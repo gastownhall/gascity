@@ -2,9 +2,12 @@ package extmsg
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -25,8 +28,10 @@ import (
 //   - A create that answers an error is classified by reading the pin back:
 //     absent, ours (recover and publish it), another writer's entry (cover it
 //     and take the next sequence), or foreign data (an invariant violation).
-//     The binding lock serializes local writers; the pinned ids make the
-//     create itself the fence against every other writer.
+//     "Ours" is proven by this Append's random token, persisted with the
+//     entry, or by a matching nonblank provider message ID. The binding lock
+//     serializes local writers; the pinned ids make the create itself the
+//     fence against every other writer.
 //   - The frontier only ever advances to one past a stored entry, via the
 //     metadata CAS when the store offers it and a covering write under the
 //     binding lock otherwise. It never decreases.
@@ -42,7 +47,21 @@ const (
 	// transcriptScanMaxPasses bounds the allocation bucket scan: one pass per
 	// sequence the scan has to skip.
 	transcriptScanMaxPasses = 32
+
+	// transcriptAppendTokenKey is the metadata key every appended entry
+	// carries this Append's random token under. A create that committed but
+	// answered an error is identified as this Append's entry by matching it.
+	transcriptAppendTokenKey = "append_token"
 )
+
+// newTranscriptAppendToken mints the per-Append ownership token.
+func newTranscriptAppendToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate transcript append token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
 
 // transcriptPinnedEntryID is the id a transcript entry for sequence is created
 // at: the state bead's own id namespace, so a store that honors pinned ids
@@ -247,9 +266,9 @@ const (
 )
 
 // classifyPinnedCreateLocked reads the pin for sequence back and classifies
-// what the refused create left there. providerMessageID, when nonblank, is the
-// only ownership evidence a stored entry carries today.
-func (s *transcriptService) classifyPinnedCreateLocked(ref ConversationRef, stateID string, sequence int64, providerMessageID string) (transcriptPinState, *ConversationTranscriptRecord, error) {
+// what the refused create left there. Ownership evidence, strongest first:
+// this Append's token, then a matching nonblank provider message ID.
+func (s *transcriptService) classifyPinnedCreateLocked(ref ConversationRef, stateID string, sequence int64, providerMessageID, appendToken string) (transcriptPinState, *ConversationTranscriptRecord, error) {
 	pin := transcriptPinnedEntryID(stateID, sequence)
 	b, err := s.live().Get(pin)
 	if err != nil {
@@ -262,6 +281,10 @@ func (s *transcriptService) classifyPinnedCreateLocked(ref ConversationRef, stat
 	if decodeErr != nil || !sameConversationRef(record.Conversation, ref) || record.Sequence != sequence {
 		return transcriptPinForeign, nil, fmt.Errorf("%w: pinned transcript entry %s holds %q", ErrInvariantViolation, pin, b.Title)
 	}
+	if appendToken != "" && strings.TrimSpace(b.Metadata[transcriptAppendTokenKey]) == appendToken {
+		rec := record
+		return transcriptPinOurs, &rec, nil
+	}
 	if providerMessageID != "" {
 		if record.ProviderMessageID == providerMessageID {
 			rec := record
@@ -270,8 +293,8 @@ func (s *transcriptService) classifyPinnedCreateLocked(ref ConversationRef, stat
 		// A different provider message id cannot be this append's entry.
 		return transcriptPinAnother, nil, nil
 	}
-	// A blank provider message ID carries no ownership evidence, so the
-	// stored entry cannot be told from another writer's: surface the create
+	// The stored entry carries neither this Append's token nor a comparable
+	// provider message ID, so ownership cannot be proven: surface the create
 	// error rather than store this message twice.
 	return transcriptPinUnidentifiable, nil, nil
 }

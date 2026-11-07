@@ -51,6 +51,7 @@ go_test(
         "session_model_phase0_spec_test.go",
         "system_reminder_test.go",
         "testenv_import_test.go",
+        "transcript_ambiguous_create_test.go",
         "transcript_lockpool_test.go",
         "transcript_sequence_repro_test.go",
         "types_wire_test.go",

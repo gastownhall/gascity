@@ -54,6 +54,10 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
+	appendToken, err := newTranscriptAppendToken()
+	if err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
 	var out ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
@@ -120,6 +124,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				"created_at":             formatTime(createdAt),
 				"actor_json":             actorJSON,
 				"attachments_json":       attachmentsJSON,
+				transcriptAppendTokenKey: appendToken,
 			})
 			labels := []string{
 				labelTranscriptBase,
@@ -139,7 +144,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				Metadata:    fields,
 			})
 			if createErr != nil {
-				pinState, entry, verifyErr := s.classifyPinnedCreateLocked(ref, state.ID, sequence, providerMessageID)
+				pinState, entry, verifyErr := s.classifyPinnedCreateLocked(ref, state.ID, sequence, providerMessageID, appendToken)
 				switch pinState {
 				case transcriptPinAbsent:
 					return fmt.Errorf("create transcript entry: %w", createErr)
