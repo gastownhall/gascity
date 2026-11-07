@@ -1746,6 +1746,40 @@ func TestOrderDispatchRigCooldownIgnoresOtherScopesEventFallback(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchCityCooldownIgnoresRigScopedEventFallback is the converse of
+// the rig-scoped negative test above: a city-level order has ScopedName() ==
+// Name, so an order.fired recorded for the same Name under a rig scope
+// ("db-health:rig:demo-repo") must not hold its cooldown closed. Subject is an
+// exact match, so the rig's event belongs to the rig's order alone. On a pruned
+// store a city order's own recent event holds its cooldown closed
+// (TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune), so dispatching
+// here can only come from the Subject mismatch.
+func TestOrderDispatchCityCooldownIgnoresRigScopedEventFallback(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:db-health bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "db-health:rig:demo-repo",
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	cityOrders := rigCooldownEventFallbackOrders()
+	cityOrders[0].Rig = "" // the same order Name at city scope: ScopedName() == "db-health"
+
+	ad := buildOrderDispatcherFromList(cityOrders, store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:db-health"); len(all) == 0 {
+		t.Fatal("expected dispatch (the recent order.fired belongs to the rig-scoped order), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
