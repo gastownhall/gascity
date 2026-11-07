@@ -1280,7 +1280,7 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 // through the delta pass's idempotency record, so a replayed or re-inferred
 // close is not a second fact.
 func (cs *controllerState) emitCompletedFact(step beads.Bead, actor string) {
-	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore(), step, actor)
+	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.Stores().Graph(), step, actor)
 }
 
 func (cs *controllerState) closeRecorder() events.Recorder {
@@ -1357,10 +1357,10 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	}
 	// The just-closed bead is read from its owning store (store), but its
 	// molecule and wisp GRAPH parents live in the graph-class store, so the
-	// graph-root walks resolve through graphBeadStore() rather than assuming
-	// co-residence with the closed bead. On a single-store city GraphBeadStore()
-	// returns the same store, so this is identity today.
-	graphStore := cs.GraphBeadStore()
+	// graph-root walks resolve through Stores().Graph() rather than assuming
+	// co-residence with the closed bead. On a single-store city the graph
+	// handle wraps the same store, so this is identity today.
+	graphStore := cs.Stores().Graph()
 	homes := cs.convoyAutocloseHomes(store, graphStore.Store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
@@ -2355,44 +2355,15 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 	return scopedStoreLike(ctx, cityPath, cfg, existing)
 }
 
-// NudgesBeadStore returns the store backing the nudge-queue shadow beads: the
-// binding when the routes relocate nudges, else the city work store. The
-// controller's emission comes from the CachingStore around each store it serves
-// (class_store_cache.go).
-func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
-	return cs.Stores().Nudges()
-}
-
 // NudgeQueue returns the city's nudge queue over its nudges-class store, for the
 // API's deferred submits and wait-nudge withdrawals.
 func (cs *controllerState) NudgeQueue() api.NudgeQueue {
-	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
-}
-
-// SessionsBeadStore returns the store backing session-class beads: the binding
-// when the routes relocate sessions, else the city work store.
-func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
-	return cs.Stores().Sessions()
-}
-
-// GraphBeadStore returns the store backing graph-class beads: the binding when
-// the routes relocate graph, else the city work store. On this side the
-// controller's CachingStore over the binding is the emitter
-// (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
-func (cs *controllerState) GraphBeadStore() beads.GraphStore {
-	return cs.Stores().Graph()
-}
-
-// OrdersBeadStore returns the store backing orders-class beads: the binding
-// when the routes relocate orders, else the city work store. It is the store
-// the order dispatcher creates every tracking bead in.
-func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
-	return cs.Stores().Orders()
+	return openNudgeQueue(cs.cityPath, cs.Stores().Nudges()).Queue
 }
 
 // ClassBindingHasLegacyResidents replays the boot census for one binding store.
 //
-// The class accessors above hand out the routes' stores, which on the
+// The class handles Stores() mints wrap the routes' stores, which on the
 // controller are the CachingStores over the engines the boot census read;
 // hasLegacyResidents looks the engine up under the cache. A store this city
 // never censused, the work store included, keeps its probe.
@@ -3152,8 +3123,8 @@ func (cs *controllerState) RigComplete(rigName string) (bool, string, string) {
 // it before the API mux starts serving. Best-effort: it returns a joined error
 // for the caller to log and never blocks startup.
 func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
-	store := cs.CityBeadStore()
-	if store == nil {
+	store := cs.Stores().Work()
+	if store == (beads.WorkStore{}) {
 		return nil
 	}
 	return api.SweepOrphanRigProvisions(ctx, store, filepath.Clean(strings.TrimSpace(cs.cityPath)), cs)
@@ -3771,7 +3742,7 @@ func (cs *controllerState) Enqueue(keys ...reconcilekey.Key) {
 // circuit breaker after an API kill (api.SessionKillHooks): the clear the
 // controller socket performs for `gc session kill`, in this process.
 func (cs *controllerState) ResetSessionCircuitBreaker(sessionID, identity string) error {
-	return resetSessionCircuitBreakerState(cs.SessionsBeadStore().Store, sessionID, identity, defaultSessionCircuitBreaker())
+	return resetSessionCircuitBreakerState(cs.Stores().Sessions().Store, sessionID, identity, defaultSessionCircuitBreaker())
 }
 
 // RecordSessionKillStop records an API kill's stop metric, as `gc session
@@ -3785,7 +3756,7 @@ var _ api.SessionKillHooks = (*controllerState)(nil)
 // WaitForSessionCommandable waits until the controller has reconciled an async
 // session create into a lifecycle state that can accept normal commands.
 func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessionID string) (session.Info, error) {
-	store := cs.SessionsBeadStore().Store
+	store := cs.Stores().Sessions().Store
 	if store == nil {
 		return session.Info{}, errors.New("session bead store is unavailable")
 	}

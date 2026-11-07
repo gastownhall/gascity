@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -528,6 +529,19 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
 			return request
 		}},
+		{"an open work bead is blocked by an open infrastructure bead (D9)", "a work store cannot hold a cross-store gate", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 0)
+			source, err := openInfraMigrationSource(request.CityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			running := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			waiting := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on it", Type: "task"})
+			if err := source.DepAdd(waiting.ID, running.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
 		{"the destination already holds beads this migration did not write", "did not write", func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
 			target := mustResolveInfraTarget(t, request.CityPath, cfg)
@@ -538,6 +552,20 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			mustCreateInfraBead(t, destination, beads.Bead{Title: "a bead some other owner put here", Type: "session"})
 			if err := closeBeadStoreHandle(destination); err != nil {
 				t.Fatalf("closing the populated destination: %v", err)
+			}
+			return request
+		}},
+		// A stale binding re-copies, except under a restore's record: the
+		// restore owns it, and the migration names the restore instead.
+		{"a binding a restore holds stale", snapshotRestoreInstruction("20261106T000000Z", "/archive"), func(t *testing.T) storageOperatorRequest {
+			request, cfg, _ := preflightReadyCity(t, 1)
+			var log bytes.Buffer
+			if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("the fixture migration reported %s: %s", got.Outcome, log.String())
+			}
+			target := mustResolveInfraTarget(t, request.CityPath, cfg)
+			if err := writeInfraRestoreRecord(target, infraRestoreRecord{Snapshot: "20261106T000000Z", Database: target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction("20261106T000000Z", "/archive")}); err != nil {
+				t.Fatal(err)
 			}
 			return request
 		}},

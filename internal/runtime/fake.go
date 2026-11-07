@@ -128,6 +128,11 @@ type Fake struct {
 	// its ProgramPanes row, while every fresh read (ProgramStatusShadowRead,
 	// ProgramStatusHoldRead) judges ProgramPanes. Absent, both agree.
 	ProgramCachedPanes map[string]ProgramPaneRow
+	// StartupNudgeHandbacks are the startup nudges a FullFake hands back
+	// once per session name ([StartupNudgeHandbackProvider]), as a leaf
+	// whose Start found its program blocked through the startup ladder.
+	// Use SetStartupNudgeHandback while other goroutines may read the fake.
+	StartupNudgeHandbacks map[string]string
 	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
 	ProgramStatusErrors map[string]error
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by

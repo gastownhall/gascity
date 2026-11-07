@@ -189,7 +189,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = a7Rec.keys
 		}},
-		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key config_drift_escalated_at continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			withoutA7(t)
 			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
 			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{

@@ -63,7 +63,7 @@ func TestSourceWorkflowStoresOmitsGraphLegOnSingleStoreCity(t *testing.T) {
 	state.stores = map[string]beads.Store{"alpha": beads.NewMemStore()}
 	s := &Server{state: state}
 
-	if state.GraphBeadStore().Store != state.CityBeadStore() {
+	if state.Stores().Graph().Store != state.CityBeadStore() {
 		t.Fatal("fixture is not a single-store city")
 	}
 	stores := s.sourceWorkflowStores()
@@ -160,7 +160,7 @@ title = "Work"
 		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 	}}
 	state.cityBeadStore = beads.NewMemStore()
-	if state.GraphBeadStore().Store != state.CityBeadStore() {
+	if state.Stores().Graph().Store != state.CityBeadStore() {
 		t.Fatal("fixture is not a single-store city")
 	}
 	if state.stores["myrig"] == state.CityBeadStore() {

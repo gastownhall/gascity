@@ -54,45 +54,10 @@ func (cs *controllerState) rigSetLocked() rigSet {
 	return rigSet{gen: cs.rigStoresGen, stores: cs.beadStores}
 }
 
-// graphBeadStore returns the store that owns graph (workflow/v2) beads. It
-// delegates to the exported GraphBeadStore() accessor so the api.State surface
-// and the controller's own callers share one resolver.
-func (cs *controllerState) graphBeadStore() beads.GraphStore {
-	return cs.GraphBeadStore()
-}
-
-// sessionsBeadStore returns the store that owns session and session-wait beads.
-// It delegates to the exported SessionsBeadStore() accessor so the api.State
-// surface and the controller's own callers share one resolver.
-func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
-	return cs.SessionsBeadStore()
-}
-
-// mailBeadStore returns the store that owns mail (message) beads: the binding
-// when the routes relocate messaging, else the city work store.
-func (cs *controllerState) mailBeadStore() beads.MailStore {
-	return cs.Stores().Mail()
-}
-
-// nudgesBeadStore returns the store that owns nudge beads. It delegates to the
-// exported NudgesBeadStore() accessor so the api.State surface and the
-// controller's own callers share one resolver.
-func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
-	return cs.NudgesBeadStore()
-}
-
-// ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the city scope. The scope argument is not read: per-order scope
-// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
-// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
-func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
-	return cs.OrdersBeadStore()
-}
-
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
 // are not scoped to a named rig: the store CityBeadStore() returns, as a
 // handle. CityBeadStore() stays beads.Store as the federation/by-id/default
-// root until the API state is retyped (T6).
+// root until T7's federated readers retire it.
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
 	return cs.Stores().Work()
 }

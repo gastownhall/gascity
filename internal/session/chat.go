@@ -504,6 +504,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
+	m.queueStartupNudgeHandbackLocked(*b, sessName)
 	if inc != nil {
 		*inc = next
 	}
@@ -1025,6 +1026,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
+			m.queueStartupNudgeHandbackLocked(b, sessName)
 			started = true
 		}
 		if started {
@@ -1269,6 +1271,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {
@@ -1413,13 +1416,16 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-// idleBoundaryOutOfReach takes the wait-idle nudge's pre-read before its idle
-// wait (runtime.IdleBoundaryNow): a session that reads busy, or whose input a
-// pending interaction owns, will not reach a boundary within the wait, so the
-// nudge is reported undelivered at once for its caller to queue. Any other
-// reading leaves the wait to decide.
-func (m *Manager) idleBoundaryOutOfReach(sessName string) bool {
-	return runtime.IdleBoundaryNow(m.sp, sessName).OutOfReach()
+// idleBoundaryOutOfReach takes the wait-idle nudge's pre-read of b's session
+// sessName before its idle wait (runtime.IdleBoundaryNow): a session that
+// reads busy, or whose input a pending interaction owns, will not reach a
+// boundary within the wait, so the nudge is reported undelivered at once for
+// its caller to queue. Any other reading leaves the wait to decide. Under
+// the program-status shadow switch the pre-read is recorded beside the
+// program's record read fresh with it (wait_idle_preread); the reading
+// never feeds the delivery.
+func (m *Manager) idleBoundaryOutOfReach(b beads.Bead, sessName string) bool {
+	return runtime.ShadowIdleBoundaryNow(m.sp, sessName, b.ID, providerKind(b)).OutOfReach()
 }
 
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
@@ -1441,8 +1447,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	if !ok {
 		return false, nil
 	}
-	m.shadowWaitIdlePreread(b, sessName)
-	if m.idleBoundaryOutOfReach(sessName) {
+	if m.idleBoundaryOutOfReach(b, sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1471,8 +1476,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if !ok {
 		return false, nil
 	}
-	m.shadowWaitIdlePreread(b, sessName)
-	if m.idleBoundaryOutOfReach(sessName) {
+	if m.idleBoundaryOutOfReach(b, sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1499,8 +1503,9 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 
 // PendingInteractionError returns an error wrapping ErrPendingInteraction that
 // names the pending request, so callers can tell the operator what must be
-// answered before text can be delivered: a permission prompt is answered with
-// Respond, a question in the terminal.
+// answered before text can be delivered: a permission prompt with Respond's
+// approve or deny, a question with Respond's select (naming one of its
+// options) or in the terminal.
 func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	what := strings.TrimSpace(pending.Kind)
 	if what == "" {
@@ -1513,9 +1518,9 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 		what += " (request " + pending.RequestID + ")"
 	}
 	if strings.TrimSpace(pending.Kind) == "question" {
-		// A question dialog offers no response verbs: only a person answers
-		// it, in the terminal.
-		return fmt.Errorf("%w: %s is waiting for an answer in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
+		// A question is answered by picking one of its options; free text
+		// and chat are answered in the terminal.
+		return fmt.Errorf("%w: %s is waiting for an answer; respond to it (select one of its options) or answer it in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
 	}
 	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
@@ -1892,7 +1897,7 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart 
 		if !restarts || !errors.Is(err, runtime.ErrTurnNotEnded) {
 			return err
 		}
-		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, err); err != nil {
+		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, false, err); err != nil {
 			return err
 		}
 		if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, restart); err != nil {

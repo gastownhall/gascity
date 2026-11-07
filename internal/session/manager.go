@@ -458,6 +458,11 @@ type Info struct {
 	// / _key), the same shape as the named pair above but for the attached path.
 	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
 	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt is the RAW config_drift_escalated_at metadata, the
+	// marker that the deferral episode named by ConfigDriftDeferredKey has
+	// emitted its single past-horizon escalation. It is valid only while its
+	// timestamp lies between ConfigDriftDeferredAt and now.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
@@ -1156,6 +1161,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its

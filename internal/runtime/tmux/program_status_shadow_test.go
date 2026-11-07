@@ -183,6 +183,30 @@ func TestShadowSinkFollowsPublishedSwitch(t *testing.T) {
 	}
 }
 
+// Kills a leaf that shadows in a process that records no comparisons: a
+// short-lived process observing sessions (gc session list) must take no
+// shadow read and hand out no sink, under shadow as under off, and the gate
+// is read live, so a process that starts deciding for a session records.
+func TestShadowSinkGatedByComparisonEnabled(t *testing.T) {
+	sink := func(runtime.ProgramStatusComparison) {}
+	enabled := false
+	p := &Provider{tm: &Tmux{cfg: Config{
+		ProgramStatus: runtime.ProgramStatusShadow, ComparisonSink: sink,
+		ComparisonEnabled: func() bool { return enabled },
+	}}}
+	if p.ProgramStatusShadowSink() != nil || p.tm.shadowing() {
+		t.Fatal("shadow, comparisons disabled: the leaf shadows")
+	}
+	enabled = true
+	if p.ProgramStatusShadowSink() == nil || !p.tm.shadowing() {
+		t.Fatal("shadow, comparisons enabled: the leaf does not shadow")
+	}
+	p.tm.SetProgramStatusMode(runtime.ProgramStatusOff)
+	if p.ProgramStatusShadowSink() != nil || p.tm.shadowing() {
+		t.Fatal("off, comparisons enabled: the leaf shadows")
+	}
+}
+
 // Kills a shadowing idle wait that decides differently from the switch off,
 // sends the scan any other command, or records the wrong comparison: the
 // scan's verdict beside the record's, the record followed to time its veto.

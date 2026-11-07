@@ -19,7 +19,8 @@ package main
 //  5. Write the manifest (S1's (id, created_at) format, plus #gc:scope,
 //     #gc:scope-annotated and #gc:gate), then the marker.
 //  6. Raise bd's min_hash_length in the rig store, so a short id minted
-//     after the clear can never re-mint an imported one.
+//     after the clear cannot re-mint an imported one (only probabilistically
+//     at bd's cap of 8 characters).
 //  7. Back up, prove the backup, mark the cleared note pending, delete the
 //     rig copies in batches, mark the note complete. No edge is re-added.
 //
@@ -36,7 +37,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -565,7 +565,7 @@ func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, ma
 	}
 	ctx.Held = held
 	if ids := elsewhereCandidates(snap, gen, held); len(ids) > 0 {
-		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig, ids)
+		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig.Name, rigStoreRoot(env.CityPath, rig), true, ids)
 	}
 	if env.Cfg != nil {
 		gate := newForeignClaimGate(env.Cfg, beads.SessionStore{Store: binding})
@@ -645,10 +645,15 @@ func rigImportPayloadRefusal(rigStore beads.Store, snap rigSnapshot, plan rigImp
 	return rigImportRefusal{}, false
 }
 
-// probeElsewhere reads ids from every store other than rig's and the
-// binding: the city work store and each other bound rig. A store that cannot
-// be opened or read is named in unread.
-func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string][]beads.Bead, []string) {
+// probeElsewhere reads ids from every store other than the source and the
+// binding: for a rig import, the city work store (cityWork) and each other
+// bound rig (any but skipRig, whose store root is not skipRoot). A store that
+// cannot be opened or read is named in unread.
+//
+// The city copy asks the same question of every bound rig whose store is not
+// the city's (skipRig empty, skipRoot the city store), and of the city work
+// store only when it copies out of the backup (cityWork).
+func probeElsewhere(env rigImportEnv, skipRig, skipRoot string, cityWork bool, ids []string) (map[string][]beads.Bead, []string) {
 	found := map[string][]beads.Bead{}
 	var unread []string
 	read := func(label string, open func() (beads.Store, error)) {
@@ -669,11 +674,12 @@ func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string]
 			}
 		}
 	}
-	read("the city work store", func() (beads.Store, error) { return rigImportCityWorkOpener(env.CityPath) })
+	if cityWork {
+		read("the city work store", func() (beads.Store, error) { return rigImportCityWorkOpener(env.CityPath) })
+	}
 	if env.Cfg != nil {
-		self := rigStoreRoot(env.CityPath, rig)
 		for _, other := range env.Cfg.Rigs {
-			if other.Name == rig.Name || strings.TrimSpace(other.Path) == "" || samePath(rigStoreRoot(env.CityPath, other), self) {
+			if other.Name == skipRig || strings.TrimSpace(other.Path) == "" || samePath(rigStoreRoot(env.CityPath, other), skipRoot) {
 				continue
 			}
 			r := other
@@ -842,7 +848,7 @@ func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan ri
 		result.Edges++
 	}
 	for _, g := range plan.Gates {
-		gate, err := createRigImportGate(binding, loc.Rig, g)
+		gate, err := createRigImportGate(binding, rigImportStamp(loc.Rig), rigScopeRef(loc.Rig), g)
 		if err != nil {
 			return err
 		}
@@ -857,16 +863,19 @@ func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan ri
 	return nil
 }
 
-// createRigImportGate mints one S3b gate for g in the binding, stamped as
-// this import's and scoped as its owner.
-func createRigImportGate(binding beads.Store, rig string, g rigImportGate) (beads.Bead, error) {
+// createRigImportGate mints one S3b gate for g in the binding, stamped with
+// stamp (the migration's gc.infra_migrated_from) and scoped as its owner, or
+// as scope when the owner carries none. The rig import and the city copy
+// both mint through it.
+func createRigImportGate(binding beads.Store, stamp, scope string, g rigImportGate) (beads.Bead, error) {
 	gate := dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, g.Owner, g.Blocker)
-	gate.Metadata[infraMigrationStampKey] = rigImportStamp(rig)
-	scope := strings.TrimSpace(g.Owner.Metadata[beadmeta.RootStoreRefMetadataKey])
-	if scope == "" {
-		scope = rigScopeRef(rig)
+	gate.Metadata[infraMigrationStampKey] = stamp
+	if owned := strings.TrimSpace(g.Owner.Metadata[beadmeta.RootStoreRefMetadataKey]); owned != "" {
+		scope = owned
 	}
-	gate.Metadata[beadmeta.RootStoreRefMetadataKey] = scope
+	if scope != "" {
+		gate.Metadata[beadmeta.RootStoreRefMetadataKey] = scope
+	}
 	created, err := binding.Create(gate)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("minting the cross-store gate for %s on %s: %w", g.Owner.ID, g.Blocker, err)
@@ -1020,33 +1029,8 @@ func rigImportWriteManifest(loc rigImportLocation, target infraBindingTarget, ma
 // sequence). conf was opened, and its provider checked, before anything was
 // written.
 func rigImportReserveIDs(conf rigHashLengthConfig, manifest *infraCopyManifest) (int, error) {
-	floor := rigImportHashFloor(sortedMapKeys(manifest.IDs))
-	if floor == 0 || conf == nil {
-		return 0, nil
-	}
-	current, err := conf.ConfigGet(bdMinHashLengthKey)
-	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
-	}
-	if n, perr := strconv.Atoi(strings.TrimSpace(current)); perr == nil && n >= floor {
-		floor = n
-	} else if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
-		return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
-	}
-	maxText, err := conf.ConfigGet(bdMaxHashLengthKey)
-	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMaxHashLengthKey, err)
-	}
-	maxLen := bdDefaultMaxHashLength
-	if n, perr := strconv.Atoi(strings.TrimSpace(maxText)); perr == nil && n > 0 {
-		maxLen = n
-	}
-	if maxLen < floor {
-		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
-		}
-	}
-	return floor, nil
+	floor, _, err := raiseBdHashFloor(conf, rigImportHashFloor(sortedMapKeys(manifest.IDs)))
+	return floor, err
 }
 
 // rigImportClear is phase 7: back up, prove, mark pending, delete in

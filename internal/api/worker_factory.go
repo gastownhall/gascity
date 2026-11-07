@@ -10,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
+func (s *Server) workerFactory(store beads.SessionStore) (*worker.Factory, error) {
 	cfg := s.state.Config()
 	var resolveTransport func(template, provider string) string
 	if cfg != nil {
@@ -36,7 +36,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 	})
 }
 
-func (s *Server) workerSessionCatalog(store beads.Store) (*worker.SessionCatalog, error) {
+func (s *Server) workerSessionCatalog(store beads.SessionStore) (*worker.SessionCatalog, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err

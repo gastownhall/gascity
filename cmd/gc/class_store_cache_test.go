@@ -68,9 +68,9 @@ func newCachedSplitControllerState(ctx context.Context, t *testing.T, routes *st
 // class from, failing the test when the binding is not cached.
 func bindingCacheOf(t *testing.T, cs *controllerState) *beads.CachingStore {
 	t.Helper()
-	cache, ok := cs.SessionsBeadStore().Store.(*beads.CachingStore)
+	cache, ok := cs.Stores().Sessions().Store.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("the sessions class resolves to %T, want the controller's CachingStore over the binding", cs.SessionsBeadStore().Store)
+		t.Fatalf("the sessions class resolves to %T, want the controller's CachingStore over the binding", cs.Stores().Sessions().Store)
 	}
 	return cache
 }
@@ -228,7 +228,7 @@ func TestControllerBindingCacheForwardsEveryEngineCapability(t *testing.T) {
 // one-shot emitter).
 func TestControllerBindingWriteEmitsExactlyOnce(t *testing.T) {
 	cs, ep := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(openBindingEngineForTest(t)), beads.NewMemStore())
-	store := cs.SessionsBeadStore().Store
+	store := cs.Stores().Sessions().Store
 
 	created, err := store.Create(beads.Bead{Title: "worker", Type: "session"})
 	if err != nil {
@@ -331,13 +331,13 @@ func TestBindingCacheSurvivesConfigReload(t *testing.T) {
 
 	cs.update(&config.City{Workspace: config.Workspace{Name: "test-city"}}, nil)
 
-	if got := cs.SessionsBeadStore().Store; got != beads.Store(binding) {
+	if got := cs.Stores().Sessions().Store; got != beads.Store(binding) {
 		t.Fatalf("after reload the sessions class resolves to %p, want the same binding cache %p", got, binding)
 	}
 	if got := binding.WriteRev("").Epoch; got != bindingEpoch {
 		t.Fatalf("binding epoch moved %d -> %d across a reload", bindingEpoch, got)
 	}
-	if _, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "after reload", Type: "session"}); err != nil {
+	if _, err := cs.Stores().Sessions().Create(beads.Bead{Title: "after reload", Type: "session"}); err != nil {
 		t.Fatalf("writing the binding after a reload: %v", err)
 	}
 	reloaded, ok := cs.CityBeadStore().(*beads.CachingStore)
@@ -366,7 +366,7 @@ func TestClassBindingHasLegacyResidentsUnwrapsCache(t *testing.T) {
 	}
 
 	cs, _ := newCachedSplitControllerState(context.Background(), t, routes, beads.NewMemStore())
-	graph := cs.GraphBeadStore().Store
+	graph := cs.Stores().Graph().Store
 	if _, cached := graph.(*beads.CachingStore); !cached {
 		t.Fatalf("graph class resolves to %T, want the binding cache", graph)
 	}
@@ -410,7 +410,7 @@ func TestSplitCityControllerBindingCacheComposition(t *testing.T) {
 	}
 
 	// A controller write is in the census, and the census covers its watermark.
-	written, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "controller session", Type: "session"})
+	written, err := cs.Stores().Sessions().Create(beads.Bead{Title: "controller session", Type: "session"})
 	if err != nil {
 		t.Fatalf("controller write: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSplitCityControllerBindingCacheComposition(t *testing.T) {
 	}
 	// A dark write (no event) is the re-scan's; a live read sees it now.
 	dark := "dark"
-	carried, err := cs.SessionsBeadStore().Create(beads.Bead{Title: "carried", Type: "session"})
+	carried, err := cs.Stores().Sessions().Create(beads.Bead{Title: "carried", Type: "session"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 			t.Fatalf("%s %s: cached Ready offers %s, which the engine blocks", verb, when, step.ID)
 		}
 	}
-	store := cs.GraphBeadStore().Store
+	store := cs.Stores().Graph().Store
 	revision := func() int64 {
 		row, err := engine.Get(step.ID)
 		if err != nil {
@@ -834,7 +834,7 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 				t.Fatalf("CLI write: %v", err)
 			}
 			cs.applyBeadEventToStores(cliEventFor(t, engine, loose[0], tc.withEdges))
-			if err := cs.GraphBeadStore().Close(other.ID); err != nil {
+			if err := cs.Stores().Graph().Close(other.ID); err != nil {
 				t.Fatalf("status change: %v", err)
 			}
 			feedBackBeadEvents(cs, ep, &cursor)
@@ -1048,11 +1048,11 @@ func TestBindingCacheReconcileStaysQuietAfterTheControllersOwnWrites(t *testing.
 
 	// The controller's own writes between two passes, each echo fed back as
 	// the watcher delivers it.
-	if _, err := orders.NewStore(cs.OrdersBeadStore()).CloseRuns(context.Background(), []string{tracking.ID}, completedOrderTrackingCloseReason); err != nil {
+	if _, err := orders.NewStore(cs.Stores().Orders()).CloseRuns(context.Background(), []string{tracking.ID}, completedOrderTrackingCloseReason); err != nil {
 		t.Fatalf("closing the order run's tracking row: %v", err)
 	}
 	feedBackBeadEvents(cs, ep, &cursor)
-	store := cs.GraphBeadStore().Store
+	store := cs.Stores().Graph().Store
 	if err := store.Close(finished.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

@@ -61,6 +61,7 @@ type ProfileBackend interface {
 	InputClearProvider
 	InteractionProvider
 	InterruptBoundaryWaitProvider
+	InterruptNoteProvider
 	InterruptedTurnResetProvider
 	InventoryProvider
 	KeyedNudgeProvider
@@ -79,6 +80,7 @@ type ProfileBackend interface {
 	SessionBindingProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	StartupNudgeHandbackProvider
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
@@ -112,6 +114,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			InputClearProvider:            b,
 			InteractionProvider:           b,
 			InterruptBoundaryWaitProvider: b,
+			InterruptNoteProvider:         b,
 			InterruptedTurnResetProvider:  b,
 			InventoryProvider:             b,
 			ListingAttestation:            b,
@@ -127,6 +130,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			ServerLifecycleProvider:       b,
 			SessionObjectKiller:           b,
 			SessionRosterProvider:         b,
+			StartupNudgeHandbackProvider:  b,
 			TurnRunningProvider:           b,
 			UnattendedSessionStopper:      b,
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
@@ -226,6 +230,7 @@ type (
 		InputClearProvider
 		InteractionProvider
 		InterruptBoundaryWaitProvider
+		InterruptNoteProvider
 		InterruptedTurnResetProvider
 		InventoryProvider
 		ListingAttestation
@@ -241,6 +246,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		StartupNudgeHandbackProvider
 		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait

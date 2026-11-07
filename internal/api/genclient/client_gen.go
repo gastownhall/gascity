@@ -5422,6 +5422,33 @@ type SessionCommandStatusBody struct {
 	Status string `json:"status"`
 }
 
+// SessionConfigDriftDeferredPayload defines model for SessionConfigDriftDeferredPayload.
+type SessionConfigDriftDeferredPayload struct {
+	// DeferredSince RFC3339 timestamp the deferral episode was first recorded; the escalation clock counts from here.
+	DeferredSince string `json:"deferred_since"`
+
+	// DriftedFields Names of the configuration fields whose fingerprint changed. Never null; empty when the stored fingerprint breakdown is unavailable.
+	DriftedFields []string `json:"drifted_fields"`
+
+	// Escalated False on the first observation; true on the single emission after the episode outlives [daemon] drift_deferral_escalate_after.
+	Escalated bool `json:"escalated"`
+
+	// PendingSeconds Whole seconds the episode had been deferred when the event fired.
+	PendingSeconds int64 `json:"pending_seconds"`
+
+	// SessionId Canonical session bead ID of the deferred seat (also the envelope Subject).
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Template of the seat.
+	Template string `json:"template"`
+
+	// WorkBeadId ID of the assigned work bead observed holding the restart back.
+	WorkBeadId string `json:"work_bead_id"`
+}
+
 // SessionCreateBody defines model for SessionCreateBody.
 type SessionCreateBody struct {
 	// Alias Optional session alias.
@@ -8980,6 +9007,22 @@ type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionConfigDriftDeferred defines model for TypedEventStreamEnvelopeSessionConfigDriftDeferred.
+type TypedEventStreamEnvelopeSessionConfigDriftDeferred struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionConfigDriftDeferredPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionConversationReset defines model for TypedEventStreamEnvelopeSessionConversationReset.
 type TypedEventStreamEnvelopeSessionConversationReset struct {
 	Actor            string                   `json:"actor"`
@@ -11112,6 +11155,23 @@ type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred defines model for TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred.
+type TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionConfigDriftDeferredPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionConversationReset defines model for TypedTaggedEventStreamEnvelopeSessionConversationReset.
@@ -14882,6 +14942,32 @@ func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
 
 // MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
 func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionConfigDriftDeferredPayload returns the union data inside the EventPayload as a SessionConfigDriftDeferredPayload
+func (t EventPayload) AsSessionConfigDriftDeferredPayload() (SessionConfigDriftDeferredPayload, error) {
+	var body SessionConfigDriftDeferredPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionConfigDriftDeferredPayload overwrites any union data inside the EventPayload as the provided SessionConfigDriftDeferredPayload
+func (t *EventPayload) FromSessionConfigDriftDeferredPayload(v SessionConfigDriftDeferredPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionConfigDriftDeferredPayload performs a merge with any union data inside the EventPayload, using the provided SessionConfigDriftDeferredPayload
+func (t *EventPayload) MergeSessionConfigDriftDeferredPayload(v SessionConfigDriftDeferredPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19639,6 +19725,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionColdStart
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionConfigDriftDeferred returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionConfigDriftDeferred() (TypedEventStreamEnvelopeSessionConfigDriftDeferred, error) {
+	var body TypedEventStreamEnvelopeSessionConfigDriftDeferred
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionConfigDriftDeferred overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionConfigDriftDeferred performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionConversationReset
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionConversationReset() (TypedEventStreamEnvelopeSessionConversationReset, error) {
 	var body TypedEventStreamEnvelopeSessionConversationReset
@@ -21159,6 +21273,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.config_drift_deferred":
+		return t.AsTypedEventStreamEnvelopeSessionConfigDriftDeferred()
 	case "session.conversation_reset":
 		return t.AsTypedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
@@ -23508,6 +23624,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred() (TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionConversationReset
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionConversationReset() (TypedTaggedEventStreamEnvelopeSessionConversationReset, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionConversationReset
@@ -25028,6 +25172,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.config_drift_deferred":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred()
 	case "session.conversation_reset":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":

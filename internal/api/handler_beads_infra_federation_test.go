@@ -46,7 +46,7 @@ func newSplitFederationState(t *testing.T) *fakeState {
 
 // newLegacyFederationState returns a fakeState shaped like a legacy
 // single-store city: the graph class is NOT relocated, so
-// GraphBeadStore() == CityBeadStore() and the infra arm never fires.
+// Stores().Graph() == CityBeadStore() and the infra arm never fires.
 func newLegacyFederationState(t *testing.T) *fakeState {
 	t.Helper()
 	fs := newFakeState(t)
@@ -231,7 +231,7 @@ func TestBeadListRigScopedReadExcludesGraphLeg(t *testing.T) {
 }
 
 // TestBeadReadyLegacyCityUnchanged is the single-store byte-identity half. On a
-// legacy city GraphBeadStore() == CityBeadStore(), so the infra arm never fires
+// legacy city Stores().Graph() == CityBeadStore(), so the infra arm never fires
 // and the response is what it was before this leg existed.
 //
 // It is also the mutation-killer for the arm's identity guard: drop

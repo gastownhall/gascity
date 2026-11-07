@@ -32,12 +32,14 @@ func (s snapshotOnly) SnapshotIdle(string) (bool, error) { return false, s.err }
 // IdleBoundaryNow is one snapshot, classified: an idle reading is at the
 // boundary and a busy one is busy. An indeterminate reading, which an open
 // dialog gives (neither a ready prompt nor a busy indicator), is pending when
-// the runtime reports a pending interaction for the session, and unknown when
-// it reports none or its look fails. Only an indeterminate reading looks.
+// it saw a pending choice (a numbered menu), or when the runtime reports a
+// pending interaction for the session, and unknown when it reports none or
+// its look fails. Only an indeterminate reading that saw no choice looks.
 // Every other answer, a runtime that takes no snapshot included, is unknown.
 func TestIdleBoundaryNow(t *testing.T) {
 	approval := &PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}
 	indeterminate := fmt.Errorf("scan: %w", ErrIdleIndeterminate)
+	choice := fmt.Errorf("scan: %w", ErrIdlePendingChoice)
 	for _, tc := range []struct {
 		name        string
 		idle        bool
@@ -52,6 +54,7 @@ func TestIdleBoundaryNow(t *testing.T) {
 		{name: "indeterminate", err: indeterminate, want: IdleBoundaryUnknown, wantLookups: 1},
 		{name: "indeterminate with a pending interaction", err: indeterminate, pending: approval, want: IdleBoundaryPending, wantLookups: 1},
 		{name: "indeterminate and the pending look failed", err: indeterminate, pendingErr: errors.New("capture-pane failed"), want: IdleBoundaryUnknown, wantLookups: 1},
+		{name: "a pending choice", err: choice, want: IdleBoundaryPending},
 		{name: "unsupported", err: fmt.Errorf("routed: %w", ErrInteractionUnsupported), pending: approval, want: IdleBoundaryUnknown},
 		{name: "capture failed", err: errors.New("capture-pane failed"), pending: approval, want: IdleBoundaryUnknown},
 	} {
@@ -86,6 +89,14 @@ func TestIdleBoundaryNow(t *testing.T) {
 			t.Errorf("IdleBoundaryNow = %v, want %v for a runtime that takes no snapshot", got, IdleBoundaryUnknown)
 		}
 	})
+}
+
+// A pending choice is an indeterminate reading to every caller that does not
+// ask for it by name: it shows neither a ready prompt nor a busy indicator.
+func TestIdlePendingChoiceIsIndeterminate(t *testing.T) {
+	if err := fmt.Errorf("scan: %w", ErrIdlePendingChoice); !errors.Is(err, ErrIdleIndeterminate) {
+		t.Fatalf("errors.Is(%v, ErrIdleIndeterminate) = false, want true", err)
+	}
 }
 
 // Only a busy or pending reading rules out a boundary within a short wait.

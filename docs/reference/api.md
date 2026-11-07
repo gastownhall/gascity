@@ -386,9 +386,13 @@ a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
 lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
 full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
 
-A question dialog (`kind` `question`) offers no `options` and cannot be
-answered through the API: the person answers it in the session's terminal,
-and `POST .../respond` on one returns 409 `invalid_interaction`.
+A question dialog (`kind` `question`) lists the options it can be answered
+with in `options`. Answer it with `POST .../respond` and `action` `select`,
+`text` naming one of those options by label (or by number, when no option
+carries that label), and the question's `request_id`. A page that lists no
+options — a multi-select page, or one whose options show previews — is
+answered in the session's terminal, as are free-text and chat rows. A
+`respond` the page does not offer returns 409 `invalid_interaction`.
 
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:
