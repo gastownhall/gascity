@@ -439,6 +439,11 @@ func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, ses
 		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
+		// The Escape is the interrupt: the leaf notes it first, as Interrupt
+		// notes its own, so the idle wait after it is the interrupt's settle
+		// (under program_status "on", a dialog raised since ends that wait,
+		// and no Ctrl-C fallback follows).
+		runtime.NoteInterrupt(m.sp, sessName)
 		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
 			return false, fmt.Errorf("interrupting session: %w", err)
 		}

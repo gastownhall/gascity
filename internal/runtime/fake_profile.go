@@ -61,6 +61,7 @@ type ProfileBackend interface {
 	InputClearProvider
 	InteractionProvider
 	InterruptBoundaryWaitProvider
+	InterruptNoteProvider
 	InterruptedTurnResetProvider
 	InventoryProvider
 	KeyedNudgeProvider
@@ -113,6 +114,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			InputClearProvider:            b,
 			InteractionProvider:           b,
 			InterruptBoundaryWaitProvider: b,
+			InterruptNoteProvider:         b,
 			InterruptedTurnResetProvider:  b,
 			InventoryProvider:             b,
 			ListingAttestation:            b,
@@ -228,6 +230,7 @@ type (
 		InputClearProvider
 		InteractionProvider
 		InterruptBoundaryWaitProvider
+		InterruptNoteProvider
 		InterruptedTurnResetProvider
 		InventoryProvider
 		ListingAttestation

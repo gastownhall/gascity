@@ -21,7 +21,8 @@ import (
 //     the ladder backs off, and on exhaustion the start goes on with the
 //     nudge handed back for its caller to queue (design §10.2 row A20);
 //   - the interrupt settle (interrupt_settle): an idle wait that follows an
-//     interrupt gc sent settles at the first root boundary past the
+//     interrupt gc sent (Interrupt's own, or keys its caller noted as one:
+//     NoteInterrupt) settles at the first root boundary past the
 //     pre-interrupt baseline, under the same nonce; a live blocked record is
 //     no settle, and the wait returns at once with an error wrapping
 //     runtime.ErrPendingInteraction, so the caller sends no more keys.
@@ -171,6 +172,18 @@ func (t *Tmux) noteProgramInterrupt(session string) {
 	}
 	t.keepInterrupt(session, shadowInterrupt{baseline: r.Status.Baseline(), at: time.Now()})
 }
+
+// NoteInterrupt implements [runtime.InterruptNoteProvider]: under the switch
+// on, name's record position before the keys of an interrupt its caller
+// sends itself (a soft-Escape family's Escape), taken as Interrupt takes its
+// own (noteProgramInterrupt), so the idle wait after those keys is that
+// interrupt's settle. Off on it reads nothing; the shadow notes only
+// Interrupt's own.
+func (p *Provider) NoteInterrupt(name string) {
+	p.tm.noteProgramInterrupt(name)
+}
+
+var _ runtime.InterruptNoteProvider = (*Provider)(nil)
 
 // startupHandbacks holds, per session, the startup nudge a Start left
 // undelivered behind a dialog its program reported (errStartupNudgeBlocked),

@@ -60,7 +60,9 @@ func TestInterruptNowQueuesBehindADialogTheSettleReports(t *testing.T) {
 				}
 			}
 			// Codex's soft Escape is followed by no Ctrl-C fallback: the
-			// one wait ended on the dialog.
+			// one wait ended on the dialog. The tmux leaf answers that wait
+			// so once the session noted its Escape as the interrupt
+			// (tmux's TestInterruptNowQueuesBehindADialogRaisedAfterTheSoftEscape).
 			if calls["WaitForIdle"] != 1 {
 				t.Fatalf("%d idle waits; want the one that reported the dialog", calls["WaitForIdle"])
 			}

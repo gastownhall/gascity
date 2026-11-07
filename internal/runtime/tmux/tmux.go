@@ -5736,11 +5736,12 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // beside the program's own record (shadowIdleWait), on a reading taken after
 // it is decided and before it returns, unless ctx carries
 // [runtime.WithShadowCallerRecords]; the outcome returned is the scan's
-// alone. With the switch on, a wait that follows an interrupt the leaf sent
+// alone. With the switch on, a wait that follows an interrupt the leaf sent,
+// or one its caller noted before sending its keys (Provider.NoteInterrupt),
 // is also the interrupt's settle (programSettle): each poll reads the
 // program's record fresh first, and the wait returns at the first root
 // boundary past the pre-interrupt baseline, or at once with an error
-// wrapping [runtime.ErrPendingInteraction] on a live blocked root.
+// wrapping [runtime.ErrPendingInteraction] on a live blocked root past it.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	if settle, ok := t.programSettle(session, time.Now()); ok {
 		return t.waitForIdleSettling(ctx, session, timeout, settle)

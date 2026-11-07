@@ -20,6 +20,7 @@ go_library(
         "idle_boundary.go",
         "import_trust.go",
         "interaction_fence.go",
+        "interrupt_note.go",
         "liveness.go",
         "mcp.go",
         "mcp_redact.go",

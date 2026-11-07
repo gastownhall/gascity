@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // decidedStartOps are start ops whose startup ladder decides with tm's
@@ -429,5 +432,144 @@ func TestFailedStartHandsNothingBack(t *testing.T) {
 	}
 	if nudge, ok := p.TakeStartupNudgeHandback("s"); ok {
 		t.Fatalf("failed Relaunch handed back %q", nudge)
+	}
+}
+
+// softInterruptTmux is a Tmux under mode over a Codex pane whose scan reads
+// busy throughout, its fresh record reads answered by rows with the keys
+// that reached the pane so far.
+func softInterruptTmux(t *testing.T, mode runtime.ProgramStatusMode, rows func(pressed []string) string) (*Tmux, *fakeCodexPane, *holdExecutor) {
+	t.Helper()
+	pane := newFakeCodexPane(t)
+	pane.busyCaptures = 1 << 30
+	tm := newCodexStopTmux(pane)
+	tm.cfg.ProgramStatus = mode
+	tm.capture.probe = passGate
+	ex := &holdExecutor{inner: pane, row: func(int) string { return rows(pane.typedOrPressed()) }}
+	tm.exec = ex
+	return tm, pane, ex
+}
+
+// dialogAfterTheEscape answers a working root (Seq 4) until an Escape reached
+// the pane, and a blocked one (Seq 5) once one has: a dialog the program
+// raised since a soft interrupt's Escape.
+func dialogAfterTheEscape(t *testing.T) func(pressed []string) string {
+	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 4 })
+	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
+	return func(pressed []string) string {
+		if slices.Contains(pressed, "key:Escape") {
+			return holdPaneRow(blocked, "", 0)
+		}
+		return holdPaneRow(working, "", 0)
+	}
+}
+
+// Kills a soft interrupt whose idle wait the record cannot settle, and an
+// Escape taken as an interrupt it is not: under on, NoteInterrupt before a
+// soft interrupt's Escape takes the pre-interrupt baseline (one fresh read),
+// so the idle wait after the Escape ends at once on a dialog the program
+// raised since; an Escape sent with no note (a dialog dismissed, an input
+// cleared) leaves that wait the scan's, with no decision read; and under off
+// and shadow the note reads nothing.
+func TestNoteInterruptArmsTheSettleOfASoftInterrupt(t *testing.T) {
+	tm, _, ex := softInterruptTmux(t, runtime.ProgramStatusOn, dialogAfterTheEscape(t))
+	p := &Provider{tm: tm}
+	p.NoteInterrupt("s")
+	if n := ex.holdReads(); n != 1 {
+		t.Fatalf("NoteInterrupt took %d decision reads; want the baseline's one", n)
+	}
+	if err := p.SendKeys("s", "Escape"); err != nil {
+		t.Fatalf("SendKeys(Escape): %v", err)
+	}
+	if err := p.WaitForIdle(context.Background(), "s", 5*time.Second); !errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("noted: WaitForIdle = %v; want a pending-interaction error at once", err)
+	}
+
+	tm, _, ex = softInterruptTmux(t, runtime.ProgramStatusOn, dialogAfterTheEscape(t))
+	p = &Provider{tm: tm}
+	if err := p.SendKeys("s", "Escape"); err != nil {
+		t.Fatalf("SendKeys(Escape): %v", err)
+	}
+	if err := p.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("unnoted Escape: WaitForIdle = %v; want the scan's timeout", err)
+	}
+	if n := ex.holdReads(); n != 0 {
+		t.Fatalf("unnoted Escape: %d decision reads; want none", n)
+	}
+
+	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusOff, runtime.ProgramStatusShadow} {
+		tm, _, ex := softInterruptTmux(t, mode, dialogAfterTheEscape(t))
+		p := &Provider{tm: tm}
+		p.NoteInterrupt("s")
+		if err := p.SendKeys("s", "Escape"); err != nil {
+			t.Fatalf("%s: SendKeys(Escape): %v", mode, err)
+		}
+		if err := p.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+			t.Fatalf("%s: WaitForIdle = %v; want the scan's timeout", mode, err)
+		}
+		if n := ex.holdReads(); n != 0 {
+			t.Fatalf("%s: %d decision reads; want none", mode, n)
+		}
+	}
+}
+
+// softInterruptSessionProvider is a session runtime whose keys, interrupts,
+// interrupt notes and idle waits reach a tmux Provider (softInterruptTmux),
+// while the session lifecycle, its other reads and message delivery stay on
+// a runtime.Fake.
+type softInterruptSessionProvider struct {
+	*runtime.Fake
+	tp *Provider
+}
+
+func (p *softInterruptSessionProvider) SendKeys(name string, keys ...string) error {
+	return p.tp.SendKeys(name, keys...)
+}
+
+func (p *softInterruptSessionProvider) Interrupt(name string) error { return p.tp.Interrupt(name) }
+
+func (p *softInterruptSessionProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.tp.WaitForIdle(ctx, name, timeout)
+}
+
+func (p *softInterruptSessionProvider) NoteInterrupt(name string) { p.tp.NoteInterrupt(name) }
+
+// Kills a soft interrupt whose Ctrl-C fallback lands in a dialog the program
+// raised after its Escape (record says blocked past the pre-Escape baseline,
+// scan says busy), end to end from the session: under on, interrupt_now on a
+// Codex session notes the interrupt at the leaf before its Escape, so the
+// idle wait after the Escape ends on the dialog, no Ctrl-C reaches the pane,
+// and the replacing message is queued behind the dialog. A note taken after
+// the Escape would read the dialog as its own baseline and settle nothing.
+func TestInterruptNowQueuesBehindADialogRaisedAfterTheSoftEscape(t *testing.T) {
+	tm, pane, _ := softInterruptTmux(t, runtime.ProgramStatusOn, dialogAfterTheEscape(t))
+	sp := &softInterruptSessionProvider{Fake: runtime.NewFake(), tp: &Provider{tm: tm}}
+	cityPath := t.TempDir()
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, session.WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	city, err := session.NewCityDir(cityPath)
+	if err != nil {
+		t.Fatalf("NewCityDir: %v", err)
+	}
+	before := len(sp.SnapshotCalls())
+
+	outcome, err := mgr.Submit(context.Background(), session.Actor{Kind: session.ActorOperator, City: city}, info.ID, "do this instead", session.BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, session.SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v; want the message queued behind the dialog", err)
+	}
+	if !outcome.Queued {
+		t.Fatalf("Submit(interrupt_now) = %+v; want the message queued behind the dialog", outcome)
+	}
+	if got, want := pane.typedOrPressed(), []string{"key:Escape"}; !slices.Equal(got, want) {
+		t.Fatalf("keys reaching the Codex pane = %q, want %q: no Ctrl-C fallback into the dialog", got, want)
+	}
+	for _, c := range sp.SnapshotCalls()[before:] {
+		switch c.Method {
+		case "Stop", "Start", "Nudge", "NudgeNow":
+			t.Fatalf("runtime call %s after the settle reported a dialog; want none", c.Method)
+		}
 	}
 }

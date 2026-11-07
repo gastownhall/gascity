@@ -131,18 +131,30 @@ func TestSessionStartsQueueTheHandedBackStartupNudge(t *testing.T) {
 
 // Kills a stop with a restart on failure that hard-restarts a session whose
 // interrupted program raised a dialog (the settle's error wraps
-// ErrPendingInteraction): the restart is withheld, and the error carries the
-// pending interaction. A dialog the interrupt itself canceled settles (the
-// leaf's settle reports pending only for one raised since), so it never gets
-// here.
+// ErrPendingInteraction), on either path, a Settle that replaces the waits'
+// error included: the restart is withheld, and the error carries the pending
+// interaction. A dialog the interrupt itself canceled settles (the leaf's
+// settle reports pending only for one raised since), so it never gets here.
 func TestStopTurnWithRestartWithheldBehindADialog(t *testing.T) {
-	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
-	sp.WaitForIdleErrors[info.SessionName] = errSettleBlocked
-	report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
-	if !errors.Is(err, ErrPendingInteraction) || report.Restarted {
-		t.Fatalf("StopTurnWith(restart) = %+v, %v; want the pending interaction and no restart", report, err)
-	}
-	if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 0 {
-		t.Fatalf("calls = %v, want no Stop", callMethods(sp.SnapshotCalls()))
+	for _, tc := range []struct {
+		name   string
+		settle func(waitErr error) error
+	}{
+		{"session-scoped", nil},
+		// The turn-scoped settle (the worker's awaitTurnEnd) names the
+		// waits' error in its text only.
+		{"settle replaces the waits' error", func(waitErr error) error { return TurnNotEndedError("interrupted turn", waitErr) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+			sp.WaitForIdleErrors[info.SessionName] = errSettleBlocked
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController), Settle: tc.settle})
+			if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
+				t.Fatalf("StopTurnWith(restart) = %+v, %v; want the pending interaction, the turn not ended, and no restart", report, err)
+			}
+			if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 0 {
+				t.Fatalf("calls = %v, want no Stop", callMethods(sp.SnapshotCalls()))
+			}
+		})
 	}
 }

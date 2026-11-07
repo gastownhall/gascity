@@ -14,7 +14,17 @@ var (
 	_ ProgramStatusHoldProvider   = FullFake{}
 
 	_ StartupNudgeHandbackProvider = FullFake{}
+	_ InterruptNoteProvider        = FullFake{}
 )
+
+// NoteInterrupt implements [InterruptNoteProvider]: it records the call, so
+// a test can tell where its caller noted an interrupt among the keys it
+// sent. The fake decides no wait on it.
+func (f FullFake) NoteInterrupt(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "NoteInterrupt", Name: name})
+}
 
 // SetStartupNudgeHandback sets the startup nudge a FullFake hands back for
 // session name ([Fake.StartupNudgeHandbacks]) under the fake's lock.

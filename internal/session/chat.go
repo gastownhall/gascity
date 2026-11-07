@@ -1896,7 +1896,7 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart 
 		if !restarts || !errors.Is(err, runtime.ErrTurnNotEnded) {
 			return err
 		}
-		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, err); err != nil {
+		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, false, err); err != nil {
 			return err
 		}
 		if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, restart); err != nil {
