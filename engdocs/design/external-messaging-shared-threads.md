@@ -118,7 +118,9 @@ type ConversationTranscriptRecord struct {
 
 Rules:
 
-- Transcript sequence is monotonically increasing per conversation.
+- Transcript sequence is unique per conversation and increases with each
+  append (see "Transcript append and sequence allocation" for what each
+  store backend guarantees).
 - Both inbound external messages and outbound public publications are
   recorded.
 - The transcript body text is stored in bead `Description`; structured
@@ -322,7 +324,8 @@ Key behaviors:
     mutate or expose session-scoped replay state.
 - `Append` allocates the next transcript sequence under the conversation
   lock and enforces `(conversation, provider_message_id)` uniqueness
-  before sequence allocation.
+  before sequence allocation; see "Transcript append and sequence
+  allocation" below.
 - `EnsureMembership` is idempotent per `(conversation, session)` and
   returns the existing record unchanged on re-call.
 - `UpdateMembership` changes replay policy or metadata for an existing
@@ -347,6 +350,57 @@ Key behaviors:
   existing binding and delivery services. Conversation sequencing,
   provider-message dedupe, hydration transitions, and membership writes
   all linearize through that shared lock namespace.
+
+### Transcript append and sequence allocation
+
+The conversation lock serializes appends only within one lock pool. Two
+processes, or two services built on separate pools, can append to one
+conversation at once, so sequence uniqueness rests on the store:
+
+- **Pinned entry IDs.** The entry at sequence `n` is created at the bead
+  ID `<transcript state bead ID>-<n>`. The state bead's ID is minted by
+  its store, so the pin lies in that store's namespace, and a store that
+  honors pinned IDs refuses a second entry at the same sequence. Append
+  creates first and reads the pin only after a refused or failed create.
+- **Frontier.** `next_sequence` on the state bead is the transcript's
+  published end. Once an entry is stored, Append advances
+  `next_sequence` past it with a metadata compare-and-set against the
+  live value, re-reading after a lost swap, so it never lowers the
+  value. Each attempt reads the frontier live, past any cache.
+- **Collisions.** When the pin is occupied, the occupant decides. An
+  entry that carries this call's `append_token` (a random value each
+  call stores as system metadata) or its provider message ID is this
+  call's own entry: Append covers it and returns it. Any other entry is
+  covered together with the run of stored entries past it, up to 64
+  entries per call, and Append retries at the next free sequence, at
+  most 8 times. A bead at the pin that is not that sequence's entry of
+  the conversation is `ErrInvariantViolation`.
+- **Recovery.** A create error never proves that nothing was stored: the
+  write may have committed. Append reads the pin; if the pin is empty it
+  returns the create error, if the read fails it returns both errors,
+  and if the pin holds this call's entry it returns that entry. A
+  replay with the same provider message ID finds the stored entry, covers
+  its sequence and returns it, so the earlier attempt's entry is never
+  stored twice.
+- **Visibility.** Readers (`List`, `ListBackfill`, read cursors) see only
+  entries below `next_sequence`. An entry stored but not yet covered,
+  because its append failed between the create and the frontier write,
+  stays hidden until an append or a replay covers it.
+- **Handler replay.** `POST /extmsg/inbound` replays a failed normalized
+  inbound once before answering when the message has a provider message
+  ID and the error is not a validation, invariant, or context error. It
+  notifies the bound sessions only after the final success, so a replay
+  never notifies twice; a persistent failure answers 5xx and notifies
+  nobody.
+
+What each store backend guarantees:
+
+| Store backend | Sequence uniqueness | `next_sequence` |
+| --- | --- | --- |
+| Honors pinned IDs, metadata CAS | Enforced by the store | Never lowered |
+| Honors pinned IDs, no metadata CAS (DoltLite) | Enforced by the store | Best effort: a stale write from another process can lower it; the next append that collides rolls it forward, and entries above it stay hidden until then |
+| Mints its own IDs | Only within one lock pool | Plain write, as before pinned IDs |
+| Upserts on a pinned ID | Unsupported: the second create overwrites the first entry | — |
 
 ### Group service integration
 

@@ -430,3 +430,63 @@ func TestTranscriptReadersHideUncoveredEntry(t *testing.T) {
 		t.Fatalf("ListBackfill after Ack(2) = %v, want none", backfill)
 	}
 }
+
+// TestTranscriptAppendRollsForwardStaleFrontierWithoutCAS: on a pin-refusing
+// store without metadata CAS, a delayed writer completes a stale
+// next_sequence write over stored entries. Once storage is available, Append
+// rolls the frontier forward over the contiguous occupied pins, a bounded
+// run per call, and stores the new message past them with no duplicate
+// sequence. A run longer than one call's budget makes that call fail with
+// its progress written, and the next call finishes the recovery.
+func TestTranscriptAppendRollsForwardStaleFrontierWithoutCAS(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stored    int
+		wantFirst bool // whether the first append after the stale write succeeds
+	}{
+		{name: "within budget", stored: 4, wantFirst: true},
+		{name: "past one call's budget", stored: transcriptRollForwardLimit + 6, wantFirst: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			freezeTestClock(t)
+			mem := honoringMemStore()
+			mem.DisableConditionalWrites = true
+			svc := newTranscriptService(beadstest.Mail(mem), newBindingLockPool())
+			for i := 1; i <= tc.stored; i++ {
+				mustAppendTestMessage(t, svc, "msg-"+strconv.Itoa(i))
+			}
+			states, err := mem.List(beads.ListQuery{Label: transcriptStateLabel(testConversationRef())})
+			if err != nil || len(states) != 1 {
+				t.Fatalf("List(state) = %d states, %v; want 1", len(states), err)
+			}
+			if err := mem.SetMetadata(states[0].ID, "next_sequence", "2"); err != nil {
+				t.Fatalf("SetMetadata(stale next_sequence): %v", err)
+			}
+
+			want := int64(tc.stored + 1)
+			providerMessageID := "msg-" + strconv.FormatInt(want, 10)
+			record, err := appendTestMessage(t, svc, providerMessageID)
+			if !tc.wantFirst {
+				if err == nil {
+					t.Fatalf("first Append stored sequence %d, want a recoverable error past the roll-forward budget", record.Sequence)
+				}
+				if got := testTranscriptNextSequence(t, mem); got <= 2 {
+					t.Fatalf("next_sequence = %d after the failed append, want its roll-forward progress written", got)
+				}
+				record, err = appendTestMessage(t, svc, providerMessageID)
+			}
+			if err != nil {
+				t.Fatalf("Append(%s): %v", providerMessageID, err)
+			}
+			if record.Sequence != want {
+				t.Fatalf("sequence = %d, want %d", record.Sequence, want)
+			}
+			if got := len(assertUniqueTranscriptSequences(t, mem)); got != tc.stored+1 {
+				t.Fatalf("stored entries = %d, want %d", got, tc.stored+1)
+			}
+			if got := testTranscriptNextSequence(t, mem); got != want+1 {
+				t.Fatalf("next_sequence = %d, want %d", got, want+1)
+			}
+		})
+	}
+}

@@ -17,6 +17,9 @@ const (
 	// transcriptFrontierAttempts bounds the reads and writes that advance
 	// next_sequence past one stored entry.
 	transcriptFrontierAttempts = 8
+	// transcriptRollForwardLimit bounds how many stored entries past a
+	// collision one Append walks over to find the transcript's end.
+	transcriptRollForwardLimit = 64
 )
 
 // errTranscriptContended reports a bounded retry loop that ran out of
@@ -117,6 +120,40 @@ func (s *transcriptService) coverSequenceLocked(stateID string, sequence int64) 
 		return s.ensureEarliestAvailableLocked(state)
 	}
 	return fmt.Errorf("advance transcript %s next_sequence past %d: %w", stateID, sequence, lastErr)
+}
+
+// rollForwardLocked covers the run of stored entries that starts at sequence,
+// an entry another append stored, and returns once next_sequence covers the
+// whole run. A store without metadata CAS can lose a write of next_sequence to
+// a stale one from another process, which leaves stored entries above it;
+// walking the occupied pins finds the transcript's end in one pass instead of
+// one collision per entry. A run longer than transcriptRollForwardLimit
+// entries covers what it walked and returns an error wrapping
+// errTranscriptContended, so the next Append carries on from there.
+func (s *transcriptService) rollForwardLocked(ref ConversationRef, stateID string, sequence int64) error {
+	last := sequence
+	for range transcriptRollForwardLimit {
+		next := last + 1
+		occupant, err := beads.LiveFor(s.store).Get(transcriptEntryID(stateID, next))
+		if errors.Is(err, beads.ErrNotFound) {
+			return s.coverSequenceLocked(stateID, last)
+		}
+		if err == nil {
+			_, err = decodeTranscriptOccupant(occupant, ref, next)
+		}
+		if err != nil {
+			if coverErr := s.coverSequenceLocked(stateID, last); coverErr != nil {
+				return errors.Join(err, coverErr)
+			}
+			return fmt.Errorf("read transcript entry %s: %w", transcriptEntryID(stateID, next), err)
+		}
+		last = next
+	}
+	if err := s.coverSequenceLocked(stateID, last); err != nil {
+		return err
+	}
+	return fmt.Errorf("transcript %s holds more than %d stored entries past next_sequence %d: %w",
+		stateID, transcriptRollForwardLimit, sequence, errTranscriptContended)
 }
 
 // ensureEarliestAvailableLocked marks sequence 1 as the earliest available

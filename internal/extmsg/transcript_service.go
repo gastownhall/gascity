@@ -142,7 +142,8 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		// Each attempt creates the entry at the pinned ID of the live
 		// frontier. After a create error, the entry at that pin decides: this
 		// append's own entry (same token or provider message ID) is covered
-		// and returned; another entry is covered and the next sequence tried.
+		// and returned; another entry is covered with the stored run past it
+		// and the next free sequence tried.
 		for range transcriptAppendAttempts {
 			if err := checkContext(ctx); err != nil {
 				return err
@@ -176,13 +177,16 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			if err != nil {
 				return err
 			}
-			if err := s.coverSequenceLocked(state.ID, sequence); err != nil {
-				return err
-			}
 			if occupant.Metadata[transcriptAppendTokenKey] == token ||
 				(providerMessageID != "" && record.ProviderMessageID == providerMessageID) {
+				if err := s.coverSequenceLocked(state.ID, sequence); err != nil {
+					return err
+				}
 				out = record
 				return nil
+			}
+			if err := s.rollForwardLocked(ref, state.ID, sequence); err != nil {
+				return err
 			}
 			if found, err := dedup(); err != nil || found {
 				return err
