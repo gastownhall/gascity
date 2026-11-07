@@ -359,8 +359,12 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		if folded := foldInfo(info, patch); strings.TrimSpace(folded.SessionKey) != "" && !session.HasStartedManualConversation(folded) {
 			maps.Copy(patch, session.ConversationResetPatch(false))
 		}
-		cycles, _ := strconv.Atoi(info.ChurnCount)
-		accrual = session.ChurnAccrualPatch(cycles, defaultMaxChurnCycles, until)
+		// A one-shot agent's own exit is expected completion, not a death
+		// spiral: it keeps this handling and writes no accrual.
+		if !sessionExpectedOneShot(info, worldCfg(r.w)) {
+			cycles, _ := strconv.Atoi(info.ChurnCount)
+			accrual = session.ChurnAccrualPatch(cycles, defaultMaxChurnCycles, until)
+		}
 	case session.ExitProductiveDeath:
 		if info.ChurnCount != "" && info.ChurnCount != "0" {
 			patch["churn_count"] = "0"

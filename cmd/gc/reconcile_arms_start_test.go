@@ -200,6 +200,20 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 	}
 }
 
+func TestDeadRuntimeOneShotExitDoesNotAccrueChurn(t *testing.T) {
+	c := newHealCase(t, livenessGone, desireSleep,
+		"template", "rig-0/worker", "state", "active", "last_woke_at", gatherNow.Add(-2*time.Minute).Format(time.RFC3339), "churn_count", "2")
+	c.w.Env = &reconcileEnv{Cfg: &config.City{
+		Rigs:   []config.Rig{{Name: "rig-0"}},
+		Agents: []config.Agent{{Name: "worker", Scope: "rig", Lifecycle: config.AgentLifecycleOneShot}},
+	}}
+	r := &rowFacts{w: c.w, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}
+	patch, _, accrued, _ := deadRuntimePatch(r, false)
+	if patch["churn_count"] != "" {
+		t.Fatalf("rig-scoped one-shot death recorded churn: accrued=%v patch=%v", accrued, patch)
+	}
+}
+
 // Kills a dead seat's quarantining accrual that shortens a live quarantine
 // (the #7706 review): A6's crash or churn accrual at the limit writes the
 // later of its deadline and the row's unexpired quarantined_until, so it

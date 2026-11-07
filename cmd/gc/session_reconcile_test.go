@@ -3194,6 +3194,49 @@ func TestFindSessionAgentByTemplate(t *testing.T) {
 	}
 }
 
+func TestSessionExitOneShotLifecycle(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	rigCfg := &config.City{
+		Rigs:   []config.Rig{{Name: "rig-0"}},
+		Agents: []config.Agent{{Name: "worker", Scope: "rig", Lifecycle: config.AgentLifecycleOneShot}},
+	}
+	cases := []struct {
+		name   string
+		age    time.Duration
+		cfg    *config.City
+		tmpl   string
+		drain  bool
+		screen sessionpkg.ScreenFact
+		want   sessionpkg.ExitOutcome
+	}{
+		{"one-shot churn band", 90 * time.Second, rigCfg, "rig-0/worker", false, sessionpkg.ScreenUnknown, sessionpkg.ExitChurn},
+		{"persistent churn band", 90 * time.Second, &config.City{}, "worker", false, sessionpkg.ScreenUnknown, sessionpkg.ExitChurn},
+		{"one-shot rapid crash", 29 * time.Second, rigCfg, "rig-0/worker", false, sessionpkg.ScreenUnknown, sessionpkg.ExitRapidCrash},
+		{"one-shot stability boundary", 30 * time.Second, rigCfg, "rig-0/worker", false, sessionpkg.ScreenUnknown, sessionpkg.ExitChurn},
+		{"one-shot productive death", 5 * time.Minute, rigCfg, "rig-0/worker", false, sessionpkg.ScreenUnknown, sessionpkg.ExitProductiveDeath},
+		{"one-shot drain", 90 * time.Second, rigCfg, "rig-0/worker", true, sessionpkg.ScreenUnknown, sessionpkg.ExitNone},
+		{"one-shot provider rate limit", 90 * time.Second, rigCfg, "rig-0/worker", false, sessionpkg.ScreenRateLimit, sessionpkg.ExitRateLimitQuarantine},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := seedSessionInfo(makeBead("b1", map[string]string{
+				"template":     tc.tmpl,
+				"last_woke_at": now.Add(-tc.age).Format(time.RFC3339),
+			}))
+			facts := sessionExitFactsInfo(info, tc.cfg, false, nil, clk)
+			facts.DrainPending = tc.drain
+			if tc.screen != sessionpkg.ScreenUnknown {
+				facts.ScreenAvailable = true
+				facts.Screen = tc.screen
+			}
+			if got := sessionpkg.DecideSessionExit(facts); got != tc.want {
+				t.Fatalf("DecideSessionExit(age=%s) = %v, want %v", tc.age, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAgentTemplateIdentitiesEquivalent pins the load-bearing asymmetry of
 // the identity-equivalence helper: a legacy bound identity is equivalent to
 // the unbound agent only after the bound agent is gone. While both a bound
@@ -3407,6 +3450,32 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 	// Edge-triggered: last_woke_at should be cleared.
 	if session.Metadata["last_woke_at"] != "" {
 		t.Error("last_woke_at should be cleared after churn detection")
+	}
+
+	oneShot := makeBead("b2", map[string]string{
+		"template":     "worker",
+		"session_name": "oneshot-worker",
+		"session_key":  "oneshot-key",
+		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
+		"churn_count":  "2",
+	})
+	oneShotCfg := &config.City{Agents: []config.Agent{{Name: "worker", Lifecycle: config.AgentLifecycleOneShot}}}
+	oneShotStore := newTestStore()
+	oneShotStore.persistRow(oneShot)
+	if _, handled := checkChurn(seedSessionInfo(oneShot), oneShotCfg, false, dt, sessionFrontDoor(oneShotStore), t.TempDir(), clk); !handled {
+		t.Fatal("expected one-shot exit to retain churn handling")
+	}
+	syncBeadFromStore(&oneShot, oneShotStore)
+	if oneShot.Metadata["churn_count"] != "2" {
+		t.Errorf("one-shot churn_count = %q, want unchanged 2", oneShot.Metadata["churn_count"])
+	}
+	// Skipping the accrual skips only the counter: the exit still forces a
+	// fresh conversation, as every other churn event does (SESSION-RECON-011).
+	if key, ok := oneShot.Metadata["session_key"]; !ok || key != "" {
+		t.Errorf("one-shot session_key = %q (set %v), want cleared", key, ok)
+	}
+	if oneShot.Metadata["continuation_reset_pending"] != "true" {
+		t.Error("one-shot exit should set continuation_reset_pending")
 	}
 }
 
