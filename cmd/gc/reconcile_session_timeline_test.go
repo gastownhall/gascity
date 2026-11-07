@@ -575,6 +575,17 @@ const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves
 // session.ClosePatch now writes beside closed_at on a close.
 const timelineUsageCloseMarker = "fix #6672 (ga-q8t65w): a close stamps the usage close marker the usage lane settles"
 
+// timelineBreakdownOperatorEnvUpstream admits the OperatorEnv and Upstream
+// keys in legacy's core_hash_breakdown: each section moved by those two rows
+// alone, both the empty-input digest, as no fixture sets either field.
+//
+// mc-xxxx is the merged-fix form's template, not a bead. The form requires
+// the fix's bead from the maintainers' ledger, though its check reads only
+// the id's shape, and none is visible for issue #6624 or this outside PR,
+// #6626. At merge, a maintainer replaces mc-xxxx with their bead for #6626,
+// or one they file, and drops this paragraph.
+const timelineBreakdownOperatorEnvUpstream = "fix #6626 (mc-xxxx): core_hash_breakdown names OperatorEnv and Upstream, the core fields it left out (#6624)"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
@@ -592,38 +603,50 @@ var (
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
 	{"a cutover finds v5 hashes on a live seat", timelineFingerprintV7, "06e19a483895"},
+	{"a cutover finds v5 hashes on a live seat", timelineBreakdownOperatorEnvUpstream, "9ddf7206d46a"},
 	{"a live drift on a seat", timelineGoldenBaseline, "e4f04b540c00"},
 	{"a live drift on a seat", timelineFingerprintV7, "7d171c9a7762"},
+	{"a live drift on a seat", timelineBreakdownOperatorEnvUpstream, "c86f85a8a741"},
 	{"an idle named session past its idle_timeout is stopped", timelineGoldenBaseline, "67930e13ed18"},
 	{"an idle named session holding assigned work defers until its streak is exhausted", timelineGoldenBaseline, "adade3317639"},
 	{"an idle named session holding assigned work defers until its streak is exhausted", timelineFingerprintV7, "04fb358751a7"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineBreakdownOperatorEnvUpstream, "e62963c2733e"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 29s after wake", timelineFingerprintV7, "1575b096e5cc"},
+	{"a crash 29s after wake", timelineBreakdownOperatorEnvUpstream, "9e7c44eae55b"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
 	{"a crash 5m0s after wake", timelineFingerprintV7, "1923589a14c4"},
+	{"a crash 5m0s after wake", timelineBreakdownOperatorEnvUpstream, "bd9a71ce9dfb"},
 	{"a manual conversation crashes 29s after wake", timelineGoldenBaseline, "5d9d5e446127"},
 	{"a manual conversation crashes 31s after wake", timelineGoldenBaseline, "3fa7f34371d2"},
 	{"a manual conversation crashes 29s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the wake failure (#7470)", "4f3610da3b6f"},
 	{"a manual conversation crashes 29s after wake", timelineFingerprintV7, "39a7521eb515"},
+	{"a manual conversation crashes 29s after wake", timelineBreakdownOperatorEnvUpstream, "adcc8a5e2600"},
 	{"a manual conversation crashes 31s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the churn (#7470)", "b82abd57b861"},
 	{"a manual conversation crashes 31s after wake", timelineFingerprintV7, "2724ce744ac4"},
+	{"a manual conversation crashes 31s after wake", timelineBreakdownOperatorEnvUpstream, "aeec3465267c"},
 	{"a live quarantined row 29s after wake", timelineGoldenBaseline, "f559e3fcf255"},
 	{"a live quarantined row 31s after wake", timelineGoldenBaseline, "25811fbce399"},
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
 	{"a managed suspend drains, then wake", timelineFingerprintV7, "da6d33776ea5"},
+	{"a managed suspend drains, then wake", timelineBreakdownOperatorEnvUpstream, "e0521e1a8370"},
 	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
 	{"a manual create read between its two writes", timelineFingerprintV7, "544ff5662fa5"},
+	{"a manual create read between its two writes", timelineBreakdownOperatorEnvUpstream, "adefef03a000"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
 	{"a provider swap stops the runtime", timelineFingerprintV7, "86d87ce7afad"},
+	{"a provider swap stops the runtime", timelineBreakdownOperatorEnvUpstream, "d8d5adf975d3"},
 	{"a quarantine, then a kill fence, expires", timelineGoldenBaseline, "e6f3872c765e"},
 	{"a quarantine, then a kill fence, expires", timelineFingerprintV7, "965f02c87800"},
+	{"a quarantine, then a kill fence, expires", timelineBreakdownOperatorEnvUpstream, "ae23110595ad"},
 	{"a reload turns idle sleep on for a detached row", timelineGoldenBaseline, "787037012e13"},
 	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
 	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
 	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
+	{"a waiter sleeps", timelineBreakdownOperatorEnvUpstream, "ca407285c43d"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row inside, then past, the wake grace", timelineUsageCloseMarker, "0455d530d7e3"},
@@ -636,15 +659,19 @@ var timelineGoldenRulings = []goldenRuling{
 	{"attach, then detach, then idle", timelineGoldenBaseline, "a8a76fb85cf8"},
 	{"drift deferrals through time", timelineGoldenBaseline, "b7bf2d092994"},
 	{"drift deferrals through time", timelineFingerprintV7, "0a780490c9ee"},
+	{"drift deferrals through time", timelineBreakdownOperatorEnvUpstream, "b89fd57ee068"},
 	{"idle, then sleep, then the next pass", timelineGoldenBaseline, "df4154567a92"},
 	{"idle, then sleep, then the next pass", timelineFingerprintV7, "2cf94220b36f"},
+	{"idle, then sleep, then the next pass", timelineBreakdownOperatorEnvUpstream, "a7fd7237c22d"},
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
 	{"kill a seat holding a dep-blocked claim", timelineUsageCloseMarker, "f4d524d6e82d"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
 	{"kill a seat holding a ready claim", timelineFingerprintV7, "56f71e57af9a"},
+	{"kill a seat holding a ready claim", timelineBreakdownOperatorEnvUpstream, "ce84065e8e36"},
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
 	{"suspend, then wake", "fix #7417 (mc-esqo7)", "ff88e0c7b075"},
 	{"suspend, then wake", timelineFingerprintV7, "fc327803a54e"},
+	{"suspend, then wake", timelineBreakdownOperatorEnvUpstream, "e6985f8163fe"},
 }
 
 func goldenDigest(section string) string {
