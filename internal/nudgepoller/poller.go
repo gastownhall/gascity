@@ -184,3 +184,35 @@ func argvHasPathFlagValue(argv []string, flag, expected string) bool {
 	}
 	return false
 }
+
+// pollTargetFromArgv returns the positional poll target of a nudge poller
+// argv, or "" when argv is not a poller command / carries no target. Flag
+// skipping mirrors argvPollTarget's rules exactly.
+func pollTargetFromArgv(argv []string) string {
+	target, _ := argvPollTarget(argv)
+	return target
+}
+
+// TargetFromArgv extracts the (sessionName, agentName) tuple a nudge poller
+// argv is polling for, returning ok=false unless argv is a well-formed poller
+// command for cityPath. The extracted tuple is validated back through
+// CmdlineMatcher, so a true result carries exactly the same identity guarantee
+// the matcher gives: reapers can trust it before signaling the PID.
+func TargetFromArgv(cityPath string, argv []string) (sessionName, agentName string, ok bool) {
+	for i := 0; i < len(argv); i++ {
+		switch {
+		case argv[i] == sessionFlag && i+1 < len(argv):
+			sessionName = argv[i+1]
+		case strings.HasPrefix(argv[i], sessionFlag+"="):
+			sessionName = strings.TrimPrefix(argv[i], sessionFlag+"=")
+		}
+	}
+	agentName = pollTargetFromArgv(argv)
+	if strings.TrimSpace(sessionName) == "" || strings.TrimSpace(agentName) == "" {
+		return "", "", false
+	}
+	if !CmdlineMatcher(cityPath, sessionName, agentName)(argv) {
+		return "", "", false
+	}
+	return sessionName, agentName, true
+}
