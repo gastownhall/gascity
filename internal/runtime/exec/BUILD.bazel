@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "exec",
     srcs = [
+        "carrier_ops.go",
         "cutover.go",
         "exec.go",
         "fence.go",
@@ -35,6 +36,7 @@ go_test(
     srcs = [
         "capacity_test.go",
         "carrier_fence_integration_test.go",
+        "carrier_ops_test.go",
         "cutover_test.go",
         "deadline_env_test.go",
         "exec_connection_test.go",
@@ -47,6 +49,7 @@ go_test(
         "hoststage_test.go",
         "idle_budget_test.go",
         "idle_integration_test.go",
+        "idle_seam_test.go",
         "idle_test.go",
         "inventory_test.go",
         "json_test.go",

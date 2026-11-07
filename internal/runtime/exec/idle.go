@@ -30,15 +30,13 @@ var execIdleProbeBudget = 5 * time.Second
 
 // idleBoundaryDeclared reports whether the pack declared everything an idle
 // boundary needs: an activity clock (report-activity), an attachment probe
-// (report-attachment), the exec connection (proc.exec) over which the in-box
-// tmux pane is observed, and idle-boundary, the pack's word that its agent
-// runs in the in-box tmux session `main` gc can read. The first three alone
-// prove no tmux: a pack whose box runs none declares them honestly. A failed
-// handshake counts as not declared.
+// (report-attachment), idle-boundary and the selected carrier's needs:
+// carrier.ops reads peek directly, while the default tmux carrier needs
+// proc.exec to read session main. A failed handshake counts as not declared.
 func (p *Provider) idleBoundaryDeclared() bool {
 	return p.handshakeCapability(runtime.ProtocolCapabilityReportActivity) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) &&
-		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) &&
+		(p.opsCarrierSelected() || p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityIdleBoundary)
 }
 
@@ -64,19 +62,23 @@ func idlePromptPrefix(configured string) string {
 }
 
 // publishReadyPrompt writes the session's effective ready-prompt prefix (the
-// default one for a blank prefix) into the in-box tmux session environment
-// (tmux.ReadyPromptEnvKey) once the in-box session exists. The in-memory cache
+// default one for a blank prefix) into the pack's metadata for carrier.ops,
+// otherwise the in-box tmux session environment
+// (tmux.ReadyPromptEnvKey) once the session exists. The in-memory cache
 // only covers the provider instance that started the session; this copy lets
 // any other instance (a restarted orchestrator, a rebuilt provider, a CLI
 // process) recover it in readyPromptPrefix. The prefix is always written,
 // never unset, so an absent variable means "never published" (a failed
 // publish, or a session started before publishing existed) rather than
-// "default prompt". Only a pack with an idle boundary has the in-box tmux
-// session and the exec connection this needs. Best effort: on failure other
-// instances fall back to the default prompt on each wait until a later Start
+// "default prompt". Only a pack with an idle boundary publishes. Best effort:
+// on failure other instances fall back to the default prompt on each wait until a later Start
 // publishes it.
 func (p *Provider) publishReadyPrompt(ctx context.Context, name string, cfg runtime.Config) {
 	if !p.idleBoundaryDeclared() {
+		return
+	}
+	if p.opsCarrierSelected() {
+		_, _ = p.runWithContext(ctx, p.timeout, []byte(idlePromptPrefix(cfg.ReadyPromptPrefix)), "set-meta", name, tmux.ReadyPromptEnvKey)
 		return
 	}
 	// -u, as local tmux passes on every command: tmux otherwise treats the
@@ -91,7 +93,7 @@ func (p *Provider) publishReadyPrompt(ctx context.Context, name string, cfg runt
 // from Start, or read back earlier, is returned without a round trip.
 // Otherwise (this instance did not start the session, for example after an
 // orchestrator restart) read fetches the prefix publishReadyPrompt wrote into
-// the in-box tmux session environment, and a found prefix is remembered. A
+// the selected carrier's prompt store, and a found prefix is remembered. A
 // failed or expired read, or an absent variable (never published), returns
 // tmux.DefaultReadyPromptPrefix without remembering it, so the next call
 // retries.
@@ -121,7 +123,9 @@ func (p *Provider) readyPromptPrefix(ctx context.Context, name string, limit tim
 // tests substitute slow or hung readers.
 type readyPromptReader func(ctx context.Context) (prefix string, found bool, err error)
 
-// readPublishedReadyPrompt reads tmux.ReadyPromptEnvKey from the in-box tmux
+// readPublishedReadyPrompt reads the carrier.ops metadata key under the wait's
+// bounded context. Empty or failed reads fall back without caching. Otherwise
+// it reads tmux.ReadyPromptEnvKey from the in-box tmux
 // session over the exec connection. It lists the whole session environment
 // rather than asking for the one key, because tmux exits 1 both for an unset
 // key and for a missing session, and the exec op does not carry the stderr
@@ -134,6 +138,13 @@ type readyPromptReader func(ctx context.Context) (prefix string, found bool, err
 // unchanged without a UTF-8 locale, which TestTmuxBoxPackIdleBoundary checks
 // with non-ASCII prompts.
 func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (string, bool, error) {
+	if p.opsCarrierSelected() {
+		out, err := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, tmux.ReadyPromptEnvKey)
+		if err != nil || out == "" {
+			return "", false, err
+		}
+		return idlePromptPrefix(out), true, nil
+	}
 	out, code, err := p.Exec(ctx, name, []string{"tmux", "-u", "show-environment", "-t", execTmuxSession})
 	if err != nil {
 		return "", false, err
@@ -150,15 +161,14 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 	return "", false, nil
 }
 
-// WaitForIdle waits until the in-box tmux pane shows the session's ready prompt
+// WaitForIdle waits until the selected carrier shows the session's ready prompt
 // with no busy indicator on two consecutive observations, and implements
 // [runtime.IdleWaitProvider]. Each observation captures the last
-// tmux.PromptObservationLines lines over the exec connection and applies
+// tmux.PromptObservationLines lines through the carrier and applies
 // tmux.ClassifyIdlePane, so the boundary is the one local tmux uses.
 //
-// A pack that does not declare report-activity, report-attachment, proc.exec
-// and idle-boundary gets [runtime.ErrInteractionUnsupported] without any op
-// being run.
+// A pack without idleBoundaryDeclared gets [runtime.ErrInteractionUnsupported]
+// without a screen read.
 //
 // timeout is a hard upper bound: the ready-prompt read (see
 // readyPromptPrefix) and every capture run under a context that expires at
@@ -351,7 +361,7 @@ func bounded[T any](ctx context.Context, limit time.Duration, f func(context.Con
 
 // IdleProbeBudget reports the timeout one idle proof needs on this pack and
 // implements [runtime.IdleProbeBudgetProvider]: execIdleProbeBudget for a pack
-// with an idle boundary, whose every pane observation is an exec round trip;
+// with an idle boundary, whose every observation is a pack round trip;
 // zero otherwise, so the orchestrator keeps its default.
 func (p *Provider) IdleProbeBudget() time.Duration {
 	if p.idleBoundaryDeclared() {

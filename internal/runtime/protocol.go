@@ -28,33 +28,31 @@ const (
 	// carrying the in-box command's exit code. The controller uses this to read
 	// an exec-op exit of 2 as the command's own exit code rather than the RPP
 	// "unknown op" sentinel (ErrExecUnsupported) — disambiguating the overloaded
-	// exit 2 at the exec-connection seam. exec stays optional; an executable that
-	// omits this capability is driven via the dedicated ops (the fallback path).
+	// exit 2 at the exec-connection seam. Without carrier.ops, driving tries
+	// tmux over exec even when proc.exec is undeclared; only ErrExecUnsupported
+	// enables dedicated-op fallback.
 	ProtocolCapabilityConnectionExec = "proc.exec"
+	// ProtocolCapabilityCarrierOps selects dedicated nudge, peek, send-keys,
+	// interrupt and clear-scrollback ops instead of tmux over exec. All five
+	// ops are required and gc sends no tmux commands after selection. With it,
+	// input-fence and proc.provision have no effect: fencing is none and start
+	// is welded. Tmux remains the undeclared default.
+	ProtocolCapabilityCarrierOps = "carrier.ops"
 	// ProtocolCapabilityInputFence declares that the box's tmux can take
 	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
 	// session present when `start` returns, and `sh`. Declared with
-	// proc.exec, it makes gc publish each agent pane's input fence and guard
+	// proc.exec and without carrier.ops, it makes gc publish each agent pane's input fence and guard
 	// fenced input over the exec connection (InputFencingAtomic); without it
 	// the pack reports InputFencingNone, and starts and launches touch no
 	// fence.
 	ProtocolCapabilityInputFence = "input-fence"
-	// ProtocolCapabilityIdleBoundary declares that gc may read the agent's
-	// idle boundary from the box's tmux: the agent runs in the in-box tmux
-	// session `main`, readable with `capture-pane` over the exec connection.
-	// Declared with proc.exec, report-activity and report-attachment, it gives
-	// the pack an idle boundary (WaitForIdle, the ready-prompt publication and
-	// the idle-proof budget) and full idle sleep; without it those three alone
-	// report timed-only sleep, because nothing else proves the box runs tmux.
-	//
-	// The name states the guarantee gc relies on (it may read the agent's idle
-	// boundary), not the mechanism, so it keeps its meaning once carriers other
-	// than tmux exist. When a pack can select its carrier (gh#8903), this
-	// definition widens from
-	// "tmux in the box" to "the carrier the pack declares can answer a Peek",
-	// and RPP-CONN-002 checks the declared carrier's liveness and read; tmux's
-	// check stays the one it runs today. A non-tmux carrier reuses this token
-	// rather than adding one.
+	// ProtocolCapabilityIdleBoundary declares that the selected carrier can
+	// answer Peek for the agent. The default tmux carrier needs proc.exec and
+	// the in-box session `main`; carrier.ops reads through the peek op instead.
+	// With report-activity and report-attachment this enables WaitForIdle,
+	// ready-prompt recovery, the idle-proof budget and full idle sleep.
+	// RPP-CONN-002 proves the selected carrier's liveness and read, separately
+	// from production's prompt classification.
 	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
@@ -76,7 +74,8 @@ const (
 	// declared, the controller provisions via `provision` and then launches the
 	// agent itself by exec-ing `tmux new-session` over the `exec` op (so it also
 	// requires proc.exec); without it, the controller uses the welded `start` op
-	// (compat). It gates TransportCapabilities.SeparableLaunch.
+	// (compat). It gates TransportCapabilities.SeparableLaunch. carrier.ops
+	// always uses welded start, even with proc.provision and proc.exec.
 	ProtocolCapabilityProvision = "proc.provision"
 	// ProtocolCapabilityObserveV1 declares the exec observe contract
 	// reconciler v2 reads (PAR-EXEC): the `observe`, `inventory` and

@@ -515,10 +515,11 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
 // (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
-// over. Otherwise the welded `start` op provisions and launches in one shot
+// over, using the default tmux carrier. carrier.ops never enables it. Otherwise the welded `start` op provisions and launches in one shot
 // (compat). Gates [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
 func (p *Provider) supportsSeparableLaunch() bool {
-	return p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
+	return !p.opsCarrierSelected() &&
+		p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
 }
 
@@ -888,23 +889,30 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// execTmuxSession is the in-box tmux session the carrier addresses. An exec-pack
-// runtime runs one agent per box in a tmux session named "main" (the tmux-in-box
-// convention shared with the Kubernetes provider), so the driving verbs are
-// reproduced as tmux commands over the exec op rather than dedicated
-// nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+// execTmuxSession is the in-box session the undeclared tmux carrier addresses.
+// carrier.ops packs instead use their dedicated driving ops.
 const execTmuxSession = "main"
 
 // defaultLaunchShell is the in-box command launchAgent runs when the config
 // carries no Command (a holding shell, matching the welded packs' default).
 const defaultLaunchShell = "/bin/sh"
 
-// carrier drives the in-box tmux session over this provider's own exec op.
+// opsCarrierSelected requires an explicit successful handshake declaration.
+// Unknown tokens and a failed handshake retain the undeclared tmux default.
+func (p *Provider) opsCarrierSelected() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityCarrierOps)
+}
+
+// carrier selects the pack's driving wire, never from proc.exec alone.
 func (p *Provider) carrier() runtime.Carrier {
+	if p.opsCarrierSelected() {
+		return opsCarrier{p}
+	}
 	return runtime.NewTmuxCarrier(p, execTmuxSession)
 }
 
-// The dedicated-wire-op driving helpers. The public driving methods
+// The dedicated-wire-op driving helpers back carrier.ops directly. Without
+// that declaration, the public driving methods
 // (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
 // exec op first and fall back to these when the runtime does not implement exec
 // (ErrExecUnsupported): a pack that ships exec + tmux-in-box is
@@ -952,10 +960,12 @@ func (p *Provider) clearScrollbackOp(ctx context.Context, name string) error {
 	return err
 }
 
-// Interrupt sends a soft interrupt (Ctrl-C) to the in-box tmux session over the
-// exec connection, falling back to the dedicated interrupt op when the runtime
-// does not implement exec.
+// Interrupt sends a soft interrupt through the selected carrier. Without a
+// declaration it tries tmux over exec, then interrupt on ErrExecUnsupported.
 func (p *Provider) Interrupt(name string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().Interrupt(context.Background(), name)
+	}
 	if err := p.carrier().Interrupt(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
@@ -1097,10 +1107,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return s == "" || s == "true"
 }
 
-// Nudge delivers content as input to the in-box tmux session (typed, then
-// submitted) over the exec connection, falling back to the dedicated nudge op
-// when the runtime does not implement exec. Empty content is a no-op.
+// Nudge delivers content and submits through the selected carrier. Without a
+// declaration it tries tmux over exec, then nudge on ErrExecUnsupported.
+// Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().Nudge(context.Background(), name, content)
+	}
 	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
@@ -1126,10 +1139,13 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// Peek captures the last `lines` of the in-box tmux pane (all scrollback when
-// lines <= 0) over the exec connection, falling back to the dedicated peek op
-// when the runtime does not implement exec.
+// Peek reads the last lines through the selected carrier, all scrollback when
+// lines <= 0. Without a declaration it tries tmux over exec, then peek only
+// on ErrExecUnsupported.
 func (p *Provider) Peek(name string, lines int) (string, error) {
+	if p.opsCarrierSelected() {
+		return p.carrier().Peek(context.Background(), name, lines)
+	}
 	out, err := p.carrier().Peek(context.Background(), name, lines)
 	if errors.Is(err, runtime.ErrExecUnsupported) {
 		return p.peekOp(context.Background(), name, lines)
@@ -1155,10 +1171,13 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-// ClearScrollback clears the in-box tmux session's scrollback over the exec
-// connection, falling back to the dedicated clear-scrollback op when the runtime
-// does not implement exec.
+// ClearScrollback clears the selected carrier's scrollback. Without a
+// declaration it tries tmux over exec, then clear-scrollback only on
+// ErrExecUnsupported.
 func (p *Provider) ClearScrollback(name string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().ClearScrollback(context.Background(), name)
+	}
 	if err := p.carrier().ClearScrollback(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
@@ -1181,11 +1200,13 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	return err
 }
 
-// SendKeys sends bare tmux-style keystrokes (e.g. "Enter", "Down") to the in-box
-// tmux session over the exec connection; used for dialog dismissal and other
-// non-text input. Falls back to the dedicated send-keys op when the runtime does
-// not implement exec.
+// SendKeys sends bare keystrokes through the selected carrier, for dialog
+// dismissal and other non-text input. Without a declaration it tries tmux
+// over exec, then send-keys only on ErrExecUnsupported.
 func (p *Provider) SendKeys(name string, keys ...string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().SendKeys(context.Background(), name, keys...)
+	}
 	if err := p.carrier().SendKeys(context.Background(), name, keys...); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
@@ -1212,10 +1233,9 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 }
 
 // SleepCapability reports the idle-sleep capability the pack's handshake
-// supports. A pack that declares report-activity, report-attachment, proc.exec
-// and idle-boundary gets full idle sleep: it has an activity clock, an
-// attachment probe, and an idle boundary read from its in-box tmux pane
-// (WaitForIdle).
+// supports. Full idle sleep needs report-activity, report-attachment,
+// idle-boundary and either carrier.ops or the default carrier's proc.exec.
+// WaitForIdle reads through the selected carrier.
 // Every other pack keeps the timed-only floor. The floor is never disabled:
 // non-interactive sleep and the queued-nudge poller rely on timed-only for
 // exec runtimes that report no activity.
@@ -1269,8 +1289,9 @@ var (
 // v0 wire op carries the command on stdin and the runtime runs it, e.g. via
 // `sh -c "$(cat)"`), and the op's exit code is the command's exit code. A
 // runtime whose script does not implement exec (exit 2) yields
-// [runtime.ErrExecUnsupported]; the driving methods then fall back to the
-// dedicated nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+// [runtime.ErrExecUnsupported] when proc.exec is undeclared. The default
+// carrier's driving methods then fall back to dedicated wire ops. carrier.ops
+// selects those ops directly, independently of this connection.
 //
 // Because the v0 `exec` op uses stdin for the command itself, the command's
 // own stdin is not separately available; the driving ops reproduced over Exec
