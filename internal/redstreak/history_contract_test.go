@@ -60,8 +60,8 @@ func TestEvaluateHistoryCountsConsecutiveAggregateConclusions(t *testing.T) {
 			wantFailures: 1,
 		},
 		{
-			name:         "cancelled and skipped are non-success",
-			conclusions:  []string{"cancelled", "skipped"},
+			name:         "cancelled and skipped are non-success", //nolint:misspell // GitHub Actions API conclusion spelling
+			conclusions:  []string{"cancelled", "skipped"},        //nolint:misspell // GitHub Actions API conclusion spelling
 			wantFailures: 2,
 		},
 		{

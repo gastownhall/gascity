@@ -117,7 +117,7 @@ func TestGitHubRunsEvaluateIsIdempotentForSameRunAndUpdatesForNewRedRun(t *testi
 	}
 
 	h.client.evaluations["nightly-red-streak"] = testRedStreakEvaluation(
-		"nightly-red-streak", 802, "cancelled", 4, 0,
+		"nightly-red-streak", 802, "cancelled", 4, 0, //nolint:misspell // GitHub Actions API conclusion spelling
 	)
 	h.store.Reset()
 	runGitHubRunsEvaluate(t, h, 0, "--monitor", "nightly-red-streak")
@@ -134,8 +134,8 @@ func TestGitHubRunsEvaluateIsIdempotentForSameRunAndUpdatesForNewRedRun(t *testi
 	if got := updated.Metadata["redstreak.consecutive_count"]; got != "4" {
 		t.Fatalf("redstreak.consecutive_count = %q, want 4", got)
 	}
-	if got := updated.Metadata["redstreak.aggregate_conclusion"]; got != "cancelled" {
-		t.Fatalf("redstreak.aggregate_conclusion = %q, want cancelled", got)
+	if got := updated.Metadata["redstreak.aggregate_conclusion"]; got != "cancelled" { //nolint:misspell // GitHub Actions API conclusion spelling
+		t.Fatalf("redstreak.aggregate_conclusion = %q, want cancelled", got) //nolint:misspell // GitHub Actions API conclusion spelling
 	}
 }
 
@@ -388,8 +388,8 @@ func newGitHubRunsContractHarness(t *testing.T) *githubRunsContractHarness {
 		}
 		return client
 	}
-	openGitHubRunEvaluateStore = func(_, _ string) (beads.Store, error) {
-		return store, nil
+	openGitHubRunEvaluateStore = func(_, _ string) (beads.WorkStore, error) {
+		return beads.WorkStore{Store: store}, nil
 	}
 	t.Cleanup(func() {
 		newGitHubRunsEvaluateClient = oldClient

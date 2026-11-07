@@ -29,10 +29,15 @@ var (
 	newGitHubRunsEvaluateClient = func(token string) githubRunEvaluator {
 		return redstreak.NewClient(token)
 	}
-	// openGitHubRunEvaluateStore opens the beads store backing red-streak
-	// episode beads. Package var for the same testability reason.
-	openGitHubRunEvaluateStore = func(cityPath, scopeRoot string) (beads.Store, error) {
-		return openStoreAtForCity(scopeRoot, cityPath)
+	// openGitHubRunEvaluateStore opens the work-class store backing
+	// red-streak episode beads. Episodes are routed work, so the handle is
+	// typed beads.WorkStore. Package var for the same testability reason.
+	openGitHubRunEvaluateStore = func(cityPath, scopeRoot string) (beads.WorkStore, error) {
+		store, err := openStoreAtForCity(scopeRoot, cityPath)
+		if err != nil {
+			return beads.WorkStore{}, err
+		}
+		return cliStores(cityPath, store).Work(), nil
 	}
 )
 
@@ -288,7 +293,7 @@ func redStreakMetadata(monitor config.GitHubRunMonitor, eval redstreak.Evaluatio
 // createRedStreakEpisode opens a new episode bead for a monitor's red streak.
 // gc.routed_to is set only here, at creation: subsequent updates never
 // resend it, so it survives untouched across the episode's lifetime.
-func createRedStreakEpisode(store beads.Store, monitor config.GitHubRunMonitor, eval redstreak.Evaluation) (beads.Bead, error) {
+func createRedStreakEpisode(store beads.WorkStore, monitor config.GitHubRunMonitor, eval redstreak.Evaluation) (beads.Bead, error) {
 	metadata := redStreakMetadata(monitor, eval)
 	metadata[beadmeta.RoutedToMetadataKey] = monitor.Route
 	priority := redStreakPriorityValue(monitor.PriorityOrDefault())
@@ -304,7 +309,7 @@ func createRedStreakEpisode(store beads.Store, monitor config.GitHubRunMonitor, 
 
 // updateRedStreakEpisode advances an existing episode bead to a monitor's
 // latest evaluation.
-func updateRedStreakEpisode(store beads.Store, existing beads.Bead, monitor config.GitHubRunMonitor, eval redstreak.Evaluation) error {
+func updateRedStreakEpisode(store beads.WorkStore, existing beads.Bead, monitor config.GitHubRunMonitor, eval redstreak.Evaluation) error {
 	metadata := redStreakMetadata(monitor, eval)
 	desc := redStreakEpisodeDescription(monitor, eval)
 	return store.Update(existing.ID, beads.UpdateOpts{
