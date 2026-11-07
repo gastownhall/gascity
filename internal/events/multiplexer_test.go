@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -444,53 +445,44 @@ func TestMultiplexerWatch(t *testing.T) {
 }
 
 func TestMultiplexerWatchDoesNotWaitForSlowProvider(t *testing.T) {
-	m := NewMultiplexer()
-	m.providerTimeout = 20 * time.Millisecond
+	// The 20ms provider budget is the behavior under test. Inside the
+	// synctest bubble the clock advances only once every goroutine is
+	// blocked, so the healthy city always attaches before the budget
+	// expires and scheduler delay on a loaded host cannot drop it.
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 20 * time.Millisecond
+		m := NewMultiplexer()
+		m.providerTimeout = budget
 
-	healthy := NewFake()
-	slow := newBlockingProvider()
-	defer slow.release()
+		healthy := NewFake()
+		slow := newBlockingProvider()
+		defer slow.release()
 
-	m.Add("healthy", healthy)
-	m.Add("slow", slow)
+		m.Add("healthy", healthy)
+		m.Add("slow", slow)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 
-	result := make(chan struct {
-		w   *MuxWatcher
-		err error
-	}, 1)
-	go func() {
+		start := time.Now()
 		w, err := m.Watch(ctx, nil)
-		result <- struct {
-			w   *MuxWatcher
-			err error
-		}{w: w, err: err}
-	}()
-
-	var w *MuxWatcher
-	select {
-	case got := <-result:
-		if got.err != nil {
-			t.Fatalf("Watch() error = %v", got.err)
+		if err != nil {
+			t.Fatalf("Watch() error = %v", err)
 		}
-		w = got.w
-	case <-time.After(200 * time.Millisecond):
-		slow.release()
-		cancel()
-		t.Fatal("Watch() waited for the slow provider")
-	}
-	defer w.Close() //nolint:errcheck
+		defer w.Close() //nolint:errcheck
+		if got := time.Since(start); got != budget {
+			t.Fatalf("Watch() returned after %s, want provider budget %s", got, budget)
+		}
 
-	healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
-	te, err := w.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if te.City != "healthy" || te.Actor != "a1" {
-		t.Fatalf("Next() = %+v, want healthy provider event", te)
-	}
+		healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+		te, err := w.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if te.City != "healthy" || te.Actor != "a1" {
+			t.Fatalf("Next() = %+v, want healthy provider event", te)
+		}
+	})
 }
 
 func TestMultiplexerWatchWithCursors(t *testing.T) {
