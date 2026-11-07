@@ -59,6 +59,7 @@ cmd/gc/storage_boot.go	openInfraPurgeStores	mint	3
 cmd/gc/storage_boot.go	openPlannedBindingEngine	raw-result	1
 cmd/gc/storage_boot.go	storageRoutes	raw-field	3
 cmd/gc/storage_boot.go	storageRoutes.distinctEngines	raw-result	1
+cmd/gc/storage_boot.go	storageRoutes.hasLegacyResidents	cache-peel	1
 cmd/gc/storage_boot.go	storageRoutes.hasLegacyResidents	cap-assert	1
 cmd/gc/storage_boot.go	storageRoutes.hasLegacyResidents	raw-param	1
 cmd/gc/storage_boot.go	storageRoutes.storeFor	raw-result	1

@@ -12,14 +12,16 @@ import (
 // class-neutral. The XFor helpers answer through a handle as they did
 // (TestXForThroughAHandleToday pins that), except the two class-neutral reads
 // As itself calls, DepListBatchFor and ReadyBlockedByAbsentFor, which walk
-// the class layers since T6a.
+// the class layers since T6a, and HandlesFor, which the handles forward since
+// T7a (class_store_handles.go).
 //
 // Outside internal/beads the storeclass lint (tools/nogo/analyzers/storeclass)
 // reports a type assertion on a store and an unwrap of a handle; As and the
 // XFor helpers are what replace them.
 
 // classLayer is a layer the class machinery puts above the store the router
-// chose: a typed class handle, and from T8 the class guard. As and SameStore
+// chose: a typed class handle, a ResidentStore, a federation leg layer and
+// its FederatedReader (leg.go), and from T8 the class guard. As and SameStore
 // walk class layers and nothing else; they never peel a CachingStore, an
 // emitter or a policy store.
 type classLayer interface {
@@ -188,17 +190,18 @@ func passesClassGate[T any]() bool {
 }
 
 // SameStore reports whether a and b are one physical store: the store below
-// their class layers, so two class handles over one store are the same, and
-// a handle is the same as the store it wraps. A nil or zero handle is the
+// their class layers, so two class handles over one store are the same, a
+// handle is the same as the store it wraps, and a FederatedReader is the same
+// as the store it reads. A nil or zero handle is the
 // same as nothing, and a store whose dynamic type is not comparable (== on
 // it would panic) is the same as nothing either.
-func SameStore(a, b Store) (same bool) {
-	a, b = physicalStore(a), physicalStore(b)
-	if a == nil || b == nil {
+func SameStore(a, b storeReader) (same bool) {
+	pa, pb := physicalStore(a), physicalStore(b)
+	if pa == nil || pb == nil {
 		return false
 	}
-	ta := reflect.TypeOf(a)
-	if ta != reflect.TypeOf(b) || !ta.Comparable() {
+	ta := reflect.TypeOf(pa)
+	if ta != reflect.TypeOf(pb) || !ta.Comparable() {
 		return false
 	}
 	defer func() {
@@ -206,7 +209,7 @@ func SameStore(a, b Store) (same bool) {
 			same = false // a comparable type holding a non-comparable interface value
 		}
 	}()
-	return a == b
+	return pa == pb
 }
 
 // LiveFor is HandlesFor(raw).Live for the store raw below s's class layers: a
@@ -214,18 +217,19 @@ func SameStore(a, b Store) (same bool) {
 // live reader, which a class handle would otherwise hide behind the logical
 // wrapper, and any other store is read through the logical wrapper over raw
 // itself, so the wrapper's optional reads (GetExactBatch) find raw's
-// capabilities rather than the handle's. s must be a store: a zero handle
-// answers a reader whose reads panic, as HandlesFor(nil) does.
-func LiveFor(s Store) LiveReader {
+// capabilities rather than the handle's. s may be a FederatedReader, whose
+// live reader is its store's (and carries no leg role). s must be a store: a
+// zero handle answers a reader whose reads panic, as HandlesFor(nil) does.
+func LiveFor(s storeReader) LiveReader {
 	return HandlesFor(physicalStore(s)).Live
 }
 
 // PhysicalStoreKey is a string identity for the store below s's class layers,
 // for a map keyed by store: "%T:%x" of its address for a reference kind,
 // "%T:%v" of its value for any other, and "<nil>" for no store. Like SameStore
-// it sees through every class handle, so two handles over one store, of any
-// classes, share the store's own key.
-func PhysicalStoreKey(s Store) string {
+// it sees through every class handle and leg reader, so two handles over one
+// store, of any classes, share the store's own key.
+func PhysicalStoreKey(s storeReader) string {
 	p := physicalStore(s)
 	if p == nil {
 		return "<nil>"
@@ -239,11 +243,11 @@ func PhysicalStoreKey(s Store) string {
 	}
 }
 
-// IsNilStore reports whether s is no store: nil, a zero handle (or a handle
-// over one), or a nil pointer below its class layers. A typed nil passes a
+// IsNilStore reports whether s is no store: nil, a zero handle or leg reader
+// (or a handle over one), or a nil pointer below its class layers. A typed nil passes a
 // nil check on the interface and then panics on its first method call, so a
 // constructor that refuses an absent store asks this rather than == nil.
-func IsNilStore(s Store) bool {
+func IsNilStore(s storeReader) bool {
 	p := physicalStore(s)
 	if p == nil {
 		return true
@@ -252,12 +256,15 @@ func IsNilStore(s Store) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
-// physicalStore is s below its class layers, or nil.
-func physicalStore(s Store) Store {
+// physicalStore is s below its class layers (leg readers and leg layers
+// included), or nil: no store, or a reader that is neither a store nor a
+// class layer.
+func physicalStore(s storeReader) Store {
 	for range classLayerMaxDepth {
 		layer, ok := s.(classLayer)
 		if !ok {
-			return s
+			store, _ := s.(Store)
+			return store
 		}
 		s = layer.unwrapClassLayer()
 	}

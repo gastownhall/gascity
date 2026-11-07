@@ -46,11 +46,13 @@ import (
 //     but only the view that created it can see it afterwards, exactly as a
 //     misrouted write on a split city is invisible to the class's readers.
 //
-// A READ inside beads.FederatedRead is a declared federation leg or residence
-// probe: it is filtered but not flagged. A read inside beads.RelicRead is a
-// leg the split plan has ruled against but still needs (pre-split rows in a
-// scope store): filtered, not a failure, and counted per call site as debt.
-// Neither marker covers a write.
+// A READ inside beads.FederatedRead, or through a federated leg layer
+// (beads.MintFederatedLeg), is a declared federation leg or residence probe:
+// it is filtered but not flagged. A read inside beads.RelicRead, or through a
+// relic leg layer, is a leg the split plan has ruled against but still needs
+// (pre-split rows in a scope store): filtered, not a failure, and counted per
+// call site as debt. Neither a marker nor a leg covers a write, and a read
+// through a class handle or a ResidentStore over no leg is policed.
 //
 // # Root and front
 //
@@ -438,9 +440,10 @@ func ViewFront(store beads.Store) (front beads.Store, rebind func(beads.Store) b
 func (v *view) visible(b beads.Bead) bool { return v.p.sideOf(b) == v.side }
 
 // flag charges one hidden row to the caller's production call site. A READ
-// under beads.FederatedRead is not charged; a read under beads.RelicRead is
-// counted as relic debt instead. A write is charged whatever marker it runs
-// under: the markers vouch for a miss, never for a misplaced write.
+// under beads.FederatedRead or through a federated leg is not charged; a read
+// under beads.RelicRead or through a relic leg is counted as relic debt
+// instead (stackFacts.declared). A write is charged whatever marker or leg it
+// runs under: they vouch for a miss, never for a misplaced write.
 func (v *view) flag(op string, b beads.Bead, read bool) {
 	facts := captureStack()
 	violation := SplitViolation{
@@ -454,7 +457,7 @@ func (v *view) flag(op string, b beads.Bead, read bool) {
 		Pkg:   facts.pkg,
 	}
 	if read {
-		switch facts.marker {
+		switch facts.declared() {
 		case beads.FederatedReadMarker:
 			return
 		case beads.RelicReadMarker:

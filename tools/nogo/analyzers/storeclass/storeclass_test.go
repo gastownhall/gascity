@@ -153,7 +153,17 @@ func assert(w beads.WorkStore) { _, _ = w.Store.(beads.Counter) } // unwrap cap-
 
 func assertAnon(g beads.GraphStore) { s := g.Raw(); _, _ = s.(interface{ Count() int }) } // unwrap cap-assert
 
-func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert
+func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert cache-peel
+
+func peelSwitch(s beads.Store) { switch v := s.(type) { case beads.WorkStore, *beads.CachingStore: _ = v; case beads.Counter: } } // raw-param cap-assert cache-peel cache-peel
+
+func peelHandle(s beads.Store) { _, _ = s.(beads.GraphStore) } // raw-param cap-assert cache-peel
+
+func peelBoxed(g beads.GraphStore) { _, _ = any(g).(*beads.CachingStore) } // cap-assert cache-peel
+
+func peelSwitchNoAssign(s beads.Store) { switch s.(type) { case *beads.CachingStore: } } // raw-param cap-assert cache-peel
+
+func peelOther(x any) { _, _ = x.(*beads.CachingStore); switch x.(type) { case beads.WorkStore: } }
 
 func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { case beads.Counter: } } // cap-assert
 
@@ -253,6 +263,7 @@ func config() storeclass.Config {
 		MintFuncs:        []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
 		RawCarriers:      []string{module + "internal/storeref.Leg"},
 		TestMintPackages: []string{module + "internal/beads/beadstest"},
+		CacheTypes:       []string{module + "internal/beads.CachingStore"},
 		Markers:          []string{module + "internal/beads.FederatedRead"},
 		Allow: []storeclass.Allow{
 			{Package: "internal/beads", Reason: "the engines and handles"},

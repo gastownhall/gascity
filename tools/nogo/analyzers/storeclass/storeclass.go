@@ -18,6 +18,13 @@
 //     beads.Store, an interface that is one, or a store, concrete store or
 //     handle boxed by a conversion): use beads.As or an XFor helper, which
 //     see through the handle;
+//   - cache-peel: on such a store value, an assertion or a type-switch case
+//     naming the cache (*beads.CachingStore) or a typed handle (a peel by
+//     hand, as liveReads does). A store value may be a handle, and through a
+//     handle the cache assertion answers false and the read serves the
+//     cache; a hand peel misses every class layer it does not name. Use
+//     beads.LiveFor, beads.HandlesFor (which the handles forward) or
+//     beads.As (OD-T7-14). The site also counts as cap-assert;
 //   - test-mint-import: production code importing a test-only minting
 //     package;
 //   - read-marker: a federated or relic read marker named (D9 freezes them:
@@ -168,12 +175,13 @@ const (
 	Mint           Rule = "mint"
 	Unwrap         Rule = "unwrap"
 	CapAssert      Rule = "cap-assert"
+	CachePeel      Rule = "cache-peel"
 	TestMintImport Rule = "test-mint-import"
 	ReadMarker     Rule = "read-marker"
 )
 
 // Rules is every rule, in reporting order.
-var Rules = []Rule{RawParam, RawResult, RawField, RawVar, RawType, Mint, Unwrap, CapAssert, TestMintImport, ReadMarker}
+var Rules = []Rule{RawParam, RawResult, RawField, RawVar, RawType, Mint, Unwrap, CapAssert, CachePeel, TestMintImport, ReadMarker}
 
 // AllRulesBut is every rule except rs, for an Allow entry.
 func AllRulesBut(rs ...Rule) []Rule {
@@ -213,6 +221,7 @@ type Config struct {
 	MintFuncs        []string // functions that mint handles
 	RawCarriers      []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
 	TestMintPackages []string // packages production code may not import
+	CacheTypes       []string // concrete cache store types an assertion on a store peels to (cache-peel)
 	Markers          []string // federated/relic read marker functions
 	Allow            []Allow
 	Sealed           []string    // module-relative packages with no baseline
@@ -552,12 +561,51 @@ func (c *checker) file(file *ast.File, base string) {
 				what := "a type switch"
 				if v.Type != nil {
 					what = "a type assertion to " + c.typeString(info.TypeOf(v.Type))
+					c.cachePeel(base, fn, v.Type, "a type assertion")
 				}
 				c.add(base, fn, CapAssert, v.Pos(), what+" on a store: use beads.As, which sees through a typed handle")
+			}
+		case *ast.TypeSwitchStmt:
+			if x := switchOperand(v); x != nil && c.isStoreValue(x) {
+				for _, stmt := range v.Body.List {
+					for _, t := range stmt.(*ast.CaseClause).List {
+						c.cachePeel(base, fn, t, "a type-switch case")
+					}
+				}
 			}
 		}
 		return true
 	})
+}
+
+// cachePeel reports a type an assertion on a store names when it peels the
+// store by hand: the cache, or a typed handle.
+func (c *checker) cachePeel(base, fn string, typ ast.Expr, what string) {
+	t := c.pass.TypesInfo.TypeOf(typ)
+	switch {
+	case t == nil:
+	case slices.Contains(c.cfg.CacheTypes, fullName(deref(t))):
+		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store: through a typed handle it answers false and the read serves the cache; use beads.LiveFor, beads.HandlesFor or beads.As, which see through the handle", what, c.typeString(t)))
+	case c.isHandle(t):
+		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store peels a typed handle by hand and misses every class layer it does not name; use beads.LiveFor, beads.HandlesFor or beads.As, which see through them all", what, c.typeString(t)))
+	}
+}
+
+// switchOperand is the value a type switch switches on.
+func switchOperand(sw *ast.TypeSwitchStmt) ast.Expr {
+	var x ast.Expr
+	switch a := sw.Assign.(type) {
+	case *ast.ExprStmt:
+		x = a.X
+	case *ast.AssignStmt:
+		if len(a.Rhs) == 1 {
+			x = a.Rhs[0]
+		}
+	}
+	if ta, ok := ast.Unparen(x).(*ast.TypeAssertExpr); ok {
+		return ta.X
+	}
+	return nil
 }
 
 // signature collects a function type's raw parameters and results.
