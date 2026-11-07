@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -54,47 +55,75 @@ func (a *HTTPAdapter) VerifyAndNormalizeInbound(_ context.Context, _ InboundPayl
 
 // Publish forwards a publish request to the adapter's callback URL.
 func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*PublishReceipt, error) {
-	if a.callbackURL == "" {
-		return &PublishReceipt{
-			Conversation: req.Conversation,
-			Delivered:    false,
-			FailureKind:  PublishFailureUnsupported,
-		}, nil
-	}
-
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling publish request: %w", err)
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.callbackURL+"/publish", bytes.NewReader(body))
+	respBody, failure, err := a.postPublish(ctx, "/publish", body)
 	if err != nil {
-		return nil, fmt.Errorf("creating HTTP request: %w", err)
+		return nil, err
+	}
+	if failure != "" {
+		return &PublishReceipt{Conversation: req.Conversation, FailureKind: failure}, nil
+	}
+	var wire wirePublishReceipt
+	if err := json.Unmarshal(respBody, &wire); err != nil {
+		return &PublishReceipt{Conversation: req.Conversation, FailureKind: PublishFailureTransient}, nil
+	}
+	return wire.toPublishReceipt(), nil
+}
+
+// PublishFile forwards a file reference to /publish-file. The file is opened
+// only by the adapter, under its own configured allowed-root policy.
+func (a *HTTPAdapter) PublishFile(ctx context.Context, req PublishFileRequest) (*PublishFileReceipt, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling file publish request: %w", err)
+	}
+	respBody, failure, err := a.postPublish(ctx, "/publish-file", body)
+	if err != nil {
+		return nil, err
+	}
+	if failure != "" {
+		return &PublishFileReceipt{Conversation: req.Conversation, FailureKind: failure}, nil
+	}
+	var wire wirePublishFileReceipt
+	if err := json.Unmarshal(respBody, &wire); err != nil ||
+		(wire.Delivered && strings.TrimSpace(wire.FileID) == "") ||
+		(!wire.Delivered && wire.FailureKind == "") {
+		return &PublishFileReceipt{Conversation: req.Conversation, FailureKind: PublishFailureTransient}, nil
+	}
+	return &PublishFileReceipt{FileID: wire.FileID, Conversation: wire.Conversation, Delivered: wire.Delivered, FailureKind: wire.FailureKind, Error: wire.Error}, nil
+}
+
+type wirePublishFileReceipt struct {
+	FileID       string             `json:"file_id,omitempty"`
+	Conversation ConversationRef    `json:"conversation"`
+	Delivered    bool               `json:"delivered"`
+	FailureKind  PublishFailureKind `json:"failure_kind,omitempty"`
+	Error        string             `json:"error,omitempty"`
+}
+
+func (a *HTTPAdapter) postPublish(ctx context.Context, path string, body []byte) ([]byte, PublishFailureKind, error) {
+	if a.callbackURL == "" {
+		return nil, PublishFailureUnsupported, nil
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.callbackURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("creating adapter request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	// See csrfHeaderName above for why this is required on outbound
-	// callbacks. Harmless when callbackURL is an external HTTP listener.
+	// Private /svc proxies require the same CSRF header as gc API mutations.
 	httpReq.Header.Set(csrfHeaderName, "true")
-
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return &PublishReceipt{
-			Conversation: req.Conversation,
-			Delivered:    false,
-			FailureKind:  PublishFailureTransient,
-		}, nil
+		return nil, PublishFailureTransient, nil
 	}
 	defer resp.Body.Close() //nolint:errcheck
-
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return &PublishReceipt{
-			Conversation: req.Conversation,
-			Delivered:    false,
-			FailureKind:  PublishFailureTransient,
-		}, nil
+		return nil, PublishFailureTransient, nil
 	}
-
 	if resp.StatusCode >= 400 {
 		kind := PublishFailureTransient
 		switch {
@@ -104,26 +133,12 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 			kind = PublishFailureNotFound
 		case resp.StatusCode == http.StatusTooManyRequests:
 			kind = PublishFailureRateLimited
-		case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		case resp.StatusCode < 500:
 			kind = PublishFailurePermanent
 		}
-		return &PublishReceipt{
-			Conversation: req.Conversation,
-			Delivered:    false,
-			FailureKind:  kind,
-		}, nil
+		return nil, kind, nil
 	}
-
-	var wire wirePublishReceipt
-	if err := json.Unmarshal(respBody, &wire); err != nil {
-		// Malformed 2xx body — cannot confirm delivery.
-		return &PublishReceipt{
-			Conversation: req.Conversation,
-			Delivered:    false,
-			FailureKind:  PublishFailureTransient,
-		}, nil
-	}
-	return wire.toPublishReceipt(), nil
+	return respBody, "", nil
 }
 
 // wirePublishReceipt mirrors PublishReceipt with the snake_case json tags

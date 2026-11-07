@@ -6652,6 +6652,24 @@
         ],
         "type": "object"
       },
+      "OutboundFileResult": {
+        "additionalProperties": false,
+        "properties": {
+          "DeliveryContext": {
+            "$ref": "#/components/schemas/DeliveryContextRecord"
+          },
+          "Receipt": {
+            "$ref": "#/components/schemas/PublishFileReceipt"
+          },
+          "TranscriptEntry": {
+            "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          }
+        },
+        "required": [
+          "Receipt"
+        ],
+        "type": "object"
+      },
       "OutboundResult": {
         "additionalProperties": false,
         "properties": {
@@ -7682,6 +7700,76 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "PublishFileReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "Conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "Delivered": {
+            "type": "boolean"
+          },
+          "Error": {
+            "type": "string"
+          },
+          "FailureKind": {
+            "type": "string"
+          },
+          "FileID": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "FileID",
+          "Conversation",
+          "Delivered",
+          "FailureKind"
+        ],
+        "type": "object"
+      },
+      "PublishFileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "file_path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "initial_comment": {
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "reply_to_message_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "conversation",
+          "file_path"
+        ],
         "type": "object"
       },
       "PublishReceipt": {
@@ -41072,6 +41160,178 @@
           }
         },
         "summary": "Post v0 city by city name extmsg outbound"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/outbound-file": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-outbound-file",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Replay key for this server's idempotency cache; defaults to the body's idempotency_key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Replay key for this server's idempotency cache; defaults to the body's idempotency_key.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishFileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundFileResult"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name extmsg outbound file"
       }
     },
     "/v0/city/{cityName}/extmsg/participants": {

@@ -2773,6 +2773,12 @@ export type OutboundEventPayload = {
     session: string;
 };
 
+export type OutboundFileResult = {
+    DeliveryContext?: DeliveryContextRecord;
+    Receipt: PublishFileReceipt;
+    TranscriptEntry?: ConversationTranscriptRecord;
+};
+
 export type OutboundResult = {
     DeliveryContext?: DeliveryContextRecord;
     Receipt: PublishReceipt;
@@ -3214,6 +3220,28 @@ export type ProxiedEndpointStamp = {
     generation?: string;
     pid?: number;
     port?: number;
+};
+
+export type PublishFileReceipt = {
+    Conversation: ConversationRef;
+    Delivered: boolean;
+    Error?: string;
+    FailureKind: string;
+    FileID: string;
+};
+
+export type PublishFileRequest = {
+    conversation: ConversationRef;
+    file_path: string;
+    filename?: string;
+    idempotency_key?: string;
+    initial_comment?: string;
+    metadata?: {
+        [key: string]: string;
+    };
+    reply_to_message_id?: string;
+    session_id: string;
+    title?: string;
 };
 
 export type PublishReceipt = {
@@ -15647,6 +15675,70 @@ export type PostV0CityByCityNameExtmsgOutboundResponses = {
 };
 
 export type PostV0CityByCityNameExtmsgOutboundResponse = PostV0CityByCityNameExtmsgOutboundResponses[keyof PostV0CityByCityNameExtmsgOutboundResponses];
+
+export type PostV0CityByCityNameExtmsgOutboundFileData = {
+    body: PublishFileRequest;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * Replay key for this server's idempotency cache; defaults to the body's idempotency_key.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/outbound-file';
+};
+
+export type PostV0CityByCityNameExtmsgOutboundFileErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameExtmsgOutboundFileError = PostV0CityByCityNameExtmsgOutboundFileErrors[keyof PostV0CityByCityNameExtmsgOutboundFileErrors];
+
+export type PostV0CityByCityNameExtmsgOutboundFileResponses = {
+    /**
+     * OK
+     */
+    200: OutboundFileResult;
+};
+
+export type PostV0CityByCityNameExtmsgOutboundFileResponse = PostV0CityByCityNameExtmsgOutboundFileResponses[keyof PostV0CityByCityNameExtmsgOutboundFileResponses];
 
 export type DeleteV0CityByCityNameExtmsgParticipantsData = {
     body: ExtMsgParticipantRemoveInputBody;
