@@ -246,3 +246,52 @@ func TestTerminateRuntimeBindsKillToScannedIdentity(t *testing.T) {
 		t.Fatalf("TerminateRuntime(recycled identity) = %v, want nil (the scanned process is gone)", err)
 	}
 }
+
+// A scan that finds no root has nothing for tracking to mark, so it must not
+// pay for the tracking reads: no session listing, no per-session metadata
+// read. A pre-start orphan scan runs before every start, and a stalled tmux
+// server would otherwise hold each start behind its listing.
+func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
+	writeTrackingProcRoot(t)
+	fake := &fakeExecutor{outs: []string{"worker", "GC_SESSION_ID=gc-1"}}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fake
+
+	found, err := p.FindRuntimesBySessionID("gc-9")
+
+	if len(found) != 0 || err != nil {
+		t.Fatalf("FindRuntimesBySessionID(gc-9) = (%+v, %v), want no roots and no error", found, err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", fake.calls)
+	}
+}
+
+// A scan that found no root because it failed is not an empty answer: the
+// short return must hand back the scan's own error, unchanged, so the caller
+// still sees a whole-scan failure, and still asks tmux nothing.
+func TestFindRuntimesBySessionIDWithNoRootsStillReturnsScanError(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	proctable.SetScanRootForTesting(t, filepath.Join(t.TempDir(), "missing"))
+	wantFound, wantErr := proctable.ScanBySessionID("gc-1")
+	if len(wantFound) != 0 || !proctable.HasWholeScanFailure(wantErr) {
+		t.Fatalf("fixture: ScanBySessionID = (%+v, %v), want no roots and a whole-scan failure", wantFound, wantErr)
+	}
+	fake := &fakeExecutor{outs: []string{"worker", "GC_SESSION_ID=gc-1"}}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fake
+
+	found, err := p.FindRuntimesBySessionID("gc-1")
+
+	if len(found) != 0 {
+		t.Fatalf("found %+v, want no roots", found)
+	}
+	if err == nil || err.Error() != wantErr.Error() || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("err = %v, want the scan's own whole-scan failure %v unchanged", err, wantErr)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("tmux was asked %v, want no calls when the scan found no roots", fake.calls)
+	}
+}
