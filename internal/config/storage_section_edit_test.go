@@ -103,6 +103,14 @@ func TestSetSessionReconcilerInCityTOML(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
+	other := "[workspace]\nsession_reconciler = \"v2\"\n\n[daemon]\nsession_reconciler = \"v2\"\n"
+	got, err = SetSessionReconcilerInCityTOML([]byte(other), SessionReconcilerLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[workspace]\nsession_reconciler = \"v2\"\n\n[daemon]\nsession_reconciler = \"legacy\"\n"; string(got) != want {
+		t.Fatalf("rewrote a key outside [daemon]:\n%s", got)
+	}
 	for name, bad := range map[string]string{
 		"no key":                    "[daemon]\nother = 1\n",
 		"key in a fragment's table": "[workspace]\nsession_reconciler = \"v2\"\n",
