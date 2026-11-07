@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 )
 
 // selfResumeOwnClaim is the session's own in_progress bead, living ONLY in the
@@ -279,7 +280,7 @@ func TestGcReadyNonInProgressArmsSkipEnrichment(t *testing.T) {
 	}
 
 	legs := mustReadyLegs(t, "mycity", work, nil, graph)
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: "open"})
+	rows, err := readywork.Read(legs, readywork.Query{Status: "open"})
 	if err != nil {
 		t.Fatalf("readyBeadsForOpts: %v", err)
 	}
@@ -291,11 +292,11 @@ func TestGcReadyNonInProgressArmsSkipEnrichment(t *testing.T) {
 }
 
 // readyRowsForAssignee runs the crash-recovery read the swapped tier 0 issues.
-func readyRowsForAssignee(t *testing.T, legs []readyLeg, assignee string) []readyBead {
+func readyRowsForAssignee(t *testing.T, legs []readywork.Leg, assignee string) []readywork.ReadyBead {
 	t.Helper()
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress, assignee: assignee, limit: 1})
+	rows, err := readywork.Read(legs, readywork.Query{Status: readywork.StatusInProgress, Assignee: assignee, Limit: 1})
 	if err != nil {
-		t.Fatalf("readyBeadsForOpts(--status in_progress --assignee %s): %v", assignee, err)
+		t.Fatalf("readywork.Read(--status in_progress --assignee %s): %v", assignee, err)
 	}
 	return rows
 }

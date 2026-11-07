@@ -3,15 +3,31 @@
 // ConditionalWriter (beads.go) bundles four methods: the revision-CAS trio
 // (UpdateIfMatch/CloseIfMatch/DeleteIfMatch) plus CompareAndSetMetadataKey.
 // The trio needs a backend fence token — a revision that advances on every
-// mutation and is never reused. The beads v1.1.0 schema cannot supply one:
-// types.Issue carries no revision field (Get().Revision is 0 and never
-// advances), the issues DDL has no version column, and updated_at is
-// second-granularity — so two same-second writes yield an EQUAL token and a
-// stale fence SILENTLY SUCCEEDS, which is the lost update a fence exists to
-// prevent. Label mutations never touch updated_at at all. A store-maintained
-// counter is not a fence either: the Dolt database is multi-writer (the bd
-// CLI, other gascity processes, graph-apply), and a counter only the fencer
-// maintains fences nothing.
+// mutation and is never reused. The beads v1.1.0 schema cannot supply one: the
+// issues DDL has no version column, and updated_at is second-granularity — so
+// two same-second writes yield an EQUAL token and a stale fence SILENTLY
+// SUCCEEDS, which is the lost update a fence exists to prevent. Label
+// mutations never touch updated_at at all. A store-maintained counter is not a
+// fence either: the Dolt database is multi-writer (the bd CLI, other gascity
+// processes, graph-apply), and a counter only the fencer maintains fences
+// nothing.
+//
+// WHAT IS NO LONGER TRUE, on the issueops facade this store now rides: the
+// premise used to read "types.Issue carries no revision field, so Get().Revision
+// is 0 and never advances". Both halves of the token now exist. The READ half
+// arrived with the detail-view re-point — issueops.IssueDetails.Revision lands
+// on Bead.Revision (native_dolt_store_read_roles.go Get), and it is a real
+// row_lock rather than a fabricated zero. The POST-WRITE half is the same
+// facade: update, close and reopen each answer with the token they minted, on
+// issueops.{Update,Close,Reopen}Result.Issue.RowVersion.
+//
+// The trio is therefore EXPRESSIBLE against this facade and is still not
+// implemented, which is a scope statement and not a fact about the schema.
+// Implementing it means declaring ConditionalWriter, which is exactly the
+// declaration the paragraph below says must not be made casually — it decides
+// what ResolveConditionalWriter does under require mode for every caller. So it
+// stays its own slice, with its own conformance run against a served adapter,
+// rather than riding in on a pin bump.
 //
 // CompareAndSetMetadataKey needs no such token — it guards on the key's own
 // current value — so it is soundly implementable today on stores where the

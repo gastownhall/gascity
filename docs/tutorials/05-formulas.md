@@ -145,7 +145,9 @@ directory overrides.
 ## Instantiating a formula
 
 Slinging a formula compiles it, materializes the root and every step as beads,
-and routes the resulting **workflow** to an agent — all in one command.
+and routes the resulting **workflow** to an agent — all in one command. Bead IDs
+are generated, so the IDs in your output will differ from the ones shown on this
+page.
 
 ![Applying a formula in three stages: the formula.toml on disk is compiled into
 an in-memory recipe (flattened steps plus dependency edges), then instantiated
@@ -197,6 +199,8 @@ Auto-convoy mc-ygc
 Slung mc-79s → worker
 ```
 
+Replace `mc-79s` with the `Root:` ID your own `gc formula cook` printed.
+
 `Created: 7` is the root plus your five steps plus the finalize step, each with
 its own bead ID. Slinging the cooked root routes it like any other bead — and
 because that's a plain bead sling, you get an auto-convoy tracking it (the
@@ -215,7 +219,8 @@ section and reference them as `{{name}}` in step titles, descriptions, and other
 text fields. They expand at cook or sling time — placeholders become concrete
 values in the resulting beads.
 
-In the simplest case, a variable is a name with a default value:
+In the simplest case, a variable is a name with a default value. Save this as
+`formulas/greeting.toml`:
 
 ```toml
 formula = "greeting"
@@ -280,7 +285,7 @@ Variables can carry richer definitions:
 | `enum`        | Restrict to a set of allowed values              |
 | `pattern`     | Regex validation                                 |
 
-A more complete example:
+A more complete example — save this as `formulas/feature-work.toml`:
 
 ```toml
 formula = "feature-work"
@@ -446,8 +451,30 @@ is empty, `false`, `0`, `no`, or `off`; `!{{var}}` inverts that. The variable is
 substituted first, then compared as a string. For richer branching, use multiple
 variables and conditions across steps.
 
-`gc formula show` shows conditions taking effect. `deploy-flow` is an
-unconditional `build` step plus the conditional `deploy` above:
+`gc formula show` shows conditions taking effect. To try it, combine an
+unconditional `build` step with the conditional `deploy` above, and give `env` a
+default. Save this as `formulas/deploy-flow.toml`:
+
+```toml
+formula = "deploy-flow"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+env = "dev"
+
+[[steps]]
+id = "build"
+title = "Build"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to staging"
+condition = "{{env}} == staging"
+```
+
+With `env=dev` the `deploy` step is dropped; with `env=staging` it's included:
 
 ```shell
 ~/my-city
@@ -476,9 +503,15 @@ Steps (3):
 
 ### Loops
 
-A step can wrap a body of sub-steps that execute multiple times:
+A step can wrap a body of sub-steps that execute multiple times. Save this as
+`formulas/retry-deploy.toml`:
 
 ```toml
+formula = "retry-deploy"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "retries"
 title = "Attempt deployment"
@@ -491,9 +524,7 @@ id = "attempt"
 title = "Try to deploy"
 ```
 
-Save that as a formula named `retry-deploy` — with the `formula` line and
-`[requires]` block, like every formula in this tutorial. The body is expanded
-at cook time into three sequential iterations:
+The body is expanded at cook time into three sequential iterations:
 
 ```shell
 ~/my-city
@@ -521,9 +552,14 @@ not supported in `count`. For a variable-driven iteration count, use
 
 <Accordion title="The `until` loop and its caveat">
 An `until` loop expands one iteration at compile time and stamps the condition
-(plus a required `max` budget) on it:
+(plus a required `max` budget) on it. Save this as `formulas/poll-until.toml`:
 
 ```toml
+formula = "poll-until"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "poll"
 title = "Poll for readiness"
@@ -562,7 +598,8 @@ grammar.
 Conditions and loops are decided when you cook. Check makes a decision at
 runtime: it runs a validation script after the agent finishes a step. If the
 script passes, the step is done; if not, another iteration is spawned and the
-agent tries again — a runtime feedback loop, not a compile-time expansion.
+agent tries again — a runtime feedback loop, not a compile-time expansion. Save
+this as `formulas/checked.toml`:
 
 ```toml
 formula = "checked"
@@ -584,7 +621,9 @@ timeout = "30s"
 ```
 
 Check is v2-only: without the `[requires]` block, compilation fails with an
-error telling you to add it. The runtime loop shows up in the compiled recipe:
+error telling you to add it. The runtime loop shows up in the compiled recipe
+(`gc formula show` doesn't run the check, so `scripts/verify.sh` doesn't need to
+exist yet):
 
 ```shell
 ~/my-city

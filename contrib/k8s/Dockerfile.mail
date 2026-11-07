@@ -8,7 +8,7 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM python:3.12-slim@sha256:9d3abd9fc11d06998ccdbdd93b4dd49b5ad7d67fcbbc11c016eb0eb2c2194891
+FROM python:3.12.16-slim@sha256:962f801b08c870ac2a51b72bf02dae38c9a4162319e5e882ec244e198188d54e
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -24,10 +24,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # installed binary package of its source, so naming it alone is the whole fix.
 # These three landed in trixie/main as a point release rather than in
 # trixie-security, so they resolve off the base image's own apt source.
+#
+# apt and libapt-pkg7.0 carry CVE-2026-109518, fixed in 3.0.4; they are the two
+# binary packages of one source, so both are named.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
     bsdutils \
     gzip \
+    libapt-pkg7.0 \
     libblkid1 \
     libcap2 \
     liblastlog2-2 \

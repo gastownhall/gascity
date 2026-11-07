@@ -39,7 +39,7 @@ func TestOnFormulaNeedsAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	deps := SlingDeps{Store: store}
+	deps := withStore(SlingDeps{}, store)
 
 	// A non---on sling never overrides idempotency.
 	if dec, err := onFormulaNeedsAttachment(SlingOpts{BeadOrFormula: routedRaw.ID}, store, deps); dec.NeedsAttach || err != nil {
@@ -98,7 +98,7 @@ func TestRoutedRawBeadReadsIdempotentWhichOnFormulaMustOverride(t *testing.T) {
 		t.Fatalf("routed-raw bead: expected Idempotent=true (the footgun), got %+v", res)
 	}
 	// ...and the --on override fires because there is no molecule.
-	if dec, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: bead.ID}, store, SlingDeps{Store: store}); !dec.NeedsAttach || err != nil {
+	if dec, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: bead.ID}, store, withStore(SlingDeps{}, store)); !dec.NeedsAttach || err != nil {
 		t.Fatalf("--on override should fire for a routed-raw bead with no molecule: got (%+v, %v)", dec, err)
 	}
 }
@@ -113,7 +113,7 @@ func TestOnFormulaNeedsAttachmentMoleculePresentStaysIdempotent(t *testing.T) {
 		{ID: "BL-1", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
 	}, nil)
-	deps := SlingDeps{Store: store}
+	deps := withStore(SlingDeps{}, store)
 	dec, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: "BL-1"}, store, deps)
 	if dec.NeedsAttach || err != nil {
 		t.Errorf("molecule-present --on: onFormulaNeedsAttachment = (%+v, %v), want NeedsAttach=false, nil (has molecule => stay idempotent)", dec, err)
@@ -135,7 +135,7 @@ func TestOnFormulaNeedsAttachmentProbeErrorStaysIdempotent(t *testing.T) {
 	}, nil)
 	probeErr := errors.New("store unavailable")
 	store := listErrStore{Store: mem, err: probeErr}
-	deps := SlingDeps{Store: store}
+	deps := withStore(SlingDeps{}, store)
 
 	dec, err := onFormulaNeedsAttachment(SlingOpts{OnFormula: "code-review", BeadOrFormula: "BL-1"}, store, deps)
 	if dec.NeedsAttach {
@@ -162,7 +162,7 @@ func TestResolveIdempotentShortCircuitWarnsWhenOnFormulaSkippedForClaim(t *testi
 			Metadata: map[string]string{"gc.routed_to": "worker"},
 		},
 	}, nil)
-	deps := SlingDeps{Store: store}
+	deps := withStore(SlingDeps{}, store)
 	// NoConvoy: true bypasses the separate convoy-tracking recovery check (a
 	// parentless routed bead would otherwise read as needing finalize to
 	// recreate a missing auto-convoy) so this test isolates the claim-skip
@@ -170,7 +170,10 @@ func TestResolveIdempotentShortCircuitWarnsWhenOnFormulaSkippedForClaim(t *testi
 	opts := SlingOpts{OnFormula: "mol-tdd-build", BeadOrFormula: "BL-1", Target: config.Agent{Name: "worker"}, NoConvoy: true}
 
 	var result SlingResult
-	shortCircuited := resolveIdempotentShortCircuit(opts, opts.Target, deps, store, &result)
+	shortCircuited, err := resolveIdempotentShortCircuit(opts, opts.Target, deps, store, &result)
+	if err != nil {
+		t.Fatalf("resolveIdempotentShortCircuit: %v", err)
+	}
 
 	if !shortCircuited || !result.Idempotent {
 		t.Fatalf("claimed bead, no molecule, --on: expected idempotent short-circuit, got shortCircuited=%v result=%+v", shortCircuited, result)

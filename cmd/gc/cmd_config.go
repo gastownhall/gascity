@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -126,6 +127,9 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		validationErrors = append(validationErrors, err.Error())
+	}
 	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
@@ -136,6 +140,12 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	}
 	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
+	// MCP servers an agent's provider cannot receive: shared-layer ones the
+	// agent starts without, and ones in its own mcp/ directory, which keep
+	// that agent from starting. Both are warnings, as gc start treats them:
+	// the rest of the city starts.
+	validationWarnings = append(validationWarnings, collectMCPCapabilityReport(cityPath, cfg).lines()...)
+	validationWarnings = append(validationWarnings, config.RigFederationWarnings(cfg.Rigs)...)
 
 	if validate {
 		if asJSON {
@@ -353,22 +363,11 @@ func singletonSessionMigrationWarnings(cfg *config.City) []string {
 	if cfg == nil {
 		return nil
 	}
-	cityName := cfg.EffectiveCityName()
-	namedByTemplate := make(map[string]bool, len(cfg.NamedSessions))
-	for i := range cfg.NamedSessions {
-		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
-		if !ok {
-			continue
-		}
-		namedByTemplate[namedSessionBackingTemplate(spec)] = true
-	}
 	var warnings []string
 	for i := range cfg.Agents {
 		agentCfg := &cfg.Agents[i]
-		if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
-			continue
-		}
-		if namedByTemplate[agentCfg.QualifiedName()] {
+		// Same shape the session API and pin/wake refuse (#6858).
+		if !session.IsDemandOnlySingletonTemplate(cfg, agentCfg) {
 			continue
 		}
 		warnings = append(warnings,

@@ -47,12 +47,24 @@ var supervisorServiceBinaryHook = supervisorServiceBinary
 // would have no known executable path. Overridable for tests.
 var readProcessExePathViaPSHook = readProcessExePathViaPS
 
+// readProcessCommViaPSHook returns a process's raw ps(1) comm value, before
+// verifiedPSExecutablePath validates it. Overridable for tests.
+var readProcessCommViaPSHook = readProcessCommViaPS
+
 func readProcessExePathViaPS(pid int) (string, error) {
+	comm, err := readProcessCommViaPSHook(pid)
+	if err != nil {
+		return "", err
+	}
+	return verifiedPSExecutablePath(pid, comm)
+}
+
+func readProcessCommViaPS(pid int) (string, error) {
 	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return "", fmt.Errorf("ps -p %d: %w", pid, err)
 	}
-	return verifiedPSExecutablePath(pid, strings.TrimSpace(string(out)))
+	return strings.TrimSpace(string(out)), nil
 }
 
 // verifiedPSExecutablePath accepts a ps(1) comm value only when it names an
@@ -96,6 +108,13 @@ type supervisorBinaryMismatch struct {
 	// the service definition's binary when a service manages the
 	// supervisor, otherwise the running process's executable.
 	RelaunchPath string
+	// RelaunchMissing is true when RelaunchPath is not the invoking gc and
+	// no longer exists (an upgrade removed it). No restart can launch it
+	// and nothing remains to keep using, but `gc supervisor install`
+	// replaces a service file that names it without --force, so stopping
+	// the supervisor and running gc start from this gc resolves the
+	// mismatch.
+	RelaunchMissing bool
 	// DifferentInstall is true when restarting the supervisor would launch
 	// a different gc executable file than the invoking gc, so no restart
 	// can bring it onto this binary; only repointing the service (or using
@@ -118,25 +137,27 @@ func detectSupervisorBinaryMismatch() (supervisorBinaryMismatch, bool) {
 	if pid == 0 {
 		return supervisorBinaryMismatch{}, false
 	}
-	baseURL, err := supervisorAPIBaseURLHook()
+	status, err := readSupervisorHealthStatus()
 	if err != nil {
 		return supervisorBinaryMismatch{}, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), supervisorBinaryProbeTimeout)
-	defer cancel()
-	status, err := supervisorHealthStatusHook(ctx, baseURL)
-	if err != nil {
-		return supervisorBinaryMismatch{}, false
-	}
+	m := newSupervisorBinaryMismatch(pid, gcBinaryIdentity{
+		ExePath: runningSupervisorExePath(pid),
+		Version: status.Version,
+		BuildID: status.BuildID,
+	})
+	return m, m.classify()
+}
 
-	m := supervisorBinaryMismatch{
-		PID:        pid,
-		Supervisor: gcBinaryIdentity{Version: status.Version, BuildID: status.BuildID},
-		Local:      gcBinaryIdentity{Version: version, BuildID: commit},
-	}
+// newSupervisorBinaryMismatch builds the mismatch model for the supervisor
+// running as pid, whose identity is sv (sv.ExePath is "" when the process
+// executable is unknown). It adds the managing service, the path a restart
+// would relaunch and whether that binary is gone, and the invoking gc's
+// identity and executable. classify fills the derived identity fields.
+func newSupervisorBinaryMismatch(pid int, sv gcBinaryIdentity) supervisorBinaryMismatch {
+	m := supervisorBinaryMismatch{PID: pid, Supervisor: sv, Local: localGCBinaryIdentity()}
 	serviceBinary, service := supervisorServiceBinaryHook()
 	m.Service = service
-	m.Supervisor.ExePath = runningSupervisorExePath(pid)
 	if m.Supervisor.ExePath == "" {
 		m.Supervisor.ExePath = serviceBinary
 	}
@@ -147,7 +168,20 @@ func detectSupervisorBinaryMismatch() (supervisorBinaryMismatch, bool) {
 	if exe, err := localGCExecutableHook(); err == nil {
 		m.Local.ExePath = resolveExecutablePath(exe)
 	}
-	return m, m.classify()
+	m.RelaunchMissing = supervisorInstallBinaryGuard(m.RelaunchPath, m.Local.ExePath) == supervisorInstallBinaryMissing
+	return m
+}
+
+// readSupervisorHealthStatus reads the supervisor's /health identity within
+// supervisorBinaryProbeTimeout.
+func readSupervisorHealthStatus() (SupervisorStatus, error) {
+	baseURL, err := supervisorAPIBaseURLHook()
+	if err != nil {
+		return SupervisorStatus{}, fmt.Errorf("resolving supervisor API URL: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), supervisorBinaryProbeTimeout)
+	defer cancel()
+	return supervisorHealthStatusHook(ctx, baseURL)
 }
 
 // runningSupervisorExePath returns the running supervisor process's
@@ -303,9 +337,19 @@ func supervisorBinaryMismatchFix(m supervisorBinaryMismatch) []string {
 			fmt.Sprintf("Fix: point systemd unit %s at this gc binary, then run '%s'.", d.Unit, d.commandHint("restart")),
 		}
 	}
-	if !m.DifferentInstall {
+	if m.RelaunchMissing {
+		// A plain stop can return before the supervisor exits, and gc start
+		// refuses while it still runs.
 		return []string{
-			"Fix: restart the supervisor so it runs this binary: 'gc supervisor stop', then 'gc start'.",
+			fmt.Sprintf("Fix: the gc binary a supervisor restart would launch no longer exists, so restart the supervisor from this gc: '%s supervisor stop --wait', then '%s start'.", self, self),
+		}
+	}
+	if !m.DifferentInstall {
+		// A plain stop can return before the supervisor exits, and gc start
+		// treats a still-running supervisor as started. When the builds
+		// match, no drift check restarts it either.
+		return []string{
+			fmt.Sprintf("Fix: restart the supervisor so it runs this binary: '%s supervisor stop --wait', then '%s start'.", self, self),
 		}
 	}
 	lines := []string{"Fix, either:"}

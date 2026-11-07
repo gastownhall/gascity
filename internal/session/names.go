@@ -170,33 +170,33 @@ func ValidateAlias(alias string) (string, error) {
 
 // EnsureAliasAvailable reports whether alias can be assigned to a live
 // session without colliding with another alias or runtime session name.
-func EnsureAliasAvailable(store beads.Store, alias, selfID string) error {
+func EnsureAliasAvailable(store beads.SessionStore, alias, selfID string) error {
 	return ensureSessionAliasAvailable(store, nil, alias, selfID, "")
 }
 
 // EnsureAliasAvailableWithConfig extends alias reservation checks with
 // configured named-session aliases so public targets cannot be squatted
 // before their managed session bead exists.
-func EnsureAliasAvailableWithConfig(store beads.Store, cfg *config.City, alias, selfID string) error {
+func EnsureAliasAvailableWithConfig(store beads.SessionStore, cfg *config.City, alias, selfID string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, "")
 }
 
 // EnsureAliasAvailableWithConfigForOwner extends alias reservation checks
 // with an explicit configured owner identity so callers creating a new
 // managed session bead can reserve that alias before a bead ID exists.
-func EnsureAliasAvailableWithConfigForOwner(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
+func EnsureAliasAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, alias, selfID, selfOwner string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, selfOwner)
 }
 
 // EnsureSessionNameAvailableWithConfig extends session-name reservation checks
 // with configured named-session runtime names.
-func EnsureSessionNameAvailableWithConfig(store beads.Store, cfg *config.City, name, selfID string) error {
+func EnsureSessionNameAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfID string) error {
 	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "")
 }
 
 // EnsureSessionNameAvailableWithConfigForOwner extends session-name
 // reservation checks with an explicit configured named-session owner.
-func EnsureSessionNameAvailableWithConfigForOwner(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+func EnsureSessionNameAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
 	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner)
 }
 
@@ -331,15 +331,15 @@ func sessionIdentifierLockFileName(identifier string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func ensureSessionNameAvailable(store beads.Store, name string) error {
+func ensureSessionNameAvailable(store beads.SessionStore, name string) error {
 	return ensureSessionNameAvailableForSelf(store, name, "")
 }
 
-func ensureSessionNameAvailableForSelf(store beads.Store, name, selfID string) error {
+func ensureSessionNameAvailableForSelf(store beads.SessionStore, name, selfID string) error {
 	return ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, "")
 }
 
-func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, selfOwner string) error {
+func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, selfID, selfOwner string) error {
 	if name == "" {
 		return nil
 	}
@@ -473,18 +473,6 @@ func configuredOwnerCanReusePoolIdentifier(b beads.Bead, name, selfOwner string)
 	return strings.TrimSpace(b.Metadata["pool_slot"]) != ""
 }
 
-func configuredNamedSessionOwnerForBead(b beads.Bead, reserved string) string {
-	reserved = strings.TrimSpace(reserved)
-	if reserved == "" {
-		return ""
-	}
-	if strings.TrimSpace(b.Metadata["configured_named_session"]) == "true" &&
-		strings.TrimSpace(b.Metadata["configured_named_identity"]) == reserved {
-		return reserved
-	}
-	return ""
-}
-
 func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, reservedName string) string {
 	if cfg == nil {
 		return ""
@@ -499,7 +487,7 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 	return identity
 }
 
-func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
 	if err := ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, selfOwner); err != nil {
 		// When a closed bead blocks the name and the caller is materializing
 		// a configured named session that owns this name, allow it. This
@@ -563,7 +551,7 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // fields. This mirrors the full collision check in
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
+func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string) bool {
 	all, err := ExactMetadataSessionCandidates(store, true,
 		map[string]string{"session_name": name},
 		map[string]string{"alias": name},
@@ -605,19 +593,16 @@ func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner stri
 	return true
 }
 
-func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
+func ensureSessionAliasAvailable(store beads.SessionStore, cfg *config.City, alias, selfID, selfOwner string) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil
 	}
-	var (
-		selfBead    beads.Bead
-		hasSelfBead bool
-	)
+	var self *Info
 	if cfg != nil && selfID != "" {
-		if self, getErr := store.Get(selfID); getErr == nil && IsSessionBeadOrRepairable(self) {
-			selfBead = self
-			hasSelfBead = true
+		if b, getErr := store.Get(selfID); getErr == nil && IsSessionBeadOrRepairable(b) {
+			info := infoFromPersistedBead(b)
+			self = &info
 		}
 	}
 	all, err := ExactMetadataSessionCandidates(store, false,
@@ -628,17 +613,33 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
+	rows := make([]Info, 0, len(all))
 	for _, b := range all {
-		if !IsSessionBeadOrRepairable(b) || b.ID == selfID {
+		rows = append(rows, infoFromPersistedBead(b))
+	}
+	return AliasConflictInfo(rows, cfg, alias, selfID, selfOwner, self)
+}
+
+// AliasConflictInfo is the alias availability rule over rows, the session
+// rows that may hold alias: the conflict, or nil when alias is free for the
+// row selfID (selfOwner its configured owner, self its row when it has
+// one). Another open row holds alias by its session name, alias or concrete
+// identity, and a configured named session reserves its own name. The live
+// check (ensureSessionAliasAvailable) and the reconciler's census read it
+// both, so they agree on every source.
+func AliasConflictInfo(rows []Info, cfg *config.City, alias, selfID, selfOwner string, self *Info) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+	for _, b := range rows {
+		if !IsSessionBeadOrRepairableInfo(b) || b.ID == selfID {
 			continue
 		}
-		if failedCreateIdentityReleased(b) {
+		if strings.TrimSpace(b.MetadataState) == string(StateFailedCreate) || b.Closed {
 			continue
 		}
-		if b.Status == "closed" {
-			continue
-		}
-		if strings.TrimSpace(b.Metadata["session_name"]) == alias {
+		if strings.TrimSpace(b.SessionNameMetadata) == alias {
 			// A superseded, non-running (asleep) configured-named-session
 			// predecessor for the SAME identity must not block that
 			// identity's own live holder from claiming its canonical alias
@@ -652,28 +653,28 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			// unrelated, live, or ambiguous session.
 			//
 			// Condition (3) is two-part on purpose.
-			// wasConfiguredNamedSession(b) establishes the holder is a
+			// wasConfiguredNamedSessionInfo(b) establishes the holder is a
 			// configured-named-session bead at all, but it is owner-AGNOSTIC
 			// — a bead minted for a DIFFERENT configured identity that merely
 			// persisted this identity's runtime session_name would satisfy it
 			// and hand the alias over on the claimant's assertion alone.
-			// configuredNamedIdentitySignalsMatch is the owner-scoped
+			// configuredNamedIdentitySignalsMatchInfo is the owner-scoped
 			// recognizer introduced for the identical trap in
 			// name_claim_sweep.go (review #3373); it matches the recorded
 			// identity, alias, agent_name, or template/role signal against
 			// THIS identity.
 			if selfOwner != "" && selfOwner == alias &&
-				strings.TrimSpace(b.Metadata["state"]) == string(StateAsleep) &&
-				wasConfiguredNamedSession(b) &&
-				configuredNamedIdentitySignalsMatch(b, selfOwner) {
+				strings.TrimSpace(b.MetadataState) == string(StateAsleep) &&
+				wasConfiguredNamedSessionInfo(b) &&
+				configuredNamedIdentitySignalsMatchInfo(b, selfOwner) {
 				continue
 			}
 			return fmt.Errorf("%w: %q conflicts with session name on %s", ErrSessionAliasExists, alias, b.ID)
 		}
-		if strings.TrimSpace(b.Metadata["alias"]) == alias {
+		if strings.TrimSpace(b.Alias) == alias {
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionAliasExists, alias, b.ID)
 		}
-		if strings.TrimSpace(b.Metadata["agent_name"]) == alias {
+		if strings.TrimSpace(b.AgentName) == alias {
 			if selfOwner != "" && selfOwner == alias {
 				continue
 			}
@@ -688,8 +689,8 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			if reserved == "" || reserved != alias {
 				continue
 			}
-			if selfOwner == "" && hasSelfBead {
-				selfOwner = configuredNamedSessionOwnerForBead(selfBead, reserved)
+			if selfOwner == "" && self != nil && IsNamedSessionInfo(*self) && NamedSessionIdentityInfo(*self) == reserved {
+				selfOwner = reserved
 			}
 			if selfOwner != "" && selfOwner == reserved {
 				return nil

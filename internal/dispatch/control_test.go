@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -59,7 +60,7 @@ func TestProcessRetryControlPass(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestProcessAttemptControlPassInvokesOnPass(t *testing.T) {
 		kind:        "retry",
 		subjectNoun: "attempt",
 		missingNoun: "no attempt found",
-		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+		evaluate: func(_ beads.GraphStore, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
 			return attemptEvaluation{disposition: attemptPass, logOutcome: "pass"}, nil
 		},
 		onPass: func(closeMetadata map[string]string, _ beads.Bead) {
@@ -142,7 +143,7 @@ func TestProcessAttemptControlPassInvokesOnPass(t *testing.T) {
 		},
 	}
 
-	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	result, err := processAttemptControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)}, strategy)
 	if err != nil {
 		t.Fatalf("processAttemptControl: %v", err)
 	}
@@ -170,12 +171,12 @@ func TestProcessAttemptControlHardFailStampsTerminalMetadata(t *testing.T) {
 		kind:        "retry",
 		subjectNoun: "attempt",
 		missingNoun: "no attempt found",
-		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+		evaluate: func(_ beads.GraphStore, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
 			return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", reason: "boom"}, nil
 		},
 	}
 
-	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	result, err := processAttemptControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)}, strategy)
 	if err != nil {
 		t.Fatalf("processAttemptControl: %v", err)
 	}
@@ -201,19 +202,19 @@ func TestProcessAttemptControlExhaustDelegatesToStrategy(t *testing.T) {
 		kind:        "retry",
 		subjectNoun: "attempt",
 		missingNoun: "no attempt found",
-		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+		evaluate: func(_ beads.GraphStore, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
 			return attemptEvaluation{disposition: attemptContinue, logOutcome: "transient", reason: "drained"}, nil
 		},
-		exhaust: func(store beads.Store, beadID string, _ int, reason, attemptLog string) (ControlResult, error) {
+		exhaust: func(store beads.GraphStore, beadID string, _ int, reason, attemptLog string) (ControlResult, error) {
 			gotReason, gotLog = reason, attemptLog
-			if err := updateMetadataAndClose(store, beadID, map[string]string{"gc.outcome": "fail"}); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(store), beadID, map[string]string{"gc.outcome": "fail"}); err != nil {
 				return ControlResult{}, err
 			}
 			return ControlResult{Processed: true, Action: "exhausted-sentinel"}, nil
 		},
 	}
 
-	result, err := processAttemptControl(store, control, ProcessOptions{}, strategy)
+	result, err := processAttemptControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)}, strategy)
 	if err != nil {
 		t.Fatalf("processAttemptControl: %v", err)
 	}
@@ -248,13 +249,13 @@ func TestProcessAttemptControlMissingAttemptUsesStrategyNouns(t *testing.T) {
 		kind:        "ralph",
 		subjectNoun: "iteration",
 		missingNoun: "no iteration found",
-		evaluate: func(_ beads.Store, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
+		evaluate: func(_ beads.GraphStore, _, _ beads.Bead, _ int, _ ProcessOptions) (attemptEvaluation, error) {
 			t.Fatal("evaluate must not run when no attempt exists")
 			return attemptEvaluation{}, nil
 		},
 	}
 
-	_, err := processAttemptControl(store, mustGet(t, store, control.ID), ProcessOptions{}, strategy)
+	_, err := processAttemptControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)}, strategy)
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("err = %v, want ErrControlGraphMalformed", err)
 	}
@@ -299,7 +300,7 @@ func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T
 	mustDep(t, base, control.ID, attempt1.ID, "blocks")
 
 	store := &controlCloseTrackingStore{Store: base, targetID: control.ID}
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestProcessRetryControlRetriesPassMissingRequiredArtifact(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestProcessRetryControlRetriesPassMissingRequiredArtifact(t *testing.T) {
 	}
 	mustClose(t, store, attempt2.ID)
 
-	result, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err = processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt2: %v", err)
 	}
@@ -470,7 +471,7 @@ func TestProcessRetryControlHardFail(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -522,7 +523,7 @@ func TestProcessRetryControlTransientRetry(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -592,7 +593,7 @@ func TestProcessRetryControlSoftFailOnExhaustion(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -687,7 +688,7 @@ func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
 			mustClose(t, store, attempt1.ID)
 			mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-			result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+			result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("processRetryControl: %v", err)
 			}
@@ -753,7 +754,7 @@ func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -824,7 +825,7 @@ func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
 	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
 	mustDep(t, store, scopeBody.ID, sibling.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -899,7 +900,7 @@ func TestProcessRetryControlClosesEnclosingScopeOnPassAndPropagatesMetadata(t *t
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -958,7 +959,7 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
@@ -988,7 +989,7 @@ func TestProcessRetryControlMissingAttemptIsGraphMalformed(t *testing.T) {
 		},
 	})
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("error = %v, want ErrControlGraphMalformed", err)
 	}
@@ -1021,10 +1022,10 @@ func TestProcessRalphControlMissingIterationIsGraphMalformed(t *testing.T) {
 	})
 
 	var traced []string
-	opts := ProcessOptions{Tracef: func(format string, args ...any) {
+	opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 		traced = append(traced, fmt.Sprintf(format, args...))
 	}}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), opts)
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("error = %v, want ErrControlGraphMalformed", err)
 	}
@@ -1068,7 +1069,7 @@ func TestProcessRetryControlPendingAttemptAddsBlockingDep(t *testing.T) {
 		},
 	})
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
@@ -1139,7 +1140,8 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	sawTrace := false
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			if strings.Contains(fmt.Sprintf(format, args...), "resolve-body") {
 				sawTrace = true
@@ -1215,7 +1217,7 @@ func TestProcessRetryControlTransientControllerErrorStaysOpenForRetry(t *testing
 		Store: base,
 		err:   errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"),
 	}
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("processRetryControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1234,7 +1236,7 @@ func TestProcessRetryControlTransientControllerErrorStaysOpenForRetry(t *testing
 		t.Fatalf("transient controller error should not set terminal metadata: %v", afterFailure.Metadata)
 	}
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRetryControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1297,7 +1299,7 @@ func TestProcessRetryControlTransientAttemptLogErrorStaysOpenForRetry(t *testing
 		key:   "gc.attempt_log",
 		err:   errors.New("failed to update metadata: invalid connection: i/o timeout"),
 	}
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("processRetryControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1353,7 +1355,7 @@ func TestProcessRetryControlPreRootTransientSpawnDoesNotDuplicateAttemptLog(t *t
 		remaining: 2,
 	}
 	for tick := 1; tick <= 2; tick++ {
-		_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+		_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 		if !errors.Is(err, ErrControlPending) {
 			t.Fatalf("tick %d processRetryControl error = %v, want %v", tick, err, ErrControlPending)
 		}
@@ -1413,7 +1415,7 @@ func TestProcessRetryControlSuccessfulSpawnClearsTransientControllerError(t *tes
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -1465,7 +1467,7 @@ func TestProcessRalphControlSuccessfulSpawnClearsTransientControllerError(t *tes
 	mustClose(t, store, iteration1.ID)
 	mustDep(t, store, control.ID, iteration1.ID, "blocks")
 
-	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRalphControl: %v", err)
 	}
@@ -1518,7 +1520,7 @@ func TestProcessRalphControlTransientControllerErrorStaysOpenForRetry(t *testing
 		Store: base,
 		err:   errors.New("adding dep: read tcp 127.0.0.1:53564->127.0.0.1:21792: i/o timeout"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1531,7 +1533,7 @@ func TestProcessRalphControlTransientControllerErrorStaysOpenForRetry(t *testing
 		t.Fatalf("controller error class = %q, want transient", afterFailure.Metadata["gc.controller_error_class"])
 	}
 
-	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1586,7 +1588,7 @@ func TestProcessRalphControlPartialInstantiateTransientFailureClosesHard(t *test
 		Store: base,
 		err:   errors.New("wiring dep: lock wait timeout exceeded; try restarting transaction"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatal("expected hard controller error for partial instantiate failure")
 	}
@@ -1606,6 +1608,102 @@ func TestProcessRalphControlPartialInstantiateTransientFailureClosesHard(t *test
 	}
 	if afterFailure.Metadata["gc.controller_retryable"] == "true" {
 		t.Fatalf("partial instantiate failure should not be retryable: %v", afterFailure.Metadata)
+	}
+}
+
+// stampRefusingStore refuses every molecule_failed stamp with stampErr: a
+// failed mint whose cleanup meets lock contention on each stamp and on its
+// retry. refusals counts the refused stamps per bead.
+type stampRefusingStore struct {
+	beads.Store
+	stampErr error
+	refusals map[string]int
+}
+
+func (s *stampRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if kvs[beadmeta.MoleculeFailedMetadataKey] == "true" {
+		s.refusals[id]++
+		return s.stampErr
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// A mint that fails for a deterministic reason stays a hard failure when its
+// failure stamps are refused with Dolt's serialization-failure text. No
+// attempt root carries molecule_failed, so only the error's classification
+// keeps the retry from adopting the root the stamp could not mark.
+func TestProcessRalphControlHardMintFailureWithUnconfirmedStampsClosesHard(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "3",
+			"gc.source_step_spec": `{
+				"id":"review-loop",
+				"title":"Review loop",
+				"type":"task",
+				"ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}},
+				"children":[
+					{"id":"review","title":"Review","type":"task"},
+					{"id":"fix","title":"Fix","type":"task","needs":["review"]}
+				]
+			}`,
+			"gc.control_epoch": "1",
+		},
+	})
+	iteration1 := mustCreate(t, base, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, base, iteration1.ID)
+	mustDep(t, base, control.ID, iteration1.ID, "blocks")
+
+	store := &stampRefusingStore{
+		Store: &failOnceDepAddStore{
+			Store: base,
+			err:   errors.New("wiring dep: dependency would create a cycle"),
+		},
+		stampErr: doltSerializationFailureErr(),
+		refusals: map[string]int{},
+	}
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
+	if len(store.refusals) == 0 {
+		t.Fatalf("no failure stamp was refused (err=%v); the mint took another path", err)
+	}
+	if err == nil || errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRalphControl error = %v, want a hard controller error", err)
+	}
+	if got := ClassifyControllerError(err); got != TierNone {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v", err, got, TierNone)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "closed" {
+		t.Fatalf("ralph control status after hard mint failure = %q, want closed", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("controller error class = %q, want hard", afterFailure.Metadata["gc.controller_error_class"])
+	}
+	for id := range store.refusals {
+		if !strings.Contains(afterFailure.Metadata["gc.controller_error"], id) {
+			t.Fatalf("controller error = %q, want it to name %s, whose failure stamp was refused", afterFailure.Metadata["gc.controller_error"], id)
+		}
 	}
 }
 
@@ -1656,7 +1754,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		MemStore: base,
 		err:      errors.New("adding dep: invalid connection: i/o timeout"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("first processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1665,7 +1763,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		t.Fatal("expected graph attach to leave nested spec bead open after outer dep failure")
 	}
 
-	_, err = processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
+	_, err = processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1697,6 +1795,7 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "workflow root close blocked", err: errors.New("gsp-p68ch6: completing workflow head: updating bead \"gsp-p68ch6\": exit status 1: cannot close blocked issue: gsp-p68ch6 is blocked by [gsp-yl7fpr]"), want: true},
+		{name: "dolt serialization failure", err: errors.New("gc-x: closing passed: updating bead \"gc-x\": Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
@@ -1707,6 +1806,119 @@ func TestIsTransientControllerError(t *testing.T) {
 				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// doltSerializationFailureErr is Dolt's own 1213/40001 text, verbatim from a
+// hub control-close log line. It shares MySQL's error number with "Deadlock
+// found" but none of its words, and it reaches the classifier only after the
+// store's bounded write retry has already lost the race three times.
+func doltSerializationFailureErr() error {
+	return errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
+}
+
+// TestClassifyControllerErrorDoltSerializationFailureIsAvailability pins the
+// wrapped control-close shape: a store that answered "try restarting
+// transaction" is lock contention, Tier A, exactly like the MySQL deadlock
+// phrasing of the same 1213 code — never a hard quarantine.
+func TestClassifyControllerErrorDoltSerializationFailureIsAvailability(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("closing passed: updating bead %q: %w", "gc-x", doltSerializationFailureErr())
+	if got := ClassifyControllerError(err); got != TierAvailability {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v", err, got, TierAvailability)
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("IsTransientControllerError(%v) = false, want true", err)
+	}
+}
+
+// failOnceUpdateStore fails the first Update with err and then delegates, the
+// shape of a control close that loses one Dolt serialization race after the
+// store layer's own bounded retry has given up.
+type failOnceUpdateStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestProcessRetryControlPassCloseLosingDoltSerializationRaceStaysOpen is the
+// field incident end to end at the dispatch boundary: the attempt passed, the
+// close of the control bead lost a 40001 race, and the control must come back
+// as a transient error with no terminal metadata so the next sweep closes it
+// as a pass — not as a hard failure that aborts its scope.
+func TestProcessRetryControlPassCloseLosingDoltSerializationRaceStaysOpen(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.on_fail":          "abort_scope",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &failOnceUpdateStore{
+		Store: base,
+		err:   fmt.Errorf("updating bead %q: %w", control.ID, doltSerializationFailureErr()),
+	}
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
+	if err == nil {
+		t.Fatalf("processRetryControl returned nil, want the lost close race surfaced")
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("processRetryControl error = %v, want transient (would be quarantined as hard)", err)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "open" {
+		t.Fatalf("control status after lost close race = %q, want open", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.outcome"] != "" || afterFailure.Metadata["gc.final_disposition"] != "" {
+		t.Fatalf("lost close race must not set terminal metadata: %v", afterFailure.Metadata)
+	}
+
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("second processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("second result = %+v, want processed pass", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control after retry = status %q outcome %q, want closed pass", after.Status, after.Metadata["gc.outcome"])
 	}
 }
 
@@ -1743,7 +1955,7 @@ func TestFindLatestAttemptDirectRef(t *testing.T) {
 	})
 	mustClose(t, store, attempt1.ID)
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -1791,7 +2003,7 @@ func TestFindLatestAttemptMultipleAttempts(t *testing.T) {
 	})
 	mustClose(t, store, attempt2.ID)
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -1834,7 +2046,7 @@ func TestFindLatestAttemptFallsBackToDependenciesWhenRootScanFails(t *testing.T)
 		Store: base,
 		err:   errors.New("search wisps: context canceled"),
 	}
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -1879,7 +2091,7 @@ func TestFindLatestAttemptSkipsMoleculeFailedPartialRoot(t *testing.T) {
 		},
 	})
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -1931,7 +2143,7 @@ func TestFindLatestAttemptNestedRetryInsideRalph(t *testing.T) {
 	mustClose(t, store, scopeCheck.ID)
 	mustDep(t, store, control.ID, scopeCheck.ID, "blocks")
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -1982,7 +2194,7 @@ func TestFindLatestAttemptFallsBackToDirectDependencyWhenRootIsScoped(t *testing
 	mustClose(t, store, attempt.ID)
 	mustDep(t, store, control.ID, attempt.ID, "blocks")
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -2021,7 +2233,7 @@ func TestFindLatestAttemptRalphIteration(t *testing.T) {
 	})
 	mustClose(t, store, iteration.ID)
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -2072,7 +2284,7 @@ func TestFindLatestAttemptScopeCheckNotMatched(t *testing.T) {
 	})
 	mustClose(t, store, realAttempt.ID)
 
-	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	found, err := findLatestAttempt(beadstest.Graph(store), mustGet(t, store, control.ID))
 	if err != nil {
 		t.Fatalf("findLatestAttempt: %v", err)
 	}
@@ -2125,7 +2337,7 @@ func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T)
 	mustDep(t, store, control.ID, iteration.ID, "blocks")
 	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
 
-	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRalphControl: %v", err)
 	}
@@ -2174,7 +2386,7 @@ func TestProcessRalphControlReturnsPendingForOpenIteration(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, iteration.ID, "blocks")
 
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
@@ -2209,7 +2421,7 @@ func TestProcessRalphControlPendingIterationAddsBlockingDep(t *testing.T) {
 		},
 	})
 
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
@@ -2271,11 +2483,11 @@ func TestReconcileClosedScopeMemberRalphPass(t *testing.T) {
 
 	// Simulate the terminal-pass close that processRalphControl performs
 	// at control.go:176 after a check returns GatePass.
-	if err := setOutcomeAndClose(store, control.ID, "pass"); err != nil {
+	if err := setOutcomeAndClose(beadstest.Graph(store), control.ID, "pass"); err != nil {
 		t.Fatalf("setOutcomeAndClose: %v", err)
 	}
 
-	if _, err := reconcileClosedScopeMember(store, control.ID); err != nil {
+	if _, err := reconcileClosedScopeMember(beadstest.Graph(store), control.ID); err != nil {
 		t.Fatalf("reconcileClosedScopeMember: %v", err)
 	}
 
@@ -2363,7 +2575,7 @@ func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
 		},
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	applyAttemptRecipeScopeChecks(recipe, nil)
 
 	stepByID := make(map[string]formula.RecipeStep, len(recipe.Steps))
 	for _, step := range recipe.Steps {
@@ -2533,9 +2745,9 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
 	// gastownhall/gascity#5246: a plain child (no Retry/Ralph/Drain) must still
-	// get a default gc.kind, mirroring the root's unconditional stamp above —
-	// otherwise it matches isWorkRecordGatedBead's (Type=="task" && gc.kind=="")
-	// test and gets wrongly swept into the ADR-0009 work-record close gate.
+	// get a default gc.kind, mirroring the root's unconditional stamp above, so
+	// its control-plane identity remains explicit and it stays out of the
+	// ADR-0009 work-record close gate.
 	if applyStep.Metadata["gc.kind"] != "task" {
 		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
 	}
@@ -2808,10 +3020,10 @@ func TestAttemptLogMultipleEntries(t *testing.T) {
 
 	bead, _ := store.Create(beads.Bead{Title: "test", Metadata: map[string]string{}})
 
-	if err := appendAttemptLog(store, bead.ID, 1, "transient", "rate_limited"); err != nil {
+	if err := appendAttemptLog(beadstest.Graph(store), bead.ID, 1, "transient", "rate_limited"); err != nil {
 		t.Fatalf("appendAttemptLog 1: %v", err)
 	}
-	if err := appendAttemptLog(store, bead.ID, 2, "pass", ""); err != nil {
+	if err := appendAttemptLog(beadstest.Graph(store), bead.ID, 2, "pass", ""); err != nil {
 		t.Fatalf("appendAttemptLog 2: %v", err)
 	}
 
@@ -2837,7 +3049,7 @@ func TestAttemptLogJSONRoundTrips(t *testing.T) {
 
 	bead, _ := store.Create(beads.Bead{Title: "test", Metadata: map[string]string{}})
 
-	if err := appendAttemptLog(store, bead.ID, 1, "hard", "auth_error"); err != nil {
+	if err := appendAttemptLog(beadstest.Graph(store), bead.ID, 1, "hard", "auth_error"); err != nil {
 		t.Fatalf("appendAttemptLog: %v", err)
 	}
 
@@ -3483,6 +3695,79 @@ func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T)
 	}
 }
 
+// TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling mirrors the
+// compile-time fanout-gating fix in the retry/ralph re-spawn path: a sibling
+// that needs an on_complete child must block on the child's minted fanout
+// control, and the child's minted scope-check must also wait on that fanout
+// control so the iteration scope finalizes behind the spawned children.
+func TestBuildAttemptRecipeRalphChildOnCompleteGatesDownstreamSibling(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach: "output.members",
+					Bond:    "review-member",
+				},
+			},
+			{
+				ID:    "synthesize",
+				Title: "Synthesize",
+				Type:  "task",
+				Needs: []string{"dc-members"},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	synthID := "mol-review.review-loop.iteration.2.synthesize"
+
+	var siblingWaitsOnFanout, siblingWaitsOnSource bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID != synthID {
+			continue
+		}
+		switch dep.DependsOnID {
+		case sourceID + "-fanout":
+			siblingWaitsOnFanout = true
+		case sourceID:
+			siblingWaitsOnSource = true
+		}
+	}
+	if !siblingWaitsOnFanout {
+		t.Fatalf("synthesize does not block on %s-fanout; deps = %+v", sourceID, recipe.Deps)
+	}
+	if siblingWaitsOnSource {
+		t.Fatalf("synthesize still blocks on raw fanout source %s; deps = %+v", sourceID, recipe.Deps)
+	}
+
+	var scopeCheckWaitsOnFanout bool
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-scope-check" && dep.DependsOnID == sourceID+"-fanout" {
+			scopeCheckWaitsOnFanout = true
+		}
+	}
+	if !scopeCheckWaitsOnFanout {
+		t.Fatalf("dc-members scope-check does not wait on %s-fanout; deps = %+v", sourceID, recipe.Deps)
+	}
+}
+
 func TestBuildAttemptRecipeRalphChildDrainKeepsDrainControl(t *testing.T) {
 	t.Parallel()
 
@@ -3683,7 +3968,7 @@ func TestFindSpecBeadPrefersRefOverStepID(t *testing.T) {
 		},
 	})
 
-	got, err := findSpecBead(store, control)
+	got, err := findSpecBead(beadstest.Graph(store), control)
 	if err != nil {
 		t.Fatalf("findSpecBead: %v", err)
 	}

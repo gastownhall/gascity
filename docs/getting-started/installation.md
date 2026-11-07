@@ -26,40 +26,26 @@ for you; the other methods require manual installation.
 | tmux | Yes | — | `brew install tmux` | `apt install tmux` | Session management |
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
-| dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.1 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| dolt | Yes | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
+| bd (Beads CLI) | Yes | 1.3.0 or newer | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
-| Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| Go 1.27.3+ | Source only | 1.27.3 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
-Use a final Dolt 2.1.0 or newer. Gas City's managed Dolt checks reject older
+Use a final Dolt 2.6.0 or newer. Gas City's managed Dolt checks reject older
 and pre-release builds because they are below the managed bd/Dolt compatibility
-floor; releases before 1.86.2 can also miss the upstream GC/writer deadlock
-fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
-under heavy write load.
+floor: 2.6.0 is the first Dolt built with a Go toolchain that distrusts the
+compromised eMudhra CA intermediates.
 
-The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
+`brew install gascity` installs a current `bd` along with `gc`. With another
+install method, install the latest
+[Beads release](https://github.com/gastownhall/beads/releases).
 
-The tested bd is v1.3.1: `brew install beads` (or `brew upgrade beads`)
-installs it, or download `bd` for your platform from the
-[v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1).
-With bd v1.3.0 Gas City falls back from its native store to the bd CLI, and
-proxied `bd backup` and closed-wisp purge are skipped.
-
-Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
-Beads 1.3.1, which keeps the same schema. When upgrading
-an existing shared database from Beads 1.2.2, coordinate the upgrade of all
-clients using that database, then run `bd migrate schema` from the workspace.
-The tested upgrade moves schema 53 to 66 and preserves existing beads. Older
-clients cannot use the migrated schema. Fresh workspaces initialize directly
-at the new schema.
-
-To install the exact release archive pinned by CI:
-
-```bash
-set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"
-```
+An upgrade that moves an existing shared database to a newer Beads schema needs
+every client of that database upgraded together and a one-time `bd migrate
+schema`; see [Upgrading an existing city](/getting-started/upgrading). Fresh
+workspaces start at the current schema.
 
 ## Homebrew (recommended)
 
@@ -67,13 +53,8 @@ set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_V
 brew install gascity
 ```
 
-This taps the `gastownhall/gascity` formula, downloads the matching `gc`
-release asset, and installs all six runtime dependencies (tmux, jq, git, dolt,
-flock, beads).
-
-Once Gas City is accepted into homebrew-core, the normal install path will be
-`brew install gascity`; the `gastownhall/gascity` tap remains available for
-emergency updates.
+This installs the latest `gc` release and its runtime dependencies (beads,
+dolt, tmux, jq, and flock). Gas City is in homebrew-core, so no tap is needed.
 
 Verify the installation:
 
@@ -97,23 +78,23 @@ brew update
 brew upgrade gascity
 ```
 
-After upgrading, restart any running city so the supervisor picks up the new
-binary:
+The `gascity` formula depends on `beads`, so this upgrades `bd` too.
 
-```bash
-gc service restart     # restarts the launchd/systemd service
-```
+After upgrading, run `gc start` for each city. When the supervisor is still
+running the old binary, `gc start` restarts it on the new one, and it
+regenerates the supervisor's service file on each invocation, so a
+`brew upgrade` followed by `gc start` always picks up template changes.
 
-`gc start` auto-regenerates the service file on each invocation, so a
-`brew upgrade` followed by `gc start` always picks up template changes
-(see [v0.13.3 release notes](https://github.com/gastownhall/gascity/releases/tag/v0.13.3)).
+An upgrade that changes the Beads version can also need a backup and a
+one-time database migration. Before upgrading a city you rely on, follow
+[Upgrading an existing city](/getting-started/upgrading).
 
 ### Uninstalling via Homebrew
 
 ```bash
 gc stop <city-path>                        # stop running city first
+gc supervisor uninstall                    # remove the background supervisor service
 brew uninstall gascity
-brew untap gastownhall/gascity             # remove the tap
 ```
 
 ## Direct download
@@ -130,8 +111,8 @@ Release tarballs are published for every tagged version. Supported platforms:
 ### Download and install
 
 ```bash
-# Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=1.4.0
+# The latest release (or set a version from https://github.com/gastownhall/gascity/releases)
+VERSION=$(curl -fsSL https://api.github.com/repos/gastownhall/gascity/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -188,7 +169,9 @@ curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION
 ### Upgrading a direct-download install
 
 Repeat the download steps above with the new version number. The `gc` binary is
-a single static file — overwriting it is safe.
+a single static file — overwriting it is safe. Install the matching `bd` as
+well, and see [Upgrading an existing city](/getting-started/upgrading) for the
+backup and Beads migration steps.
 
 <Tip>
 You still need to install the [prerequisites](#prerequisites) separately when
@@ -197,7 +180,7 @@ using direct download. Homebrew handles this automatically.
 
 ## Build from source
 
-Requires `make` and Go 1.26+ (pinned in `go.mod` as 1.26.4).
+Requires `make` and Go 1.27.3+ (pinned in `go.mod` as 1.27.3).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git
@@ -224,25 +207,15 @@ for a local experiment. Successful local signing also removes stale
 
 ### Contributor setup
 
-After building, install the dev toolchain and pre-commit hooks:
-
-```bash
-make setup
-make check          # runs fmt, lint, vet, and unit tests
-```
-
-See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
-for the full contributor workflow, and
-[Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)
-to set up the remote build cache — warm `bazel test //...` runs complete in
-under a second by sharing compiled artifacts across worktrees and CI.
+To change Gas City itself (tests, lint, docs preview), follow
+[CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md).
 
 ## Verify your installation
 
 Regardless of install method, confirm everything is working:
 
 ```bash
-gc version          # should print the installed version and commit
+gc version          # prints the installed version
 ```
 
 If that runs `git commit` instead of Gas City, your shell has a `gc` alias.
@@ -250,33 +223,10 @@ Use `command gc version` for this check and see
 [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
 for the permanent fix.
 
-Then create your first city:
-
-```bash
-gc init ~/my-city
-cd ~/my-city
-```
-
-`gc init` registers the city with the supervisor, which then starts it. By the
-time the command returns, the city is running.
-See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+Next, follow the [Quickstart](/getting-started/quickstart) to create your
+first city and send work through a formula.
 
 Gas City ships a JSONL archive that snapshots every bead database for
 disaster recovery. By default it runs in local-only mode and keeps commits
 on this host. To enable off-box backup, see
 [JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
-
-## Docs preview
-
-The docs site uses [Mintlify](https://mintlify.com). Preview locally from the
-repo root:
-
-```bash
-./mint.sh dev
-```
-
-Or run a link check without starting the server:
-
-```bash
-make check-docs
-```

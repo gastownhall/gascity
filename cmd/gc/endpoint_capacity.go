@@ -67,6 +67,16 @@ func endpointKeyForAgent(cfg *config.City, agent *config.Agent, info sessionpkg.
 	return ""
 }
 
+// rowEndpoint is a row's config-only endpoint key: endpointKeyForAgent for
+// the agent of its resolved template, as the allocator's selection entry
+// reads it. It is the one helper for a row's endpoint: admission counts the
+// census's bring-up rows on it, gather reads their breakers by it, and the
+// pass's intents carry it, a create's from its plan's template alone, so a
+// row is counted and gated on the same endpoint before and after it lands.
+func rowEndpoint(cfg *config.City, info sessionpkg.Info) endpointKey {
+	return endpointKeyForAgent(cfg, findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg)), info)
+}
+
 // capacityBreakerSettings trips on the first refusal and backs off 5s, 10s,
 // 20s, 40s, then 60s (full jitter within each cap). HalfOpenInterval is only a
 // backstop: tickets resolve probes. The values are provisional.
@@ -367,7 +377,9 @@ func (g *endpointCapacityGuard) noteSeen(k endpointKey) {
 // endpointHoldForRows returns a hold check for rows seen without template
 // params (the stale-session reaper runs before desired state is built). The
 // endpoint comes from config: the agent's selected upstream, else the provider
-// recorded on the row, which is already the resolved leaf.
+// recorded on the row, which is already the resolved leaf. The reaper combines
+// this hold with the start-deferral memo's through pendingCreateHold; a reader
+// that sees only the bead (gc session wake) sees neither.
 func endpointHoldForRows(cfg *config.City, g *endpointCapacityGuard) func(sessionpkg.Info) bool {
 	return func(info sessionpkg.Info) bool {
 		var tp TemplateParams

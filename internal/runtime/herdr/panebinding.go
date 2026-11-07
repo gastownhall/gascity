@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -79,8 +80,9 @@ type paneLookupOps struct {
 	// boundAge reports how long ago the binding was persisted (a very large
 	// value when unknown, so pre-upgrade bindings are still reapable).
 	boundAge func() time.Duration
-	// reapPane closes an exited agent's leftover pane (best-effort).
-	reapPane func(paneID string)
+	// reapPane closes an exited agent's leftover pane. A pane herdr answers
+	// is already gone counts as closed; any other failure is returned.
+	reapPane func(paneID string) error
 	// probePane inspects the bound pane. A zero probe with nil error means
 	// herdr confirmed the pane gone; a non-nil error means the probe itself
 	// failed (transport), which proves nothing either way.
@@ -102,7 +104,8 @@ type paneLookupOps struct {
 // per completed wisp otherwise. Within the grace the pane resolves untouched
 // (an in-flight Start provisionally bound it). A binding whose pane is
 // confirmed gone is cleared and resolves absent; a transport failure on
-// either tier surfaces as an error and clears nothing.
+// either tier, or a reap whose close failed, surfaces as an error and clears
+// nothing, so the next resolution still finds the pane.
 func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) {
 	a, ok, err := ops.getAgent()
 	if err != nil {
@@ -127,7 +130,9 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 		return pane, true, nil
 	}
 	if ops.boundAge() > bindingLaunchGrace {
-		ops.reapPane(pane)
+		if err := ops.reapPane(pane); err != nil {
+			return "", false, fmt.Errorf("reaping exited agent pane %s: %w", pane, err)
+		}
 		ops.clearBinding()
 		return "", false, nil
 	}
@@ -296,7 +301,16 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 			return time.Since(time.Unix(ts, 0))
 		},
 		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
-		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
+		reapPane:     func(paneID string) error { return p.closeExitedPane(ctx, paneID) },
 		clearBinding: func() { p.clearPaneBinding(name) },
 	}
+}
+
+// closeExitedPane closes an exited agent's leftover pane. A pane herdr answers
+// is already gone counts as closed.
+func (p *Provider) closeExitedPane(ctx context.Context, paneID string) error {
+	if err := p.c.closePane(ctx, paneID); err != nil && !paneGone(err) {
+		return err
+	}
+	return nil
 }

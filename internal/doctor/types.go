@@ -61,6 +61,25 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// Done, when non-nil, is closed once the runner abandons this Run at the
+	// per-check timeout. Nothing reads an abandoned check's result, so a check
+	// that issues many store or subprocess calls should stop issuing new ones
+	// once it closes (see Canceled). Nil for unbounded runs.
+	Done <-chan struct{}
+}
+
+// Canceled reports whether the runner has abandoned the check execution this
+// context belongs to. A nil context, or one without Done, is never canceled.
+func (c *CheckContext) Canceled() bool {
+	if c == nil || c.Done == nil {
+		return false
+	}
+	select {
+	case <-c.Done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Renderer is implemented by checks that produce additional, optional
@@ -70,6 +89,22 @@ type CheckContext struct {
 type Renderer interface {
 	RenderExtras(ctx *CheckContext, w io.Writer)
 }
+
+// FixHintError is an error a Check's Fix may return when the fix fails for a
+// reason whose remedy differs from the FixHint Run suggested; the runner
+// reports Err as FixError and Hint as the result's FixHint.
+type FixHintError struct {
+	// Err is the underlying fix failure, reported verbatim as FixError.
+	Err error
+	// Hint replaces the result's FixHint when non-empty.
+	Hint string
+}
+
+// Error returns the underlying error's text unchanged.
+func (e *FixHintError) Error() string { return e.Err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *FixHintError) Unwrap() error { return e.Err }
 
 // CheckResult holds the outcome of a single check execution.
 type CheckResult struct {
@@ -87,6 +122,8 @@ type CheckResult struct {
 	// Details holds extra lines shown only in verbose mode.
 	Details []string
 	// FixHint is a suggestion shown when the check fails and cannot auto-fix.
+	// When an attempted Fix fails with a *FixHintError carrying a non-empty
+	// Hint, the runner replaces FixHint with that Hint.
 	FixHint string
 	// Payload is optional structured evidence, projected into `gc doctor
 	// --json` as the result's `payload` object and never rendered to a

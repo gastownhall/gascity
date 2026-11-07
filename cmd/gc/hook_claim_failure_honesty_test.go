@@ -63,6 +63,7 @@ func (h *failureHookHarness) ops() hookClaimOps {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
 		},
 		DrainAck:                 func(io.Writer) error { h.drained = true; return nil },
+		ReadWorkStarted:          noStartedClaims,
 		ResolveWorkBranch:        func(hookClaimWorkTree) string { return "" },
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
@@ -169,6 +170,37 @@ func TestClaimQueryFailureIsRetriedThenReportedNotDrained(t *testing.T) {
 		t.Fatalf("event type = %q, want %q", h.events[0].Type, events.SessionWorkQueryFailed)
 	}
 	if !strings.Contains(stderr, "exit status 1") {
+		t.Fatalf("stderr = %q, want the underlying failure named", stderr)
+	}
+}
+
+// A read plain `gc hook` would report as store-unavailable gets the same
+// classification on the claim door: exit 2 and the GC_HOOK_STORE_UNAVAILABLE
+// token, so a consumer can tell a dead store from no work. The exit code is the
+// only thing that differs from an ordinary failed read: the seat is still kept,
+// with no drain result and no drain-ack.
+func TestClaimQueryStoreUnavailableExitsTwoWithTokenWithoutDrain(t *testing.T) {
+	withFastClaimRetries(t)
+	h := newFailureHookHarness()
+	readErr := errors.New("bd ready: dial tcp 127.0.0.1:3307: connect: connection refused")
+	if !workQueryStoreUnavailable(readErr) {
+		t.Fatalf("precondition: %q must classify as store-unavailable, or this row pins nothing", readErr)
+	}
+	h.script("/rig", hookRunnerAnswer{err: readErr})
+	stores := []hookStore{{dir: "/rig", env: []string{"BEADS_DIR=/rig"}}}
+
+	result, code, stderr := runFailureClaim(t, h, stores)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2: the claim door reports an unreachable store like the discovery door", code)
+	}
+	if !strings.Contains(stderr, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want the %s token on the claim door", stderr, hookStoreUnavailableToken)
+	}
+	if result.Action != "" || h.drained {
+		t.Fatalf("result = %+v, drained = %v; want no drain result and no drain-ack for a failed read", result, h.drained)
+	}
+	if !strings.Contains(stderr, "connection refused") {
 		t.Fatalf("stderr = %q, want the underlying failure named", stderr)
 	}
 }

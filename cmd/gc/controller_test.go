@@ -256,6 +256,11 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	if got, want := string(legacyPing), strconv.Itoa(os.Getpid()); got != want {
 		t.Fatalf("legacy ping response = %q, want numeric PID %q", got, want)
 	}
+	// The published mode crosses the real socket (V2-18): a legacy wake is
+	// read as a latched legacy.
+	if mode, known, err := queryControllerReconcilerMode(cityPath, time.Second); !known || mode != reconcilerLegacy || err != nil {
+		t.Fatalf("queryControllerReconcilerMode = %v, %v, %v; want legacy, known", mode, known, err)
+	}
 	identity := probeControllerIdentity(cityPath)
 	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
 		t.Fatalf("probeControllerIdentity = %+v, want PID %d hosted standalone", identity, os.Getpid())
@@ -1118,7 +1123,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
-			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"test_config_hash":           runtime.CoreFingerprint(seedCfg),
 			"live_hash":                  runtime.LiveFingerprint(seedCfg),
 			"generation":                 "1",
 			"continuation_epoch":         "1",
@@ -2120,7 +2125,7 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 
 	// Core pack housekeeping orders (explicit core include).
-	for _, want := range []string{"gate-sweep", "wisp-compact"} {
+	for _, want := range []string{"gate-sweep", "orphan-sweep"} {
 		if !names[want] {
 			t.Errorf("missing core order %q; got %v", want, names)
 		}
@@ -2134,6 +2139,9 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	if names["dolt-gc-nudge"] {
 		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
 	}
+	if names["wisp-compact"] {
+		t.Errorf("wisp-compact is retired and should not be registered; got %v", names)
+	}
 }
 
 func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
@@ -2144,7 +2152,9 @@ func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, m
 // startControllerSocket removes whatever sits at that path, so a sentinel
 // there survives only if no socket opened. With the override (mctl), the
 // controller runs v2 and its runtime and API state share the wiring's routed
-// wake. Both cases go through the one runController call below.
+// wake; over a store that fences, v2 boots its planner, and over the file
+// store, C0.7 refuses the boot after the wiring. All cases go through the one
+// runController call below.
 func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 	type started struct {
 		dir            string
@@ -2153,7 +2163,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		rec            *events.Fake
 		stdout, stderr *lockedBuffer
 	}
-	start := func(t *testing.T, prefix string, beforeRun func(dir string)) started {
+	start := func(t *testing.T, prefix string, mutate func(*config.City), beforeRun func(dir string)) started {
 		t.Helper()
 		dir := shortSocketTempDir(t, prefix)
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -2168,6 +2178,9 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 			Beads:     config.BeadsConfig{Provider: "file"},
 			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2"},
 		}
+		if mutate != nil {
+			mutate(cfg)
+		}
 		buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
 		s := started{dir: dir, done: make(chan struct{}), code: new(int), rec: events.NewFake(), stdout: &lockedBuffer{}, stderr: &lockedBuffer{}}
 		go func() {
@@ -2179,7 +2192,8 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 
 	t.Run("refused", func(t *testing.T) {
 		var sockPath string
-		s := start(t, "gc-latch-", func(dir string) {
+		deferred := func(c *config.City) { c.ChatSessions.IdleTimeout = "30m" }
+		s := start(t, "gc-latch-", deferred, func(dir string) { // a feature v2 defers: the latch refuses
 			sockPath = controllerSocketPath(dir)
 			if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 				t.Fatal(err)
@@ -2198,8 +2212,8 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		if *s.code != 1 {
 			t.Fatalf("runController exit = %d, want 1\nstderr: %s", *s.code, s.stderr.String())
 		}
-		if !strings.Contains(s.stderr.String(), "not available in this build") {
-			t.Errorf("stderr = %q, want the v2 refusal", s.stderr.String())
+		if !strings.Contains(s.stderr.String(), "is refused") {
+			t.Errorf("stderr = %q, want the v2 latch refusal", s.stderr.String())
 		}
 		if data, err := os.ReadFile(sockPath); err != nil || string(data) != "sentinel" {
 			t.Errorf("controller socket path was touched before the refusal (sentinel read = %q, %v)", data, err)
@@ -2209,14 +2223,12 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		}
 	})
 
-	t.Run("admitted", func(t *testing.T) {
-		admitV2(t)
-		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-v2-", nil)
-		t.Cleanup(func() {
-			tryStopController(s.dir, &bytes.Buffer{})
-			awaitClose(t, s.done, "controller to exit after stop")
-		})
+	// awaitWired waits for the controller state's wiring, or for
+	// runController's exit. setControllerState runs before cr.run, the only
+	// path to the boot, so a wired runtime is wired whether or not it exited
+	// since.
+	awaitWired := func(t *testing.T, s started, wired func() []*CityRuntime) {
+		t.Helper()
 		awaitCond(t, func() bool {
 			select {
 			case <-s.done:
@@ -2225,11 +2237,104 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 				return len(wired()) > 0
 			}
 		}, "controller state wiring")
-		select {
-		case <-s.done:
+		if len(wired()) == 0 {
 			t.Fatalf("runController exited %d before wiring its controller state:\n%s", *s.code, s.stderr.String())
-		default:
 		}
 		assertV2WakeWired(t, wired())
+	}
+
+	t.Run("admitted", func(t *testing.T) {
+		admitV2(t)
+		// A store that fences (C0.7), opened for every scope.
+		store := fencingAtomicCloseStore(t)
+		restore := openStoreFactoryForCity
+		openStoreFactoryForCity = func(context.Context, beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+			return beads.StoreOpenResult{Store: store}, nil
+		}
+		t.Cleanup(func() { openStoreFactoryForCity = restore })
+		wired := captureWiredControllerStates(t)
+		s := start(t, "gc-latch-v2-", nil, nil)
+		t.Cleanup(func() {
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "controller to exit after stop")
+		})
+		awaitWired(t, s, wired)
+		select {
+		case <-wired()[0].v2.ready:
+		case <-s.done:
+			t.Fatalf("runController exited %d before its v2 planner booted:\n%s", *s.code, s.stderr.String())
+		case <-time.After(hangBudget):
+			t.Fatalf("v2 planner did not boot within the hang budget (%s):\n%s", hangBudget, s.stderr.String())
+		}
 	})
+
+	t.Run("capability refused", func(t *testing.T) {
+		admitV2(t)
+		wired := captureWiredControllerStates(t)
+		// The file store fences only with conditional writes on, and they
+		// default to auto (mc-dpo2b), so the refusal needs them off.
+		cwOff := func(c *config.City) { c.Beads.ConditionalWrites = "off" }
+		s := start(t, "gc-latch-c07-", cwOff, nil)
+		awaitWired(t, s, wired)
+		select {
+		case <-s.done:
+		case <-time.After(hangBudget):
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "runController exit after stop")
+			t.Fatalf("v2 over the file store ran a controller; want the C0.7 boot refusal\nstderr: %s", s.stderr.String())
+		}
+		if !strings.Contains(s.stderr.String(), "v2 refuses to boot without conditional writes (C0.7)") {
+			t.Errorf("stderr = %q, want the C0.7 boot refusal", s.stderr.String())
+		}
+	})
+}
+
+// TestRunControllerFiresAnEventOrderOnTheControllerStartedItRecords pins the
+// standalone start order: runController builds its order dispatcher, which
+// reads the head its never-run event orders start from, before it records
+// controller.started. An order on that event therefore fires on the boot that
+// recorded it instead of starting past it.
+func TestRunControllerFiresAnEventOrderOnTheControllerStartedItRecords(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-started-order-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	if err := os.MkdirAll(filepath.Join(dir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orders", "on-start.toml"), []byte(`
+[order]
+trigger = "event"
+on = "controller.started"
+exec = "true"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", PatrolInterval: "50ms"},
+	}
+	buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
+	rec := events.NewFake()
+	var stdout, stderr lockedBuffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, runtime.NewFake(), nil, nil, nil, nil, 0, rec, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		awaitClose(t, done, "runController exit after stop")
+		if t.Failed() {
+			t.Logf("controller stderr:\n%s", stderr.String())
+		}
+	})
+	waitForController(t, dir)
+
+	awaitCond(t, func() bool {
+		fired, err := rec.List(events.Filter{Type: events.OrderFired, Subject: "on-start"})
+		return err == nil && len(fired) > 0
+	}, "the order on controller.started to fire")
 }

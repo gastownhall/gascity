@@ -12,7 +12,7 @@ func applyConvoyFields(b *beads.Bead, fields ConvoyFields) {
 	convoy.ApplyConvoyFields(b, fields)
 }
 
-func setConvoyFields(store beads.Store, id string, fields ConvoyFields) error {
+func setConvoyFields(store beads.WorkStore, id string, fields ConvoyFields) error {
 	return convoy.SetConvoyFields(store, id, fields)
 }
 
