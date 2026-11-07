@@ -274,3 +274,42 @@ func TestTranscriptAppendSequenceUniqueAcrossLockPools(t *testing.T) {
 		t.Fatalf("next_sequence = %d, want 4 (writes %v)", got, frontier)
 	}
 }
+
+// TestTranscriptAppendRecoversCommittedCreateError: the entry create commits
+// and then reports an error, as an ambiguous write does. Append reads the
+// entry back at its pinned ID, publishes it, and returns it as the single
+// stored entry; the next append gets the next sequence. A blank provider
+// message ID still recovers, through the append's own token.
+func TestTranscriptAppendRecoversCommittedCreateError(t *testing.T) {
+	for _, providerMessageID := range []string{"msg-1", ""} {
+		t.Run("provider_message_id="+providerMessageID, func(t *testing.T) {
+			freezeTestClock(t)
+			mem := honoringMemStore()
+			fault := newTranscriptFaultStore(mem, nil)
+			fault.commitThenFailCreates = 1
+			svc := newTranscriptService(beadstest.Mail(casTranscriptFaultStore{fault}), newBindingLockPool())
+
+			first, err := appendTestMessage(t, svc, providerMessageID)
+			if err != nil {
+				t.Fatalf("Append(%q) after committed create error: %v", providerMessageID, err)
+			}
+			if first.Sequence != 1 {
+				t.Fatalf("first sequence = %d, want 1", first.Sequence)
+			}
+			if got := len(assertUniqueTranscriptSequences(t, mem)); got != 1 {
+				t.Fatalf("stored entries after first append = %d, want 1", got)
+			}
+
+			next := mustAppendTestMessage(t, svc, "msg-next")
+			if next.Sequence != 2 {
+				t.Fatalf("next sequence = %d, want 2", next.Sequence)
+			}
+			if got := len(assertUniqueTranscriptSequences(t, mem)); got != 2 {
+				t.Fatalf("stored entries = %d, want 2", got)
+			}
+			if got := testTranscriptNextSequence(t, mem); got != 3 {
+				t.Fatalf("next_sequence = %d, want 3", got)
+			}
+		})
+	}
+}

@@ -63,6 +63,10 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	if err != nil {
 		return ConversationTranscriptRecord{}, err
 	}
+	token, err := newTranscriptAppendToken()
+	if err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
 	entryAt := func(stateID string, sequence int64) beads.Bead {
 		fields := encodeMetadataFields(input.Metadata, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
@@ -82,6 +86,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			"created_at":             formatTime(createdAt),
 			"actor_json":             actorJSON,
 			"attachments_json":       attachmentsJSON,
+			transcriptAppendTokenKey: token,
 		})
 		labels := []string{
 			"gc:extmsg-transcript",
@@ -125,8 +130,9 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			}
 		}
 		// Each attempt creates the entry at the pinned ID of the live
-		// frontier. A store that refuses the ID holds another entry there:
-		// cover it and try the next sequence.
+		// frontier. After a create error, the entry at that pin decides: this
+		// append's own entry (same token or provider message ID) is covered
+		// and returned; another entry is covered and the next sequence tried.
 		for range transcriptAppendAttempts {
 			if err := checkContext(ctx); err != nil {
 				return err
@@ -156,11 +162,17 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			case getErr != nil:
 				return fmt.Errorf("create transcript entry %s: %w (verify pinned entry: %w)", pin, createErr, getErr)
 			}
-			if _, err := decodeTranscriptOccupant(occupant, ref, sequence); err != nil {
+			record, err := decodeTranscriptOccupant(occupant, ref, sequence)
+			if err != nil {
 				return err
 			}
 			if err := s.coverSequenceLocked(state.ID, sequence); err != nil {
 				return err
+			}
+			if occupant.Metadata[transcriptAppendTokenKey] == token ||
+				(providerMessageID != "" && record.ProviderMessageID == providerMessageID) {
+				out = record
+				return nil
 			}
 		}
 		return fmt.Errorf("append transcript entry to %s after %d attempts: %w", state.ID, transcriptAppendAttempts, errTranscriptContended)

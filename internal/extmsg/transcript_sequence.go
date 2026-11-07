@@ -1,6 +1,8 @@
 package extmsg
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -26,6 +28,21 @@ var errTranscriptContended = errors.New("transcript sequence contended")
 // store that honors pinned IDs refuses a second entry at one sequence.
 func transcriptEntryID(stateID string, sequence int64) string {
 	return stateID + "-" + strconv.FormatInt(sequence, 10)
+}
+
+// transcriptAppendTokenKey is the system metadata key holding the token of the
+// Append call that created an entry.
+const transcriptAppendTokenKey = "append_token"
+
+// newTranscriptAppendToken returns a random token that identifies one Append
+// call, so it can recognize an entry it created even when the store reported
+// the create as failed and the message has no provider message ID.
+func newTranscriptAppendToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate transcript append token: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // readTranscriptStateLive reads the transcript state bead from the store
