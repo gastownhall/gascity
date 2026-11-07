@@ -1137,7 +1137,7 @@ func TestOrderRun(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "digest", "", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1202,7 +1202,7 @@ func TestOrderRunUsesGraphApplyThroughOrdersStore(t *testing.T) {
 	spy := &orderRunGraphApplySpy{MemStore: beads.NewMemStore()}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: spy}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "digest", "", sharedTestFormulaDir, beads.OrdersStore{Store: spy}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1218,7 +1218,7 @@ func TestOrderRunFormulaRecordsTrackingBead(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	if code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 0 {
+	if code := doOrderRun(aa, "digest", "", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
@@ -1245,7 +1245,7 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, true, nil, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "digest", "", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, true, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2144,7 +2144,7 @@ description = "Do the cleanup."
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "dog-cleanup", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "dog-cleanup", "", formulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2206,7 +2206,7 @@ description = "Do the cleanup."
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "legacy-cleanup", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "legacy-cleanup", "", formulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -2239,7 +2239,7 @@ func TestOrderRunNonPoolDoesNotSetRouteMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "cleanup", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "cleanup", "", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2422,7 +2422,7 @@ func TestOrderRunNoPool(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "cleanup", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "cleanup", "", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2476,7 +2476,7 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "digest", "", dir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -2908,7 +2908,7 @@ description = "Inspect convoy {{convoy_id}}"
 	}
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "convoy-patrol", "", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "convoy-patrol", "", dir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
@@ -3992,7 +3992,7 @@ func TestOrderRunRigQualifiesPool(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "db-health", "demo-repo", "/city", beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "db-health", "demo-repo", sharedTestFormulaDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
