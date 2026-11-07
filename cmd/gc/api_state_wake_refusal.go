@@ -94,7 +94,7 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 // WakeStartRefusal is api.WakeStartRefuser over wakeWillNotStart.
 func (cs *controllerState) WakeStartRefusal(info sessionpkg.Info) (string, bool) {
 	return wakeWillNotStart(info, wakeVerdictDeps{
-		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.SessionsBeadStore()),
+		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.Stores().Sessions()),
 		sp: cs.SessionProvider(), work: cityWorkLegOf(cs.cityWorkStore()), rigStores: cs.wakeRigStores,
 		runsV2: cs.wakeOf().runsV2,
 	}, time.Now())

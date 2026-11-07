@@ -276,8 +276,11 @@ type OrderHistoryListOutput struct {
 
 // humaHandleOrderHistory is the Huma-typed handler for GET /v0/orders/history.
 func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryInput) (*OrderHistoryListOutput, error) {
-	store := s.state.CityBeadStore()
-	if err := cacheLiveOr503(store); err != nil {
+	// The gate and the cache age are the city work store's, while the rows
+	// come from the order's store infos (E1: preserved, a follow-up reports
+	// the serving store's cache).
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	scopedName := input.ScopedName
@@ -370,7 +373,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
-	freshness := cacheAgeSeconds(store)
+	freshness := cacheAgeSeconds(work)
 	out := &OrderHistoryListOutput{
 		CacheAgeS:    freshness.ageS,
 		CacheRefresh: freshness.refresh,
@@ -504,10 +507,11 @@ const ordersClassStoreRefPrefix = "orders"
 // converged city holds the pre-cutover history in them.
 //
 // Skipped whenever the binding is one of the stores already present, which is
-// every city that relocates nothing: OrdersBeadStore() == CityBeadStore() there,
-// so the read stays byte-identical rather than scanning one database twice.
+// every city that relocates nothing: Stores().Orders() wraps CityBeadStore()
+// there, so the read stays byte-identical rather than scanning one database
+// twice.
 func appendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, cityName string) []workflowStoreInfo {
-	ordersStore := state.OrdersBeadStore().Store
+	ordersStore := state.Stores().Orders().Store
 	if ordersStore == nil {
 		return infos
 	}

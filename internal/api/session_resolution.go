@@ -336,7 +336,7 @@ func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
 			add(stores[rigName])
 		}
 	}
-	add(s.state.GraphBeadStore().Store)
+	add(s.state.Stores().Graph().Store)
 	add(sessions)
 	return out
 }

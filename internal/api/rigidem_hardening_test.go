@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -88,7 +89,7 @@ func TestRigIdemForwardReconcileCompleteOrphan(t *testing.T) {
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-fwd-00001"}
 	digest, _ := rigCreateDigest(body)
 
-	id, err := createIdemRecord(store, "c1", "req-fwd-00001", digest, "3", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-fwd-00001", digest, "3", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestRigIdemForwardReconcileCompleteOrphan(t *testing.T) {
 		return false, "", ""
 	}
 
-	res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, rigComplete, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, rigComplete, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -128,13 +129,13 @@ func TestRigIdemIncompleteOrphanStillReclones(t *testing.T) {
 	idx := newRigIdemIndex()
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-part-00001"}
 	digest, _ := rigCreateDigest(body)
-	id, err := createIdemRecord(store, "c1", "req-part-00001", digest, "3", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-part-00001", digest, "3", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rigComplete := func(string) (bool, string, string) { return false, "", "" }
 
-	res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, rigComplete, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, rigComplete, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -151,17 +152,17 @@ func TestRigIdemDeletedRigSucceededReclones(t *testing.T) {
 	idx := newRigIdemIndex()
 	body := RigCreateBody{Name: "web", Path: "/srv/web", GitURL: "g://x", RequestID: "req-del-00001"}
 	digest, _ := rigCreateDigest(body)
-	id, err := createIdemRecord(store, "c1", "req-del-00001", digest, "3", "web", idemStateSucceeded)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-del-00001", digest, "3", "web", idemStateSucceeded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := markIdemSucceeded(store, id, "web", "w", "main"); err != nil {
+	if err := markIdemSucceeded(beadstest.Work(store), id, "web", "w", "main"); err != nil {
 		t.Fatal(err)
 	}
 
 	// rig deleted ⇒ not in config.
 	deleted := func(string) bool { return false }
-	res, err := admitRigCreate(idx, store, fixedCursor("8"), deleted, nil, "c1", body)
+	res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("8"), deleted, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -173,16 +174,16 @@ func TestRigIdemDeletedRigSucceededReclones(t *testing.T) {
 	// Use a fresh store/record — the reclone above already reset the first record
 	// to in_flight.
 	store2 := beads.NewMemStore()
-	id2, err := createIdemRecord(store2, "c1", "req-del-00001", digest, "3", "web", idemStateSucceeded)
+	id2, err := createIdemRecord(beadstest.Work(store2), "c1", "req-del-00001", digest, "3", "web", idemStateSucceeded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := markIdemSucceeded(store2, id2, "web", "w", "main"); err != nil {
+	if err := markIdemSucceeded(beadstest.Work(store2), id2, "web", "w", "main"); err != nil {
 		t.Fatal(err)
 	}
 	idx2 := newRigIdemIndex()
 	present := func(string) bool { return true }
-	res2, err := admitRigCreate(idx2, store2, fixedCursor("8"), present, nil, "c1", body)
+	res2, err := admitRigCreate(idx2, beadstest.Work(store2), fixedCursor("8"), present, nil, "c1", body)
 	if err != nil {
 		t.Fatalf("admit (present): %v", err)
 	}
@@ -195,21 +196,21 @@ func TestRigIdemDeletedRigSucceededReclones(t *testing.T) {
 // stops blocking a name whose only durable record is succeeded-but-deleted.
 func TestDurableRigNameScanIgnoresDeletedSucceeded(t *testing.T) {
 	store := beads.NewMemStore()
-	if _, err := createIdemRecord(store, "c1", "req-scan-del", "d", "0", "web", idemStateSucceeded); err != nil {
+	if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-scan-del", "d", "0", "web", idemStateSucceeded); err != nil {
 		t.Fatal(err)
 	}
 	// Present in config ⇒ blocks.
-	hit, err := durableRigNameScan(store, "c1", "web", func(string) bool { return true })
+	hit, err := durableRigNameScan(beadstest.Work(store), "c1", "web", func(string) bool { return true })
 	if err != nil || !hit {
 		t.Fatalf("scan (present) = (%v,%v), want (true,nil)", hit, err)
 	}
 	// Absent from config ⇒ name is free.
-	hit, err = durableRigNameScan(store, "c1", "web", func(string) bool { return false })
+	hit, err = durableRigNameScan(beadstest.Work(store), "c1", "web", func(string) bool { return false })
 	if err != nil || hit {
 		t.Fatalf("scan (deleted) = (%v,%v), want (false,nil)", hit, err)
 	}
 	// nil predicate preserves the pre-fix blocking behavior.
-	hit, err = durableRigNameScan(store, "c1", "web", nil)
+	hit, err = durableRigNameScan(beadstest.Work(store), "c1", "web", nil)
 	if err != nil || !hit {
 		t.Fatalf("scan (nil predicate) = (%v,%v), want (true,nil)", hit, err)
 	}
@@ -223,14 +224,14 @@ func TestLookupIdemRecordSelfHealsDuplicates(t *testing.T) {
 	store := beads.NewMemStore()
 	// Two durable records for the SAME (city, request_id) — the double-record
 	// poison a pre-serialization race would leave.
-	if _, err := createIdemRecord(store, "c1", "req-dup-00001", "d", "1", "web", idemStateInFlight); err != nil {
+	if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-dup-00001", "d", "1", "web", idemStateInFlight); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createIdemRecord(store, "c1", "req-dup-00001", "d", "1", "web", idemStateInFlight); err != nil {
+	if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-dup-00001", "d", "1", "web", idemStateInFlight); err != nil {
 		t.Fatal(err)
 	}
 
-	rec, err := lookupIdemRecord(store, "c1", "req-dup-00001")
+	rec, err := lookupIdemRecord(beadstest.Work(store), "c1", "req-dup-00001")
 	if err != nil {
 		t.Fatalf("lookup healed = %v, want nil (self-heal, not 500)", err)
 	}
@@ -240,7 +241,7 @@ func TestLookupIdemRecordSelfHealsDuplicates(t *testing.T) {
 
 	// A follow-up lookup now resolves to exactly one record (the duplicate was
 	// neutralized out of the rig-create kind).
-	rec2, err := lookupIdemRecord(store, "c1", "req-dup-00001")
+	rec2, err := lookupIdemRecord(beadstest.Work(store), "c1", "req-dup-00001")
 	if err != nil || rec2 == nil {
 		t.Fatalf("second lookup = (%v,%v), want the single survivor", rec2, err)
 	}
@@ -366,7 +367,7 @@ func TestRigCreateAsyncSameRequestIDDifferentNameSerialized(t *testing.T) {
 	}
 
 	// And a fresh lookup does not 500 (no poison).
-	if _, err := lookupIdemRecord(state.cityBeadStore, city, req); err != nil {
+	if _, err := lookupIdemRecord(beadstest.Work(state.cityBeadStore), city, req); err != nil {
 		t.Fatalf("post-race lookupIdemRecord = %v, want nil (unpoisoned)", err)
 	}
 }
@@ -385,14 +386,14 @@ func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
 	t.Run("foreign live byName blocks reclone", func(t *testing.T) {
 		store := beads.NewMemStore()
 		idx := newRigIdemIndex()
-		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
+		if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
 			t.Fatal(err)
 		}
 		// A second actor is mid-provision under the same name.
 		foreign := &liveProvision{requestID: "req-B-000002", rigName: "web", eventCursor: "7", done: make(chan struct{})}
 		idx.register("c1", foreign)
 
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), nil, nil, "c1", body)
+		res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), nil, nil, "c1", body)
 		var conflict *rigNameConflictError
 		if !errors.As(err, &conflict) {
 			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
@@ -415,11 +416,11 @@ func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
 	t.Run("foreign live in config blocks reclone", func(t *testing.T) {
 		store := beads.NewMemStore()
 		idx := newRigIdemIndex()
-		if _, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
+		if _, err := createIdemRecord(beadstest.Work(store), "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack); err != nil {
 			t.Fatal(err)
 		}
 		inConfig := func(string) bool { return true }
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), inConfig, nil, "c1", body)
+		res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), inConfig, nil, "c1", body)
 		var conflict *rigNameConflictError
 		if !errors.As(err, &conflict) {
 			t.Fatalf("err = %v (outcome %d), want *rigNameConflictError", err, res.outcome)
@@ -432,12 +433,12 @@ func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
 	t.Run("own free name still reclones", func(t *testing.T) {
 		store := beads.NewMemStore()
 		idx := newRigIdemIndex()
-		id, err := createIdemRecord(store, "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack)
+		id, err := createIdemRecord(beadstest.Work(store), "c1", "req-A-000001", digest, "3", "web", idemStateRolledBack)
 		if err != nil {
 			t.Fatal(err)
 		}
 		free := func(string) bool { return false }
-		res, err := admitRigCreate(idx, store, fixedCursor("9"), free, nil, "c1", body)
+		res, err := admitRigCreate(idx, beadstest.Work(store), fixedCursor("9"), free, nil, "c1", body)
 		if err != nil {
 			t.Fatalf("admit: %v", err)
 		}
@@ -456,7 +457,7 @@ func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
 // gets in internal/dispatch/control.go.
 func TestIdemRecordStaysOutOfTheWorkRecordPopulation(t *testing.T) {
 	store := beads.NewMemStore()
-	id, err := createIdemRecord(store, "c1", "req-kind-00001", "d", "0", "web", idemStateInFlight)
+	id, err := createIdemRecord(beadstest.Work(store), "c1", "req-kind-00001", "d", "0", "web", idemStateInFlight)
 	if err != nil {
 		t.Fatalf("createIdemRecord: %v", err)
 	}
