@@ -6560,6 +6560,240 @@ func TestSettleAdoptedDefaultRigBdSchemaPinsTheInitializerBdAndAddsNoConsent(t *
 	}
 }
 
+// settleRecordingRunner drives the settle helper's two bd commands from a
+// fixed version answer and a fixed migration outcome, recording the commands
+// it saw.
+func settleRecordingRunner(versionOut string, migrateOut []byte, migrateErr error) (beads.CommandRunner, *[]string) {
+	var commands []string
+	return func(_, _ string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "version" {
+			return []byte(versionOut), nil
+		}
+		return migrateOut, migrateErr
+	}, &commands
+}
+
+// The settle helper follows the script's version gate: bd older than 1.0.5
+// has no `migrate schema` subcommand (its bare `migrate` would take `schema`
+// as an ignored argument), so those warn and skip; 1.0.5 and newer run the
+// verb.
+func TestSettleAdoptedDefaultRigBdSchemaGatesOnThePairedBdVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version     string
+		wantMigrate bool
+	}{
+		{version: "bd version 0.62.0"},
+		{version: "bd version 1.0.4"},
+		{version: "bd version 1.0.4-rc.1"},
+		{version: "bd version 1.0.5", wantMigrate: true},
+		{version: "bd version 1.3.1-rc.1", wantMigrate: true},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			run, commands := settleRecordingRunner(tc.version, []byte("applied 1 schema migration\n"), nil)
+			var warn strings.Builder
+			if err := settleAdoptedDefaultRigBdSchema("/rig", run, &warn); err != nil {
+				t.Fatal(err)
+			}
+			migrated := false
+			for _, cmd := range *commands {
+				if cmd == "migrate schema --quiet" {
+					migrated = true
+				}
+			}
+			if migrated != tc.wantMigrate {
+				t.Fatalf("migrate ran = %v, want %v; commands: %v; warnings:\n%s", migrated, tc.wantMigrate, *commands, warn.String())
+			}
+			if !tc.wantMigrate && !strings.Contains(warn.String(), "predates 'bd migrate schema'") {
+				t.Fatalf("warnings = %q, want the skip warning to name the floor", warn.String())
+			}
+		})
+	}
+}
+
+// Every bd old enough to lack the verb reports a version the probe reads, so
+// an unreadable version is not evidence of an old bd: report the diagnostic
+// and still attempt the verb, the script's compatibility fallback.
+func TestSettleAdoptedDefaultRigBdSchemaAttemptsMigrationWhenVersionUnreadable(t *testing.T) {
+	for name, runner := range map[string]beads.CommandRunner{
+		"probe fails": func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "version" {
+				return nil, errors.New("exit status 1: bd version: signal: killed")
+			}
+			return []byte("applied 1 schema migration\n"), nil
+		},
+		"output unparseable": func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "version" {
+				return []byte("garbage"), nil
+			}
+			return []byte("applied 1 schema migration\n"), nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var warn strings.Builder
+			var migrated bool
+			recording := func(dir, nm string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "migrate" {
+					migrated = true
+				}
+				return runner(dir, nm, args...)
+			}
+			if err := settleAdoptedDefaultRigBdSchema("/rig", recording, &warn); err != nil {
+				t.Fatal(err)
+			}
+			if !migrated {
+				t.Fatal("the migration was not attempted on an unreadable version")
+			}
+			if !strings.Contains(warn.String(), "cannot read the paired bd's version") {
+				t.Fatalf("warnings = %q, want the unreadable-version diagnostic", warn.String())
+			}
+		})
+	}
+}
+
+// A remote-backed scope refuses unattended migration by design: the helper
+// reports bd's refusal with the scope and carries on — readiness, not the
+// settlement, decides the outcome.
+func TestSettleAdoptedDefaultRigBdSchemaSurfacesRemoteBackedRefusalAndContinues(t *testing.T) {
+	run, commands := settleRecordingRunner("bd version 1.3.1-rc.1", nil,
+		fmt.Errorf("exit status 1: Error: refusing to auto-apply 3 migrations to a remote-backed database"))
+	var warn strings.Builder
+	if err := settleAdoptedDefaultRigBdSchema("/rigs/api", run, &warn); err != nil {
+		t.Fatalf("a remote-backed refusal must not fail settlement: %v", err)
+	}
+	if !strings.Contains(warn.String(), "/rigs/api") {
+		t.Fatalf("warnings = %q, want the scope named", warn.String())
+	}
+	if !strings.Contains(warn.String(), "refusing to auto-apply 3 migrations to a remote-backed database") {
+		t.Fatalf("warnings = %q, want bd's refusal diagnostic verbatim", warn.String())
+	}
+	if len(*commands) != 2 || (*commands)[1] != "migrate schema --quiet" {
+		t.Fatalf("commands = %v, want the version probe then the migration", *commands)
+	}
+}
+
+// What bd reports the migration did stays visible (from bd 1.3.0 a migration
+// can lock out older co-resident clients); an empty report adds nothing.
+func TestSettleAdoptedDefaultRigBdSchemaForwardsNonemptySuccessOutput(t *testing.T) {
+	for name, tc := range map[string]struct {
+		out      []byte
+		wantEcho bool
+	}{
+		"report echoed": {out: []byte("applied 2 schema migrations\n"), wantEcho: true},
+		"quiet success": {out: nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run, _ := settleRecordingRunner("bd version 1.3.1-rc.1", tc.out, nil)
+			var warn strings.Builder
+			if err := settleAdoptedDefaultRigBdSchema("/rig", run, &warn); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantEcho && !strings.Contains(warn.String(), "applied 2 schema migrations") {
+				t.Fatalf("warnings = %q, want bd's report forwarded", warn.String())
+			}
+			if !tc.wantEcho && strings.Contains(warn.String(), "applied") {
+				t.Fatalf("warnings = %q, want no invented output", warn.String())
+			}
+		})
+	}
+}
+
+// behindSchemaAdoptionFixture builds a doltlite city with an already
+// initialized direct-server rig store and one fake bd that serves the init
+// (already-initialized refusal), the version probe (1.3.1-rc.1) and the
+// readiness reads, recording every command in seqPath. The migrate and list
+// arms are shell bodies appended after their log line.
+func behindSchemaAdoptionFixture(t *testing.T, migrateArm, listArm string) (cityPath, rigPath, seqPath string) {
+	t.Helper()
+	cityPath = t.TempDir()
+	rigPath = filepath.Join(cityPath, "rigs", "tincan")
+	seqPath = filepath.Join(t.TempDir(), "seq")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"tincan"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBd := filepath.Join(t.TempDir(), "bd")
+	script := "#!/bin/sh\n" +
+		"log() { printf '%s\\n' \"$1\" >> " + strconv.Quote(seqPath) + "; }\n" +
+		"case \"${1:-}\" in\n" +
+		"  init)\n" +
+		"    log init\n" +
+		"    echo \"Found existing Dolt database 'tincan' for this workspace. This workspace is already initialized; just run bd commands normally. Aborting.\" >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  version)\n" +
+		"    log version\n" +
+		"    echo \"bd version 1.3.1-rc.1\"\n" +
+		"    ;;\n" +
+		"  migrate)\n" +
+		"    log migrate\n" +
+		migrateArm + "\n" +
+		"    ;;\n" +
+		"  list)\n" +
+		"    log list\n" +
+		listArm + "\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+	return cityPath, rigPath, seqPath
+}
+
+// Issue #8106, the remote-backed arm: bd's remote-migrate gate refuses
+// unattended migration by design. Settlement reports the refusal and carries
+// on; readiness stays authoritative — it succeeds on a readable store and
+// still fails on an unreadable one, exactly as it would without the refused
+// migration.
+func TestSettleAdoptedDefaultRigBdSchemaRemoteBackedRefusalLeavesReadinessAuthoritative(t *testing.T) {
+	const refusal = "echo \"Error: refusing to migrate a remote-backed database\" >&2\nexit 1\n"
+	for name, tc := range map[string]struct {
+		listArm string
+		wantErr bool
+	}{
+		"readiness still fails on an unreadable store": {
+			listArm: "echo \"Error 1105 (HY000): table \\\"i\\\" does not have column \\\"storage_class\\\"\" >&2\nexit 1\n",
+			wantErr: true,
+		},
+		"readiness succeeds on a readable store": {
+			listArm: "printf '[]\\n'\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath, rigPath, seqPath := behindSchemaAdoptionFixture(t, refusal, tc.listArm)
+			err := initAndHookDir(cityPath, rigPath, "tc")
+			if tc.wantErr && err == nil {
+				t.Fatal("readiness must stay authoritative: an unreadable store still fails init")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("a refused migration must not fail init on a readable store: %v", err)
+			}
+			data, err := os.ReadFile(seqPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"init", "version", "migrate", "list"} {
+				if !strings.Contains("\n"+string(data)+"\n", "\n"+want+"\n") {
+					t.Fatalf("bd commands = %q, want a %s command (readiness must still run)", data, want)
+				}
+			}
+		})
+	}
+}
+
 func TestInitAndHookDirAdoptsAlreadyInitializedCanonicalExecBdStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "tincan")
