@@ -59,12 +59,13 @@ func EvaluateHistory(monitor config.GitHubRunMonitor, runs []ObservedRun) (Evalu
 				break
 			}
 			eval.ConsecutiveSuccesses++
-		} else {
-			if eval.ConsecutiveSuccesses > 0 {
-				break
-			}
-			eval.ConsecutiveFailures++
+			continue
 		}
+
+		if eval.ConsecutiveSuccesses > 0 && !contractBroken {
+			break
+		}
+		eval.ConsecutiveFailures++
 
 		if contractBroken {
 			eval.DataContractError = true

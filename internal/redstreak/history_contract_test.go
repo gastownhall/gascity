@@ -218,6 +218,42 @@ func TestEvaluateHistoryReportsMissingOrDuplicatePostActivationAggregateJobAsRed
 	}
 }
 
+func TestEvaluateHistoryReportsContractErrorBehindAnActiveSuccessStreak(t *testing.T) {
+	monitor := testRunMonitor("nightly", "Nightly summary")
+	runs := []ObservedRun{
+		testObservedRun(503, "schedule", "success", "success", "2026-07-30T03:00:00Z", monitor.AggregateJob),
+		testObservedRun(502, "schedule", "success", "success", "2026-07-30T02:00:00Z", monitor.AggregateJob),
+		{
+			Run: Run{
+				ID:         501,
+				Event:      "schedule",
+				Conclusion: "success",
+				StartedAt:  mustTime(t, "2026-07-30T01:00:00Z"),
+				URL:        "https://example.test/runs/501",
+			},
+			Jobs: nil,
+		},
+	}
+
+	got, err := EvaluateHistory(monitor, runs)
+	if err == nil {
+		t.Fatal("EvaluateHistory() error = nil, want *DataContractError for the older contract-broken run")
+	}
+	var contractErr *DataContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("EvaluateHistory() error = %T %v, want *DataContractError", err, err)
+	}
+	if contractErr.RunID != 501 {
+		t.Fatalf("DataContractError.RunID = %d, want 501 (the older contract-broken run)", contractErr.RunID)
+	}
+	if !got.DataContractError {
+		t.Fatal("DataContractError = false, want true; a contract break behind an active success streak must not be silently dropped")
+	}
+	if got.ConsecutiveSuccesses != 2 {
+		t.Fatalf("ConsecutiveSuccesses = %d, want 2 (the streak established before the contract-broken run)", got.ConsecutiveSuccesses)
+	}
+}
+
 func testRunMonitor(name, aggregate string) config.GitHubRunMonitor {
 	return config.GitHubRunMonitor{
 		Name:           name,
