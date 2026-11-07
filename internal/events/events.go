@@ -262,6 +262,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionConfigDriftDeferred fires when the reconciler defers a
+	// config-drift restart because an ordinary seat holds assigned work. It
+	// fires once when the deferral episode is first recorded and once more,
+	// with escalated=true, when the episode outlives [daemon]
+	// drift_deferral_escalate_after. It is a signal only: the held work stays
+	// protected and the controller never drains, restarts or kills the session
+	// for it. Delivery is best-effort; a write the reconciler loses emits
+	// nothing and a later pass retries. See gastownhall/gascity#8345.
+	SessionConfigDriftDeferred = "session.config_drift_deferred"
 	// SessionWakeRefused fires when a durable explicit wake request
 	// (wake_request=explicit) is refused before the session ever reaches a
 	// live runtime — held, quarantined, or asleep past its idle-sleep
@@ -674,6 +683,7 @@ var KnownEventTypes = []string{
 	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionStrandedClaims,
 	SessionUnknownState,
+	SessionConfigDriftDeferred,
 	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
