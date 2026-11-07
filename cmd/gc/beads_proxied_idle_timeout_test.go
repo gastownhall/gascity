@@ -430,6 +430,94 @@ func TestDefaultRigBdStoreInitSettlesSchemaClientSide(t *testing.T) {
 	}
 }
 
+// Issue #8106, the fresh arm: a successful bd init already carries bd's own
+// creation consent — the fresh store's schema is current by construction — so
+// settlement is adoption-only. A fresh init must not probe the version or run
+// the migration verb.
+func TestDefaultRigBdStoreFreshInitDoesNotSettleSchema(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "api")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "bd-args")
+	fakeBd := filepath.Join(city, "bd")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$1\" in\n" +
+		"  version) echo \"bd version 1.3.1-rc.1\" ;;\n" +
+		"  list) printf '[]\\n' ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+
+	if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+		t.Fatalf("initDefaultRigBdStore: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "version") || strings.HasPrefix(line, "migrate schema") {
+			t.Fatalf("fresh init must not settle the schema (cursor-zero creation already carries bd's consent); bd invocations:\n%s", data)
+		}
+	}
+}
+
+// Issue #8106, the proxied arm: a proxied scope's schema belongs to the proxy
+// lifecycle bd owns on that path, so an already-initialized proxied store is
+// adopted without gc running a migration itself.
+func TestDefaultRigBdStoreProxiedAdoptionDoesNotSettleSchema(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "bd-args")
+	fakeBd := filepath.Join(city, "bd")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$1\" in\n" +
+		"  init) echo \"This workspace is already initialized; just run bd commands normally. Aborting.\" >&2; exit 1 ;;\n" +
+		"  version) echo \"bd version 1.3.1-rc.1\" ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"r1"}`)
+
+	// The init itself does more than call bd; only the invocation record
+	// matters here, as in the neighboring proxied fixtures.
+	_ = initDefaultRigBdStore(city, rig, "r1", "r1")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	if !strings.Contains(string(data), "init ") {
+		t.Fatalf("the fixture must reach bd init; bd invocations:\n%s", data)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "version") || strings.HasPrefix(line, "migrate schema") {
+			t.Fatalf("a proxied adoption must not settle the schema through gc; bd invocations:\n%s", data)
+		}
+	}
+}
+
 // The provider-owned front door (gc init, gc rig add) hands the script's init
 // op the resolved idle timeout.
 func TestProviderOwnedScopeInitCarriesResolvedIdleTimeout(t *testing.T) {
