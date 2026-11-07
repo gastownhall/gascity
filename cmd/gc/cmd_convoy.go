@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1576,13 +1578,52 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 	return 0
 }
 
-// doConvoyStatusFallback is the direct-bd path for "gc convoy status".
-func doConvoyStatusFallback(cityPath, convoyID string, jsonOut bool, stdout, stderr io.Writer) int {
+// convoyStatusLocalTimeout bounds the local path of "gc convoy status": the
+// store open, the convoy read and its members. It exceeds the native store's
+// 90s read retry budget, so a read that spans a managed Dolt restart still
+// recovers, while a read that never returns becomes an error naming itself
+// instead of a silent hang (#5715).
+var convoyStatusLocalTimeout = 2 * time.Minute
+
+// convoyStatusLocalRead is the unbounded local read doConvoyStatusFallback
+// runs under convoyStatusLocalTimeout; tests replace it.
+var convoyStatusLocalRead = func(cityPath, convoyID string, jsonOut bool, stdout, stderr io.Writer) int {
 	store, code := openConvoyStoreByIDAt(convoyID, cityPath, stderr, "gc convoy status")
 	if store == nil {
 		return code
 	}
 	return doConvoyStatusWithJSON(store, []string{convoyID}, jsonOut, stdout, stderr)
+}
+
+// doConvoyStatusFallback is the direct-bd path for "gc convoy status". The
+// read runs in a goroutine writing to its own buffers, copied out only when it
+// finishes in time, so a read abandoned at the deadline cannot write later.
+func doConvoyStatusFallback(cityPath, convoyID string, jsonOut bool, stdout, stderr io.Writer) int {
+	type localResult struct {
+		code        int
+		out, errOut bytes.Buffer
+	}
+	done := make(chan *localResult, 1)
+	// Read the seams before spawning: an abandoned goroutine can outlive the
+	// caller, and with it a test's restore of the package vars.
+	read, timeout := convoyStatusLocalRead, convoyStatusLocalTimeout
+	go func() {
+		r := &localResult{}
+		r.code = read(cityPath, convoyID, jsonOut, &r.out, &r.errOut)
+		done <- r
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		stderr.Write(r.errOut.Bytes()) //nolint:errcheck // best-effort stderr
+		stdout.Write(r.out.Bytes())    //nolint:errcheck // best-effort stdout
+		return r.code
+	case <-timer.C:
+		fmt.Fprintf(stderr, "gc convoy status: local store read of convoy %s in %s did not finish within %s\n", convoyID, cityPath, timeout) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics")                                                                      //nolint:errcheck // best-effort stderr
+		return 1
+	}
 }
 
 // doConvoyStatus shows detailed status of a convoy and its children.

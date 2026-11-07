@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -4110,5 +4111,99 @@ func TestConvoyStatusStoreOpensReuseTheLoadedConfig(t *testing.T) {
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
 		t.Fatalf("resolving %s across the convoy stores loaded the city config %d more times, want 0", convoy.ID, grew)
+	}
+}
+
+// TestConvoyStatusLocalTimesOut pins #5715: a local read that never returns
+// ends at convoyStatusLocalTimeout with an error naming the convoy, and the
+// abandoned read cannot write to stdout afterwards.
+func TestConvoyStatusLocalTimesOut(t *testing.T) {
+	oldTimeout := convoyStatusLocalTimeout
+	convoyStatusLocalTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { convoyStatusLocalTimeout = oldTimeout })
+
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	oldRead := convoyStatusLocalRead
+	convoyStatusLocalRead = func(_, _ string, _ bool, stdout, _ io.Writer) int {
+		<-release
+		fmt.Fprintln(stdout, "late") //nolint:errcheck
+		close(finished)
+		return 0
+	}
+	t.Cleanup(func() { convoyStatusLocalRead = oldRead })
+
+	var stdout, stderr bytes.Buffer
+	returned := make(chan int, 1)
+	go func() { returned <- doConvoyStatusFallback("/city", "gc-1", true, &stdout, &stderr) }()
+	var code int
+	select {
+	case code = <-returned:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("doConvoyStatusFallback did not return within 5s of a 20ms timeout")
+	}
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if want := "local store read of convoy gc-1 in /city did not finish within 20ms"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	close(release)
+	<-finished
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty after the abandoned read wrote", stdout.String())
+	}
+}
+
+// TestConvoyStatusLocalCopiesOut: a read that finishes in time keeps its
+// stdout, stderr and exit code.
+func TestConvoyStatusLocalCopiesOut(t *testing.T) {
+	oldRead := convoyStatusLocalRead
+	convoyStatusLocalRead = func(_, _ string, _ bool, stdout, stderr io.Writer) int {
+		fmt.Fprint(stdout, "status")  //nolint:errcheck
+		fmt.Fprint(stderr, "warning") //nolint:errcheck
+		return 3
+	}
+	t.Cleanup(func() { convoyStatusLocalRead = oldRead })
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyStatusFallback("/city", "gc-1", true, &stdout, &stderr); code != 3 {
+		t.Fatalf("code = %d, want 3", code)
+	}
+	if stdout.String() != "status" || stderr.String() != "warning" {
+		t.Fatalf("stdout = %q, stderr = %q, want the read's own output", stdout.String(), stderr.String())
+	}
+}
+
+// TestConvoyStatusLocalOutputIdentical: on a real city store, the bounded
+// path renders a convoy's status byte-for-byte identical to the unbounded
+// read, in JSON and in text, so the deadline changes nothing a read that
+// finishes in time prints (the snapshot of each is the read's own output).
+func TestConvoyStatusLocalOutputIdentical(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cityStore, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	convoy, err := cityStore.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := cityStore.Create(beads.Bead{Title: "task A", ParentID: convoy.ID}); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	for _, jsonOut := range []bool{true, false} {
+		var wantOut, wantErr, gotOut, gotErr bytes.Buffer
+		wantCode := convoyStatusLocalRead(cityDir, convoy.ID, jsonOut, &wantOut, &wantErr)
+		gotCode := doConvoyStatusFallback(cityDir, convoy.ID, jsonOut, &gotOut, &gotErr)
+		if wantCode != 0 || wantOut.Len() == 0 {
+			t.Fatalf("json=%v: unbounded read = %d with %d stdout bytes, want 0 and a status; stderr=%s", jsonOut, wantCode, wantOut.Len(), wantErr.String())
+		}
+		snapshot := wantOut.Bytes()
+		if gotCode != wantCode || !bytes.Equal(gotOut.Bytes(), snapshot) || !bytes.Equal(gotErr.Bytes(), wantErr.Bytes()) {
+			t.Fatalf("json=%v: bounded = %d %q %q, want %d %q %q", jsonOut, gotCode, gotOut.String(), gotErr.String(), wantCode, snapshot, wantErr.String())
+		}
 	}
 }
