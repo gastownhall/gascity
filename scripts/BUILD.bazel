@@ -152,6 +152,7 @@ go_test(
         "makefile_install_test.go",
         "native_doltlite_target_test.go",
         "oasdiff_pin_test.go",
+        "observable_log_reclaim_test.go",
         "openapi_breaking_gate_test.go",
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
