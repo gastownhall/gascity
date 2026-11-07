@@ -777,6 +777,15 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The hold boot makes before anything else on a marked binding (S5 §7.2):
+	// a binding converged from another work store is not this city's.
+	if state == infraConvergenceMarked || state == infraConvergenceStale {
+		if _, _, hold := markerWorkStoreIdentityHold(request.CityPath, target, logPrefix, stderr); hold != nil {
+			hold.Target = target
+			fmt.Fprintf(stdout, "converged: no (%s)\nblocking invariant: %s\n", hold.Outcome, infraMigrationOperatorAdvice(*hold, logPrefix)) //nolint:errcheck // best-effort stdout
+			return 1
+		}
+	}
 	// A converged city's work store is counted under its manifest's classifier
 	// generation, the one every verdict below judges it by: rows the copy's
 	// classifier left as work are not infrastructure that city retains.
