@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# observable-log-reclaim - identify, and on request compress, old legacy
+# observable logs (gascity-*.jsonl.*) left in a scratch directory.
+#
+# Operator-invoked and foreground only: there is no scheduler and no background
+# work. The default is a dry run that changes nothing; --apply acts.
+#
+#   observable-log-reclaim [--apply] [--scratch-root DIR] [--proc-root DIR]
+#
+# Scope: regular files directly inside DIR (default /var/tmp) named
+# gascity-*.jsonl.* that do not end in .gz. Symlinks, subdirectories and
+# everything else are ignored, never listed, never touched.
+#
+# A file is ELIGIBLE only when all of these hold:
+#   - owned by the invoking user
+#   - last modified 72 hours or more ago
+#   - not open in any process of the invoking user (/proc/PID/fd)
+#   - its basename is cited by no bead (every rig store, via bd -C STORE_ROOT)
+#     and by no git-tracked file of any of those rigs
+#   - no FILE.gz exists beside it
+# Anything else is HELD:<reason>. A probe that cannot answer (unreadable /proc,
+# a store that errors, an empty bead index, a failed file listing) answers
+# "unknown", holds every file it could have decided, and makes the exit status 1:
+# the tool fails closed.
+#
+# --apply compresses each ELIGIBLE file in place: gzip to a hidden temp file,
+# gzip -t it, link it to FILE.gz (which refuses to overwrite), then remove the
+# original. It never deletes anything else. The result is re-derived on every run,
+# so running it again is a no-op.
+#
+# Output (stdout), one record per line:
+#   store beads=<n|unknown> path=<root>
+#   file verdict=<ELIGIBLE|COMPRESSED|HELD:reason> bytes=<n> after=<n|-> age_h=<n> \
+#        open=<yes|no|unknown> cited-by=<ids|-|unknown> path=<abs path>
+#   summary eligible=<n> eligible_bytes=<n> held=<n> files=<n> stores=<n> \
+#        compressed=<n> reclaimed_bytes=<n> mode=<dry-run|apply>
+# Problems go to stderr as "probe-failed: ...". Exit 0 = clean, 1 = a probe or
+# a file operation failed, 2 = usage.
+#
+# --proc-root and --scratch-root exist so the tests can run against fakes.
+
+set -u
+set -o pipefail
+
+PROG=observable-log-reclaim
+SCRATCH_ROOT=/var/tmp
+PROC_ROOT=/proc
+APPLY=0
+MIN_AGE_SECS=$((72 * 3600))
+
+OPEN_OK=1
+CITE_OK=1
+PROBE_FAILED=0
+FILE_FAILED=0
+WORK=
+
+usage() {
+	cat <<EOF
+usage: $PROG [--apply] [--scratch-root DIR] [--proc-root DIR]
+  (no flags)           dry run: report what would be compressed, change nothing
+  --apply              compress each eligible gascity-*.jsonl.* file in place
+  --scratch-root DIR   directory to scan (default /var/tmp)
+  --proc-root DIR      process table to read open files from (default /proc)
+EOF
+}
+
+usage_error() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	usage >&2
+	exit 2
+}
+
+probe_fail() {
+	printf 'probe-failed: %s\n' "$*" >&2
+	PROBE_FAILED=1
+}
+
+# first_line FILE: a short single-line excerpt of a captured stderr file.
+first_line() {
+	head -c 300 "$1" 2>/dev/null | tr '\n\t' '  '
+}
+
+# size_mtime PATH: prints "<bytes> <mtime epoch>".
+size_mtime() {
+	stat -c '%s %Y' -- "$1" 2>/dev/null || stat -f '%z %m' -- "$1" 2>/dev/null
+}
+
+mode_of() {
+	stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' -- "$1" 2>/dev/null
+}
+
+# scan_open: collect the targets of every fd of every process the invoking user
+# owns into $WORK/open.txt. Anything short of a complete scan is a failed probe.
+scan_open() {
+	local p fd seen=0
+	: >"$WORK/open.txt"
+	if [ ! -d "$PROC_ROOT" ]; then
+		probe_fail "proc root $PROC_ROOT is not a directory: cannot tell which logs are open"
+		OPEN_OK=0
+		return
+	fi
+	for p in "$PROC_ROOT"/[0-9]*; do
+		[ -d "$p" ] || continue
+		seen=$((seen + 1))
+		[ -O "$p" ] || continue
+		fd="$p/fd"
+		if [ ! -d "$fd" ] || [ ! -r "$fd" ] || [ ! -x "$fd" ]; then
+			[ -d "$p" ] || continue # the process exited while we looked
+			probe_fail "cannot read $fd: cannot tell which logs are open"
+			OPEN_OK=0
+			return
+		fi
+		set -- "$fd"/*
+		if [ -e "$1" ] || [ -L "$1" ]; then
+			readlink "$@" >>"$WORK/open.txt" 2>/dev/null
+		fi
+	done
+	if [ "$seen" -eq 0 ]; then
+		probe_fail "no processes visible under $PROC_ROOT: cannot tell which logs are open"
+		OPEN_OK=0
+	fi
+}
+
+STORE_ROOTS=()
+STORE_JSON=()
+TOTAL_BEADS=0
+
+# probe_stores: list the rig stores and fetch each one's full bead index.
+probe_stores() {
+	local list="$WORK/stores.txt" n=0 root json count
+	if ! gc rig list --json >"$WORK/rigs.json" 2>"$WORK/rigs.err" </dev/null; then
+		probe_fail "gc rig list --json failed: $(first_line "$WORK/rigs.err")"
+		CITE_OK=0
+		return
+	fi
+	if ! jq -r 'if type == "array" then . else .rigs end | .[].path' "$WORK/rigs.json" 2>"$WORK/rigs.err" | sort -u >"$list" || [ ! -s "$list" ]; then
+		probe_fail "gc rig list --json named no rig stores: $(first_line "$WORK/rigs.err")"
+		CITE_OK=0
+		return
+	fi
+	while IFS= read -r root; do
+		n=$((n + 1))
+		json="$WORK/store.$n.json"
+		if [ ! -d "$root" ]; then
+			probe_fail "store root $root is not a directory"
+			printf 'store beads=unknown path=%s\n' "$root"
+			CITE_OK=0
+			continue
+		fi
+		# G9: address the store explicitly; an ambient BEADS_DIR would pin bd elsewhere.
+		if ! env -u BEADS_DIR bd -C "$root" list --all --json --limit 0 >"$json" 2>"$WORK/store.$n.err" </dev/null; then
+			probe_fail "bd -C $root list failed: $(first_line "$WORK/store.$n.err")"
+			printf 'store beads=unknown path=%s\n' "$root"
+			CITE_OK=0
+			continue
+		fi
+		if ! count=$(jq -r 'if type == "array" then length else error("not a JSON array") end' "$json" 2>"$WORK/store.$n.err"); then
+			probe_fail "bd -C $root list returned unusable JSON: $(first_line "$WORK/store.$n.err")"
+			printf 'store beads=unknown path=%s\n' "$root"
+			CITE_OK=0
+			continue
+		fi
+		printf 'store beads=%s path=%s\n' "$count" "$root"
+		TOTAL_BEADS=$((TOTAL_BEADS + count))
+		STORE_ROOTS+=("$root")
+		STORE_JSON+=("$json")
+	done <"$list"
+	if [ "$CITE_OK" -eq 1 ] && [ "$TOTAL_BEADS" -eq 0 ]; then
+		probe_fail "the bead index is empty across ${#STORE_ROOTS[@]} stores: refusing to treat that as 'nothing is cited'"
+		CITE_OK=0
+	fi
+}
+
+# probe_citations NAMES: fill $WORK/cites.txt with "<citer>\t<basename>" lines,
+# one per bead or tracked file that mentions one of the basenames in NAMES.
+probe_citations() {
+	local names="$1" i=0 root json rc
+	: >"$WORK/cites.txt"
+	[ "$CITE_OK" -eq 1 ] || return
+	[ -s "$names" ] || return
+	[ "${#STORE_JSON[@]}" -gt 0 ] || return
+	for json in "${STORE_JSON[@]}"; do
+		root=${STORE_ROOTS[$i]}
+		i=$((i + 1))
+		# beads: a cheap grep finds which basenames appear at all, then one jq
+		# pass over the store attributes them to bead ids.
+		grep -oF -f "$names" -- "$json" >"$WORK/m.raw" 2>"$WORK/m.err" </dev/null
+		rc=$?
+		if [ "$rc" -gt 1 ]; then
+			probe_fail "searching the beads of $root failed: $(first_line "$WORK/m.err")"
+			CITE_OK=0
+			return
+		fi
+		if [ -s "$WORK/m.raw" ]; then
+			sort -u "$WORK/m.raw" >"$WORK/m.names"
+			if ! jq -r --rawfile names "$WORK/m.names" '
+				($names | split("\n") | map(select(length > 0))) as $n
+				| .[] | . as $b | ($b | tojson) as $t
+				| $n[] | select($t | contains(.))
+				| "\($b.id // "?")\t\(.)"' "$json" >>"$WORK/cites.txt" 2>"$WORK/m.err"; then
+				probe_fail "attributing citations in $root failed: $(first_line "$WORK/m.err")"
+				CITE_OK=0
+				return
+			fi
+		fi
+		# tracked files (gate records, docs, ...) of the same rig.
+		if ! git -C "$root" ls-files -z >"$WORK/tracked" 2>"$WORK/m.err" </dev/null; then
+			probe_fail "git -C $root ls-files failed: $(first_line "$WORK/m.err")"
+			CITE_OK=0
+			return
+		fi
+		(cd "$root" && xargs -0 -r grep -IoHF -f "$names" -- <"$WORK/tracked") >"$WORK/t.raw" 2>"$WORK/t.err"
+		# grep exits 1 for "no match" and xargs folds that into 123, so judge by stderr.
+		if grep -v -e 'No such file or directory' -e 'Is a directory' "$WORK/t.err" >"$WORK/t.bad" 2>/dev/null && [ -s "$WORK/t.bad" ]; then
+			probe_fail "searching the tracked files of $root failed: $(first_line "$WORK/t.bad")"
+			CITE_OK=0
+			return
+		fi
+		awk '{ i = match($0, /:[^:]*$/); if (i > 0) printf "%s\t%s\n", substr($0, 1, i - 1), substr($0, i + 1) }' "$WORK/t.raw" >>"$WORK/cites.txt"
+	done
+}
+
+N_FILES=0
+N_ELIGIBLE=0
+N_HELD=0
+N_COMPRESSED=0
+ELIGIBLE_BYTES=0
+RECLAIMED_BYTES=0
+
+# emit VERDICT BYTES AFTER AGE OPEN CITED PATH
+emit() {
+	printf 'file verdict=%s bytes=%s after=%s age_h=%s open=%s cited-by=%s path=%s\n' "$@"
+}
+
+# compress_one FILE BYTES MTIME: gzip FILE in place. Prints the verdict and
+# the compressed size as "<verdict> <after>".
+compress_one() {
+	local f="$1" bytes="$2" mtime="$3" dir base tmp cur mode
+	dir=$(dirname -- "$f")
+	base=$(basename -- "$f")
+	tmp="$dir/.$base.gz.tmp.$$"
+	if ! (umask 077 && gzip -c -- "$f" >"$tmp") 2>/dev/null; then
+		rm -f -- "$tmp"
+		echo "HELD:compress-failed -"
+		return 1
+	fi
+	if ! gzip -t -- "$tmp" 2>/dev/null; then
+		rm -f -- "$tmp"
+		echo "HELD:verify-failed -"
+		return 1
+	fi
+	# A log that grew or was touched while it compressed is live: leave it alone.
+	cur=$(size_mtime "$f")
+	if [ "$cur" != "$bytes $mtime" ]; then
+		rm -f -- "$tmp"
+		echo "HELD:changed -"
+		return 0
+	fi
+	touch -r "$f" -- "$tmp" 2>/dev/null
+	mode=$(mode_of "$f")
+	[ -z "$mode" ] || chmod "$mode" -- "$tmp" 2>/dev/null
+	# ln refuses to replace an existing FILE.gz, unlike mv.
+	if ! ln -- "$tmp" "$f.gz" 2>/dev/null; then
+		rm -f -- "$tmp"
+		echo "HELD:gz-exists -"
+		return 0
+	fi
+	rm -f -- "$tmp"
+	if ! rm -f -- "$f"; then
+		echo "HELD:remove-failed -"
+		return 1
+	fi
+	echo "COMPRESSED $(size_mtime "$f.gz" | cut -d' ' -f1)"
+}
+
+main() {
+	local arg tool f base now bytes mtime age_s age_h open cited verdict result after
+	local -a files=()
+
+	while [ $# -gt 0 ]; do
+		arg=$1
+		case $arg in
+		--apply) APPLY=1 ;;
+		--scratch-root | --proc-root)
+			[ $# -ge 2 ] || usage_error "$arg needs a value"
+			if [ "$arg" = --scratch-root ]; then SCRATCH_ROOT=$2; else PROC_ROOT=$2; fi
+			shift
+			;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*) usage_error "unknown argument: $arg" ;;
+		esac
+		shift
+	done
+
+	for tool in jq gzip gc bd git stat readlink xargs grep awk sort paste touch ln chmod mktemp date; do
+		command -v "$tool" >/dev/null 2>&1 || {
+			echo "probe-failed: required tool not found: $tool" >&2
+			exit 1
+		}
+	done
+	if [ ! -d "$SCRATCH_ROOT" ]; then
+		echo "$PROG: scratch root $SCRATCH_ROOT is not a directory" >&2
+		exit 1
+	fi
+	SCRATCH_ROOT=$(cd -- "$SCRATCH_ROOT" && pwd -P) || exit 1
+
+	WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/$PROG.XXXXXX") || exit 1
+	trap 'rm -rf "$WORK"' EXIT
+
+	for f in "$SCRATCH_ROOT"/gascity-*.jsonl.*; do
+		[ -L "$f" ] && continue
+		[ -f "$f" ] || continue
+		case $f in
+		*.gz | *$'\n'*) continue ;;
+		esac
+		files+=("$f")
+	done
+	: >"$WORK/names.txt"
+	if [ "${#files[@]}" -gt 0 ]; then
+		for f in "${files[@]}"; do basename -- "$f"; done >"$WORK/names.txt"
+	fi
+
+	scan_open
+	probe_stores
+	probe_citations "$WORK/names.txt"
+
+	now=$(date +%s)
+	if [ "${#files[@]}" -gt 0 ]; then
+		for f in "${files[@]}"; do
+			base=$(basename -- "$f")
+			read -r bytes mtime <<EOF
+$(size_mtime "$f")
+EOF
+			if [ -z "${bytes:-}" ] || [ -z "${mtime:-}" ]; then
+				probe_fail "cannot stat $f"
+				FILE_FAILED=1
+				continue
+			fi
+			N_FILES=$((N_FILES + 1))
+			age_s=$((now - mtime))
+			age_h=$((age_s / 3600))
+
+			if [ "$OPEN_OK" -eq 1 ]; then
+				if grep -Fxq -- "$f" "$WORK/open.txt"; then open=yes; else open=no; fi
+			else
+				open=unknown
+			fi
+			if [ "$CITE_OK" -eq 1 ]; then
+				cited=$(awk -F'\t' -v n="$base" '$2 == n { print $1 }' "$WORK/cites.txt" | sort -u | paste -sd, - | tr ' \t' '__')
+				[ -n "$cited" ] || cited=-
+			else
+				cited=unknown
+			fi
+
+			if [ "$age_s" -lt "$MIN_AGE_SECS" ]; then
+				verdict=HELD:young
+			elif [ ! -O "$f" ]; then
+				verdict=HELD:not-owned
+			elif [ -e "$f.gz" ] || [ -L "$f.gz" ]; then
+				verdict=HELD:gz-exists
+			elif [ "$open" = yes ]; then
+				verdict=HELD:open
+			elif [ "$cited" != - ] && [ "$cited" != unknown ]; then
+				verdict=HELD:cited
+			elif [ "$open" = unknown ] || [ "$cited" = unknown ]; then
+				verdict=HELD:probe-failed
+			else
+				verdict=ELIGIBLE
+			fi
+
+			after=-
+			if [ "$verdict" = ELIGIBLE ]; then
+				N_ELIGIBLE=$((N_ELIGIBLE + 1))
+				ELIGIBLE_BYTES=$((ELIGIBLE_BYTES + bytes))
+				if [ "$APPLY" -eq 1 ]; then
+					result=$(compress_one "$f" "$bytes" "$mtime") || FILE_FAILED=1
+					verdict=${result%% *}
+					after=${result#* }
+					if [ "$verdict" = COMPRESSED ]; then
+						N_COMPRESSED=$((N_COMPRESSED + 1))
+						RECLAIMED_BYTES=$((RECLAIMED_BYTES + bytes - after))
+					fi
+				fi
+			fi
+			case $verdict in HELD:*) N_HELD=$((N_HELD + 1)) ;; esac
+			emit "$verdict" "$bytes" "$after" "$age_h" "$open" "$cited" "$f"
+		done
+	fi
+
+	printf 'summary eligible=%s eligible_bytes=%s held=%s files=%s stores=%s compressed=%s reclaimed_bytes=%s mode=%s\n' \
+		"$N_ELIGIBLE" "$ELIGIBLE_BYTES" "$N_HELD" "$N_FILES" "${#STORE_ROOTS[@]}" \
+		"$N_COMPRESSED" "$RECLAIMED_BYTES" "$([ "$APPLY" -eq 1 ] && echo apply || echo dry-run)"
+
+	if [ "$PROBE_FAILED" -ne 0 ] || [ "$FILE_FAILED" -ne 0 ]; then
+		exit 1
+	fi
+	exit 0
+}
+
+main "$@"

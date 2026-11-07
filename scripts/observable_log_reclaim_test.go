@@ -549,16 +549,16 @@ func TestObservableLogReclaimProbeFailuresFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "open"},
-		{"HQ store errors", func(f *reclaimFixture) { f.mark(f.cityDir, ".bdfail") }, "cited"},
-		{"rig store errors", func(f *reclaimFixture) { f.mark(f.rigDir, ".bdfail") }, "cited"},
-		{"store returns invalid json", func(f *reclaimFixture) { f.setBeads(f.rigDir, "not json") }, "cited"},
-		{"store returns a non-array", func(f *reclaimFixture) { f.setBeads(f.rigDir, `{"error":"x"}`) }, "cited"},
-		{"gc rig list fails", func(f *reclaimFixture) { f.write(filepath.Join(f.fixDir, "gc.fail"), "") }, "cited"},
-		{"tracked-file listing fails", func(f *reclaimFixture) { f.mark(f.rigDir, ".gitfail") }, "cited"},
+		{"HQ store errors", func(f *reclaimFixture) { f.mark(f.cityDir, ".bdfail") }, "cited-by"},
+		{"rig store errors", func(f *reclaimFixture) { f.mark(f.rigDir, ".bdfail") }, "cited-by"},
+		{"store returns invalid json", func(f *reclaimFixture) { f.setBeads(f.rigDir, "not json") }, "cited-by"},
+		{"store returns a non-array", func(f *reclaimFixture) { f.setBeads(f.rigDir, `{"error":"x"}`) }, "cited-by"},
+		{"gc rig list fails", func(f *reclaimFixture) { f.write(filepath.Join(f.fixDir, "gc.fail"), "") }, "cited-by"},
+		{"tracked-file listing fails", func(f *reclaimFixture) { f.mark(f.rigDir, ".gitfail") }, "cited-by"},
 		{"empty index", func(f *reclaimFixture) {
 			f.setBeads(f.cityDir, `[]`)
 			f.setBeads(f.rigDir, `[]`)
-		}, "cited"},
+		}, "cited-by"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
