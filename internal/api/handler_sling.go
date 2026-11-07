@@ -194,6 +194,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		// store on a city that relocates nothing is the city store, which put
 		// a rig bead's workflow where the rig's pool workers never look.
 		GraphStore: graphAt(st, scope),
+		Sessions:   st.Sessions(),
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {

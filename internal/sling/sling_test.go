@@ -121,10 +121,11 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) SlingDe
 	}, beads.NewMemStore())
 }
 
-// withStore is deps over one store s, as a single-store city wires it: s is
-// the work store, and the graph store collapses onto it.
+// withStore is deps over one store s, as a single-store city wires it at city
+// scope: s is the work store, and the graph and sessions stores collapse onto
+// it.
 func withStore(deps SlingDeps, s beads.Store) SlingDeps {
-	deps.Store, deps.GraphStore = beadstest.Work(s), beadstest.Graph(s)
+	deps.Store, deps.GraphStore, deps.Sessions = beadstest.Work(s), beadstest.Graph(s), beadstest.Sessions(s)
 	return deps
 }
 

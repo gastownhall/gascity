@@ -26,8 +26,8 @@ import (
 // rollback closes an empty subtree and leaves the abandoned launch open and
 // claim-attracting, and a workflow-id lookup reports a live root as missing.
 //
-// deps.GraphStore collapses to deps.Store whenever GraphStore is unset, so
-// every single-store caller is byte-identical.
+// On a single-store city the caller wires deps.GraphStore over the same store
+// as deps.Store, so every single-store caller is byte-identical.
 
 // splitSlingDeps returns deps whose graph class is served by a separate,
 // prefix-disjoint store — the shape a split city has. The work leaf mints
@@ -39,6 +39,7 @@ func splitSlingDeps(t *testing.T, cfg *config.City) (SlingDeps, beads.Store, bea
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Store = beadstest.Work(work)
 	deps.GraphStore = beadstest.Graph(graph)
+	deps.Sessions = beadstest.Sessions(splittest.NewClassStore(t, config.BeadClassSessions))
 	return deps, work, graph
 }
 

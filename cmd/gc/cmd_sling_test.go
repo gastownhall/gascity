@@ -455,9 +455,10 @@ func TestSlingJSONFromResult(t *testing.T) {
 }
 
 // slingDepsWithStore is deps over one store s, as a single-store city wires
-// it: s is the work store, and the graph store collapses onto it.
+// it at city scope: s is the work store, and the graph and sessions stores
+// collapse onto it.
 func slingDepsWithStore(deps slingDeps, s beads.Store) slingDeps {
-	deps.Store, deps.GraphStore = beadstest.Work(s), beadstest.Graph(s)
+	deps.Store, deps.GraphStore, deps.Sessions = beadstest.Work(s), beadstest.Graph(s), beadstest.Sessions(s)
 	return deps
 }
 

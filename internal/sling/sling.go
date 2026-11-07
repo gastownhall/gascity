@@ -166,6 +166,11 @@ type SlingDeps struct {
 	// else Store's own store. The caller supplies it; DoSling refuses a zero
 	// one.
 	GraphStore beads.GraphStore
+	// Sessions is the city's sessions store, whatever the sling's scope:
+	// session beads live only there (the city store, or the binding a split
+	// city relocates the class to), never in a rig store. A zero handle reads
+	// no session store.
+	Sessions beads.SessionStore
 	// Events records best-effort current execution facts after graph workflow
 	// materialization. Nil leaves sling event-silent.
 	Events events.Recorder

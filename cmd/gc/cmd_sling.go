@@ -524,6 +524,19 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// The sling's scope stores: store as the work store, and the graph class
 	// at that scope, the binding on a city that relocates it.
 	cs := cliStores(cityPath, store)
+	// Session beads live in the city's sessions store, never in a rig store:
+	// a rig-scope sling opens the city store to read them.
+	sessions := cs.Sessions()
+	if !samePath(storeDir, cityPath) {
+		cityStore, err := openSlingCityStore(cityPath)
+		if err != nil {
+			return fail("store_open_failed", fmt.Sprintf("gc sling: opening the city store: %v", err))
+		}
+		if cityStore != nil {
+			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
+			sessions = cliStores(cityPath, cityStore).Sessions()
+		}
+	}
 	deps := slingDeps{
 		CityName:           cityName,
 		CityPath:           cityPath,
@@ -532,6 +545,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Runner:             runner,
 		Store:              cs.Work(),
 		GraphStore:         cs.Graph(),
+		Sessions:           sessions,
 		Events:             eventRecorder,
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
