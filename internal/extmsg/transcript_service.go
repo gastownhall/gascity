@@ -934,7 +934,9 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			if err != nil {
 				return err
 			}
-			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
+			// An entry above endSeq is stored but not yet published; Ack
+			// would refuse it, so readers must not show it either.
+			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after || record.Sequence > endSeq {
 				continue
 			}
 			bucketRecords = append(bucketRecords, record)

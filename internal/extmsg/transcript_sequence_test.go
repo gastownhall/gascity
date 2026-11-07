@@ -3,6 +3,7 @@ package extmsg
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -350,5 +351,82 @@ func TestTranscriptAppendReplayCoversStoredEntry(t *testing.T) {
 	}
 	if got := testTranscriptNextSequence(t, mem); got != 2 {
 		t.Fatalf("next_sequence = %d after replay, want 2", got)
+	}
+}
+
+// TestTranscriptReadersHideUncoveredEntry: an entry stored past next_sequence,
+// in the same bucket as the last visible entry, stays out of List and
+// ListBackfill until it is published. The member then reads it and can
+// acknowledge it, so its read cursor never skips it.
+func TestTranscriptReadersHideUncoveredEntry(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	mem := honoringMemStore()
+	fault := newTranscriptFaultStore(mem, nil)
+	svc := newTranscriptService(beadstest.Mail(casTranscriptFaultStore{fault}), newBindingLockPool())
+	ref := testConversationRef()
+	if _, err := svc.EnsureMembership(ctx, EnsureMembershipInput{
+		Caller:         testControllerCaller(),
+		Conversation:   ref,
+		SessionID:      "session-1",
+		BackfillPolicy: MembershipBackfillAll,
+		Owner:          MembershipOwnerManual,
+		Now:            testNow(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership: %v", err)
+	}
+	mustAppendTestMessage(t, svc, "msg-1")
+	fault.mu.Lock()
+	fault.failFrontier = true
+	fault.mu.Unlock()
+	if _, err := appendTestMessage(t, svc, "msg-2"); err == nil {
+		t.Fatal("Append(msg-2) with a failing next_sequence advance succeeded, want error")
+	}
+	fault.mu.Lock()
+	fault.failFrontier = false
+	fault.mu.Unlock()
+
+	sequences := func(records []ConversationTranscriptRecord) []int64 {
+		out := make([]int64, 0, len(records))
+		for _, r := range records {
+			out = append(out, r.Sequence)
+		}
+		return out
+	}
+	read := func() (listed, backfill []int64) {
+		t.Helper()
+		var all []int64
+		for _, order := range []TranscriptOrder{TranscriptOrderAsc, TranscriptOrderDesc} {
+			records, err := svc.List(ctx, ListTranscriptInput{Caller: testControllerCaller(), Conversation: ref, Limit: 10, Order: order})
+			if err != nil {
+				t.Fatalf("List(%s): %v", order, err)
+			}
+			got := sequences(records)
+			slices.Sort(got)
+			if all != nil && !slices.Equal(all, got) {
+				t.Fatalf("List orders disagree: %v vs %v", all, got)
+			}
+			all = got
+		}
+		records, err := svc.ListBackfill(ctx, ListBackfillInput{Caller: testControllerCaller(), Conversation: ref, SessionID: "session-1", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListBackfill: %v", err)
+		}
+		return all, sequences(records)
+	}
+
+	if listed, backfill := read(); !slices.Equal(listed, []int64{1}) || !slices.Equal(backfill, []int64{1}) {
+		t.Fatalf("before publication: List = %v, ListBackfill = %v, want [1] and [1]", listed, backfill)
+	}
+
+	mustAppendTestMessage(t, svc, "msg-2")
+	if listed, backfill := read(); !slices.Equal(listed, []int64{1, 2}) || !slices.Equal(backfill, []int64{1, 2}) {
+		t.Fatalf("after publication: List = %v, ListBackfill = %v, want [1 2] and [1 2]", listed, backfill)
+	}
+	if err := svc.Ack(ctx, AckMembershipInput{Caller: testControllerCaller(), Conversation: ref, SessionID: "session-1", Sequence: 2}); err != nil {
+		t.Fatalf("Ack(2): %v", err)
+	}
+	if _, backfill := read(); len(backfill) != 0 {
+		t.Fatalf("ListBackfill after Ack(2) = %v, want none", backfill)
 	}
 }
