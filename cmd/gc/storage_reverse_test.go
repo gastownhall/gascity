@@ -814,3 +814,131 @@ func TestStorageMigrateReverseFlags(t *testing.T) {
 		t.Fatalf("--abort-reverse with nothing open = %d: %s", code, stderr)
 	}
 }
+
+// TestReverseResumeRecopiesWhatTheBindingChanged: a row an earlier run copied
+// is kept only while it still equals the binding's row with exactly its
+// planned edges; one the binding changed since, or whose edge the binding
+// dropped, is deleted and copied again, and the reverse ends equal to the
+// binding as it is now.
+func TestReverseResumeRecopiesWhatTheBindingChanged(t *testing.T) {
+	city := newReverseEngineCity(t, 300, "")
+	closeBindingGates(t, city)
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "reverse city verify" {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	code, _, _ := city.reverse(t, reverseOptions{})
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatal("the kill did not stop the reverse")
+	}
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retitled, unlinked, from string
+	for _, d := range city.deps {
+		if isInfra(city.before[d.IssueID]) && isInfra(city.before[d.DependsOnID]) && d.Type == "blocks" && unlinked == "" {
+			from, unlinked = d.IssueID, d.DependsOnID
+		}
+	}
+	for id, b := range city.before {
+		if isInfra(b) && b.Type == "message" && retitled == "" {
+			retitled = id
+		}
+	}
+	title := "retitled in the binding"
+	if err := binding.Update(retitled, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.DepRemove(from, unlinked); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("the rerun = %d: %s%s", code, stdout, stderr)
+	}
+	got, err := city.source.Get(retitled)
+	if err != nil || got.Title != title {
+		t.Fatalf("%s in the work store = %+v, %v; want the binding's new title", retitled, got, err)
+	}
+	deps, err := city.source.DepList(from, "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range deps {
+		if d.DependsOnID == unlinked {
+			t.Fatalf("the work store keeps %s -> %s, which the binding dropped", from, unlinked)
+		}
+	}
+}
+
+// TestReverseVerifyCatchesAFaultyCopy: a destination that writes something
+// other than the plan (a changed field, an invented row, a dropped edge, a
+// changed payload) fails the reverse at its verify, before the phase is
+// recorded done, and the next run with an honest store repairs it.
+func TestReverseVerifyCatchesAFaultyCopy(t *testing.T) {
+	faults := map[string]func(*reverseTarget){
+		"a changed field": func(target *reverseTarget) {
+			create := target.create
+			target.create = func(rows []beads.Bead) error {
+				rows = append([]beads.Bead(nil), rows...)
+				rows[0].Title = "not what the binding holds"
+				return create(rows)
+			}
+		},
+		"an invented row": func(target *reverseTarget) {
+			create := target.create
+			target.create = func(rows []beads.Bead) error {
+				extra := rows[0]
+				extra.ID = "mc-invented-" + rows[0].ID
+				return create(append(append([]beads.Bead(nil), rows...), extra))
+			}
+		},
+		"a dropped edge": func(target *reverseTarget) {
+			add := target.addEdges
+			target.addEdges = func(edges []beads.DepWithPayload) error { return add(edges[1:]) }
+		},
+		"a changed payload": func(target *reverseTarget) {
+			add := target.addEdges
+			target.addEdges = func(edges []beads.DepWithPayload) error {
+				edges = append([]beads.DepWithPayload(nil), edges...)
+				for i := range edges {
+					if edges[i].Payload != "" {
+						edges[i].Payload = `{"gate":"changed"}`
+					}
+				}
+				return add(edges)
+			}
+		},
+	}
+	for name, fault := range faults {
+		t.Run(name, func(t *testing.T) {
+			city := newReverseEngineCity(t, 300, "")
+			closeBindingGates(t, city)
+			prev := reverseTargetOpener
+			reverseTargetOpener = func(cityPath string, cfg *config.City, dest string) (*reverseTarget, error) {
+				target, err := openReverseTarget(cityPath, cfg, dest)
+				if err == nil {
+					fault(target)
+				}
+				return target, err
+			}
+			code, _, stderr := city.reverse(t, reverseOptions{})
+			reverseTargetOpener = prev
+			if code == 0 || !strings.Contains(stderr, "verifying the city work store") {
+				t.Fatalf("a faulty copy (%s) = %d: %s", name, code, stderr)
+			}
+			if journal, _, _ := readStorageReverseJournal(city.cityPath); journal.Phase >= reverseR2 {
+				t.Fatalf("the journal recorded the city copied (phase %d) over a failed verify", journal.Phase)
+			}
+			if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+				t.Fatalf("the honest rerun = %d: %s%s", code, stdout, stderr)
+			}
+			city.assertReversedNotLossy(t)
+		})
+	}
+}
