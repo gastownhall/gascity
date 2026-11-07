@@ -215,6 +215,9 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	cmd.Dir = p.commandDir()
 	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnvForRuntimeDir(p.rt.CityPath(), citylayout.TrustedAmbientCityRuntimeDir(p.rt.CityPath()))...)
 	cmd.Env = append(cmd.Env,
+		// The city's own name, appended after os.Environ() so it wins over a
+		// supervisor's ambient value for another city.
+		"GC_CITY_NAME="+p.rt.CityName(),
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
 		// Scaffolded at 0700 by ensureStateRoot; the sanctioned home for

@@ -190,6 +190,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"OTEL_SERVICE_NAME":                   os.Getenv("OTEL_SERVICE_NAME"),
 			"UNRELATED_SERVICE_SENTINEL":          os.Getenv("UNRELATED_SERVICE_SENTINEL"),
 			"GC_CITY":                             os.Getenv("GC_CITY"),
+			"GC_CITY_NAME":                        os.Getenv("GC_CITY_NAME"),
 			"GC_CITY_PATH":                        os.Getenv("GC_CITY_PATH"),
 			"GC_CITY_RUNTIME_DIR":                 os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"),
@@ -312,6 +313,10 @@ func testProxyProcessDisablesProductMetrics(t *testing.T, ambientGC string, late
 
 func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	t.Setenv("GC_SERVICE_HELPER", "1")
+	// A supervisor serving several cities carries one ambient name; the
+	// service must see its own runtime's name, not this neighbor's or the
+	// workspace declaration's (demo-app).
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
 	// The helper subprocess is the same test binary. proxy_process.go seeds
 	// GC_CITY / GC_CITY_PATH / GC_CITY_RUNTIME_DIR /
 	// GC_CONTROL_DISPATCHER_TRACE_DEFAULT into the child env; without a
@@ -386,6 +391,9 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	}
 	if env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != filepath.Join(rt.cityPath, ".gc", "runtime", "control-dispatcher-trace.log") {
 		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], filepath.Join(rt.cityPath, ".gc", "runtime", "control-dispatcher-trace.log"))
+	}
+	if env["GC_CITY_NAME"] != rt.cityName {
+		t.Fatalf("GC_CITY_NAME = %q, want the service's own city %q over the ambient one", env["GC_CITY_NAME"], rt.cityName)
 	}
 	if env["GC_SERVICE_NAME"] != "bridge" {
 		t.Fatalf("GC_SERVICE_NAME = %q, want bridge", env["GC_SERVICE_NAME"])
