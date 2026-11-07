@@ -10,7 +10,11 @@ import (
 	"testing"
 	"time"
 
+	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
+	_ "time/tzdata"
+
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
@@ -164,11 +168,14 @@ func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 }
 
 func TestCheckTriggerCondition(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "true"}
+	a := Order{Name: "check", Trigger: "condition", Check: "echo warning >&2; exit 0"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
 	if !result.Due {
 		t.Errorf("Due = false, want true (exit 0)")
+	}
+	if result.Reason != "condition: check passed (exit 0)" {
+		t.Errorf("Reason = %q, want unchanged success reason", result.Reason)
 	}
 }
 
@@ -222,6 +229,9 @@ func TestCheckTriggerConditionHonorsOrderCheckTimeoutWithoutOptions(t *testing.T
 	if !strings.Contains(result.Reason, ConditionCheckTimedOutMarker) {
 		t.Fatalf("Reason = %q, want it to contain %q", result.Reason, ConditionCheckTimedOutMarker)
 	}
+	if !result.TimedOut {
+		t.Fatal("TimedOut = false, want true for check_timeout deadline")
+	}
 }
 
 func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
@@ -261,15 +271,192 @@ func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
 }
 
 func TestCheckTriggerConditionFails(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "false"}
-	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	result := CheckTrigger(a, now, neverRan, nil, nil)
-	if result.Due {
-		t.Errorf("Due = true, want false (exit non-zero)")
+	for _, check := range []string{"exit 1", "printf ' \\n\\t' >&2; exit 1"} {
+		a := Order{Name: "check", Trigger: "condition", Check: check}
+		now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+		result := CheckTrigger(a, now, neverRan, nil, nil)
+		if result.Due {
+			t.Errorf("Due = true, want false (exit non-zero)")
+		}
+		if result.Reason != "condition: not met (exit 1)" {
+			t.Errorf("Reason = %q, want byte-identical silent not-met reason", result.Reason)
+		}
+		if result.TimedOut {
+			t.Fatal("TimedOut = true, want false for ordinary exit 1")
+		}
 	}
-	const wantReason = "condition: not met (exit 1)"
-	if result.Reason != wantReason {
-		t.Errorf("Reason = %q, want %q", result.Reason, wantReason)
+}
+
+func TestCheckTriggerConditionFailureIncludesStderr(t *testing.T) {
+	result := checkCondition(Order{Check: "echo 'Error: no beads database found' >&2; exit 1"}, TriggerOptions{})
+
+	if result.Due {
+		t.Fatal("Due = true, want false for exit 1")
+	}
+	if !strings.Contains(result.Reason, "Error: no beads database found") {
+		t.Fatalf("Reason = %q, want stderr excerpt", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureKeepsStderrTailOnOneLine(t *testing.T) {
+	result := checkCondition(Order{Check: "printf 'first line\\nsecond line\\nLAST LINE\\n' >&2; exit 1"}, TriggerOptions{})
+
+	if strings.ContainsAny(result.Reason, "\r\n") {
+		t.Fatalf("Reason contains a line break: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "LAST LINE") {
+		t.Fatalf("Reason = %q, want final stderr line", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureBoundsStderrTail(t *testing.T) {
+	const marker = "FINAL-STDERR-MARKER"
+	result := checkCondition(Order{
+		Check: `dd if=/dev/zero bs=1048576 count=4 2>/dev/null | tr '\000' x >&2; printf '\nFINAL-STDERR-MARKER\n' >&2; exit 1`,
+	}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: "
+	if got, limit := len([]rune(result.Reason)), len([]rune(prefix))+300; got > limit {
+		t.Fatalf("Reason is %d runes, want at most %d", got, limit)
+	}
+	if !strings.Contains(result.Reason, marker) {
+		t.Fatalf("Reason = %q, want final marker", result.Reason)
+	}
+	if !strings.HasPrefix(result.Reason, prefix+"…") {
+		t.Fatalf("Reason = %q, want truncated excerpt to start with ellipsis", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsPartialSecretLine(t *testing.T) {
+	const secret = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-_"
+	check := `head -c 5000 /dev/zero | tr '\000' x >&2; printf '\n%s' "$ORDER_API_TOKEN" >&2; printf '%4070s' '' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{
+		ConditionEnv: []string{"ORDER_API_TOKEN=" + secret},
+	})
+
+	const want = "check command failed: exit status 1: stderr: …[redacted]"
+	if result.Reason != want {
+		t.Fatalf("Reason = %q, want %q", result.Reason, want)
+	}
+	for i := 0; i+8 <= len(secret); i++ {
+		if fragment := secret[i : i+8]; strings.Contains(result.Reason, fragment) {
+			t.Fatalf("Reason leaked secret fragment %q: %q", fragment, result.Reason)
+		}
+	}
+}
+
+func TestCheckTriggerConditionFailureOverflowStartsAtCompleteLine(t *testing.T) {
+	check := `i=1; while [ "$i" -le 200 ]; do printf 'line-%05d padding-padding-padding\n' "$i" >&2; i=$((i + 1)); done; printf 'LAST-LINE\n' >&2; printf '%3900s' '' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: …"
+	if !strings.HasPrefix(result.Reason, prefix) {
+		t.Fatalf("Reason = %q, want prefix %q", result.Reason, prefix)
+	}
+	if !strings.HasSuffix(result.Reason, "LAST-LINE") {
+		t.Fatalf("Reason = %q, want final line", result.Reason)
+	}
+	fields := strings.Fields(strings.TrimPrefix(result.Reason, prefix))
+	if len(fields) == 0 || fields[0] != "line-00196" {
+		t.Fatalf("first token after ellipsis = %q, want line-00196 (reason %q)", fields, result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureCapsExcerptRunes(t *testing.T) {
+	check := `i=1; while [ "$i" -le 20 ]; do printf 'line-%05d padding-padding-padding\n' "$i" >&2; i=$((i + 1)); done; printf 'LAST-LINE\n' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: "
+	excerpt := strings.TrimPrefix(result.Reason, prefix)
+	if excerpt == result.Reason {
+		t.Fatalf("Reason = %q, want prefix %q", result.Reason, prefix)
+	}
+	if got := len([]rune(excerpt)); got != conditionCheckStderrExcerptRunes {
+		t.Fatalf("excerpt is %d runes, want %d: %q", got, conditionCheckStderrExcerptRunes, excerpt)
+	}
+	if !strings.HasPrefix(excerpt, "…") || !strings.HasSuffix(excerpt, "LAST-LINE") {
+		t.Fatalf("excerpt = %q, want leading ellipsis and final line", excerpt)
+	}
+}
+
+func TestCheckTriggerConditionFailureSanitizesControlCharacters(t *testing.T) {
+	result := checkCondition(Order{Check: `printf '\033[31mboom\033[0m\177\n' >&2; exit 1`}, TriggerOptions{})
+
+	for _, b := range []byte(result.Reason) {
+		if b < 0x20 || b == 0x7f {
+			t.Fatalf("Reason contains control byte 0x%02x: %q", b, result.Reason)
+		}
+	}
+	if !strings.Contains(result.Reason, "boom") {
+		t.Fatalf("Reason = %q, want retained stderr excerpt", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureSanitizesNonPrintCharacters(t *testing.T) {
+	result := checkCondition(Order{Check: `printf 'safe\342\200\256evil\342\200\250next\342\200\213end\n' >&2; exit 1`}, TriggerOptions{})
+
+	for _, want := range []string{"safe", "evil", "next"} {
+		if !strings.Contains(result.Reason, want) {
+			t.Fatalf("Reason = %q, want %q", result.Reason, want)
+		}
+	}
+	for _, forbidden := range []rune{'\u202e', '\u2028', '\u200b'} {
+		if strings.ContainsRune(result.Reason, forbidden) {
+			t.Fatalf("Reason contains non-printing rune %U: %q", forbidden, result.Reason)
+		}
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsSensitiveEnvironment(t *testing.T) {
+	const secret = "condition-check-secret-value"
+	result := checkCondition(Order{Check: `printf '%s\n' "$ORDER_API_TOKEN" >&2; exit 1`}, TriggerOptions{
+		ConditionEnv: []string{"ORDER_API_TOKEN=" + secret},
+	})
+
+	if strings.Contains(result.Reason, secret) {
+		t.Fatalf("Reason leaked sensitive environment value: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "[redacted]") {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsMultilineSecretAcrossTailBoundary(t *testing.T) {
+	const secret = "ABCDE\nleaked-secret-suffix"
+	result := checkCondition(Order{
+		Check: `printf '%s' "$ORDER_API_TOKEN" >&2; printf '%4075s' '' >&2; exit 1`,
+	}, TriggerOptions{ConditionEnv: []string{"ORDER_API_TOKEN=" + secret}})
+
+	if strings.Contains(result.Reason, "leaked-secret-suffix") {
+		t.Fatalf("Reason leaked sensitive environment suffix: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, execenv.Redacted) {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsShortSensitiveEnvironment(t *testing.T) {
+	const secret = "abc"
+	result := checkCondition(Order{
+		Check: `printf '%s' "$ORDER_API_TOKEN" >&2; exit 1`,
+	}, TriggerOptions{ConditionEnv: []string{"ORDER_API_TOKEN=" + secret}})
+
+	if strings.Contains(result.Reason, secret) {
+		t.Fatalf("Reason leaked short sensitive environment value: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, execenv.Redacted) {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureMentioningTimedOutIsNotTimeout(t *testing.T) {
+	result := checkCondition(Order{Check: "echo 'connection timed out' >&2; exit 1"}, TriggerOptions{})
+
+	if result.TimedOut {
+		t.Fatalf("TimedOut = true for ordinary failure: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "connection timed out") {
+		t.Fatalf("Reason = %q, want stderr excerpt", result.Reason)
 	}
 }
 
@@ -572,6 +759,54 @@ func TestCheckTriggerEventNoEventsProvider(t *testing.T) {
 	result := CheckTrigger(a, time.Time{}, neverRan, nil, nil)
 	if result.Due {
 		t.Errorf("Due = true, want false (nil provider)")
+	}
+}
+
+// strandedEventsProvider is an event log caught mid-rotation: its plain List
+// misses the events still stranded in the in-flight rotating file, which
+// ListInFlight folds in, as a FileRecorder's do during an archive's
+// compression window.
+type strandedEventsProvider struct {
+	*events.Fake
+	stranded []events.Event
+}
+
+func (p *strandedEventsProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	visible, err := p.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	return append(events.ApplyFilter(p.stranded, filter), visible...), nil
+}
+
+// TestCheckTriggerEventReadsEventsStrandedInARotation: while an archive is
+// compressed, the events just rotated out of the active log live only in the
+// in-flight rotating file. The check reads them too, so it does not call an
+// event order undue over a matching event that is on disk.
+func TestCheckTriggerEventReadsEventsStrandedInARotation(t *testing.T) {
+	ep := &strandedEventsProvider{
+		Fake:     events.NewFake(),
+		stranded: []events.Event{{Seq: 3, Type: "bead.closed"}},
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, func(string) uint64 { return 2 })
+	if !result.Due {
+		t.Fatalf("Due = false, want true for the event stranded in the rotating file; reason: %s", result.Reason)
+	}
+}
+
+// TestCheckTriggerEventReportsAReadFailure: a check that cannot read the event
+// log says the read failed, not that no event matched, so a caller that keeps
+// how far its checks have read does not move past events it never read.
+func TestCheckTriggerEventReportsAReadFailure(t *testing.T) {
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	failed := CheckTrigger(a, time.Time{}, neverRan, events.NewFailFake(), nil)
+	if failed.Due || !failed.ReadFailed {
+		t.Fatalf("unreadable log: result = %+v, want not due and ReadFailed", failed)
+	}
+	unmatched := CheckTrigger(a, time.Time{}, neverRan, newEventsProvider(t, []events.Event{{Type: "bead.created"}}), nil)
+	if unmatched.Due || unmatched.ReadFailed {
+		t.Fatalf("no matching event: result = %+v, want not due and not ReadFailed", unmatched)
 	}
 }
 

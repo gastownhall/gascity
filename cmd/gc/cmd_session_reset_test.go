@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -66,8 +68,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -76,25 +77,10 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
-	lis, err := startControllerSocket(
-		cityDir,
-		controllerHostingStandalone,
-		func() {},
-		nil,
-		nil,
-		make(chan reloadRequest),
-		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
-	)
-	if err != nil {
-		t.Fatalf("startControllerSocket: %v", err)
-	}
-	defer lis.Close()                              //nolint:errcheck
-	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+	startSessionResetTestController(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionReset([]string{identity}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -151,8 +137,7 @@ func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -167,7 +152,7 @@ func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if got := stdout.String(); got != "" {
@@ -231,8 +216,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -241,6 +225,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -249,8 +234,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -345,8 +329,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -410,8 +393,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -420,6 +402,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -428,8 +411,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -662,7 +644,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionReset(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -686,7 +668,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantExact := []string{"ping\n", "poke\n", "poke\n"}
+	// The probe poke is key-less; the post-reset enqueue carries the
+	// session key.
+	wantExact := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
@@ -792,7 +776,7 @@ func TestCmdSessionReset_ControllerClearFailureDoesNotQueueRestart(t *testing.T)
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"session-a"}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{"session-a"}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `clearing session circuit breaker for "session-a": clear failed`) {
@@ -904,5 +888,210 @@ template = "session-a"
 `)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
+// TestCmdSessionReset_RollsBackStuckPendingCreate: reset is what an operator
+// reaches for when a session is stuck in creating. An in-place restart leaves
+// the pending-create claim and the alias in place, so the controller re-enters
+// the same failing start; reset must roll the unfinished create back instead,
+// release the alias, and say so on the wire.
+func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-pc-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	now := time.Now().UTC()
+	bead, err := store.Create(beads.Bead{
+		Title:  "stuck create",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                     "sky",
+			"template":                  "worker",
+			"session_name":              "s-gc-reset-pc-test",
+			"state":                     "creating",
+			"generation":                "3",
+			"instance_token":            "tok-stuck",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+			"last_woke_at":              now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	startSessionResetTestController(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, true); code != 0 {
+		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"mode":"rollback"`) {
+		t.Fatalf("reset JSON does not report the rollback: %s", stdout.String())
+	}
+
+	reloaded, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(reload): %v", err)
+	}
+	got, err := reloaded.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed: reset left the unfinished create holding its claim (pending_create_claim=%q)", got.Status, got.Metadata["pending_create_claim"])
+	}
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(reloaded), "sky", ""); err != nil {
+		t.Fatalf("alias still held after reset: %v", err)
+	}
+}
+
+// registerSessionResetTestRuntime registers a single-store runtime for cityDir
+// over a store opened at the city, as a real controller registers its runtime:
+// the controller socket's session commands answer from that registration.
+func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
+	}
+	registerResidencyRoutes(cityDir, nil, func() beads.Store { return store })
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityDir, nil)
+		_ = closeBeadStoreHandle(store)
+	})
+}
+
+// startSessionResetTestController serves the real controller socket for
+// cityDir until the test ends, behind a registered runtime.
+func startSessionResetTestController(t *testing.T, cityDir string) {
+	t.Helper()
+	registerSessionResetTestRuntime(t, cityDir)
+	lis, err := startControllerSocket(
+		cityDir,
+		controllerHostingStandalone,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()                              //nolint:errcheck
+		os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+	})
+}
+
+// TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting: a reset of a row
+// in a state the controller skips is refused before any write. It names the
+// raw state and the close that releases the row, queues no fresh restart,
+// rotates nothing, records no op, and sends the controller nothing past the
+// liveness probe: no circuit-breaker reset for the named row and no keyed
+// reconcile poke. Kills a reset that queues a restart the controller never
+// applies.
+func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "future-state", "session_key": "original-key"})
+
+	sockPath := controllerSocketPath(c.dir)
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() { os.Remove(sockPath) }) //nolint:errcheck
+	commands := make(chan string, 16)
+	go func() {
+		defer close(commands)
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 512)
+			n, _ := conn.Read(buf)
+			cmd := string(buf[:n])
+			commands <- cmd
+			reply := "ok\n"
+			switch {
+			case cmd == "ping\n":
+				reply = "123\n"
+			case strings.HasPrefix(cmd, "session-circuit-reset:"):
+				reply = `{"outcome":"ok"}` + "\n"
+			}
+			conn.Write([]byte(reply)) //nolint:errcheck
+			conn.Close()              //nolint:errcheck
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false)
+	lis.Close() //nolint:errcheck
+	if code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session reset: session " + c.bead.ID + " cannot be reset: ",
+		`"future-state"`,
+		"gc session close " + c.bead.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	var got []string
+	for cmd := range commands {
+		got = append(got, cmd)
+	}
+	if len(got) != 2 || got[0] != "ping\n" || got[1] != "poke\n" {
+		t.Fatalf("controller commands = %q, want only the ping and poke liveness probe", got)
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+		t.Fatalf("op rows = %+v, want none", ops)
+	}
+	row, err := c.reloadSessions(t).Get(c.bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", c.bead.ID, err)
+	}
+	for key, want := range map[string]string{
+		"state": "future-state", "restart_requested": "", "continuation_reset_pending": "", "session_key": "original-key",
+	} {
+		if row.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, row.Metadata[key], want)
+		}
+	}
+}
+
+// TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode: a closed
+// row whose state carries a close code the controller does not manage (the
+// pool sweep's gc_swept) is answered "session is closed", as any closed row
+// is, not refused as a row the controller skips: a close of it does nothing.
+// Kills a refusal that sends an operator to close an already-closed row.
+func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "gc_swept"})
+	if err := c.sessions.Close(c.bead.ID); err != nil {
+		t.Fatalf("Close(%s): %v", c.bead.ID, err)
+	}
+	startSessionResetTestController(t, c.dir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "session is closed") || strings.Contains(stderr.String(), "skips it") {
+		t.Fatalf("stderr = %q, want the closed answer, not the skipped-state refusal", stderr.String())
 	}
 }

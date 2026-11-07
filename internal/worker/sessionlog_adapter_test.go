@@ -110,6 +110,57 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 }
 
+// SessionHandle caches history by Generation.ID, so a snapshot whose generation
+// is newer than its content is served until the transcript next changes: a live
+// stream keeps its heartbeat but never delivers the write it missed. The write
+// lands as the generation is captured, the moment a loaded host can deschedule
+// a loader between reading the transcript and identifying it.
+func TestSessionLogAdapterLoadHistoryGenerationNeverNewerThanContent(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sess-race.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-race"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"one","stop_reason":"end_turn"},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-race"}`,
+	)
+
+	appended := false
+	adapter := SessionLogAdapter{statTranscript: func(p string) (os.FileInfo, error) {
+		if !appended {
+			appended = true
+			f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				return nil, err
+			}
+			_, writeErr := fmt.Fprintln(f, `{"uuid":"a2","parentUuid":"a1","type":"assistant","message":{"role":"assistant","content":"two","stop_reason":"end_turn"},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-race"}`)
+			if closeErr := f.Close(); writeErr != nil || closeErr != nil {
+				return nil, fmt.Errorf("append transcript: write=%w close=%w", writeErr, closeErr)
+			}
+		}
+		return os.Stat(p)
+	}}
+
+	snapshot, err := adapter.LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+		GCSessionID:    "gc-race",
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if !appended {
+		t.Fatal("LoadHistory never captured the transcript generation through statTranscript")
+	}
+
+	final, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if snapshot.Generation.ID == transcriptGenerationID(final) && snapshot.Cursor.AfterEntryID != "a2" {
+		t.Fatalf("snapshot claims generation %s, the transcript after the append, but ends at %q, want a2", snapshot.Generation.ID, snapshot.Cursor.AfterEntryID)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCarriesImageBlockMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -1725,4 +1776,39 @@ func samePath(a, b string) bool {
 	resolvedA, errA := filepath.EvalSymlinks(a)
 	resolvedB, errB := filepath.EvalSymlinks(b)
 	return errA == nil && errB == nil && resolvedA == resolvedB
+}
+
+func TestCodexSnapshotAndActivityAgreeOnExplicitCompletion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout.jsonl")
+	lines := []string{
+		`{"type":"session_meta","payload":{"id":"codex-test","cwd":"/test"}}`,
+		`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready"}]}}`,
+		`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+	}
+	adapter := SessionLogAdapter{SearchPaths: []string{root}}
+	for _, completed := range []bool{false, true} {
+		n := len(lines) - 1
+		want := TailActivityInTurn
+		if completed {
+			n++
+			want = TailActivityIdle
+		}
+		writeLines(t, path, lines[:n]...)
+		snapshot, err := adapter.LoadHistory(LoadRequest{Provider: "codex/tmux-cli", TranscriptPath: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.TailState.Activity != want {
+			t.Fatalf("completed=%v snapshot activity=%q want=%q", completed, snapshot.TailState.Activity, want)
+		}
+		activity, err := adapter.TailActivityForProvider("codex/tmux-cli", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if activity != want {
+			t.Fatalf("completed=%v activity=%q want=%q", completed, activity, want)
+		}
+	}
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 207,
+  "next_id": 215,
   "permanent_ids": [
     {
       "name": "help",
@@ -79,6 +79,21 @@
       "classification": "agent-add",
       "owner": "immediate",
       "id": 5
+    },
+    {
+      "path": "gc agent is-foreign",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "agent-is-foreign",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc agent list",
@@ -238,6 +253,21 @@
       "resolver": "group-dispatch",
       "deferred_default": "unknown",
       "id": 3
+    },
+    {
+      "path": "gc beads city migrate-proxied",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-city-migrate-proxied",
+      "owner": "immediate",
+      "id": 208
     },
     {
       "path": "gc beads city use-external",
@@ -1212,6 +1242,36 @@
       "exclusion": "hidden-private"
     },
     {
+      "path": "gc dolt-state fsync-probe",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc dolt-state fsync-probe-worker",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
       "path": "gc dolt-state health-check",
       "aliases": [],
       "conditional_modes": [],
@@ -2124,6 +2184,21 @@
       "exclusion": "hidden-private"
     },
     {
+      "path": "gc internal program-status-shadow-report",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
       "path": "gc internal project-mcp",
       "aliases": [],
       "conditional_modes": [],
@@ -2597,6 +2672,21 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc nudge drop",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "nudge-drop",
+      "owner": "immediate",
+      "id": 207
     },
     {
       "path": "gc nudge poll",
@@ -3490,6 +3580,21 @@
       "id": 136
     },
     {
+      "path": "gc runtime workdir-export",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-workdir-export",
+      "owner": "immediate",
+      "id": 210
+    },
+    {
       "path": "gc service",
       "aliases": [],
       "conditional_modes": [],
@@ -4041,6 +4146,67 @@
       "id": 201
     },
     {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage",
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage mark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-mark",
+      "owner": "immediate",
+      "id": 213
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage unmark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-unmark",
+      "owner": "immediate",
+      "id": 214
+    },
+    {
+      "path": "gc storage repair-sequence",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-repair-sequence",
+      "owner": "immediate",
+      "id": 209
+    },
+    {
       "path": "gc storage status",
       "aliases": [],
       "conditional_modes": [],
@@ -4054,6 +4220,21 @@
       "classification": "storage-status",
       "owner": "immediate",
       "id": 199
+    },
+    {
+      "path": "gc storage vouch-bd",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-vouch-bd",
+      "owner": "immediate",
+      "id": 212
     },
     {
       "path": "gc supervisor",

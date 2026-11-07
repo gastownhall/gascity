@@ -3,7 +3,8 @@ package main
 // The boot gate against the compiled beads workspace provider.
 //
 // These are the arms that need no workspace at all: a city whose work store
-// still holds infrastructure beads never reaches the binding, and a city whose
+// still holds infrastructure beads never reaches the binding, a city under
+// native transport "off" is refused before it does, and a city whose
 // configured workspace is not there is refused by the open. The serving arm
 // needs a real workspace and lives beside these under the integration tag.
 //
@@ -23,6 +24,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 )
 
@@ -125,6 +127,58 @@ func TestStorageGateRefusesAWorkspaceThatIsNotThere(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat of %s after a refused boot = %v, want the directory never to have been created", root, err)
+	}
+}
+
+// TestStorageGateRefusesAWorkspaceUnderNativeTransportOff proves native
+// transport "off" refuses a beads-workspace binding before the gate records an
+// outcome, and that the refusal names the switch that fired: the city's own
+// value or the deprecated process-wide GC_BEADS_FORCE_FALLBACK alias. A city
+// that cannot serve under its config must not publish converged on every boot.
+// Under "auto" the same city gets past the switch and is refused by the open
+// instead, because no workspace exists here.
+func TestStorageGateRefusesAWorkspaceUnderNativeTransportOff(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		nativeTransport string
+		forceFallback   string
+		wantCause       string
+	}{
+		{name: "city sets off", nativeTransport: "off", wantCause: `beads.native_transport = "off"`},
+		{name: "force-fallback alias overrides auto", nativeTransport: "auto", forceFallback: "1", wantCause: "GC_BEADS_FORCE_FALLBACK"},
+		{name: "auto reaches the open", nativeTransport: "auto"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS_FORCE_FALLBACK", tc.forceFallback)
+			cityPath := t.TempDir()
+			stubInfraMigrationSource(t)
+			cfg := workspaceSplitConfig("infra")
+			cfg.Beads.NativeTransport = tc.nativeTransport
+			rec := events.NewFake()
+
+			var stderr bytes.Buffer
+			routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+			if err == nil {
+				_ = routes.close()
+				t.Fatal("a city whose workspace does not exist served")
+			}
+			if tc.wantCause == "" {
+				if !errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+					t.Fatalf("the gate refused with %v, want %v: native_transport %q must let the binding reach its open",
+						err, beadsworkspace.ErrWorkspaceUnavailable, tc.nativeTransport)
+				}
+				return
+			}
+			if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+				t.Fatalf("the gate opened the workspace instead of refusing it: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantCause) {
+				t.Errorf("the refusal does not name its cause %s: %v", tc.wantCause, err)
+			}
+			if len(rec.Events) != 0 {
+				t.Errorf("a binding refused by its config recorded %d outcome event(s), want none: %+v", len(rec.Events), rec.Events)
+			}
+		})
 	}
 }
 

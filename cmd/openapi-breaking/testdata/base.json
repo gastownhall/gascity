@@ -1,0 +1,86 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorModel": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "type": {
+            "examples": [
+              "urn:gascity:error:widget-not-found",
+              "urn:gascity:error:widget-locked"
+            ],
+            "format": "uri",
+            "type": "string",
+            "x-gascity-problem-types": [
+              "urn:gascity:error:widget-not-found",
+              "urn:gascity:error:widget-locked"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Widget": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "fixture",
+    "version": "0.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v0/widgets/{id}": {
+      "get": {
+        "operationId": "get-widget",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Widget"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        }
+      }
+    }
+  }
+}

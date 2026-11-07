@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -141,7 +142,7 @@ func TestStrandedRoutedDemandReconcileTickDefaultPolicyIsOffAndSilent(t *testing
 	rec := events.NewFake()
 	cr := strandedDemandRuntime(t, store, rec, cfg)
 
-	cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 	if got := len(routedDemandStrandedEvents(rec)); got != 0 {
 		t.Fatalf("stranded events with unset policy = %d, want 0 (default must be Off); events=%+v", got, rec.Events)
@@ -187,7 +188,7 @@ func TestStrandedRoutedDemandReconcileTickAutoModeWarnsForAllWriters(t *testing.
 			rec := events.NewFake()
 			cr := strandedDemandRuntime(t, store, rec, cfg)
 
-			cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 			ev := requireOneRoutedDemandStrandedEvent(t, rec)
 			payload := requireEventPayload(t, ev)
@@ -223,7 +224,7 @@ func TestStrandedRoutedDemandReconcileTickPolicyModes(t *testing.T) {
 			rec := events.NewFake()
 			cr := strandedDemandRuntime(t, store, rec, cfg)
 
-			cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 			gotEvents := routedDemandStrandedEvents(rec)
 			if !tc.wantStranded {
@@ -314,7 +315,7 @@ func TestStrandedRoutedDemandReconcileTickDebounceAndExclusions(t *testing.T) {
 			rec := events.NewFake()
 			cr := strandedDemandRuntime(t, store, rec, cfg)
 
-			cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 			got := len(routedDemandStrandedEvents(rec))
 			if tc.wantEvent && got != 1 {
@@ -354,7 +355,7 @@ func TestStrandedRoutedDemandReconcileTickSecondTickStaysSilent(t *testing.T) {
 			rec := events.NewFake()
 			cr := strandedDemandRuntime(t, store, rec, cfg)
 
-			cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 			if got := len(routedDemandStrandedEvents(rec)); got != 1 {
 				t.Fatalf("stranded events after first tick = %d, want 1; events=%+v", got, rec.Events)
@@ -364,7 +365,7 @@ func TestStrandedRoutedDemandReconcileTickSecondTickStaysSilent(t *testing.T) {
 				t.Fatalf("%s count after first tick = %d, want 1; events=%+v", events.OrderFailed, firstOrderFailed, rec.Events)
 			}
 
-			cr.beadReconcileTick(context.Background(), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), strandedDemandResult(), newSessionBeadSnapshot(nil), nil, false)
 
 			if got := len(routedDemandStrandedEvents(rec)); got != 1 {
 				t.Fatalf("stranded events after second tick = %d, want 1 (a persisting condition must stay silent on repeat ticks); events=%+v", got, rec.Events)
@@ -395,7 +396,7 @@ func TestDetectStrandedRoutedDemandEscalatesAfterThreshold(t *testing.T) {
 	rec := events.NewFake()
 
 	t1 := base.Add(90 * time.Second) // clears the default 60s debounce
-	if err := detectStrandedRoutedDemand(store, cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t1); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t1); err != nil {
 		t.Fatalf("detect (first sight): %v", err)
 	}
 	first := requireOneRoutedDemandStrandedEvent(t, rec)
@@ -407,7 +408,7 @@ func TestDetectStrandedRoutedDemandEscalatesAfterThreshold(t *testing.T) {
 	}
 
 	t2 := t1.Add(10 * time.Minute) // well inside the escalation window
-	if err := detectStrandedRoutedDemand(store, cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t2); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t2); err != nil {
 		t.Fatalf("detect (mid-window): %v", err)
 	}
 	if got := len(routedDemandStrandedEvents(rec)); got != 1 {
@@ -418,7 +419,7 @@ func TestDetectStrandedRoutedDemandEscalatesAfterThreshold(t *testing.T) {
 	}
 
 	t3 := t1.Add(routedDemandStrandedEscalationAge + time.Minute) // just past the threshold
-	if err := detectStrandedRoutedDemand(store, cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t3); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t3); err != nil {
 		t.Fatalf("detect (escalation): %v", err)
 	}
 	escalatedEvents := routedDemandStrandedEvents(rec)
@@ -433,7 +434,7 @@ func TestDetectStrandedRoutedDemandEscalatesAfterThreshold(t *testing.T) {
 	}
 
 	t4 := t3.Add(routedDemandStrandedEscalationAge) // long past, still stranded: fully throttled now
-	if err := detectStrandedRoutedDemand(store, cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t4); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), cfg, newSessionBeadSnapshot(nil), rec, io.Discard, t4); err != nil {
 		t.Fatalf("detect (post-escalation): %v", err)
 	}
 	if got := len(routedDemandStrandedEvents(rec)); got != 2 {
@@ -459,7 +460,7 @@ func TestDetectStrandedRoutedDemandClearsMarkersOnRecovery(t *testing.T) {
 	rec := events.NewFake()
 
 	t1 := base.Add(90 * time.Second)
-	if err := detectStrandedRoutedDemand(store, deadCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t1); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), deadCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t1); err != nil {
 		t.Fatalf("detect (stranded): %v", err)
 	}
 	requireOneRoutedDemandStrandedEvent(t, rec)
@@ -475,7 +476,7 @@ func TestDetectStrandedRoutedDemandClearsMarkersOnRecovery(t *testing.T) {
 	wakeableCfg := deadAssigneeDemandConfig(1) // max_active_sessions=1: agent supports a generic ephemeral session again
 	setDemandConfigString(t, wakeableCfg, "StrandedRoutePolicy", "auto")
 	t2 := t1.Add(time.Minute)
-	if err := detectStrandedRoutedDemand(store, wakeableCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t2); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), wakeableCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t2); err != nil {
 		t.Fatalf("detect (recovered): %v", err)
 	}
 	if got := len(routedDemandStrandedEvents(rec)); got != 1 {
@@ -494,7 +495,7 @@ func TestDetectStrandedRoutedDemandClearsMarkersOnRecovery(t *testing.T) {
 	}
 
 	t3 := t2.Add(time.Minute) // re-stranded: must be treated as a fresh first-sight, not suppressed
-	if err := detectStrandedRoutedDemand(store, deadCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t3); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), deadCfg, newSessionBeadSnapshot(nil), rec, io.Discard, t3); err != nil {
 		t.Fatalf("detect (re-stranded): %v", err)
 	}
 	got := routedDemandStrandedEvents(rec)
@@ -534,7 +535,7 @@ func TestDetectStrandedRoutedDemandEmitsOnlyThrottledBeadIDs(t *testing.T) {
 	// escalation window, so it stays throttled/silent this tick while fresh
 	// (no marker at all) is newly signaled.
 	now := base.Add(10 * time.Minute)
-	if err := detectStrandedRoutedDemand(store, cfg, newSessionBeadSnapshot(nil), rec, io.Discard, now); err != nil {
+	if err := detectStrandedRoutedDemand(beadstest.Work(store), beadstest.Orders(store), cfg, newSessionBeadSnapshot(nil), rec, io.Discard, now); err != nil {
 		t.Fatalf("detect: %v", err)
 	}
 

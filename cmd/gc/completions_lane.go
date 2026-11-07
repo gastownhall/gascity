@@ -41,6 +41,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 )
@@ -112,7 +113,7 @@ func newCompletionsLane() *completionsLane {
 	return &completionsLane{
 		pending:  map[string]struct{}{},
 		interval: completionsBackstopInterval,
-		poll:     completionsBackstopChunkInterval,
+		poll:     clock.Backstop(completionsBackstopChunkInterval),
 		// Nothing has converged yet, so the first thing this lane does is sweep —
 		// expressed by sweepRan being false rather than by pre-setting the forced
 		// latch. Both make the first pass due; only this one lets it report itself
@@ -366,6 +367,11 @@ func (cr *CityRuntime) runCompletionsSweepLoop(ctx context.Context, lane *comple
 func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.CompletionBackstop, lane *completionsLane, reason string) executionevent.CompletionBackstopResult {
 	if cr.cs == nil {
 		return executionevent.CompletionBackstopResult{SweepComplete: true}
+	}
+	if cr.beadsQuiescent.Load() {
+		// The city is suspended with nothing running: its stores are not
+		// touched until it resumes.
+		return executionevent.CompletionBackstopResult{}
 	}
 	ep, graphStores := cr.cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {

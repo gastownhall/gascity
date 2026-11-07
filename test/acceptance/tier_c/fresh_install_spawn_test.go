@@ -181,7 +181,10 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	}
 	sessionName := metaString(spawnedSessionBead.Metadata, "session_name")
 	require.NotEmpty(t, sessionName, "spawned worker should record session_name metadata")
-	require.True(t, strings.HasPrefix(sessionName, "claude-"), "spawned worker should use a claude-* session name, got %q", sessionName)
+	// An unaliased pool worker runs as <template>-<beadID> so the runtime name
+	// resolves back to its session bead (not the bare template, not a
+	// "-pool" step-aside).
+	require.Equal(t, "claude-"+spawnedSessionBead.ID, sessionName, "spawned worker should use the claude-<beadID> session name")
 
 	outputPath := filepath.Join(c.Dir, outputRel)
 	var lastWorkBead beadJSON

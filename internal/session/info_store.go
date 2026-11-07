@@ -108,13 +108,12 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 // bead"). Note the split: absence yields the wrapped store error, NOT
 // ErrSessionNotFound — that sentinel is reserved for a present non-session bead.
 func (s *Store) validatedBead(id string) (beads.Bead, error) {
-	// Nil-inner-store short-circuit, mirroring ListAll's listAllBeads guard
-	// (s == nil || s.store.Store == nil): a nil backing store cannot produce the
-	// bead, so treat it as absence — the wrapped store not-found error, matching
+	// Absent-store short-circuit, mirroring ListAll's listAllBeads guard (a nil
+	// door or a zero handle): an absent backing store cannot produce the bead, so treat it as absence — the wrapped store not-found error, matching
 	// the absent-id path below and NOT the ErrSessionNotFound sentinel (reserved
 	// for a present non-session bead). Without this a non-nil *Store wrapping a
 	// nil inner store would panic in s.store.Get.
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
 	b, err := s.store.Get(id)
@@ -156,13 +155,15 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	return out, nil
 }
 
-// ListByMetadataInfos returns the Info projection of every bead matching the given
-// metadata filters, keeping the raw-bead codec confined to this edge. It is the typed
-// front door for the session-log workdir fallback's ListByMetadata scans (the callers
-// need only Info fields). limit is passed through to the store; a zero limit is
-// unbounded. No raw bead escapes.
+// ListByMetadataInfos returns the Info projection of every session row
+// (IsSessionBeadOrRepairable) matching the given metadata filters, keeping the
+// raw-bead codec confined to this edge. It is the typed front door for the
+// session-log workdir fallback's ListByMetadata scans (the callers need only
+// Info fields). Only a session row is one: another bead carrying the keys (a
+// task's) is no sibling session (architecture B). limit is passed through to
+// the store; a zero limit is unbounded. No raw bead escapes.
 func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	found, err := s.store.ListByMetadata(filters, limit)
@@ -171,7 +172,9 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 	}
 	out := make([]Info, 0, len(found))
 	for _, b := range found {
-		out = append(out, infoFromPersistedBead(b))
+		if IsSessionBeadOrRepairable(b) {
+			out = append(out, infoFromPersistedBead(b))
+		}
 	}
 	return out, nil
 }
@@ -187,7 +190,7 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 // explicit closed skip keeps the closed-excluded contract byte-stable across store
 // backends. No raw bead escapes.
 func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	labeled, err := s.store.ListByLabel(LabelSession, 0)
@@ -290,4 +293,21 @@ func sessionMatchesFiltersInfo(info Info, stateFilter, templateFilter string) bo
 		return false
 	}
 	return true
+}
+
+// StateFilterIncludesClosed reports whether a session-list state filter can
+// keep a closed session under the filter ListFromInfos applies: the whole
+// filter "all", or a comma-separated "closed" entry. The empty default and
+// every other filter keep open sessions only, so a list that reads persisted
+// rows before filtering them needs closed rows only when this is true.
+func StateFilterIncludesClosed(stateFilter string) bool {
+	if stateFilter == "all" {
+		return true
+	}
+	for _, sf := range strings.Split(stateFilter, ",") {
+		if sf == "closed" {
+			return true
+		}
+	}
+	return false
 }

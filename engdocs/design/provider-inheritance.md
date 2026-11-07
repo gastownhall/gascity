@@ -267,12 +267,27 @@ loudly.
 | `ResumeCommand` | Non-zero child replaces. Inherited by default. | Unchanged (field semantic new) |
 
 Schema-managed flags in `args` or `args_append` are normalized at the
-provider layer that declares them before the layer is merged. For a single
-layer, explicit `args` / `args_append` choices override that same layer's
+provider layer that declares them before the layer is merged. Agent `args`
+are normalized the same way when they are merged over the resolved provider,
+but only when every schema-managed flag in them belongs to an option the
+args select. Ownership is per option: codex's
+`--ask-for-approval on-request` beside `--sandbox workspace-write`
+normalizes to `suggest`, because both groups belong to `permission_mode`.
+Otherwise the agent args are kept as written: a flag that selects nothing on
+its own, such as a lone `--ask-for-approval never` or
+`--sandbox workspace-write` (one group of codex's grouped `auto-edit`
+choice), would be dropped and leave its option at the default. Two paths
+still drop such a flag and fall back to the default (ga-kg2mqb):
+provider-layer normalization, and `BuildProviderLaunchCommand`
+(`gc session new`, API-created sessions, runtime command rebuilds), which
+strips every schema-managed group from the command, kept agent args
+included, before it appends the effective option values. For a single layer,
+explicit `args` / `args_append` choices override that same layer's
 `option_defaults`. Across inheritance, child `option_defaults` still beat
 parent defaults inferred from parent args. Effective precedence is:
 
 ```
+agent args >
 agent option_defaults >
 child provider args / args_append >
 child provider option_defaults >

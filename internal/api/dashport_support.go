@@ -4,6 +4,7 @@
 // by the //go:build integration dashboard e2e harness (test/dashport). The
 // build tag keeps it out of the production binary and the normal internal/api
 // surface; it is compiled only when the integration tag is set.
+
 package api
 
 import (
@@ -18,8 +19,12 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -97,7 +102,7 @@ type SeededCityDeps struct {
 //
 // The plane's per-city run tailers and status samplers are started against ctx.
 // The returned stop function invokes the plane's Stop, which cancels those
-// goroutines and synchronously waits for them to drain; cancelling ctx alone
+// goroutines and synchronously waits for them to drain; canceling ctx alone
 // stops them but does not wait, so call stop (e.g. via the harness's t.Cleanup,
 // after the server is closed) for a deterministic teardown. baseURL is the
 // loopback origin the host-side status samplers dial to read this stack's own
@@ -199,10 +204,12 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
-		// Unrouted on purpose: SeededCityDeps carries one store for every
-		// class, so there is no messaging binding to route to. See the
-		// CityBeadStore doc for what that means for a split-city case.
-		svc := extmsg.NewServices(s.cityStore)
+		// SeededCityDeps carries one store for every class, so there is no
+		// messaging binding to route to: the single-store Stores hand both
+		// classes the city store. See the CityBeadStore doc for what that
+		// means for a split-city case.
+		stores := s.classStores()
+		svc := extmsg.NewServices(stores.Mail(), stores.Sessions())
 		s.extmsgSvc = &svc
 	}
 	return s
@@ -252,23 +259,38 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 	return nil, nil
 }
 
+// classStores mints the seeded city's handles: a single-store topology, so
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// collapse to the city store on a seeded single-store city, exactly as they do
-// on a default (non-relocated) controller city.
+// wrap the city store, exactly as they do on a default (non-relocated)
+// controller city, and each seeded rig is a rig scope over its own store, by
+// name as the controller lists them.
+func (s *seededState) classStores() storeref.Stores {
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}, storeref.StoresOptions{})
+}
+
+// Stores is the seeded city's class handles (classStores). The seeded stores
+// never change, so every call mints the same handles.
+func (s *seededState) Stores() storeref.Stores { return s.classStores() }
+
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: s.cityStore}
+	return s.classStores().Nudges()
+}
+
+// NudgeQueue is the city's state.json queue over the seeded city store.
+func (s *seededState) NudgeQueue() NudgeQueue {
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
 }
 
 func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: s.cityStore}
+	return s.classStores().Sessions()
 }
 
 func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: s.cityStore}
+	return s.classStores().Graph()
 }
 
 func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: s.cityStore}
+	return s.classStores().Orders()
 }
 
 // ClassBindingHasLegacyResidents answers true for everything: a seeded city
@@ -276,14 +298,20 @@ func (s *seededState) OrdersBeadStore() beads.OrdersStore {
 // and a state that censused nothing has cleared nothing.
 func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
-func (s *seededState) Orders() []orders.Order    { return nil }
-func (s *seededState) OrdersAll() []orders.Order { return nil }
-func (s *seededState) Poke()                     {}
+func (s *seededState) Orders() []orders.Order      { return nil }
+func (s *seededState) OrdersAll() []orders.Order   { return nil }
+func (s *seededState) Enqueue(...reconcilekey.Key) {}
 
 func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
 func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
+
+// ApplyStartupPrompt returns hints unchanged: a seeded city renders no startup
+// prompts.
+func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
+	return hints, nil
+}
 
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.

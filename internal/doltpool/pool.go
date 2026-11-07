@@ -31,6 +31,30 @@ const (
 	maxOpenConns    = 5
 	maxIdleConns    = 2
 	connMaxLifetime = time.Hour
+	// connMaxIdleTime must stay STRICTLY BELOW the server's idle reaper so
+	// the CLIENT closes an idle pooled connection before the server does.
+	// On this dolt version that reaper is read_timeout_millis
+	// (config.DefaultDoltReadTimeoutMillis, 120000) — NOT wait_timeout,
+	// which the server accepts, stores and reports but which reaps nothing
+	// on dolt 2.2.3 (measured for #5383; see
+	// config.DefaultDoltWaitTimeoutSeconds and the golden-file guard in
+	// cmd/gc/cmd_dolt_config_test.go). Without a client-side idle bound a
+	// pooled connection lives until connMaxLifetime (an hour), so the
+	// SERVER reaps it first and logs an error per reap:
+	//
+	//   Error reading packet from client N: read tcp ... i/o timeout
+	//   io.ReadFull(header size) failed
+	//
+	// 6565 such lines in one day were observed on a single managed city,
+	// arriving on a clean 30s cycle. That period matches neither the inert
+	// wait_timeout nor the 120s read_timeout default, so that city most
+	// likely carried a lower read_timeout_millis — unconfirmed, and not a
+	// bound to design against. 20s sits below every candidate (120s default,
+	// any 30s-class override, and connMaxLifetime), which is the property
+	// that matters. Closing client-side removes the events at the source
+	// rather than muting them; equality with a reaper bound would be a race,
+	// not a bound.
+	connMaxIdleTime = 20 * time.Second
 	connTimeout     = 5 * time.Second
 	readTimeout     = 30 * time.Second
 	writeTimeout    = 30 * time.Second
@@ -89,15 +113,69 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt connection to %s:%s/%s: %w", host, port, database, err)
 	}
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
+	configurePool(db)
 	registry.dbs[k] = db
 	return db, nil
 }
 
-// Shutdown closes all pooled connections and empties the registry. Call
-// once on process exit; subsequent Open calls recreate pools on demand.
+// OpenPrivate returns a fresh single-connection *sql.DB for the given Dolt
+// endpoint, outside the registry, which the caller closes. It is the
+// explicit fresh-dial path for a caller that must not share a pooled session:
+// cmd/gc's storage maintenance window lists a server's sessions and counts
+// every session but its own, so its own must not sit in a pool other reads
+// leave idle connections in. One-shot use only, never per operation: a fresh
+// dial per call is the churn the registry exists to prevent.
+func OpenPrivate(host, port, user, password, database string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
+	if err != nil {
+		return nil, fmt.Errorf("opening private dolt connection to %s:%s/%s: %w", host, port, database, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	return db, nil
+}
+
+// OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
+func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
+	k := key("unix", socket, user, password, database)
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if db, ok := registry.dbs[k]; ok {
+		return db, nil
+	}
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, "unix", socket, database
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = connTimeout, readTimeout, writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening pooled dolt socket connection %s/%s: %w", socket, database, err)
+	}
+	configurePool(db)
+	registry.dbs[k] = db
+	return db, nil
+}
+
+// configurePool applies the per-endpoint caps to a new pooled handle. TCP and
+// Unix-socket pools share it so neither can drift from the other: the socket
+// path once skipped the idle bound, so its idle connections lived until
+// connMaxLifetime and the server reaped them first, and every reuse logged
+// "closing bad idle connection: EOF" from the driver.
+func configurePool(db *sql.DB) {
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+}
+
+// Shutdown closes all pooled connections and empties the registry. Call it on
+// process exit; subsequent Open calls recreate pools on demand. A one-shot
+// process may also call it mid-run to close its own idle sessions before it
+// judges a server's sessions (cmd/gc's storage maintenance window), provided
+// no caller still holds a handle Open returned: a held handle is closed under
+// it.
 func Shutdown() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()

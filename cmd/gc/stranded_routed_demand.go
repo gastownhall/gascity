@@ -78,8 +78,8 @@ type routedDemandStrandedSignal struct {
 // (clearRoutedDemandStrandedMarkers) so a later recurrence is treated as a
 // fresh first-sight. This mirrors session_reconciler.go's
 // emitSessionUnknownStateDiagnostic throttle shape.
-func detectStrandedRoutedDemand(store beads.Store, cfg *config.City, sessionBeads *sessionBeadSnapshot, rec events.Recorder, stderr io.Writer, now time.Time) error {
-	if store == nil || cfg == nil || rec == nil {
+func detectStrandedRoutedDemand(store beads.WorkStore, orderStore beads.OrdersStore, cfg *config.City, sessionBeads *sessionBeadSnapshot, rec events.Recorder, stderr io.Writer, now time.Time) error {
+	if cfg == nil || rec == nil {
 		return nil
 	}
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{})
@@ -138,7 +138,7 @@ func detectStrandedRoutedDemand(store beads.Store, cfg *config.City, sessionBead
 			Payload: api.RoutedDemandStrandedPayloadJSON(severity, template, beadIDs, signal.firstSeen, signal.escalated),
 		})
 		if mode == rollout.Require {
-			failStrandedOrderRuns(store, rec, stderr, template, signal.beads)
+			failStrandedOrderRuns(orderStore, rec, stderr, template, signal.beads)
 		}
 	}
 	return nil
@@ -160,7 +160,7 @@ func detectStrandedRoutedDemand(store beads.Store, cfg *config.City, sessionBead
 // The returned signal's firstSeen is the earliest first-seen timestamp among
 // the included beads, and escalated is true iff at least one included bead
 // crossed the escalation threshold this tick.
-func throttleRoutedDemandStrandedGroup(store beads.Store, stderr io.Writer, group []beads.Bead, now time.Time) routedDemandStrandedSignal {
+func throttleRoutedDemandStrandedGroup(store beads.WorkStore, stderr io.Writer, group []beads.Bead, now time.Time) routedDemandStrandedSignal {
 	var signal routedDemandStrandedSignal
 	takeEarliest := func(t time.Time) {
 		if signal.firstSeen.IsZero() || t.Before(signal.firstSeen) {
@@ -199,7 +199,7 @@ func throttleRoutedDemandStrandedGroup(store beads.Store, stderr io.Writer, grou
 // suppressed forever; clearing here means a recurrence is treated as a fresh
 // first-sight, mirroring clearSessionUnknownStateMarkers. Per-bead, per-marker
 // no-op when the bead carries neither marker.
-func clearRoutedDemandStrandedMarkers(store beads.Store, stderr io.Writer, group []beads.Bead) {
+func clearRoutedDemandStrandedMarkers(store beads.WorkStore, stderr io.Writer, group []beads.Bead) {
 	for _, b := range group {
 		if strings.TrimSpace(b.Metadata[beadmeta.RoutedDemandStrandedFirstSeenMetadataKey]) != "" {
 			setRoutedDemandStrandedMarker(store, stderr, b.ID, beadmeta.RoutedDemandStrandedFirstSeenMetadataKey, "")
@@ -215,7 +215,7 @@ func clearRoutedDemandStrandedMarkers(store beads.Store, stderr io.Writer, group
 // write failure — the same event-first, store-write-best-effort pairing
 // failStrandedOrderRuns uses. A failed stamp only costs an extra emission on
 // the next tick, never a stuck or silently-dropped one.
-func setRoutedDemandStrandedMarker(store beads.Store, stderr io.Writer, beadID, key, value string) {
+func setRoutedDemandStrandedMarker(store beads.WorkStore, stderr io.Writer, beadID, key, value string) {
 	if err := store.SetMetadata(beadID, key, value); err != nil {
 		logDispatchError(stderr, "gc: stranded routed demand: failed to set marker %s on %s: %v", key, beadID, err)
 	}
@@ -226,7 +226,7 @@ func setRoutedDemandStrandedMarker(store beads.Store, stderr io.Writer, beadID, 
 // blocked beads and molecule/wisp types) plus molecule/wisp beads explicitly
 // marked as order-dispatch pool demand via poolDemandWispMetadataKey — the
 // one narrow additive exception to Ready's type exclusion.
-func strandedRoutedDemandCandidates(store beads.Store) ([]beads.Bead, error) {
+func strandedRoutedDemandCandidates(store beads.WorkStore) ([]beads.Bead, error) {
 	ready, err := store.Ready()
 	if err != nil {
 		return nil, err
@@ -321,8 +321,8 @@ func formatRoutedDemandStrandedMessage(severity, template string, beadIDs []stri
 // bead's status or assignee — following the same event-first,
 // store-write-best-effort pairing order_dispatch.go's markTrackingFailure
 // call sites use.
-func failStrandedOrderRuns(store beads.Store, rec events.Recorder, stderr io.Writer, template string, group []beads.Bead) {
-	front := orders.NewStore(beads.OrdersStore{Store: store})
+func failStrandedOrderRuns(orderStore beads.OrdersStore, rec events.Recorder, stderr io.Writer, template string, group []beads.Bead) {
+	front := orders.NewStore(orderStore)
 	for _, b := range group {
 		run, ok := orders.RunFromTrackingBead(b)
 		if !ok {

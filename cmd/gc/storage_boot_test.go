@@ -798,7 +798,7 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 		t.Fatal("the binding in the resolved plan still offers an engine opener")
 	}
 
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg, root, nil)
 	if err == nil {
 		_ = routes.close()
 		t.Fatal("routes opened for a binding whose provider opens no bead engine; the classes assigned to it would have fallen through to the work store")
@@ -1018,12 +1018,11 @@ func TestStorageMigrateRefusesWhileAnotherMigratorHoldsTheCity(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
-// TestStorageMigrateRefusesRigResidueByName covers the rig-scope preflight.
-//
-// The remedy is asserted as carefully as the refusal: it must not name an
-// importer, because this binary carries none, and a remedy naming a command
-// that does not exist is an instruction that fails at the shell.
-func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
+// TestStorageMigrateNoLongerRefusesOverRigHistory: a rig's graph history no
+// longer blocks the city cutover (S4b). The relic legs keep it readable and
+// `gc storage migrate --from-rigs` moves it, so the city migrates, leaves the
+// rig row where it is, and names the rig and the command that imports it.
+func TestStorageMigrateNoLongerRefusesOverRigHistory(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
@@ -1033,32 +1032,87 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
+	}
 	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the city migration refused over rig history: %d %s %s", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Rigs awaiting import") || !strings.Contains(got, "alpha") || !strings.Contains(got, "gc storage migrate --from-rigs --fleet-stopped") {
+		t.Errorf("the success message does not name the rig awaiting import and the command: %q", got)
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the city migration touched the rig row %s: %v", stray.ID, err)
+	}
+}
+
+// TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
+// the upgrade order ends with: a converged city whose work store still holds
+// retained copies, beside a rig scope holding pre-split infrastructure rows.
+// The re-run copies nothing, so the census that guards a copy does not run:
+// the clear proceeds, `gc storage status` exits 0, and the rig row is
+// untouched. Refused, as it was, the city kept the retained copies boot
+// refuses over, and every seat's drain fence stayed closed on them.
+func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubStrandedRecoverySource(t)
+	stubInfraControllerPing(t, 0)
+	carried := mustCreateInfraBead(t, source, beads.Bead{Title: "a delivered mail", Type: "message"})
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
+
+	cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "gp"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a pre-split workflow step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": "gp-root", "gc.kind": "task"}})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("precondition: status exits 0 with the retained copy %s in the work store: %s", carried.ID, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear-only re-run = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := source.Get(carried.ID); err == nil {
+		t.Errorf("the re-run left the retained copy %s", carried.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	// The city's own verdict is clean; the rig still awaits its import, and
+	// a split city's deploy gate covers its rigs (D5).
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "rig packs: awaiting import") || strings.Contains(stdout.String(), "blocking invariant") {
+		t.Errorf("status after the clear = %d, want non-zero for the rig alone: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)
+	}
+}
+
+// stubStorageScopeStore makes the rig census open rig() for rigPath, read at
+// each open so one stub can serve a sequence of rig stores.
+func stubStorageScopeStore(t *testing.T, rigPath string, rig func() beads.Store) {
+	t.Helper()
 	prev := openStorageScopeStore
 	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
 		if storePath == rigPath {
-			return rig, nil
+			return rig(), nil
 		}
 		return prev(storePath, cityPath)
 	}
 	t.Cleanup(func() { openStorageScopeStore = prev })
-
-	var stdout, stderr bytes.Buffer
-	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code == 0 {
-		t.Fatal("a city with infrastructure beads in a rig scope migrated anyway")
-	}
-	got := stderr.String()
-	if !strings.Contains(got, stray.ID) || !strings.Contains(got, "rig alpha") {
-		t.Errorf("the refusal does not name the bead and its rig: %q", got)
-	}
-	for _, forbidden := range []string{"import", "migrate storage"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("the remedy names %q, which this binary does not carry: %q", forbidden, got)
-		}
-	}
-	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
-		"a migrator that refused must record no convergence")
 }
 
 // TestStorageMigrateRequiresItsSourceExplicitly proves the command will not
@@ -2133,6 +2187,94 @@ func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
 	}
 	if closes != 1 {
 		t.Errorf("the opened binding was closed %d time(s), want exactly 1: a boot that refuses must not keep the engine it opened", closes)
+	}
+}
+
+// TestStorageStatusBypassesThePlanWithoutStorageConfig pins the same
+// compatibility boundary as storageBootGate: a legacy city that never authored
+// [storage] reaches no provider registry or plan resolution.
+func TestStorageStatusBypassesThePlanWithoutStorageConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	registries := 0
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registries++
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: &config.City{}}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Errorf("status = %d for a legacy city that boot serves; want 0\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	if registries != 0 {
+		t.Errorf("status constructed %d provider registries without [storage]; want none", registries)
+	}
+	if !strings.Contains(stdout.String(), "binding: none") {
+		t.Errorf("status omitted the legacy work-store layout:\n%s", stdout.String())
+	}
+}
+
+// TestStorageStatusCarriesBootPlanRefusalOnConfiguredPaths pins the deploy-gate
+// contract doStorageStatus claims for itself: "a city boot refuses must not
+// report may-serve here". That held only on the born-split path, which was the
+// one path that resolved the plan; configured served and all-work paths
+// returned 0 without ever asking whether boot would refuse.
+//
+// The stdout assertions are the load-bearing half. Carrying the refusal into
+// the exit code is easy to get right by returning early on the plan error, and
+// that suppresses the readout at exactly the moment an operator needs it. These
+// assertions fail such a fix.
+func TestStorageStatusCarriesBootPlanRefusalOnConfiguredPaths(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Storage: &config.StorageConfig{}}
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "city: "+cityPath) {
+		t.Errorf("plan refusal suppressed the status header:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "binding: none") {
+		t.Errorf("plan refusal suppressed the status body:\n%s", stdout.String())
+	}
+}
+
+// TestStorageStatusCarriesBootPlanRefusalAfterCutover pins the served SQLite
+// arm. That arm has its own final return after the convergence census, so the
+// all-work assertion above cannot catch it accidentally dropping exitCode.
+func TestStorageStatusCarriesBootPlanRefusalAfterCutover(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	stubInfraControllerPing(t, 0)
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 after cutover for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "converged: yes") {
+		t.Errorf("plan refusal suppressed the served binding census:\n%s", stdout.String())
 	}
 }
 

@@ -11,6 +11,9 @@ set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+# --json callers get a skip document rather than runtime.sh's plain line, so
+# this command handles the bd-owned proxied case itself (after flag parsing).
+GC_DOLT_PROXIED_HANDLED=1
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
 metadata_files() {
@@ -71,6 +74,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# bd owns this scope's Dolt lifecycle: nothing here is ours to probe.
+if [ "${GC_DOLT_SCOPE_BD_PROXIED:-0}" = "1" ]; then
+  if [ "$json_output" = true ]; then
+    print_proxied_skip_json
+  else
+    printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE"
+  fi
+  exit 0
+fi
+
 # Note: run_bounded / TIMEOUT_BIN are provided by assets/scripts/runtime.sh.
 
 # Determine host for probing.
@@ -130,7 +143,9 @@ human_duration() {
 should_probe_sql=false
 is_external=false
 if is_local_dolt_host "$host"; then
-  pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+  # The pid of a state file port resolution trusts names the server ahead
+  # of a lower pid that also listens on the port.
+  pid=$(managed_runtime_server_pid "$GC_DOLT_PORT" || true)
   if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
     server_running=true
     [ -n "$pid" ] && server_pid="$pid"
@@ -509,11 +524,13 @@ if [ -d "$quarantine_dir" ]; then
   for marker in "$quarantine_dir"/*; do
     [ -f "$marker" ] || continue
     q_db=$(basename "$marker")
-    # compact/run.sh writes transient files into this same directory:
-    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
-    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
-    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
-    # and a spurious exit 2.
+    # compact/run.sh stages transient files in this same directory as
+    # dotfiles, which the glob above skips: `.$db.tmp.XXXXXX`
+    # (write_compact_marker) and `.$db.probe.XXXXXX`
+    # (ensure_compact_marker_writable). Earlier releases staged them without
+    # the leading dot, so an interrupted pre-upgrade run can leave a
+    # `$db.tmp.*` or `$db.probe.*` here. Neither is a marker; reading one
+    # yields a phantom entry and a spurious exit 2.
     case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
     # Anchor each key to column 1 with index()==1 — the same reader idiom
     # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
@@ -543,7 +560,8 @@ fi
 # positives from processes that merely mention "dolt" in their args
 # (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 #
-# Rig-local Dolt servers (configured via dolt.port in config.yaml)
+# Rig-local Dolt servers (configured via dolt.port in config.yaml, flat or
+# nested)
 # are legitimate — exclude any PID listening on a known rig port.
 #
 # Foreign Dolt servers (managed by OTHER cities on the same host) are
@@ -578,7 +596,7 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -f "$meta" ] || continue
     config_file="$(dirname "$meta")/config.yaml"
     [ -f "$config_file" ] || continue
-    rig_port=$(grep '^dolt\.port:' "$config_file" 2>/dev/null | sed "s/^dolt\\.port:[[:space:]]*//; s/[[:space:]]*#.*$//; s/['\\\"]//g; s/[[:space:]]*$//" | head -1)
+    rig_port=$(beads_config_value "$config_file" dolt.port)
     case "$rig_port" in ''|*[!0-9]*) continue ;; esac
     [ "$rig_port" = "$GC_DOLT_PORT" ] && continue
     rig_pid=$(managed_runtime_listener_pid "$rig_port" || true)

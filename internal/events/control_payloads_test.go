@@ -132,3 +132,125 @@ func TestControlRootSettleFailedPayloadRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// TestControlDispatcherScopeGapIsAKnownEventTypeWithATypedPayload pins both
+// halves of the registration, for the same reason the control.stalled sibling
+// above does: a constant that never reached KnownEventTypes is invisible to
+// TestEveryKnownEventTypeHasRegisteredPayload, and the SSE wire would carry the
+// scope gap as an untyped envelope — which is the observability hole this event
+// exists to close.
+func TestControlDispatcherScopeGapIsAKnownEventTypeWithATypedPayload(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(KnownEventTypes, ControlDispatcherScopeGap) {
+		t.Fatalf("%q is missing from KnownEventTypes; the SSE projection would carry it untyped", ControlDispatcherScopeGap)
+	}
+	sample, ok := LookupPayload(ControlDispatcherScopeGap)
+	if !ok {
+		t.Fatalf("%q has no registered payload", ControlDispatcherScopeGap)
+	}
+	if _, ok := sample.(ControlDispatcherScopeGapPayload); !ok {
+		t.Fatalf("%q registered payload is %T, want ControlDispatcherScopeGapPayload", ControlDispatcherScopeGap, sample)
+	}
+}
+
+func TestControlDispatcherScopeGapPayloadRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	want := ControlDispatcherScopeGapPayload{
+		ScopeLabel:      `class binding "class:gmnos" serving rig "beads"`,
+		RigContext:      "beads",
+		StoreRef:        "class:gmnos",
+		SuppressedCount: 3,
+		SampleBeadID:    "ga-ods2a",
+	}
+	raw := ControlDispatcherScopeGapPayloadJSON(want)
+
+	decoded, typed, err := DecodePayload(ControlDispatcherScopeGap, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !typed {
+		t.Fatal("DecodePayload reported no registered type for control.dispatcher_scope_gap")
+	}
+	got, ok := decoded.(ControlDispatcherScopeGapPayload)
+	if !ok {
+		t.Fatalf("DecodePayload returned %T, want ControlDispatcherScopeGapPayload", decoded)
+	}
+	if got != want {
+		t.Fatalf("round-trip = %+v, want %+v", got, want)
+	}
+
+	// The typed-wire invariant: every field is a named scalar, so the JSON has
+	// a fixed shape rather than a free-form bag.
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, key := range []string{"scope_label", "rig_context", "store_ref", "suppressed_count", "sample_bead_id"} {
+		if _, ok := shape[key]; !ok {
+			t.Fatalf("payload JSON is missing %q: %s", key, raw)
+		}
+	}
+}
+
+// TestControlCheckUnlaunchableIsAKnownEventTypeWithATypedPayload pins both
+// halves of the registration, for the same reason the control.stalled sibling
+// above does: a constant that never reached KnownEventTypes is invisible to
+// TestEveryKnownEventTypeHasRegisteredPayload, and the SSE wire would carry
+// the announcement as an untyped envelope.
+func TestControlCheckUnlaunchableIsAKnownEventTypeWithATypedPayload(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(KnownEventTypes, ControlCheckUnlaunchable) {
+		t.Fatalf("%q is missing from KnownEventTypes; the SSE projection would carry it untyped", ControlCheckUnlaunchable)
+	}
+	sample, ok := LookupPayload(ControlCheckUnlaunchable)
+	if !ok {
+		t.Fatalf("%q has no registered payload", ControlCheckUnlaunchable)
+	}
+	if _, ok := sample.(ControlCheckUnlaunchablePayload); !ok {
+		t.Fatalf("%q registered payload is %T, want ControlCheckUnlaunchablePayload", ControlCheckUnlaunchable, sample)
+	}
+}
+
+func TestControlCheckUnlaunchablePayloadRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	want := ControlCheckUnlaunchablePayload{
+		BeadID:     "gcg-103196",
+		Kind:       "ralph",
+		RootBeadID: "gcg-102877",
+		StorePath:  "/data/projects/gc-demo-game",
+		CheckPath:  ".gc/scripts/checks/build-artifact-valid.sh",
+		Error:      "resolving gate condition path: lstat /data/projects/gc-demo-game/.gc/scripts/checks/build-artifact-valid.sh: no such file or directory",
+	}
+	raw := ControlCheckUnlaunchablePayloadJSON(want)
+
+	decoded, typed, err := DecodePayload(ControlCheckUnlaunchable, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !typed {
+		t.Fatal("DecodePayload reported no registered type for control.check_unlaunchable")
+	}
+	got, ok := decoded.(ControlCheckUnlaunchablePayload)
+	if !ok {
+		t.Fatalf("DecodePayload returned %T, want ControlCheckUnlaunchablePayload", decoded)
+	}
+	if got != want {
+		t.Fatalf("round-trip = %+v, want %+v", got, want)
+	}
+
+	// The typed-wire invariant: every field is a named scalar, so the JSON has
+	// a fixed shape rather than a free-form bag.
+	var shape map[string]any
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, key := range []string{"bead_id", "kind", "root_bead_id", "store_path", "check_path", "error"} {
+		if _, ok := shape[key]; !ok {
+			t.Fatalf("payload JSON is missing %q: %s", key, raw)
+		}
+	}
+}

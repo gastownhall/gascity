@@ -40,6 +40,10 @@ const (
 	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
 	// sweeps query it directly (the label-based query is recipient-scoped).
 	ReadMetadataKey = "mail.read"
+	// DedupKeyMetadataKey stores the caller-supplied dedup key on messages
+	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
+	// orders, maintenance loops) use it to suppress duplicate alerts.
+	DedupKeyMetadataKey = "mail.dedup_key"
 )
 
 // Message represents a mail message between agents or humans.
@@ -60,11 +64,14 @@ type Message struct {
 
 // HandoffIntent is the domain-shaped request for handoff mail. It lets the
 // gc handoff command express a message in mail terms — sender, recipient,
-// subject, body — plus the two handoff-specific routing details that ordinary
+// subject, body — plus the handoff-specific routing details that ordinary
 // [Provider.Send] does not surface: an explicit thread ID (so a handoff thread
-// is stable and addressable) and extra labels (the auto-handoff / archive-after-
-// inject markers). The bead translation of these fields is confined to the
-// backend implementation; callers never construct a message bead themselves.
+// is stable and addressable), extra labels (the auto-handoff / archive-after-
+// inject markers), and an optional dedup key that suppresses the send only while an
+// unread archive-after-inject auto-handoff with the same key is pending for the
+// recipient; a handoff that was read but left open does not suppress. The bead
+// translation of these fields is confined to the backend implementation;
+// callers never construct a message bead themselves.
 type HandoffIntent struct {
 	From        string
 	To          string
@@ -72,6 +79,7 @@ type HandoffIntent struct {
 	Body        string
 	ThreadID    string
 	ExtraLabels []string
+	DedupKey    string
 }
 
 // ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or
@@ -80,6 +88,33 @@ type HandoffIntent struct {
 type ArchiveResult struct {
 	ID  string
 	Err error
+}
+
+// DedupSender is an optional [Provider] capability: send-time suppression of
+// duplicate notifications. Repeating notifiers (cooldown orders, maintenance
+// loops) re-detect the same condition every interval; a provider implementing
+// DedupSender lets them emit at most one live copy per notification stream
+// instead of one message per interval. Suppression is best-effort, not a
+// hard guarantee: the check-then-create is not atomic, so two concurrent
+// senders of the same stream can race past each other and both create a
+// message. The repeating notifiers this serves are single-goroutine loops,
+// where the race does not arise. The dedup horizon is deliberately the
+// message's own live lifetime: archiving closes a message, and only open
+// messages are probed, so an archived notification no longer matches and the
+// stream may re-alert. Callers that want a longer re-alert cadence keep their
+// own last-sent state. Providers that cannot query their own message history
+// simply don't implement the interface and callers fall back to Send.
+type DedupSender interface {
+	// SendDeduped creates a message unless a live (un-archived) message
+	// with the same dedup key addressed to the same recipient already
+	// exists. Key identifies the notification stream (callers embed
+	// whatever distinguishes streams — order name, database, bead ID) and
+	// is matched together with the recipient, so senders must pass the
+	// same canonical recipient address on every send of a stream. When
+	// suppressed it returns the pre-existing message and suppressed=true;
+	// otherwise the newly created message, stamped with key under
+	// [DedupKeyMetadataKey].
+	SendDeduped(from, to, subject, body, key string) (msg Message, suppressed bool, err error)
 }
 
 // Provider is the internal interface for mail backends and the canonical
@@ -111,7 +146,8 @@ type Provider interface {
 	MarkUnread(id string) error
 
 	// Archive removes a message from all views. Bead-backed implementations
-	// delete the message bead eagerly.
+	// close the message bead, which keeps the row for history while taking it
+	// out of every mail view.
 	Archive(id string) error
 
 	// ArchiveMany archives a batch of messages in one round-trip where the
