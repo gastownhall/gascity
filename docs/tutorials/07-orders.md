@@ -235,7 +235,9 @@ The rules:
 - The script receives `ORDER_DIR` (the directory containing the order file) in
   its environment; pack-sourced orders also get `PACK_DIR`.
 - An `[order.env]` table exports extra environment variables into the script —
-  handy for tuning thresholds without editing it. `env` is exec-only.
+  handy for tuning thresholds without editing it. Controller-owned keys are
+  rejected: `GC_CITY_NAME` (the script always gets its own city's name) and
+  the store-scope variables cannot be overridden. `env` is exec-only.
 - Default timeout is 30s for formula orders, 300s for exec orders.
 
 ## Timeouts
