@@ -39,6 +39,104 @@ config, run one command, start the city.
   a provider a downstream fork compiled in creates its binding at first boot
   and moves nothing. This command's one source is the work store.
 
+## If your city predates split storage
+
+A city that has run for months on a single store has a long infrastructure
+history, and tooling of its own that assumes one store. Neither stops the
+migration, but both decide how the window goes and what breaks quietly
+afterwards. These notes come from cutting over one such city (about 20,000
+infrastructure beads across the city and 7 rigs, gc 9ee5212cc7).
+
+### Prune what you do not need to carry
+
+Every infrastructure row the migration moves is also a row the clear removes
+from the work store, and on a native-Dolt store each removal is a Dolt commit
+(Step 4). So the size of the infrastructure history decides how long the city
+stays down, and how much Dolt history it leaves behind. Before you schedule the
+window, while the city still runs:
+
+- **Order-tracking history** is usually the largest class: every order run
+  leaves a closed tracking bead, kept for
+  `[beads.policies.order_tracking].delete_after_close` (default `7d`). A busy
+  city can hold tens of thousands; this one held 60,000 and went into its
+  window with under 1,000. Lower the retention for the days before the window
+  (and put it back afterwards), then prune with `gc order sweep-tracking`
+  (`--dry-run` first; it asks for `--confirm` above
+  `GC_BULK_DELETE_CONFIRM_THRESHOLD` deletions). It always keeps at least the
+  latest 10 closed tracking beads per order, which is where an order's cooldown
+  reads its last run; do not delete those by other means.
+- **Read mail and other closed messaging rows** are the next largest. Whatever
+  you delete, keep a backup of it: rows you prune before the window are not in
+  the migration's own backup (`infra.retained-source.jsonl`), so keep your own
+  copy.
+
+`gc storage preflight` reports `would copy N infrastructure bead(s)` for the
+city and `would import N bead(s)` per rig, so you can watch the number fall.
+
+For scale, with the fleet stopped: the city clear removed 11,455 rows in about
+seven minutes (about 2,000 rows a minute after a slow first minute), and the
+rig import moved 8,630 rows from 7 rigs in about three and a half minutes, the
+largest rig (5,051 rows) taking 1m48s. Treat these as one city's numbers, not a
+promise.
+
+### Back up the binding yourself
+
+After the cutover, mail, sessions, order history, nudges and the workflow
+graph exist only in the binding's `beads.sqlite`
+(`<city>/.gc/store/graph/beads.sqlite` with the default `path = ".gc/store"`
+from Step 1; use your binding's `path` if you changed it), and nothing gc ships
+backs that file up yet
+([#8792](https://github.com/gastownhall/gascity/issues/8792)). A file-level
+copy of `.gc/` (rsync, a nightly copy job) is not a consistent copy of a live
+SQLite database in WAL mode. Use SQLite's own online backup:
+
+```
+sqlite3 <city>/.gc/store/graph/beads.sqlite ".backup <file>"
+```
+
+Take one right after `--from-work`, one after `--from-rigs`, and then at least
+daily. `gc storage migrate --from-backup` re-converges only to the state *as of
+the cutover*.
+
+### Check the closed-session retention you inherited
+
+On a split city, closed session beads in the binding are purged by wisp GC,
+not by the core reaper. That purge runs whenever the graph-class GC is on
+(both `[daemon] wisp_gc_interval` and `wisp_ttl` set, with `wisp_ttl` greater
+than zero) and keeps a closed session for `GC_INFRA_SESSION_PURGE_AGE` after
+its last update, default **72h**. It does not read
+`GC_REAPER_SESSION_PURGE_AGE`. A city that lengthened the reaper's session
+retention on purpose keeps only three days of session history in the binding
+unless it sets `GC_INFRA_SESSION_PURGE_AGE` too. Decide this before you enable
+wisp GC on a split city, not after.
+
+### Find the readers that do not go through gc
+
+Raw `bd` reads one ledger. After the split, a raw `bd list --type message`, or
+any read of mail, sessions, orders or nudges straight from the work store,
+**succeeds with an empty or stale answer**: exit 0, nothing to see. Scripts,
+prompts and formulas a long-lived city has grown tend to have such reads: a
+"what did I send" check, a wake gate, an audit. Before the window, search your
+packs and scripts for raw `bd` reads of infrastructure classes, and move them
+to `gc mail`, `gc session`, `gc nudge status`, `gc order` or `gc bd show <id>`.
+`gc bd ready` refuses on purpose (see "`gc bd ready` stops answering, on
+purpose").
+
+The same goes for anything that relies on `gc bd` forwarding to the bd on
+`PATH`. On a split city `gc bd` forwards only to a pinned bd build (see "gc bd
+on split cities"), so a wrapper script on `PATH` turns every forwarded command
+into a refusal. Check `gc doctor --check bd-command-inventory` and
+`gc storage vouch-bd` (with `--rig` for each rig) before the window.
+
+### Re-check Dolt's config after you start the city
+
+If you started the city's Dolt yourself at any point in the window (for
+example during a recovery), `gc start` adopts that server as it is and does not
+compare its config with the one the city would generate
+([#8791](https://github.com/gastownhall/gascity/issues/8791)). After Step 5,
+run `gc doctor --check dolt-config`; on drift, `gc dolt restart` regenerates
+it.
+
 ## Step 1: author the split
 
 Add the class map and the binding it names. Either half may live in an include
