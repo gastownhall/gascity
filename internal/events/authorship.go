@@ -195,6 +195,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionStranded:                       AuthorController,
 	SessionPoolSlotRetiredAtDrainDeadline: AuthorController,
 	SessionUnknownState:                   AuthorController,
+	SessionConfigDriftDeferred:            AuthorController,
 	SessionWakeRefused:                    AuthorController,
 	SessionResetStalled:                   AuthorController,
 	SessionColdStartTimeout:               AuthorController,
