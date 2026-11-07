@@ -115,7 +115,56 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	}
 	cmd.AddCommand(newHookRunCmd(stdout, stderr))
 	cmd.AddCommand(newHookCurrentCmd(stdout, stderr))
+	cmd.AddCommand(newHookQueryCmd(stdout, stderr))
 	return cmd
+}
+
+func newHookQueryCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "query <work|assigned-in-progress|assigned-ready|routed-pool> [agent]",
+		Short: "Read one configured work-query tier without claiming",
+		Long: `Runs the same query policy used by gc hook for the selected tier.
+
+Used by generated prompts to keep routing policy out of the prompt body.
+Resolves the current session and city configuration at execution time, including
+pool routing, claimant exclusions, dependencies, holds and storage topology.
+A custom work_query remains the full discovery contract for every tier.
+
+Prints normalized ready-only output. Exits 0 for work, 1 for an empty result or
+a query error, and 2 when the store is unavailable. Does not claim work;
+use gc hook --claim --json to atomically claim a candidate.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.RangeArgs(1, 2)(cmd, args); err != nil {
+				return err
+			}
+			return validateHookQueryKind(args[0])
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			return exitForCode(cmdHookWithOptions(args[1:], hookCommandOptions{QueryKind: args[0]}, stdout, stderr))
+		},
+	}
+}
+
+func validateHookQueryKind(kind string) error {
+	switch kind {
+	case "", "work", "assigned-in-progress", "assigned-ready", "routed-pool":
+		return nil
+	default:
+		return fmt.Errorf("unknown query tier %q: use work, assigned-in-progress, assigned-ready or routed-pool", kind)
+	}
+}
+
+func hookQueryCommand(a *config.Agent, topo config.QueryTopology, kind string) string {
+	switch kind {
+	case "assigned-in-progress":
+		return a.EffectiveAssignedInProgressQueryFor(topo)
+	case "assigned-ready":
+		return a.EffectiveAssignedReadyQueryFor(topo)
+	case "routed-pool":
+		return a.EffectiveRoutedPoolQueryFor(topo)
+	default:
+		return a.EffectiveWorkQueryFor(topo)
+	}
 }
 
 func newHookRunCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -292,6 +341,7 @@ type hookCommandOptions struct {
 	DrainAck   bool
 	JSON       bool
 	DrainAckFn hookDrainAckFunc
+	QueryKind  string
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -306,6 +356,10 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 }
 
 func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if err := validateHookQueryKind(opts.QueryKind); err != nil {
+		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if opts.Inject {
 		return 0
 	}
@@ -462,7 +516,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	topo, workQuery := hookWorkQuery(cityPath, cityName, cfg, &a, stderr)
+	topo, workQuery := hookTierQuery(cityPath, cityName, cfg, &a, opts.QueryKind, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 
 	// Build the work query subprocess environment. Rig-backed agents get
@@ -527,7 +581,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// maintainer-city) the claim would discard. No-op on a single-store city and
 	// for a custom work_query, where both forms are the same string.
 	var stores []hookStore
-	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
+	if singleStore := singleStoreHookQuery(cityPath, cityName, cfg, &a, topo, opts.QueryKind, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
 		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
 	} else {
 		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
@@ -1142,12 +1196,26 @@ func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 // the hook reaches the rig stores itself, by running the single-store query
 // once per store (hookWorkQueryStores).
 func hookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) (config.QueryTopology, string) {
+	return hookTierQuery(cityPath, cityName, cfg, a, "", stderr)
+}
+
+// hookTierQuery is hookWorkQuery for one tier of `gc hook query`. A named tier
+// stands in for a discovery placeholder in a generated prompt, so it reads what
+// that placeholder would have: the prompt topology, federated for a
+// cross-store-eligible agent on a city with rigs (promptQueryTopology), with
+// the federated reader's loud failure on a broken rig store. The returned
+// topology then scopes the read to the primary store. Plain `gc hook` passes
+// "" and keeps the city topology and its per-store fan-out.
+func hookTierQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, kind string, stderr io.Writer) (config.QueryTopology, string) {
 	topo := cityQueryTopology(cityPath, cfg)
 	warnFederationBlindOverrides(stderr, a, topo)
+	if kind != "" {
+		topo = promptQueryTopology(topo, a, cfg.Rigs)
+	}
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
-	return topo, expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
+	return topo, expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", hookQueryCommand(a, topo, kind), stderr)
 }
 
 // singleStoreHookWorkQuery returns the agent's work query built for the SAME
@@ -1159,6 +1227,10 @@ func hookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent,
 // It returns "" on a city that federates nothing, so the caller's scoping is a
 // no-op there rather than a second build of the identical string.
 func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) string {
+	return singleStoreHookQuery(cityPath, cityName, cfg, a, topo, "", stderr)
+}
+
+func singleStoreHookQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, kind string, stderr io.Writer) string {
 	if !topo.FederatedReady || cfg == nil || a == nil {
 		return ""
 	}
@@ -1167,8 +1239,8 @@ func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *co
 	// A custom work_query is returned verbatim for both topologies; scoping then
 	// no-ops on the equality check, and expanding it twice would repeat its
 	// template diagnostic, so stop before that.
-	command := a.EffectiveWorkQueryFor(singleStore)
-	if command == a.EffectiveWorkQueryFor(topo) {
+	command := hookQueryCommand(a, singleStore, kind)
+	if command == hookQueryCommand(a, topo, kind) {
 		return ""
 	}
 	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)

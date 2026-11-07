@@ -1,0 +1,76 @@
+# Compact prompt commands share the hook discovery contract. Testscript's
+# default file store and fake runtime keep this at the CLI boundary.
+
+! exec gc hook query typo
+stderr 'unknown query tier'
+! exec gc hook query
+stderr 'accepts between 1 and 2 arg'
+
+cd city
+exec gc hook query work worker
+stdout 'candidate'
+exec gc hook query assigned-in-progress worker
+stdout 'candidate'
+exec gc hook query assigned-ready worker
+stdout 'candidate'
+exec gc hook query routed-pool worker
+stdout 'candidate'
+
+# An empty queue differs from a store that did not answer.
+! exec gc hook query work empty
+stdout '^\[\]$'
+! exec gc hook query work unavailable
+! stdout .
+stderr 'GC_HOOK_STORE_UNAVAILABLE'
+
+# Exercise the generated tiers through Cobra and the query runner. This narrow
+# bd argv double distinguishes tiers without needing a database server.
+env PATH=$WORK/bin:$PATH
+chmod 755 $WORK/bin/bd
+cp .gc/beads.json $WORK/before.json
+exec gc hook query work generated
+stdout 'recovery'
+! stdout 'preassigned|routed'
+exec gc hook query assigned-in-progress generated
+stdout 'recovery'
+! stdout 'preassigned|routed'
+exec gc hook query assigned-ready generated
+stdout 'preassigned'
+! stdout 'recovery|routed'
+exec gc hook query routed-pool generated
+stdout 'routed'
+! stdout 'recovery|preassigned'
+cmp .gc/beads.json $WORK/before.json
+
+-- city/.gc/.keep --
+-- city/city.toml --
+[workspace]
+name = "hook-query-city"
+
+[[agent]]
+name = "worker"
+work_query = '''printf '[{"id":"candidate","status":"open"}]' '''
+
+[[agent]]
+name = "empty"
+work_query = "printf '[]'"
+
+[[agent]]
+name = "unavailable"
+work_query = "echo 'connection refused' >&2; exit 1"
+
+[[agent]]
+name = "generated"
+
+-- city/.gc/beads.json --
+{"seq":3,"beads":[{"id":"recovery","type":"task","status":"in_progress","assignee":"generated"},{"id":"preassigned","type":"task","status":"open","assignee":"generated"},{"id":"routed","type":"task","status":"open","metadata":{"gc.routed_to":"generated"}}]}
+-- bin/bd --
+#!/bin/sh
+case "$*" in
+  'list --status in_progress '*) printf '%s' '[{"id":"recovery","type":"task","status":"in_progress","assignee":"generated","blocked_by":[]}]' ;;
+  'ready --assignee='*) printf '%s' '[{"id":"preassigned","type":"task","status":"open","assignee":"generated"}]' ;;
+  'ready --metadata-field '*) printf '%s' '[{"id":"routed","type":"task","status":"open","metadata":{"gc.routed_to":"generated"}}]' ;;
+  show*) printf '%s' '[{"dependencies":[]}]' ;;
+  query*|list*) printf '%s' '[]' ;;
+  *) echo "unexpected bd command: $*" >&2; exit 1 ;;
+esac

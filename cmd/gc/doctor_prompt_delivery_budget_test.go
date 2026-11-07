@@ -23,11 +23,11 @@ func startupPromptOverhead(agentName string) int {
 }
 
 // clearPromptDeliveryBudgetEnv clears the ambient GC_* variables that
-// buildPrimeContextFor reads directly (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG,
+// buildPrimeContext reads directly (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG,
 // GC_RIG_ROOT), auto-restored by t.Setenv on test cleanup. Without this, a
 // test run from inside a real gc-managed session (which sets these) would
 // leak ambient rig/agent identity into what should be a hermetic fixture.
-// Every reader of these vars (cmd_prime.go's buildPrimeContextFor) treats
+// Every reader of these vars (cmd_prime.go's buildPrimeContext) treats
 // an empty value the same as unset (`os.Getenv(k) != ""`), so t.Setenv(k,
 // "") is behaviorally equivalent to unsetting.
 func clearPromptDeliveryBudgetEnv(t *testing.T) {

@@ -431,27 +431,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if cfgAgent.PromptTemplate != "" {
 		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
-	topo := config.QueryTopology{}
-	if p.city != nil {
-		topo.Beads = p.city.Beads
-	}
-	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
-	// cityQueryTopology. Resolving the federation fact means asking the
-	// storage routes, and the one-shot funnel that answers for a CLI command
-	// (cliStorageRoutes) is explicitly for the half of the program that
-	// "never builds a CityRuntime" — a controller reaching it would open the
-	// city's binding a second time in a process that already holds it open.
-	// The controller's own routes are the right source; threading them into
-	// this plumbing is a change to controller wiring, not part of swapping
-	// the reader, so it stays with the claim-routing slice (ga-601v2).
-	//
-	// The four discovery placeholders are a separate question from that
-	// storage-route fact. They run verbatim in the agent's own shell, with no
-	// hook-style store fan-out around them, so they render against
-	// promptQueryTopology, which federates them for a cross-store-eligible agent
-	// on a city with configured rigs and asks no storage route. SlingQuery is
-	// not a discovery reader and keeps the raw topology.
-	promptTopo := promptQueryTopology(topo, cfgAgent, p.rigs)
+	// Hook commands resolve storage topology when the agent executes them.
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -463,10 +443,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranch,
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(promptTopo), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(promptTopo), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(promptTopo), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(promptTopo), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", promptHookQuery(cfgAgent, "assigned-in-progress"), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", promptHookQuery(cfgAgent, "assigned-ready"), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", promptHookQuery(cfgAgent, "routed-pool"), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", promptHookQuery(cfgAgent, "work"), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,

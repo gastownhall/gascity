@@ -1919,6 +1919,7 @@ go_test(
         "program_status_shadow_wiring_test.go",
         "program_status_wiring_test.go",
         "prompt_delivery_test.go",
+        "prompt_hook_query_test.go",
         "prompt_meta_test.go",
         "prompt_missing_template_test.go",
         "prompt_query_topology_pins_test.go",
