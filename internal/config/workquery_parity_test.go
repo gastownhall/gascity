@@ -100,9 +100,9 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
-	route := a.QualifiedName()
+	reopenUnrouted := `bd update "$id" --status open`
 	if a.PoolName != "" {
-		route = a.PoolName
+		reopenUnrouted = `bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+a.PoolName)
 	}
 	_ = topo
 	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
@@ -117,7 +117,7 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(` + reopenUnrouted + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }

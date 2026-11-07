@@ -6565,6 +6565,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		Name:              "dog",
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnDeath()
 	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=myrig/dog'"} {
@@ -6586,12 +6587,15 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 }
 
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
-	a := Agent{Name: "mayor"}
+	a := Agent{Name: "worker"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=mayor'"} {
+	for _, want := range []string{"bd list --assignee=worker", "--status=in_progress", `bd update "$id" --status open`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, "--set-metadata") {
+		t.Errorf("EffectiveOnDeath() = %q, want singleton recovery without route backfill", got)
 	}
 }
 
@@ -6626,6 +6630,39 @@ esac
 	}
 	if !strings.Contains(log, "--set-metadata gc.run_target=hello-world/dog") {
 		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
+	}
+}
+
+func TestEffectiveOnDeathSingletonRetainsUnroutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[{"id":"test-durable","assignee":"hello-world/worker","status":"in_progress","metadata":{}}]'
+    ;;
+  query)
+    printf '[{"id":"test-ephemeral","assignee":"hello-world/worker","status":"in_progress","ephemeral":true,"metadata":{}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	for _, id := range []string{"test-durable", "test-ephemeral"} {
+		if !strings.Contains(log, "update "+id+" --status open\n") {
+			t.Errorf("hook log = %q, want %s reopened with its singleton assignee retained", log, id)
+		}
+	}
+	if strings.Contains(log, "--set-metadata") {
+		t.Errorf("hook log = %q, want no pool route invented for singleton work", log)
+	}
+	if strings.Contains(log, "--assignee") {
+		t.Errorf("hook log = %q, want directly assigned singleton work to remain assigned", log)
 	}
 }
 
