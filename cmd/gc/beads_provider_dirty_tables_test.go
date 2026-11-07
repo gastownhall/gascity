@@ -642,3 +642,95 @@ func TestManagedDoltDirtyTableCountIsDatabaseQualified(t *testing.T) {
 		t.Fatalf("session database `other` reports %d dirty tables, want 0 (the control must be clean)", viaOwnSession)
 	}
 }
+
+// A post-commit re-init that reports "already initialized" means the recovery
+// worked, as the gc-beads-bd branch already treats it. The gc-beads-k8s branch
+// must not turn a recovered scope into a hard init failure.
+func TestInitBeadsForDirWithExecutorK8sTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+	cityDir, rigDir := k8sDirtyTablesCity(t)
+
+	var commits int
+	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
+		commits++
+		return true, nil
+	})
+	var calls int
+	execute := func(_ string, _ []string, _ ...string) error {
+		calls++
+		if calls == 1 {
+			return errors.New(bdDirtyTablesErrText)
+		}
+		return errors.New("bd init: already initialized")
+	}
+
+	if err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", execute); err != nil {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want nil: an already-initialized answer after the recovery is success", err)
+	}
+	if calls != 2 {
+		t.Fatalf("init attempts = %d, want 2 (initial + post-commit retry)", calls)
+	}
+	if commits != 1 {
+		t.Fatalf("commit rounds = %d, want 1", commits)
+	}
+}
+
+// fakeDirtyThenAlreadyInitializedBd installs a bd that refuses its first `init`
+// with beads' dirty-table text and answers "already initialized" to every call
+// after it, and returns a reader for the number of times it was invoked.
+func fakeDirtyThenAlreadyInitializedBd(t *testing.T, dir string) func() int {
+	t.Helper()
+	countPath := filepath.Join(dir, "bd-invocations")
+	script := "#!/bin/sh\n" +
+		"echo x >> \"" + countPath + "\"\n" +
+		"if [ \"$(wc -l < \"" + countPath + "\")\" -le 1 ]; then\n" +
+		"  echo '" + bdDirtyTablesErrText + "' >&2\n" +
+		"else\n" +
+		"  echo 'bd init: already initialized' >&2\n" +
+		"fi\n" +
+		"exit 1\n"
+	fake := filepath.Join(dir, "bd")
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fake)
+	return func() int {
+		data, err := os.ReadFile(countPath)
+		if err != nil {
+			return 0
+		}
+		return strings.Count(string(data), "\n")
+	}
+}
+
+// initDefaultRigBdStore already treated an "already initialized" answer to the
+// first bd init as success. The same answer to the post-commit retry means the
+// recovery worked, so it must not come back as a `bd init: ...` failure.
+func TestInitDefaultRigBdStoreTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocations := fakeDirtyThenAlreadyInitializedBd(t, city)
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r1"}`)
+
+	var commits int
+	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
+		commits++
+		return true, nil
+	})
+
+	// The init goes on to open the store, so a later failure is not asserted
+	// on; it must not be the already-initialized answer the retry gave.
+	err := initDefaultRigBdStore(city, rig, "r1", "r1")
+	if err != nil && strings.Contains(err.Error(), "already initialized") {
+		t.Fatalf("initDefaultRigBdStore() = %v, want the already-initialized answer to the retry treated as success", err)
+	}
+	if got := invocations(); got != 2 {
+		t.Fatalf("bd init attempts = %d, want 2 (initial + post-commit retry)", got)
+	}
+	if commits != 1 {
+		t.Fatalf("commit rounds = %d, want 1", commits)
+	}
+}
