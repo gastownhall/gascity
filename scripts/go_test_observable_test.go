@@ -235,6 +235,73 @@ func TestGoTestObservableCaptureFailureNeverChangesProductStatus(t *testing.T) {
 	}
 }
 
+func TestGoTestObservableRemovesScriptCreatedLogOnPass(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	timingFile := filepath.Join(tmpDir, "timing.json")
+	events := `{"Action":"pass","Package":"github.com/gastownhall/gascity/internal/example","Test":"TestAlpha","Elapsed":0.3}` + "\n"
+	status, output := runObservableCommandWithLog(t, tmpDir, timingFile, events, 0, 0, "")
+	if status != 0 {
+		t.Fatalf("observable exit = %d, want 0:\n%s", status, output)
+	}
+	logPath := observableLogPath(t, output)
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("passing run left the script-created log %q behind: err=%v\n%s", logPath, err, output)
+	}
+	if !strings.Contains(string(output), "observable go test: PASS (log removed)") {
+		t.Fatalf("observable output did not report the removed log:\n%s", output)
+	}
+	// Timing capture reads the raw log, so it must have run before removal.
+	if _, err := os.Stat(timingFile); err != nil {
+		t.Fatalf("timing artifact missing after log removal: %v\n%s", err, output)
+	}
+}
+
+func TestGoTestObservableKeepsScriptCreatedLogOnFailure(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	events := `{"Action":"fail","Package":"github.com/gastownhall/gascity/internal/example","Test":"TestBroken","Elapsed":0.4}` + "\n"
+	status, output := runObservableCommandWithLog(t, tmpDir, filepath.Join(tmpDir, "timing.json"), events, 17, 0, "")
+	if status != 17 {
+		t.Fatalf("observable exit = %d, want product exit 17:\n%s", status, output)
+	}
+	logPath := observableLogPath(t, output)
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failing run did not keep its log %q: %v\n%s", logPath, err, output)
+	}
+	if string(got) != events {
+		t.Fatalf("kept log = %q, want the raw go test events %q", got, events)
+	}
+	if !strings.Contains(string(output), "observable go test: FAIL status=17 log="+logPath) {
+		t.Fatalf("observable output did not point at the kept log:\n%s", output)
+	}
+}
+
+func TestGoTestObservableKeepsCallerNamedLogOnPass(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	rawLog := filepath.Join(tmpDir, "caller-owned.jsonl")
+	events := `{"Action":"pass","Package":"github.com/gastownhall/gascity/internal/example","Test":"TestAlpha","Elapsed":0.3}` + "\n"
+	status, output := runObservableCommandWithLog(t, tmpDir, filepath.Join(tmpDir, "timing.json"), events, 0, 0, rawLog)
+	if status != 0 {
+		t.Fatalf("observable exit = %d, want 0:\n%s", status, output)
+	}
+	got, err := os.ReadFile(rawLog)
+	if err != nil {
+		t.Fatalf("passing run removed the caller-named log %q: %v\n%s", rawLog, err, output)
+	}
+	if string(got) != events {
+		t.Fatalf("caller-named log = %q, want the raw go test events %q", got, events)
+	}
+	if !strings.Contains(string(output), "observable go test: PASS log="+rawLog) {
+		t.Fatalf("observable output did not point at the kept log:\n%s", output)
+	}
+}
+
 func runObservableWithFakeGo(t *testing.T, output string, productStatus int) ([]byte, []byte) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -268,6 +335,13 @@ func runObservableCommand(t *testing.T, tmpDir, timingFile, output string, produ
 
 func runObservableCommandWithModuleStatus(t *testing.T, tmpDir, timingFile, output string, productStatus, moduleStatus int) (int, []byte) {
 	t.Helper()
+	return runObservableCommandWithLog(t, tmpDir, timingFile, output, productStatus, moduleStatus, filepath.Join(tmpDir, "raw.jsonl"))
+}
+
+// runObservableCommandWithLog runs the wrapper over a fake go. An empty rawLog
+// leaves OBSERVABLE_TEST_LOG unset so the wrapper creates (and owns) its log.
+func runObservableCommandWithLog(t *testing.T, tmpDir, timingFile, output string, productStatus, moduleStatus int, rawLog string) (int, []byte) {
+	t.Helper()
 	repoRoot := repoRoot(t)
 	fakeBin := filepath.Join(tmpDir, "bin")
 	if err := os.Mkdir(fakeBin, 0o755); err != nil {
@@ -300,9 +374,11 @@ exit 99
 	cmd.Dir = repoRoot
 	env := goTestScriptEnv(t, tmpDir)
 	env = replaceScriptEnv(env, "PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if rawLog != "" {
+		env = replaceScriptEnv(env, "OBSERVABLE_TEST_LOG", rawLog)
+	}
 	for key, value := range map[string]string{
 		"GC_TEST_NO_SLICE":            "1",
-		"OBSERVABLE_TEST_LOG":         filepath.Join(tmpDir, "raw.jsonl"),
 		"OBSERVABLE_TIMING_FILE":      timingFile,
 		"OBSERVABLE_VARIANT":          "default",
 		"OBSERVABLE_COMMIT_SHA":       "deadbeef",
@@ -366,6 +442,12 @@ func runObservableTestLogPath(t *testing.T, repoRoot, tmpDir string) string {
 	if err != nil {
 		t.Fatalf("go-test-observable failed: %v\n%s", err, out)
 	}
+
+	return observableLogPath(t, out)
+}
+
+func observableLogPath(t *testing.T, out []byte) string {
+	t.Helper()
 
 	match := regexp.MustCompile(`(?m)^observable go test: log=(.+)$`).FindSubmatch(out)
 	if match == nil {
