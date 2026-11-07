@@ -1642,3 +1642,18 @@ func TestConfigWarnWriter(t *testing.T) {
 		t.Fatalf("human mode: writer must be stderr")
 	}
 }
+
+// The suspend help must describe what the reconciler does to a live session of
+// a suspended template: it drains it unless the session still holds open
+// assigned work (TestAllocator_UndesiredSuspendedAgentDrainsAsSuspended,
+// session_reconciler.go's "suspended" drain). It used to say existing sessions
+// continue running.
+func TestAgentSuspendHelpSaysLiveSessionsDrain(t *testing.T) {
+	long := newAgentSuspendCmd(io.Discard, io.Discard).Long
+	if strings.Contains(long, "continue running") {
+		t.Fatalf("suspend help still says existing sessions continue running:\n%s", long)
+	}
+	if !strings.Contains(long, "drained unless it still holds") {
+		t.Fatalf("suspend help does not say a live session is drained unless it holds open assigned work:\n%s", long)
+	}
+}
