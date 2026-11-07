@@ -690,13 +690,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
-// gatherSupervisorUnitOwnership relates the live supervisor PID to gc's own
-// systemd user unit for the supervisor-unit-ownership doctor check.
+// gatherSupervisorUnitOwnership relates the live supervisor PID to the systemd
+// unit that owns it — the per-user unit gc installs, or a system-scope unit of
+// the same name (city-8xj7) — for the supervisor-unit-ownership doctor check.
 func gatherSupervisorUnitOwnership(pid int) doctor.SupervisorUnitOwnership {
 	raw := supervisorDetermineUnitOwnership(pid)
 	return doctor.SupervisorUnitOwnership{
 		Status:     raw.Status,
 		Unit:       raw.Unit,
+		Scope:      raw.Scope,
 		UnitActive: raw.UnitActive,
 		UnitPID:    raw.UnitPID,
 		ProbeErr:   raw.ProbeErr,
