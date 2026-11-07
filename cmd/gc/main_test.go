@@ -328,6 +328,11 @@ func TestMain(m *testing.M) {
 	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
 		return packman.RegistryRelease{}, false, nil, nil
 	}
+	// A storage migration raises the city work store's bd id floor before its
+	// clear (storage_id_floor.go). Test cities stub their work store, so the
+	// floor would reach for a bd that does not serve it; the tests that pin
+	// the floor install their own surface.
+	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
@@ -5594,6 +5599,10 @@ func TestInitFromSkip(t *testing.T) {
 		{filepath.Join(".gc", "prompts", "mayor.md"), false, true},
 		{".beads", true, true},
 		{filepath.Join(".beads", "metadata.json"), false, true},
+		{filepath.Join("rigs", "demo", ".beads"), true, true},
+		{filepath.Join("rigs", "demo", ".beads", "metadata.json"), false, true},
+		{filepath.Join("rigs", "demo", "config.toml"), false, false},
+		{filepath.Join("rigs", "demo", ".beads-backup", "metadata.json"), false, false},
 		{"gastown_test.go", false, true},
 		{filepath.Join("sub", "foo_test.go"), false, true},
 		{"city.toml", false, false},
@@ -5617,7 +5626,17 @@ func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
 
 	parent := t.TempDir()
 	srcDir := filepath.Join(parent, "template")
-	if err := os.MkdirAll(filepath.Join(srcDir, ".beads", "provider-runtime"), 0o755); err != nil {
+	nestedRig := filepath.Join(srcDir, "rigs", "demo")
+	for _, dir := range []string{
+		filepath.Join(srcDir, ".beads", "provider-runtime"),
+		filepath.Join(nestedRig, ".beads", "provider-runtime"),
+		filepath.Join(nestedRig, ".beads-backup"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(nestedRig, "config"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte("[workspace]\nname = \"template\"\n"), 0o644); err != nil {
@@ -5629,6 +5648,15 @@ func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "provider-runtime", "state"), []byte("provider-owned"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(nestedRig, "config", "rig.toml"), []byte("ordinary rig config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedRig, ".beads", "provider-runtime", "state"), []byte("stale nested provider state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedRig, ".beads-backup", "metadata.json"), []byte("user backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	cityPath := filepath.Join(parent, "city")
 	var stdout, stderr bytes.Buffer
@@ -5637,6 +5665,15 @@ func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("provider-owned .beads state was copied, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "rigs", "demo", ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("nested provider-owned .beads state was copied, stat err = %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(cityPath, "rigs", "demo", "config", "rig.toml")); err != nil || string(got) != "ordinary rig config" {
+		t.Fatalf("ordinary nested rig content = %q, %v; want it copied", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(cityPath, "rigs", "demo", ".beads-backup", "metadata.json")); err != nil || string(got) != "user backup" {
+		t.Fatalf("near-name .beads-backup content = %q, %v; want it copied", got, err)
 	}
 }
 

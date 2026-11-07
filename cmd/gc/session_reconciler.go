@@ -6650,7 +6650,7 @@ func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath stri
 		// (ErrSessionNotFound is tolerated). ResolveSessionRecordByExactID is the
 		// front-door typed twin of the raw ResolveSessionBeadByExactID — identical
 		// error contract, no bead escapes.
-		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(beads.SessionStore{Store: store}, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return false, err
 		}
 	}
@@ -7903,7 +7903,13 @@ func relaunchAgentForLaunchDrift(
 		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
-	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
+	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, relaunchErr == nil, time.Now()); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v\n", name, err) //nolint:errcheck
+	}
+	if err := relaunchErr; err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
 		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
 		// back to the full restart so the launch change is still applied.

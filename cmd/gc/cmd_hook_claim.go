@@ -678,7 +678,7 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.DrainPending = hookSessionDrainPending
 	}
 	if ops.InputVerdict == nil {
-		ops.InputVerdict = hookInputVerdictWithBdStore
+		ops.InputVerdict = hookInputDoneWithBdStore
 	}
 	if ops.RetireWorkflow == nil {
 		ops.RetireWorkflow = hookRetireWorkflowWithBdStore
@@ -1338,7 +1338,8 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
-	stop, err := molecule.WorkflowStopReason(store, candidate)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
@@ -2201,7 +2202,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// same root. Siblings share the bead's root, so one ancestry read, made only
 	// once there is a sibling to pin, answers for all of them; a failed read
 	// fails open like the gate itself.
-	var workflowStore beads.Store
+	var workflowStore beads.MoleculeTarget
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
 	stoppedSibling := func(sibling beads.Bead) bool {
@@ -2210,7 +2211,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		}
 		if !ancestorRead {
 			ancestorRead = true
-			workflowStore = ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")
+			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
 			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
 				ancestorStop = stop
 			}
@@ -2234,6 +2236,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
 			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// A pin runs the sibling in this seat's directory, so a sibling
+			// whose evidence binds it to another managed worktree is left
+			// routed for a seat in that worktree, as a fresh claim leaves it.
+			hookClaimWorktreeHeldElsewhere(sibling, opts.PoolSeat.WorkDir) ||
 			stoppedSibling(sibling) {
 			continue
 		}
@@ -2325,7 +2331,7 @@ func hookRetireIfInputSettled(candidate beads.Bead, opts hookClaimOptions, ops h
 // input convoy, or a convoy with no resolvable members, is never complete. For
 // a live graph.v2 root, input that prove proves absent — the convoy itself, or
 // every member it tracks — is purged.
-func workflowInputDone(ctx context.Context, store beads.Store, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+func workflowInputDone(ctx context.Context, store beads.WorkStore, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 	return workflowInputDoneAcross(ctx, store, store, candidate, identityCandidates, prove)
 }
 
@@ -2351,7 +2357,7 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // convoy and its members from work. On a single-store city both are the same
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
-func workflowInputDoneAcross(ctx context.Context, graph, work beads.Store, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 	rootID := workflowRootIDForInputCheck(candidate)
 	if rootID == "" {
 		return workflowInputVerdict{}, nil
@@ -2370,10 +2376,10 @@ func workflowInputDoneAcross(ctx context.Context, graph, work beads.Store, candi
 	}
 	purgeable := prove != nil && workflowRootPurgeable(root)
 	// An absence proof reads the claim's own stores before the city: work,
-	// and graph when it is another handle (an unrouted claim passes one store
-	// as both).
+	// and graph when it is another store (an unrouted claim passes one store
+	// as both, graph through work's handle).
 	var graphLeg []workflowInputReader
-	if !sameStoreHandle(graph, work) {
+	if !beads.SameStore(graph, work) {
 		graphLeg = []workflowInputReader{graph}
 	}
 	if purgeable {
@@ -2389,7 +2395,7 @@ func workflowInputDoneAcross(ctx context.Context, graph, work beads.Store, candi
 			return purgedIfProven(ctx, pending, graphLeg, []string{convoyID}, prove)
 		}
 	}
-	members, err := convoy.Members(work, convoyID, true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: work}, convoyID, true)
 	if err != nil {
 		return pending, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
@@ -2479,8 +2485,10 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
-func hookInputVerdictWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
-	return workflowInputDone(ctx, hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates, prove)
+// hookInputDoneWithBdStore is the default InputVerdict seam: workflowInputDone
+// over the bd store at dir.
+func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+	return workflowInputDone(ctx, beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates, prove)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -3127,20 +3135,6 @@ func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaim
 	return trees
 }
 
-// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
-// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
-// gc.work_branch before it will treat a bead as a fully managed workspace.
-var worktreeOwnershipEvidenceKeys = []string{
-	beadmeta.WorktreeRepoMetadataKey,
-	beadmeta.WorktreeRootMetadataKey,
-	beadmeta.WorktreeBaseRefMetadataKey,
-	beadmeta.WorktreeBaseSHAMetadataKey,
-	beadmeta.WorktreeCreatorMetadataKey,
-	beadmeta.WorktreeOwnerMetadataKey,
-	beadmeta.WorktreeGenerationMetadataKey,
-	beadmeta.WorktreeLifecycleMetadataKey,
-}
-
 // hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
 // eight worktree-ownership keys are either all present or all absent. A claim
 // must not be the thing that first introduces a partial (1-7 of 8) ownership
@@ -3152,12 +3146,12 @@ var worktreeOwnershipEvidenceKeys = []string{
 // just keeping the branch in sync).
 func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 	present := 0
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) != "" {
 			present++
 		}
 	}
-	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+	return present == 0 || present == len(beadmeta.WorktreeOwnershipEvidenceKeys)
 }
 
 // hookClaimManagedWorktreeDir returns the checkout a bead's complete
@@ -3182,7 +3176,7 @@ func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
 	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return "", false
 	}
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) == "" {
 			return "", false
 		}
@@ -3325,8 +3319,12 @@ func hookSeatManaged(label, seatWorkDir string, probe func(string) (bool, error)
 // hookClaimSeatInManagedWorktree reports whether seatWorkDir is a managed
 // worktree: its private git directory holds the provenance a completed
 // `gc worktree ensure` published, which worktree.Verify checked before the
-// controller started a pool seat there (verifiedPoolTriggerWorkDir). git
-// finding no repository there, and a git directory without a record, establish
+// controller started a pool seat there (verifiedPoolTriggerWorkDir), and the
+// record names seatWorkDir itself as the worktree's root. The controller only
+// starts a seat for bound work at that root, so a directory nested inside a
+// managed worktree (a configured work_dir or pack workspace subdirectory)
+// shares its git directory but is not one. git finding no repository there, a
+// git directory without a record, and a record naming another path establish
 // that it is not. A git that timed out or could not run, and a record that
 // could not be read or decoded, establish nothing and return an error.
 func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
@@ -3347,7 +3345,7 @@ func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(provenance.BeadID) != "", nil
+	return strings.TrimSpace(provenance.BeadID) != "" && pathutil.SamePath(provenance.Path, seatWorkDir), nil
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

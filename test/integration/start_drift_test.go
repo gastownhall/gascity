@@ -1277,9 +1277,22 @@ Environment=GC_SESSION=fake
 [Install]
 WantedBy=default.target
 `, binaryPath, gcHome, gcHome, gcHome, integrationIsolatedHome(gcHome), supervisorIsolatedHomeEnv, runtimeDir)
-	path := filepath.Join(dir, unitName)
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		t.Fatalf("writing systemd unit: %v", err)
+	// The manager finds the unit in the runtime directory, but gc's restart
+	// guard reads the installed service file at supervisorSystemdServicePath,
+	// $HOME/.local/share/systemd/user, and the gc subprocess runs under the
+	// isolated HOME. Mirror the unit there so the guard reads the same
+	// content the manager loaded; the copy lives under gcHome, so it is
+	// removed with the scenario and the manager never searches it.
+	guardDir := filepath.Join(integrationIsolatedHome(gcHome), ".local", "share", "systemd", "user")
+	if err := os.MkdirAll(guardDir, 0o755); err != nil {
+		t.Fatalf("creating isolated HOME systemd dir: %v", err)
+	}
+	// Mirror first: the runtime-dir copy is the one the manager loads, and
+	// the caller registers its cleanup only after this helper returns.
+	for _, path := range []string{filepath.Join(guardDir, unitName), filepath.Join(dir, unitName)} {
+		if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+			t.Fatalf("writing systemd unit: %v", err)
+		}
 	}
 	return unitName
 }

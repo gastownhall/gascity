@@ -199,7 +199,12 @@ calls = 4
 [[count]]
 path = "cmd/gc/cmd_beads_test.go"
 resource = "http_test_server"
-calls = 10
+calls = 11
+
+[[count]]
+path = "cmd/gc/cmd_citystatus_fresh_test.go"
+resource = "http_test_server"
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
@@ -650,7 +655,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_wait_test.go"
 resource = "http_test_server"
-calls = 6
+calls = 7
 
 [[count]]
 path = "cmd/gc/cmd_wait_test.go"
@@ -905,6 +910,18 @@ tagged = true
 path = "cmd/gc/hosted_beads_gateway_test.go"
 resource = "environment"
 calls = 3
+
+[[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/infra_copy_manifest_test.go"
@@ -1300,6 +1317,23 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
+resource = "subprocess"
+calls = 5
+tagged = true
+
+[[count]]
+path = "cmd/gc/storage_snapshot_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/supervisor_log_rotation_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1633,6 +1667,11 @@ resource = "http_test_server"
 calls = 6
 
 [[count]]
+path = "internal/api/client_status_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
 calls = 74
@@ -1861,6 +1900,16 @@ calls = 4
 path = "internal/api/session_stream_capability_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/api/status_build_cost_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/store_health_test.go"
+resource = "fixed_sleep"
+calls = 3
 
 [[count]]
 path = "internal/api/supervisor_dashboard_test.go"
@@ -2450,6 +2499,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimecontract/screen_reference_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
 resource = "subprocess"
 calls = 1
@@ -2598,6 +2652,11 @@ path = "internal/runtime/tmux/program_capture_integration_test.go"
 resource = "subprocess"
 calls = 2
 tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/program_status_shadow_nudge_test.go"
+resource = "fixed_sleep"
+calls = 2
 
 [[count]]
 path = "internal/runtime/tmux/server_probe_test.go"
@@ -2883,6 +2942,11 @@ resource = "subprocess"
 calls = 5
 
 [[count]]
+path = "scripts/check_routed_test_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/check_split_topology_rows_test.go"
 resource = "subprocess"
 calls = 1
@@ -2940,6 +3004,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/rbe_fork_pool_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "scripts/rbe_worker_env_drift_test.go"
 resource = "subprocess"
 calls = 2
@@ -2985,6 +3054,12 @@ calls = 1
 path = "scripts/test_slice_enroll_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "test/acceptance/beads_adopt_loopback_server_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "test/acceptance/beads_cli_contract_port_file_test.go"

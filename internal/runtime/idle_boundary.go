@@ -59,6 +59,12 @@ func IdleBoundaryNow(p Provider, name string) IdleBoundary {
 		return IdleBoundaryUnknown
 	}
 	idle, err := snap.SnapshotIdle(name)
+	return idleBoundaryOf(p, name, idle, err)
+}
+
+// idleBoundaryOf classifies one idle snapshot of session name on p (idle,
+// err), as [IdleBoundaryNow] documents.
+func idleBoundaryOf(p Provider, name string, idle bool, err error) IdleBoundary {
 	switch {
 	case errors.Is(err, ErrIdleIndeterminate):
 		if interactionPending(p, name) {

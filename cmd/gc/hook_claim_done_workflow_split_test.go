@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -29,7 +30,7 @@ import (
 // The work store here is a real FileStore and the binding a real SQLite store,
 // fenced to the infrastructure namespaces. The base seams are the production
 // functions (workflowInputDone, skipDoneWorkflow, failPurgedWorkflow) over the
-// work store, exactly as hookInputVerdictWithBdStore and
+// work store, exactly as hookInputDoneWithBdStore and
 // hookRetireWorkflowWithBdStore run them over the bd store.
 
 type doneWorkflowSplitFixture struct {
@@ -66,7 +67,7 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 		t.Fatal(err)
 	}
 	f.convoyID = conv.ID
-	if err := convoy.TrackItem(work, conv.ID, f.source.ID); err != nil {
+	if err := convoy.TrackItemIn(convoy.MemberClasses{Convoy: beadstest.Work(work)}, conv.ID, f.source.ID); err != nil {
 		t.Fatalf("tracking the source in the input convoy: %v", err)
 	}
 
@@ -119,7 +120,7 @@ func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 	t.Helper()
 	return hookClaimOps{
 		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
-			return workflowInputDone(ctx, f.work, candidate, ids, prove)
+			return workflowInputDone(ctx, beadstest.Work(f.work), candidate, ids, prove)
 		},
 		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
 			if verdict.State == workflowInputPurged {

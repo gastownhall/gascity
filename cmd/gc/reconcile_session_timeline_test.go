@@ -20,6 +20,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1297,7 +1298,7 @@ func operatorTimeline() []timelineFixture {
 			tlRestlessSeed,
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
-				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend(context.Background(), testActorIn(tw.t, session.ActorOperator, tw.city), "gc-1", false); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(st), tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend(context.Background(), testActorIn(tw.t, session.ActorOperator, tw.city), "gc-1", false); err != nil {
 					tw.t.Fatal(err)
 				}
 			}},

@@ -38,7 +38,7 @@ func workflowRigLegRetired(state State, info workflowStoreInfo) bool {
 // city that relocates the graph class, and false on every other city (where
 // the graph store IS the city store and no separate probe is needed).
 func workflowGraphStoreInfo(state State) (workflowStoreInfo, bool) {
-	graphStore := state.GraphBeadStore().Store
+	graphStore := state.Stores().Graph().Store
 	if graphStore == nil || graphStore == state.CityBeadStore() {
 		return workflowStoreInfo{}, false
 	}

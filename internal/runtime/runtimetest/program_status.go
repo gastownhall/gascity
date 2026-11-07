@@ -12,7 +12,7 @@ import (
 )
 
 // ProgramStatusFixtures supplies the sessions the RUNTIME-CONTRACT-017 cases
-// (PS-001…PS-014) read, for a provider implementing
+// (PS-001…PS-016) read, for a provider implementing
 // [runtime.ProgramStatusProvider]. Each fixture starts a session whose agent
 // pane runs the scripted OSC 7501 emitter (package
 // runtimetest/osc7501emitter/emit) under the given city switch mode,
@@ -32,6 +32,14 @@ type ProgramStatusFixtures struct {
 	// Relayed starts an armed session whose program runs under the
 	// probe-answering relay.
 	Relayed func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
+	// Held starts a session as Armed does, its capture armed declaring the
+	// mid-turn hold (runtime.ProgramStatusArm.HoldMidTurn).
+	Held func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
+	// Nudged starts a session as Armed does, with startup nudge nudge
+	// (runtime.Config.Nudge): its program reports script, and the capture
+	// has published it, before the start's startup ladder begins. Typed
+	// into the program, nudge runs as its next step.
+	Nudged func(t *testing.T, mode runtime.ProgramStatusMode, nudge string, script ...string) ProgramStatusSession
 }
 
 // ProgramStatusSession is one session a [ProgramStatusFixtures] fixture
@@ -91,7 +99,7 @@ func skipUnchecked(unchecked []string) error {
 	return skip("unchecked: " + strings.Join(unchecked, "; "))
 }
 
-// programStatusCases are PS-001…PS-014 in order.
+// programStatusCases are PS-001…PS-016 in order.
 var programStatusCases = []programStatusCase{
 	{"PS-001_SwitchOffReadsUnread", checkPS001},
 	{"PS-002_FirstReportIsValid", checkPS002},
@@ -107,13 +115,16 @@ var programStatusCases = []programStatusCase{
 	{"PS-012_AdvancedPastCreditsOnlyBoundaryBaselines", checkPS012},
 	{"PS-013_ForeignPipeIsNeverTakenOver", checkPS013},
 	{"PS-014_HealRearmsAndDisarms", checkPS014},
+	{"PS-015_HoldReadIsDeclaredOnAndBounded", checkPS015},
+	{"PS-016_StartupNudgeBehindADialogIsHandedBack", checkPS016},
 }
 
-// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-014:
+// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-016:
 // a program-status reading is the pane program's own bounded claim, valid
 // only from the pane's own armed incarnation with its reader attached,
 // Unread under the switch off, and never revalidated after a respawn. Heal
-// cases also need [runtime.ProgramCaptureHealer] and skip without it.
+// cases also need [runtime.ProgramCaptureHealer] and skip without it; the
+// hold case needs [runtime.ProgramStatusHoldProvider].
 //
 // Call it from a standalone test, never from a ledger-checked
 // TestXxxConformance proof, which must stay a bare [RunProviderTests] call.
@@ -616,7 +627,10 @@ func checkPS013(t *testing.T, f ProgramStatusFixtures) error {
 
 // PS-014: heal arms a not_armed pane, re-arms one whose pipe closed, leaves
 // a healthy capture alone, and disarms when the switch goes off; each
-// re-armed pane reads valid at its next report.
+// re-armed pane reads valid at its next report. A healthy capture whose
+// mid-turn hold declaration differs from want's has it set (backfilled on a
+// pane armed before its provider declared it) or withdrawn, the capture
+// otherwise untouched.
 func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil || f.Unarmed == nil {
 		return skip("needs armed- and unarmed-session fixtures")
@@ -643,6 +657,9 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	}
 	if missing := heal(ProgramStatusSession{Provider: u.Provider, Name: programStatusMissingSession}, "missing session", captureAll, ""); !errors.Is(missing, runtime.ErrSessionNotFound) {
 		return wantSessionNotFound("heal of a missing session", missing)
+	}
+	if err := checkHoldDeclarationHeal(t, f); err != nil {
+		return err
 	}
 
 	s := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
@@ -677,4 +694,179 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 		return err
 	}
 	return skipUnchecked(unchecked)
+}
+
+// holdRead takes s's fresh hold reading through the routed leaf.
+func holdRead(s ProgramStatusSession) (runtime.ProgramHoldReading, bool, error) {
+	h, ok := runtime.ProgramStatusHoldFor(s.Provider, s.Name)
+	if !ok {
+		return runtime.ProgramHoldReading{}, false, fmt.Errorf("provider %T does not implement runtime.ProgramStatusHoldProvider for %q", s.Provider, s.Name)
+	}
+	r, ok := h.ProgramStatusHoldRead(s.Name)
+	return r, ok, nil
+}
+
+// PS-015: a hold reading is taken only under the switch on and only for a
+// pane armed declaring the hold; it carries the record as the program last
+// reported it, so a live working root holds typing, and a blocked root or
+// an input boundary does not, and its hold ends at the bound past the later
+// of the record's Since and the pane's activity.
+func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
+	if f.Held == nil || f.Armed == nil {
+		return skip("needs held- and armed-session fixtures")
+	}
+	s := f.Held(t, runtime.ProgramStatusOn, "report state=working")
+	if _, ok := runtime.ProgramStatusHoldFor(s.Provider, s.Name); !ok {
+		return skip(fmt.Sprintf("provider %T does not implement runtime.ProgramStatusHoldProvider", s.Provider))
+	}
+	for _, c := range []struct {
+		step  string
+		state runtime.ProgramState
+		holds bool
+	}{
+		{"", runtime.ProgramWorking, true},
+		{"report state=idle", runtime.ProgramIdle, false},
+		{"report state=blocked:kind=question", runtime.ProgramBlocked, false},
+		{"report state=done", runtime.ProgramDone, false},
+		{"report state=working", runtime.ProgramWorking, true},
+	} {
+		if c.step != "" {
+			s.Emit(t, c.step)
+		}
+		label := "held " + string(c.state)
+		r, ok, err := holdRead(s)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if !ok || !r.Status.Decides() || r.Status.State != c.state {
+			return fmt.Errorf("%s: hold read ok=%v %+v, want a deciding %s reading", label, ok, r.Status, c.state)
+		}
+		now := time.Now()
+		if got := runtime.ProgramTypingHolds(r, now); got != c.holds {
+			return fmt.Errorf("%s: ProgramTypingHolds = %v, want %v (reading %+v)", label, got, c.holds, r.Status)
+		}
+		if !c.holds {
+			continue
+		}
+		from := r.Status.Since
+		if r.Activity.After(from) {
+			from = r.Activity
+		}
+		if r.Activity.After(now.Add(captureClockSkew)) {
+			return fmt.Errorf("%s: activity %v is after the read", label, r.Activity)
+		}
+		if runtime.ProgramTypingHolds(r, from.Add(runtime.ProgramStatusHoldLimit)) {
+			return fmt.Errorf("%s: the hold outlives its bound past %v", label, from)
+		}
+	}
+	for _, c := range []struct {
+		label string
+		s     ProgramStatusSession
+	}{
+		{"held under shadow", f.Held(t, runtime.ProgramStatusShadow, "report state=working")},
+		{"held under off", f.Held(t, runtime.ProgramStatusOff, "report state=working")},
+		{"armed without the hold", f.Armed(t, runtime.ProgramStatusOn, "report state=working")},
+	} {
+		r, ok, err := holdRead(c.s)
+		if err != nil {
+			return fmt.Errorf("%s: %w", c.label, err)
+		}
+		if ok {
+			return fmt.Errorf("%s: a hold reading %+v was taken", c.label, r.Status)
+		}
+	}
+	return nil
+}
+
+// startupNudgeStep is the startup nudge PS-016 starts with: typed into the
+// program, it reports a turn start, so the record shows whether it was typed.
+const startupNudgeStep = "report state=working"
+
+// startupNudgeWait bounds how long PS-016 waits for a typed nudge's report.
+const startupNudgeWait = 10 * time.Second
+
+// PS-016: under the switch on, a start whose program reports a dialog
+// (a live blocked root) through its whole startup ladder types no nudge,
+// succeeds, and hands the nudge back once ([runtime.TakeStartupNudgeHandback])
+// for its caller to queue (design §10.2 row A20); a start whose program is at
+// an input boundary types its nudge, which the program's turn start
+// confirms, and hands nothing back.
+func checkPS016(t *testing.T, f ProgramStatusFixtures) error {
+	if f.Nudged == nil {
+		return skip("needs a nudged-start fixture")
+	}
+	s := f.Nudged(t, runtime.ProgramStatusOn, startupNudgeStep, "report state=blocked:kind=permission")
+	nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name)
+	if !ok || nudge != startupNudgeStep {
+		return fmt.Errorf("blocked start: handback %q (%v), want the startup nudge %q", nudge, ok, startupNudgeStep)
+	}
+	if again, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("blocked start: handback %q taken twice", again)
+	}
+	if _, err := readValid(s, "blocked start, after the ladder", runtime.ProgramBlocked); err != nil {
+		return fmt.Errorf("%w: the nudge was typed into the dialog", err)
+	}
+	s = f.Nudged(t, runtime.ProgramStatusOn, startupNudgeStep, "report state=idle")
+	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("idle start: handback %q, want none", nudge)
+	}
+	deadline := time.Now().Add(startupNudgeWait)
+	for {
+		r, err := read(s)
+		if err != nil {
+			return fmt.Errorf("idle start: %w", err)
+		}
+		if r.Running() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("idle start: reading %+v after %s, want the typed nudge's turn start", r, startupNudgeWait)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// checkHoldDeclarationHeal is PS-014's hold half: a healthy capture armed
+// without the mid-turn hold has it backfilled when want declares it, is
+// left alone once it matches, and has it withdrawn when want stops
+// declaring it; each change is seen by the next fresh hold read, and the
+// capture keeps reading valid. A provider without hold reads, or fixtures
+// without a held one, skip it.
+func checkHoldDeclarationHeal(t *testing.T, f ProgramStatusFixtures) error {
+	a := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
+	if _, ok := runtime.ProgramStatusHoldFor(a.Provider, a.Name); !ok {
+		return nil
+	}
+	holding := runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}
+	declared := func(label string, want bool) error {
+		_, ok, err := holdRead(a)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if ok != want {
+			return fmt.Errorf("%s: hold read ok=%v, want the pane to declare the hold: %v", label, ok, want)
+		}
+		return nil
+	}
+	if err := declared("armed without the hold", false); err != nil {
+		return err
+	}
+	if err := heal(a, "backfill", holding, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	if err := declared("backfilled", true); err != nil {
+		return err
+	}
+	if err := heal(a, "backfilled, converged", holding, runtime.ProgramCaptureUnchanged); err != nil {
+		return err
+	}
+	if err := heal(a, "withdrawal", captureAll, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	if err := declared("withdrawn", false); err != nil {
+		return err
+	}
+	a.Emit(t, "report state=idle")
+	_, err := readValid(a, "after the declaration changes", runtime.ProgramIdle)
+	return err
 }

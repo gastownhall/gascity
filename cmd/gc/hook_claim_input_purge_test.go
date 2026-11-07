@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -149,7 +150,7 @@ func TestWorkflowInputVerdictPurgedWhenConvoyProvenAbsent(t *testing.T) {
 	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
 
 	for _, candidate := range []beads.Bead{w.root, w.open, stamped} {
-		verdict, err := workflowInputDone(context.Background(), store, candidate, nil, prover.prove)
+		verdict, err := workflowInputDone(context.Background(), beadstest.Work(store), candidate, nil, prover.prove)
 		if err != nil {
 			t.Fatalf("workflowInputDone(%s): %v", candidate.ID, err)
 		}
@@ -217,7 +218,7 @@ func purgeClaimOps(t *testing.T, cityDir string, cfg *config.City, store beads.S
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
 		},
 		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
-			return workflowInputDone(ctx, store, candidate, ids, prove)
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, ids, prove)
 		},
 		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
 			if verdict.State == workflowInputPurged {
@@ -482,7 +483,7 @@ func TestWorkflowInputVerdictWithoutCompleteAbsenceProofStaysPending(t *testing.
 			}
 			prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
 
-			verdict, err := workflowInputDone(context.Background(), store, w.open, nil, tc.prove(prover))
+			verdict, err := workflowInputDone(context.Background(), beadstest.Work(store), w.open, nil, tc.prove(prover))
 
 			if tc.wantErr != "" {
 				if err == nil || !errors.Is(err, proofErr) || err.Error() != tc.wantErr {
@@ -587,7 +588,7 @@ func TestWorkflowInputMissingConvoyWithoutProofIgnoresLeftoverEdges(t *testing.T
 			w := seedPurgedInputWorkflow(t, store, input.ID)
 			prover := &recordingProver{absent: map[string]bool{"gc-gone1": true, "gc-gone2": true}}
 
-			verdict, err := workflowInputDone(context.Background(), store, w.open, nil, prover.prove)
+			verdict, err := workflowInputDone(context.Background(), beadstest.Work(store), w.open, nil, prover.prove)
 			if err != nil {
 				t.Fatalf("workflowInputDone: %v", err)
 			}
@@ -646,7 +647,7 @@ func TestWorkflowInputMemberSurvivingInTheGraphHandleBlocksPurge(t *testing.T) {
 	w := seedPurgedInputWorkflow(t, graph, input.ID)
 	prover := &recordingProver{absent: map[string]bool{survivor.ID: true}}
 
-	verdict, err := workflowInputDoneAcross(context.Background(), graph, work, w.open, nil, prover.prove)
+	verdict, err := workflowInputDoneAcross(context.Background(), graph, beadstest.Work(work), w.open, nil, prover.prove)
 	if err != nil {
 		t.Fatalf("workflowInputDoneAcross: %v", err)
 	}
@@ -669,7 +670,7 @@ func TestWorkflowInputConvoyHeldByTheGraphHandleBlocksPurge(t *testing.T) {
 	w := seedPurgedInputWorkflow(t, graph, held.ID)
 	prover := &recordingProver{absent: map[string]bool{held.ID: true}}
 
-	verdict, err := workflowInputDoneAcross(context.Background(), graph, work, w.open, nil, prover.prove)
+	verdict, err := workflowInputDoneAcross(context.Background(), graph, beadstest.Work(work), w.open, nil, prover.prove)
 	if err != nil {
 		t.Fatalf("workflowInputDoneAcross: %v", err)
 	}
@@ -704,7 +705,7 @@ func TestWorkflowInputMissingConvoyIsReadOnceFromOneClaimStore(t *testing.T) {
 	store := &idGetCountingStore{Store: mem, id: "gc-gone"}
 	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
 
-	verdict, err := workflowInputDone(context.Background(), store, w.open, nil, prover.prove)
+	verdict, err := workflowInputDone(context.Background(), beadstest.Work(store), w.open, nil, prover.prove)
 
 	if err != nil || verdict.State != workflowInputPurged {
 		t.Fatalf("workflowInputDone = %+v, %v; want purged", verdict, err)
@@ -1055,7 +1056,7 @@ func TestHookDoneWorkflowRetirementListsMembershipOnceAndNeverProves(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := convoy.TrackItem(mem, conv.ID, source.ID); err != nil {
+	if err := convoy.TrackItemIn(convoy.MemberClasses{Convoy: beadstest.Work(mem)}, conv.ID, source.ID); err != nil {
 		t.Fatal(err)
 	}
 	w := seedPurgedInputWorkflow(t, mem, conv.ID)
@@ -1063,7 +1064,7 @@ func TestHookDoneWorkflowRetirementListsMembershipOnceAndNeverProves(t *testing.
 	prover := &recordingProver{absent: map[string]bool{conv.ID: true, source.ID: true}}
 	ops := hookClaimOps{
 		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
-			return workflowInputDone(ctx, store, candidate, ids, prove)
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, ids, prove)
 		},
 		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
 			if verdict.State == workflowInputPurged {
@@ -1129,7 +1130,7 @@ func TestHookInputPurgeRetirementFailure(t *testing.T) {
 	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
 	ops := hookClaimOps{
 		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
-			return workflowInputDone(ctx, store, candidate, ids, prove)
+			return workflowInputDone(ctx, beadstest.Work(store), candidate, ids, prove)
 		},
 		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
 			if verdict.State == workflowInputPurged {

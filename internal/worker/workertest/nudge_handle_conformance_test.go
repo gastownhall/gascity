@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -105,7 +106,7 @@ func sessionHandleWaitIdleNudge(t *testing.T, reading waitIdleReading) (worker.N
 	t.Helper()
 	fake := runtime.NewFake()
 	sp := &idleSnapshotProvider{Fake: fake, idle: reading.idle, err: reading.err}
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager: manager,
 		Session: worker.SessionSpec{

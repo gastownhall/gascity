@@ -102,7 +102,7 @@ func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.ListAllSessionBeads(beads.SessionStore{Store: store}, beads.ListQuery{})
 	if err != nil {
 		return nil, fmt.Errorf("listing session beads: %w", err)
 	}
@@ -306,27 +306,48 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 }
 
 // queueChangedResolvedProviderSessionMetadata queues the resolved-provider
-// projection fields (provider, provider_kind, builtin_ancestor) whenever the
-// freshly resolved value differs from what is stored, mirroring the command
-// refresh so a provider switch in agent.toml is reflected on the session bead
-// (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
-// write-if-changed reconcile contract) and never clobbers a stored value with
-// an empty resolved one — a transient resolution failure must not wipe good
+// projection (provider, provider_kind, builtin_ancestor, resume_flag,
+// resume_style, resume_command, session_id_flag) wherever the freshly
+// resolved value differs from what is stored, mirroring the command refresh
+// so a provider switch in agent.toml is reflected on the session bead
+// (gc-rhp36). A successful resolution is authoritative for the six family and
+// resume keys: one it leaves empty clears the stored value, so a previous
+// provider's family or resume command does not survive a switch or a config
+// edit (#8539). The provider name is queued only when the resolution names
+// one, since a start-command resolution is unnamed. It is diff-gated (no
+// write when unchanged, honoring the write-if-changed reconcile contract), and
+// a nil resolution queues nothing: a failed resolution must not wipe good
 // metadata.
+//
+// session_id_flag is a peer projection field of resume_flag: the reactive
+// startup-death strip (stripSessionIDFlag via retryFreshStartAfterStaleKey)
+// reads it from persisted bead metadata, so a legacy bead backfilled with
+// session_key but no session_id_flag would replay a rejected first-start
+// `--session-id <key>` command. Projecting it here lets an upgraded bead gain
+// the flag in the same tick its key is backfilled.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
 	}
+	queueChanged := func(key, value string) {
+		if existing[key] != value {
+			queue(key, value)
+		}
+	}
 	name := strings.TrimSpace(resolved.Name)
-	if name != "" && existing["provider"] != name {
-		queue("provider", name)
+	if name != "" {
+		queueChanged("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); family != "" && existing["provider_kind"] != family {
-		queue("provider_kind", family)
+	queueChanged("provider_kind", resolvedProviderFamilyMetadata(resolved))
+	ancestor := strings.TrimSpace(resolved.BuiltinAncestor)
+	if ancestor == name {
+		ancestor = ""
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name && existing["builtin_ancestor"] != ancestor {
-		queue("builtin_ancestor", ancestor)
-	}
+	queueChanged("builtin_ancestor", ancestor)
+	queueChanged("resume_flag", resolved.ResumeFlag)
+	queueChanged("resume_style", resolved.ResumeStyle)
+	queueChanged("resume_command", resolved.ResumeCommand)
+	queueChanged("session_id_flag", resolved.SessionIDFlag)
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
@@ -455,7 +476,7 @@ func closedConfiguredNamedSessionBeadToReopen(
 	if store == nil || cfg == nil {
 		return beads.Bead{}, false
 	}
-	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(beads.SessionStore{Store: store}, identity, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
 		return beads.Bead{}, false
@@ -598,10 +619,11 @@ func reopenClosedConfiguredNamedSessionBeadLocked(
 	batch map[string]string,
 	write func() error,
 ) (beads.Bead, error) {
-	if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, identity, bead.ID, identity); err != nil {
+	sessions := beads.SessionStore{Store: store}
+	if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, identity, bead.ID, identity); err != nil {
 		return beads.Bead{}, fmt.Errorf("alias %q for %s unavailable during reopen: %w", identity, identity, err)
 	}
-	if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sessionName, bead.ID, identity); err != nil {
+	if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, sessionName, bead.ID, identity); err != nil {
 		return beads.Bead{}, fmt.Errorf("session_name %q for %s unavailable during reopen: %w", sessionName, identity, err)
 	}
 	if err := write(); err != nil {
@@ -2174,7 +2196,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if managedAlias != "" {
 				lockFn := func() error {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, "", managedAlias); err != nil {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, "", managedAlias); err != nil {
 						fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 						if isConfiguredNamed {
 							createErr = err
@@ -2185,7 +2207,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						meta["alias"] = managedAlias
 					}
 					if isConfiguredNamed {
-						if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sn, "", managedAlias); err != nil {
+						if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, sn, "", managedAlias); err != nil {
 							fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable: %v\n", sn, agentName, err) //nolint:errcheck
 							createErr = err
 							blocked = true
@@ -2387,37 +2409,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		// the authoritative command source for respawn. If agent config changes
 		// (e.g., adding `[option_defaults] model = "opus"`, or switching the
 		// agent's provider), the freshly resolved values differ from the stored
-		// ones; sync here so the bead matches the current config. Empty resolved
-		// values are ignored to avoid clobbering stored values when resolution
-		// fails transiently. The provider/resume projection fields follow the
-		// same diff-gated, clobber-safe refresh as command (gc-rhp36); without
-		// it they freeze at their creation-time provider after an agent.toml
-		// provider switch while command alone follows.
+		// ones; sync here so the bead matches the current config. An empty
+		// resolved command and a nil resolution are ignored to avoid clobbering
+		// stored values when resolution fails transiently. A successful
+		// resolution refreshes the provider projection, clearing the family and
+		// resume fields it leaves empty (gc-rhp36, #8539); without it they
+		// freeze at their creation-time provider after an agent.toml provider
+		// switch while command alone follows.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
-		if tp.ResolvedProvider != nil {
-			queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
-			if tp.ResolvedProvider.ResumeFlag != "" && b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
-				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
-			}
-			if tp.ResolvedProvider.ResumeStyle != "" && b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
-				queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
-			}
-			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
-				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
-			}
-			// session_id_flag is a peer projection field of resume_flag: the
-			// reactive startup-death strip (stripSessionIDFlag via
-			// retryFreshStartAfterStaleKey) reads it from persisted bead
-			// metadata, so a legacy bead backfilled with session_key (above)
-			// but no session_id_flag would replay a rejected first-start
-			// `--session-id <key>` command. Project it diff-gated so upgraded
-			// beads gain the flag in the same tick the key is backfilled.
-			if tp.ResolvedProvider.SessionIDFlag != "" && b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
-				queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
-			}
-		}
+		queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
 
 		// Update existing bead metadata.
 		// live_hash is NOT updated here — it records what config the
@@ -2540,11 +2542,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				var err error
 				switch {
 				case isConfiguredNamed:
-					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
 				case isManagedPool && isPoolInstance:
-					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, managedAlias)
+					err = session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, managedAlias, b.ID, managedAlias)
 				default:
-					err = session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID)
+					err = session.EnsureAliasAvailableWithConfig(sessStore, cfg, managedAlias, b.ID)
 				}
 				if err != nil {
 					recordAliasConflict()

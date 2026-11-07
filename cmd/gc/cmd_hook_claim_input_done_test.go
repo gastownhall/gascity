@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
 )
 
@@ -37,7 +38,7 @@ func seedDoneWorkflow(t *testing.T, memberStatus string) (*beads.MemStore, beads
 	if err != nil {
 		t.Fatalf("create convoy: %v", err)
 	}
-	if err := convoy.TrackItem(store, conv.ID, work.ID); err != nil {
+	if err := convoy.TrackItemIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, conv.ID, work.ID); err != nil {
 		t.Fatalf("track: %v", err)
 	}
 	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
@@ -62,7 +63,7 @@ func seedDoneWorkflow(t *testing.T, memberStatus string) (*beads.MemStore, beads
 // workflowInputCompleteIn is workflowInputDone over store with no absence
 // prover, as the root id it resolved and whether the input is complete.
 func workflowInputCompleteIn(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	verdict, err := workflowInputDone(context.Background(), store, candidate, identityCandidates, nil)
+	verdict, err := workflowInputDone(context.Background(), beadstest.Work(store), candidate, identityCandidates, nil)
 	return verdict.RootID, verdict.State == workflowInputComplete, err
 }
 
@@ -188,7 +189,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatOfSameWorkflow(t *test
 	if err := store.Close(claimStep.ID); err != nil {
 		t.Fatalf("close claim step: %v", err)
 	}
-	members, err := convoy.Members(store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
 	if err != nil || len(members) != 1 {
 		t.Fatalf("convoy.Members = %d, %v; want 1 member", len(members), err)
 	}
@@ -220,7 +221,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySiblingSeatWhoseStepWasReopened(t
 	}}); err != nil {
 		t.Fatalf("create reopened claim step: %v", err)
 	}
-	members, err := convoy.Members(store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
 	if err != nil || len(members) != 1 {
 		t.Fatalf("convoy.Members = %d, %v; want 1 member", len(members), err)
 	}
@@ -250,7 +251,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySessionIDOnlyProvenance(t *testin
 	}}); err != nil {
 		t.Fatalf("create reopened claim step: %v", err)
 	}
-	members, err := convoy.Members(store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
 	if err != nil || len(members) != 1 {
 		t.Fatalf("convoy.Members = %d, %v; want 1 member", len(members), err)
 	}
@@ -270,7 +271,7 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySessionIDOnlyProvenance(t *testin
 func TestWorkflowInputDoneFalseWhenMemberAssignedToIdentityCandidate(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "handed_off")
 	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
-	members, err := convoy.Members(store, convoyID, true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, convoyID, true)
 	if err != nil {
 		t.Fatalf("convoy.Members: %v", err)
 	}

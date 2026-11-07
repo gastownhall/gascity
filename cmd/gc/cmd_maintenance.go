@@ -183,8 +183,8 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 }
 
 // renderMaintenanceStatus prints the status view as human-readable text or
-// JSON, appending a stale-read banner when the API cache age exceeds the
-// shared threshold. Always returns 0 — status is purely informational.
+// JSON. The status is not read from the bead cache, so it prints no cache-age
+// footer. Always returns 0 — status is purely informational.
 func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonOut bool, stdout io.Writer) int {
 	if jsonOut {
 		envelope := map[string]any{
@@ -223,9 +223,6 @@ func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonO
 			}
 			fmt.Fprintln(stdout, line) //nolint:errcheck
 		}
-	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
 	}
 	return 0
 }

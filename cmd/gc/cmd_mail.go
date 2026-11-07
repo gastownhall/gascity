@@ -582,7 +582,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
-	c, reason := mailCheckAPIClient(cityPath)
+	c, reason := mailCheckClient(cityPath, inject)
 	// An injecting check reads the mailbox in process whatever the controller
 	// says (routeMailCheck), and any check without a controller does. Its config
 	// load above ran the builtin readiness pass the routing read needs, so
@@ -603,6 +603,25 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 		return c, ""
 	}
 	return nil, apiClientFallbackReason(cityPath)
+}
+
+// mailInjectProbeClient resolves the client an injecting check probes for a
+// degraded-read notice before it reads the mailbox in process
+// (routeMailCheck): a standalone controller's [api] endpoint only
+// (standaloneAPIClient). In a supervisor-hosted city that probe would be a
+// supervisor inbox listing on every agent prompt, about half a second ahead of
+// the same read done locally, so there the hook reads the mailbox directly.
+// Indirected through a var so tests choose the client.
+var mailInjectProbeClient = standaloneAPIClient
+
+// mailCheckClient resolves the API client a `gc mail check` routes through:
+// mailInjectProbeClient for an injecting check, mailCheckAPIClient for every
+// other. An injecting check uses no fallback reason (routeMailCheck).
+func mailCheckClient(cityPath string, inject bool) (*api.Client, string) {
+	if inject {
+		return mailInjectProbeClient(cityPath), ""
+	}
+	return mailCheckAPIClient(cityPath)
 }
 
 // Route-log reasons for API-capable mail reads that take the local path
@@ -678,7 +697,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 				return 1
 			}
 			logRoute(stderr, cmdName, "api", "")
-			return renderMailCheckFromAPI(cr, target.display, inject, hookFormat, stdout)
+			return renderMailCheckFromAPI(cr, target.display, inject, hookFormat, stdout, stderr)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -785,10 +804,10 @@ func logMailTargetUnverified(stderr io.Writer, cmdName string, at mailAPITarget)
 // renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
 // With --inject, writes the <system-reminder> block and always returns 0.
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
-// local fallback contract; human output appends a stale-read banner when the
-// supervisor cache is > 30 s old. The count is the server's pre-paging Total,
+// local fallback contract; human output is followed by the cache-age footer on
+// stderr when the server's cache is behind (writeCacheAgeFooter). The count is the server's pre-paging Total,
 // so a mailbox larger than one page reports every unread message.
-func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	messages := cr.Body.Items
 	if inject {
 		if len(messages) > 0 {
@@ -801,9 +820,7 @@ func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient strin
 		return 1
 	}
 	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", n, recipient) //nolint:errcheck // best-effort stdout
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
@@ -1310,7 +1327,7 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, sessS
 		return "human", nil
 	}
 	if sessStore != nil {
-		sessionID, err := session.ResolveSessionIDByExactID(sessStore, identifier)
+		sessionID, err := session.ResolveSessionIDByExactID(beads.SessionStore{Store: sessStore}, identifier)
 		if err == nil {
 			return sessionID, nil
 		}
@@ -1542,7 +1559,7 @@ func resolveMailTargetsCached(sessStore beads.Store, identifier string, cache *m
 // from its session inbox like a target resolved by id, rather than expanding
 // each of its addresses through whichever session holds that address now.
 func mailTargetFromSessionID(sessStore beads.Store, sessionID, identifier string) (resolvedMailTarget, error) {
-	info, _, err := session.ResolveSessionRecordByExactID(sessStore, sessionID)
+	info, _, err := session.ResolveSessionRecordByExactID(beads.SessionStore{Store: sessStore}, sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
@@ -2618,9 +2635,7 @@ func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jso
 				return 0
 			}
 			printMessage(cr.Body, stdout)
-			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-			}
+			writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 			return 0
 		},
 		func() int { return doMailPeekFallback(args, jsonOut, stdout, stderr) },
@@ -3133,9 +3148,7 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 			if code := writeMailCountResult(at.target, cr.Body.Total, cr.Body.Unread, jsonOut, stdout, stderr); code != 0 || jsonOut {
 				return code
 			}
-			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-			}
+			writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 			return 0
 		},
 		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },

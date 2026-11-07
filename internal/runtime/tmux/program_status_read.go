@@ -27,17 +27,19 @@ const programReadSanitizer = "[^-+A-Za-z0-9=_.|%]"
 
 // programPaneFormat is a pane's capture fields, appended to a list-panes -a
 // row only while the switch is not off: the agent-pane marker, the pane id,
-// whether a pipe-pane reader is attached, and the sanitized tap nonce and
-// record. The row's own pane_dead field completes the agent-pane read. An
+// whether a pipe-pane reader is attached, the sanitized tap nonce and
+// record, and the sanitized hold declaration (programHoldOption). The row's
+// own pane_dead field completes the agent-pane read. An
 // option set at no scope expands empty; one set at window, session or global
 // scope is inherited, which the judgement's pane-bound nonce compare tells
 // apart.
 const programPaneFormat = agentPaneMarkerFormat + "\t#{pane_id}\t#{pane_pipe}\t" +
 	"#{s/" + programReadSanitizer + "//:" + programTapOption + "}\t" +
-	"#{s/" + programReadSanitizer + "//:" + programStatusOption + "}"
+	"#{s/" + programReadSanitizer + "//:" + programStatusOption + "}\t" +
+	"#{s/" + programReadSanitizer + "//:" + programHoldOption + "}"
 
 // programPaneFields is the field count of programPaneFormat.
-const programPaneFields = 5
+const programPaneFields = 6
 
 // programPane is one pane's capture fields as list-panes printed them.
 type programPane struct {
@@ -47,7 +49,13 @@ type programPane struct {
 	pipe   bool   // a pipe-pane reader is attached
 	tap    string // the tap nonce as the pane reads it, inherited values included
 	record string // the published record, sanitized
+	hold   string // the hold declaration as the pane reads it: its own id when declared
 }
+
+// holdDeclared reports whether the pane's hold declaration names the pane
+// itself, as a hold-declaring arm binds it: a value set at window, session
+// or global scope names another pane, or none.
+func (p programPane) holdDeclared() bool { return p.hold != "" && p.hold == p.id }
 
 // parseProgramPane parses programPaneFields fields of a row whose pane_dead
 // field read dead. It reports false for a field tmux would never print: an
@@ -56,7 +64,7 @@ func parseProgramPane(fields []string, dead bool) (programPane, bool) {
 	if len(fields) != programPaneFields {
 		return programPane{}, false
 	}
-	pane := programPane{mark: fields[0], id: fields[1], dead: dead, tap: fields[3], record: fields[4]}
+	pane := programPane{mark: fields[0], id: fields[1], dead: dead, tap: fields[3], record: fields[4], hold: fields[5]}
 	switch pane.mark {
 	case runtime.TmuxAgentPaneMarked, runtime.TmuxAgentPaneOrphan, "pane":
 	default:
@@ -105,19 +113,27 @@ func foldProgramPane(rows []programPane) (programPane, bool) {
 
 // programTaps is the process table's account of capture readers: the nonce
 // ("<rand>.<pane_id>") every tap process carries. known is false when the
-// table was not read, and then no tap's liveness is known.
+// table was not read, and then no tap's liveness is known. pending holds the
+// rands of the nonces this process armed after the table was scanned (see
+// programArmStamps): their taps may postdate it.
 type programTaps struct {
-	known  bool
-	nonces map[string]struct{}
+	known   bool
+	nonces  map[string]struct{}
+	pending map[string]struct{}
 }
 
-// liveness is the tap-liveness tristate for nonce.
+// liveness is the tap-liveness tristate for nonce. A tap the table does not
+// hold is gone unless its arm postdates the table, and then it is unknown:
+// the table cannot say.
 func (t programTaps) liveness(nonce string) runtime.ProgramTapLiveness {
 	if !t.known {
 		return runtime.ProgramTapUnknown
 	}
 	if _, ok := t.nonces[nonce]; ok {
 		return runtime.ProgramTapAlive
+	}
+	if _, ok := t.pending[nonceRand(nonce)]; ok {
+		return runtime.ProgramTapUnknown
 	}
 	return runtime.ProgramTapGone
 }
@@ -161,6 +177,7 @@ func judgeProgramPane(mode runtime.ProgramStatusMode, gate bool, pane programPan
 	if named {
 		row.PaneID, row.PaneDead, row.PanePipe, row.Tap = pane.id, pane.dead, pane.pipe, pane.tap
 		row.TapLiveness = taps.liveness(pane.tap)
+		row.HoldDeclared = pane.holdDeclared()
 		record, err := programstatus.Decode(pane.record)
 		row.RecordForm, row.Record = programstatus.RecordForm(err), record
 	}
@@ -200,17 +217,17 @@ func (p *Provider) ProgramStatus(name string) (runtime.ProgramStatus, error) {
 		// fields: there is nothing to judge.
 		return runtime.ProgramStatus{Mode: mode}, nil
 	}
-	return judgeProgramPane(mode, p.tm.captureGatePassed(), session.Program, session.ProgramNamed, obs.state.programTaps()), nil
+	return judgeProgramPane(mode, p.tm.captureGatePassed(), session.Program, session.ProgramNamed, p.tm.snapshotTaps(obs.state)), nil
 }
 
 // judgeInventoryPrograms fills each entry's Program from its session's agent
 // pane, judged under mode with the tap liveness of the state cache's process
 // table. That table can predate the inventory's listing by up to the cache's
-// TTL, so a pane armed in between reads reader_lost until the next refresh:
-// a reading that withholds state, never one that grants it.
+// TTL; a tap this process armed after the table was scanned reads unknown
+// liveness (snapshotTaps), not reader_lost, until the next refresh.
 func (p *Provider) judgeInventoryPrograms(mode runtime.ProgramStatusMode, entries map[string]runtime.InventoryEntry, panes map[string]programPane) {
 	gate := p.tm.captureGatePassed()
-	taps := p.cache.currentState().programTaps()
+	taps := p.tm.snapshotTaps(p.cache.currentState())
 	for name, e := range entries {
 		pane, named := panes[name]
 		e.Program = judgeProgramPane(mode, gate, pane, named, taps)

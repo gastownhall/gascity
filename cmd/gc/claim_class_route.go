@@ -844,7 +844,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(ctx, route.class, work, candidate, identityCandidates, prove)
+		return workflowInputDoneAcross(ctx, route.class, beads.WorkStore{Store: work}, candidate, identityCandidates, prove)
 	}
 
 	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {

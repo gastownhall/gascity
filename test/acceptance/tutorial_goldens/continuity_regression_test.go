@@ -70,7 +70,7 @@ func TestTutorialContinuity_CommunicationUsesVisibleWakeAndRigScopedReviewer(t *
 	if !strings.Contains(page04Text, `gc session nudge mayor "Check mail and hook status, then act accordingly"`) {
 		t.Fatal("tutorial 04 no longer shows the explicit mayor wake-up step")
 	}
-	if !strings.Contains(page04Text, `gc sling my-project/reviewer "Review the auth module changes"`) {
+	if !strings.Contains(page04Text, `gc sling my-project/reviewer "Review hello.py and report feedback"`) {
 		t.Fatal("tutorial 04 no longer shows the mayor routing work to the rig-scoped reviewer")
 	}
 }
@@ -101,6 +101,24 @@ func TestTutorialContinuity_BeadsExplainsBlockedReadyQuery(t *testing.T) {
 	} {
 		if !strings.Contains(page06Text, want) {
 			t.Fatalf("tutorial 06 is missing the blocked-work explanation %q", want)
+		}
+	}
+}
+
+func TestTutorialContinuity_OrdersPageCarriesTheFilesItsGoldenCreates(t *testing.T) {
+	script := tutorialLintScriptShellCommand(t)
+	for _, want := range []string{"#!/bin/sh", "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("tutorial 07 lint-changed.sh heredoc is missing %q:\n%s", want, script)
+		}
+	}
+	for file, want := range map[string]string{
+		"# orders/lint-check.toml":    `exec = "scripts/lint-changed.sh"`,
+		"# orders/release-notes.toml": `schedule = "0 9 * * 1"`,
+	} {
+		body := tutorialFileSnippet(t, "docs/tutorials/07-orders.md", "toml", file)
+		if !strings.Contains(body, want) {
+			t.Fatalf("tutorial 07 %s is missing %q:\n%s", file, want, body)
 		}
 	}
 }

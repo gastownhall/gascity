@@ -63,7 +63,7 @@ func (s *Store) GetWait(id string) (WaitInfo, error) {
 // reachable waits instead of dropping them. A hard (non-partial) store error still
 // short-circuits with nil rows.
 func (s *Store) WaitsForSession(sessionID string) ([]WaitInfo, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -136,7 +136,7 @@ func (s *Store) ListWaits(state, sessionID string) ([]WaitInfo, error) {
 // read folds its beads.PartialResultError through alongside the surviving rows
 // (same fold-through as WaitsForSession); a hard error returns nil rows.
 func (s *Store) listWaitsByLabel() ([]WaitInfo, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	all, err := s.store.List(beads.ListQuery{
@@ -507,7 +507,7 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
 // during canonical session repair, closing terminal waits it encounters.
 func (s *Store) ReassignWaits(oldSessionID, newSessionID string) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
@@ -588,7 +588,7 @@ func (s *Store) WakeSession(id string, now time.Time, opts WakeOpts) (WakeResult
 	if !IsSessionBeadOrRepairable(b) {
 		return WakeResult{}, fmt.Errorf("%w: %s", ErrNotSessionBead, id)
 	}
-	RepairEmptyType(s.store.Store, &b)
+	RepairEmptyType(s.store, &b)
 	info := infoFromPersistedBead(b)
 	if opts.RejectClosed && b.Status == "closed" {
 		return WakeResult{}, &WakeConflictError{SessionID: id, State: "closed"}
