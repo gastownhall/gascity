@@ -1355,6 +1355,7 @@ go_test(
         "cmd_prime_test.go",
         "cmd_prompt_test.go",
         "cmd_ready_bd_status_inventory_test.go",
+        "cmd_ready_dispatchable_test.go",
         "cmd_ready_test.go",
         "cmd_register_test.go",
         "cmd_registry_requests_test.go",
