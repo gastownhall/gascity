@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -82,7 +83,9 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	// when no Get matched — dropping up to one metadata scan per store on the
 	// common path. Both phases still consult every store, so cross-store
 	// uniqueness (selectWorkflowRootMatch's len(matches)==1 gate) is unchanged
-	// (gascity#2940).
+	// (gascity#2940). The one exception is a root the residency resolver pins
+	// to the graph binding: the binding is its authority, so the sweep is
+	// skipped (graphBindingWorkflowRoot).
 	stores := s.workflowStores()
 	storesScanned := make([]string, 0, len(stores))
 	seenStoreRefs := make(map[string]bool, len(stores))
@@ -100,6 +103,21 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	// the city name directly (as the SQL path does) instead of harvesting it
 	// mid-scan, so it is correct even when the city store yields no match.
 	cityScopeRef := workflowCityScopeRef(s.state.CityName())
+
+	// When the residency resolver pins the root to the relocated graph
+	// binding, the binding is its authority and any work store's copy is a
+	// frozen migration twin, so the snapshot reads the binding alone and skips
+	// the sweep, whose Get misses cost a bd call per store on a city of
+	// proxied-local rigs. A decline or anything the snapshot cannot use falls
+	// through to the sweep unchanged.
+	if graph, ok := workflowGraphStore(stores); ok {
+		if root, ok := s.graphBindingWorkflowRoot(graph, workflowID); ok {
+			if match, ok := selectWorkflowRootMatch([]workflowRootMatch{{info: graph, root: root}}, fallbackScopeKind, fallbackScopeRef, cityScopeRef); ok {
+				return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, []string{graph.ref}, false, snapshotIndex)
+			}
+		}
+	}
+
 	var firstGetErr error
 
 	for _, info := range stores {
@@ -181,6 +199,44 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	}
 
 	return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
+}
+
+// workflowGraphStore returns the relocated graph binding's entry from a
+// workflowStores list; a city whose graph class is not relocated has none.
+func workflowGraphStore(stores []workflowStoreInfo) (workflowStoreInfo, bool) {
+	for _, info := range stores {
+		if info.store != nil && strings.HasPrefix(info.ref, workflowGraphStoreRefPrefix+":") {
+			return info, true
+		}
+	}
+	return workflowStoreInfo{}, false
+}
+
+// graphBindingWorkflowRoot returns the workflow root when the residency
+// resolver pins id to the graph binding (storeref.ResolveBindingOwner, which
+// never reads a work store). It declines on anything else: no binding owner,
+// another binding, a resolver or read fault, or a bead that is not this
+// workflow's root. The caller's sweep then reads every store and reports any
+// fault itself.
+func (s *Server) graphBindingWorkflowRoot(graph workflowStoreInfo, workflowID string) (beads.Bead, bool) {
+	plan, err := storeref.Plan(storeref.ByID{ID: workflowID, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	owner, found, err := storeref.ResolveBindingOwner(plan, workflowID)
+	if err != nil || !found || owner.Store != graph.store {
+		return beads.Bead{}, false
+	}
+	root := owner.Bead
+	if !owner.Read {
+		if root, err = owner.Store.Get(workflowID); err != nil {
+			return beads.Bead{}, false
+		}
+	}
+	if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
+		return beads.Bead{}, false
+	}
+	return root, true
 }
 
 // snapshotFromStore builds a workflow snapshot for one store. Both of its
