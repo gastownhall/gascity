@@ -80,7 +80,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				// The entry is already stored; publish it. A redelivery after
 				// a failed advance must advance the frontier past the stored
 				// entry, or the entry stays invisible to readers forever.
-				if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, existing.Sequence); err != nil {
+				if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, existing.Sequence, transcriptPinsHonored(existing.ID, state.ID)); err != nil {
 					return err
 				}
 				out = *existing
@@ -161,19 +161,22 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				case transcriptPinForeign:
 					return verifyErr
 				case transcriptPinOurs:
-					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence, transcriptPinsHonored(entry.ID, state.ID)); err != nil {
 						return err
 					}
 					out = *entry
 					return nil
 				case transcriptPinAnother:
-					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+					// The pin holds another writer's valid entry, so pins are
+					// honored here by construction: a bead read back at the
+					// pinned id.
+					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence, true); err != nil {
 						return err
 					}
 					continue
 				}
 			}
-			if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+			if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence, created.ID == pin); err != nil {
 				return err
 			}
 			out, err = decodeTranscriptBead(created)

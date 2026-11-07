@@ -47,6 +47,9 @@ const (
 	// transcriptScanMaxPasses bounds the allocation bucket scan: one pass per
 	// sequence the scan has to skip.
 	transcriptScanMaxPasses = 32
+	// transcriptRecoverMaxEntries bounds the CAS-less roll-forward: how many
+	// contiguous occupied pins one completed covering write may recover over.
+	transcriptRecoverMaxEntries = 64
 
 	// transcriptAppendTokenKey is the metadata key every appended entry
 	// carries this Append's random token under. A create that committed but
@@ -68,6 +71,14 @@ func newTranscriptAppendToken() (string, error) {
 // keeps the entry exactly readable by sequence.
 func transcriptPinnedEntryID(stateID string, sequence int64) string {
 	return fmt.Sprintf("%s-%d", stateID, sequence)
+}
+
+// transcriptPinsHonored reports whether entryID is a pin of stateID: only
+// then is reading a pin a reliable probe of a stored entry (a store that
+// minted its own id over the pin stores the entry elsewhere in the
+// namespace).
+func transcriptPinsHonored(entryID, stateID string) bool {
+	return len(entryID) > len(stateID)+1 && entryID[:len(stateID)] == stateID && entryID[len(stateID)] == '-'
 }
 
 // live reads this service's store behind any cache the store chain carries, so
@@ -183,10 +194,12 @@ func (s *transcriptService) nextAllocatableSequenceLive(ref ConversationRef, flo
 // storedSeq — never lowering it — and initializes earliest_available_sequence
 // when the state predates it. The advance goes through the metadata CAS when
 // the store offers it, so a racing writer's frontier survives; otherwise the
-// binding lock serializes local writers and a covering write is exact. The
+// binding lock serializes local writers and a covering write is exact, and
+// when the store honors pins the write is followed by a bounded roll-forward
+// over the contiguous occupied pins earlier failed advances left behind. The
 // CAS-conflict and CAS-error cases re-read the live state: a frontier already
 // past the target resolves them, and the remaining budget bounds the retry.
-func (s *transcriptService) coverTranscriptFrontierLocked(ctx context.Context, ref ConversationRef, stateID string, storedSeq int64) error {
+func (s *transcriptService) coverTranscriptFrontierLocked(ctx context.Context, ref ConversationRef, stateID string, storedSeq int64, pinsHonored bool) error {
 	target := storedSeq + 1
 	var lastErr error
 	for range transcriptCoverMaxAttempts {
@@ -232,12 +245,50 @@ func (s *transcriptService) coverTranscriptFrontierLocked(ctx context.Context, r
 		}); err != nil {
 			return fmt.Errorf("update transcript state: %w", err)
 		}
+		if pinsHonored {
+			return s.rollForwardOverPinsLocked(ref, stateID, target)
+		}
 		return nil
 	}
 	if lastErr != nil {
 		return fmt.Errorf("advance transcript sequence past %d for %s: %w", storedSeq, conversationLockKey(ref), lastErr)
 	}
 	return fmt.Errorf("advance transcript sequence past %d for %s: too many attempts", storedSeq, conversationLockKey(ref))
+}
+
+// rollForwardOverPinsLocked completes a covering write on a store without
+// metadata CAS: earlier writers may have stored entries at pins beyond the
+// just-written frontier while their own advances failed, so probe the pins
+// forward and advance over every contiguous occupied one. A sequence is never
+// advanced over unless its pin reads back a stored bead — absence stops the
+// walk. The probe budget bounds it; exhausting it persists what was verified
+// and reports the recovery incomplete.
+func (s *transcriptService) rollForwardOverPinsLocked(ref ConversationRef, stateID string, from int64) error {
+	live := s.live()
+	frontier := from
+	complete := false
+	for range transcriptRecoverMaxEntries {
+		_, err := live.Get(transcriptPinnedEntryID(stateID, frontier))
+		if errors.Is(err, beads.ErrNotFound) {
+			complete = true
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("recover transcript frontier for %s at sequence %d: %w", conversationLockKey(ref), frontier, err)
+		}
+		frontier++
+	}
+	if frontier > from {
+		if err := s.store.SetMetadataBatch(stateID, map[string]string{
+			"next_sequence": strconv.FormatInt(frontier, 10),
+		}); err != nil {
+			return fmt.Errorf("update transcript state: %w", err)
+		}
+	}
+	if !complete {
+		return fmt.Errorf("recover transcript frontier for %s above sequence %d: too many contiguous stored entries", conversationLockKey(ref), from-1)
+	}
+	return nil
 }
 
 // transcriptPinState classifies a create that answered an error, by reading
