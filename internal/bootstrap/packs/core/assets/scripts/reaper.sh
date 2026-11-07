@@ -1561,9 +1561,13 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
                 DELETED_COUNT=""
                 if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
-                    # gc bd delete --json: a batch reply has deleted_count; a one-id
-                    # reply has deleted as a non-empty string and no count.
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (if (.deleted | type) == "string" and .deleted != "" then 1 else empty end)' 2>/dev/null || true)
+                    # bd 1.3.1 omits deleted_count for a one-id batch: `deleted` is a
+                    # bare string there instead of the array it is for 2+, so count it
+                    # from `deleted`'s own shape rather than trusting deleted_count alone.
+                    # Also covers a zero-id batch (deleted: [], no deleted_count), which
+                    # a string-only fallback reads as empty and treats as a failure even
+                    # though nothing needed deleting.
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (.deleted | if type == "array" then length elif type == "string" and length > 0 then 1 else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)
