@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +73,12 @@ func (f *inboundReplayFaultStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, errors.New("i/o timeout")
 	}
 	return f.Store.Get(id)
+}
+
+func (f *inboundReplayFaultStore) entryCreateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.entryCreates
 }
 
 // newInboundReplayFixture binds a running session to a conversation whose
@@ -157,5 +164,39 @@ func TestHandleExtMsgInboundReplaysStoredButFailedAppend(t *testing.T) {
 	}
 	if got := countNudges(fs, worker.SessionName); got != 1 {
 		t.Fatalf("nudges to bound session = %d, want 1; calls=%#v", got, fs.sp.SnapshotCalls())
+	}
+}
+
+// TestHandleExtMsgInboundPersistentFaultReturns5xxWithoutNotify: every entry
+// create fails. The handler replays a message with a provider message ID
+// once, then answers 5xx and notifies nobody; a message without a provider
+// message ID is not replayed.
+func TestHandleExtMsgInboundPersistentFaultReturns5xxWithoutNotify(t *testing.T) {
+	for _, tc := range []struct {
+		providerMessageID string
+		wantCreates       int
+	}{
+		{providerMessageID: "m1", wantCreates: 2},
+		{providerMessageID: "", wantCreates: 1},
+	} {
+		t.Run("provider_message_id="+tc.providerMessageID, func(t *testing.T) {
+			fault := &inboundReplayFaultStore{failCreates: true}
+			fs, srv, worker, ref := newInboundReplayFixture(t, fault)
+
+			rec := postInboundReplayMessage(t, fs, srv, ref, tc.providerMessageID)
+			if rec.Code < http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 5xx; body: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "i/o timeout") {
+				t.Fatalf("body = %s, want the storage error", rec.Body.String())
+			}
+			srv.waitForBackground()
+			if got := fault.entryCreateCount(); got != tc.wantCreates {
+				t.Fatalf("entry creates = %d, want %d", got, tc.wantCreates)
+			}
+			if got := countNudges(fs, worker.SessionName); got != 0 {
+				t.Fatalf("nudges to bound session = %d, want 0; calls=%#v", got, fs.sp.SnapshotCalls())
+			}
+		})
 	}
 }
