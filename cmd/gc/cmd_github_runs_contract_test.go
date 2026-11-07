@@ -370,6 +370,136 @@ func TestGitHubRunsEvaluateRejectsUnknownMonitorBeforeCallingGitHub(t *testing.T
 	}
 }
 
+// blockingGitHubRunEvaluator models a stalled GitHub connection: Evaluate
+// returns only once its context is done. The backstop timer keeps a missing
+// bound from hanging the suite; it reports an error the test then rejects.
+type blockingGitHubRunEvaluator struct{}
+
+func (blockingGitHubRunEvaluator) Evaluate(ctx context.Context, _ config.GitHubRunMonitor) (redstreak.Evaluation, error) {
+	select {
+	case <-ctx.Done():
+		return redstreak.Evaluation{}, fmt.Errorf("stalled github call: %w", ctx.Err())
+	case <-time.After(10 * time.Second):
+		return redstreak.Evaluation{}, errors.New("evaluation context was never bounded")
+	}
+}
+
+// historyGitHubRunEvaluator feeds canned run history through the real
+// redstreak.EvaluateHistory, so tests exercise the evaluation that
+// production produces instead of a hand-built redstreak.Evaluation.
+type historyGitHubRunEvaluator struct {
+	runs map[string][]redstreak.ObservedRun
+}
+
+func (h historyGitHubRunEvaluator) Evaluate(_ context.Context, monitor config.GitHubRunMonitor) (redstreak.Evaluation, error) {
+	eval, err := redstreak.EvaluateHistory(monitor, h.runs[monitor.Name])
+	eval.Monitor = monitor.Name
+	return eval, err
+}
+
+func TestGitHubRunsEvaluateHasABoundedTimeoutFlag(t *testing.T) {
+	flag := newGitHubRunsEvaluateCmd(&bytes.Buffer{}, &bytes.Buffer{}).Flags().Lookup("timeout")
+	if flag == nil {
+		t.Fatal("gc github runs evaluate has no --timeout flag; the GitHub calls are unbounded")
+	}
+	if flag.DefValue == "" || flag.DefValue == "0" || flag.DefValue == "0s" {
+		t.Fatalf("--timeout default = %q, want a non-zero bound", flag.DefValue)
+	}
+}
+
+func TestGitHubRunsEvaluateBoundsAStalledGitHubCallAndWritesNothing(t *testing.T) {
+	h := newGitHubRunsContractHarness(t)
+	newGitHubRunsEvaluateClient = func(string) githubRunEvaluator { return blockingGitHubRunEvaluator{} }
+
+	start := time.Now()
+	stderr := runGitHubRunsEvaluate(t, h, 1, "--monitor", "nightly-red-streak", "--timeout", "50ms")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("evaluate took %v with --timeout 50ms; the evaluation context is not bounded", elapsed)
+	}
+	if !strings.Contains(stderr, "deadline exceeded") {
+		t.Fatalf("stderr = %q, want the context deadline error", stderr)
+	}
+	if calls := h.store.Calls(); len(calls) != 0 {
+		t.Fatalf("timed-out evaluation mutated beads: %#v", calls)
+	}
+}
+
+func TestGitHubRunsEvaluateContractBreakBehindGreenStreakCreatesNoEpisodeAtThresholdOne(t *testing.T) {
+	h := newGitHubRunsContractHarness(t)
+	body := `[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "gascity"
+path = "gascity"
+prefix = "ga"
+
+[[github.run_monitor]]
+name = "nightly-red-streak"
+owner = "gastownhall"
+repo = "gascity"
+workflow_file = "nightly.yml"
+aggregate_job = "Nightly summary"
+activated_after = "2026-07-30T00:00:00Z"
+threshold = 1
+rig = "gascity"
+route = "gascity/nightly-triage"
+priority = "P1"
+`
+	if err := os.WriteFile(filepath.Join(h.cityPath, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	green := func(id int64, startedAt string) redstreak.ObservedRun {
+		return redstreak.ObservedRun{
+			Run: redstreak.Run{
+				ID: id, Event: "schedule", Conclusion: "success",
+				StartedAt: mustParseTestTime(t, startedAt),
+				URL:       fmt.Sprintf("https://example.test/runs/%d", id),
+			},
+			Jobs: []redstreak.Job{{Name: "Nightly summary", Conclusion: "success"}},
+		}
+	}
+	broken := redstreak.ObservedRun{
+		Run: redstreak.Run{
+			ID: 501, Event: "schedule", Conclusion: "success",
+			StartedAt: mustParseTestTime(t, "2026-07-30T01:00:00Z"),
+			URL:       "https://example.test/runs/501",
+		},
+	}
+	newGitHubRunsEvaluateClient = func(string) githubRunEvaluator {
+		return historyGitHubRunEvaluator{runs: map[string][]redstreak.ObservedRun{
+			"nightly-red-streak": {
+				green(503, "2026-07-30T03:00:00Z"),
+				green(502, "2026-07-30T02:00:00Z"),
+				broken,
+			},
+		}}
+	}
+
+	// The data-contract break is a soft error: exit 1, but beads are still
+	// written for what the walked streak supports. That streak is two green
+	// runs, so there is no red streak and no episode may be created.
+	stderr := runGitHubRunsEvaluate(t, h, 1, "--monitor", "nightly-red-streak")
+	if !strings.Contains(stderr, "matched 0 jobs") {
+		t.Fatalf("stderr = %q, want the data-contract error reported", stderr)
+	}
+	if creates := h.store.CallsForOp("Create"); len(creates) != 0 {
+		t.Fatalf("contract break behind a green streak created an episode at threshold 1: %#v", creates)
+	}
+	if episodes := requireEpisodes(t, h.store, "nightly-red-streak", true); len(episodes) != 0 {
+		t.Fatalf("episodes = %#v, want none", episodes)
+	}
+}
+
+func mustParseTestTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", value, err)
+	}
+	return parsed
+}
+
 func newGitHubRunsContractHarness(t *testing.T) *githubRunsContractHarness {
 	t.Helper()
 	cityPath := writeGitHubRunsContractCity(t)

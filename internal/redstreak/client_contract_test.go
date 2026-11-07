@@ -2,10 +2,12 @@ package redstreak
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -134,5 +136,54 @@ func TestClientRejectsMalformedAPIDataAndCommandFailure(t *testing.T) {
 				t.Fatalf("ListRuns() error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewClientDefaultHTTPClientHasATimeout(t *testing.T) {
+	client := NewClient("test-token")
+	if client.httpClient == http.DefaultClient {
+		t.Fatal("NewClient uses http.DefaultClient, which has no timeout; a stalled GitHub connection would hang the scheduled monitor")
+	}
+	if client.httpClient.Timeout != 30*time.Second {
+		t.Fatalf("default HTTP client Timeout = %v, want 30s (matching internal/githubmonitor)", client.httpClient.Timeout)
+	}
+}
+
+func TestClientEvaluateReturnsAnErrorWhenTheContextExpiresInsteadOfHanging(t *testing.T) {
+	client := NewClient("test-token", WithEndpoint("http://redstreak.test"), WithHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			// A stalled GitHub connection: nothing answers until the
+			// caller gives up.
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}),
+	}))
+	monitor := config.GitHubRunMonitor{
+		Name:           "nightly",
+		Owner:          "gastownhall",
+		Repo:           "gascity",
+		WorkflowFile:   "nightly.yml",
+		AggregateJob:   "Nightly summary",
+		ActivatedAfter: "2026-07-30T00:00:00Z",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Evaluate(ctx, monitor)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Evaluate() error = nil, want an error once the context deadline passes")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Evaluate() error = %v, want it to wrap context.DeadlineExceeded", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Evaluate() still blocked 10s after its context expired")
 	}
 }

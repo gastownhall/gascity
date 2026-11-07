@@ -252,6 +252,38 @@ func TestEvaluateHistoryReportsContractErrorBehindAnActiveSuccessStreak(t *testi
 	if got.ConsecutiveSuccesses != 2 {
 		t.Fatalf("ConsecutiveSuccesses = %d, want 2 (the streak established before the contract-broken run)", got.ConsecutiveSuccesses)
 	}
+	if got.ConsecutiveFailures != 0 {
+		t.Fatalf("ConsecutiveFailures = %d, want 0; failures and successes are mutually exclusive, so a contract-broken run behind a green streak must not also count as a failure",
+			got.ConsecutiveFailures)
+	}
+}
+
+func TestEvaluateHistoryContractBreakExtendsAnActiveRedStreak(t *testing.T) {
+	monitor := testRunMonitor("nightly", "Nightly summary")
+	runs := []ObservedRun{
+		testObservedRun(503, "schedule", "failure", "failure", "2026-07-30T03:00:00Z", monitor.AggregateJob),
+		testObservedRun(502, "schedule", "failure", "failure", "2026-07-30T02:00:00Z", monitor.AggregateJob),
+		{
+			Run: Run{
+				ID:         501,
+				Event:      "schedule",
+				Conclusion: "failure",
+				StartedAt:  mustTime(t, "2026-07-30T01:00:00Z"),
+				URL:        "https://example.test/runs/501",
+			},
+			Jobs: nil,
+		},
+	}
+
+	got, err := EvaluateHistory(monitor, runs)
+	var contractErr *DataContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("EvaluateHistory() error = %T %v, want *DataContractError", err, err)
+	}
+	if got.ConsecutiveFailures != 3 || got.ConsecutiveSuccesses != 0 {
+		t.Fatalf("streak = failures %d successes %d, want 3/0; the contract-broken run extends the active red streak",
+			got.ConsecutiveFailures, got.ConsecutiveSuccesses)
+	}
 }
 
 func testRunMonitor(name, aggregate string) config.GitHubRunMonitor {
