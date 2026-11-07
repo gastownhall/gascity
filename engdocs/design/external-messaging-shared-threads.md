@@ -320,9 +320,52 @@ Key behaviors:
     `RemoveMembership`, `ListMemberships`, `ListConversationsBySession`,
     `ListBackfill`, `Ack`) are controller-owned operations because they
     mutate or expose session-scoped replay state.
-- `Append` allocates the next transcript sequence under the conversation
-  lock and enforces `(conversation, provider_message_id)` uniqueness
-  before sequence allocation.
+- `Append` allocates the transcript sequence with a create-first pinned-ID
+  protocol and enforces `(conversation, provider_message_id)` uniqueness
+  before sequence allocation:
+  - Each entry is created at the pinned ID `<state-bead-ID>-<sequence>`, in
+    the state bead's own ID namespace, before the state's `next_sequence`
+    frontier advances. A fault between the two leaves a stored-but-
+    unpublished entry — never a published-but-missing one.
+  - The allocated sequence comes from a live bucket scan that never lands
+    below a stored entry, so a writer whose frontier advance failed does not
+    hand its sequence to the next message, even across lock pools or
+    processes.
+  - A create that answers an error is classified by reading the pinned ID
+    back live: absent (surface the create error), ours — proven by the
+    per-Append random token persisted with the entry, or a matching nonblank
+    provider message ID (recover and publish the stored entry), another
+    writer's entry (cover past it and take the next sequence), or foreign
+    data at the pin (an invariant violation).
+  - The frontier advances only past a stored entry, through the metadata
+    CAS when the store offers it (monotonic publication under racing
+    writers) and a covering write under the conversation lock otherwise,
+    followed by a bounded roll-forward (64 pins) over the contiguous
+    occupied pins earlier failed advances left behind. The frontier never
+    decreases; the dedupe path covers the frontier past a stored entry too,
+    so a redelivery publishes what a failed advance left unpublished.
+  - `List` and `ListBackfill` cap visibility at the frontier: an entry
+    stored but not yet covered stays invisible until a cover publishes it.
+- Recovery contract by backend behavior (wrappers inherit their actual
+  backing behavior, not a guarantee inferred from their type name):
+
+  | Backend behavior | Sequence uniqueness | Frontier guarantee |
+  | --- | --- | --- |
+  | Atomic pin refusal and metadata CAS | Store-enforced for new pinned entries sharing one state | Monotonic publication |
+  | Atomic pin refusal, no CAS (including current DoltLite wrapper) | Store-enforced for new pinned entries sharing one state | Best-effort recovery; regression possible |
+  | IDs minted over the pin | Existing local-pool behavior only | No new multiwriter guarantee |
+  | Upsert at an occupied ID | Unsupported contract | Read-before-create cannot make it safe |
+
+  Not every production deployment is covered: FileStore and exec are
+  configurable backends too. The CAS-less row is a weaker contract by
+  design — a delayed writer or a crash can leave entries hidden until a
+  later recovery — and a strong guarantee on DoltLite requires a sound
+  backend atomic operation.
+- The inbound HTTP handler replays a stored-but-errored normalized inbound
+  exactly once (retryable error, live context, nonblank provider message
+  ID) before mapping the error to a status; permanent rejections map
+  straight through, and a fault that survives the replay answers 5xx with
+  no member notification.
 - `EnsureMembership` is idempotent per `(conversation, session)` and
   returns the existing record unchanged on re-call.
 - `UpdateMembership` changes replay policy or metadata for an existing
