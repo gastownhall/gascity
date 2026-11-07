@@ -129,6 +129,12 @@ type conversationLaneExec struct {
 	// holds content its activity clock has starved; production asks
 	// laneStarvedHold, the legacy poller's rule but for an undecided record.
 	starvedHold func(t nudgeTarget, now time.Time) (hold bool, err error)
+	// recordHold is the program record's mid-turn hold at now: under
+	// program_status = "on", whether a fresh read of the record of a
+	// session whose provider declares hold_mid_turn shows a live working
+	// turn; production asks laneRecordTypingHold, the hold the starved
+	// boundary's look takes too (starvedBypassLook).
+	recordHold func(t nudgeTarget, now time.Time) bool
 	// contentSince is when the oldest content candidate of the pass became
 	// deliverable (opjournal.ConversationView.ContentSince), as Probe read
 	// it; a re-probe's host view carries none, so Reprobe keeps it. Each
@@ -250,6 +256,9 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 	}
 	e.starvedHold = func(t nudgeTarget, now time.Time) (bool, error) {
 		return laneStarvedHold(t, e.deps.sp, now)
+	}
+	e.recordHold = func(t nudgeTarget, now time.Time) bool {
+		return laneRecordTypingHold(t, e.deps.sp, now)
 	}
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
@@ -525,7 +534,13 @@ func (t nudgeTarget) holdMidTurnWithoutRecord() bool {
 }
 
 // quietBoundary is a keystroke runtime's boundary once the quiescence rule
-// reads it quiet in obs. The rule reads the activity clock, which over tmux
+// reads it quiet in obs. Under program_status = "on", a provider declaring
+// hold_mid_turn has its program's record read fresh first (recordHold), and
+// a live working turn there keeps the boundary closed, as one on screen
+// does: the screen can show none while one runs, and typing into it aborts
+// the turn (the second shadow: 54 of 350 Codex deliveries at this boundary
+// typed into a running turn). A record that shows no working turn, or does
+// not decide, leaves the rest of this rule to decide. The rule reads the activity clock, which over tmux
 // comes from a cached fleet snapshot in whole seconds, so a pane that redraws
 // every second can read quiet while its agent runs a turn; and the lane comes
 // back at the deadline the last look named (quiescenceDeadline), where the
@@ -543,6 +558,9 @@ func (t nudgeTarget) holdMidTurnWithoutRecord() bool {
 // until the reading goes stale, where the quiescence rule alone delivered
 // both: the price of never typing into a running turn.
 func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
+	if e.recordHold(e.target, e.now()) {
+		return opjournal.TriNo
+	}
 	running, known, err := e.turnOnScreen(e.target)
 	e.shadowPreread(running, known, err)
 	switch {
@@ -816,6 +834,9 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		// before it types (starvedSendLook).
 		if !e.lastStarved {
 			runtime.ShadowWaitForIdle(e.deps.sp, e.target.sessionName, laneWaitStarted(d.Ops, at), at, runtime.ProgramVerdictIdle)
+			if err := e.recordSendLook(at); err != nil {
+				return opjournal.NotDelivered{Transient: true, Cause: err}
+			}
 		} else if err := e.starvedSendLook(at); err != nil {
 			return opjournal.NotDelivered{Transient: true, Cause: err}
 		}
@@ -864,6 +885,37 @@ func (e *conversationLaneExec) starvedSendLook(now time.Time) error {
 		return fmt.Errorf("session %s's turn, looked at again before typing content its activity clock starved, holds it", e.info.ID)
 	}
 	return nil
+}
+
+// recordSendLook takes the program record's mid-turn hold (e.recordHold)
+// again, at now, right before Deliver types what the probe let go at the
+// quiescence rule's boundary, as starvedSendLook does at the starved one: a
+// turn that started since the probe's read (a Codex picking up a follow-up
+// it queued) holds the delivery. It returns why the delivery holds, and
+// Deliver hands it back unsent as a transient miss, charged no failure, for
+// a later pass.
+func (e *conversationLaneExec) recordSendLook(now time.Time) error {
+	if e.recordHold(e.target, now) {
+		return fmt.Errorf("session %s's program reports a running turn right before typing, which holds the delivery", e.info.ID)
+	}
+	return nil
+}
+
+// laneRecordTypingHold is the program record's mid-turn hold on typing into
+// t's session at now: under program_status = "on", for a target whose
+// provider declares hold_mid_turn (programHoldDeclared), a fresh read of its
+// program's record that decides and shows a live working turn
+// (runtime.ProgramRecordTypingHold). It is the one mechanism that holds such
+// a provider's input mid-turn under "on": the starved boundary and the
+// legacy poller's starved bypass take the same read (starvedBypassLook).
+// Under any other switch, for an undeclared provider, and on a read that
+// does not decide, nothing holds.
+func laneRecordTypingHold(t nudgeTarget, sp runtime.Provider, now time.Time) bool {
+	if !t.programHoldDeclared() {
+		return false
+	}
+	_, held := runtime.ProgramRecordTypingHold(sp, t.sessionName, now)
+	return held
 }
 
 // laneWaitStarted is when a delivery's wait for its boundary began: its

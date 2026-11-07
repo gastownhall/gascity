@@ -522,13 +522,19 @@ func (t *Tmux) shadowNoteInterrupt(session string) {
 	if !ok {
 		return
 	}
+	t.keepInterrupt(session, shadowInterrupt{baseline: s.Baseline(), at: time.Now()})
+}
+
+// keepInterrupt keeps mark as session's last interrupt, for the settle wait
+// that follows it (takeShadowInterrupt).
+func (t *Tmux) keepInterrupt(session string, mark shadowInterrupt) {
 	sh := &t.shadow
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.interrupts == nil || len(sh.interrupts) >= 4096 {
 		sh.interrupts = make(map[string]shadowInterrupt)
 	}
-	sh.interrupts[session] = shadowInterrupt{baseline: s.Baseline(), at: time.Now()}
+	sh.interrupts[session] = mark
 }
 
 // takeShadowInterrupt returns and forgets session's interrupt baseline when

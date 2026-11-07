@@ -36,15 +36,19 @@ type ProgramStatusBinding struct {
 	// only report after their support probe is answered. Unset inherits.
 	Relay *bool `toml:"relay,omitempty"`
 	// HoldMidTurn declares that the program aborts its running turn when
-	// input is typed into it mid-turn. It governs only the bypass of the
-	// quiescence gate that a delivery starved on a never-quiet session takes.
-	// The conversation lane takes that bypass only under the [session]
-	// program_status switch on, on a fresh read of the program's own record
-	// that decides and shows no live working record. Legacy delivery defers
-	// it under on while such a read shows a live working record, and
-	// otherwise takes it as without the declaration. Every other delivery is
-	// unchanged. It reaches a pane when its capture is armed (create,
-	// respawn, heal), and heal keeps it current. Unset inherits.
+	// input is typed into it mid-turn. It governs the conversation lane's
+	// keystroke boundary and the bypass of the quiescence gate that a
+	// delivery starved on a never-quiet session takes. Under the [session]
+	// program_status switch on, the lane's quiescence boundary stays closed,
+	// and a delivery at it is held right before it is typed, while a fresh
+	// read of the program's own record shows a live working record; the lane
+	// takes the starved bypass only on such a read that decides and shows no
+	// live working record. Under off and shadow the lane never takes the
+	// starved bypass. Legacy delivery defers the bypass under on while such a
+	// read shows a live working record, and otherwise takes it as without
+	// the declaration. Every other delivery is unchanged. It reaches a pane
+	// when its capture is armed (create, respawn, heal), and heal keeps it
+	// current. Unset inherits.
 	HoldMidTurn *bool `toml:"hold_mid_turn,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch
