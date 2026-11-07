@@ -222,6 +222,11 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_SERVICE_SECRETS_DIR="+filepath.Join(p.absStateRoot, "secrets"),
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
+		// The service belongs to this city — the same runtime identity
+		// GC_SERVICE_URL_PREFIX below uses — so it must not keep whatever
+		// GC_CITY_NAME the supervisor's ambient environment holds for another
+		// city. Appended after os.Environ(), so the service's own name wins.
+		"GC_CITY_NAME="+p.rt.CityName(),
 		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
 		"GC_SERVICE_PUBLIC_URL="+p.publication.URL,
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,

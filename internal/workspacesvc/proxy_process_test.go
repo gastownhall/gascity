@@ -193,6 +193,7 @@ func TestProxyProcessHelper(t *testing.T) {
 			"GC_CITY_PATH":                        os.Getenv("GC_CITY_PATH"),
 			"GC_CITY_RUNTIME_DIR":                 os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"),
+			"GC_CITY_NAME":                        os.Getenv("GC_CITY_NAME"),
 			"GC_SERVICE_NAME":                     os.Getenv("GC_SERVICE_NAME"),
 			"GC_SERVICE_STATE_ROOT":               os.Getenv("GC_SERVICE_STATE_ROOT"),
 			"GC_SERVICE_SECRETS_DIR":              os.Getenv("GC_SERVICE_SECRETS_DIR"),
@@ -312,6 +313,9 @@ func testProxyProcessDisablesProductMetrics(t *testing.T, ambientGC string, late
 
 func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	t.Setenv("GC_SERVICE_HELPER", "1")
+	// Ambient neighbor name: one supervisor can serve several cities, so the
+	// service must see its own city's name, not the controller environment's.
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
 	// The helper subprocess is the same test binary. proxy_process.go seeds
 	// GC_CITY / GC_CITY_PATH / GC_CITY_RUNTIME_DIR /
 	// GC_CONTROL_DISPATCHER_TRACE_DEFAULT into the child env; without a
@@ -386,6 +390,12 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	}
 	if env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != filepath.Join(rt.cityPath, ".gc", "runtime", "control-dispatcher-trace.log") {
 		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"], filepath.Join(rt.cityPath, ".gc", "runtime", "control-dispatcher-trace.log"))
+	}
+	// The service's own city name, from the same runtime identity
+	// GC_SERVICE_URL_PREFIX uses — not the ambient neighbor value, and not the
+	// workspace declaration's name (demo-app) either.
+	if env["GC_CITY_NAME"] != rt.cityName {
+		t.Fatalf("GC_CITY_NAME = %q, want the service's own city %q over the ambient one", env["GC_CITY_NAME"], rt.cityName)
 	}
 	if env["GC_SERVICE_NAME"] != "bridge" {
 		t.Fatalf("GC_SERVICE_NAME = %q, want bridge", env["GC_SERVICE_NAME"])
