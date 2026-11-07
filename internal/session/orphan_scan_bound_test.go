@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -265,6 +266,74 @@ func TestKillExistingOrphansUsesAnAnswerWithinTheBudget(t *testing.T) {
 		}
 		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 100 {
 			t.Fatalf("terminated %v, want the answered orphan 100", got)
+		}
+	})
+}
+
+// AC-2: while one scan of a city's session is out, a retry through the same
+// Manager or a newly constructed one (the API and worker factory build
+// Managers per request) starts no scan and answers unavailable at once, under
+// any spelling of the same city path.
+func TestKillExistingOrphansRetryWhileScanOutstandingStartsNoScan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		city := t.TempDir()
+		sp := newGatedScanProvider(city, alwaysWedged)
+		defer sp.unblock()
+		store := beads.NewMemStore()
+		mgr := newTestManager(t, store, sp, WithCityPath(city))
+		wantUnansweredScan(t, killWithWatchdog(context.Background(), t, mgr, "sid-wedged"), context.DeadlineExceeded)
+
+		for _, tc := range []struct {
+			name string
+			mgr  *Manager
+		}{
+			{name: "same manager", mgr: mgr},
+			{name: "new manager", mgr: newTestManager(t, store, sp, WithCityPath(city))},
+			{name: "new manager, equivalent city path", mgr: newTestManager(t, store, sp, WithCityPath(filepath.Join(city, "sub", "..")+string(filepath.Separator)))},
+		} {
+			before := time.Now()
+
+			err := killWithWatchdog(context.Background(), t, tc.mgr, "sid-wedged")
+
+			wantUnansweredScan(t, err, runtime.ErrBoundedCallOutstanding)
+			if elapsed := time.Since(before); elapsed != 0 {
+				t.Fatalf("%s: the retry took %v, want an immediate answer", tc.name, elapsed)
+			}
+			if got := sp.scans.Load(); got != 1 {
+				t.Fatalf("%s: %d scans launched, want only the outstanding one", tc.name, got)
+			}
+		}
+	})
+}
+
+// AC-2: the latch is per city and session: a wedged scan of one session holds
+// neither another session of its city nor the same session ID in another city.
+func TestKillExistingOrphansKeysLatchByCityAndSession(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		city := t.TempDir()
+		wedged := newGatedScanProvider(city, alwaysWedged)
+		defer wedged.unblock()
+		store := beads.NewMemStore()
+		wantUnansweredScan(t, killWithWatchdog(context.Background(), t, newTestManager(t, store, wedged, WithCityPath(city)), "sid-wedged"), context.DeadlineExceeded)
+
+		otherCity := t.TempDir()
+		for _, tc := range []struct {
+			name, city, sessionID string
+		}{
+			{name: "other session, same city", city: city, sessionID: "sid-other"},
+			{name: "same session, other city", city: otherCity, sessionID: "sid-wedged"},
+		} {
+			healthy := newGatedScanProvider(tc.city, neverWedged)
+			healthy.answer = func(int64) []runtime.LiveRuntime { return orphanAt(300) }
+			mgr := newTestManager(t, store, healthy, WithCityPath(tc.city))
+
+			err := killWithWatchdog(context.Background(), t, mgr, tc.sessionID)
+			if err != nil {
+				t.Fatalf("%s: killExistingOrphans = %v, want an independent scan", tc.name, err)
+			}
+			if got := healthy.terminatedPIDs(); healthy.scans.Load() != 1 || len(got) != 1 || got[0] != 300 {
+				t.Fatalf("%s: scans=%d terminated=%v, want one scan and its orphan 300 terminated", tc.name, healthy.scans.Load(), got)
+			}
 		}
 	})
 }
