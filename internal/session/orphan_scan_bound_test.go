@@ -501,3 +501,156 @@ func TestKillExistingOrphansCompletedScanStillTerminatesItsRoots(t *testing.T) {
 		}
 	})
 }
+
+// TestStartDefersWhenOrphanScanNeverFinishes: the resume gate refuses without
+// launching a replacement when the pre-start scan cannot answer.
+func TestStartDefersWhenOrphanScanNeverFinishes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{block: release})
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "Start", func() error {
+			return mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{})
+		})
+
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Start = %v, want the unanswered-scan deferral (wrapping runtime.ErrRuntimeUnavailable)", err)
+		}
+		if n := sp.starts.Load(); n != 0 {
+			t.Fatalf("provider Starts = %d, want 0: an unanswered scan launches no replacement", n)
+		}
+		if got := sp.terminations(); len(got) != 0 {
+			t.Fatalf("terminated %v from a scan that answered nothing", got)
+		}
+	})
+}
+
+// TestStartRuntimeOnlyDefersWhenOrphanScanNeverFinishes: the reconciler's
+// runtime-only start gate refuses without launching a replacement when the
+// pre-start scan cannot answer.
+func TestStartRuntimeOnlyDefersWhenOrphanScanNeverFinishes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{block: release})
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "StartRuntimeOnly", func() error {
+			return startRuntimeOnly(t, mgr, b.ID, "claude --resume k-stale", runtime.Config{})
+		})
+
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("StartRuntimeOnly = %v, want the unanswered-scan deferral (wrapping runtime.ErrRuntimeUnavailable)", err)
+		}
+		if n := sp.starts.Load(); n != 0 {
+			t.Fatalf("provider Starts = %d, want 0: an unanswered scan launches no replacement", n)
+		}
+	})
+}
+
+// TestStaleKeyFreshRestartDefersWhenOrphanScanNeverFinishes: the stale-key
+// recovery's fresh-start gate refuses without relaunching when its scan
+// cannot answer; only the launch that died happened.
+func TestStaleKeyFreshRestartDefersWhenOrphanScanNeverFinishes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{}, scanStep{block: release})
+		sp.startErr = fmt.Errorf("%w: session died at startup", runtime.ErrSessionDiedDuringStartup)
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store, "session_key", "k-stale", "resume_flag", "--resume")
+		mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "Start after stale key", func() error {
+			return mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{})
+		})
+
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Start = %v, want the unanswered-scan deferral (wrapping runtime.ErrRuntimeUnavailable)", err)
+		}
+		if n := sp.starts.Load(); n != 1 {
+			t.Fatalf("provider Starts = %d, want 1: only the launch that died, never a fresh replacement", n)
+		}
+		if got := sp.terminations(); len(got) != 0 {
+			t.Fatalf("terminated %v from a scan that answered nothing", got)
+		}
+	})
+}
+
+// TestCreateDefersAndRollsBackWhenOrphanScanNeverFinishes: a direct create
+// whose pre-start scan cannot answer rolls back the row it just created —
+// explicit name included — and starts nothing.
+func TestCreateDefersAndRollsBackWhenOrphanScanNeverFinishes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{block: release})
+		defer close(release)
+		store := beads.NewMemStore()
+		mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "CreateSession", func() error {
+			_, err := mgr.CreateSession(context.Background(), CreateOptions{
+				Template: "worker", Title: "chat", Command: "claude", WorkDir: t.TempDir(),
+				Provider: "claude", ExplicitName: "explicit-name-1", Resume: ProviderResume{},
+				Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"},
+			})
+			return err
+		})
+
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !strings.Contains(err.Error(), "orphan cleanup") {
+			t.Fatalf("Create = %v, want the unanswered-scan refusal (wrapping runtime.ErrRuntimeUnavailable)", err)
+		}
+		if n := sp.starts.Load(); n != 0 {
+			t.Fatalf("provider Starts = %d, want 0: an unanswered scan starts nothing", n)
+		}
+		rows, listErr := store.List(beads.ListQuery{Type: BeadType, IncludeClosed: true})
+		if listErr != nil {
+			t.Fatalf("List: %v", listErr)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want the rolled-back create alone", len(rows))
+		}
+		row := rows[0]
+		if row.Status != "closed" {
+			t.Fatalf("rolled-back row status = %q, want closed", row.Status)
+		}
+		if row.Metadata["session_name"] != "" || row.Metadata["session_name_explicit"] != "" {
+			t.Fatalf("rolled-back row name = %q explicit = %q, want both cleared", row.Metadata["session_name"], row.Metadata["session_name_explicit"])
+		}
+	})
+}
+
+// TestPreStartOrphanScanFastPathsPreserved: a provider without a process-table
+// scanner and an empty session ID keep their fast paths — no scan, no gate.
+func TestPreStartOrphanScanFastPathsPreserved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := runtime.NewFake()
+		mgr := newTestManager(t, beads.NewMemStore(), &providerWithoutProcessScanner{Provider: fake})
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{
+			Template: "worker", Title: "chat", Command: "claude", WorkDir: t.TempDir(),
+			Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{},
+			ExtraMeta: map[string]string{"session_origin": "manual"},
+		})
+		if err != nil {
+			t.Fatalf("Create without a scanner: %v", err)
+		}
+		if !fake.IsRunning(info.SessionName) {
+			t.Fatal("Create without a scanner never started the runtime")
+		}
+
+		sp := newScriptedScanProvider(t.TempDir())
+		mgr2 := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+		if err := mgr2.killExistingOrphans(context.Background(), ""); err != nil {
+			t.Fatalf("killExistingOrphans(empty id) = %v, want nil", err)
+		}
+		if n := sp.scans.Load(); n != 0 {
+			t.Fatalf("scans begun = %d, want 0: an empty session ID scans nothing", n)
+		}
+	})
+}
