@@ -289,7 +289,7 @@ func driftRestartPatch(tp TemplateParams, row session.Info, now time.Time) sessi
 	if preserve {
 		patch["started_config_hash"] = hash
 	}
-	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata} {
+	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata, configDriftEscalatedAtMetadata} {
 		patch[k] = ""
 	}
 	return patch
