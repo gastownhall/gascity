@@ -15,6 +15,32 @@ import "strings"
 // verdict. No Go code inspects what the gate was checking.
 const GateInfraExitCode = 75
 
+// GateConfigExitCode is the exit status a gate command uses to say "I cannot
+// run on this machine as it is configured" rather than "the thing I check is
+// not true" or "the infrastructure I need is unreachable right now". It is
+// EX_CONFIG from sysexits.h, the code the repo's own scripts already use for
+// missing operator configuration (examples/bd/dolt/assets/scripts/port_resolve.sh).
+//
+// The difference from GateInfraExitCode is permanence. Exit 75 says re-running
+// may succeed, so the dispatcher re-runs attempt-free within a bounded budget.
+// Exit 78 says re-running cannot help until an operator changes the machine or
+// the city configuration (an interpreter missing a module the script imports,
+// a tool the script needs that is not on the sandboxed PATH), so the dispatcher
+// holds the step open on the same lane as a script it cannot launch, and the
+// next sweep after the fix resumes it. Neither a semantic attempt nor the
+// infrastructure budget is spent. As with 75, the script opts in by exiting
+// with the code; no Go code inspects what it was checking.
+const GateConfigExitCode = 78
+
+// IsGateConfigError reports whether a gate command that ran to completion
+// declared, by exiting GateConfigExitCode, that it cannot run in this
+// environment. Only a GateFail carrying exit code 78 qualifies: results that
+// already carry an infrastructure outcome (GateError/GateTimeout) and passing
+// results are never configuration errors.
+func IsGateConfigError(result GateResult) bool {
+	return result.Outcome == GateFail && result.ExitCode != nil && *result.ExitCode == GateConfigExitCode
+}
+
 // gateInfraMarkers are the failure strings Gas City's own tools print when a
 // read cannot see its infrastructure. They are a defense-in-depth layer under
 // GateInfraExitCode, for gate commands that simply propagate `gc`/`bd` output
