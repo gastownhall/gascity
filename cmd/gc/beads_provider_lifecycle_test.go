@@ -6449,6 +6449,117 @@ func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStore(
 	}
 }
 
+// Issue #8106, adoption settlement's consent boundary: the version probe and
+// the migration must drive the initializer's own runner — the BD_BIN-pinned
+// bd, not whatever bd PATH resolves, with the canonical GC_BIN the init
+// command pinned — and gc must add no migration consent of its own. An
+// ambient operator unlock passes through untouched; without one, bd sees
+// exactly what the operator's shell carried.
+func TestSettleAdoptedDefaultRigBdSchemaPinsTheInitializerBdAndAddsNoConsent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ambient  string // ambient BD_ALLOW_REMOTE_MIGRATE in the operator's environment
+		wantSeen string // value the pinned bd must observe on version and migrate
+	}{
+		{name: "no operator unlock", ambient: "", wantSeen: ""},
+		{name: "explicit operator consent preserved", ambient: "1", wantSeen: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("BD_ALLOW_REMOTE_MIGRATE", tc.ambient)
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "api")
+			if err := os.MkdirAll(rig, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil { //nolint:gosec // fixture
+				t.Fatal(err)
+			}
+
+			pinnedDir := t.TempDir()
+			pinnedLog := filepath.Join(pinnedDir, "pinned.log")
+			pinnedBd := filepath.Join(pinnedDir, "bd")
+			pinnedScript := "#!/bin/sh\n" +
+				"printf '%s GC_BIN=%s BD_ALLOW_REMOTE_MIGRATE=%s %s\\n' \"$1\" \"${GC_BIN-}\" \"$BD_ALLOW_REMOTE_MIGRATE\" \"$*\" >> " + strconv.Quote(pinnedLog) + "\n" +
+				"case \"$1\" in\n" +
+				"  init) echo \"This workspace is already initialized; just run bd commands normally. Aborting.\" >&2; exit 1 ;;\n" +
+				"  version) echo \"bd version 1.3.1-rc.1\" ;;\n" +
+				"  list) printf '[]\\n' ;;\n" +
+				"esac\n" +
+				"exit 0\n"
+			if err := os.WriteFile(pinnedBd, []byte(pinnedScript), 0o755); err != nil { //nolint:gosec // fixture must be executable
+				t.Fatal(err)
+			}
+			decoyDir := t.TempDir()
+			decoyLog := filepath.Join(decoyDir, "decoy.log")
+			decoyBd := filepath.Join(decoyDir, "bd")
+			decoyScript := "#!/bin/sh\nprintf 'decoy %s\\n' \"$*\" >> " + strconv.Quote(decoyLog) + "\nexit 0\n"
+			if err := os.WriteFile(decoyBd, []byte(decoyScript), 0o755); err != nil { //nolint:gosec // fixture must be executable
+				t.Fatal(err)
+			}
+
+			gcBin := filepath.Join(t.TempDir(), "gc")
+			if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+				t.Fatal(err)
+			}
+			oldResolve := resolveInvokingExecutable
+			resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+			t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+			t.Setenv("GC_BIN", "/tmp/stale-gc")
+
+			t.Setenv("BD_BIN", pinnedBd)
+			t.Setenv("PATH", strings.Join([]string{decoyDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+			if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+				t.Fatalf("initDefaultRigBdStore: %v", err)
+			}
+
+			wantGCBin, err := filepath.EvalSymlinks(gcBin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(pinnedLog)
+			if err != nil {
+				t.Fatalf("the pinned bd never ran: %v", err)
+			}
+			var versionLine, migrateLine string
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 3 {
+					continue
+				}
+				switch fields[0] {
+				case "version":
+					versionLine = line
+				case "migrate":
+					migrateLine = line
+				}
+			}
+			if versionLine == "" || migrateLine == "" {
+				t.Fatalf("settlement must probe the version and migrate through the pinned bd; pinned bd invocations:\n%s", data)
+			}
+			for name, line := range map[string]string{"version": versionLine, "migrate": migrateLine} {
+				fields := strings.Fields(line)
+				if got := strings.TrimPrefix(fields[1], "GC_BIN="); got != wantGCBin {
+					t.Errorf("%s saw GC_BIN=%q, want the canonical %q the init command pinned", name, got, wantGCBin)
+				}
+				if got := strings.TrimPrefix(fields[2], "BD_ALLOW_REMOTE_MIGRATE="); got != tc.wantSeen {
+					t.Errorf("%s saw BD_ALLOW_REMOTE_MIGRATE=%q, want the ambient %q passed through untouched", name, got, tc.wantSeen)
+				}
+			}
+			if !strings.HasSuffix(migrateLine, "migrate schema --quiet") {
+				t.Errorf("migration invocation = %q, want exactly the quiet schema verb", migrateLine)
+			}
+			if strings.Contains(migrateLine, "--force") {
+				t.Errorf("gc appended a force flag to the migration: %s", migrateLine)
+			}
+			if decoy, err := os.ReadFile(decoyLog); err == nil && (strings.Contains(string(decoy), " version") || strings.Contains(string(decoy), " migrate")) {
+				t.Fatalf("settlement ran a command through the PATH bd instead of BD_BIN:\n%s", decoy)
+			}
+		})
+	}
+}
+
 func TestInitAndHookDirAdoptsAlreadyInitializedCanonicalExecBdStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "tincan")
