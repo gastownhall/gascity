@@ -34,27 +34,28 @@ var (
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
 type Provider struct {
-	ops                k8sOps
-	namespace          string
-	image              string
-	k8sContext         string
-	managedServiceHost string
-	managedServicePort string
-	cpuRequest         string
-	memRequest         string
-	cpuLimit           string
-	memLimit           string
-	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool                // skip staging + init container for prebaked images
-	cityName           string              // the controller's city name, for the pod's remote-stage record
-	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
-	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
-	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
-	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration       // settle time before post-start liveness check
-	stderr             io.Writer           // warning output (default os.Stderr)
-	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
-	now                func() time.Time    // the poke ledger's clock; nil is time.Now
+	ops                  k8sOps
+	namespace            string
+	image                string
+	k8sContext           string
+	managedServiceHost   string
+	managedServicePort   string
+	cpuRequest           string
+	memRequest           string
+	cpuLimit             string
+	memLimit             string
+	serviceAccount       string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked             bool                // skip staging + init container for prebaked images
+	cityName             string              // the controller's city name, for the pod's remote-stage record
+	nodeSelector         map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations          []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
+	affinity             *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
+	priorityClassName    string              // GC_K8S_PRIORITY_CLASS_NAME
+	postStartSettle      time.Duration       // settle time before post-start liveness check
+	startupDialogTimeout time.Duration       // bounded pane polling budget for startup dialogs
+	stderr               io.Writer           // warning output (default os.Stderr)
+	pokes                runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
+	now                  func() time.Time    // the poke ledger's clock; nil is time.Now
 }
 
 type schedulingFields struct {
@@ -111,23 +112,24 @@ func NewProvider() (*Provider, error) {
 			restConfig: restConfig,
 			namespace:  namespace,
 		},
-		namespace:          namespace,
-		image:              image,
-		k8sContext:         k8sContext,
-		managedServiceHost: managedServiceHost,
-		managedServicePort: managedServicePort,
-		cpuRequest:         envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
-		memRequest:         envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
-		cpuLimit:           envOrDefault("GC_K8S_CPU_LIMIT", "2"),
-		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
-		serviceAccount:     os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
-		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
-		postStartSettle:    3 * time.Second,
-		stderr:             os.Stderr,
-		nodeSelector:       scheduling.nodeSelector,
-		tolerations:        scheduling.tolerations,
-		affinity:           scheduling.affinity,
-		priorityClassName:  scheduling.priorityClassName,
+		namespace:            namespace,
+		image:                image,
+		k8sContext:           k8sContext,
+		managedServiceHost:   managedServiceHost,
+		managedServicePort:   managedServicePort,
+		cpuRequest:           envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
+		memRequest:           envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
+		cpuLimit:             envOrDefault("GC_K8S_CPU_LIMIT", "2"),
+		memLimit:             envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
+		serviceAccount:       os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
+		prebaked:             os.Getenv("GC_K8S_PREBAKED") == "true",
+		postStartSettle:      3 * time.Second,
+		stderr:               os.Stderr,
+		nodeSelector:         scheduling.nodeSelector,
+		tolerations:          scheduling.tolerations,
+		affinity:             scheduling.affinity,
+		priorityClassName:    scheduling.priorityClassName,
+		startupDialogTimeout: runtime.StartupDialogTimeout(),
 	}, nil
 }
 
@@ -155,16 +157,17 @@ func parseSchedulingEnv() (schedulingFields, error) {
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).
 func newProviderWithOps(ops k8sOps) *Provider {
 	return &Provider{
-		ops:                ops,
-		namespace:          "test-ns",
-		image:              "test-image:latest",
-		managedServiceHost: podManagedDoltHost,
-		managedServicePort: podManagedDoltPort,
-		cpuRequest:         "500m",
-		memRequest:         "1Gi",
-		cpuLimit:           "2",
-		memLimit:           "4Gi",
-		stderr:             io.Discard,
+		ops:                  ops,
+		namespace:            "test-ns",
+		image:                "test-image:latest",
+		managedServiceHost:   podManagedDoltHost,
+		managedServicePort:   podManagedDoltPort,
+		cpuRequest:           "500m",
+		memRequest:           "1Gi",
+		cpuLimit:             "2",
+		memLimit:             "4Gi",
+		startupDialogTimeout: time.Millisecond,
+		stderr:               io.Discard,
 	}
 }
 
@@ -295,6 +298,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Enable pane logging + run session setup (shared with the relaunch tail).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	if err := p.acceptPodStartupDialogs(ctx, name, podName, cfg); err != nil {
+		cleanup("startup dialog handling canceled")
+		return err
+	}
+
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
 
 	// Post-start liveness check: verify interactive sessions survived startup.
@@ -424,6 +432,12 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	// A respawned agent can show a dialog too. Cancellation leaves the warm pod
+	// in place, as every other relaunch failure does.
+	if err := p.acceptPodStartupDialogs(ctx, name, podName, cfg); err != nil {
+		return err
+	}
+
 	// Post-relaunch liveness: detect an agent that dies immediately.
 	if k8sRequiresPostStartLiveness(cfg) {
 		if p.postStartSettle > 0 {
@@ -444,6 +458,32 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+	return nil
+}
+
+// acceptPodStartupDialogs answers startup dialogs so the first nudge reaches the
+// agent rather than a dialog. A failed read only warns; the only error returned
+// is cancellation.
+func (p *Provider) acceptPodStartupDialogs(ctx context.Context, name, podName string, cfg runtime.Config) error {
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
+		return nil
+	}
+	carrier := p.carrier()
+	err := runtime.AcceptStartupDialogsWithTimeout(ctx, p.startupDialogTimeout,
+		func(lines int) (string, error) {
+			return carrier.Peek(ctx, name, lines)
+		},
+		func(keys ...string) error {
+			return carrier.SendKeys(ctx, name, keys...)
+		},
+	)
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(p.stderr, "gc: warning: accepting startup dialogs for %s: %v\n", podName, err) //nolint:errcheck
+	if ctx.Err() != nil {
+		return fmt.Errorf("accepting startup dialogs for session %q: %w", name, ctx.Err())
 	}
 	return nil
 }
