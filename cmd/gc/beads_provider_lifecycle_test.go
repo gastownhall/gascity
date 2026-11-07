@@ -6353,6 +6353,102 @@ esac
 	}
 }
 
+// Issue #8106: an adopted direct-server rig store whose schema sits behind the
+// paired bd — `bd list` answers the storage_class error until `bd migrate
+// schema` runs — must be settled between bd init's already-initialized refusal
+// and the readiness read, at rig add and on every later boot. At base the
+// readiness loop alone retried the unreadable store until init failed, which
+// is how a whole city stayed down until an operator migrated the rig store by
+// hand.
+func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStore(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "tincan")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// doltlite city triggers shouldInitDefaultRigBdStore for the rig without
+	// setting a GC_BEADS scope-wide override that would shadow the rig's own
+	// metadata-based provider detection.
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"tincan"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir := t.TempDir()
+	seqPath := filepath.Join(stateDir, "seq")
+	migratedPath := filepath.Join(stateDir, "migrated")
+	fakeBd := filepath.Join(stateDir, "bd")
+	fakeBdScript := "#!/bin/sh\n" +
+		"log() { printf '%s\\n' \"$1\" >> " + strconv.Quote(seqPath) + "; }\n" +
+		"case \"${1:-}\" in\n" +
+		"  init)\n" +
+		"    log init\n" +
+		"    echo \"Found existing Dolt database 'tincan' for this workspace. This workspace is already initialized; just run bd commands normally. Aborting.\" >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  version)\n" +
+		"    log version\n" +
+		"    echo \"bd version 1.3.1-rc.1\"\n" +
+		"    ;;\n" +
+		"  migrate)\n" +
+		"    log migrate\n" +
+		"    echo \"applied 2 schema migrations\"\n" +
+		"    touch " + strconv.Quote(migratedPath) + "\n" +
+		"    ;;\n" +
+		"  list)\n" +
+		"    log list\n" +
+		"    if [ -e " + strconv.Quote(migratedPath) + " ]; then printf '[]\\n'; else\n" +
+		"      echo \"Error 1105 (HY000): table \\\"i\\\" does not have column \\\"storage_class\\\"\" >&2\n" +
+		"      exit 1\n" +
+		"    fi\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+
+	if err := initAndHookDir(cityPath, rigPath, "tc"); err != nil {
+		t.Fatalf("initAndHookDir should settle the behind schema of an adopted rig store: %v", err)
+	}
+
+	data, err := os.ReadFile(seqPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	firstIndex := func(name string) int {
+		for i, line := range lines {
+			if line == name {
+				return i
+			}
+		}
+		return -1
+	}
+	initAt, migrateAt, listAt := firstIndex("init"), firstIndex("migrate"), firstIndex("list")
+	if initAt < 0 || migrateAt < 0 || listAt < 0 {
+		t.Fatalf("expected bd init, migrate schema and list; bd commands:\n%s", data)
+	}
+	if initAt >= migrateAt || migrateAt >= listAt {
+		t.Fatalf("schema settlement must run after init and before the first readiness read (init=%d migrate=%d list=%d); bd commands:\n%s", initAt, migrateAt, listAt, data)
+	}
+
+	// Idempotence: a later boot adopts the same store again and settles it
+	// again; the now-current schema reads fine either way.
+	if err := initAndHookDir(cityPath, rigPath, "tc"); err != nil {
+		t.Fatalf("second initAndHookDir over the settled store: %v", err)
+	}
+}
+
 func TestInitAndHookDirAdoptsAlreadyInitializedCanonicalExecBdStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "tincan")

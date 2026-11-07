@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -2213,8 +2214,9 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		return err
 	}
 	applyExportSuppressionEnv(env)
+	proxied := scopeInitUsesProxiedDoltMode(cityPath, dir)
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
-	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
+	if proxied {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 		// bd init under a user-level dolt.shared-server: true would root the
 		// new proxy in ~/.beads/shared-server and persist that choice into the
@@ -2236,13 +2238,74 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	if canonicalDoltDatabase != "" {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
-	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
+	run := beads.ExecCommandRunnerWithEnv(env)
+	if _, err := run(dir, "bd", args...); err != nil {
 		if isBdAlreadyInitializedError(err) {
+			// The scope already carries a store gc did not just create: it
+			// may sit behind the paired bd's schema, and the readiness read
+			// in the finalizer refuses a behind store on every boot. Settle
+			// it client-side first, as the exec-provider adoption paths do
+			// (finish_bd_schema_migrations); a proxied scope leaves the
+			// schema to the proxy lifecycle bd owns there.
+			if !proxied {
+				if err := settleAdoptedDefaultRigBdSchema(dir, run, os.Stderr); err != nil {
+					return err
+				}
+			}
 			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 		}
 		return fmt.Errorf("bd init: %w", err)
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+}
+
+// settleAdoptedDefaultRigBdSchema completes the schema of an adopted
+// direct-server rig scope — one whose bd init answered "already initialized"
+// — before readiness reads it, mirroring finish_bd_schema_migrations in
+// examples/bd/assets/scripts/gc-beads-bd.sh, the settlement the exec-provider
+// adoption paths already run. An adopted store can sit behind the paired bd's
+// schema (a gc older than the bd created it, or the bd was upgraded since);
+// without this step the readiness List refuses the store on every boot and
+// the supervisor retries a failing init forever.
+//
+// run must be the initializer's own runner, so the version probe and the
+// migration drive the same pinned bd (BD_BIN), scope directory, BEADS_DIR,
+// canonical GC_BIN and ambient operator consent the init command itself used;
+// gc adds no migration consent (BD_ALLOW_REMOTE_MIGRATE) and no --force.
+func settleAdoptedDefaultRigBdSchema(scope string, run beads.CommandRunner, w io.Writer) error {
+	store := beads.NewBdStore(scope, run)
+	version, err := store.BDVersion()
+	if err != nil {
+		// Every bd old enough to lack `bd migrate schema` reports a version
+		// this probe reads, so an unreadable version is not evidence of an
+		// old bd: report the diagnostic and still attempt the verb, matching
+		// the script's compatibility fallback.
+		_, _ = fmt.Fprintf(w, "warning: cannot read the paired bd's version for scope %q (%v); attempting 'bd migrate schema' anyway\n", scope, err)
+	} else if deps.CompareVersions(version, beads.MigrateSchemaMinBDVersion) < 0 {
+		// An older bd would take `schema` as an ignored argument and run the
+		// unrelated bare migration; it applies pending schema migrations when
+		// it next opens the store for a write, so leave them to that.
+		_, _ = fmt.Fprintf(w, "warning: bd %s predates 'bd migrate schema' (bd %s); pending schema migrations for scope %q are left to bd's next write\n", version, beads.MigrateSchemaMinBDVersion, scope)
+		return nil
+	}
+	out, err := store.MigrateSchema()
+	if err != nil {
+		if errors.Is(err, beads.ErrRemoteBackedMigrateRefused) {
+			// A remote-backed scope refuses unattended migration by design:
+			// that is an operator decision, not a broken adoption. Report it
+			// and carry on; readiness stays authoritative.
+			_, _ = fmt.Fprintf(w, "warning: pending bd schema migrations for scope %q were not applied (remote-backed scope; see bd's message below)\n%s\n", scope, strings.TrimSpace(err.Error()))
+			return nil
+		}
+		return fmt.Errorf("settling schema of adopted rig store %q: %w", scope, err)
+	}
+	if len(out) > 0 {
+		// From bd 1.3.0 the verb is also consent to promote a shared-server
+		// database, which can lock out an older bd that uses it, so what bd
+		// reports the step did stays visible rather than dropped.
+		_, _ = fmt.Fprintf(w, "%s\n", strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) error {

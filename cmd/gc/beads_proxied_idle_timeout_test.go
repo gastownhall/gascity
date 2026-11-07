@@ -366,6 +366,70 @@ func TestInitBeadsForDirProxiedCarriesResolvedIdleTimeout(t *testing.T) {
 	}
 }
 
+// Issue #8106: adopting an already-initialized default rig store must settle
+// its schema client-side, as gc-beads-bd.sh does for its adoption paths with
+// finish_bd_schema_migrations. A store created by a gc whose embedded schema
+// knowledge lags the paired bd (or left behind by a bd upgrade) fails the
+// readiness `bd list` on every later boot. On bd init's "already initialized"
+// refusal gc runs `bd migrate schema --quiet` itself — and adds no consent of
+// its own: the ambient BD_ALLOW_REMOTE_MIGRATE passes through untouched, with
+// no unlock variable or force flag gc invented.
+func TestDefaultRigBdStoreInitSettlesSchemaClientSide(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "api")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := "[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n\n" +
+		"[[rigs]]\nname = \"api\"\npath = " + strconv.Quote(rig) + "\nprefix = \"api\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityTOML), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "bd-args")
+	fakeBd := filepath.Join(city, "bd")
+	script := "#!/bin/sh\n" +
+		"printf 'BD_ALLOW_REMOTE_MIGRATE=%s %s\\n' \"$BD_ALLOW_REMOTE_MIGRATE\" \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$1\" in\n" +
+		"  init) echo \"This workspace is already initialized; just run bd commands normally. Aborting.\" >&2; exit 1 ;;\n" +
+		"  version) echo \"bd version 1.3.1-rc.1\" ;;\n" +
+		"  list) printf '[]\\n' ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+
+	if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+		t.Fatalf("initDefaultRigBdStore: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	var migrate string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.Contains(line, "migrate schema") {
+			migrate = line
+		}
+	}
+	if migrate == "" {
+		t.Fatalf("adoption never settled the schema client-side (no bd migrate schema after the already-initialized refusal); bd invocations:\n%s", data)
+	}
+	if !strings.Contains(migrate, "migrate schema --quiet") {
+		t.Fatalf("migration invocation = %q, want the quiet schema verb", migrate)
+	}
+	if strings.Contains(migrate, "BD_ALLOW_REMOTE_MIGRATE=1") {
+		t.Fatalf("gc added BD_ALLOW_REMOTE_MIGRATE to the migration; the ambient value must pass through untouched: %s", migrate)
+	}
+	if strings.Contains(migrate, "--force") {
+		t.Fatalf("gc appended a force flag to the migration: %s", migrate)
+	}
+}
+
 // The provider-owned front door (gc init, gc rig add) hands the script's init
 // op the resolved idle timeout.
 func TestProviderOwnedScopeInitCarriesResolvedIdleTimeout(t *testing.T) {
