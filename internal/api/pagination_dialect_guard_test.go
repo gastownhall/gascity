@@ -61,10 +61,29 @@ func paginationSuspect(name string) bool {
 var grandfatheredDialects = map[string][]string{
 	"GET /v0/city/{cityName}/agent/{base}/output":       {"before", "tail"},
 	"GET /v0/city/{cityName}/agent/{dir}/{base}/output": {"before", "tail"},
-	"GET /v0/city/{cityName}/events/stream":             {"after_seq"},
-	"GET /v0/events/stream":                             {"after_cursor"},
-	"GET /v0/city/{cityName}/extmsg/transcript":         {"after_sequence", "limit"},
-	"GET /v0/city/{cityName}/orders/history":            {"before", "limit"},
+	// Events list. Owner sign-off 2026-07-25 via architecture bead ga-dm3unq
+	// (gascity/architect, closed/decided): after_seq is a sequence-number
+	// LOWER-BOUND FILTER (matches events.Filter.AfterSeq, "Seq > after_seq"),
+	// not a replacement page-boundary — cursor+limit remain the actual keyset
+	// walk on this endpoint, unchanged. The bead specifies the field to
+	// mirror EventStreamInput.AfterSeq exactly, the identical dialect already
+	// grandfathered on the sibling GET .../events/stream entry below, "so the
+	// builder bead needs no further architecture judgment calls." Wired to
+	// the existing, already-tested archiveOverlapsFilter skip path.
+	//
+	// Why this exists at all (not just a lint silence): ga-xd3ujg / PR #4628
+	// found that a selective events-list query with no lower bound gunzips
+	// every retained archive (53 archives / 2.1GB, 176s on this fleet) because
+	// EventListInput had no after_seq param for archiveOverlapsFilter's
+	// pre-existing AfterSeq skip check to key off. #4628 fixed the Since case
+	// and explicitly filed the after_seq gap onward as a contract question
+	// rather than deciding it from that seat — ga-dm3unq is that decision,
+	// and this grandfather entry is its wire-level consequence.
+	"GET /v0/city/{cityName}/events":            {"after_seq", "cursor", "limit"},
+	"GET /v0/city/{cityName}/events/stream":     {"after_seq"},
+	"GET /v0/events/stream":                     {"after_cursor"},
+	"GET /v0/city/{cityName}/extmsg/transcript": {"after_sequence", "limit"},
+	"GET /v0/city/{cityName}/orders/history":    {"before", "limit"},
 	// Async request outcome lookup: a point lookup, not a list walk.
 	// after_seq is the event_cursor of the request's 202, the value and the
 	// name the city event stream resumes from; it bounds the log read to the
