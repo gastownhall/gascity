@@ -116,6 +116,21 @@ These record types are usually the fastest path to the bug:
 - `operation`: scale check, start, interrupt, and drain boundary calls
 - `mutation`: bead or runtime writes that actually landed
 
+### Why a session woke or slept
+
+The `reconciler.session.wake_decision` record (outcome `start_candidate`) and
+every `reconciler.session.drain` record carry the `ComputeAwakeSet` verdict
+for that session, so a missing or surprising wake no longer needs the inputs
+re-derived by hand:
+
+- `awake_reason`: the `AwakeDecision.Reason` (for example `scaled:demand`,
+  `assigned-work`, `held`, `quarantined`, `idle-sleep`), or `no-decision`
+  when the session had no entry in the awake set.
+- `has_assigned_work`: whether the session had assigned-work demand before
+  any wake-reason override.
+- `assigned_work_bead_id`: the bead that anchored the assigned-work decision;
+  omitted when there is none.
+
 ## Sessions Skipped In An Unknown State
 
 The reconciler skips, on purpose, any open session row whose raw `state` is

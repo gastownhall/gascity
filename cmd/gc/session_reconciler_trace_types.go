@@ -687,6 +687,31 @@ func traceRecentRecords(records []SessionReconcilerTraceRecord, limit int) []Ses
 
 type traceRecordPayload map[string]any
 
+// awakeDecisionTraceFields reports why ComputeAwakeSet woke or slept a
+// session: the decision Reason plus its assigned-work anchor. hasDec is false
+// when the session had no entry in the awake set, which is reported as
+// "no-decision" rather than an empty reason.
+func awakeDecisionTraceFields(d AwakeDecision, hasDec bool) traceRecordPayload {
+	reason := d.Reason
+	if !hasDec {
+		reason = "no-decision"
+	}
+	fields := traceRecordPayload{
+		"awake_reason":      reason,
+		"has_assigned_work": hasDec && d.HasAssignedWork,
+	}
+	if hasDec && d.AssignedWorkBeadID != "" {
+		fields["assigned_work_bead_id"] = d.AssignedWorkBeadID
+	}
+	return fields
+}
+
+// withTraceFields adds extra to base and returns base.
+func withTraceFields(base, extra traceRecordPayload) traceRecordPayload {
+	maps.Copy(base, extra)
+	return base
+}
+
 type sessionReconcilerTraceCycleInfo struct {
 	TickID               uint64
 	TraceID              string
