@@ -914,12 +914,12 @@ func (p *Provider) carrier() runtime.Carrier {
 // so it inherits the same carrier-then-fallback behavior. (watch-startup, a
 // streaming op the request/response exec connection cannot carry, remains a
 // direct wire op.)
-func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
+func (p *Provider) nudgeOp(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	message := runtime.FlattenText(content)
 	if message == "" {
 		return nil
 	}
-	_, err := p.run([]byte(message), "nudge", name)
+	_, err := p.runWithContext(ctx, p.timeout, []byte(message), "nudge", name)
 	return err
 }
 
@@ -928,8 +928,8 @@ func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
 // whose screen is gone): an empty screen with no error, for every caller, so
 // a start whose agent exits while its startup dialogs are read sees a blank
 // screen, not a failed start.
-func (p *Provider) peekOp(name string, lines int) (string, error) {
-	out, err := p.run(nil, "peek", name, strconv.Itoa(lines))
+func (p *Provider) peekOp(ctx context.Context, name string, lines int) (string, error) {
+	out, err := p.runWithContext(ctx, p.timeout, nil, "peek", name, strconv.Itoa(lines))
 	var e *opExitError
 	if errors.As(err, &e) && e.code == runtime.ExitCodeNoScreen && p.v2Ready() {
 		return "", nil
@@ -937,18 +937,18 @@ func (p *Provider) peekOp(name string, lines int) (string, error) {
 	return out, err
 }
 
-func (p *Provider) sendKeysOp(name string, keys ...string) error {
-	_, err := p.run(nil, append([]string{"send-keys", name}, keys...)...)
+func (p *Provider) sendKeysOp(ctx context.Context, name string, keys ...string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, append([]string{"send-keys", name}, keys...)...)
 	return err
 }
 
-func (p *Provider) interruptOp(name string) error {
-	_, err := p.run(nil, "interrupt", name)
+func (p *Provider) interruptOp(ctx context.Context, name string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, "interrupt", name)
 	return err
 }
 
-func (p *Provider) clearScrollbackOp(name string) error {
-	_, err := p.run(nil, "clear-scrollback", name)
+func (p *Provider) clearScrollbackOp(ctx context.Context, name string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, "clear-scrollback", name)
 	return err
 }
 
@@ -959,7 +959,7 @@ func (p *Provider) Interrupt(name string) error {
 	if err := p.carrier().Interrupt(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.interruptOp(name)
+	return p.interruptOp(context.Background(), name)
 }
 
 // IsRunning checks if the session is alive: script is-running <name>
@@ -1104,7 +1104,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.nudgeOp(name, content)
+	return p.nudgeOp(context.Background(), name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>
@@ -1132,7 +1132,7 @@ func (p *Provider) RemoveMeta(name, key string) error {
 func (p *Provider) Peek(name string, lines int) (string, error) {
 	out, err := p.carrier().Peek(context.Background(), name, lines)
 	if errors.Is(err, runtime.ErrExecUnsupported) {
-		return p.peekOp(name, lines)
+		return p.peekOp(context.Background(), name, lines)
 	}
 	return out, err
 }
@@ -1162,7 +1162,7 @@ func (p *Provider) ClearScrollback(name string) error {
 	if err := p.carrier().ClearScrollback(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.clearScrollbackOp(name)
+	return p.clearScrollbackOp(context.Background(), name)
 }
 
 // CheckImage verifies that a container image exists locally by invoking:
@@ -1189,7 +1189,7 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if err := p.carrier().SendKeys(context.Background(), name, keys...); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.sendKeysOp(name, keys...)
+	return p.sendKeysOp(context.Background(), name, keys...)
 }
 
 // RunLive re-applies session_live commands. For exec providers, runs
