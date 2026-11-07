@@ -563,3 +563,37 @@ func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
 		t.Fatalf("the Dolt work store's edges:\n%s\nwant:\n%s", strings.Join(edges, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// TestReverseToRigsReListsTheRigBeforeTheClear (SHOULD 9): a row the rig no
+// longer holds under the run's stamp keeps the binding's copies, puts the
+// reverse back to R0, and the next run copies it again.
+func TestReverseToRigsReListsTheRigBeforeTheClear(t *testing.T) {
+	r := newReverseRigFixture(t)
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "reverse phase "+reversePhaseName(reverseR3) {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatal("the kill did not stop the reverse")
+	}
+	if err := r.rig("packs").Delete("gp-step1"); err != nil {
+		t.Fatal(err)
+	}
+	before := workStoreFingerprint(t, r.binding())
+	code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+	if code == 0 || !strings.Contains(stderr, "no longer holds 1 row(s)") || !strings.Contains(stderr, "gp-step1") {
+		t.Fatalf("a clear over a rig that lost a row = %d: %s", code, stderr)
+	}
+	if workStoreFingerprint(t, r.binding()) != before {
+		t.Fatal("the binding lost rows while the rig did not hold them")
+	}
+	if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+		t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
+	}
+	r.assertRigAsSeeded(t)
+}
