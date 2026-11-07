@@ -12,7 +12,13 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-const defaultEndpoint = "https://api.github.com"
+const (
+	defaultEndpoint = "https://api.github.com"
+
+	// defaultHTTPTimeout bounds each GitHub request so a stalled connection
+	// cannot hang the scheduled monitor. It matches internal/githubmonitor.
+	defaultHTTPTimeout = 30 * time.Second
+)
 
 // Client polls the GitHub Actions API for workflow run and job history.
 type Client struct {
@@ -39,7 +45,7 @@ func NewClient(token string, opts ...ClientOption) *Client {
 	c := &Client{
 		token:      token,
 		endpoint:   defaultEndpoint,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 	}
 	for _, opt := range opts {
 		opt(c)

@@ -62,15 +62,20 @@ func EvaluateHistory(monitor config.GitHubRunMonitor, runs []ObservedRun) (Evalu
 			continue
 		}
 
-		if eval.ConsecutiveSuccesses > 0 && !contractBroken {
+		if contractBroken {
+			eval.DataContractError = true
+			// A contract-broken run extends an active red streak, but behind
+			// a green streak it must not also count as a failure: failures
+			// and successes are mutually exclusive.
+			if eval.ConsecutiveSuccesses == 0 {
+				eval.ConsecutiveFailures++
+			}
+			return eval, &DataContractError{RunID: run.ID, AggregateJob: monitor.AggregateJob, Matches: matches}
+		}
+		if eval.ConsecutiveSuccesses > 0 {
 			break
 		}
 		eval.ConsecutiveFailures++
-
-		if contractBroken {
-			eval.DataContractError = true
-			return eval, &DataContractError{RunID: run.ID, AggregateJob: monitor.AggregateJob, Matches: matches}
-		}
 	}
 	return eval, nil
 }

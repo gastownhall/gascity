@@ -2102,6 +2102,7 @@ gc github runs evaluate [flags]
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | evaluate and report without mutating any episode bead |
 | `--monitor` | string |  | evaluate only the named monitor (default: all configured monitors) |
+| `--timeout` | duration | `2m0s` | bound on the whole GitHub evaluation (token lookup and every monitor) |
 
 ## gc graph
 

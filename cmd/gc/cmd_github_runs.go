@@ -41,9 +41,14 @@ var (
 	}
 )
 
+// defaultGitHubRunsEvaluateTimeout bounds one whole evaluation: the token
+// lookup plus every monitor's run and job requests.
+const defaultGitHubRunsEvaluateTimeout = 2 * time.Minute
+
 type githubRunsEvaluateOptions struct {
 	monitorName string
 	dryRun      bool
+	timeout     time.Duration
 }
 
 func newGitHubRunsCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -60,7 +65,7 @@ func newGitHubRunsCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newGitHubRunsEvaluateCmd(stdout, stderr io.Writer) *cobra.Command {
-	opts := githubRunsEvaluateOptions{}
+	opts := githubRunsEvaluateOptions{timeout: defaultGitHubRunsEvaluateTimeout}
 	cmd := &cobra.Command{
 		Use:   "evaluate",
 		Short: "Evaluate configured GitHub Actions red-streak monitors",
@@ -82,6 +87,7 @@ configured monitors are evaluated; pass --monitor to evaluate just one.`,
 	}
 	cmd.Flags().StringVar(&opts.monitorName, "monitor", "", "evaluate only the named monitor (default: all configured monitors)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "evaluate and report without mutating any episode bead")
+	cmd.Flags().DurationVar(&opts.timeout, "timeout", opts.timeout, "bound on the whole GitHub evaluation (token lookup and every monitor)")
 	return cmd
 }
 
@@ -114,7 +120,8 @@ func doGitHubRunsEvaluate(opts githubRunsEvaluateOptions, stdout, stderr io.Writ
 		return 1
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
 	token, err := resolveGitHubToken(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc github runs evaluate: %v\n", err) //nolint:errcheck // best-effort stderr
