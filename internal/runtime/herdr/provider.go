@@ -135,7 +135,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
 	// tab's root shell pane — created here with the agent's cwd and env — IS
 	// the agent's pane.
-	wsLabel, tabLabel := placementFor(name, cfg.Env)
+	wsLabel, tabLabel := placementFor(name, cfg.Env, p.c.session)
 	p.mu.Lock()
 	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, cfg.Env)
 	p.mu.Unlock()
@@ -1292,14 +1292,27 @@ func (p *Provider) paneID(ctx context.Context, name string) (string, error) {
 // per-rig (or per-town) workspace label and a per-agent tab label. Runtime names
 // are "<rig>--<town>__<agent>" (rig-qualified; citylayout maps "/" → "--") or
 // "<town>__<agent>" (town-level). Workspace = the rig when present, else the
-// town; tab = the agent (the segment after the last "__"). Falls back to the
-// whole name when those separators are absent (defensive for non-gc names).
-func workspaceTabFor(name string) (workspace, tab string) {
+// town; tab = the agent (the segment after the last "__").
+//
+// Neither separator is present when [session] session_template is left at its
+// default ("{{.Agent}}", config.go) — the common case — because a town agent's
+// runtime name is then just its bare agent name (e.g. "mayor"), with no town
+// prefix to split on at all. Per-tmux-socket isolation makes that prefix
+// unnecessary for tmux, but herdr's session is also already per-city, so
+// workspace is the only grouping axis left; falling back to workspace = name
+// here would put every bare-named town agent in its own one-agent workspace
+// instead of the shared town one. town is the city name the caller's herdr
+// session already carries (see placementFor); it is used only for this
+// fallback and only when there is no GC_RIG, since a rig-qualified name is
+// never bare.
+func workspaceTabFor(name, town string) (workspace, tab string) {
 	rest := name
 	if i := strings.Index(name, "--"); i >= 0 {
 		workspace, rest = name[:i], name[i+2:]
 	} else if j := strings.Index(name, "__"); j >= 0 {
 		workspace = name[:j]
+	} else if town != "" {
+		workspace = town
 	} else {
 		workspace = name
 	}
@@ -1331,8 +1344,14 @@ func workspaceTabFor(name string) (workspace, tab string) {
 // the themed instance name, yielding e.g. workspace "webapp", tab
 // "polecat-furiosa". Persistent and town-level sessions are unaffected: they
 // either carry no GC_RIG (town agents) or already resolve to the same labels.
-func placementFor(name string, env map[string]string) (workspace, tab string) {
-	workspace, tab = workspaceTabFor(name)
+//
+// town is the herdr session's own city name (Provider.c.session), passed
+// through to workspaceTabFor's bare-name fallback so a town agent whose
+// runtime name carries neither "--" nor "__" (the default session_template,
+// "{{.Agent}}") lands in the shared town workspace instead of one named after
+// itself.
+func placementFor(name string, env map[string]string, town string) (workspace, tab string) {
+	workspace, tab = workspaceTabFor(name, town)
 	if len(env) == 0 {
 		return workspace, tab
 	}
