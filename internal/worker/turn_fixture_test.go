@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -61,6 +62,16 @@ func claudePromptWithoutID(ts string) string {
 
 func claudeReply(ts string) string {
 	return fmt.Sprintf(`{"type":"assistant","isSidechain":false,"timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"a reply"}],"stop_reason":"end_turn"}}`, ts)
+}
+
+// claudeAPIError is an API error entry as Claude Code writes it: its error
+// class, its HTTP status (0: none recorded) and its text.
+func claudeAPIError(ts, class string, status int, text string) string {
+	var statusField string
+	if status != 0 {
+		statusField = fmt.Sprintf(`,"apiErrorStatus":%d`, status)
+	}
+	return fmt.Sprintf(`{"type":"assistant","isSidechain":false,"timestamp":%q,"isApiErrorMessage":true,"error":%q%s,"message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, ts, class, statusField, text)
 }
 
 func claudeTurnDuration(ts string) string {
@@ -166,7 +177,7 @@ func newTurnSessionWith(t *testing.T, sp runtime.Provider, provider string, opts
 	t.Helper()
 	root := t.TempDir()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()),
 		// A keyed start would otherwise wait out the stale-key detection delay.
 		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	spec := SessionSpec{
@@ -436,7 +447,8 @@ func assertTurnHistory(t *testing.T, got, want runtime.TurnHistory) {
 	}
 	for i := range want.Recent {
 		g, w := got.Recent[i], want.Recent[i]
-		if g.TurnID != w.TurnID || !g.StartedAt.Equal(w.StartedAt) || !g.EndedAt.Equal(w.EndedAt) || g.Status != w.Status || g.Inferred != w.Inferred {
+		if g.TurnID != w.TurnID || !g.StartedAt.Equal(w.StartedAt) || !g.EndedAt.Equal(w.EndedAt) || g.Status != w.Status || g.Inferred != w.Inferred ||
+			g.Failure != w.Failure {
 			t.Fatalf("Recent[%d] = %+v, want %+v", i, g, w)
 		}
 	}

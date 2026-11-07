@@ -153,7 +153,7 @@ type explicitReasonCloser interface {
 //
 // An empty or whitespace-only reason falls through to a plain Close rather
 // than stamping a meaningless value that downstream validators would trip on.
-func CloseWithReason(store beads.Store, id, reason string) error {
+func CloseWithReason(store beads.WorkStore, id, reason string) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return store.Close(id)
@@ -161,14 +161,14 @@ func CloseWithReason(store beads.Store, id, reason string) error {
 	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
 		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
 	}
-	if closer, ok := store.(explicitReasonCloser); ok {
+	if closer, ok := beads.As[explicitReasonCloser](store); ok {
 		return closer.CloseWithReason(id, reason)
 	}
 	return store.Close(id)
 }
 
 // ConvoyClose closes a convoy bead and emits a ConvoyClosed event.
-func ConvoyClose(deps ConvoyDeps, store beads.Store, id string) error {
+func ConvoyClose(deps ConvoyDeps, store beads.WorkStore, id string) error {
 	if _, err := store.Get(id); err != nil {
 		return fmt.Errorf("getting convoy %s: %w", id, err)
 	}

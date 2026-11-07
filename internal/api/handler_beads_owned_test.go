@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -129,7 +130,7 @@ func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
 					t.Fatal(err)
 				}
 				if r.tracked {
-					if err := convoycore.TrackItem(store, convoy.ID, b.ID); err != nil {
+					if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, b.ID); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -140,13 +141,13 @@ func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
 				}
 				before, _ := store.Get(b.ID)
 				all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-				tracked, _ := convoycore.HasTrack(store, convoy.ID, b.ID)
+				tracked, _ := convoycore.HasTrack(beadstest.Work(store), convoy.ID, b.ID)
 
 				rec := beadRequest(t, h, r.method, cityURL(state, r.fill(r.path, b.ID, convoy.ID)), r.fill(r.body, b.ID, convoy.ID))
 
 				got, _ := store.Get(b.ID)
 				after, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-				stillTracked, _ := convoycore.HasTrack(store, convoy.ID, b.ID)
+				stillTracked, _ := convoycore.HasTrack(beadstest.Work(store), convoy.ID, b.ID)
 				switch {
 				case rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "the generic bead API never"):
 					t.Fatalf("status %d (%s), want 422 naming the owner", rec.Code, rec.Body.String())
@@ -250,7 +251,7 @@ func TestGenericAPIWritesAWorkBead(t *testing.T) {
 				t.Fatal(err)
 			}
 			if r.tracked {
-				if err := convoycore.TrackItem(store, convoy.ID, work.ID); err != nil {
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, work.ID); err != nil {
 					t.Fatal(err)
 				}
 			}

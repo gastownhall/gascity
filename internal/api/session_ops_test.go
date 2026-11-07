@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -31,6 +33,8 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // The O0 shadow ops on /submit and /messages (DES-O0API §6, §15 OJ-2b).
@@ -44,6 +48,9 @@ type opsTestStore struct {
 	mu sync.Mutex
 	// createErr fails op-row creates, writing nothing.
 	createErr error
+	// failCreate, when set, fails each op-row create it reports true for,
+	// writing nothing.
+	failCreate func(beads.Bead) bool
 	// ambiguous commits an op-row create, then answers an error.
 	ambiguous bool
 	// panicAfterCreate commits the next op-row create, then panics (a crash
@@ -68,11 +75,14 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return s.MemStore.Create(b)
 	}
 	s.mu.Lock()
-	createErr, ambiguous, panicAfter, onCreate := s.createErr, s.ambiguous, s.panicAfterCreate, s.onOpCreate
+	createErr, failCreate, ambiguous, panicAfter, onCreate := s.createErr, s.failCreate, s.ambiguous, s.panicAfterCreate, s.onOpCreate
 	s.panicAfterCreate, s.onOpCreate = false, nil
 	s.mu.Unlock()
 	if createErr != nil {
 		return beads.Bead{}, createErr
+	}
+	if failCreate != nil && failCreate(b) {
+		return beads.Bead{}, errors.New("transport: create failed")
 	}
 	created, err := s.MemStore.Create(b)
 	if err != nil {
@@ -166,10 +176,19 @@ type rebuiltOverState struct {
 	ev    events.Provider
 }
 
-func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: r.store}
-}
 func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
+
+// Stores is a single-store city over the reopened store, which serves every
+// class as CityBeadStore does: raw, with no gate view. Its rigs are the stores
+// BeadStore returns.
+func (r *rebuiltOverState) Stores() storeref.Stores {
+	rigs := make(map[string]beads.Store, len(r.stores))
+	for rig := range r.stores {
+		rigs[rig] = r.BeadStore(rig)
+	}
+	return mintFakeStores(r.store, rigs, nil, nil)
+}
+
 func (r *rebuiltOverState) EventProvider() events.Provider {
 	if r.ev != nil {
 		return r.ev
@@ -356,7 +375,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 			setup: func(t *testing.T, e *opsEnv) session.Info {
 				e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 				e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
+				info, err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
 					Template: "helper", Title: "Off interrupt", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"},
 				})
 				if err != nil {
@@ -368,7 +387,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			var info session.Info
 			if tc.setup != nil {
 				info = tc.setup(t, e)
@@ -559,7 +578,7 @@ func TestSessionContentOpsAutoOneKeyIsOneOpAcrossPathsAndSpellings(t *testing.T)
 func TestSessionContentOpsAutoReplayDoesNotApplyResume(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Resume")
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath))
 	if err := mgr.Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -772,7 +791,7 @@ func TestSessionContentOpsAutoMessagesInFlightReplay(t *testing.T) {
 		t.Fatalf("in-flight replay = %d %+v, want the first answer %+v", rec.Code, second, first)
 	}
 	release()
-	srv := httptest.NewServer(e.h)
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv.Close()
 	c := NewCityScopedClient(srv.URL, e.fs.CityName())
 	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
@@ -1191,7 +1210,7 @@ func TestSessionContentOpsReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.
 func TestSessionContentOpsOffReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.T) {
 	for _, endpoint := range []string{"/submit", "/messages"} {
 		t.Run(strings.TrimPrefix(endpoint, "/"), func(t *testing.T) {
-			e := newOpsEnv(t, "")
+			e := newOpsEnv(t, "off")
 			cityLog := events.NewFake()
 			live := &closableEvents{Fake: cityLog}
 			e.fs.eventProv = live
@@ -1674,6 +1693,129 @@ func TestSessionContentOpsDegradeRaisesALatchedEvent(t *testing.T) {
 	}
 }
 
+// opsIncapableStore hides the conditional-write family of the store it
+// wraps, as a bd without --if-revision does.
+type opsIncapableStore struct{ beads.Store }
+
+// opsLogHandler keeps the level of every record logged through it.
+type opsLogHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *opsLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *opsLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+
+func (h *opsLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *opsLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *opsLogHandler) logged() []slog.Level {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Level(nil), h.levels...)
+}
+
+// A store that cannot record ops raises ops.recording_degraded and logs a
+// warning under an explicit auto, and under the builtin default, which treats
+// that store as off, raises nothing and logs at debug only. Both run the
+// request.
+func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	for _, c := range []struct {
+		mode   string
+		events int
+		level  slog.Level
+	}{{"", 0, slog.LevelDebug}, {"auto", 1, slog.LevelWarn}} {
+		t.Run("mode="+c.mode, func(t *testing.T) {
+			e := newOpsEnv(t, c.mode)
+			e.fs.cityBeadStore = opsIncapableStore{e.store}
+			e.restart(t)
+			logs := &opsLogHandler{}
+			e.server(t).ops.content.Logger = slog.New(logs)
+			info := e.session(t, "Incapable")
+			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if acc.Op != nil {
+				t.Fatalf("an incapable store recorded: %+v", acc.Op)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+			if len(evs) != c.events {
+				t.Fatalf("degrade events = %d, want %d", len(evs), c.events)
+			}
+			if got := logs.logged(); !slices.Equal(got, []slog.Level{c.level}) {
+				t.Fatalf("degrade log levels = %v, want [%v]", got, c.level)
+			}
+		})
+	}
+}
+
+// The builtin auto default records only over a SQLite sessions store. A
+// store that can record ops but is not SQLite-backed (here a capable memory
+// store; in production a Dolt-served one) runs the request unrecorded and
+// quietly, as if the gate were off; an explicit auto records over it, and the
+// default records over a SQLite store.
+func TestSessionContentOpsDefaultAutoRecordsOnlyOnSQLite(t *testing.T) {
+	openSQLite := func(t *testing.T) beads.Store {
+		st, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { _ = st.(interface{ CloseStore() error }).CloseStore() })
+		return st
+	}
+	for _, c := range []struct {
+		name   string
+		mode   string
+		sqlite bool
+		record bool
+	}{
+		{name: "default over a capable non-SQLite store", mode: "", record: false},
+		{name: "explicit auto over a capable non-SQLite store", mode: "auto", record: true},
+		{name: "default over SQLite", mode: "", sqlite: true, record: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newOpsEnv(t, c.mode)
+			if c.sqlite {
+				e.fs.cityBeadStore = openSQLite(t)
+				e.restart(t)
+			}
+			logs := &opsLogHandler{}
+			e.server(t).ops.content.Logger = slog.New(logs)
+			info := e.session(t, "Default")
+			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if got := acc.Op != nil; got != c.record {
+				t.Fatalf("recorded = %v (op %+v), want %v", got, acc.Op, c.record)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+			if len(evs) != 0 {
+				t.Fatalf("degrade events = %d, want 0", len(evs))
+			}
+			for _, level := range logs.logged() {
+				if level > slog.LevelDebug {
+					t.Fatalf("degrade log levels = %v, want debug at most", logs.logged())
+				}
+			}
+			if !c.record && !c.sqlite && e.store.creates.Load() != 0 {
+				t.Fatalf("the default wrote %d op rows over a non-SQLite store", e.store.creates.Load())
+			}
+		})
+	}
+}
+
 // §6.4: a configured named session with no row runs unrecorded in auto and
 // is materialized, then recorded, in require.
 func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {
@@ -1689,6 +1831,12 @@ func TestSessionContentOpsUnmaterializedNamedTarget(t *testing.T) {
 				if acc.Op != nil || len(e.opRows(t)) != 0 {
 					t.Fatalf("auto recorded an unmaterialized target: %+v", acc)
 				}
+				// The 202 answers before the delivery runs: it materializes the
+				// named session, under the city's name locks, after the
+				// response. Wait for its terminal event, as require does, so
+				// the delivery is not still writing the city when the test's
+				// TempDir is removed (ga-qybvuf).
+				waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
 				return
 			}
 			if acc.Op == nil || acc.Op.Conversation == "" {
@@ -1751,7 +1899,7 @@ func TestSessionSubmitInterruptNowReportsTheTurnFence(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Fenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -2712,7 +2860,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 			var gotKey atomic.Value
 			gotKey.Store("")
 			var streamed atomic.Bool
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-1/submit":
 					gotKey.Store(r.Header.Get("Idempotency-Key"))
@@ -2727,7 +2875,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
 				}
-			}))
+			})))
 			defer ts.Close()
 			c := NewCityScopedClient(ts.URL, "alpha")
 			var (
@@ -2771,7 +2919,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Client")
-	srv := httptest.NewServer(e.h)
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv.Close()
 	c := NewCityScopedClient(srv.URL, e.fs.CityName())
 	first, err := c.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
@@ -2780,7 +2928,7 @@ func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	}
 
 	e.restart(t)
-	srv2 := httptest.NewServer(e.h)
+	srv2 := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv2.Close()
 	c2 := NewCityScopedClient(srv2.URL, e.fs.CityName())
 	replayed, err := c2.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
@@ -3059,7 +3207,7 @@ func TestSessionContentOpsUnfencedInterruptReachesTheOp(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Unfenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -3098,7 +3246,7 @@ func TestSessionContentOpsMessagesOutcomes(t *testing.T) {
 	t.Run("queued", func(t *testing.T) {
 		e := newOpsEnv(t, "auto")
 		info := e.session(t, "Held")
-		if err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 			t.Fatal(err)
 		}
 		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"later"}`).Body)
@@ -3253,7 +3401,7 @@ func newT3OpsEnv(t *testing.T, mode string) (*opsEnv, session.Info) {
 	t.Helper()
 	e := newOpsEnv(t, mode)
 	e.fs.sessionProvider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: e.fs.sp})
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "T3", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)

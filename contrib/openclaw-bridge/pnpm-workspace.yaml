@@ -14,9 +14,24 @@ allowBuilds:
   tree-sitter-bash: false
 
 # Security pin, mirrored by package.json "overrides" for npm so both lockfiles
-# resolve the same tree (lockfiles_in_sync_test): openclaw 2026.8.35 pins
-# @modelcontextprotocol/sdk 1.30.0. 1.31.0 fixes GHSA-6qxp-vccf-f47h; 1.32.0
-# fixes GHSA-6prh-2h8m-c8cw, GHSA-22jm-h49p-29qw, GHSA-rvq5-wwqv-78pq and
-# GHSA-46jr-4wx8-v453. Drop both once openclaw pins >= 1.32.0.
+# resolve the same tree (lockfiles_in_sync_test): openclaw 2026.10.8 exact-pins
+# undici 8.11.2 and zod 4.6.5. undici 8.12.2 fixes GHSA-2m5v-pch6-74hx
+# (TLS certificate validation bypass), GHSA-4qv8-2p9j-2685, GHSA-4w7w-5xrc-9h26,
+# GHSA-55wc-3pg8-jfw6, GHSA-9fm3-97px-rjf6, GHSA-f72v-6w45-q472,
+# GHSA-qrxm-fqhp-jwvm and GHSA-xjj6-f33q-929c; zod 4.6.6 fixes
+# GHSA-mrhx-c7xc-m3w5. Drop each once openclaw pins a fixed version.
+# (openclaw 2026.10.8 pins @modelcontextprotocol/sdk 1.32.0, which carries the
+# fixes the former sdk override was for, so that override is gone.)
+# openclaw 2026.10.8 also exact-pins npm 12.2.0, whose bundled brace-expansion
+# 5.0.9 has GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr and GHSA-qhr7-859c-m2p7;
+# npm 12.2.1 bundles the fixed 5.0.12. Both npm releases still bundle an
+# unpatched undici 6.x (12.2.1 has 6.29.0, below the 6.29.1 fix for
+# GHSA-2m5v-pch6-74hx and others). Only node-gyp's header download loads it,
+# and the bridge never runs npm or node-gyp; a bundled dependency is out of
+# reach of any override. Drop the npm pin once openclaw pins npm >= 12.2.1.
+# @openclaw/imessage bundles its own zod 4.6.5 (bundleDependencies), which no
+# override can reach.
 overrides:
-  "@modelcontextprotocol/sdk": 1.32.2
+  npm: 12.2.1
+  undici: 8.12.3
+  zod: 4.6.7

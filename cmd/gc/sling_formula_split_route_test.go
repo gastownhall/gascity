@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/readywork"
 )
 
 // These tests pin #6054: `gc sling <target> <formula> --formula` on a city whose
@@ -98,7 +97,7 @@ func assertSplitFormulaSlingRoutesInTheBinding(t *testing.T, cityPath string) {
 
 	resetCLIStorageRoutes(t)
 	var readyOut, readyErr bytes.Buffer
-	if rc := cmdReady(readywork.Query{}, &readyOut, &readyErr); rc != 0 {
+	if rc := cmdReady(readyFlags{}, &readyOut, &readyErr); rc != 0 {
 		t.Fatalf("gc ready exit = %d: %s", rc, readyErr.String())
 	}
 	var rows []struct {

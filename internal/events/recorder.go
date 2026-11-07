@@ -94,6 +94,11 @@ type FileRecorder struct {
 	// directory regardless. Crash recovery of orphaned rotating files is
 	// unchanged: the long-lived recorder still sweeps.
 	skipSweep bool
+
+	// mirrorOpts configures the event-log mirror (WithMirror); mirror is its
+	// running copier, nil when no mirror is configured.
+	mirrorOpts MirrorOptions
+	mirror     *eventMirror
 }
 
 // FileRecorderOption customizes a FileRecorder at construction time.
@@ -255,6 +260,13 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 	r.file = file
 	r.lock = lock
 	r.seq = maxSeq
+	if r.mirrorOpts.Path != "" {
+		if err := validateMirrorOptions(path, r.mirrorOpts); err != nil {
+			fmt.Fprintf(stderr, "events: mirror disabled: %v\n", err) //nolint:errcheck // best-effort stderr
+		} else {
+			r.mirror = startMirror(path, r.mirrorOpts, maxSeq, stderr)
+		}
+	}
 	return r, nil
 }
 
@@ -875,8 +887,8 @@ func (r *FileRecorder) LatestSeq() (uint64, error) {
 }
 
 // Watch returns a Watcher that delivers every retained event with Seq > afterSeq
-// exactly once per watcher, in sequence order. When afterSeq is below the active
-// file's history it first backfills across the sibling .gz archives and in-flight
+// exactly once per watcher, in sequence order. When afterSeq is below the log's
+// latest seq it first backfills across the sibling .gz archives and in-flight
 // rotating-* files (lazily, on the first Next call) before tailing the active
 // file. It also detects rotation mid-watch (inode change) and catches up across
 // the just-rotated archive before re-tailing the fresh active file, so no
@@ -932,10 +944,13 @@ func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, err
 		activeFile: activeFile,
 		activeSize: size,
 	}
-	// Backfill is needed only when the cursor predates the active file's head.
-	if haveStat && afterSeq < latestSeq {
+	// Backfill is needed only when the cursor predates the log's latest seq.
+	// That seq can sit in a rotating file while the active log is empty or
+	// absent (a rotation renamed it and has not written its anchor, or could
+	// not), so the segments are replayed with or without an active leg.
+	if afterSeq < latestSeq {
 		w.needsBackfill = true
-		w.bfActive = true
+		w.bfActive = haveStat
 	} else if activeFile != nil {
 		// No backfill: close the captured fd immediately (once).
 		w.closeFd()
@@ -976,9 +991,16 @@ func (r *FileRecorder) Close() error {
 	r.file = nil
 	lock := r.lock
 	r.lock = nil
+	mirror := r.mirror
+	r.mirror = nil
 	r.mu.Unlock()
 
+	// Rotations finish first: the mirror copier keeps copying meanwhile, and
+	// its stop then takes the log's latest seq from settled archives.
 	r.rotations.Wait()
+	if mirror != nil {
+		mirror.stop()
+	}
 
 	var lockErr error
 	if lock != nil {

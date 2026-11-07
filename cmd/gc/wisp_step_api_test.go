@@ -219,17 +219,58 @@ func TestControllerActiveWorkStepReadsTheScopeStore(t *testing.T) {
 	}
 }
 
-// TestControllerActiveWorkStepRefusesWhileAConfigReloadIsPending pins the
+// TestControllerActiveWorkStepRefusesWhileAReloadIsInProgressOrFailed pins the
 // freshness guard ReadyWork has: the config decides which store a scope names,
-// so the controller answers only under a config it can show is current.
-func TestControllerActiveWorkStepRefusesWhileAConfigReloadIsPending(t *testing.T) {
+// so the controller refuses while a reload or API config write is in progress
+// and after a failed reload until one applies. A reload that is only due (the
+// dirty flag) is not a reason to refuse: the controller answers from the
+// config it has published, read with its stores as one generation.
+func TestControllerActiveWorkStepRefusesWhileAReloadIsInProgressOrFailed(t *testing.T) {
 	f := newActiveStepFixture(t, true)
-	cs := f.controller()
-	var dirty atomic.Bool
-	dirty.Store(true)
-	cs.configDirty = &dirty
-	if _, err := cs.ActiveWorkStep(context.Background(), activeStepAssignees, f.rigPath); !errors.Is(err, api.ErrReadyWorkConfigNotCurrent) {
-		t.Fatalf("ActiveWorkStep with a pending reload = %v, want api.ErrReadyWorkConfigNotCurrent", err)
+	seeded := activeStepScenarios()["assigned molecule, in-progress step"](t, f)
+	want, err := f.controller().ActiveWorkStep(context.Background(), activeStepAssignees, f.rigPath)
+	if err != nil || want == nil || want.ID != seeded {
+		t.Fatalf("ActiveWorkStep under a current config = %+v, %v; want step %s", want, err, seeded)
+	}
+	for _, tc := range []struct {
+		name    string
+		change  func(cs *controllerState)
+		answers bool
+	}{
+		{name: "a reload is due", change: func(cs *controllerState) {
+			var dirty atomic.Bool
+			dirty.Store(true)
+			cs.configDirty = &dirty
+		}, answers: true},
+		{name: "a reload or API config write is in progress", change: func(cs *controllerState) { cs.freshness.beginChange() }},
+		{name: "the last reload failed", change: func(cs *controllerState) {
+			cs.freshness.beginChange()
+			cs.freshness.endReload(reloadOutcomeFailed)
+		}},
+		{name: "a reload applied after one failed", change: func(cs *controllerState) {
+			cs.freshness.beginChange()
+			cs.freshness.endReload(reloadOutcomeFailed)
+			cs.freshness.beginChange()
+			cs.freshness.endReload(reloadOutcomeApplied)
+		}, answers: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := f.controller()
+			tc.change(cs)
+			got, err := cs.ActiveWorkStep(context.Background(), activeStepAssignees, f.rigPath)
+			if !tc.answers {
+				if !errors.Is(err, api.ErrReadyWorkConfigNotCurrent) {
+					t.Fatalf("ActiveWorkStep = %+v, %v; want api.ErrReadyWorkConfigNotCurrent", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ActiveWorkStep = %v; the controller must answer from its published config", err)
+			}
+			if got == nil || *got != *want {
+				t.Fatalf("ActiveWorkStep = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
@@ -322,9 +363,7 @@ func TestWispStepInjectionFallsBackOnAnyControllerFailure(t *testing.T) {
 	}{
 		{name: "no controller", client: func(*testing.T, *controllerState) *api.Client { return nil }},
 		{name: "refusing controller", client: func(t *testing.T, cs *controllerState) *api.Client {
-			var dirty atomic.Bool
-			dirty.Store(true)
-			cs.configDirty = &dirty
+			cs.freshness.beginChange()
 			return readyWorkTestServer(t, cs)
 		}},
 		{name: "hung controller", client: func(t *testing.T, cs *controllerState) *api.Client {
@@ -545,6 +584,26 @@ func TestWispStepLookupIsBoundedWhileItsClientResolves(t *testing.T) {
 	case <-stopped:
 	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("stop waited on a client that never resolved; it must give up at activeWorkStepAPITimeout")
+	}
+}
+
+// TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound pins that a caller
+// taking the answer after the bound has passed still gets the controller's
+// answer when it has already arrived: a hook that reads its SessionStart mail
+// before taking the step answer can find both ready, and a fallback there costs
+// an in-process read the controller already saved it.
+func TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound(t *testing.T) {
+	step := &api.ActiveWorkStep{ID: "gc-step", Title: "inspect the queue"}
+	for i := 0; i < 200; i++ {
+		answer := make(chan wispStepAnswer, 1)
+		answer <- wispStepAnswer{answered: true, step: step, route: "api"}
+		// Timer channels are synchronous: a zero-duration timer's channel is
+		// ready to receive from as soon as it is made.
+		lookup := &wispStepLookup{answer: answer, expired: time.NewTimer(0), cancel: func() {}}
+		got := lookup.take()
+		if !got.answered || got.route != "api" {
+			t.Fatalf("take %d = %+v, want the controller's answer already in hand over the expired bound", i, got)
+		}
 	}
 }
 

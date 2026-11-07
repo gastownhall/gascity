@@ -16,6 +16,7 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -113,6 +114,7 @@ func liveListQuery(query ListQuery) ListQuery {
 // queries are unsupported because Count must match List cardinality, including
 // List's post-sort limit cap.
 func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
 	}
@@ -216,6 +218,7 @@ func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, 
 // that already fall back to the backing store (List/Count/Ready), where a
 // refresh-and-serve is invisible to callers.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	query = c.listTier(query)
 	if query.IncludesClosed() {
 		return nil, false
 	}
@@ -232,6 +235,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 // performs backing-store I/O. The stamp fences only this process's cache
 // projection; it does not certify durable-store lineage or event delivery.
 func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, bool) {
+	query = c.listTier(query)
 	if query.Validate() != nil ||
 		(!query.HasFilter() && !query.AllowScan) ||
 		query.Live ||
@@ -762,7 +766,8 @@ type RowRefreshOptions struct {
 	// (announcedCloses): its closing write, a re-scan or a refresh announced
 	// it, and a re-scan or full Prime then dropped the closed row. A close
 	// the cache never announced is announced, however recently the cache
-	// wrote the row: a full Prime drops a row closed out of band silently.
+	// wrote the row: a write over a close the cache never held installs it
+	// silently, and a full Prime then drops the closed row.
 	// So is the close of a row the cache holds closed only because a path
 	// that announces no close installed it over no cached row (a write that
 	// only refreshed the row, a conditional write's refetch, an applied
@@ -968,12 +973,12 @@ func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, inst
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if !readyQueryFromArgs(query).IsZero() {
-		return c.backing.Ready(query...)
+		return c.backing.Ready(c.readyArgsTier(query)...)
 	}
-	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+	if rows, ok := c.readyFromCache(c.readyTier(ReadyQuery{})); ok {
 		return rows, nil
 	}
-	return c.backing.Ready(query...)
+	return c.backing.Ready(c.readyArgsTier(query)...)
 }
 
 // ReadyPreferCache answers any ready query (tier, assignee, limit) from the
@@ -988,6 +993,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // arguments has always meant "authoritative" to its existing callers; the
 // native Ready endpoint opts in explicitly.
 func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	query = c.readyTier(query)
 	if rows, ok := c.readyFromCache(query); ok {
 		return rows, nil
 	}
@@ -1074,7 +1080,7 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	rows, err := c.cachedReadyCompleteOnly(ctx, c.readyTier(readyQueryFromArgs(query)))
 	if err != nil {
 		return rows, err
 	}
@@ -1082,6 +1088,29 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 		return nil, err
 	}
 	return rows, nil
+}
+
+// ReadyJudgmentContext is ReadyContext for a reader that trusts the cache
+// row by row: it judges every candidate the cache can vouch for, leaves a
+// dirty or unanswerable one unjudged rather than declining the whole read, and
+// returns the snapshot its verdicts were reached on (ReadyJudgment): each
+// judged candidate's edges, and which rows the cache held and trusted. A
+// reader that must know a verdict judged every target, rather than skipping
+// one the cache does not hold, reads this. Like ReadyContext it never reads
+// the backing: a cache that cannot vouch for any of it (not live, coverage
+// incomplete, projection degraded, busy) returns ErrCacheUnavailable.
+func (c *CachingStore) ReadyJudgmentContext(ctx context.Context, query ReadyQuery) (ReadyJudgment, error) {
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	j, err := c.cachedReadyJudgment(ctx, c.readyTier(query), true)
+	if err != nil {
+		return ReadyJudgment{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ReadyJudgment{}, err
+	}
+	return j, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.
@@ -1109,7 +1138,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
-		if IsReadyCandidate(b, now) {
+		if IsReadyCandidateForTier(b, now, c.readTier(TierIssues)) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false
 			}

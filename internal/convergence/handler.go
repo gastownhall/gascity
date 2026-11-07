@@ -84,6 +84,13 @@ type Store interface {
 	// CloseReason* constants below for canonical wording.
 	CloseBead(id, reason string) error
 
+	// CloseOpenDescendants closes every non-closed descendant of id, but not
+	// id itself, stamping reason as close_reason on each bead it closes.
+	// Descendants under an already-closed intermediate are included;
+	// already-closed descendants are left untouched. A subtree with nothing
+	// open returns nil.
+	CloseOpenDescendants(id, reason string) error
+
 	// DeleteBead permanently removes a bead. Used to burn discarded
 	// speculative wisps so they are not counted as completed iterations.
 	DeleteBead(id string) error

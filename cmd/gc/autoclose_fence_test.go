@@ -233,7 +233,7 @@ func TestConvoyAutocloseReadsTheConvoyLiveBeforeClosing(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 
 	if got := statusOf(t, backing, convoy.ID); got != "open" {
 		t.Fatalf("convoy %s; the live row is owned", got)
@@ -354,7 +354,7 @@ func TestConvoyAutocloseRechecksTheConvoyIsStillOpen(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 	for _, evt := range rec.Events {
 		if evt.Type == events.ConvoyClosed {
 			t.Fatalf("recorded %s for a convoy another writer already closed", evt.Type)

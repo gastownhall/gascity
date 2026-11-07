@@ -91,8 +91,9 @@ func TestBdStoreBatchedDispatchReadsMatchPerCallReads(t *testing.T) {
 		t.Fatalf("ChildrenOfAny(WithBothTiers) = %v, want the TierBoth List union %v (4 children, the ephemeral one included)", gotBoth, bothTiers)
 	}
 
-	// DepListBatch answers each anchor as DepList does, for one id (whose
-	// `bd dep list <id> --json` prints rows, not records) and for several.
+	// DepListBatch answers each anchor as DepList does for edges to held beads,
+	// for one id (which it names twice, so bd prints records rather than rows)
+	// and for several.
 	blocked := mk(beads.Bead{Title: "blocked", Type: "task", ParentID: p1.ID})
 	if err := store.DepAdd(blocked.ID, p2.ID, "blocks"); err != nil {
 		t.Fatalf("DepAdd: %v", err)

@@ -119,10 +119,13 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"fullScanGen": true,
 		"backing":     true, "idPrefix": true, "mu": true, "reconciling": true,
 		"eventPrefixes": true, // event-ownership config, fixed at construction
-		"epoch":         true, // instance identity, fixed at construction
-		"reconcileGate": true, // reconcile-loop gate, fixed at construction
-		"now":           true, // the clock (WithClock), fixed at construction
-		"onChange":      true, "problemf": true, "problemLog": true,
+		// logicalReadTier is read-tier config (WithLogicalReadTier), fixed at
+		// construction; it shapes reads only and the merge never touches it.
+		"logicalReadTier": true,
+		"epoch":           true, // instance identity, fixed at construction
+		"reconcileGate":   true, // reconcile-loop gate, fixed at construction
+		"now":             true, // the clock (WithClock), fixed at construction
+		"onChange":        true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
@@ -182,6 +185,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
 		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
+		// read from the reconcile gate by Stats; the merge neither reads nor writes it
+		"ReconcilePaused": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }

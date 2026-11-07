@@ -200,9 +200,11 @@ func TestStage2MCPRefusalWarningsStayBoundedForAgentsSharingAWorkDir(t *testing.
 }
 
 // A pack overlay that ships a provider file the hook installer does not own
-// (here .gemini/settings.json) is merged into the work dir's file on every
-// tick, rewriting the same bytes once merged. gc's own rewrite is not a
-// change: the refusal is reported once.
+// (here .gemini/settings.json) is merged into the work dir's file. Staging
+// leaves an already-merged file alone, so each tick first restores the team's
+// own settings (as a checkout would): every tick then has gc rewrite the file
+// to the same merged bytes. gc's own rewrite is not a change: the refusal is
+// reported once.
 func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
 	cityPath := t.TempDir()
 	var stderr bytes.Buffer
@@ -216,11 +218,11 @@ func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
 	}
 	params.packOverlayDirs = []string{overlayDir}
 	workDir := filepath.Join(cityPath, ".gc", "worktrees", "worker-1")
-	writeTeamGeminiSettings(t, workDir)
 	target := filepath.Join(workDir, ".gemini", "settings.json")
 	agent := &config.Agent{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/worker-1"}
 	old := time.Unix(1_000_000, 0)
 	for tick := 0; tick < 4; tick++ {
+		writeTeamGeminiSettings(t, workDir)
 		// Backdate the file, so the tick's rewrite shows in its mtime.
 		if err := os.Chtimes(target, old, old); err != nil {
 			t.Fatal(err)

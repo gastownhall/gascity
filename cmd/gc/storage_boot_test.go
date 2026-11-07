@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -1019,12 +1018,11 @@ func TestStorageMigrateRefusesWhileAnotherMigratorHoldsTheCity(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
-// TestStorageMigrateRefusesRigResidueByName covers the rig-scope preflight.
-//
-// The remedy is asserted as carefully as the refusal: it must not name an
-// importer, because this binary carries none, and a remedy naming a command
-// that does not exist is an instruction that fails at the shell.
-func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
+// TestStorageMigrateNoLongerRefusesOverRigHistory: a rig's graph history no
+// longer blocks the city cutover (S4b). The relic legs keep it readable and
+// `gc storage migrate --from-rigs` moves it, so the city migrates, leaves the
+// rig row where it is, and names the rig and the command that imports it.
+func TestStorageMigrateNoLongerRefusesOverRigHistory(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
@@ -1034,163 +1032,72 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code == 0 {
-		t.Fatal("a city with infrastructure beads in a rig scope migrated anyway")
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the city migration refused over rig history: %d %s %s", code, stdout.String(), stderr.String())
 	}
-	got := stderr.String()
-	if !strings.Contains(got, stray.ID) || !strings.Contains(got, "rig alpha") {
-		t.Errorf("the refusal does not name the bead and its rig: %q", got)
+	if got := stdout.String(); !strings.Contains(got, "Rigs awaiting import") || !strings.Contains(got, "alpha") || !strings.Contains(got, "gc storage migrate --from-rigs --fleet-stopped") {
+		t.Errorf("the success message does not name the rig awaiting import and the command: %q", got)
 	}
-	for _, forbidden := range []string{"import", "migrate storage"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("the remedy names %q, which this binary does not carry: %q", forbidden, got)
-		}
-	}
-	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
-		"a migrator that refused must record no convergence")
-}
-
-// TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
-// is the city's own work store (a unified city whose rig .beads carries a copy
-// of the city's remote binding, or resolves to the same database). Its rows
-// ARE the copy's source rows, so they are not residue: refusing them sent the
-// operator to blank the rig path to get a migration through (MC shadow F1).
-// Both shapes are covered: the same handle behind both opens, and a second,
-// independently opened handle over the same rows.
-func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
-	rigPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
-	request := storageTestRequest(t, cfg)
-	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
-
-	city := stubInfraMigrationSource(t)
-	stubInfraControllerPing(t, 0)
-	mustCreateInfraBead(t, city, beads.Bead{Title: "a city wisp", Type: "session", Labels: []string{"alpha", "beta"}})
-	mustCreateInfraBead(t, city, beads.Bead{Title: "ordinary work", Type: "task"})
-	rows, err := city.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil {
-		t.Fatalf("listing the city work store: %v", err)
-	}
-
-	var rig beads.Store
-	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
-	for _, shape := range []struct {
-		name  string
-		store beads.Store
-	}{
-		{"the city's own handle", city},
-		{"a second handle over the same rows", beads.NewMemStoreFrom(len(rows), rows, nil)},
-	} {
-		rig = shape.store
-		if err := censusRigInfraResidue(request.CityPath, cfg); err != nil {
-			t.Errorf("%s: a rig sharing the city work store was refused as residue: %v", shape.name, err)
-		}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the city migration touched the rig row %s: %v", stray.ID, err)
 	}
 }
 
-// TestStorageMigrateRefusesRigRowHeldInAnotherState covers a rig store that
-// holds a city id in a state the city work store does not. The copy carries
-// the city's version, so the rig's would be dropped: each is refused by name,
-// on whichever field differs, because no version stamp is comparable across
-// the two stores (a revision is each store's own token, bd lists none, and the
-// native store never fills UpdatedAt). A revision on either side, a timestamp
-// only one side publishes, bd's readiness projection and the order labels and
-// edges come back in are no evidence either way, so those rows are judged on
-// the rest of the row and accepted.
-func TestStorageMigrateRefusesRigRowHeldInAnotherState(t *testing.T) {
+// TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
+// the upgrade order ends with: a converged city whose work store still holds
+// retained copies, beside a rig scope holding pre-split infrastructure rows.
+// The re-run copies nothing, so the census that guards a copy does not run:
+// the clear proceeds, `gc storage status` exits 0, and the rig row is
+// untouched. Refused, as it was, the city kept the retained copies boot
+// refuses over, and every seat's drain fence stayed closed on them.
+func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
-	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
-
-	city := stubInfraMigrationSource(t)
+	source := stubStrandedRecoverySource(t)
 	stubInfraControllerPing(t, 0)
-	notBlocked := false
-	shared := mustCreateInfraBead(t, city, beads.Bead{
-		Title:        "a city message",
-		Type:         "message",
-		Labels:       []string{"alpha", "beta"},
-		Metadata:     beads.StringMap{"note": "city"},
-		Dependencies: []beads.Dep{{DependsOnID: "gc-target", Type: "blocks"}, {DependsOnID: "gc-other", Type: "related"}},
-		IsBlocked:    &notBlocked,
-	})
+	carried := mustCreateInfraBead(t, source, beads.Bead{Title: "a delivered mail", Type: "message"})
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
 
-	var rig beads.Store
+	cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "gp"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a pre-split workflow step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": "gp-root", "gc.kind": "task"}})
 	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
-	census := func(rows ...beads.Bead) error {
-		rig = beads.NewMemStoreFrom(len(rows), rows, nil)
-		return censusRigInfraResidue(request.CityPath, cfg)
-	}
-	for _, tc := range []struct {
-		name    string
-		mutate  func(beads.Bead) beads.Bead
-		refused bool
-	}{
-		{"title", func(b beads.Bead) beads.Bead { b.Title = "the rig's own copy"; return b }, true},
-		{"status", func(b beads.Bead) beads.Bead { b.Status = "closed"; return b }, true},
-		{"labels", func(b beads.Bead) beads.Bead { b.Labels = []string{"alpha"}; return b }, true},
-		{"metadata", func(b beads.Bead) beads.Bead { b.Metadata = beads.StringMap{"note": "rig"}; return b }, true},
-		{"dependencies", func(b beads.Bead) beads.Bead { b.Dependencies = b.Dependencies[:1]; return b }, true},
-		{"a dependency's type", func(b beads.Bead) beads.Bead {
-			b.Dependencies = []beads.Dep{b.Dependencies[0], {DependsOnID: "gc-other", Type: "blocks"}}
-			return b
-		}, true},
-		{"another store's revision", func(b beads.Bead) beads.Bead { b.Revision = shared.Revision + 7919; return b }, false},
-		{"a published create time", func(b beads.Bead) beads.Bead { b.CreatedAt = b.CreatedAt.Add(-time.Hour); return b }, true},
-		{"a published update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = b.UpdatedAt.Add(time.Hour); return b }, true},
-		{"a legacy revision", func(b beads.Bead) beads.Bead { b.Revision = 0; return b }, false},
-		{"an unpublished create time", func(b beads.Bead) beads.Bead { b.CreatedAt = time.Time{}; return b }, false},
-		{"an unpublished update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = time.Time{}; return b }, false},
-		{"label order", func(b beads.Bead) beads.Bead { b.Labels = []string{"beta", "alpha"}; return b }, false},
-		{"edge order", func(b beads.Bead) beads.Bead {
-			b.Dependencies = []beads.Dep{b.Dependencies[1], b.Dependencies[0]}
-			return b
-		}, false},
-		{"the readiness projection", func(b beads.Bead) beads.Bead { blocked := true; b.IsBlocked = &blocked; return b }, false},
-	} {
-		if got := censusRowDiffers(tc.mutate(shared), shared); got != tc.refused {
-			t.Errorf("%s: with the city holding the row that differs in %s, censusRowDiffers = %v, want %v; the answer must not depend on which side holds which state",
-				tc.name, tc.name, got, tc.refused)
-		}
-		err := census(tc.mutate(shared))
-		switch {
-		case !tc.refused && err != nil:
-			t.Errorf("%s: a rig row differing only in %s was refused: %v", tc.name, tc.name, err)
-		case !tc.refused:
-		case err == nil || !strings.Contains(err.Error(), shared.ID+" (rig sandbox)") || !strings.Contains(err.Error(), "in another state"):
-			t.Errorf("%s: a rig row differing in %s was not refused by name as held in another state: %v", tc.name, tc.name, err)
-		case strings.Contains(err.Error(), "Move them"):
-			t.Errorf("%s: the refusal tells the operator to move a row whose id the work store already holds: %v", tc.name, err)
-		}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("precondition: status exits 0 with the retained copy %s in the work store: %s", carried.ID, stdout.String())
 	}
 
-	// Each kind of residue keeps the remedy it needs when both are present.
-	stray := shared
-	stray.ID = "gc-only-in-the-rig"
-	stale := shared
-	stale.Title = "the rig's own copy"
-	err := census(stray, stale)
-	if err == nil {
-		t.Fatal("a rig holding an absent row and a diverged row was not refused")
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear-only re-run = %d, want 0: %s %s", code, stdout.String(), stderr.String())
 	}
-	absentPart, divergedPart, ok := strings.Cut(err.Error(), "Move them into the city work store")
-	if !ok || !strings.Contains(absentPart, stray.ID) || strings.Contains(absentPart, shared.ID) {
-		t.Errorf("the absent row is not named under the move remedy alone: %v", err)
+	if _, err := source.Get(carried.ID); err == nil {
+		t.Errorf("the re-run left the retained copy %s", carried.ID)
 	}
-	if !strings.Contains(divergedPart, shared.ID) || !strings.Contains(divergedPart, storageStopCommand) {
-		t.Errorf("the diverged row is not named under its own remedy, which must say to re-check a stopped city: %v", err)
+	stdout.Reset()
+	stderr.Reset()
+	// The city's own verdict is clean; the rig still awaits its import, and
+	// a split city's deploy gate covers its rigs (D5).
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "rig packs: awaiting import") || strings.Contains(stdout.String(), "blocking invariant") {
+		t.Errorf("status after the clear = %d, want non-zero for the rig alone: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)
 	}
 }
 

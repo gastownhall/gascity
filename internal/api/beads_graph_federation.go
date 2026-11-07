@@ -13,15 +13,30 @@ import (
 //
 // Routing is keyed on STORE IDENTITY, the same rule handler_beads.go's by-id
 // class resolver and handler_convoy_dispatch.go's workflow scan use: on a
-// default city GraphBeadStore() returns the city store itself, so there is
+// default city Stores().Graph() wraps the city store itself, so there is
 // nothing to federate and every caller's extra arm stays dead. That identity
 // guard is what keeps a single-store city byte-identical.
 func relocatedGraphStore(state State) beads.Store {
-	graph := state.GraphBeadStore().Store
+	graph := state.Stores().Graph().Store
 	if graph == nil || graph == state.CityBeadStore() {
 		return nil
 	}
 	return graph
+}
+
+// bindingReservedPrefixes is the reserved id namespaces store holds as a class
+// binding: the prefixes of every binding the residency topology serves from it,
+// as cmd/gc's readyLegReservedPrefixes reads them for `gc ready`. The
+// cross-store ready rule takes the binding's own verdict on a blocker in one of
+// them, which no other store can hold, and reads every copy of any other.
+func (s *Server) bindingReservedPrefixes(store beads.Store) []string {
+	var prefixes []string
+	for _, binding := range s.residencyTopology().Bindings {
+		if binding.Leg.Store == store { // residency:allow — matches the already-resolved graph store to its binding, to read its namespaces; no store is ordered, opened or read
+			prefixes = append(prefixes, binding.Prefixes...)
+		}
+	}
+	return prefixes
 }
 
 // queryTopology answers the city facts a generated work_query or MCP catalog has

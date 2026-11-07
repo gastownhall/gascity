@@ -355,12 +355,21 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 // where this scope's beads actually are.
 //
 // The predicate above discriminates "bd's foreign upstream" from "gc's own
-// managed server" on the recorded host alone, compared against
-// managedCityHost(), which reads GC_DOLT_HOST from the live environment. A
-// gc-managed scope initialized under a non-loopback GC_DOLT_HOST records that
-// host verbatim, so a later boot with the variable unset or pointing elsewhere
-// compares unequal and reads gc's own server as foreign. This is the evidence
-// that settles it without consulting the environment at all.
+// managed server" by the recorded binding: a non-loopback host is compared
+// against managedCityHost(), which reads GC_DOLT_HOST from the live
+// environment, and a loopback one against the ports gc's runtime records for
+// the city. A gc-managed scope initialized under a non-loopback GC_DOLT_HOST
+// records that host verbatim, so a later boot with the variable unset or
+// pointing elsewhere compares unequal and reads gc's own server as foreign.
+// This is the evidence that settles it without consulting the environment at
+// all.
+//
+// It answers before the port rule for a loopback binding too. bd's binding
+// keeps the port it was initialized against, so once gc's own server has moved
+// to another port, the port rule alone would read gc's own legacy store as
+// bd's. The cost is the converse: a store an operator binds to their own
+// loopback server under the name of a database gc keeps in the city's data
+// dir (one a removed rig left behind) is gc's.
 //
 // It takes TWO facts, and the conjunction is the whole point:
 //
@@ -571,13 +580,17 @@ func cityHasProviderOwnedScope(cityPath string) (bool, error) {
 }
 
 // proxiedScopeProviderRoot resolves the directory bd roots a proxied scope's
-// proxy and Dolt child at: the sidecar's root_path when bd wrote one, else the
-// documented default .beads/dolt.
+// proxy and Dolt child at, as bd's ResolveProxiedServerRootPath does: the
+// sidecar's root_path when bd wrote one, else the scope's Dolt data directory
+// (scopeDoltDataDir), which is metadata.json's dolt_data_dir when it names one
+// and the documented default .beads/dolt otherwise. A rig gc beads city
+// migrate-proxied pointed at the city's root keeps that dolt_data_dir through
+// a re-clone, which drops the gitignored sidecar.
 func proxiedScopeProviderRoot(scopeRoot string) (string, error) {
 	beadsDir := filepath.Join(normalizePathForCompare(scopeRoot), ".beads")
 	data, err := os.ReadFile(filepath.Join(beadsDir, "proxied_server_client_info.json"))
 	if scopeArtifactAbsent(err) {
-		return filepath.Join(beadsDir, "dolt"), nil
+		return scopeDoltDataDir(scopeRoot), nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("read proxied server binding: %w", err)
@@ -590,7 +603,7 @@ func proxiedScopeProviderRoot(scopeRoot string) (string, error) {
 	}
 	root := strings.TrimSpace(sidecar.RootPath)
 	if root == "" {
-		return filepath.Join(beadsDir, "dolt"), nil
+		return scopeDoltDataDir(scopeRoot), nil
 	}
 	if !filepath.IsAbs(root) {
 		root = filepath.Join(beadsDir, root)
@@ -609,6 +622,16 @@ func validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot string) error {
 	if _, journaled, err := providerScopeOwnership(cityPath, scopeRoot); err != nil || journaled {
 		return err
 	}
+	return validateProxiedScopeBindingHasStore(scopeRoot)
+}
+
+// validateProxiedScopeBindingHasStore is validateProviderOwnedProxiedScopeStore
+// without the journal exemption: whatever the journal records for the scope,
+// a proxied binding to a local store with no store behind it is refused. It is
+// for --adopt, which registers a store that must already exist: a record does
+// not make one, since a fresh add that failed leaves its pending record and gc
+// rig remove leaves a ready one at the rig's path.
+func validateProxiedScopeBindingHasStore(scopeRoot string) error {
 	intent, proxied, err := providerOwnedScopeIntentFromBinding(scopeRoot)
 	if err != nil || !proxied {
 		return err
@@ -622,6 +645,9 @@ func validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot string) error {
 	if err != nil {
 		return err
 	}
+	if !samePath(root, filepath.Join(normalizePathForCompare(scopeRoot), ".beads", "dolt")) {
+		return validateProxiedScopeDatabaseOnRoot(scopeRoot, root)
+	}
 	_, statErr := os.Stat(root)
 	switch {
 	case statErr == nil:
@@ -630,6 +656,36 @@ func validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot string) error {
 		return fmt.Errorf("beads scope %q declares bd proxied-server mode but its provider store %s does not exist; bd commits .beads/metadata.json and ignores the store itself, so a clone carries the mode without the data. Refusing to create an empty store: initialize it explicitly with --beads-transport proxied --beads-target local, or restore %s", scopeRoot, root, root)
 	default:
 		return fmt.Errorf("inspect proxied provider store %s: %w", root, statErr)
+	}
+}
+
+// validateProxiedScopeDatabaseOnRoot refuses a proxied scope whose Dolt root,
+// root, is not its own .beads/dolt and does not hold the scope's database:
+// bd's default database when metadata.json pins none, as bd opens it. Such a
+// root can be shared, like the city's root a rig gc beads city
+// migrate-proxied pointed at it stands on, so that it exists says nothing
+// about this scope's store, and a bd write through the scope would create the
+// database empty in it. The check is the one sharedCityRootForRig makes before
+// pointing a rig at the city's root.
+func validateProxiedScopeDatabaseOnRoot(scopeRoot, root string) error {
+	metaPath := scopeMetadataJSONPath(scopeRoot)
+	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", metaPath, err)
+	}
+	if !ok {
+		database = contract.DefaultDoltDatabase
+	}
+	store := filepath.Join(root, database)
+	marker := filepath.Join(store, ".dolt")
+	_, statErr := os.Stat(marker)
+	switch {
+	case statErr == nil:
+		return nil
+	case errors.Is(statErr, os.ErrNotExist):
+		return fmt.Errorf("beads scope %q declares bd proxied-server mode, but the Dolt root %s it stands on holds no database %q (%s does not exist); bd commits .beads/metadata.json and ignores the store itself, so a clone carries the mode without the data. Refusing to create an empty database there: restore %s", scopeRoot, root, database, marker, store)
+	default:
+		return fmt.Errorf("inspect proxied provider store %s: %w", marker, statErr)
 	}
 }
 

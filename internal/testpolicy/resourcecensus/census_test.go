@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1748,6 +1749,133 @@ func TestScanRejectsMalformedBuildConstraint(t *testing.T) {
 	requireErrorContains(t, err, "parsing build constraint")
 }
 
+func TestScanBuildTargetGoTestLineIncrementsCount(t *testing.T) {
+	t.Parallel()
+
+	before, err := ScanFS(fstest.MapFS{
+		"Makefile": &fstest.MapFile{Data: []byte("build:\n\tgo build ./...\n")},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS (before): %v", err)
+	}
+	assertCount(t, before, ScopeBuildTargets, ResourceTestTarget, 0, 0)
+
+	after, err := ScanFS(fstest.MapFS{
+		"Makefile": &fstest.MapFile{Data: []byte("build:\n\tgo build ./...\n\ntest-new:\n\tgo test ./new/...\n")},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS (after): %v", err)
+	}
+	assertCount(t, after, ScopeBuildTargets, ResourceTestTarget, 1, 1)
+}
+
+func TestScanBuildTargetWorkflowRunLineIncrementsCount(t *testing.T) {
+	t.Parallel()
+
+	before, err := ScanFS(fstest.MapFS{
+		".github/workflows/ci.yml": &fstest.MapFile{Data: []byte(`name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: echo hello
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS (before): %v", err)
+	}
+	assertCount(t, before, ScopeBuildTargets, ResourceTestTarget, 0, 0)
+
+	after, err := ScanFS(fstest.MapFS{
+		".github/workflows/ci.yml": &fstest.MapFile{Data: []byte(`name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: echo hello
+      - run: go test ./...
+`)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS (after): %v", err)
+	}
+	assertCount(t, after, ScopeBuildTargets, ResourceTestTarget, 1, 1)
+}
+
+func TestScanBuildTargetCountsMultipleFilesAndLines(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"Makefile": &fstest.MapFile{Data: []byte(`build:
+	go build ./...
+
+test-unit:
+	go test ./...
+	@echo done
+
+test-integration:
+	# go test ./... -tags integration (disabled for now)
+	go test -tags integration ./...
+`)},
+		".github/workflows/ci.yml": &fstest.MapFile{Data: []byte(`name: CI
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run go test suite
+        run: go test ./...
+      - name: multiline block
+        run: |
+          echo starting
+          go test ./internal/...
+          # go test ./skip/this
+      - name: only mentions it in metadata, not run
+        with:
+          note: "go test elsewhere"
+`)},
+		".github/workflows/not-yaml.txt": &fstest.MapFile{Data: []byte("go test ./should-not-count\n")},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+
+	// Makefile: 2 real recipe lines (comment line excluded).
+	// ci.yml: 1 single-line run + 1 line inside a block run (its own
+	// commented go-test line excluded; the name: and with: text that
+	// mentions "go test" outside run: is not scanned).
+	// not-yaml.txt: not a build-target file, never scanned.
+	assertCount(t, got, ScopeBuildTargets, ResourceTestTarget, 4, 2)
+}
+
+func TestScanBuildTargetSkipsCommentedAndNonRunGoTestText(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"Makefile": &fstest.MapFile{Data: []byte("check:\n\t# go test ./disabled/...\n\t@echo skipped\n")},
+		".github/workflows/ci.yml": &fstest.MapFile{Data: []byte(`name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - name: mentions go test outside run
+        run: echo hello
+      - name: commented run line
+        run: |
+          # go test ./disabled/...
+          echo skipped
+`)},
+	}
+
+	got, err := ScanFS(files)
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeBuildTargets, ResourceTestTarget, 0, 0)
+}
+
 func TestValidateAcceptsExactSourceRatchets(t *testing.T) {
 	t.Parallel()
 
@@ -2427,6 +2555,43 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error = %q, want substring %q", err, want)
+	}
+}
+
+// TestWalkedTopsCoverEveryTestRoot: with no git index (Bazel runfiles), the
+// census walks only walkedTops, so a top-level directory that holds a Go test
+// and is not among them goes uncounted under Bazel while the git index counts
+// it.
+func TestWalkedTopsCoverEveryTestRoot(t *testing.T) {
+	root := repositoryRoot(t)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "bazel-") || slices.Contains(walkedTops, name) {
+			continue
+		}
+		var test string
+		err := filepath.WalkDir(filepath.Join(root, name), func(path string, d os.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				return err
+			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
+				return filepath.SkipDir
+			case !d.IsDir() && strings.HasSuffix(d.Name(), "_test.go"):
+				test = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", name, err)
+		}
+		if test != "" {
+			t.Errorf("%s holds a Go test (%s), but walkedTops does not walk it: a census under Bazel would not count it", name, test)
+		}
 	}
 }
 

@@ -36,18 +36,20 @@ type OrderedReadyReader interface {
 // reads store's whole ready set otherwise; ordered reports which. Both read
 // LIVE: a caching store answers from its backing store, never its read cache.
 //
-// A query with no positive Limit is never bounded.
+// A query with no positive Limit is never bounded. Both lookups see through
+// class handles (As, LiveFor), as ReadyPreferCache's do: a handle over a cache
+// reads the cache's backing, never the cache through the handle.
 func ReadyOrdered(store Store, query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
-	if reader, ok := store.(OrderedReadyReader); ok && query.Limit > 0 {
+	if reader, ok := As[OrderedReadyReader](store); ok && query.Limit > 0 {
 		return reader.ReadyOrdered(query, order)
 	}
 	query.Limit = 0
-	rows, err := HandlesFor(store).Live.Ready(query)
+	rows, err := LiveFor(store).Ready(query)
 	return rows, false, err
 }
 
 // ReadyOrdered reads the backing store, live: a bounded read is an authoritative
 // read, and this cache's ready projection is not one.
 func (c *CachingStore) ReadyOrdered(query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
-	return ReadyOrdered(c.backing, query, order)
+	return ReadyOrdered(c.backing, c.readyTier(query), order)
 }

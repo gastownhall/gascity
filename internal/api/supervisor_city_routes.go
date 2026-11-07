@@ -20,6 +20,7 @@ func sessionStreamEventMap() map[string]any {
 		"activity":        SessionActivityEvent{},
 		"pending":         runtime.PendingInteraction{},
 		"pending_cleared": SessionPendingClearedEvent{},
+		"program_status":  SessionProgramStatusEvent{},
 		"heartbeat":       HeartbeatEvent{},
 	}
 }
@@ -360,14 +361,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 			"When some children were routed and others failed, the sling has already changed state, so it answers 200 with status \"partial\" and the per-child outcomes (failed children carry a reason, and a conflict naming the blocking workflows when a live source workflow refused them) rather than an error; do not retry such a request as a whole. "+
 			"A convoy sling that routed no child and failed at least one is an error, as before."))
 
-	// Maintenance (Dolt store gc + snapshot).
+	// Maintenance (the Dolt store maintenance loop, observe-only for now).
 	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "trigger-maintenance-dolt-gc",
 		Method:        http.MethodPost,
 		Path:          "/maintenance/dolt-gc",
 		Summary:       "Trigger a Dolt store maintenance run",
-		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+		Description:   "Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
@@ -440,6 +441,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+
 			"The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. "+
+			"409 session-conflict also refuses a session in a state the controller skips; the detail names the raw state and `gc session close`, the command that releases the row. "+
 			"For a named session, the controller clears a tripped respawn circuit breaker when its next tick consumes the restart request through the restart path. Unlike `gc session reset`, this endpoint does not clear the breaker synchronously, so the clear does not happen if the controller never processes the request, and it also does not happen when a session drain-acks in the same window: the drain-ack path consumes the restart request without touching the breaker. Use `gc session reset` when clearing the breaker is itself the goal. "+
 			"This endpoint always requests an in-place restart. Unlike `gc session reset`, it never rolls back an unfinished create, so a session wedged mid-create is retried in place instead of being replaced; use `gc session reset` to roll one back."))
 	cityRegister(sm, huma.Operation{
@@ -459,6 +461,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. "+
 			"409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. "+
+			"409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. "+
 			"`gc session wake` applies the same rules."))
 	cityPost(sm, "/session/{id}/pin", (*Server).humaHandleSessionPin, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Pins the session awake (pin_awake), as gc session pin does; a configured named session not yet materialized is. 409 on a closed session."))
@@ -529,7 +532,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Description: "Server-Sent Events stream of session transcript updates. " +
 			"Streams turns (conversation format), raw messages (JSONL format), or structured messages " +
 			"based on the format query parameter. Emits activity and pending events " +
-			"for tool approval prompts.",
+			"for tool approval prompts, and a program_status event when the session " +
+			"program's own reported status changes (only while the city's " +
+			"program_status switch is shadow or on; a frame without program_status " +
+			"means the status became unknown).",
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),

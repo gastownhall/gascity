@@ -34,8 +34,15 @@ func (r *storeStampingRouter) Route(_ context.Context, req RouteRequest) error {
 // in that store, not in the work store the sling was configured with. On a
 // split city the work store has never held the root and the stamp failed with
 // "bead not found", leaking an unrouted wisp into the graph binding.
+//
+// The formula is a root-only (vapor) wisp, which is graph class. A v1 poured
+// formula is work class and is poured into the work store instead
+// (TestSplitSlingPoursEachRecipeIntoTheStoreOfItsClass).
 func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) {
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{splitAttachFormulaDir(t)}},
+	}
 	deps, work, graph := splitSlingDeps(t, cfg)
 	router := &storeStampingRouter{fallback: work}
 	deps.Router = router
@@ -43,7 +50,7 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := DoSling(SlingOpts{
 		Target:        a,
-		BeadOrFormula: "code-review",
+		BeadOrFormula: splitAttachVaporA,
 		IsFormula:     true,
 		Merge:         "mr",
 	}, deps, nil)
