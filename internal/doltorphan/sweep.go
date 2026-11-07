@@ -50,8 +50,7 @@ const sentinelFileName = ".no-orphan-sweep"
 // Dolt stores.
 const noReapMarkerName = ".gc-no-reap"
 
-// defaultLsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
-// shell script's `timeout 30 lsof -w`.
+// defaultLsofScanTimeout bounds the real `lsof -Q -w -F n +D <root>` invocation.
 const defaultLsofScanTimeout = 30 * time.Second
 
 // SweepConfig configures a single Sweep pass. Root is required; every
@@ -63,8 +62,8 @@ type SweepConfig struct {
 	MinAge time.Duration
 	// Clock supplies "now" for age comparisons. Defaults to clock.Real{}.
 	Clock clock.Clock
-	// RunLsof runs `lsof -w` (or an equivalent) and returns its raw
-	// stdout. Defaults to a real lsof -w invocation. Injectable for tests.
+	// RunLsof runs a scoped lsof query (or equivalent) and returns its raw
+	// stdout. Defaults to a full-descent scan rooted at Root. Injectable for tests.
 	RunLsof func(ctx context.Context) ([]byte, error)
 	// RemoveAll removes a candidate directory. Defaults to os.RemoveAll.
 	// Injectable for tests.
@@ -172,7 +171,7 @@ func Sweep(cfg SweepConfig) SweepResult {
 
 	held, err := lsofHeldChildren(cfg.Root, cfg.RunLsof, cfg.lsofCommand, cfg.lsofScanTimeout)
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("lsof -w: %w", err))
+		result.Errors = append(result.Errors, fmt.Errorf("lsof scan: %w", err))
 		result.Skipped = len(candidates)
 		return result
 	}
@@ -253,17 +252,16 @@ func findDoltStoreDir(dir string, depth int) (string, bool) {
 	return "", false
 }
 
-// lsofHeldChildren runs runLsof (defaulting to a real `lsof -w`) and
-// returns the set of root's direct children that appear as a path prefix
-// of some open file, i.e. directories currently held open by a live
-// process anywhere on the system.
+// lsofHeldChildren runs runLsof (defaulting to a real `lsof -Q -w -F n +D root`)
+// and returns the set of root's direct children that appear as a path prefix
+// of some open file, i.e. directories currently held open by a live process.
 func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, error), command string, scanTimeout time.Duration) (map[string]bool, error) {
 	if runLsof == nil {
 		if command == "" {
 			command = "lsof"
 		}
 		runLsof = func(ctx context.Context) ([]byte, error) {
-			return runLsofW(ctx, command)
+			return runLsofW(ctx, command, root)
 		}
 	}
 	if scanTimeout <= 0 {
@@ -285,14 +283,15 @@ func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, er
 
 var errLsofNoOutput = errors.New("lsof produced no output")
 
-// runLsofW runs `lsof -w` and returns its stdout. Exit status 1 with output
-// is accepted because lsof exits 1 when it cannot read some other process's
-// /proc entries while the rest of its output stays valid (mirroring the
-// shell heuristic's `2>/dev/null`). Launch failures, any other exit status,
-// signal termination, context expiry and empty output are fatal, because a
-// truncated scan under-reports held directories.
-func runLsofW(ctx context.Context, command string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, command, "-w")
+// runLsofW scans only files below root and returns their names in field output.
+// -Q lets a successful scan with no matching open files exit successfully.
+// Exit status 1 with output is accepted because lsof can report inaccessible
+// unrelated /proc entries while still listing matches (mirroring the shell
+// heuristic's `2>/dev/null`). Launch failures, any other exit status, signal
+// termination, context expiry, and exit status 1 with empty output are fatal,
+// because an unverifiable scan must not remove any candidate.
+func runLsofW(ctx context.Context, command, root string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, command, "-Q", "-w", "-F", "n", "+D", root)
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -301,7 +300,7 @@ func runLsofW(ctx context.Context, command string) ([]byte, error) {
 	if err != nil && (!errors.As(err, &exitErr) || exitErr.ExitCode() != 1) {
 		return nil, err
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && err != nil {
 		return nil, errors.Join(errLsofNoOutput, err)
 	}
 	return out, nil

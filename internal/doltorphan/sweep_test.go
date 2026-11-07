@@ -60,6 +60,36 @@ func storeDirFor(dir string, markerDepth int) string {
 
 func noLsofHits(context.Context) ([]byte, error) { return nil, nil }
 
+func TestSweep_DefaultLsofUsesRootedFullDescent(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	held := mkStoreDir(t, root, "held1", 1, old)
+	argsFile := filepath.Join(t.TempDir(), "lsof.args")
+	body := `printf '%s\n' "$@" > ` + argsFile + `
+printf '%s\n' 'n` + held + `/.dolt/noms'`
+	command := writeRawLsofStub(t, body)
+
+	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", argsFile, err)
+	}
+	wantArgs := "-Q\n-w\n-F\nn\n+D\n" + root + "\n"
+	if string(args) != wantArgs {
+		t.Fatalf("lsof args = %q, want %q", args, wantArgs)
+	}
+
+	if len(result.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", result.Errors)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (lsof-held)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+}
+
 func TestSweep_RemovesOldMarkedUnheldDir(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().Add(-2 * time.Hour)
@@ -269,7 +299,7 @@ func TestSweep_LsofUnexpectedExitStatusFailsClosed(t *testing.T) {
 	}
 }
 
-func TestSweep_LsofEmptyOutputFailsClosed(t *testing.T) {
+func TestSweep_LsofEmptyOutput(t *testing.T) {
 	for _, status := range []string{"0", "1"} {
 		t.Run("exit "+status, func(t *testing.T) {
 			root := t.TempDir()
@@ -278,6 +308,16 @@ func TestSweep_LsofEmptyOutputFailsClosed(t *testing.T) {
 			command := writeRawLsofStub(t, "exit "+status)
 
 			result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+			if status == "0" {
+				if len(result.Errors) != 0 {
+					t.Fatalf("Errors = %v, want none for a successful empty scan", result.Errors)
+				}
+				if len(result.Removed) != 1 || result.Removed[0] != dir {
+					t.Fatalf("Removed = %v, want [%s] for a successful empty scan", result.Removed, dir)
+				}
+				return
+			}
 
 			assertSweepFailedClosed(t, result, dir)
 			if !errors.Is(result.Errors[0], errLsofNoOutput) {
