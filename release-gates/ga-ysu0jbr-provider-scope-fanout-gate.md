@@ -3,6 +3,7 @@
 **Verdict:** **PASS**
 
 Reviewed source: `4658068e759b9391c7af2002b70eb36db165dea9`. Build ga-b4a91c; review ga-v26yxbm PASS at the exact resolved source. No review carryover or added-test exception.
+Follow-up `746b343` (after the reviewed source) adds a sixth owned test, `TestProviderOwnedFailedRecoverDoesNotSkipSiblingConfirmations`; it is covered by head CI and by a by-name PASS on the tree merged with current main.
 Canonical merge: `ae4a3163b165451695f018b76a569db42ac2de62`; tree `e0f87fa496b932d50acf7f6d0104ddc7c0f16c05`.
 DEPLOY_MODE: remote. BASE_REF: origin/main.
 merge_state: clean (origin/main@06260a01564cffbee52d0c95d244a8136fd5fc15)
