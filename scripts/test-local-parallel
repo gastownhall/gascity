@@ -71,7 +71,9 @@ gc_local_parallel_on_signal() {
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+# Ignore SIGPIPE during cleanup: a leftover writer hitting a closed stdout
+# must not turn a suite that already passed into exit 141.
+trap 'trap "" PIPE; gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
 trap 'gc_local_parallel_on_signal INT' INT
 trap 'gc_local_parallel_on_signal TERM' TERM
 trap 'gc_local_parallel_on_signal HUP' HUP
