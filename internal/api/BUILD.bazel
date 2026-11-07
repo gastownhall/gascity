@@ -411,6 +411,7 @@ go_test(
         "handler_sling_graph_binding_test.go",
         "handler_sling_partial_test.go",
         "handler_sling_test.go",
+        "handler_sling_typed_test.go",
         "handler_status_bench_test.go",
         "handler_status_count_test.go",
         "handler_status_fresh_test.go",
