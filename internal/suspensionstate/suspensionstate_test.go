@@ -410,6 +410,28 @@ func TestSetRig_ExplicitResumeRetainsEntry(t *testing.T) {
 	}
 }
 
+func TestRigSuspendedAt(t *testing.T) {
+	stamped := time.Date(2026, 10, 30, 22, 28, 14, 0, time.UTC)
+	updated := stamped.Add(time.Hour)
+	suspended := true
+	st := State{
+		UpdatedAt: updated,
+		Rigs: map[string]Override{
+			"stamped": {Suspended: &suspended, SuspendedAt: &stamped},
+			"legacy":  {Suspended: &suspended},
+		},
+	}
+	if got, ok := RigSuspendedAt(st, "stamped"); !ok || !got.Equal(stamped) {
+		t.Fatalf("stamped = %v ok=%v, want %v", got, ok, stamped)
+	}
+	if got, ok := RigSuspendedAt(st, "legacy"); !ok || !got.Equal(updated) {
+		t.Fatalf("legacy = %v ok=%v, want updated_at %v", got, ok, updated)
+	}
+	if _, ok := RigSuspendedAt(st, "absent"); ok {
+		t.Fatal("a rig with no explicit suspend has no suspended_at")
+	}
+}
+
 // TestSetRigSuspended_NoOpWhenAlreadyDesired guards the no-rewrite
 // optimization.
 func TestSetRigSuspended_NoOpWhenAlreadyDesired(t *testing.T) {
@@ -450,6 +472,9 @@ func TestSetRigSuspended_FullLifecycle(t *testing.T) {
 	if !IsRigSuspended(st, "foo") {
 		t.Fatal("foo should be suspended after SetRigSuspended(&true)")
 	}
+	if st.Rigs["foo"].SuspendedAt == nil || st.Rigs["foo"].SuspendedAt.IsZero() {
+		t.Fatal("explicit suspend should stamp suspended_at")
+	}
 
 	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", boolPtr(false)); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -460,6 +485,9 @@ func TestSetRigSuspended_FullLifecycle(t *testing.T) {
 	}
 	if IsRigSuspended(st, "foo") {
 		t.Error("foo should not be suspended after SetRigSuspended(&false)")
+	}
+	if st.Rigs["foo"].SuspendedAt != nil {
+		t.Error("resume should clear suspended_at")
 	}
 	if _, ok := st.Rigs["foo"]; !ok {
 		t.Error("explicit resume must retain the rig entry so SuspendedOnStart can't reassert")
