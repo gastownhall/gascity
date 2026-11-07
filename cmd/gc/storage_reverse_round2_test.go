@@ -506,3 +506,55 @@ func TestReverseAbortCrashAfterRowsResumes(t *testing.T) {
 		t.Fatalf("boot after the resumed abort = %v", err)
 	}
 }
+
+// TestReverseDeletesOnlyDetachedRows: every delete the reverse makes (here an
+// abort's) comes after the edges between a row it deletes and a row that
+// stays are gone, in both directions: a bd delete finds the survivors whose
+// text names a deleted id by those edges, and rewrites it.
+func TestReverseDeletesOnlyDetachedRows(t *testing.T) {
+	city := newReverseEngineCity(t, 300, "")
+	closeBindingGates(t, city)
+	withOldClearEdge(t, city)
+	killReverseAt(t, city, "reverse city verify")
+	deletes := 0
+	prev := reverseTargetOpener
+	reverseTargetOpener = func(cityPath string, cfg *config.City, dest string) (*reverseTarget, error) {
+		target, err := openReverseTarget(cityPath, cfg, dest)
+		if err != nil {
+			return nil, err
+		}
+		del := target.deleteIDs
+		target.deleteIDs = func(ids []string) error {
+			going := setOf(ids)
+			all, err := target.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+			if err != nil {
+				return err
+			}
+			every := make([]string, 0, len(all))
+			for _, b := range all {
+				every = append(every, b.ID)
+			}
+			down, err := target.down(every)
+			if err != nil {
+				return err
+			}
+			for from, deps := range down {
+				for _, d := range deps {
+					if going[from] != going[d.DependsOnID] && !strings.HasPrefix(d.DependsOnID, "external:") {
+						return fmt.Errorf("deleting %d rows while %s -> %s still joins one to a row that stays", len(ids), from, d.DependsOnID)
+					}
+				}
+			}
+			deletes++
+			return del(ids)
+		}
+		return target, nil
+	}
+	t.Cleanup(func() { reverseTargetOpener = prev })
+	if code, stdout, stderr := city.abort(t); code != 0 {
+		t.Fatalf("--abort-reverse = %d: %s%s", code, stdout, stderr)
+	}
+	if deletes == 0 {
+		t.Fatal("the abort deleted nothing, so the check proves nothing")
+	}
+}
