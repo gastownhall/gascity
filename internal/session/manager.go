@@ -764,6 +764,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// orphanScanBudget bounds how long a start waits on its pre-start orphan
+// scan. The process-table read behind FindRuntimesBySessionID can wedge on a
+// stalled provider and cannot be canceled, so the wait is abandoned at the
+// budget — or at the caller's earlier deadline — and the start defers rather
+// than hang on it.
+const orphanScanBudget = 10 * time.Second
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
@@ -775,13 +782,42 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
 // yet.
+//
+// The scan itself is bounded (orphanScanBudget, or the caller's earlier
+// deadline): a wait that ends with no answer returns an error wrapping both
+// runtime.ErrRuntimeUnavailable and the context error, and terminates
+// nothing — no answer is never confirmed absence, and no root dies on a scan
+// that answered nothing. An already-ended context launches no scan.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
-	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("session %s: scanning for orphaned runtimes: %w: %w", sessionID, runtime.ErrRuntimeUnavailable, err)
+	}
+	type scanAnswer struct {
+		found []runtime.LiveRuntime
+		err   error
+	}
+	answers := make(chan scanAnswer, 1)
+	go func() {
+		found, err := scanner.FindRuntimesBySessionID(sessionID)
+		answers <- scanAnswer{found: found, err: err}
+	}()
+	scanCtx, cancelScan := context.WithTimeout(ctx, orphanScanBudget)
+	defer cancelScan()
+	var answer scanAnswer
+	select {
+	case answer = <-answers:
+	case <-scanCtx.Done():
+		select {
+		case answer = <-answers: // it answered as the wait ended: use it
+		default:
+			return fmt.Errorf("session %s: scanning for orphaned runtimes: %w: %w", sessionID, runtime.ErrRuntimeUnavailable, scanCtx.Err())
+		}
+	}
+	found, err := answer.found, answer.err
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
