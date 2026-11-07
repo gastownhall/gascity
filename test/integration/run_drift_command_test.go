@@ -81,3 +81,46 @@ func TestRunDriftCommand_SuccessAddsNoDiagnostic(t *testing.T) {
 		t.Errorf("output = %q, want %q", out, "fine\n")
 	}
 }
+
+// TestRunDriftCommand_FailureReportCarriesTheElapsedTime pins the elapsed-time
+// clause of the diagnostic: a failing command's report says how long it ran
+// before it failed, and the figure is the one the helper returns, so a restart
+// that dies after half a minute reads differently from one that dies at once.
+func TestRunDriftCommand_FailureReportCarriesTheElapsedTime(t *testing.T) {
+	bin := writeFakeDriftBinary(t, "sleep 1\nexit 3")
+
+	out, exitCode, elapsed := runDriftCommandWithin(t, 30*time.Second, bin, os.Environ(), t.TempDir(), "start")
+
+	if exitCode != 3 {
+		t.Fatalf("exit code = %d, want 3", exitCode)
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %s, want about the 1s the command slept", elapsed)
+	}
+	if want := "after " + elapsed.Round(time.Millisecond).String(); !strings.Contains(out, want) {
+		t.Errorf("failure report missing the elapsed time %q:\n%s", want, out)
+	}
+}
+
+// TestDriftSystemdCommandTimeout_FitsALoadedRestartButStaysBounded pins both
+// sides of the systemd call's own bound. It leaves room for the 31.1s restart a
+// loaded gate host took on top of the default bound that the restart outran,
+// and it is still a bound, so a command that really hangs fails within minutes
+// rather than at the test binary's own timeout. The call site is not pinned
+// here: TestStartDrift_SystemdManaged_RestartsToNewBuildID is the only test that
+// reaches it, and it skips where there is no user systemd.
+func TestDriftSystemdCommandTimeout_FitsALoadedRestartButStaysBounded(t *testing.T) {
+	const (
+		loadedRestart = 31100 * time.Millisecond // gate tracker ga-dhnv01xi
+		longestBound  = 5 * time.Minute
+	)
+	got := driftSystemdCommandTimeout
+
+	if got < driftCommandTimeout+loadedRestart {
+		t.Errorf("driftSystemdCommandTimeout = %s, want at least the default %s plus the %s restart a loaded gate host took",
+			got, driftCommandTimeout, loadedRestart)
+	}
+	if got > longestBound {
+		t.Errorf("driftSystemdCommandTimeout = %s, want at most %s, so a command that really hangs still fails", got, longestBound)
+	}
+}
