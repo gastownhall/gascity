@@ -50,6 +50,75 @@ func TestTarDirStripsOwnership(t *testing.T) {
 	}
 }
 
+func TestRelativeCityWorkDir(t *testing.T) {
+	city := filepath.Join(t.TempDir(), "city")
+	tests := []struct {
+		name    string
+		workDir string
+		want    string
+		ok      bool
+	}{
+		{name: "nested", workDir: filepath.Join(city, "rigs", "team"), want: filepath.Join("rigs", "team"), ok: true},
+		{name: "cleaned nested", workDir: city + string(filepath.Separator) + "rigs" + string(filepath.Separator) + ".." + string(filepath.Separator) + "rigs" + string(filepath.Separator) + "team" + string(filepath.Separator), want: filepath.Join("rigs", "team"), ok: true},
+		{name: "city root", workDir: city + string(filepath.Separator)},
+		{name: "outside", workDir: filepath.Join(filepath.Dir(city), "outside", "work")},
+		{name: "shared-prefix sibling", workDir: filepath.Join(city+"-backup", "rigs", "team")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := relativeCityWorkDir(city, tc.workDir)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("relativeCityWorkDir(%q, %q) = (%q, %v), want (%q, %v)", city, tc.workDir, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestTarDirSkippingExactSubtree(t *testing.T) {
+	city := t.TempDir()
+	for name, content := range map[string]string{
+		"rigs/team/active.txt":      "active workdir",
+		"rigs/team/nested/file.txt": "nested workdir content",
+		"rigs/teamwork/keep.txt":    "shared-prefix sibling",
+		"rigs/other/keep.txt":       "ordinary city content",
+	} {
+		file := filepath.Join(city, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var archive bytes.Buffer
+	if err := tarDirSkippingWithWalkComplete(city, filepath.Join("rigs", "team"), &archive, nil); err != nil {
+		t.Fatalf("tarDirSkippingWithWalkComplete: %v", err)
+	}
+	var entries []string
+	tr := tar.NewReader(&archive)
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, header.Name)
+	}
+	for _, skipped := range []string{"rigs/team", "rigs/team/active.txt", "rigs/team/nested", "rigs/team/nested/file.txt"} {
+		if slices.Contains(entries, skipped) {
+			t.Errorf("archive contains skipped subtree entry %q: %v", skipped, entries)
+		}
+	}
+	for _, retained := range []string{"rigs/teamwork/keep.txt", "rigs/other/keep.txt"} {
+		if !slices.Contains(entries, retained) {
+			t.Errorf("archive omitted ordinary city entry %q: %v", retained, entries)
+		}
+	}
+}
+
 func TestTarFileStripsOwnership(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "test.txt")
 	if err := os.WriteFile(f, []byte("hello"), 0o644); err != nil {
@@ -100,7 +169,7 @@ func TestStageFilesStagesKiroPackOverlayAtWorkspaceRoot(t *testing.T) {
 	}
 
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
@@ -149,7 +218,7 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
@@ -195,7 +264,7 @@ func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	}
 
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:             workDir,
 		ProviderName:        "claude",
 		ProviderOverlayName: "kiro",
@@ -230,7 +299,7 @@ func TestStageFilesSurfacesKiroPreservationWarning(t *testing.T) {
 
 	var warnings bytes.Buffer
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
@@ -263,7 +332,7 @@ func TestStageFilesPropagatesFatalProviderOverlayError(t *testing.T) {
 
 	var warnings bytes.Buffer
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
@@ -321,7 +390,7 @@ func TestStageFilesFailsClosedWhenStreamedCopyFails(t *testing.T) {
 			}}
 
 			var warnings bytes.Buffer
-			err := stageFiles(context.Background(), ops, "gc-stream", tc.cfg(src), "", &warnings)
+			_, err := stageFiles(context.Background(), ops, "gc-stream", tc.cfg(src), "", &warnings)
 			if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("stageFiles error = %v, want %q wrapping the walk failure", err, tc.wantErr)
 			}
@@ -342,18 +411,169 @@ func TestStageFilesSkipsAbsentSources(t *testing.T) {
 	}}
 
 	var warnings bytes.Buffer
-	err := stageFiles(context.Background(), ops, "gc-absent", runtime.Config{
+	workDirStaged, err := stageFiles(context.Background(), ops, "gc-absent", runtime.Config{
 		WorkDir:   missing,
 		CopyFiles: []runtime.CopyEntry{{Src: missing, RelDst: "data"}},
 	}, "", &warnings)
 	if err != nil {
 		t.Fatalf("stageFiles: %v", err)
 	}
+	if workDirStaged {
+		t.Fatal("stageFiles reported an absent workdir as staged")
+	}
 	if !ops.ran("touch", "/workspace/.gc-ready") {
 		t.Fatal("stageFiles did not release the init container")
 	}
 	if warnings.Len() != 0 {
 		t.Fatalf("warnings = %q, want absent sources skipped silently", warnings.String())
+	}
+}
+
+func TestStageFilesReportsWorkDirStagedOnlyAfterSuccessfulCopy(t *testing.T) {
+	t.Run("streamed directory copy succeeds", func(t *testing.T) {
+		city := t.TempDir()
+		workDir := filepath.Join(city, "rigs", "team")
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workDir, "task.txt"), []byte("task"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		staged, err := stageFiles(context.Background(), newCapturingStageOps(), "pod", runtime.Config{WorkDir: workDir}, city, io.Discard)
+		if err != nil {
+			t.Fatalf("stageFiles: %v", err)
+		}
+		if !staged {
+			t.Fatal("stageFiles reported a completed workdir copy as unstaged")
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		workDir func(t *testing.T) string
+	}{
+		{name: "unavailable source", workDir: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "non-directory source", workDir: func(t *testing.T) string {
+			file := filepath.Join(t.TempDir(), "workdir")
+			if err := os.WriteFile(file, []byte("not a directory"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			staged, err := stageFiles(context.Background(), newCapturingStageOps(), "pod", runtime.Config{WorkDir: tc.workDir(t)}, "", io.Discard)
+			if err != nil {
+				t.Fatalf("stageFiles: %v", err)
+			}
+			if staged {
+				t.Fatal("stageFiles authorized an unavailable or non-directory workdir")
+			}
+		})
+	}
+
+	t.Run("streamed copy fails", func(t *testing.T) {
+		workDir := t.TempDir()
+		copyErr := errors.New("stream rejected")
+		ops := &streamStageOps{onTarStdin: func(context.Context, io.Reader) error { return copyErr }}
+		staged, err := stageFiles(context.Background(), ops, "pod", runtime.Config{WorkDir: workDir}, "", io.Discard)
+		if staged || !errors.Is(err, copyErr) {
+			t.Fatalf("stageFiles = (%v, %v), want (false, %v)", staged, err, copyErr)
+		}
+	})
+}
+
+func TestInitCityInPodSkipsSuccessfullyStagedNestedWorkDir(t *testing.T) {
+	city := t.TempDir()
+	workDir := filepath.Join(city, "rigs", "team")
+	for name, content := range map[string]string{
+		"active.txt":      "active workdir",
+		"nested/task.txt": "nested active workdir content",
+	} {
+		file := filepath.Join(workDir, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, content := range map[string]string{
+		"rigs/teamwork/keep.txt": "shared-prefix sibling",
+		"rigs/other/keep.txt":    "ordinary city content",
+	} {
+		file := filepath.Join(city, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stageOps := newCapturingStageOps()
+	workDirStaged, err := stageFiles(context.Background(), stageOps, "pod", runtime.Config{WorkDir: workDir}, city, io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if !workDirStaged {
+		t.Fatal("nested workdir copy did not complete")
+	}
+	if stageOps.files["/workspace/rigs/team/active.txt"] != "active workdir" {
+		t.Fatal("dedicated workdir copy did not reach its projected workspace path")
+	}
+	skipRel := cityTemplateSkipRel(workDirStaged, city, workDir)
+	if skipRel != filepath.Join("rigs", "team") {
+		t.Fatalf("city template exclusion = %q, want %q", skipRel, filepath.Join("rigs", "team"))
+	}
+
+	cityOps := newCapturingStageOps()
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+	for _, skipped := range []string{"/tmp/city-src/rigs/team/active.txt", "/tmp/city-src/rigs/team/nested/task.txt"} {
+		if _, ok := cityOps.files[skipped]; ok {
+			t.Errorf("city template recopied successfully staged workdir file %q", skipped)
+		}
+	}
+	for path, want := range map[string]string{
+		"/tmp/city-src/rigs/teamwork/keep.txt": "shared-prefix sibling",
+		"/tmp/city-src/rigs/other/keep.txt":    "ordinary city content",
+	} {
+		if got := cityOps.files[path]; got != want {
+			t.Errorf("city template file %q = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestInitCityInPodKeepsUnstagedWorkDirInTemplate(t *testing.T) {
+	city := t.TempDir()
+	workDir := filepath.Join(city, "rigs", "team")
+	if err := os.MkdirAll(filepath.Dir(workDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workDir, []byte("unstaged workdir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workDirStaged, err := stageFiles(context.Background(), newCapturingStageOps(), "pod", runtime.Config{WorkDir: workDir}, city, io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if workDirStaged {
+		t.Fatal("non-directory workdir was reported as staged")
+	}
+	skipRel := cityTemplateSkipRel(workDirStaged, city, workDir)
+	if skipRel != "" {
+		t.Fatalf("unstaged workdir exclusion = %q, want empty", skipRel)
+	}
+
+	cityOps := newCapturingStageOps()
+	if err := initCityInPod(context.Background(), cityOps, "pod", city, skipRel); err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+	if got := cityOps.files["/tmp/city-src/rigs/team"]; got != "unstaged workdir" {
+		t.Fatalf("city template workdir = %q, want the unstaged source file", got)
 	}
 }
 
