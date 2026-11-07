@@ -862,19 +862,23 @@ func TestSawRowsIsSharedAcrossStoresOverOneScope(t *testing.T) {
 	}
 }
 
-// TestBdStoreCannotCountSoWholeLedgerReadsHydrate is the evidence behind the
-// branch labels in the store-health count.
+// TestBdStoreCountsWholeLedgerReadsSoHydrationIsTheFallback is the evidence
+// behind the branch labels in the store-health count.
 //
-// countBeadStoreRows takes its Counter fast path only when the store
-// implements beads.Counter. BdStore does not, so on every bd-backed city the
-// store-health denominator reaches the hydrating list fallback instead — which
-// is what makes an empty whole-ledger answer, and the zero built from it,
-// reachable at all. If BdStore ever gains Count, that reasoning changes and the
-// labels want revisiting.
-func TestBdStoreCannotCountSoWholeLedgerReadsHydrate(t *testing.T) {
+// countBeadStoreRows takes its Counter fast path when the store implements
+// beads.Counter. BdStore does, for the closed-inclusive whole-ledger scan
+// (gastownhall/gascity#7546: bd count --include-infra answers in ~0.03s what
+// the hydrating list spent 5-8s on against a 1s budget), so on a bd-backed
+// city the store-health denominator normally answers from the counter fast
+// path. The hydrating list fallback remains reachable — for bd builds whose
+// count verb is capability-absent (ErrCountUnsupported) and for shapes Count
+// declines — which keeps an empty whole-ledger answer, and the zero built from
+// it, a live branch. If BdStore ever loses Count, that reasoning changes and
+// the labels want revisiting.
+func TestBdStoreCountsWholeLedgerReadsSoHydrationIsTheFallback(t *testing.T) {
 	var store beads.Store = beads.NewBdStore(t.TempDir(), newRecordingRunner(nil).run)
-	if _, ok := store.(beads.Counter); ok {
-		t.Fatal("BdStore now implements Counter; the store-health count no longer falls through to the hydrating list path, so revisit the branch labels in internal/api/store_health.go")
+	if _, ok := store.(beads.Counter); !ok {
+		t.Fatal("BdStore no longer implements Counter; the store-health count loses its hydration-free whole-ledger path, so revisit the branch labels in internal/api/store_health.go")
 	}
 	if _, ok := store.(beads.RowWitness); !ok {
 		t.Fatal("BdStore no longer implements RowWitness; the store-health count loses its only disproof of a zero on bd-backed cities")
