@@ -141,9 +141,9 @@ func TestFakeStateStoresWrapTheResidueAccessors(t *testing.T) {
 // store accessors, keyed "file func method" (typed-stores T6 plan, OD-2): the
 // T7 residue the plan's Appendix A names (federation, by-id, the status
 // session snapshot and work counts, and ScopedStoreLike, which must keep
-// receiving raw stores, R12), store health (whose list fallback reaches
-// ScopedStoreLike), and the sling store lookup T6d retypes. The table only
-// shrinks: a new caller takes its class handle from Stores().
+// receiving raw stores, R12) and store health (whose list fallback reaches
+// ScopedStoreLike). The table only shrinks: a new caller takes its class
+// handle from Stores().
 var reviewedResidueCallers = map[string]int{
 	"beads_graph_federation.go relocatedGraphStore CityBeadStore": 1,
 	// Not the accessor: SeededCityDeps' field of the same name, read by the
@@ -161,8 +161,6 @@ var reviewedResidueCallers = map[string]int{
 	"handler_convoy_dispatch.go workflowStoresWith CityBeadStore":     1,
 	"handler_convoys.go isGraphConvoyID BeadStores":                   1,
 	"handler_convoys.go isGraphConvoyID CityBeadStore":                1,
-	"handler_sling.go Server.findSlingStore BeadStore":                3,
-	"handler_sling.go Server.findSlingStore CityBeadStore":            2,
 	"handler_sling.go Server.sourceWorkflowStores BeadStores":         2,
 	"handler_sling.go Server.sourceWorkflowStores CityBeadStore":      1,
 	"handler_status.go Server.statusSessionSnapshot CityBeadStore":    1,

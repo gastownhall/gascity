@@ -521,14 +521,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
+	// The sling's scope stores: store as the work store, and the graph class
+	// at that scope, the binding on a city that relocates it.
+	cs := cliStores(cityPath, store)
 	deps := slingDeps{
 		CityName:           cityName,
 		CityPath:           cityPath,
 		Cfg:                cfg,
 		SP:                 sp,
 		Runner:             runner,
-		Store:              store,
-		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Store:              cs.Work(),
+		GraphStore:         cs.Graph(),
 		Events:             eventRecorder,
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
@@ -561,7 +564,10 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	}
 
 	inheritSlingInitiator(&opts, slingClaimStoresFor(cfg, cityPath, cityName, openSourceWorkflowViews), os.Getenv, stderr)
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	nudge := func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, cityName, cityPath, cfg, sp, store, beadID, stdout, stderr)
+	}
+	return doSlingBatchWithJSON(opts, deps, deps.Store, nudge, jsonOutput, humanStdout, stdout, stderr)
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
@@ -839,11 +845,13 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	// The core names the store that holds the bead when it is not the work
 	// store (a --formula wisp root lives in the graph binding, #6054).
-	store := req.Store
-	if store == nil {
+	var store beads.Writer
+	switch {
+	case !req.Store.Absent():
+		store = req.Store
+	case r.deps.Store != (beads.WorkStore{}):
 		store = r.deps.Store
-	}
-	if store == nil {
+	default:
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
@@ -1046,10 +1054,23 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 
 // doSlingBatch creates a Sling instance and dispatches batch or single.
 func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdout, stderr io.Writer) int {
-	return doSlingBatchWithJSON(opts, deps, querier, false, stdout, stdout, stderr)
+	return doSlingBatchWithJSON(opts, deps, querier, depsSlingNudge(deps), false, stdout, stdout, stderr)
 }
 
-func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
+// slingNudge nudges the agent a sling routed beadID to (doSlingNudge).
+type slingNudge func(a *config.Agent, beadID string, stdout, stderr io.Writer)
+
+// depsSlingNudge is the slingNudge over deps' own work store. `gc sling`
+// nudges over the raw scope store it opened instead: the nudge's session
+// lookups go through cliSessionStore, whose emission wrap reads the store's
+// own type, which a class handle over it hides.
+func depsSlingNudge(deps slingDeps) slingNudge {
+	return func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, beadID, stdout, stderr)
+	}
+}
+
+func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, nudge slingNudge, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
 	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
@@ -1123,7 +1144,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return dryRunSingle(opts, deps, querier, humanStdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, result.BeadID, humanStdout, stderr)
+		nudge(result.NudgeAgent, result.BeadID, humanStdout, stderr)
 	}
 	// Success only (never dry-run or error): surface a dashboard deep link
 	// when one resolves. Resolution failure degrades silently to no link.
@@ -2358,11 +2379,7 @@ func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName st
 	if formulaName == "" {
 		return 0, true
 	}
-	graphStore := deps.GraphStore
-	if graphStore == nil {
-		graphStore = deps.Store
-	}
-	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName)
+	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, opts.BeadOrFormula, formulaName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: pre-check inconclusive: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0, false

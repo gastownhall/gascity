@@ -40,14 +40,16 @@ func TestStoreIdentityGuard(t *testing.T) {
 }
 
 // TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle pins apiBeadRouter's
-// identity test to SameStore (T6a, R3): the core names the store that holds
-// the routed bead, and on a city whose graph is relocated the route honors it
-// when it is the graph binding, whether the core names it raw or as a class
-// handle. With == a handle never matched, so a standalone formula root minted
-// in the binding was routed through the sling's own store and the route
-// failed.
+// identity test to SameStore (T6a, R3): the core names the molecule target
+// that holds the routed bead, and on a city whose graph is relocated the
+// route honors it when it is over the graph binding. With == a target never
+// matched the raw binding, so a standalone formula root minted in the binding
+// was routed through the sling's own store and the route failed.
 func TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle(t *testing.T) {
-	for name, wrap := range apiHandleWraps {
+	for name, target := range map[string]func(beads.Store) beads.MoleculeTarget{
+		"a graph target": beadstest.GraphMolecule,
+		"a work target":  beadstest.WorkMolecule,
+	} {
 		state := newFakeState(t)
 		city, binding, rig := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
 		state.cityBeadStore = city
@@ -56,8 +58,8 @@ func TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r := apiBeadRouter{server: New(state), store: rig}
-		if err := r.Route(t.Context(), sling.RouteRequest{BeadID: root.ID, Target: "myrig/worker", Store: wrap(binding)}); err != nil {
+		r := apiBeadRouter{server: New(state), store: beadstest.Work(rig)}
+		if err := r.Route(t.Context(), sling.RouteRequest{BeadID: root.ID, Target: "myrig/worker", Store: target(binding)}); err != nil {
 			t.Fatalf("%s: route: %v", name, err)
 		}
 		got, err := binding.Get(root.ID)

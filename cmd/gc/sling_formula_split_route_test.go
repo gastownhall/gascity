@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -153,8 +154,8 @@ func TestSlingFormulaRootFeedsPoolDemandOnBothTopologies(t *testing.T) {
 			CityPath:   e.cityPath,
 			Cfg:        e.cfg,
 			Runner:     newFakeRunner().run,
-			Store:      e.work,
-			GraphStore: e.graphStore(),
+			Store:      beadstest.Work(e.work),
+			GraphStore: beadstest.Graph(e.graphStore()),
 			StoreRef:   "city:split-topology-city",
 		}
 		var stdout, stderr bytes.Buffer

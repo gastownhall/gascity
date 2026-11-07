@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -19,7 +20,7 @@ import (
 
 // This file pins the legacy (non-graph.v2) --on attach guard on a split city.
 //
-// A sling pours its molecule through deps.graphStore(). On a city whose graph
+// A sling pours its molecule through deps.GraphStore. On a city whose graph
 // class is relocated to a [storage] binding, that is a different store from
 // deps.Store, which holds the source bead and its molecule_id stamp. The guard
 // used to read the molecule back through deps.Store, could not see it, and
@@ -102,8 +103,8 @@ func newSplitAttachEnv(t *testing.T, split bool) splitAttachEnv {
 	if split {
 		env.work = splittest.NewWorkStore(t, "gc")
 		env.graph = realSQLiteGraphLeg(t)
-		deps.Store = env.work
-		deps.GraphStore = env.graph
+		deps.Store = beadstest.Work(env.work)
+		deps.GraphStore = beadstest.Graph(env.graph)
 	} else {
 		env.work = deps.Store
 		env.graph = deps.Store
@@ -441,7 +442,7 @@ func TestAttachGuardFailsClosedOnAnUnreadableAttachment(t *testing.T) {
 				if tc.childListFails {
 					q = childListFailingStore{Store: work}
 				}
-				scope := attachmentScope{work: work, graph: oneIDUnreadableStore{Store: graphLeaf, failID: unreadableID}}
+				scope := attachmentScope{work: beadstest.Work(work), graph: beadstest.Graph(oneIDUnreadableStore{Store: graphLeaf, failID: unreadableID})}
 
 				var result SlingResult
 				if batch {
@@ -682,7 +683,7 @@ func TestBurnGuardEdges(t *testing.T) {
 		work, src, root := mkAttached(t, "")
 		store := listFailingStore{Store: work, rootID: root.ID}
 		var result SlingResult
-		err := checkNoMoleculeChildren(store, src.ID, singleStoreAttachmentScope(store), &result, false)
+		err := checkNoMoleculeChildren(store, src.ID, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 		var molErr *MoleculeAttachedError
 		if !errors.As(err, &molErr) || len(result.AutoBurned) != 0 {
 			t.Fatalf("burn with an unreadable subtree: err=%v burned=%v, want a refusal", err, result.AutoBurned)
@@ -698,7 +699,7 @@ func TestBurnGuardEdges(t *testing.T) {
 	t.Run("hooked-step", func(t *testing.T) {
 		work, src, root := mkAttached(t, "hooked")
 		var result SlingResult
-		err := checkNoMoleculeChildren(work, src.ID, singleStoreAttachmentScope(work), &result, false)
+		err := checkNoMoleculeChildren(work, src.ID, withStore(SlingDeps{}, work).attachmentScope(), &result, false)
 		var molErr *MoleculeAttachedError
 		if !errors.As(err, &molErr) {
 			t.Fatalf("burn over a hooked step: err=%v, want MoleculeAttachedError", err)
@@ -718,7 +719,7 @@ func TestBurnGuardEdges(t *testing.T) {
 		work, src, root := mkAttached(t, "")
 		store := listFailingStore{Store: work, rootID: root.ID}
 		var result SlingResult
-		err := checkBatchNoMoleculeChildren(store, []beads.Bead{src}, singleStoreAttachmentScope(store), &result, false)
+		err := checkBatchNoMoleculeChildren(store, []beads.Bead{src}, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 		if err == nil || len(result.AutoBurned) != 0 {
 			t.Fatalf("batch burn with an unreadable subtree: err=%v burned=%v, want a refusal", err, result.AutoBurned)
 		}
@@ -733,7 +734,7 @@ func TestBurnGuardEdges(t *testing.T) {
 	t.Run("batch", func(t *testing.T) {
 		work, src, root := mkAttached(t, "in_progress")
 		var result SlingResult
-		err := checkBatchNoMoleculeChildren(work, []beads.Bead{src}, singleStoreAttachmentScope(work), &result, false)
+		err := checkBatchNoMoleculeChildren(work, []beads.Bead{src}, withStore(SlingDeps{}, work).attachmentScope(), &result, false)
 		if err == nil || len(result.AutoBurned) != 0 {
 			t.Fatalf("batch burn over an in-progress step: err=%v burned=%v, want a refusal", err, result.AutoBurned)
 		}
@@ -795,9 +796,9 @@ func TestBurnGuardNeverBurnsAnUnreadableSubtree(t *testing.T) {
 			store := failOnceSubtreeStore{Store: work, rootID: root.ID, failed: &failed}
 			var result SlingResult
 			if batch {
-				err = checkBatchNoMoleculeChildren(store, []beads.Bead{src}, singleStoreAttachmentScope(store), &result, false)
+				err = checkBatchNoMoleculeChildren(store, []beads.Bead{src}, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 			} else {
-				err = checkNoMoleculeChildren(store, src.ID, singleStoreAttachmentScope(store), &result, false)
+				err = checkNoMoleculeChildren(store, src.ID, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 			}
 			if !failed {
 				t.Fatal("the guard never read the attachment's subtree")

@@ -1,10 +1,12 @@
 package sling
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -15,7 +17,7 @@ import (
 // This file pins the store the source-workflow REPLACEMENT machinery reads and
 // mutates graph.v2 roots through.
 //
-// A workflow root is GRAPH class and is BORN through deps.graphStore()
+// A workflow root is GRAPH class and is BORN through deps.GraphStore
 // (InstantiateSlingFormula, doStartGraphWorkflow). Every read of that same root
 // has to use the same store: on a city that relocates graph, reading it through
 // deps.Store asks the WORK ledger about a bead it has never held, and every one
@@ -24,7 +26,7 @@ import (
 // rollback closes an empty subtree and leaves the abandoned launch open and
 // claim-attracting, and a workflow-id lookup reports a live root as missing.
 //
-// deps.graphStore() collapses to deps.Store whenever GraphStore is unset, so
+// deps.GraphStore collapses to deps.Store whenever GraphStore is unset, so
 // every single-store caller is byte-identical.
 
 // splitSlingDeps returns deps whose graph class is served by a separate,
@@ -35,8 +37,8 @@ func splitSlingDeps(t *testing.T, cfg *config.City) (SlingDeps, beads.Store, bea
 	t.Helper()
 	work, graph := splittest.NewSplitStores(t)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = work
-	deps.GraphStore = graph
+	deps.Store = beadstest.Work(work)
+	deps.GraphStore = beadstest.Graph(graph)
 	return deps, work, graph
 }
 
@@ -164,7 +166,7 @@ func TestGraphV2ReplacementSnapshotAndRollbackUseTheGraphStore(t *testing.T) {
 		t.Fatalf("the first root is not graph resident (%v); the fixture cannot distinguish the two stores", err)
 	}
 
-	snapshot, err := snapshotGraphV2ReplacementRoot(deps.graphStore(), "graph-work", vars, "default", "", true)
+	snapshot, err := snapshotGraphV2ReplacementRoot(deps.GraphStore, "graph-work", vars, "default", "", true)
 	if err != nil {
 		t.Fatalf("snapshotGraphV2ReplacementRoot: %v", err)
 	}
@@ -178,7 +180,7 @@ func TestGraphV2ReplacementSnapshotAndRollbackUseTheGraphStore(t *testing.T) {
 	if err := graph.Update(replaced.RootID, beads.UpdateOpts{Status: &closed}); err != nil {
 		t.Fatalf("closing the replaced root: %v", err)
 	}
-	if err := rollbackGraphV2ReplacementLaunch(deps.graphStore(), "", snapshot); err != nil {
+	if err := rollbackGraphV2ReplacementLaunch(deps.GraphStore, "", snapshot); err != nil {
 		t.Fatalf("rollbackGraphV2ReplacementLaunch: %v", err)
 	}
 	restored, err := graph.Get(replaced.RootID)
@@ -190,18 +192,28 @@ func TestGraphV2ReplacementSnapshotAndRollbackUseTheGraphStore(t *testing.T) {
 	}
 }
 
-// TestGraphRootStoreCollapsesWhenGraphIsNotRelocated is the single-store
-// compatibility row for all four sites: with GraphStore unset, deps.graphStore()
-// returns the EXACT store value deps.Store carries, so every one of these paths
-// reads the store it always did — and the optional-capability assertions the
-// molecule create relies on keep holding on the same value.
-func TestGraphRootStoreCollapsesWhenGraphIsNotRelocated(t *testing.T) {
-	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
-	if deps.GraphStore != nil {
-		t.Fatal("testDeps wired a GraphStore; this row is about the collapse")
-	}
-	if deps.graphStore() != deps.Store {
-		t.Errorf("graphStore() returned %p, want the identical work store %p", deps.graphStore(), deps.Store)
+// TestDoSlingRefusesAbsentStores pins validateDeps: the caller supplies both
+// the work and the graph store (the graph store's collapse onto the work store
+// on a single-store city is the caller's, storeref Stores.GraphFor), so a
+// sling missing either is refused before it reads or writes anything.
+func TestDoSlingRefusesAbsentStores(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	for name, tc := range map[string]struct {
+		clear func(*SlingDeps)
+		want  string
+	}{
+		"no work store":  {func(d *SlingDeps) { d.Store = beads.WorkStore{} }, "Store is required"},
+		"no graph store": {func(d *SlingDeps) { d.GraphStore = beads.GraphStore{} }, "GraphStore is required"},
+	} {
+		deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		tc.clear(&deps)
+		_, err := DoSling(SlingOpts{Target: config.Agent{Name: "mayor"}, BeadOrFormula: "code-review", IsFormula: true}, deps, nil)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: DoSling error = %v, want %q", name, err, tc.want)
+		}
+		if _, err := New(deps); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: New error = %v, want %q", name, err, tc.want)
+		}
 	}
 }
 
@@ -237,8 +249,8 @@ func TestForcedGraphV2ReplacementQueriesTheGraphStoreNotTheWorkLedger(t *testing
 	deps.CityPath = t.TempDir()
 	workSpy := &rootKeyQuerySpy{Store: work}
 	graphSpy := &rootKeyQuerySpy{Store: graph}
-	deps.Store = workSpy
-	deps.GraphStore = graphSpy
+	deps.Store = beadstest.Work(workSpy)
+	deps.GraphStore = beadstest.Graph(graphSpy)
 
 	source, err := work.Create(beads.Bead{Title: "source bead", Type: "task"})
 	if err != nil {
@@ -295,7 +307,7 @@ func TestForcedGraphV2ReplacementRollbackRestoresInTheGraphStore(t *testing.T) {
 	deps, work, graph := splitSlingDeps(t, cfg)
 	deps.CityPath = t.TempDir()
 	promoteGuard := &promoteFailingStore{Store: graph}
-	deps.GraphStore = promoteGuard
+	deps.GraphStore = beadstest.Graph(promoteGuard)
 
 	convoy, err := work.Create(beads.Bead{Title: "input", Type: "convoy"})
 	if err != nil {

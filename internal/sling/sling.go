@@ -139,12 +139,13 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
-	// Store is the store that holds BeadID and that built-in routing must
-	// stamp. Nil means the router's own default store (the work store the
-	// sling was configured with). A formula wisp root is minted in the graph
-	// store (SlingDeps.graphStore), which on a city whose graph class is
-	// relocated to a [storage] binding is not the work store (#6054).
-	Store beads.Store
+	// Store is the molecule target that holds BeadID and that built-in
+	// routing must stamp. An absent target means the router's own default
+	// store (the work store the sling was configured with). A formula wisp
+	// root is minted in the graph store (SlingDeps.GraphStore), which on a
+	// city whose graph class is relocated to a [storage] binding is not the
+	// work store (#6054).
+	Store beads.MoleculeTarget
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -154,13 +155,17 @@ type SlingDeps struct {
 	Cfg      *config.City
 	SP       runtime.Provider
 	Runner   SlingRunner
-	Store    beads.Store
+	// Store is the work store of the sling's scope: the city's, or the rig's
+	// for a rig-scope sling. It holds the source bead and its convoys.
+	Store beads.WorkStore
 	// GraphStore owns graph (workflow/v2) beads: the workflow molecule a sling
 	// materializes (root + steps + deps) and its graph-routing metadata. The
 	// source bead a workflow is launched from stays in Store (the work-class
-	// store). When nil, graph beads collapse onto Store — the single-store
-	// default — so a single-store caller behaves exactly as before the seam.
-	GraphStore beads.Store
+	// store). It is the graph store at the sling's scope (storeref
+	// Stores.GraphFor): the binding on a city that relocates the graph class,
+	// else Store's own store. The caller supplies it; DoSling refuses a zero
+	// one.
+	GraphStore beads.GraphStore
 	// Events records best-effort current execution facts after graph workflow
 	// materialization. Nil leaves sling event-silent.
 	Events events.Recorder
@@ -193,43 +198,18 @@ type SlingDeps struct {
 	DirectSessionResolver graphroute.DirectSessionResolver
 }
 
-// graphStore returns the store that owns the graph (workflow/v2) beads this
-// sling materializes. It is the create-side seam for the workflow molecule:
-// InstantiateSlingFormula and doStartGraphWorkflow route graph reads, the
-// molecule create, and graph-routing metadata through it instead of reaching
-// for Store directly. When GraphStore is unset the graph class collapses onto
-// Store, so graphStore returns the exact same concrete store the pre-seam path
-// used — preserving the GraphApplyFor / HandlesFor / StorageCreateStore
-// optional-capability assertions the molecule create relies on.
-func (deps SlingDeps) graphStore() beads.Store {
-	if deps.GraphStore != nil {
-		return deps.GraphStore
-	}
-	return deps.Store
-}
-
-// moleculeStoreFor returns the store a compiled recipe's molecule is poured
-// into: the graph store for a graph-class recipe (a graph.v2 workflow, a
-// root-only wisp), the work store for a work-class one (a v1 POURED molecule
-// container with plain steps). This is the rule order dispatch, `gc order
-// run` and `gc formula cook` follow (moleculeClassStore in cmd/gc), so a v1
-// poured molecule stays visible to every work-scope reader. On a single-store
-// city both are the same store.
-func (deps SlingDeps) moleculeStoreFor(recipe *formula.Recipe) beads.Store {
-	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
-		return deps.graphStore()
-	}
-	return deps.Store
-}
-
-// moleculeTargetFor is moleculeStoreFor's store as the molecule target of the
-// recipe's class: the graph store as a graph target, the work store as a work
-// target. T6 gives SlingDeps the handles themselves.
+// moleculeTargetFor is the molecule target a compiled recipe's molecule is
+// poured into: the graph store for a graph-class recipe (a graph.v2
+// workflow, a root-only wisp), the work store for a work-class one (a v1
+// POURED molecule container with plain steps). This is the rule order
+// dispatch, `gc order run` and `gc formula cook` follow (moleculeClassStore
+// in cmd/gc), so a v1 poured molecule stays visible to every work-scope
+// reader. On a single-store city both are the same store.
 func (deps SlingDeps) moleculeTargetFor(recipe *formula.Recipe) beads.MoleculeTarget {
 	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
-		return beads.GraphMolecule(beads.GraphStore{Store: deps.graphStore()})
+		return beads.GraphMolecule(deps.GraphStore)
 	}
-	return beads.WorkMolecule(beads.WorkStore{Store: deps.Store})
+	return beads.WorkMolecule(deps.Store)
 }
 
 // graphrouteDeps projects the graph-routing subset of SlingDeps into
@@ -871,12 +851,12 @@ func routeStoreLabel(storeRef string) string {
 
 // ProbeBeadInStore checks if a bead exists in the given store and surfaces
 // non-not-found lookup errors.
-func ProbeBeadInStore(store beads.Store, id string) (bool, error) {
+func ProbeBeadInStore(store BeadQuerier, id string) (bool, error) {
 	return probeBeadInQuerier(store, id)
 }
 
 func probeBeadInQuerier(querier BeadQuerier, id string) (bool, error) {
-	if querier == nil {
+	if absentQuerier(querier) {
 		return false, fmt.Errorf("store unavailable")
 	}
 	_, err := querier.Get(id)
@@ -998,7 +978,7 @@ func IsCustomSlingQuery(a config.Agent) bool {
 // BeadPriorityOverride reads the priority from an existing bead for use
 // as a priority override when creating child beads.
 func BeadPriorityOverride(store BeadQuerier, beadID string) *int {
-	if store == nil || beadID == "" {
+	if absentQuerier(store) || beadID == "" {
 		return nil
 	}
 	bead, err := store.Get(beadID)
@@ -1019,8 +999,8 @@ func ClonePriorityPtr(v *int) *int {
 
 // BeadMetadataTarget walks the bead's parent chain looking for a "target"
 // metadata value (used for branch targeting).
-func BeadMetadataTarget(store beads.Store, beadID string) string {
-	if store == nil || beadID == "" {
+func BeadMetadataTarget(store BeadQuerier, beadID string) string {
+	if absentQuerier(store) || beadID == "" {
 		return ""
 	}
 
@@ -1305,7 +1285,7 @@ func mergeRigFormulaVars(vars map[string]string, cfg *config.City, a config.Agen
 // ResolveSlingEnvForBead to avoid a redundant store lookup.
 func ResolveSlingEnv(a config.Agent, deps SlingDeps, beadID string) map[string]string {
 	var bead beads.Bead
-	if deps.Store != nil && strings.TrimSpace(beadID) != "" {
+	if deps.Store != (beads.WorkStore{}) && strings.TrimSpace(beadID) != "" {
 		if got, err := deps.Store.Get(beadID); err == nil {
 			bead = got
 		}
@@ -1324,7 +1304,12 @@ func ResolveSlingEnvForBead(a config.Agent, deps SlingDeps, bead beads.Bead) map
 		if deps.Cfg != nil {
 			sessionTemplate = deps.Cfg.Workspace.SessionTemplate
 		}
-		sn := agentutil.LookupSessionName(deps.Store, deps.CityName, a.QualifiedName(), sessionTemplate)
+		// The zero work store reads no store, as a nil one read none.
+		var store beads.Store
+		if deps.Store != (beads.WorkStore{}) {
+			store = deps.Store
+		}
+		sn := agentutil.LookupSessionName(store, deps.CityName, a.QualifiedName(), sessionTemplate)
 		env["GC_SLING_TARGET"] = sn
 	}
 
@@ -1408,8 +1393,8 @@ func WorkflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 }
 
 // IsGraphWorkflowAttachment checks whether a bead is a graph.v2 workflow root.
-func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
-	if store == nil || rootID == "" {
+func IsGraphWorkflowAttachment(store BeadQuerier, rootID string) bool {
+	if absentQuerier(store) || rootID == "" {
 		return false
 	}
 	b, err := store.Get(rootID)
@@ -1486,7 +1471,7 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // it under the RootKey file lock so the live-root lookup and creation are
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
-	graphStore := deps.graphStore()
+	graphStore := deps.GraphStore
 	// graphStore is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T6).
 	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, beads.SessionStore{Store: graphStore}, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
@@ -1526,8 +1511,7 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 			if cleanupErr := closeFailedGraphV2Roots(graphStore, recipe); cleanupErr != nil {
 				rollbackErr = errors.Join(rollbackErr, cleanupErr)
 			}
-			// graphStore may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			if restoreErr := sourceworkflow.RestoreWorkflowBeads(beads.GraphMolecule(beads.GraphStore{Store: graphStore}), replacedSnapshots); restoreErr != nil {
+			if restoreErr := sourceworkflow.RestoreWorkflowBeads(beads.GraphMolecule(graphStore), replacedSnapshots); restoreErr != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced formulas v2 root %s: %w", replacedRootID, restoreErr))
 			}
 			if rollbackErr != nil {
@@ -1547,19 +1531,18 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	return result, nil
 }
 
-func emitCurrentExecutionFacts(deps SlingDeps, graphStore beads.Store, rootID, actor, formulaName string) {
+func emitCurrentExecutionFacts(deps SlingDeps, graphStore beads.GraphStore, rootID, actor, formulaName string) {
 	workStore := deps.Store
 	if deps.ExecutionWorkStore != nil {
-		workStore = deps.ExecutionWorkStore
+		workStore = beads.WorkStore{Store: deps.ExecutionWorkStore}
 	}
-	if err := executionevent.EmitCurrent(deps.Events, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: workStore}, rootID, actor); err != nil {
+	if err := executionevent.EmitCurrent(deps.Events, graphStore, workStore, rootID, actor); err != nil {
 		depsTracef(deps, "execution snapshot projection failed formula=%s root=%s err=%v", formulaName, rootID, err)
 	}
 }
 
-func closeReplacedGraphV2Root(store beads.Store, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
+func closeReplacedGraphV2Root(store beads.GraphStore, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
+	storeMolecule := beads.GraphMolecule(store)
 	root, err := store.Get(rootID)
 	if err != nil {
 		return nil, fmt.Errorf("loading replaced formulas v2 root %s: %w", rootID, err)
@@ -1592,10 +1575,9 @@ type graphV2ReplacementSnapshot struct {
 	snapshots []sourceworkflow.WorkflowBeadSnapshot
 }
 
-func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars map[string]string, scopeKind, scopeRef string, force bool) (graphV2ReplacementSnapshot, error) {
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
-	if !force || store == nil {
+func snapshotGraphV2ReplacementRoot(store beads.GraphStore, formulaName string, vars map[string]string, scopeKind, scopeRef string, force bool) (graphV2ReplacementSnapshot, error) {
+	storeMolecule := beads.GraphMolecule(store)
+	if !force || store == (beads.GraphStore{}) {
 		return graphV2ReplacementSnapshot{}, nil
 	}
 	inputConvoyID := strings.TrimSpace(vars[graphv2.ConvoyIDVar])
@@ -1632,10 +1614,9 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	}, nil
 }
 
-func rollbackGraphV2ReplacementLaunch(store beads.Store, replacementRootID string, snapshot graphV2ReplacementSnapshot) error {
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
-	if store == nil || snapshot.rootID == "" || len(snapshot.snapshots) == 0 {
+func rollbackGraphV2ReplacementLaunch(store beads.GraphStore, replacementRootID string, snapshot graphV2ReplacementSnapshot) error {
+	storeMolecule := beads.GraphMolecule(store)
+	if store == (beads.GraphStore{}) || snapshot.rootID == "" || len(snapshot.snapshots) == 0 {
 		return nil
 	}
 	var rollbackErr error
@@ -1651,16 +1632,15 @@ func rollbackGraphV2ReplacementLaunch(store beads.Store, replacementRootID strin
 	return rollbackErr
 }
 
-func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
-	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+func closeFailedGraphV2Roots(store beads.GraphStore, recipe *formula.Recipe) error {
+	if store == (beads.GraphStore{}) || recipe == nil || len(recipe.Steps) == 0 {
 		return nil
 	}
 	key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	if key == "" {
 		return nil
 	}
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	return closeFailedGraphV2RootsByKey(beads.GraphMolecule(beads.GraphStore{Store: store}), key)
+	return closeFailedGraphV2RootsByKey(beads.GraphMolecule(store), key)
 }
 
 func closeFailedGraphV2RootsByKey(store beads.MoleculeTarget, key string) error {
@@ -1709,16 +1689,15 @@ func stampGraphV2RootMetadata(recipe *formula.Recipe, formulaName string, vars m
 	}
 }
 
-func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.Result, error) {
-	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+func existingGraphV2Root(store beads.GraphStore, recipe *formula.Recipe) (*molecule.Result, error) {
+	if store == (beads.GraphStore{}) || recipe == nil || len(recipe.Steps) == 0 {
 		return nil, nil
 	}
 	key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	if key == "" {
 		return nil, nil
 	}
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	matches, err := sourceworkflow.KeyedRoots(beads.GraphMolecule(beads.GraphStore{Store: store}), beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(beads.GraphMolecule(store), beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1794,7 +1773,7 @@ func ShouldPromoteWorkflowLaunchStatus(status string) bool {
 
 // PromoteWorkflowLaunchBead sets a bead to in_progress if its current status
 // is eligible for promotion.
-func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
+func PromoteWorkflowLaunchBead(store beads.GraphStore, beadID string) error {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
 		return nil
@@ -1830,7 +1809,7 @@ type BeadCheckOptions struct {
 // the graph store for a root a recipe just poured: a v1 poured root (work
 // class) lives in the work store, and missing it there is the right answer
 // ("not graph.v2").
-func graphWorkflowAttachmentInGraphStore(graphStore beads.Store, rootID string) (graph bool) {
+func graphWorkflowAttachmentInGraphStore(graphStore beads.GraphStore, rootID string) (graph bool) {
 	_ = beads.FederatedRead(func() error {
 		graph = IsGraphWorkflowAttachment(graphStore, rootID)
 		return nil
