@@ -144,21 +144,28 @@ func TestProjectionHidesWrongClassRowsByID(t *testing.T) {
 	}
 }
 
+// convoyCloseThrough is a production by-id read: convoy.ConvoyClose reads
+// the convoy before it closes it, so handing it a session id through the work
+// side asks the wrong store, charged to convoy.ConvoyClose.
+func convoyCloseThrough(s beads.Store, id string) error {
+	return convoy.ConvoyClose(convoy.ConvoyDeps{}, beadstest.Work(s), id)
+}
+
 func TestProjectionChargesAProductionCaller(t *testing.T) {
-	SetPackageUnderTest("internal/storeref")
+	SetPackageUnderTest("internal/convoy")
 	t.Cleanup(func() { SetPackageUnderTest("") })
 	p, leaf, sink := newTestProjection(t)
 	session := seed(t, leaf, sessionBead("s"))
 
-	if _, err := storeref.Resolve(session.ID, []beads.Store{p.WorkView()}); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("Resolve through the work view error = %v, want ErrNotFound", err)
+	if err := convoyCloseThrough(p.WorkView(), session.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ConvoyClose through the work view error = %v, want ErrNotFound", err)
 	}
 	sites := sink.summaries()
 	if len(sites) != 1 {
 		t.Fatalf("sites = %+v, want one", sites)
 	}
 	site := sites[0]
-	want := SiteKey{File: "internal/storeref/storeref.go", Func: "storeref.Resolve", Op: "get", View: "work", Class: "sessions", Caller: "-"}
+	want := SiteKey{File: "internal/convoy/convoy.go", Func: "convoy.ConvoyClose", Op: "get", View: "work", Class: "sessions", Caller: "-"}
 	if site.Key != want || len(site.Lines) != 1 || site.Lines[0] <= 0 {
 		t.Fatalf("site = %+v, want key %+v at one line", site, want)
 	}
@@ -167,15 +174,31 @@ func TestProjectionChargesAProductionCaller(t *testing.T) {
 	}
 }
 
+// TestProjectionTreatsStorerefAsPlumbing: storeref's executors run a
+// caller's legs, so a read one makes is charged to whoever called it; called
+// from a test, it is a test-only read with no production site.
+func TestProjectionTreatsStorerefAsPlumbing(t *testing.T) {
+	p, leaf, sink := newTestProjection(t)
+	session := seed(t, leaf, sessionBead("s"))
+	if _, err := storeref.Resolve(session.ID, []beads.Store{p.WorkView()}); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Resolve through the work view error = %v, want ErrNotFound", err)
+	}
+	if sites := sink.summaries(); len(sites) != 0 {
+		t.Fatalf("a storeref read was charged to a site: %+v", sites)
+	}
+	if got := sink.testOnlyCount(); got != 1 {
+		t.Fatalf("test-only violations = %d, want 1", got)
+	}
+}
+
 func TestProjectionMarkersCoverReadsOnly(t *testing.T) {
 	p, leaf, sink := newTestProjection(t)
 	session := seed(t, leaf, sessionBead("s"))
 	err := beads.FederatedRead(func() error {
-		_, err := storeref.Resolve(session.ID, []beads.Store{p.WorkView()})
-		return err
+		return convoyCloseThrough(p.WorkView(), session.ID)
 	})
 	if !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("federated Resolve error = %v, want ErrNotFound (still hidden)", err)
+		t.Fatalf("federated ConvoyClose error = %v, want ErrNotFound (still hidden)", err)
 	}
 	if sites := sink.summaries(); len(sites) != 0 {
 		t.Fatalf("a federated read was flagged: %+v", sites)
@@ -194,14 +217,13 @@ func TestProjectionCountsRelicReadsAsDebt(t *testing.T) {
 	p, leaf, sink := newTestProjection(t)
 	session := seed(t, leaf, sessionBead("s"))
 	_ = beads.RelicRead(func() error {
-		_, err := storeref.Resolve(session.ID, []beads.Store{p.WorkView()})
-		return err
+		return convoyCloseThrough(p.WorkView(), session.ID)
 	})
 	if sites := sink.summaries(); len(sites) != 0 {
 		t.Fatalf("a relic read was a violation: %+v", sites)
 	}
-	if relics := summarize(sink.sightings(), kindRelic); len(relics) != 1 || relics[0].Key.Func != "storeref.Resolve" {
-		t.Fatalf("relic tally = %+v, want storeref.Resolve", relics)
+	if relics := summarize(sink.sightings(), kindRelic); len(relics) != 1 || relics[0].Key.Func != "convoy.ConvoyClose" {
+		t.Fatalf("relic tally = %+v, want convoy.ConvoyClose", relics)
 	}
 }
 
@@ -756,4 +778,20 @@ func sameIDs(rows []beads.Bead, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// TestProjectionViewOverAHandleClaimsOnlyItsStoresHandles: a class handle
+// forwards Handles whatever it wraps, so a view over a handle claims explicit
+// handles exactly when the store below it has them: none over a plain store
+// (cmd/gc's demand read must not pay a second, live Ready), the cache's over
+// a CachingStore.
+func TestProjectionViewOverAHandleClaimsOnlyItsStoresHandles(t *testing.T) {
+	p, leaf, _ := newTestProjection(t)
+	if _, ok := newProjectionView(p, beadstest.Sessions(leaf), sideClass).(handlesProvider); ok {
+		t.Error("a view over a handle over a plain store claims explicit handles")
+	}
+	cache := beads.NewCachingStoreForTest(leaf, nil)
+	if _, ok := newProjectionView(p, beadstest.Sessions(cache), sideClass).(handlesProvider); !ok {
+		t.Error("a view over a handle over a cache hides the cache's handles")
+	}
 }
