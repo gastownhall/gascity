@@ -367,3 +367,43 @@ func TestKillExistingOrphansFreesTheKeyWhenTheScanReturns(t *testing.T) {
 		}
 	})
 }
+
+// TestKillExistingOrphansIgnoresTheAnswerOfAnAbandonedScan: a scan whose
+// waiter gave up delivers its late answer into the void; once its key is
+// free, the next cleanup runs a fresh scan, and the abandoned answer's roots
+// are never terminated on its word.
+func TestKillExistingOrphansIgnoresTheAnswerOfAnAbandonedScan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		endScan := sync.OnceFunc(func() { close(release) })
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{
+			roots: []runtime.LiveRuntime{{PID: 4100, IsTracked: false}},
+			block: release,
+		})
+		defer endScan()
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "killExistingOrphans", func() error {
+			return mgr.killExistingOrphans(context.Background(), "gc-a")
+		})
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("first cleanup err = %v, want the unanswered-scan deferral", err)
+		}
+		endScan()       // the abandoned scan finally answers root 4100
+		synctest.Wait() // ... into the buffer, freeing its key
+		sp.queue(scanStep{roots: []runtime.LiveRuntime{{PID: 4200, IsTracked: false}}})
+
+		err = withOrphanScanWatchdog(t, "killExistingOrphans after release", func() error {
+			return mgr.killExistingOrphans(context.Background(), "gc-a")
+		})
+		if err != nil {
+			t.Fatalf("second cleanup: %v", err)
+		}
+		if n := sp.scans.Load(); n != 2 {
+			t.Fatalf("scans begun = %d, want 2: the retry runs a fresh scan", n)
+		}
+		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4200 {
+			t.Fatalf("terminated %v, want only the fresh scan's root 4200, never the abandoned 4100", got)
+		}
+	})
+}
