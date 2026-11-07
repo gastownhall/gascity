@@ -595,3 +595,49 @@ func TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault(t *testing.T)
 		})
 	}
 }
+
+// TestResolveTemplateGivesTheSessionItsOwnCityName pins the session-side half
+// of the per-city GC_CITY_NAME projection: the name the controller builds the
+// session with is explicit identity, like GC_SESSION_NAME, so it must win over
+// the controller's ambient value (one supervisor serving several cities holds
+// one ambient name) and over any config-authored env layer.
+func TestResolveTemplateGivesTheSessionItsOwnCityName(t *testing.T) {
+	cases := []struct {
+		name     string
+		ambient  string
+		agentEnv map[string]string
+	}{
+		{name: "ambient neighbor city", ambient: "neighbor-city"},
+		{name: "ambient empty", ambient: ""},
+		{name: "ambient already matches", ambient: "own-city"},
+		{name: "config-authored env supplies another name", ambient: "neighbor-city", agentEnv: map[string]string{"GC_CITY_NAME": "config-city"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeTemplateResolveCityConfig(t, cityPath, "file")
+			t.Setenv("GC_CITY_NAME", tc.ambient)
+
+			params := &agentBuildParams{
+				cityName:   "own-city",
+				cityPath:   cityPath,
+				workspace:  &config.Workspace{Provider: "test"},
+				providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+				lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+				fs:         fsys.OSFS{},
+				beaconTime: time.Unix(0, 0),
+				beadNames:  make(map[string]string),
+				stderr:     io.Discard,
+			}
+
+			agent := &config.Agent{Name: "runner", Env: tc.agentEnv}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			if got := tp.Env["GC_CITY_NAME"]; got != "own-city" {
+				t.Fatalf("GC_CITY_NAME = %q, want own-city", got)
+			}
+		})
+	}
+}

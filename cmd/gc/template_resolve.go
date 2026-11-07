@@ -347,13 +347,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 8: Build agent environment.
 	agentEnv := map[string]string{
-		"GC_SESSION_NAME":     sessName,
-		"GC_SESSION_ID":       sessionBeadID,
-		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_SESSION_ORIGIN":   "ephemeral",
-		"GC_AGENT":            sessName,
-		"GC_ALIAS":            qualifiedName,
-		"GC_DIR":              workDir,
+		"GC_SESSION_NAME":   sessName,
+		"GC_SESSION_ID":     sessionBeadID,
+		"GC_TEMPLATE":       templateNameFor(cfgAgent, qualifiedName),
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_AGENT":          sessName,
+		"GC_ALIAS":          qualifiedName,
+		"GC_DIR":            workDir,
+		// The city name is session identity, like GC_SESSION_NAME: written
+		// unconditionally from the build params, never inherited from the
+		// controller's ambient value. agentEnv merges last, so this also wins
+		// over config-authored env; one supervisor serving several cities
+		// would otherwise stamp every child with one ambient name.
+		"GC_CITY_NAME":        p.cityName,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
