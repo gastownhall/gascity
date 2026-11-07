@@ -954,6 +954,62 @@ func TestLooksLikeConfiguredBeadIDAcceptsHQPrefix(t *testing.T) {
 	}
 }
 
+// BeadIDMatchesPrefix is the dash-append gate for prefixes that live outside
+// city config (the routes.jsonl arm of gc bd's subject router). Its accepted
+// and rejected ID shapes must parallel the configured matcher's — the two
+// arms route the same ID population or a registration and a config can
+// disagree about who owns an ID (city-fr3t).
+func TestBeadIDMatchesPrefix(t *testing.T) {
+	tests := []struct {
+		id     string
+		prefix string
+		want   bool
+	}{
+		{"city-fr3t", "city", true},
+		{"CITY-fr3t", "city", true},                          // prefix match is case-insensitive
+		{"City-Ab1", "cItY", true},                           // both sides
+		{"city-fr3t", "ci", false},                           // truncated prefix selects nothing — city-fr3t
+		{"cityfr3t", "city", false},                          // no dash.
+		{"city-", "city", false},                             // empty suffix.
+		{"city-fr3t.extra", "city", true},                    // hierarchical .child.
+		{"city-12345678", "city", true},                      // 8-char numeric suffix.
+		{"city-123456789", "city", false},                    // 9-char suffix exceeds cap.
+		{"city-not-an-id!", "city", false},                   // non-alphanumeric suffix.
+		{"", "city", false},                                  // empty id.
+		{"   ", "city", false},                               // whitespace id.
+		{"city-fr3t", "", false},                             // empty prefix.
+		{"city-fr3t", "  city  ", true},                      // trimmed prefix.
+		{"agent-diagnostics-hnn", "agent-diagnostics", true}, // hyphenated route prefix.
+	}
+	for _, tt := range tests {
+		if got := BeadIDMatchesPrefix(tt.id, tt.prefix); got != tt.want {
+			t.Errorf("BeadIDMatchesPrefix(%q, %q) = %v, want %v", tt.id, tt.prefix, got, tt.want)
+		}
+	}
+}
+
+// ValidBeadSuffix is exported for the routes arm; its shapes must not drift
+// from the configured matcher's suffix gate.
+func TestValidBeadSuffixShapes(t *testing.T) {
+	tests := []struct {
+		suffix string
+		want   bool
+	}{
+		{"fr3t", true},
+		{"12345678", true},
+		{"123456789", false}, // over the 8-char cap.
+		{"", false},
+		{"fr3t.x", true},
+		{"fr3t.", true}, // trailing dot accepted (matches BeadIDParts).
+		{"no!pe", false},
+	}
+	for _, tt := range tests {
+		if got := ValidBeadSuffix(tt.suffix); got != tt.want {
+			t.Errorf("ValidBeadSuffix(%q) = %v, want %v", tt.suffix, got, tt.want)
+		}
+	}
+}
+
 // Underscored rig prefixes (e.g. "live_docs") are common in real cities
 // but were rejected by BeadIDParts' alpha-only prefix charset. The
 // config-aware path matches against cfg.Rigs literally, so the broken

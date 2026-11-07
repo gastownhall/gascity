@@ -1877,10 +1877,13 @@ func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStar
 // a bead its leg serves could live in. All of these are proven residences
 // (Resident). The claim and the readback are the leg's on the assumption that
 // bd resolves the bead in the leg's own store: on a local miss bd falls back
-// to the store a routes.jsonl prefix route names, a fallback the routes
-// gascity writes never select (writeAllRoutes spells a bare prefix; bd matches
-// an id's hyphenated one), and to its contributor auto-routing, which gc turns
-// off for every bd it runs (applyBdContributorRoutingOptOut).
+// to the store a routes.jsonl prefix route names, and to its contributor
+// auto-routing, which gc turns off for every bd it runs
+// (applyBdContributorRoutingOptOut). gc's own claim reads and mutations open
+// the leg's store directly, so route registration cannot move them;
+// writeAllRoutes spells each store's real issue prefix since city-fr3t, which
+// is what makes those routes selectable at all where a store's real prefix
+// differs from its configured one.
 //
 // An adoption on a city that relocates classes (a class route, or one that
 // degraded) whose readback found it in no store (hookAdoptionUnverified: the
