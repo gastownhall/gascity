@@ -58,9 +58,11 @@ type AbsentBlockedReader interface {
 
 // ReadyBlockedByAbsentFor returns store's absent-blocker listing, or false
 // when the store strands nothing: it has no listing, or it wraps a store that
-// has none (StrandsAbsentTargets).
+// has none (StrandsAbsentTargets). Like DepListBatchFor it sees through class
+// handles by walking the class layers itself, not through As, which answers
+// this capability by calling here.
 func ReadyBlockedByAbsentFor(store Store) (AbsentBlockedReader, bool) {
-	reader, ok := store.(AbsentBlockedReader)
+	reader, ok := physicalStore(store).(AbsentBlockedReader)
 	if !ok || !reader.StrandsAbsentTargets() {
 		return nil, false
 	}

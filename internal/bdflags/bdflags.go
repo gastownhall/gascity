@@ -48,7 +48,7 @@ var globalBoolFlags = map[string]bool{
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24, and bd 1.3.0
+// Sourced from `bd <sub> --help` (bd 1.3.4, 2026-11-04, and bd 1.3.0
 // Enterprise, 2026-10-26: TestBdFlagManifestCurrent passes against both).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
@@ -64,6 +64,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"-s": true, "--status": true, "--storage-class": true, "--title": true,
 		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
+		// Hidden aliases bd accepts without listing them in its help:
+		// --label for --labels; --body, -m/--message and --description-file
+		// for --description.
+		"--label": true, "--body": true, "-m": true, "--message": true,
+		"--description-file": true,
 	},
 	"update": {
 		"--acceptance": true, "--add-label": true, "--append-notes": true,
@@ -75,6 +80,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--session": true, "--set-labels": true, "--set-metadata": true,
 		"-s": true, "--status": true, "-t": true, "--type": true,
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
+		// Hidden aliases bd accepts without listing them in its help: --body,
+		// -m/--message and --description-file for --description,
+		// --acceptance-criteria for --acceptance.
+		"--body": true, "-m": true, "--message": true,
+		"--description-file": true, "--acceptance-criteria": true,
 		// The compare-and-set guards. Pinned as well as discovered: help
 		// discovery swallows its own errors, so a bd that is missing, renamed
 		// or slow leaves the pinned table as the only answer, and these two
@@ -87,6 +97,9 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
 		"--if-revision": true,
+		// Hidden aliases bd accepts for --reason without listing them in its
+		// help.
+		"--resolution": true, "-m": true, "--message": true, "--comment": true,
 	},
 	"reopen": {
 		"-r": true, "--reason": true, "--if-revision": true,
@@ -150,7 +163,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24). A flag whose
+// Sourced from `bd <sub> --help` (bd 1.3.4, 2026-11-04). A flag whose
 // help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
 // not in valueFlagsBySub: it never consumes the next argv token, so
 // `bd list --deps all` leaves "all" positional.

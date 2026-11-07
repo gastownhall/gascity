@@ -161,8 +161,11 @@ func TestOrderEventCursorSeesAWorkResidentPouredRoot(t *testing.T) {
 		a.Interval = ""
 		a.On = events.BeadClosed
 		ep := events.NewFake()
-		ep.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 		m, _ := newWorkClassOrderDispatcher(t, e, a, ep)
+		// The order has never run, so its first check starts at the head:
+		// the event it consumes is recorded after that check.
+		dispatchGraphOrder(t, m, e.cityPath)
+		ep.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 		dispatchGraphOrder(t, m, e.cityPath)
 		if roots := orderMoleculeRoots(t, e.work, a.ScopedName()); len(roots) != 1 {
 			t.Fatalf("first dispatch roots = %d, want 1", len(roots))

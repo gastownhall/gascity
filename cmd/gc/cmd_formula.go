@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -21,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
-	"github.com/spf13/cobra"
 )
 
 func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -739,6 +740,9 @@ city's work store, copy them into the binding with
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
+			// store is the scope's work store; the convoy and invocation calls below
+			// take it as the work class.
+			storeWork := beads.WorkStore{Store: store}
 			// A graph.v2 cook materializes a workflow root and its steps, and
 			// every one of those beads is GRAPH class (molecule.Instantiate
 			// stamps gc.root_bead_id on each member of a graph pour). On a city
@@ -763,13 +767,13 @@ city's work store, copy them into the binding with
 
 			cookVars := parseFormulaVars(vars)
 
-			// Parse --meta before any bead exists so a malformed flag refuses the
-			// cook write-free: before PrepareInvocation can mint a synthetic input
-			// convoy, and before any root, step or blocking dependency is written,
-			// on whichever arm runs below. The non-attach arms' class-must-not-flip
-			// guard (cookMetaClassFlip) also judges it against the recipe root
-			// before anything is cooked, so a refused stamp leaves no molecule
-			// behind.
+			// Parse --meta before any bead exists so a malformed flag, or a key the
+			// bead store would refuse, refuses the cook write-free: before
+			// PrepareInvocation can mint a synthetic input convoy, and before any
+			// root, step or blocking dependency is written, on whichever arm runs
+			// below. The non-attach arms' class-must-not-flip guard
+			// (cookMetaClassFlip) also judges it against the recipe root before
+			// anything is cooked, so a refused stamp leaves no molecule behind.
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -884,7 +888,7 @@ city's work store, copy them into the binding with
 					// input convoy that workflow tracks.
 					wired := false
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
-						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+						inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
@@ -929,7 +933,8 @@ city's work store, copy them into the binding with
 								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
 							}
 						}
-						if roots, err := sourceworkflow.ListLiveRoots(store, attach, storeRef, storeRef); err != nil {
+						// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+						if roots, err := sourceworkflow.ListLiveRoots(beads.GraphMolecule(beads.GraphStore{Store: store}), attach, storeRef, storeRef); err != nil {
 							return fmt.Errorf("checking live workflows for %s: %w", attach, err)
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -941,7 +946,7 @@ city's work store, copy them into the binding with
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
-						result, err = molecule.Instantiate(cmd.Context(), placement, recipe, molecule.Options{
+						result, err = molecule.Instantiate(cmd.Context(), beads.GraphMolecule(beads.GraphStore{Store: placement}), recipe, molecule.Options{
 							Title:            title,
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
@@ -953,7 +958,7 @@ city's work store, copy them into the binding with
 							}
 							return err
 						}
-						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
+						emitFormulaCookExecutionFacts(store, storeWork, cityPath, result, stderr)
 						wired, err = wireFormulaCookGraphV2AttachRoot(store, attach, result.RootID, rootMeta)
 						return err
 					})
@@ -965,7 +970,7 @@ city's work store, copy them into the binding with
 						// comes after the wiring, when the live workflow tracks that
 						// convoy, so it stays open.
 						if !wired {
-							graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+							graphv2.CloseSyntheticInputConvoy(storeWork, syntheticInputConvoyID, attach)
 						}
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
@@ -998,7 +1003,7 @@ city's work store, copy them into the binding with
 				// the store it is handed only has to be able to LOAD the
 				// formula. That is exactly why this arm can serve a class-owned
 				// attach bead when the graph.v2 arm above cannot.
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), attachStore, args[0], scope.searchPaths, attach, cookVars)
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -1025,7 +1030,7 @@ city's work store, copy them into the binding with
 				// its own graph leg through resolveGraphStore, which already
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
-				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
+				result, err := molecule.Attach(cmd.Context(), moleculeClassTarget(recipe, attachStore, attachStore), recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1077,7 +1082,7 @@ city's work store, copy them into the binding with
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 			}
-			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
+			inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 			}
@@ -1129,7 +1134,7 @@ city's work store, copy them into the binding with
 					unlock := graphv2.LockKey(graphRootKey)
 					defer unlock()
 				}
-				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, molecule.Options{
+				result, err = molecule.Instantiate(cmd.Context(), moleculeClassTarget(recipe, rootStore, rootStore), recipe, molecule.Options{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1137,7 +1142,7 @@ city's work store, copy them into the binding with
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
-				emitFormulaCookExecutionFacts(rootStore, store, cityPath, result, stderr)
+				emitFormulaCookExecutionFacts(rootStore, storeWork, cityPath, result, stderr)
 			} else {
 				// The legacy compiler still emits a graph-class root for a
 				// root-only formula: `phase = "vapor"` (or no [[steps]]) compiles
@@ -1150,7 +1155,8 @@ city's work store, copy them into the binding with
 				opts := molecule.Options{Title: title, Vars: cookVars}
 				var err error
 				var refused error
-				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+				var target beads.MoleculeTarget
+				result, target, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.MoleculeTarget {
 					chosen := moleculeClassStore(recipe, store, graphStore)
 					// The chooser runs after compile and before instantiate:
 					// the one point where the root's class and its store are
@@ -1158,10 +1164,11 @@ city's work store, copy them into the binding with
 					// stops the cook; the refusal is reported below.
 					if flip := cookMetaClassFlip(recipe, rootMeta, routesClassHolds(cookRoutes, chosen)); flip != nil {
 						refused = cookMetaFlipError(args[0], flip)
-						return nil
+						return beads.MoleculeTarget{}
 					}
-					return chosen
+					return moleculeClassTarget(recipe, chosen, chosen)
 				})
+				rootStore = target
 				if refused != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, refused)
 				}
@@ -1211,17 +1218,18 @@ city's work store, copy them into the binding with
 // the work store holds the tracks edges of the input convoy the root names.
 // Wrapping one store as both legs reads the convoy out of the ledger it does not
 // live in; on a city that relocates nothing the two arguments are the same value.
-func emitFormulaCookExecutionFacts(graphStore, workStore beads.Store, cityPath string, result *molecule.Result, stderr io.Writer) {
+func emitFormulaCookExecutionFacts(graphStore beads.Store, workStore beads.WorkStore, cityPath string, result *molecule.Result, stderr io.Writer) {
 	if result == nil || !result.GraphWorkflow {
 		return
 	}
-	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: workStore}, result.RootID, "formula-cook"); err != nil {
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: graphStore}, workStore, result.RootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", result.RootID, err) //nolint:errcheck // successful cook is preserved
 	}
 }
 
-func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
-	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, _ *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	stores := cliStores(cityPath, store)
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), stores.Graph(), stores.Work(), workflowRootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
 	}
 }
@@ -1278,7 +1286,8 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	// store-ref encoding (empty QualifiedName so the root stays unrouted;
 	// MetadataOnly mirrors the no-session default binding).
 	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
-	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, beads.SessionStore{Store: store}, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 // wireFormulaCookGraphV2AttachRoot makes the attach bead block on the graph.v2
@@ -1346,6 +1355,8 @@ func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allo
 }
 
 func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
 		return nil
 	}
@@ -1353,7 +1364,7 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 	if key == "" {
 		return nil
 	}
-	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key)
+	matches, err := sourceworkflow.KeyedRoots(storeMolecule, beadmeta.Graphv2RootKeyMetadataKey, key)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1361,7 +1372,7 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
-		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
+		if _, err := sourceworkflow.CloseWorkflowSubtree(storeMolecule, root.ID); err != nil {
 			return fmt.Errorf("closing failed formulas v2 root %s: %w", root.ID, err)
 		}
 	}
@@ -1376,7 +1387,8 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	matches, err := sourceworkflow.KeyedRoots(beads.GraphMolecule(beads.GraphStore{Store: store}), beadmeta.Graphv2RootKeyMetadataKey, key)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1451,6 +1463,10 @@ func cookMetaFlipError(formulaName string, flip *coordclass.Flip) error {
 	return fmt.Errorf("%s", classFlipRefusalText(fmt.Sprintf("--meta on the root of %q", formulaName), flip))
 }
 
+// parseMetadataArgs parses --meta key=value pairs. It refuses a pair with no
+// "=" or an empty key, and a key the bead store would refuse
+// (beadmeta.ValidateKey): bd and native Dolt reject such a key on the stamp's
+// SetMetadataBatch, which runs only after the cook has written its beads.
 func parseMetadataArgs(items []string) (map[string]string, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1460,6 +1476,9 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok || key == "" {
 			return nil, fmt.Errorf("invalid metadata %q (want key=value)", item)
+		}
+		if err := beadmeta.ValidateKey(key); err != nil {
+			return nil, fmt.Errorf("invalid metadata %q: %w", item, err)
 		}
 		out[key] = value
 	}

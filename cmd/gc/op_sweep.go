@@ -195,7 +195,7 @@ func (s *opSweeper) wantsTicker() bool {
 // open found unable to record ops under gates that are auto only by their
 // builtin default.
 func (s *opSweeper) incapableNow() bool {
-	over := s.cs.SessionsBeadStore().Store
+	over := s.cs.Stores().Sessions().Store
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.incapableOver != nil && sameBeadStore(s.incapableOver, over)
@@ -300,7 +300,7 @@ func (s *opSweeper) pass() {
 // left work a later pass can finish.
 func (s *opSweeper) sweep(mode rollout.Mode) bool {
 	if mode == rollout.Off && !s.hasStore() {
-		has, err := opjournal.HasSubmittedOps(s.cs.SessionsBeadStore())
+		has, err := opjournal.HasSubmittedOps(s.cs.Stores().Sessions())
 		if err != nil {
 			reason := legacyop.DegradeReason(err)
 			s.fail(mode, legacyop.StageSweep, reason, err)
@@ -460,7 +460,7 @@ func (s *opSweeper) hasStore() bool {
 // SQLite-backed answers *opjournal.NotRecordedByDefaultError, cached store
 // or not: that default records nothing there.
 func (s *opSweeper) store(builtinDefault bool) (*opjournal.Store, beads.Store, error) {
-	over := s.cs.SessionsBeadStore()
+	over := s.cs.Stores().Sessions()
 	if builtinDefault {
 		if err := opjournal.CheckRecordsByDefault(over); err != nil {
 			return nil, over.Store, err

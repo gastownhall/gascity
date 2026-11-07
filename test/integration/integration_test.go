@@ -243,7 +243,7 @@ func TestMain(m *testing.M) {
 	} else if bazeltest.IsBazel() {
 		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_2", "bd"); bd != "" {
+		if bd := runfilesBinaryAt("bd_bin_v1_3_4", "bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -656,7 +656,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.2"
+const wantPinnedBeadsModuleVersion = "v1.3.4"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -977,7 +977,7 @@ func isSubprocessTestLeaf(cmd, agentScript string) bool {
 	switch {
 	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
 		return true
-	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
+	case strings.Contains(cmd, "bd ready --assignee=worker --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"):
 		return true
 	case strings.Contains(cmd, agentScript):
 		return true

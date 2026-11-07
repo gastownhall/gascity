@@ -1150,6 +1150,10 @@
           "type": "boolean",
           "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
         },
+        "hold_mid_turn": {
+          "type": "boolean",
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs the conversation lane's\nkeystroke boundary and the bypass of the quiescence gate that a\ndelivery starved on a never-quiet session takes. Under the [session]\nprogram_status switch on, the lane's quiescence boundary stays closed,\nand a delivery at it is held right before it is typed, while a fresh\nread of the program's own record shows a live working record; the lane\ntakes the starved bypass only on such a read that decides and shows no\nlive working record. Under off and shadow the lane never takes the\nstarved bypass. Legacy delivery defers the bypass under on while such a\nread shows a live working record, and otherwise takes it as without\nthe declaration. Every other delivery is unchanged. It reaches a pane\nwhen its capture is armed (create, respawn, heal), and heal keeps it\ncurrent. Unset inherits."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"

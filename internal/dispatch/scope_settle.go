@@ -16,12 +16,12 @@ const scopeSettledAction = "scope-settled"
 
 // scopeBodyCloser records a scope body's settled metadata (its gc.outcome
 // included) and closes it.
-type scopeBodyCloser func(store beads.Store, bodyID string, metadata map[string]string) error
+type scopeBodyCloser func(store beads.GraphStore, bodyID string, metadata map[string]string) error
 
 // forceCloseScopeBody records metadata on a scope body and closes it with a
 // forced Close. A control that settles its scope before closing itself still
 // blocks the body, and bd refuses an unforced close of a blocked bead.
-func forceCloseScopeBody(store beads.Store, bodyID string, metadata map[string]string) error {
+func forceCloseScopeBody(store beads.GraphStore, bodyID string, metadata map[string]string) error {
 	return settleLogicalBead(store, bodyID, metadata)
 }
 
@@ -45,7 +45,7 @@ const (
 // and a body that is already closed means this member's own earlier settle
 // completed, so the scope is left exactly as recorded and the result's action
 // is scopeSettledAction.
-func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts ProcessOptions, state scopeMemberState) (ControlResult, error) {
+func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, opts ProcessOptions, state scopeMemberState) (ControlResult, error) {
 	scopeRef := bead.Metadata[beadmeta.ScopeRefMetadataKey]
 	if scopeRef == "" {
 		return ControlResult{}, nil
@@ -159,7 +159,7 @@ func (s *scopeSnapshot) substituteMember(member beads.Bead) {
 // closes the control without touching the scope and reports
 // scopeSettledAction. action is the control's own action, reported when this
 // run did the settling.
-func closeScopedControl(store beads.Store, controlID string, closeMetadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
+func closeScopedControl(store beads.GraphStore, controlID string, closeMetadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
 	current, err := store.Get(controlID)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: reloading control before close: %w", controlID, err)

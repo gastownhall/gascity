@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // scopedFanoutFixture is a fanout control in scope "body" over a closed source
@@ -75,7 +76,7 @@ func TestFanoutSettlesScopeBeforeClosing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newScopedFanoutFixture(t, tc.source)
-			result, err := ProcessControl(f.store, f.fanout, ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(f.store), f.fanout, ProcessOptions{Work: beadstest.Work(f.store)})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -117,12 +118,12 @@ func TestFanoutRerunAdoptsSettledScope(t *testing.T) {
 				beadmeta.ScopeRefMetadataKey:   "body",
 				beadmeta.ScopeRoleMetadataKey:  "member",
 			}})
-			if err := forceCloseScopeBody(f.store, f.body.ID, map[string]string{beadmeta.OutcomeMetadataKey: tc.bodyOutcome}); err != nil {
+			if err := forceCloseScopeBody(beadstest.Graph(f.store), f.body.ID, map[string]string{beadmeta.OutcomeMetadataKey: tc.bodyOutcome}); err != nil {
 				t.Fatalf("settling body: %v", err)
 			}
 			bodyBefore := mustGetBead(t, f.store, f.body.ID)
 
-			result, err := ProcessControl(f.store, f.fanout, ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(f.store), f.fanout, ProcessOptions{Work: beadstest.Work(f.store)})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -166,7 +167,7 @@ func TestDrainFinishesRecordedClose(t *testing.T) {
 	}})
 	mustDepAdd(t, store, body.ID, drain.ID, "blocks")
 
-	result, err := ProcessControl(store, drain, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestDrainRecordedCloseWithoutOutcomeIsMalformed(t *testing.T) {
 		beadmeta.KindMetadataKey:       beadmeta.KindDrain,
 		beadmeta.DrainStateMetadataKey: beadmeta.DrainStateSucceeded,
 	}})
-	_, err := ProcessControl(store, drain, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlGraphMalformed", err)
 	}

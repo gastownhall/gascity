@@ -596,7 +596,15 @@ func waitForRigStoreAccessible(cityPath, rigPath string, timeout time.Duration) 
 	}
 }
 
+// prepareRigAdoptProviderState readies provider state for --adopt before store
+// init. A proxied store that is missing is refused first, whatever the journal
+// records: init would create an empty store and register the rig on it. The
+// prefix read refuses the same scope earlier, but it is skipped when
+// .beads/config.yaml records the prefix.
 func prepareRigAdoptProviderState(cityPath, rigPath string) error {
+	if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
+		return err
+	}
 	if rawBeadsProvider(cityPath) != "file" {
 		return nil
 	}
@@ -618,12 +626,13 @@ var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
 //
 // bd is aimed at the rig's store the same way gc registers types.custom on the
 // two kinds of scope: a proxied-server scope through the provider's projection
-// (bd refuses --readonly through its proxy), after refusing a clone whose store
-// is missing, because any bd command there would create an empty one; every
-// other scope through doctor's store projection with --readonly, so on those
-// nothing is started, migrated or written before adoption is decided. The
-// proxied read is an ordinary bd command: it may start the workspace's proxy
-// and run bd's version-bump maintenance even when the adopt is then refused.
+// (bd refuses --readonly through its proxy), after refusing a scope whose store
+// is missing whatever the journal records, because any bd command there would
+// create an empty one; every other scope through doctor's store projection
+// with --readonly, so on those nothing is started, migrated or written before
+// adoption is decided. The proxied read is an ordinary bd command: it may
+// start the workspace's proxy and run bd's version-bump maintenance even when
+// the adopt is then refused.
 func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
 	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
@@ -641,7 +650,7 @@ func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
 	var env map[string]string
 	args := []string{"--readonly", "config", "get", "--json", "issue_prefix"}
 	if contract.IsProxiedDoltMode(backend, mode) {
-		if err := validateProviderOwnedProxiedScopeStore(cityPath, rigPath); err != nil {
+		if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
 			return "", err
 		}
 		env, err = providerOwnedScopeCustomTypesEnv(cityPath, rigPath)
@@ -717,12 +726,14 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // rigListHQRunning reports whether the city's controller is running, for the
-// HQ row of the API-render rig list. Indirected through a var so tests pin both
-// outcomes without a live controller. controllerStatusForCity (not bare
-// controllerAlive) is supervisor-aware: on the supervisor sub-lane
-// controllerAlive==0 by construction while the city IS running.
+// HQ row of the rig list on both routes, so the two print the same value.
+// It pings the city's controller socket, which a standalone controller and
+// the supervisor (for each city it runs) both serve. It never calls the
+// supervisor HTTP API: the local route is the GC_NO_API=1 escape hatch.
+// Indirected through a var so tests pin both outcomes without a live
+// controller.
 var rigListHQRunning = func(cityPath string) bool {
-	return controllerStatusForCity(cityPath).Running
+	return controllerAlive(cityPath) != 0
 }
 
 // routeRigList dispatches the `rig list` read to the supervisor API when
@@ -743,9 +754,16 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 }
 
 // renderRigListFromAPI formats the API-sourced rig list to match doRigList
-// output. HQ info and per-rig beads status are derived locally (neither
-// lives on the API response); configured rigs come from the API with an
-// _cache_age_s envelope field (JSON) or staleness banner (human).
+// output. The rigs are the ones city.toml registers, listed as doRigList
+// lists them: the controller answers from the config it has published, which
+// reaches a rig gc rig add or gc rig remove just wrote only at its next config
+// reload. The API supplies each loaded rig's runtime state (running agents,
+// effective suspension); a rig the controller has not loaded yet has no
+// running agent and the on-disk suspension doRigList reads. HQ info and
+// per-rig beads status are derived locally (neither lives on the API
+// response); the JSON output carries an _cache_age_s envelope field, which
+// the server reports as 0 because the rig list is not read from the bead
+// cache, and human output prints no cache-age footer.
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -763,16 +781,18 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
 	resolveRigPaths(cityPath, cfg.Rigs)
-	rigsByName := make(map[string]config.Rig, len(cfg.Rigs))
-	for i := range cfg.Rigs {
-		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
+	loaded := make(map[string]api.RigView, len(cr.Body))
+	for _, rig := range cr.Body {
+		loaded[rig.Name] = rig
 	}
+	suspState, _ := loadSuspensionState(fs, cityPath)
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
-	// HQ running is derived from controllerStatusForCity (supervisor-aware),
-	// not a hardcoded true — it flips to false only if the controller actually
-	// died between the ListRigs fetch and this render. Computed for --json only:
-	// renderRigListText ignores Running and the probe costs a socket/supervisor
-	// dial (mirrors doRigList's guard). No wire field — rig list is not
+	// HQ running comes from rigListHQRunning, the same controller-socket ping
+	// the local route uses, not a hardcoded true — it flips to false only if
+	// the controller actually died between the ListRigs fetch and this render.
+	// Computed for --json only: renderRigListText ignores Running and the probe
+	// costs a socket dial (mirrors doRigList's guard). No wire field — rig list is not
 	// remote-wired, and "the server handling the request IS the controller".
 	hqRunning := true
 	if jsonOutput {
@@ -793,29 +813,25 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Beads:   rigBeadsStatus(fs, cityPath),
 		}},
 	}
-	for _, rig := range cr.Body {
-		path := rig.Path
-		prefix := rig.Prefix
-		defaultBranch := rig.DefaultBranch
-		defaultSlingTarget := ""
-		var defaultSlingTargets []string
-		if cfgRig, ok := rigsByName[rig.Name]; ok {
-			path = cfgRig.Path
-			prefix = cfgRig.EffectivePrefix()
-			defaultBranch = cfgRig.EffectiveDefaultBranch()
-			defaultSlingTarget = cfgRig.DefaultSlingTarget
-			defaultSlingTargets = cfgRig.DefaultSlingTargets
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		suspended, running := suspNames[rig.Name], false
+		federation, namespace := rigListFederation(&rig)
+		if view, ok := loaded[rig.Name]; ok {
+			suspended, running = view.Suspended, view.RunningCount > 0
 		}
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                rig.Name,
-			Path:                path,
-			Prefix:              prefix,
-			DefaultBranch:       defaultBranch,
-			Suspended:           rig.Suspended,
-			Running:             rig.RunningCount > 0,
-			DefaultSlingTarget:  defaultSlingTarget,
-			DefaultSlingTargets: defaultSlingTargets,
-			Beads:               rigBeadsStatus(fs, path),
+			Path:                rig.Path,
+			Prefix:              rig.EffectivePrefix(),
+			DefaultBranch:       rig.EffectiveDefaultBranch(),
+			Suspended:           suspended,
+			Running:             running,
+			DefaultSlingTarget:  rig.DefaultSlingTarget,
+			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
+			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
 
@@ -823,10 +839,6 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		return renderRigListJSON(result, stdout, stderr)
 	}
 	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, "")                                                               //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
 	return 0
 }
 
@@ -854,8 +866,8 @@ func renderRigListJSON(result RigListJSON, stdout, stderr io.Writer) int {
 
 // renderRigListText renders the human rig-list table from result. displayName is
 // the HQ header name (loadedCityName), which intentionally differs from the HQ
-// item's JSON Name (EffectiveCityName). Shared by both rig-list paths; the
-// API-render path appends its own cache-age banner after calling this.
+// item's JSON Name (EffectiveCityName). Shared by both rig-list paths, so
+// their human output is identical.
 func renderRigListText(displayName string, result RigListJSON, stdout io.Writer) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w("")
@@ -880,14 +892,16 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 		if rig.DefaultBranch != "" {
 			w(fmt.Sprintf("    Default branch: %s", rig.DefaultBranch))
 		}
+		if rig.Federation != "" {
+			line := "    Federation: " + rig.Federation
+			if rig.Namespace != "" {
+				line += " (namespace: " + rig.Namespace + ")"
+			}
+			w(line + " (not enforced by this build)")
+		}
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
 }
-
-// cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
-// output appends the "reconciler may be lagging" banner. Matches the
-// enabler contract D5 documented in the ga-h6w plan.
-const cacheAgeBannerThresholdSeconds = 30.0
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
@@ -913,7 +927,24 @@ type RigListItem struct {
 	Running             bool     `json:"running"`
 	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
 	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
-	Beads               string   `json:"beads"`
+	// Federation and Namespace mirror the rig's federation settings. Each is
+	// present only when it differs from its default ("city" and "shared"), so
+	// output for a rig that sets neither is unchanged.
+	Federation string `json:"federation,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+	Beads      string `json:"beads"`
+}
+
+// rigListFederation returns the rig's federation and namespace for rig-list
+// output, each blank when it is the default.
+func rigListFederation(r *config.Rig) (federation, namespace string) {
+	if r.FederationGuarded() {
+		federation = r.EffectiveFederation()
+	}
+	if r.NamespaceExclusive() {
+		namespace = r.EffectiveNamespace()
+	}
+	return federation, namespace
 }
 
 type RigListSummary struct {
@@ -956,14 +987,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		CityPath:      cityPath,
 		CityName:      cityName,
 	}
-	// Running-status detection (controllerAlive + the per-rig session provider)
+	// Running-status detection (rigListHQRunning + the per-rig session provider)
 	// is computed for --json ONLY: the session provider forks tmux probes and
 	// scales O(rigs), and the human table does not display running status
 	// (renderRigListText ignores the Running field). Guarding it here preserves
 	// the historical text-path fast path (~7x faster than --json for many rigs).
 	hqRunning := false
 	if jsonOutput {
-		hqRunning = controllerAlive(cityPath) != 0
+		hqRunning = rigListHQRunning(cityPath)
 	}
 	result.Rigs = append(result.Rigs, RigListItem{
 		Name:    cityName,
@@ -989,6 +1020,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		if jsonOutput {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
+		federation, namespace := rigListFederation(&cfg.Rigs[i])
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                cfg.Rigs[i].Name,
 			Path:                cfg.Rigs[i].Path,
@@ -998,6 +1030,8 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running:             running,
 			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
 			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Provision runs the full rig-add provisioning against the injected deps.
@@ -115,25 +116,27 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// Step 12: banner + warn lines.
 	emitRigBannerAndWarnings(deps, req, plan, includes, hasGit, rigPath, resolvedDefaultBranch, defaultBranchOverride, defaultBranchRemote, emit)
 
-	// Step 13: beads-store init. Record whether the rig already had a .beads/
-	// first, and snapshot the store it holds: init is the step that writes into
-	// the rig directory, and a failure partway through must neither leave a
-	// store it created behind nor leave a store that was already there (an
-	// --adopt'ed or re-added one) rewritten.
-	beadsStorePreexisting, err := rigBeadsStoreExists(fs, rigPath)
+	// Step 13: beads-store init. Record what the rig's .beads/ held first:
+	// init is the step that writes into the rig directory, and a failure
+	// partway through must leave that directory as the add found it — no store
+	// init created, no store that was already there (an --adopt'ed or
+	// re-added one) rewritten, nothing init added to a directory that held no
+	// store, and the directory's own mode unchanged.
+	beadsDirPreexisting, err := rigBeadsStoreExists(fs, rigPath)
 	if err != nil {
 		return config.Rig{}, result, err
 	}
-	var preexistingStore []FileSnapshot
-	if beadsStorePreexisting {
-		if preexistingStore, err = snapshotPreexistingStore(fs, rigPath); err != nil {
+	var found preexistingBeadsDir
+	if beadsDirPreexisting {
+		if found, err = snapshotPreexistingBeadsDir(fs, rigPath); err != nil {
 			return config.Rig{}, result, err
 		}
 	}
+	preexistingStore := found.store
 	deferred, err := initRigBeadsStore(deps, req, rigPath, plan.prefix, emit)
 	if err != nil {
-		if beadsStorePreexisting {
-			return config.Rig{}, result, restorePreexistingStore(fs, preexistingStore, err)
+		if beadsDirPreexisting {
+			return config.Rig{}, result, found.restoreAfterFailedInit(fs, err)
 		}
 		return config.Rig{}, result, removePartialBeadsStore(fs, rigPath, err)
 	}
@@ -236,7 +239,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 	if req.Adopt {
 		adopted = readAdoptedStorePrefix(deps, rigPath)
 	}
-	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig, adopted.prefix)
+	prefix, err := resolveRigPrefix(deps, req, name, reAdd, existingRig, adopted)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -264,11 +267,23 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 			return rigMutationPlan{}, err
 		}
+		if err := config.ValidateRigFederationLayout(deps.CityPath, nextCfg); err != nil {
+			return rigMutationPlan{}, err
+		}
 		// A reserved prefix on a split city is refused HERE, before anything is
 		// written: once it is in city.toml every CLI process refuses the city
-		// and every hook claim fails closed (split-default R10).
-		if err := config.ReservedPrefixSplitRefusalForEdit(deps.FS, filepath.Join(deps.CityPath, "city.toml"), nextCfg); err != nil {
-			return rigMutationPlan{}, err
+		// and every hook claim fails closed (split-default R10). An adopted
+		// store's own prefix can only change in that store, so its refusal
+		// names that remedy instead of a [[rigs]] prefix.
+		tomlPath := filepath.Join(deps.CityPath, "city.toml")
+		var refusal error
+		if !reAdd && adoptsStoreOwnPrefix(req, adopted.prefix, prefix) {
+			refusal = config.ReservedPrefixSplitRefusalForAdopt(deps.FS, tomlPath, nextCfg, name, adoptedStorePrefixRemedy(rigPath, adopted, "this city reserves that namespace"))
+		} else {
+			refusal = config.ReservedPrefixSplitRefusalForEdit(deps.FS, tomlPath, nextCfg)
+		}
+		if refusal != nil {
+			return rigMutationPlan{}, refusal
 		}
 	}
 
@@ -315,17 +330,18 @@ func detectRigReAdd(cfg *config.City, name, cityPath, rigPath string) (reAdd, ne
 // resolveRigPrefix derives the rig's bead prefix — the existing rig's on a
 // re-add, the lowercased --prefix override, the adopted store's own prefix on
 // --adopt, or one derived from the name — and,
-// for a fresh add, rejects a prefix that collides with HQ or another rig with
-// the byte-identical CLI text.
-func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adoptedPrefix string) (string, error) {
+// for a fresh add, rejects a prefix that collides with HQ or another rig
+// (rigPrefixCollision).
+func resolveRigPrefix(deps Deps, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adopted adoptedStorePrefix) (string, error) {
+	cfg := deps.Cfg
 	var prefix string
 	switch {
 	case reAdd:
 		prefix = existingRig.EffectivePrefix()
 	case req.Prefix != "":
 		prefix = strings.ToLower(req.Prefix)
-	case req.Adopt && adoptedPrefix != "":
-		prefix = adoptedPrefix
+	case req.Adopt && adopted.prefix != "":
+		prefix = adopted.prefix
 	default:
 		prefix = config.DeriveBeadsPrefix(name)
 	}
@@ -333,15 +349,93 @@ func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd
 	if !reAdd {
 		prefixKey := strings.ToLower(prefix)
 		if prefixKey == strings.ToLower(config.EffectiveHQPrefix(cfg)) {
-			return "", fmt.Errorf("rig %q: prefix %q collides with HQ. Use --prefix to specify a different prefix.", name, prefixKey) //nolint:revive,staticcheck // byte-identical rig-add collision text (trailing period)
+			return "", rigPrefixCollision(req, name, prefixKey, prefixHolder{name: "HQ", dir: deps.CityPath}, adopted)
 		}
 		for _, rg := range cfg.Rigs {
 			if prefixKey == strings.ToLower(rg.EffectivePrefix()) {
-				return "", fmt.Errorf("rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.", name, prefixKey, rg.Name) //nolint:revive,staticcheck // byte-identical rig-add collision text (trailing period)
+				return "", rigPrefixCollision(req, name, prefixKey, prefixHolder{name: rg.Name, dir: configuredRigDir(deps.CityPath, rg.Path), rig: true}, adopted)
 			}
 		}
 	}
 	return prefix, nil
+}
+
+// prefixHolder is the scope already holding the prefix an add collides with:
+// HQ, whose store is in the city directory, or the rig named name (rig set).
+// dir is the directory its store is in, "" when city.toml records no path for
+// the rig.
+type prefixHolder struct {
+	name string
+	dir  string
+	rig  bool
+}
+
+// keepsStoreIn reports whether h's store is the one in dir, however either
+// path spells it: a symlink to the city directory, or to a registered rig's,
+// names the same store.
+func (h prefixHolder) keepsStoreIn(dir string) bool {
+	return h.dir != "" && pathutil.SamePath(h.dir, dir)
+}
+
+// label names h in a sentence: HQ, or rig "<name>".
+func (h prefixHolder) label() string {
+	if h.rig {
+		return fmt.Sprintf("rig %q", h.name)
+	}
+	return h.name
+}
+
+// configuredRigDir is the directory a rig's city.toml path names, a relative
+// one taken from the city directory as detectRigReAdd does; "" when city.toml
+// records no path.
+func configuredRigDir(cityPath, path string) string {
+	switch {
+	case strings.TrimSpace(path) == "":
+		return ""
+	case filepath.IsAbs(path):
+		return path
+	default:
+		return filepath.Join(cityPath, path)
+	}
+}
+
+// rigPrefixCollision is the refusal for a fresh add whose prefix collides with
+// holder's. An --adopt whose prefix is its store's own cannot take another one,
+// since --prefix must match the store, so its remedy is the store's
+// (adoptedStorePrefixRemedy), unless that store is holder's own: it is in the
+// city already, and renaming its prefix would break holder. Any other add
+// keeps the byte-identical CLI text that asks for a different --prefix.
+func rigPrefixCollision(req ProvisionRequest, name, prefix string, holder prefixHolder, adopted adoptedStorePrefix) error {
+	switch {
+	case !adoptsStoreOwnPrefix(req, adopted.prefix, prefix):
+		return fmt.Errorf("rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.", name, prefix, holder.name) //nolint:revive,staticcheck // byte-identical rig-add collision text (trailing period)
+	case !holder.keepsStoreIn(req.Path):
+		return fmt.Errorf("rig %q: prefix %q collides with %s; %s", name, prefix, holder.name, adoptedStorePrefixRemedy(req.Path, adopted, holder.label()+" holds that prefix"))
+	case holder.rig:
+		return fmt.Errorf("rig %q: --adopt: the store at %s is already registered as rig %q", name, req.Path, holder.name)
+	default:
+		return fmt.Errorf("rig %q: --adopt: the store at %s is the city's own HQ store; it cannot also be registered as a rig", name, req.Path)
+	}
+}
+
+// adoptsStoreOwnPrefix reports whether an add registers an existing store under
+// the prefix that store records: an --adopt whose resolved prefix is the one
+// read from the store. Such a prefix can only change in the store itself.
+func adoptsStoreOwnPrefix(req ProvisionRequest, adoptedPrefix, prefix string) bool {
+	return req.Adopt && adoptedPrefix != "" && prefix == adoptedPrefix
+}
+
+// adoptedStorePrefixRemedy is the remedy a refusal of an adopted store's own
+// prefix names: gc pins an adopted rig to that prefix, so it has to change in
+// the store (renameStorePrefix). When bd cannot rename it there, the remedy
+// says so (cannotRename) and that the store cannot be adopted while blocker
+// (what stands in the prefix's way) holds. It then names no config.yaml edit:
+// that alone would adopt the store while its beads keep the old prefix.
+func adoptedStorePrefixRemedy(rigPath string, adopted adoptedStorePrefix, blocker string) string {
+	if adopted.mode.stuck != "" {
+		return fmt.Sprintf("an adopted rig keeps its store's own prefix, and %s, so that store cannot be adopted while %s", adopted.mode.cannotRename("the proxied-server store at "+rigPath), blocker)
+	}
+	return "an adopted rig keeps its store's own prefix, so rename that prefix in the store before adopting it: " + renameStorePrefix(rigPath, newPrefixPlaceholder, adopted.inConfigYAML, adopted.mode)
 }
 
 // buildNextRigConfig materializes the config to write. A re-add that needs a
@@ -809,8 +903,8 @@ func rigBeadsStoreExists(fs fsys.FS, rigPath string) (bool, error) {
 
 // removePartialBeadsStore deletes the .beads/ a failed store init created and
 // returns the init error for the caller to surface. It is only called for a
-// .beads/ that did not exist before this add (restorePreexistingStore covers a
-// store that did), and it never touches the rig directory itself — that is the
+// .beads/ that did not exist before this add (preexistingBeadsDir covers one
+// that did), and it never touches the rig directory itself — that is the
 // user's repo, not ours to delete.
 //
 // Without this, an init that wrote metadata.json before failing left a
@@ -825,30 +919,115 @@ func removePartialBeadsStore(fs fsys.FS, rigPath string, cause error) error {
 	return cause
 }
 
-// snapshotPreexistingStore snapshots the scope files of the store a rig's
-// .beads/ already holds — one with metadata.json or config.yaml, the markers
-// the fresh-add guard reads — before init touches them. It returns nil when
-// .beads/ is not a directory or holds no store: what init writes there is left
-// in place, as before, and a git_url teardown reads the database init minted
-// from that metadata.json.
-func snapshotPreexistingStore(fs fsys.FS, rigPath string) ([]FileSnapshot, error) {
+// preexistingBeadsDir is the .beads/ directory a rig already had when the add
+// reached store init.
+//
+// A directory that held a store — metadata.json or config.yaml, the markers
+// the fresh-add guard reads — records store: its scope files, then its mode.
+// Every rollback restores them, so the store ends up with the bytes and mode
+// the add found.
+//
+// A directory that held no store (.beads/formulas only, say) records entries,
+// the names at its top level, and mode instead. A failed init removes every
+// entry it added — the markers that would make the retry refuse the directory
+// as an existing store, and any other debris — leaves every entry that was
+// there, and puts the mode back. An init that succeeded leaves a store there,
+// which the guarded write window's rollback keeps, as for a fresh add.
+//
+// Removing the markers after a failed init also removes the metadata.json a
+// git_url teardown would read a database name from. That matches a clone with
+// no .beads/, whose failed init loses the whole directory. Keeping the file
+// would not be safe: the caller can write it before the init op runs, so after
+// a failed init it may name a database this add never created.
+//
+// The zero value (.beads is not a directory) restores nothing.
+type preexistingBeadsDir struct {
+	store   []FileSnapshot
+	path    string
+	entries map[string]bool
+	mode    []FileSnapshot
+}
+
+// snapshotPreexistingBeadsDir records the rig's .beads/ before init touches it.
+func snapshotPreexistingBeadsDir(fs fsys.FS, rigPath string) (preexistingBeadsDir, error) {
 	beadsPath := filepath.Join(rigPath, ".beads")
 	fi, err := fs.Stat(beadsPath)
 	if err != nil {
-		return nil, fmt.Errorf("checking %s: %w", beadsPath, err)
+		return preexistingBeadsDir{}, fmt.Errorf("checking %s: %w", beadsPath, err)
 	}
 	if !fi.IsDir() {
-		return nil, nil
+		return preexistingBeadsDir{}, nil
 	}
+	mode := dirModeSnapshot(beadsPath, fi)
 	holdsStore, err := beadsDirContainsStore(fs, beadsPath)
-	if err != nil || !holdsStore {
-		return nil, err
-	}
-	snapshots, err := snapshotScopeFiles(fs, rigPath)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot canonical files: %w", err)
+		return preexistingBeadsDir{}, err
 	}
-	return snapshots, nil
+	if holdsStore {
+		files, err := snapshotScopeFiles(fs, rigPath)
+		if err != nil {
+			return preexistingBeadsDir{}, fmt.Errorf("snapshot canonical files: %w", err)
+		}
+		// The mode goes last: RestoreSnapshots restores in order, and the
+		// files are written back before a narrower mode is.
+		return preexistingBeadsDir{store: append(files, mode)}, nil
+	}
+	entries, err := fs.ReadDir(beadsPath)
+	if err != nil {
+		return preexistingBeadsDir{}, fmt.Errorf("reading %s: %w", beadsPath, err)
+	}
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		names[entry.Name()] = true
+	}
+	return preexistingBeadsDir{path: beadsPath, entries: names, mode: []FileSnapshot{mode}}, nil
+}
+
+// restoreAfterFailedInit puts the directory back after store init failed and
+// returns cause for the caller to surface, with "(rollback failed: ...)" when
+// the directory could not be put back. It never removes an entry the
+// directory had before the add.
+func (d preexistingBeadsDir) restoreAfterFailedInit(fs fsys.FS, cause error) error {
+	if d.entries == nil {
+		return restorePreexistingStore(fs, d.store, cause)
+	}
+	var failures []string
+	if err := removeAddedEntries(fs, d.path, d.entries); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if err := RestoreSnapshots(fs, d.mode); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%w (rollback failed: %s)", cause, strings.Join(failures, "; "))
+	}
+	return cause
+}
+
+// removeAddedEntries removes every top-level entry of dir whose name is not in
+// keep. A dir that is gone has nothing left to remove.
+func removeAddedEntries(fs fsys.FS, dir string, keep map[string]bool) error {
+	entries, err := fs.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s: %w", dir, err)
+	}
+	var failures []string
+	for _, entry := range entries {
+		if keep[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if err := fsys.RemoveAll(fs, path); err != nil {
+			failures = append(failures, fmt.Sprintf("removing %s: %v", path, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // restorePreexistingStore puts back the scope files store init rewrote in a

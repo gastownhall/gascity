@@ -94,16 +94,18 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	}
 	// Every city's leaf gets the shadow sink; the leaf hands it out only
 	// while its live switch is shadow (a reload publishes the switch to a
-	// leaf it keeps), so off and on record nothing.
+	// leaf it keeps), so off and on record nothing. A short-lived process
+	// records only the sessions it decides for (programShadowDecideFor).
 	var comparisons runtime.ProgramStatusComparisonSink
-	var followUps func() bool
+	var enabled, followUps func() bool
 	var work func() func()
 	if cityPath != "" {
-		comparisons = programStatusShadowSink(cityPath)
-		followUps, work = programShadowFollowUps, programShadowBeginWork
+		comparisons = programShadowScoped(programStatusShadowSink(cityPath))
+		enabled, followUps, work = programShadowRecording, programShadowFollowUps, programShadowBeginWork
 	}
 	return sessiontmux.Config{
 		ComparisonSink:      comparisons,
+		ComparisonEnabled:   enabled,
 		ComparisonFollowUps: followUps,
 		ComparisonWork:      work,
 		SetupTimeout:        sc.SetupTimeoutDuration(),
@@ -918,10 +920,13 @@ func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.St
 	case "fail":
 		return mail.NewFailFake()
 	default:
+		// The callers resolved each store for its class; the handles carry that
+		// class to beadmail.
+		msg, sess := beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore}
 		if cached {
-			return beadmail.NewCachedWithStores(msgStore, sessStore)
+			return beadmail.NewCachedWithStores(msg, sess)
 		}
-		return beadmail.NewWithStores(msgStore, sessStore)
+		return beadmail.NewWithStores(msg, sess)
 	}
 }
 

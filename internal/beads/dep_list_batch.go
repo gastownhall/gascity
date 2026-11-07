@@ -50,7 +50,12 @@ var ErrDepListBatchUnsupported = errors.New("batched dep-edge read unsupported b
 // that forwards the capability but is backed by a store without it reports
 // "unsupported" through one path rather than by returning an empty answer that
 // reads as a graph with no edges.
+//
+// It sees through class handles: a handle answers with its store's batch. It
+// walks the class layers itself rather than through As, because As answers
+// this capability by calling here; skipping a class guard is safe because the
+// batch is a class-neutral read (passesClassGate).
 func DepListBatchFor(store Store) (DependencyBatchLister, bool) {
-	batch, ok := store.(DependencyBatchLister)
+	batch, ok := physicalStore(store).(DependencyBatchLister)
 	return batch, ok
 }

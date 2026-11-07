@@ -44,8 +44,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	index := s.latestIndex()
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -80,10 +80,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
+			freshness := cacheAgeSeconds(work)
 			return &ListOutput[beads.Bead]{
-				Index:     hit.Index,
-				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -261,7 +263,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
@@ -282,9 +284,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
-		Body:      body,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         body,
 	}, nil
 }
 
@@ -470,7 +473,7 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 // the store implements no Counter or cannot count this query shape exactly
 // (ErrCountUnsupported).
 func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := store.(beads.Counter)
+	counter, ok := beads.As[beads.Counter](store)
 	if !ok {
 		return 0, false
 	}
@@ -733,8 +736,8 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	index := s.latestIndex()
 	id := input.ID
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -742,10 +745,12 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
+	freshness := cacheAgeSeconds(work)
 	return &IndexOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      b,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         b,
 	}, nil
 }
 
@@ -805,6 +810,16 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			// review).
 			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
 				return beads.Bead{}, err
+			}
+			// Record who made a write-auth-verified request. Cloned so the
+			// request body, which the idempotency digest covers, is never
+			// mutated.
+			if kid, ok := VerifiedPrincipal(ctx); ok {
+				candidate.Metadata = maps.Clone(candidate.Metadata)
+				if candidate.Metadata == nil {
+					candidate.Metadata = make(map[string]string, 1)
+				}
+				candidate.Metadata[beadmeta.InitiatorMetadataKey] = kid
 			}
 			// The store follows from the bead, not from the request: an
 			// infrastructure-class body belongs in this city's class binding
@@ -1035,7 +1050,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// CachingStore, read bd only after the wait.
 	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
-		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+		if waiter, ok := beads.As[beads.ParentProjectionWaiter](store); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
 				return nil, err
 			}
@@ -1156,8 +1171,11 @@ func ownerOf(b beads.Bead) (kind, owner string) {
 func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
 	var invalid []*huma.ErrorDetail
 	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
-		if !beadmeta.ValidKey(k) {
+		switch {
+		case !beadmeta.ValidKey(k):
 			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		case k == beadmeta.InitiatorMetadataKey:
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "server-owned metadata key: the server records who made the request", Value: w.meta[k]})
 		}
 	}
 	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -63,7 +64,7 @@ func TestStrictClassLeafDoesNotPoliceRelicIDs(t *testing.T) {
 func TestStrictWorkLeafRecordsAByIDWriteToAClassNamespaceID(t *testing.T) {
 	work := NewWorkStore(t, "gc")
 	// convoy.SetConvoyFields is a production by-id metadata write.
-	_ = convoy.SetConvoyFields(work, "gcs-3", convoy.ConvoyFields{Owner: "x"})
+	_ = convoy.SetConvoyFields(beadstest.Work(work), "gcs-3", convoy.ConvoyFields{Owner: "x"})
 	got := TakeSplitViolations(work)
 	if len(got) != 1 || got[0].Op != "set-metadata" || got[0].Class != "sessions" || got[0].Site.File != "internal/convoy/convoy_fields.go" {
 		t.Fatalf("violations = %+v, want one set-metadata of a sessions id charged to convoy_fields.go", got)
@@ -124,7 +125,7 @@ func TestStrictLeavesRecordAProductionWrongClassCreate(t *testing.T) {
 	work, graph := NewSplitStores(t)
 	// beadmail is production code: a message sent into the graph leaf lands a
 	// messaging-class row in a store that holds only graph rows.
-	if _, err := beadmail.New(graph).Send("a", "b", "s", "body"); err != nil {
+	if _, err := newTestBeadMail(graph).Send("a", "b", "s", "body"); err != nil {
 		t.Fatal(err)
 	}
 	got := TakeSplitViolations(graph)
@@ -142,7 +143,7 @@ func TestStrictLeavesRecordAProductionWrongClassCreate(t *testing.T) {
 
 func TestNewSingleStoreHoldsEveryClass(t *testing.T) {
 	single := NewSingleStore(t, "hq")
-	if _, err := beadmail.New(single).Send("a", "b", "s", "body"); err != nil {
+	if _, err := newTestBeadMail(single).Send("a", "b", "s", "body"); err != nil {
 		t.Fatal(err)
 	}
 	if got := TakeSplitViolations(single); len(got) != 0 {
@@ -152,7 +153,7 @@ func TestNewSingleStoreHoldsEveryClass(t *testing.T) {
 
 func TestNewBindingStoreHoldsEveryInfrastructureClass(t *testing.T) {
 	binding := NewBindingStore(t)
-	if _, err := beadmail.New(binding).Send("a", "b", "s", "body"); err != nil {
+	if _, err := newTestBeadMail(binding).Send("a", "b", "s", "body"); err != nil {
 		t.Fatal(err)
 	}
 	if got := TakeSplitViolations(binding); len(got) != 0 {
@@ -161,4 +162,11 @@ func TestNewBindingStoreHoldsEveryInfrastructureClass(t *testing.T) {
 	if got := leafClasses(SQLiteSemantics, binding.(*StrictStore).namespaces); len(got) != 5 || got[coordclass.ClassWork] {
 		t.Fatalf("binding classes = %v, want the five infrastructure classes", got)
 	}
+}
+
+// newTestBeadMail is the stateless beadmail provider over one store serving
+// both the messaging and the sessions class, as a single-store city's store
+// does.
+func newTestBeadMail(store beads.Store) *beadmail.Provider {
+	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }

@@ -264,7 +264,7 @@ Table-form fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `description` | string | What the variable is for; shown by `gc formula show` |
-| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, the routing variables `gc sling` injects, and `{{convoy_id}}`) or other defaults. Supplied values are used verbatim and never re-expanded |
+| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, the routing variables `gc sling` and formula orders inject, and `{{convoy_id}}`) or other defaults. Supplied values are used verbatim and never re-expanded |
 | `required` | bool | The variable must be provided at instantiation. Declaring `required = true` together with a `default` fails validation: `vars.<name>: cannot have both required:true and default` |
 | `enum` | []string | Allowed values; enforced at instantiation |
 | `pattern` | string | Regex the value must match; enforced at instantiation |
@@ -617,10 +617,15 @@ alias does not change the separate reservation of `gc.*` *metadata keys*.
 
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the
-gated step to it: the step stays blocked until the gate bead is closed.
-`waits_for` records a `gate:<value>` label on the cooked step bead and
-compiles a `waits-for` dependency edge on the spawner step, treated as
-readiness-blocking. The gate `type` vocabulary and the `waits_for` mode
+gated step to it: the step stays blocked until the gate bead is closed. The
+declared `type` is stamped verbatim on the gate bead as `gc.gate_type`
+metadata. The core pack's human-gate orders mail the addressee of a `human`
+gate when it is created and re-nudge it while it stays open; close it with
+`gc bd close <id>`. The gate bead is created with the rest of the recipe at
+instantiation, so the addressee can be asked before the gated step's `needs`
+finish. `waits_for` records a `gate:<value>` label on the cooked
+step bead and compiles a `waits-for` dependency edge on the spawner step,
+treated as readiness-blocking. Other gate types and the `waits_for` mode
 distinction have no runtime consumer (section 4).
 
 **Preview.** `gc formula show <name>` renders the compiled recipe. For the
@@ -824,9 +829,13 @@ runs it, so there is no exit status to read. The step stays open rather than
 failing: the fix is out of band (ship the script, `chmod +x` it), and closing
 the step would release the steps that need it. The orchestrator re-checks the
 step every sweep; once the script can run, the step resumes and spends attempts
-normally. If the script is still unlaunchable when the stall budget elapses (15
-minutes by default), the orchestrator emits a single `control.stalled` event
-with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+normally. On the first sweep that cannot launch the script, the orchestrator
+emits a `control.check_unlaunchable` event naming the step's bead, its
+`check.path`, and the reason. It emits the event again only when the reason
+changes, such as a missing script that ships without its execute bit. If the
+script is still unlaunchable when the stall budget elapses (15 minutes by
+default), the orchestrator emits a single `control.stalled` event with
+`error_class = "pending"` and keeps waiting. It records no `order.failed`.
 A script that is missing because the step's working directory was removed, and
 that exists nowhere else, is held open the same way. Restoring the directory
 heals it; shipping a copy under the city or store root does not. The script
@@ -1140,10 +1149,12 @@ them; they are documented to prevent silent surprise.
   Use `check` (section 3.1) for orchestrator-driven re-execution.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
-  external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
-  `human`, and `mail` are doc-comment vocabulary in
-  `internal/formula/types.go` — the parser never validates them and no
-  bundled watcher acts on them. Zero bundled formulas use `gate`.
+  external watcher), and records the declared `type` as `gc.gate_type`
+  metadata. The values `gh:run`, `gh:pr`, `timer`, `human`, and `mail` are
+  doc-comment vocabulary in `internal/formula/types.go` — the parser never
+  validates them. Only `human` has a bundled consumer: the core pack's
+  human-gate orders announce and re-nudge it. No bundled watcher resolves any
+  gate type. Zero bundled formulas use `gate`.
 - **`waits_for` gate modes.** `waits_for` compiles to a readiness-blocking
   `waits-for` dependency edge plus a recorded gate mode, but no current
   dispatcher logic interprets the `all-children` / `any-children`

@@ -56,6 +56,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -117,6 +118,11 @@ type storageRoutes struct {
 	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
 	// every rig's relic leg.
 	rigMarkers *rigGraphMarkers
+	// mint memoizes the class bindings the router mints over, for the class
+	// stores the routes held when it was derived (city_stores.go). A rewrite
+	// in place (withControllerCache, withCLIEmission) is noticed on the next
+	// read, so nothing here has to invalidate it.
+	mint atomic.Pointer[routesBindings]
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -294,6 +300,13 @@ func storageSplitShapeOf(storage config.StorageConfig) (storageSplitShape, strin
 // A non-nil error is a refusal, already carrying the operator instruction; the
 // caller prints it and stops.
 func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
+	// A gc older than the split's recorded floor reads none of it, whatever
+	// the config says (storage_min_gc_version.go). One failed stat on a city
+	// that has none.
+	if err := minGCVersionRefusal(cityPath, version); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+
 	// The bypass, first — and now with the one question a city that HAS served
 	// a split can answer differently from a city that never did.
 	//

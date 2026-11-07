@@ -1,14 +1,18 @@
 package beads
 
-import "reflect"
+import (
+	"fmt"
+	"reflect"
+)
 
 // This file is the capability side of the typed class handles (typed-stores
 // design §3.3, phase T1): one way to reach an optional capability through a
 // handle, one way to ask whether two handles are one physical store, and the
 // seam a class guard (T8) uses to vet every capability that is not
-// class-neutral. It changes no existing lookup: the XFor helpers answer
-// through a handle exactly as they did (TestXForThroughAHandleToday pins
-// that), and As is new.
+// class-neutral. The XFor helpers answer through a handle as they did
+// (TestXForThroughAHandleToday pins that), except the two class-neutral reads
+// As itself calls, DepListBatchFor and ReadyBlockedByAbsentFor, which walk
+// the class layers since T6a.
 //
 // Outside internal/beads the storeclass lint (tools/nogo/analyzers/storeclass)
 // reports a type assertion on a store and an unwrap of a handle; As and the
@@ -172,10 +176,11 @@ func resolveCapability[T any](s Store) (T, bool) {
 // method set. A capability added later is vetted until it is listed.
 func passesClassGate[T any]() bool {
 	switch any((*T)(nil)).(type) {
-	case *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader,
+	case *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader, *DepMetadataBatchReader,
 		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
 		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
 		*RowWitness, *ParentProjectionWaiter, *AbsentBlockedReader,
+		*CacheStatsReporter, *CacheLivenessReporter, *CachedLister,
 		*ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
 		return true
 	}
@@ -202,6 +207,49 @@ func SameStore(a, b Store) (same bool) {
 		}
 	}()
 	return a == b
+}
+
+// LiveFor is HandlesFor(raw).Live for the store raw below s's class layers: a
+// store with its own Handles (a CachingStore, a policy store) answers with its
+// live reader, which a class handle would otherwise hide behind the logical
+// wrapper, and any other store is read through the logical wrapper over raw
+// itself, so the wrapper's optional reads (GetExactBatch) find raw's
+// capabilities rather than the handle's. s must be a store: a zero handle
+// answers a reader whose reads panic, as HandlesFor(nil) does.
+func LiveFor(s Store) LiveReader {
+	return HandlesFor(physicalStore(s)).Live
+}
+
+// PhysicalStoreKey is a string identity for the store below s's class layers,
+// for a map keyed by store: "%T:%x" of its address for a reference kind,
+// "%T:%v" of its value for any other, and "<nil>" for no store. Like SameStore
+// it sees through every class handle, so two handles over one store, of any
+// classes, share the store's own key.
+func PhysicalStoreKey(s Store) string {
+	p := physicalStore(s)
+	if p == nil {
+		return "<nil>"
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return fmt.Sprintf("%T:%x", p, v.Pointer())
+	default:
+		return fmt.Sprintf("%T:%v", p, p)
+	}
+}
+
+// IsNilStore reports whether s is no store: nil, a zero handle (or a handle
+// over one), or a nil pointer below its class layers. A typed nil passes a
+// nil check on the interface and then panics on its first method call, so a
+// constructor that refuses an absent store asks this rather than == nil.
+func IsNilStore(s Store) bool {
+	p := physicalStore(s)
+	if p == nil {
+		return true
+	}
+	v := reflect.ValueOf(p)
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // physicalStore is s below its class layers, or nil.

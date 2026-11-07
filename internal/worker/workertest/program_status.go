@@ -9,11 +9,13 @@ import (
 
 // ProgramStatusDeclaration is a program-status declaration as gc arms it:
 // whether capture is declared, the program name the capture reader accepts
-// reports from, and whether the program runs under the probe-answering relay.
+// reports from, whether the program runs under the probe-answering relay,
+// and whether input typed mid-turn aborts its turn (the mid-turn hold).
 type ProgramStatusDeclaration struct {
-	Declared bool
-	App      string
-	Relay    bool
+	Declared    bool
+	App         string
+	Relay       bool
+	HoldMidTurn bool
 }
 
 // ProgramStatusExpectation is a profile's OSC 7501 program-status
@@ -130,8 +132,9 @@ func ProgramStatusPendingSlice(code RequirementCode) (string, bool) {
 // ProgramStatusGate classifies profile for WC-PSTAT row code before the
 // row's behavior runs. implementation is the declaration gc's provider data
 // arms for the profile's family. A declaration that drifts from the
-// profile's expectation (declared, app or relay) fails; an undeclared
-// profile is out of scope (Unsupported); a row whose behavior has not landed
+// profile's expectation (declared, app, relay or hold) fails; an undeclared
+// profile is out of scope (Unsupported), as is a profile not declaring the
+// mid-turn hold for the hold's row; a row whose behavior has not landed
 // is pending (Unsupported, naming its slice). run is true only when the row
 // must be checked.
 func ProgramStatusGate(profile Profile, code RequirementCode, implementation ProgramStatusDeclaration) (result Result, run bool) {
@@ -144,6 +147,7 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	if implementation.Declared {
 		evidence["implementation_app"] = implementation.App
 		evidence["implementation_relay"] = strconv.FormatBool(implementation.Relay)
+		evidence["implementation_hold_mid_turn"] = strconv.FormatBool(implementation.HoldMidTurn)
 	}
 	switch slice, pending := ProgramStatusPendingSlice(code); {
 	case implementation != expected:
@@ -153,6 +157,9 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	case !expected.Declared:
 		return Unsupported(profile.ID, code,
 			fmt.Sprintf("provider %q does not declare program status (out of scope)", profile.Provider)).WithEvidence(evidence), false
+	case code == RequirementProgramStatusHoldMidTurn && !expected.HoldMidTurn:
+		return Unsupported(profile.ID, code,
+			fmt.Sprintf("provider %q does not declare the mid-turn hold (out of scope)", profile.Provider)).WithEvidence(evidence), false
 	case pending:
 		evidence["pending_slice"] = slice
 		return Unsupported(profile.ID, code,

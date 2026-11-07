@@ -185,8 +185,9 @@ func TestGcBdRefusesAClassFlipOnASplitCity(t *testing.T) {
 
 // TestGcBdImportSkipInfraImportsOnlyTheWorkRows pins the recovery runbook on a
 // split city end to end: --skip-infra hands bd a work-only copy of the archive
-// (never the original path) and reports what it left out; the flag itself
-// never reaches bd, on either kind of city.
+// (never the original path; the copy keeps the archive's name, which bd
+// records in its history) and reports what it left out; the flag itself never
+// reaches bd, on either kind of city.
 func TestGcBdImportSkipInfraImportsOnlyTheWorkRows(t *testing.T) {
 	archive := `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n" +
 		`{"id":"demo-2","title":"step","issue_type":"task","metadata":{"gc.root_bead_id":"demo-0"}}` + "\n" +
@@ -202,7 +203,7 @@ func TestGcBdImportSkipInfraImportsOnlyTheWorkRows(t *testing.T) {
 		t.Fatalf("exit %d; stderr=%q", res.code, res.stderr)
 	}
 	w := bdParityWrites(res.bd)
-	if len(w) != 1 || strings.Contains(w[0], "archive.jsonl") || strings.Contains(w[0], "--skip-infra") || !strings.Contains(w[0], "gc-bd-import-work-") {
+	if len(w) != 1 || slices.Contains(strings.Fields(w[0]), "archive.jsonl") || strings.Contains(w[0], "--skip-infra") || !strings.Contains(w[0], "/gc-bd-judged-") || !strings.HasSuffix(w[0], "/archive.jsonl") {
 		t.Fatalf("bd ran %v, want one import of the work-only copy", w)
 	}
 	for _, want := range []string{"importing 1 row(s)", "left out 2 row(s)", "1 graph", "1 sessions"} {

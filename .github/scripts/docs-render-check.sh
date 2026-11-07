@@ -132,7 +132,7 @@ while IFS= read -r link; do
 done <"$NEW_LINKS"
 echo ""
 echo "──────────────────────────────────────────────────────────────────────────"
-echo "docs/ is authored for the Mintlify site (https://docs.gascityhall.com),"
+echo "docs/ is authored for the Mintlify site (https://docs.gascity.com),"
 echo "not for direct GitHub viewing. These paths/links are intentional —"
 echo "please don't reformat them for GitHub. If something is genuinely broken"
 echo "on the live site, note it in the PR and we'll fix it Mintlify-side."
