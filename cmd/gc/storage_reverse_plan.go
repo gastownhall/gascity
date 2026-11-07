@@ -258,11 +258,8 @@ func planReverse(in reverseInput) reversePlan {
 				continue
 			}
 			if closedGate[to] {
-				if moving {
-					// The gate's record on its owner restores the edge it
-					// stood for (below).
-					continue
-				}
+				// The gate is not carried; its record on its owner restores
+				// the edge it stood for (below).
 				continue
 			}
 			payload := in.Payloads[beads.DepPair{IssueID: id, DependsOnID: to}]

@@ -383,7 +383,7 @@ func workStoreFingerprint(t *testing.T, store beads.Store) string {
 // unstamped row survive, R4's changes are put back, and boot serves the split
 // again.
 func TestAbortReverseRemovesExactlyTheStampedRows(t *testing.T) {
-	for _, point := range []string{"reverse city copying rows 100/", "reverse phase " + reversePhaseName(reverseR2), "reverse R4 config"} {
+	for _, point := range []string{"reverse city copying rows 100/", "reverse phase " + reversePhaseName(reverseR2), "reverse R4 config", "reverse phase " + reversePhaseName(reverseR4)} {
 		t.Run(point, func(t *testing.T) {
 			city := newReverseEngineCity(t, 300, "")
 			closeBindingGates(t, city)
