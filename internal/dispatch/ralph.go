@@ -1439,6 +1439,12 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ControlPendingCountMetadataKey,
 		beadmeta.ControlPendingFirstSeenMetadataKey,
 		beadmeta.ControlPendingStalledMetadataKey,
+		// The storage-class migration stamps the rows it copies into a
+		// binding, and a clone of one is a new row there that the migration
+		// did not write. A stamped clone would read as a copy to every reader
+		// of the stamp: a binding restore would look for it in the store the
+		// row came from, which never held it, and refuse.
+		beadmeta.InfraMigratedFromMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

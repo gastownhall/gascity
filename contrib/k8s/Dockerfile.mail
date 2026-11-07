@@ -24,10 +24,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # installed binary package of its source, so naming it alone is the whole fix.
 # These three landed in trixie/main as a point release rather than in
 # trixie-security, so they resolve off the base image's own apt source.
+#
+# apt and libapt-pkg7.0 carry CVE-2026-109518, fixed in 3.0.4; they are the two
+# binary packages of one source, so both are named.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
     bsdutils \
     gzip \
+    libapt-pkg7.0 \
     libblkid1 \
     libcap2 \
     liblastlog2-2 \

@@ -64,9 +64,9 @@ func caseNamed(t *testing.T, code string) programStatusCase {
 }
 
 // Kills a case list that drops, reorders or renumbers a PS row.
-func TestProgramStatusCasesArePS001ThroughPS015(t *testing.T) {
-	if len(programStatusCases) != 15 {
-		t.Fatalf("%d cases, want 15", len(programStatusCases))
+func TestProgramStatusCasesArePS001ThroughPS016(t *testing.T) {
+	if len(programStatusCases) != 16 {
+		t.Fatalf("%d cases, want 16", len(programStatusCases))
 	}
 	for i, c := range programStatusCases {
 		want := fmt.Sprintf("PS-%03d_", i+1)
@@ -306,6 +306,61 @@ func TestProgramStatusContractCatchesBadHoldReads(t *testing.T) {
 	var s skipError
 	if err := ps015.run(t, noHold); !errors.As(err, &s) {
 		t.Fatalf("PS-015 without a held fixture = %v, want a skip", err)
+	}
+}
+
+// nudgedLeaf is a Nudged fixture over the fake fixtures' armed session whose
+// start runs leaf: given the program's record after script, it says whether
+// the start types the nudge (it runs as the program's next step) and whether
+// it hands the nudge back.
+func nudgedLeaf(leaf func(r runtime.ProgramStatus) (types, handsBack bool)) ProgramStatusFixtures {
+	f := FakeProgramStatusFixtures()
+	armed := f.Armed
+	f.Nudged = func(t *testing.T, m runtime.ProgramStatusMode, nudge string, script ...string) ProgramStatusSession {
+		s := armed(t, m, script...)
+		r, err := read(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		types, handsBack := leaf(r)
+		if types {
+			s.Emit(t, nudge)
+		}
+		if handsBack {
+			s.Provider.(runtime.FullFake).SetStartupNudgeHandback(s.Name, nudge)
+		}
+		return s
+	}
+	return f
+}
+
+// Kills a PS-016 that passes a start typing its nudge into a program-reported
+// dialog, dropping it, handing back one it typed, or handing one back from a
+// start that delivered it.
+func TestProgramStatusContractCatchesBadStartupHandbacks(t *testing.T) {
+	ps016 := caseNamed(t, "PS-016")
+	good := func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), r.Blocked() }
+	if err := ps016.run(t, nudgedLeaf(good)); err != nil {
+		t.Fatalf("a leaf that holds the nudge behind the dialog breaks PS-016: %v", err)
+	}
+	for name, leaf := range map[string]func(runtime.ProgramStatus) (bool, bool){
+		"types into the dialog":          func(runtime.ProgramStatus) (bool, bool) { return true, false },
+		"drops the held-back nudge":      func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), false },
+		"types and hands back":           func(r runtime.ProgramStatus) (bool, bool) { return true, r.Blocked() },
+		"hands back a delivered nudge":   func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), true },
+		"never types, always hands back": func(runtime.ProgramStatus) (bool, bool) { return false, true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ps016.run(t, nudgedLeaf(leaf))
+			var s skipError
+			if err == nil || errors.As(err, &s) {
+				t.Fatalf("PS-016 passed a leaf that %s (err %v)", name, err)
+			}
+		})
+	}
+	var s skipError
+	if err := ps016.run(t, FakeProgramStatusFixtures()); !errors.As(err, &s) {
+		t.Fatalf("PS-016 without a nudged fixture = %v, want a skip", err)
 	}
 }
 

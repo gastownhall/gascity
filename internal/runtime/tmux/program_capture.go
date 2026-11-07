@@ -371,6 +371,21 @@ func (p *capturePlan) wrapRelay(command string) string {
 	return shellquote.Join([]string{p.capability.companion, "relay", "--", p.shell, "-c", command})
 }
 
+// execPaneRoot prefixes command, the pane's relay command line with or
+// without its env -u withholding, with exec when the plan runs the relay.
+// tmux runs a pane's command as its default-shell -c, and a shell that does
+// not exec the last command of -c (dash, /bin/sh on Debian and Ubuntu) stays
+// the pane's root with the relay its child. The relay is meant to be the
+// root: it holds the pane's terminal, it is read as the pane's command
+// (wrapperCommands), and stop and reap reach the program through it. The
+// command is one simple command, so exec is safe. Nil-safe.
+func (p *capturePlan) execPaneRoot(command string) string {
+	if p == nil || !p.relay || command == "" {
+		return command
+	}
+	return "exec " + command
+}
+
 // tapCommand is the pipe-pane command: the tap reading the pane's output.
 // tmux expands its formats (#{socket_path}, #{pane_id}) and its strftime
 // conversions when it runs it, so every literal '#' and '%' is doubled. The
