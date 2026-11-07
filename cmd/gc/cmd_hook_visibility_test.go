@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // --- hookRouteIdentitiesEqual ----------------------------------------------
@@ -540,5 +544,220 @@ func TestFilterForeignHookCandidatesLegacyWorkflowControlAliasMatched(t *testing
 	}
 	if len(keptNarrow) != 0 {
 		t.Errorf("unexpanded identity matched the legacy alias: kept %v", keptNarrow)
+	}
+}
+
+// Root parking suppresses worker claims; it must not suppress the independent
+// finalizer after the live child completes. Exercise the hook and dispatcher
+// against one ledger, retaining the compiler's informational finalizer edge.
+func TestExpandedWorkflowParkedRootFinalizesAfterChildCloses(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name       string
+		labels     []string
+		deferUntil *time.Time
+		indefinite bool
+	}{
+		{name: "future deferral", deferUntil: &future},
+		{name: "indefinite deferral", indefinite: true},
+		{name: "expired deferral", deferUntil: &past},
+		{name: "manual external hold", labels: []string{"hold:external"}},
+		{name: "manual operator hold", labels: []string{"hold:mayor"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			root := f.create(beads.Bead{
+				Title: "expanded workflow", Type: "molecule", Labels: tc.labels, DeferUntil: tc.deferUntil, IndefinitelyDeferred: tc.indefinite,
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker"},
+			})
+			child := f.create(beads.Bead{
+				Title: "live child", Type: "task", Assignee: "live-owner",
+				Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"},
+			})
+			liveStatus := "in_progress"
+			if err := f.store.Update(child.ID, beads.UpdateOpts{Status: &liveStatus}); err != nil {
+				t.Fatal(err)
+			}
+			finalizer := f.create(beads.Bead{
+				Title: "finalize", Type: "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": root.ID},
+			})
+			for _, dep := range []beads.Dep{
+				{IssueID: finalizer.ID, DependsOnID: child.ID, Type: "blocks"},
+				{IssueID: root.ID, DependsOnID: finalizer.ID, Type: "tracks"},
+			} {
+				if err := f.store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.served = []string{root.ID, child.ID}
+			if id, _ := f.run(); id != "" {
+				t.Fatalf("hook served %s while child is live", id)
+			}
+			if _, err := dispatch.ProcessControl(f.store, finalizer, dispatch.ProcessOptions{}); !errors.Is(err, dispatch.ErrControlPending) {
+				t.Fatalf("finalizer before child close: %v, want pending", err)
+			}
+			if b := f.get(child.ID); b.Status != "in_progress" || b.Assignee != "live-owner" {
+				t.Fatalf("pending finalizer changed live child: %+v", b)
+			}
+			f.closeAs(child.ID, "pass", nil)
+			if id, _ := f.run(); id != "" {
+				t.Fatalf("hook served %s after child close", id)
+			}
+			if routes := controllerDemandRouteCandidates(f.get(root.ID)); len(routes) != 0 {
+				t.Fatalf("root demand = %v", routes)
+			}
+			result, err := dispatch.ProcessControl(f.store, finalizer, dispatch.ProcessOptions{})
+			if err != nil || !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("finalizer = %+v, %v", result, err)
+			}
+			for _, id := range []string{root.ID, child.ID, finalizer.ID} {
+				b := f.get(id)
+				if b.Status != "closed" || b.Metadata["gc.outcome"] != "pass" {
+					t.Fatalf("%s = %s/%s", id, b.Status, b.Metadata["gc.outcome"])
+				}
+			}
+			if len(f.claims) != 0 {
+				t.Fatalf("non-worker topology reached claim mutation: %v", f.claims)
+			}
+		})
+	}
+}
+
+// Both hooks receive the same stale query snapshot: an expanded routed root,
+// a live owned child and one ready sibling. The real SQLite claim CAS must
+// yield one owned receipt and leave the root and live owner untouched.
+func TestConcurrentWorkflowHookClaimsHaveOneStepOwner(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opened.(*beads.SQLiteStore)
+	t.Cleanup(func() {
+		if err := store.CloseStore(); err != nil {
+			t.Error(err)
+		}
+	})
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		got, err := store.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	root := create(beads.Bead{Title: "expanded root", Type: "molecule", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker",
+	}})
+	live := create(beads.Bead{Title: "live child", Type: "task", Assignee: "live-owner", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"}})
+	liveStatus := "in_progress"
+	if err := store.Update(live.ID, beads.UpdateOpts{Status: &liveStatus}); err != nil {
+		t.Fatal(err)
+	}
+	live, err = store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := create(beads.Bead{Title: "ready child", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"}})
+	snapshot, err := json.Marshal([]beads.Bead{root, live, ready})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads, workers sync.WaitGroup
+	reads.Add(2)
+	workers.Add(2)
+	release, bothRead, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	type answer struct {
+		code           int
+		stdout, stderr string
+	}
+	answers := make(chan answer, 2)
+	dir := t.TempDir()
+	for _, owner := range []string{"session-a", "session-b"} {
+		go func() {
+			defer workers.Done()
+			// Reuse the hook fixture's no-op external notifications. Runner returns
+			// the shared snapshot; claims, input checks and ancestry reads use SQLite.
+			// Release, ListContinuation and AssignContinuation remain fixture-backed;
+			// this scenario exercises the competing claims, not those paths.
+			ops := newHookWorkflowStopFixture(t).ops()
+			ops.Runner = func(string, string) (string, error) { reads.Done(); <-release; return string(snapshot), nil }
+			ops.Claim = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+				return hookClaimThroughStore(id, assignee, func() (beads.Bead, bool, error) { return store.Claim(id, assignee) }, store.Get)
+			}
+			ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return store }
+			ops.InputDone = func(_ context.Context, _ string, _ []string, candidate beads.Bead, identities []string) (string, bool, error) {
+				return workflowInputDone(store, candidate, identities)
+			}
+			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) { return store.Get(id) }
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", dir, hookClaimOptions{Assignee: owner, IdentityCandidates: []string{owner}, RouteTargets: []string{"worker"}, JSON: true}, ops, &stdout, &stderr)
+			answers <- answer{code, stdout.String(), stderr.String()}
+		}()
+	}
+	go func() { reads.Wait(); close(bothRead) }()
+	go func() { workers.Wait(); close(finished) }()
+	awaitClose(t, bothRead, "both workflow query snapshots")
+	close(release)
+	awaitClose(t, finished, "competing workflow hook claims")
+	wins := 0
+	winner := ""
+	for range 2 {
+		a := <-answers
+		var result hookClaimJSONResult
+		if err := json.Unmarshal([]byte(a.stdout), &result); err != nil {
+			t.Fatalf("hook = %d: invalid JSON %q: %v; stderr: %s", a.code, a.stdout, err, a.stderr)
+		}
+		if result.SchemaVersion != "1" || !result.OK || result.Command != hookClaimCommandName || result.DrainAcknowledged {
+			t.Fatalf("unexpected hook result: %+v", result)
+		}
+		switch result.Action {
+		case "work":
+			if a.code != 0 || result.Reason != "claimed" || result.Route != "worker" {
+				t.Fatalf("work hook = %d: %+v; stderr: %s", a.code, result, a.stderr)
+			}
+			wins++
+			winner = result.Assignee
+			if result.BeadID != ready.ID {
+				t.Fatalf("claimed %s, want ready child %s", result.BeadID, ready.ID)
+			}
+		case "drain":
+			if a.code != 1 || result.Reason != hookClaimReasonNoWork || result.BeadID != "" || result.Assignee != "" || result.Route != "" {
+				t.Fatalf("unacknowledged drain hook = %d: %+v; stderr: %s", a.code, result, a.stderr)
+			}
+		default:
+			t.Fatalf("unexpected hook result: %+v", result)
+		}
+	}
+	if wins != 1 || (winner != "session-a" && winner != "session-b") {
+		t.Fatalf("work receipts = %d, owner = %q; want exactly one competing session", wins, winner)
+	}
+	rows, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("workflow rows = %d, %v; want the original root and two children", len(rows), err)
+	}
+	for _, before := range []beads.Bead{root, live, ready} {
+		after, err := store.Get(before.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantOwner, wantStatus := before.Assignee, before.Status
+		if before.ID == ready.ID {
+			wantOwner, wantStatus = winner, "in_progress"
+			if after.ClaimFence != 1 {
+				t.Fatalf("ready child ownership transitions = %d, want one", after.ClaimFence)
+			}
+		}
+		if after.Assignee != wantOwner || after.Status != wantStatus {
+			t.Fatalf("%s = %s/%s, want %s/%s", after.ID, after.Status, after.Assignee, wantStatus, wantOwner)
+		}
 	}
 }

@@ -11,8 +11,10 @@ gc hook --claim --drain-ack --json
 ```
 
 If the result action is `work`, read the returned `bead_id` with
-`gc bd show <id>`. If the result action is `drain`, the drain was
-acknowledged for you: your session is done — exit.
+`gc bd show <id>`. If the startup command above returns `drain`, its
+`--drain-ack` flag acknowledged drain for you: your session is done — exit.
+A later `gc hook --claim --json` call does not acknowledge drain; if it
+returns `drain`, run `gc runtime drain-ack` before exiting.
 
 **Never look for your work with `gc bd list --assignee=<your alias>` or
 `gc bd ready`.** Pool work is invisible to those queries twice over: an
