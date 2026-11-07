@@ -403,7 +403,9 @@ func TestReverseKeepsAnOlderUnpinnedSnapshot(t *testing.T) {
 		}
 		complete, _, _ := snapshotIDs(to)
 		older = complete
-		time.Sleep(1100 * time.Millisecond)
+	}
+	if len(older) != 3 {
+		t.Fatalf("took %v, want three snapshots", older)
 	}
 	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
 		t.Fatalf("--to-work = %d: %s%s", code, stdout, stderr)
