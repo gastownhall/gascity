@@ -2551,7 +2551,6 @@ go_test(
         "//internal/featureflags",
         "//internal/formula",
         "//internal/formulatest",
-        "//internal/fsyncprobe",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/git",
@@ -2664,11 +2663,40 @@ go_test(
         "@net_pgregory_rapid//:rapid",
         "@org_golang_x_mod//semver",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/fsyncprobe",
+        ],
         "@rules_go//go/platform:android": [
+            "//internal/fsyncprobe",
             "//internal/pathdurability",
         ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/fsyncprobe",
+        ],
         "@rules_go//go/platform:linux": [
+            "//internal/fsyncprobe",
             "//internal/pathdurability",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/fsyncprobe",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/fsyncprobe",
         ],
         "//conditions:default": [],
     }),

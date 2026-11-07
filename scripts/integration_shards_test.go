@@ -239,7 +239,9 @@ func fileAppliesOnLinuxAMD64(t *testing.T, path string, tags map[string]bool) bo
 	if expr == nil {
 		return true
 	}
-	return expr.Eval(func(tag string) bool { return tags[tag] })
+	// The Go toolchain satisfies "unix" on linux, so it is true here whatever
+	// tags holds.
+	return expr.Eval(func(tag string) bool { return tag == "unix" || tags[tag] })
 }
 
 // leadingGoBuildConstraint returns the //go:build expression in data's
