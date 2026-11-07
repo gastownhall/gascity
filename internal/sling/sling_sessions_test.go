@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -88,6 +89,55 @@ func TestReslingOfPoolClaimedWorkReadsTheClaimantInTheSessionsStore(t *testing.T
 		result := CheckBeadState(deps.Store, b.ID, pool, deps)
 		if result.Idempotent {
 			t.Fatalf("CheckBeadState = %+v: the claimant session %s is closed in the sessions store, so the work is not held by the pool", result, sb.ID)
+		}
+	})
+}
+
+// createNamedSessionBead creates an open session bead for template whose
+// runtime session is sessionName, in store.
+func createNamedSessionBead(t *testing.T, store beads.Store, template, sessionName string) beads.Bead {
+	t.Helper()
+	sb, err := store.Create(beads.Bead{
+		Title:    "session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc.session"},
+		Metadata: map[string]string{beadmeta.TemplateMetadataKey: template, "session_name": sessionName},
+	})
+	if err != nil {
+		t.Fatalf("creating the session bead: %v", err)
+	}
+	return sb
+}
+
+// TestSlingTargetEnvNamesTheSessionInTheSessionsStore is E2: GC_SLING_TARGET
+// names a single-session agent's runtime session, read from its session bead.
+// That bead lives in the sessions store; read through the work store it was
+// missed on a split city, and the env fell back to the computed name, or it
+// was read from the work store's stale pre-migration copy.
+func TestSlingTargetEnvNamesTheSessionInTheSessionsStore(t *testing.T) {
+	a := singleSessionAgent()
+
+	t.Run("the session bead lives only in the sessions store", func(t *testing.T) {
+		work, sessions := beads.NewMemStore(), beads.NewMemStoreFrom(100, nil, nil)
+		createNamedSessionBead(t, sessions, a.QualifiedName(), "s-bound-1")
+		deps, _ := splitSessionsDeps(t, work, sessions)
+
+		if got := ResolveSlingEnv(a, deps, "")["GC_SLING_TARGET"]; got != "s-bound-1" {
+			t.Fatalf("GC_SLING_TARGET = %q, want the sessions store's s-bound-1", got)
+		}
+	})
+
+	t.Run("the work store holds a stale copy", func(t *testing.T) {
+		sessions := beads.NewMemStoreFrom(100, nil, nil)
+		sb := createNamedSessionBead(t, sessions, a.QualifiedName(), "s-current")
+		stale := sb
+		stale.Metadata = map[string]string{beadmeta.TemplateMetadataKey: a.QualifiedName(), "session_name": "s-pre-migration"}
+		work := beads.NewMemStoreFrom(200, []beads.Bead{stale}, nil)
+		deps, _ := splitSessionsDeps(t, work, sessions)
+
+		if got := ResolveSlingEnv(a, deps, "")["GC_SLING_TARGET"]; got != "s-current" {
+			t.Fatalf("GC_SLING_TARGET = %q, want the sessions store's s-current", got)
 		}
 	})
 }
