@@ -273,3 +273,66 @@ func TestSettleAdoptedDefaultRigBdSchemaForwardsMigrationOutput(t *testing.T) {
 		t.Fatalf("an empty successful migration must add nothing; stderr %q", stderr.String())
 	}
 }
+
+func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreUsesPinnedBdAndCanonicalGCBin(t *testing.T) {
+	rig := newBehindSchemaRig(t, "1.3.1-rc.1", migrateMakesSchemaCurrent)
+	// A different bd earlier on PATH than the pinned BD_BIN: settlement must
+	// never reach it.
+	decoyDir := filepath.Join(t.TempDir(), "decoy")
+	if err := os.MkdirAll(decoyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(decoyDir, "bd")
+	decoyScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s|%%s|%%s|%%s\\n' \"$0\" \"${BD_ALLOW_REMOTE_MIGRATE-<unset>}\" \"${GC_BIN-}\" \"$*\" >> %q\nexit 1\n", rig.logPath)
+	if err := os.WriteFile(decoy, []byte(decoyScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", strings.Join([]string{decoyDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	if err := initAndHookDir(rig.cityPath, rig.rigPath, "tc"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	wantGCBin, err := filepath.EvalSymlinks(rig.gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := rig.invocations(t)
+	for _, prefix := range []string{"version", "migrate schema --quiet"} {
+		at := firstSchemaRigCall(calls, prefix)
+		if at < 0 {
+			t.Fatalf("settlement never ran bd %s; bd calls:\n%s", prefix, describeSchemaRigCalls(calls))
+		}
+		c := calls[at]
+		if c.bin != rig.fakeBd {
+			t.Errorf("bd %s ran %q, want the pinned BD_BIN %q", prefix, c.bin, rig.fakeBd)
+		}
+		if c.gcBin != wantGCBin {
+			t.Errorf("bd %s saw GC_BIN=%q, want canonical %q", prefix, c.gcBin, wantGCBin)
+		}
+		if c.unlock != "<unset>" {
+			t.Errorf("bd %s saw BD_ALLOW_REMOTE_MIGRATE=%q; gc must add no migration consent", prefix, c.unlock)
+		}
+	}
+	for _, c := range calls {
+		if strings.Contains(c.args, "--force") {
+			t.Errorf("gc added a force flag: bd %s", c.args)
+		}
+	}
+}
+
+func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStorePreservesOperatorConsent(t *testing.T) {
+	rig := newBehindSchemaRig(t, "1.3.1-rc.1", migrateMakesSchemaCurrent)
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
+
+	if err := initAndHookDir(rig.cityPath, rig.rigPath, "tc"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	calls := rig.invocations(t)
+	at := firstSchemaRigCall(calls, "migrate schema --quiet")
+	if at < 0 {
+		t.Fatalf("settlement never ran; bd calls:\n%s", describeSchemaRigCalls(calls))
+	}
+	if got := calls[at].unlock; got != "1" {
+		t.Fatalf("bd migrate schema saw BD_ALLOW_REMOTE_MIGRATE=%q, want the operator's ambient 1 preserved", got)
+	}
+}
