@@ -146,3 +146,35 @@ func TestExtMsgInboundReplayRecoversStoredButErroredTranscriptAppend(t *testing.
 		t.Fatalf("member notifications = %d, want 1", got)
 	}
 }
+
+// TestExtMsgInboundReplayFaultPersistingReturns500WithoutNotify is the other
+// half: when the storage fault survives the single replay, the handler must
+// answer 5xx (so the adapter holds and redelivers) and must not notify the
+// member — a notification for a message that may not be stored would let the
+// member read a half-delivered conversation.
+func TestExtMsgInboundReplayFaultPersistingReturns500WithoutNotify(t *testing.T) {
+	store := &transcriptCreateFaultStore{Store: beads.NewMemStore()}
+	store.failAll.Store(true)
+	fs, srv, _, ref, sessionName := newInboundReplayFixture(t, store)
+
+	rec := postExtMsg(t, fs, srv, "/extmsg/inbound", map[string]any{
+		"message": map[string]any{
+			"provider_message_id": "msg-stuck-1",
+			"conversation":        conversationBody(ref),
+			"actor":               map[string]any{"id": "user-1", "display_name": "User One", "is_bot": false},
+			"text":                "hello stuck",
+			"received_at":         time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if got := store.attempts.Load(); got != 2 {
+		t.Fatalf("transcript create attempts = %d, want 2 (one bounded replay)", got)
+	}
+
+	srv.waitForBackground()
+	if got := countSessionNudges(fs.sp, sessionName, "hello stuck"); got != 0 {
+		t.Fatalf("member notifications = %d, want 0 while the message is not stored", got)
+	}
+}
