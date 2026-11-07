@@ -210,6 +210,7 @@ go_test(
         "native_dolt_store_allow_schema_behind_migrate_test.go",
         "native_dolt_store_batch_close_test.go",
         "native_dolt_store_batch_create_integration_test.go",
+        "native_dolt_store_batch_create_test.go",
         "native_dolt_store_batch_tx_test.go",
         "native_dolt_store_claim_role_test.go",
         "native_dolt_store_close_chain_test.go",
