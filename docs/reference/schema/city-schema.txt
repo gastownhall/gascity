@@ -1088,7 +1088,7 @@
             "auto",
             "require"
           ],
-          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"auto\", except that a store that cannot fence (an exec\nstore, or a bd without --if-revision) runs as \"off\" without a warning.\nGC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config\nload.",
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"auto\", except that a store that cannot fence (an exec\nstore, or a bd without --if-revision) runs as \"off\" without a warning.\nGC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config\nload. The arming path requires an explicit \"require\" for both\nconditional_writes and guarded_release.",
           "default": "auto"
         },
         "guarded_release": {
