@@ -156,6 +156,7 @@ func TestSlingFormulaRootFeedsPoolDemandOnBothTopologies(t *testing.T) {
 			Runner:     newFakeRunner().run,
 			Store:      beadstest.Work(e.work),
 			GraphStore: beadstest.Graph(e.graphStore()),
+			Sessions:   beadstest.Sessions(e.sessionsStore()),
 			StoreRef:   "city:split-topology-city",
 		}
 		var stdout, stderr bytes.Buffer

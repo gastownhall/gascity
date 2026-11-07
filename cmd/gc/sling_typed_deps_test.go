@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // TestSlingDepsHandlesWrapTheStoresTheyReplace pins the `gc sling` deps
@@ -121,5 +125,74 @@ func TestCheckBeadStateWithZeroDepsDoesNotPanic(t *testing.T) {
 	result := checkBeadState(store, b.ID, pool)
 	if result.Idempotent {
 		t.Errorf("checkBeadState = %+v: with no sessions store the claimant is not recognized as the pool's own", result)
+	}
+	// Unclaimed routed work reaches the convoy-recovery read of the work store.
+	unclaimed, err := store.Create(beads.Bead{Title: "routed", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "polecat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := checkBeadState(store, unclaimed.ID, pool); result.Idempotent {
+		t.Errorf("checkBeadState = %+v: with no work store no convoy tracks the work, so finalize must re-run", result)
+	}
+}
+
+// TestCLIBeadRouterWithNoStoreRefuses pins cliBeadRouter's absent store: with
+// no store named by the request and a zero work store it refuses instead of
+// writing through a zero handle.
+func TestCLIBeadRouterWithNoStoreRefuses(t *testing.T) {
+	err := cliBeadRouter{deps: &slingDeps{}}.Route(t.Context(), sling.RouteRequest{BeadID: "gc-1", Target: "worker"})
+	if err == nil || !strings.Contains(err.Error(), "requires a store") {
+		t.Fatalf("Route with no store = %v, want the requires-a-store refusal", err)
+	}
+}
+
+// TestCmdSlingRigScopeReslingReadsTheClaimantInTheCityStore pins the `gc
+// sling` door's sessions store at rig scope (OD-3c): a rig store holds no
+// session beads, so a rig-scope sling reads them in the city store it opens.
+// A re-sling of rig work its own pool session claimed under its session bead
+// id is then the idempotent no-op it is at city scope, on a city that
+// relocates nothing; read through the rig store the claimant was missed and
+// the work was routed again beside the session holding it.
+func TestCmdSlingRigScopeReslingReadsTheClaimantInTheCityStore(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDefaultTargetsFixture(t, nil)
+	cityToml := "[workspace]\nname = \"demo\"\n\n[[rigs]]\nname = \"foundations\"\npath = \"foundations\"\nprefix = \"fo\"\n\n[[agent]]\nname = \"worker-a\"\ndir = \"foundations\"\nmax_active_sessions = 3\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	writeTestFileStoreBeads(t, cityDir, []beads.Bead{{
+		ID:       "gc-sess-1",
+		Title:    "pool session",
+		Type:     session.BeadType,
+		Status:   "open",
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"template": "foundations/worker-a", "pool_managed": "true"},
+	}})
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{
+		{ID: "fo-held", Title: "held work", Type: "task", Status: "in_progress", Assignee: "gc-sess-1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "foundations/worker-a"}},
+		{ID: "fo-cvy", Title: sling.AutoConvoyRootTitle("fo-held"), Type: "convoy", Status: "open", Metadata: map[string]string{}},
+	})
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("open the rig store: %v", err)
+	}
+	if err := rigStore.DepAdd("fo-cvy", "fo-held", "tracks"); err != nil {
+		t.Fatalf("tracking the held work: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"foundations/worker-a", "fo-held"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("gc sling = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already routed") || strings.Contains(stderr.String(), "assigned to") {
+		t.Errorf("re-sling of work pool session gc-sess-1 holds: stdout=%q stderr=%q, want an idempotent skip", stdout.String(), stderr.String())
 	}
 }

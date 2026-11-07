@@ -1,11 +1,13 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -64,5 +66,16 @@ func TestSlingStoresAreTheStoresTheAccessorsServed(t *testing.T) {
 	state := newFakeState(t)
 	if got := graphAt(state.Stores(), storeref.RigRef("unopened")); got != (beads.GraphStore{}) {
 		t.Errorf("graph store at an unopened rig = %v, want the zero handle", got)
+	}
+}
+
+// TestAPIBeadRouterWithNoStoreRefuses pins apiBeadRouter's absent store: with
+// a zero work store and no graph-binding target named by the request it
+// refuses instead of writing through a zero handle.
+func TestAPIBeadRouterWithNoStoreRefuses(t *testing.T) {
+	r := apiBeadRouter{server: New(newFakeState(t))}
+	err := r.Route(t.Context(), sling.RouteRequest{BeadID: "gc-1", Target: "myrig/worker"})
+	if err == nil || !strings.Contains(err.Error(), "requires a store") {
+		t.Fatalf("Route with no store = %v, want the requires-a-store refusal", err)
 	}
 }
