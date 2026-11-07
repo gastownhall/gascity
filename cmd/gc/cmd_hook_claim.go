@@ -81,6 +81,11 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
+// hookClaimClock is the clock a `gc hook --claim` invocation reads its claim
+// window from: the start it stamps (cmdHookWithOptions) and the default
+// hookClaimOps.Now. A seam so tests can stall the invocation on a fake clock.
+var hookClaimClock = time.Now
+
 // hookClaimWindowDefault bounds how long after a `gc hook --claim` invocation
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
@@ -333,9 +338,10 @@ type hookClaimOps struct {
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
-	// outlived the turn that asked for it. applyDefaults fills both, once per
-	// invocation, so every federated leg shares ONE window rather than getting a
-	// fresh one each time the loop copies the ops.
+	// outlived the turn that asked for it. `gc hook --claim` stamps InvokedAt when
+	// the command starts (hookCity.claimOps); applyDefaults fills whichever is
+	// still zero, once per invocation, so every federated leg shares ONE window
+	// rather than getting a fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
 	// ClassRoute is the relocated coordination-class binding these seams
@@ -753,7 +759,7 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.EmitWorkStartedUnrecorded = emitWorkStartedUnrecorded
 	}
 	if ops.Now == nil {
-		ops.Now = time.Now
+		ops.Now = hookClaimClock
 	}
 	if ops.Sleep == nil {
 		ops.Sleep = time.Sleep

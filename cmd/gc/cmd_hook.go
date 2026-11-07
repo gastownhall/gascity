@@ -309,6 +309,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if opts.Inject {
 		return 0
 	}
+	// The claim window opens here: a stall resolving the city, loading its config
+	// or in the session fence's store open spends the window too.
+	invokedAt := hookClaimClock()
 	// One composed city config for the whole invocation. The front door loads
 	// it, and the claim's helpers and the drain-ack load it again on their own;
 	// each composition walks city.toml and every pack include, ~0.15-0.2 s on
@@ -363,6 +366,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	city := newHookCity(cityPath, cfg)
+	city.invokedAt = invokedAt
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns
