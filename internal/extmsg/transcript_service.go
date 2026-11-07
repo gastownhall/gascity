@@ -119,15 +119,25 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		} else if state.HydrationStatus == HydrationPending {
 			return ErrHydrationPending
 		}
-		if providerMessageID != "" {
+		// dedup finds this message's stored entry by provider message ID and
+		// covers its sequence, which an earlier append may have left
+		// unpublished.
+		dedup := func() (bool, error) {
+			if providerMessageID == "" {
+				return false, nil
+			}
 			existing, err := s.findTranscriptByProviderMessageLocked(ref, providerMessageID)
-			if err != nil {
-				return err
+			if err != nil || existing == nil {
+				return false, err
 			}
-			if existing != nil {
-				out = *existing
-				return nil
+			if err := s.coverSequenceLocked(state.ID, existing.Sequence); err != nil {
+				return false, err
 			}
+			out = *existing
+			return true, nil
+		}
+		if found, err := dedup(); err != nil || found {
+			return err
 		}
 		// Each attempt creates the entry at the pinned ID of the live
 		// frontier. After a create error, the entry at that pin decides: this
@@ -173,6 +183,9 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				(providerMessageID != "" && record.ProviderMessageID == providerMessageID) {
 				out = record
 				return nil
+			}
+			if found, err := dedup(); err != nil || found {
+				return err
 			}
 		}
 		return fmt.Errorf("append transcript entry to %s after %d attempts: %w", state.ID, transcriptAppendAttempts, errTranscriptContended)
@@ -836,7 +849,7 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 }
 
 func (s *transcriptService) findTranscriptByProviderMessageLocked(ref ConversationRef, providerMessageID string) (*ConversationTranscriptRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
+	items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
 	if err != nil {
 		return nil, fmt.Errorf("list transcript by provider message label: %w", err)
 	}

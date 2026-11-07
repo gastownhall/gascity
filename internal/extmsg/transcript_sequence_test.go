@@ -73,6 +73,12 @@ func (f *transcriptFaultStore) Create(b beads.Bead) (beads.Bead, error) {
 	return created, nil
 }
 
+func (f *transcriptFaultStore) entryCreateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.entryCreates
+}
+
 func (f *transcriptFaultStore) Get(id string) (beads.Bead, error) {
 	f.mu.Lock()
 	fail := f.failGets > 0 && f.createdIDs[id]
@@ -311,5 +317,38 @@ func TestTranscriptAppendRecoversCommittedCreateError(t *testing.T) {
 				t.Fatalf("next_sequence = %d, want 3", got)
 			}
 		})
+	}
+}
+
+// TestTranscriptAppendReplayCoversStoredEntry: an entry is stored but its
+// next_sequence advance fails, so Append errors. Replaying the same provider
+// message after the fault clears returns the stored entry without creating
+// another, and advances next_sequence past it.
+func TestTranscriptAppendReplayCoversStoredEntry(t *testing.T) {
+	freezeTestClock(t)
+	mem := honoringMemStore()
+	fault := newTranscriptFaultStore(mem, nil)
+	svc := newTranscriptService(beadstest.Mail(casTranscriptFaultStore{fault}), newBindingLockPool())
+
+	fault.mu.Lock()
+	fault.failFrontier = true
+	fault.mu.Unlock()
+	if _, err := appendTestMessage(t, svc, "msg-1"); err == nil {
+		t.Fatal("Append(msg-1) with a failing next_sequence advance succeeded, want error")
+	}
+	fault.mu.Lock()
+	fault.failFrontier = false
+	fault.mu.Unlock()
+	creates := fault.entryCreateCount()
+
+	replayed := mustAppendTestMessage(t, svc, "msg-1")
+	if replayed.Sequence != 1 || replayed.ProviderMessageID != "msg-1" {
+		t.Fatalf("replay = sequence %d provider message %q, want 1 msg-1", replayed.Sequence, replayed.ProviderMessageID)
+	}
+	if got := fault.entryCreateCount(); got != creates {
+		t.Fatalf("entry creates = %d after replay, want %d (no new create)", got, creates)
+	}
+	if got := testTranscriptNextSequence(t, mem); got != 2 {
+		t.Fatalf("next_sequence = %d after replay, want 2", got)
 	}
 }
