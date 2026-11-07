@@ -25,7 +25,7 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 		pool := proxyendpointtest.NewPostOpenDB(before, after)
 		t.Cleanup(func() { _ = pool.DB.Close() })
 		var head string
-		if err := pool.DB.QueryRowContext(context.Background(), postOpenHeadQuery).Scan(&head); err != nil {
+		if err := pool.DB.QueryRowContext(context.Background(), schemaPlaneHeadQuery).Scan(&head); err != nil {
 			t.Fatalf("single statement: %v", err)
 		}
 		if head != "before0000" {
@@ -43,8 +43,10 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 		if report.Head != "after11111" {
 			t.Fatalf("head = %q, want the hash after the open: an open that committed would pass the check", report.Head)
 		}
-		if pool.Conns() != 1 || len(pool.Statements()) != 2 {
-			t.Fatalf("the read used %d connection(s) and %d statement(s), want 1 and 2", pool.Conns(), len(pool.Statements()))
+		// One pinned connection: the advancing HEAD read, the plane statement,
+		// and SHOW COLUMNS for the sentinel column on a healthy database.
+		if pool.Conns() != 1 || len(pool.Statements()) != 3 {
+			t.Fatalf("the read used %d connection(s) and %d statement(s), want 1 and 3", pool.Conns(), len(pool.Statements()))
 		}
 	})
 
@@ -128,14 +130,22 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 			if report != tc.want {
 				t.Fatalf("report = %+v, want %+v", report, tc.want)
 			}
-			// HEAD and the plane ride ONE statement (issued twice), not one
-			// statement per question.
-			for _, statement := range pool.Statements() {
-				if !strings.Contains(statement, "DOLT_HASHOF('HEAD')") ||
-					strings.Count(statement, "information_schema.tables") != len(ignoredSentinelTables)+len(ignoredSentinelFlooredTables)+1 ||
-					strings.Count(statement, "information_schema.columns") != 1 {
-					t.Fatalf("statement %q does not carry HEAD, the cursor table, every sentinel and floored sentinel table and the column", statement)
+			// The advancing statement is HEAD alone; HEAD and every table then
+			// ride ONE statement with one catalog scan, and the sentinel column
+			// is SHOW COLUMNS, issued only when its table exists.
+			statements := pool.Statements()
+			if len(statements) < 2 || statements[0] != schemaPlaneHeadQuery || !strings.Contains(statements[1], "DOLT_HASHOF('HEAD')") ||
+				strings.Count(statements[1], "information_schema.tables") != 1 || strings.Contains(statements[1], "information_schema.columns") {
+				t.Fatalf("statements = %q, want the bare HEAD read and then the plane statement with one tables scan and no columns scan", statements)
+			}
+			wantShow := !tc.after.AbsentTables[IgnoredSentinelColumnTable]
+			for _, table := range ignoredSentinelTables {
+				if tc.after.AbsentTables[table] {
+					wantShow = false // a missing sentinel table floors at 0 and short-circuits the column
 				}
+			}
+			if gotShow := len(statements) == 3 && strings.HasPrefix(statements[2], "SHOW COLUMNS FROM "); gotShow != wantShow || len(statements) > 3 {
+				t.Fatalf("statements = %q, want SHOW COLUMNS exactly when %s exists (%v)", statements, IgnoredSentinelColumnTable, wantShow)
 			}
 		})
 	}
