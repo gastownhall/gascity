@@ -338,6 +338,17 @@ migration_target = "P0.4c-listener"
 expires = "2026-12-31"
 
 [[medium]]
+package_dir = "internal/runtime/k8s"
+package_name = "k8s"
+owner = "TestDynamicUserWrapperPreservesCommand"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "Kubernetes launch-command transport regression is a checked Medium subprocess owner"
+resource_owner = "the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument"
+migration_target = "P0.4b"
+expires = "2026-12-31"
+
+[[medium]]
 package_dir = "internal/runtime/tmux"
 package_name = "tmux"
 owner = "TestMain"
