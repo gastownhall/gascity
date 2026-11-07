@@ -595,3 +595,50 @@ func TestResolveTemplateAgentEnvWithholdsOpenCodePermissionDefault(t *testing.T)
 		})
 	}
 }
+
+// TestResolveTemplateStampsOwnCityName pins that a session's GC_CITY_NAME is
+// the city's own build name, never a neighbor's ambient value or a
+// config-authored env layer, so one supervisor serving several cities hands
+// each city's sessions their own identity.
+func TestResolveTemplateStampsOwnCityName(t *testing.T) {
+	cases := []struct {
+		name         string
+		ambient      string
+		workspaceEnv map[string]string
+		agentEnv     map[string]string
+	}{
+		{name: "ambient neighbor", ambient: "neighbor-city"},
+		{name: "ambient empty", ambient: ""},
+		{name: "ambient matching", ambient: "own-city"},
+		{name: "workspace env names another city", ambient: "neighbor-city", workspaceEnv: map[string]string{"GC_CITY_NAME": "workspace-city"}},
+		{name: "agent env names another city", ambient: "neighbor-city", agentEnv: map[string]string{"GC_CITY_NAME": "agent-city"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeTemplateResolveCityConfig(t, cityPath, "file")
+			t.Setenv("GC_CITY_NAME", tc.ambient)
+
+			params := &agentBuildParams{
+				cityName:   "own-city",
+				cityPath:   cityPath,
+				workspace:  &config.Workspace{Name: "declared-city", Provider: "test", Env: tc.workspaceEnv},
+				providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+				lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+				fs:         fsys.OSFS{},
+				beaconTime: time.Unix(0, 0),
+				beadNames:  make(map[string]string),
+				stderr:     io.Discard,
+			}
+
+			agent := &config.Agent{Name: "runner", Env: tc.agentEnv}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			if got := tp.Env["GC_CITY_NAME"]; got != "own-city" {
+				t.Fatalf("GC_CITY_NAME = %q, want the session's own city %q", got, "own-city")
+			}
+		})
+	}
+}

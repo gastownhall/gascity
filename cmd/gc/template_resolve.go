@@ -355,6 +355,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_ALIAS":            qualifiedName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		// The city's own name, so a supervisor's ambient value for another
+		// city never reaches this city's sessions.
+		"GC_CITY_NAME": p.cityName,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.

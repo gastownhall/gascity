@@ -396,8 +396,8 @@ environment. For a configured agent's session it holds:
   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_PROFILE`
   and others), not every `AWS_*` variable.
 - The city's `[workspace]` env, then the provider's, then the agent's, then
-  the session's own variables (`GC_AGENT`, `GC_ALIAS`, `GC_CITY`, `GC_DIR`,
-  `GC_SESSION_ID` and more), and last the agent's selected upstream's
+  the session's own variables (`GC_AGENT`, `GC_ALIAS`, `GC_CITY`,
+  `GC_CITY_NAME`, `GC_DIR`, `GC_SESSION_ID` and more), and last the agent's selected upstream's
   variables and a few gc-owned settings, the empty `GC_CONTROLLER_TOKEN`
   among them.
 
