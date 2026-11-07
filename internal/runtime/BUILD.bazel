@@ -107,6 +107,7 @@ go_test(
         "nudge_delivery_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_control_unix_test.go",
         "process_env_guard_test.go",
         "process_table_scanner_test.go",
         "program_status_fingerprint_test.go",

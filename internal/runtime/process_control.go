@@ -19,17 +19,26 @@ const ManagedProcessStopGrace = 5 * time.Second
 // an escaped old process from racing the new one for the same work bead.
 const ManagedProcessReapGrace = 3 * time.Second
 
-// SignalProcessGroup sends sig to the managed process group when possible and
-// falls back to the direct process signal for older sessions or platforms that
-// cannot signal by group.
-func SignalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
+// processGroupKill sends sig to pid. A negative pid selects the process group
+// whose id is -pid. Tests replace it to observe which target was chosen.
+var processGroupKill = syscall.Kill
+
+// SignalProcessGroup signals the process group recorded at spawn when
+// knownPGID is set, and otherwise signals cmd's process directly.
+//
+// knownPGID is the leader pid captured after a successful Setpgid start. That
+// id still names the group after the leader has been reaped. Getpgid cannot
+// see that state: it returns ESRCH while kill of the recorded group still
+// reaches descendants. Callers that did not create a group pass 0 so the
+// signal never widens to a group this session does not own.
+func SignalProcessGroup(cmd *exec.Cmd, knownPGID int, sig syscall.Signal) error {
+	if knownPGID > 1 {
+		return processGroupKill(-knownPGID, sig)
+	}
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 1 {
 		return nil
 	}
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil {
-		return nil
-	}
-	return cmd.Process.Signal(sig)
+	return processGroupKill(cmd.Process.Pid, sig)
 }
 
 // managedGroupPollInterval is how often TerminateManagedProcess checks whether
@@ -44,29 +53,22 @@ const managedGroupPollInterval = 25 * time.Millisecond
 // once while the program it started finishes what it was doing, or never
 // stops), and nothing would kill it afterwards: for a provider whose control
 // socket lives in the stopping process, nothing can even reach it.
-func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) error {
-	_ = SignalProcessGroup(cmd, syscall.SIGTERM)
+func TerminateManagedProcess(cmd *exec.Cmd, knownPGID int, done <-chan struct{}, grace time.Duration) error {
+	_ = SignalProcessGroup(cmd, knownPGID, syscall.SIGTERM)
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 
 	select {
 	case <-done:
-		if !startedAsGroupLeader(cmd) || groupGoneBefore(cmd.Process.Pid, timer.C) {
+		if knownPGID <= 1 || groupGoneBefore(knownPGID, timer.C) {
 			return nil
 		}
 	case <-timer.C:
 	}
 
-	_ = SignalProcessGroup(cmd, syscall.SIGKILL)
+	_ = SignalProcessGroup(cmd, knownPGID, syscall.SIGKILL)
 	<-done
 	return nil
-}
-
-// startedAsGroupLeader reports whether cmd was started as the leader of a new
-// process group, so its PID names that group even after the leader is reaped.
-func startedAsGroupLeader(cmd *exec.Cmd) bool {
-	return cmd != nil && cmd.Process != nil && cmd.SysProcAttr != nil &&
-		cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0
 }
 
 // groupGoneBefore polls process group pgid until it has no members (true) or

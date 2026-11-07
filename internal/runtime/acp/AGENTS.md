@@ -115,3 +115,8 @@
 - The connection keeps the last `turnHistoryLen` (8) finished turns for
   `TurnHistory`; only the owner has them, so another process's
   `TurnCapabilities` are not lossless.
+- That SIGINT addresses the process group recorded at the Setpgid spawn
+  (`sessionConn.pgid`), not a group re-derived from the leader pid at signal
+  time. After the leader is reaped, Getpgid returns ESRCH while the recorded
+  id still names the group, so descendants are still signaled. A session that
+  recorded no group is signaled as a process and the signal is not widened.
