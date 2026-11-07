@@ -49,12 +49,14 @@ vulnerabilities:
   # 2026-10-25 to waive it rather than keep the gc-controller image scan red
   # until a fixed kubectl ships; its vulnerable package is not compiled into
   # kubectl at all, as its statement explains. CVE-2026-78661 (added 2026-11-06)
-  # is a denial-of-service finding in x/net's HTML tokenizer, fixed in x/net
-  # 0.62.0. The tokenizer is compiled into kubectl, but its only caller is
-  # apimachinery's proxy transport (rewriteHTML), which serves `kubectl proxy`,
-  # and gc runs kubectl only for attach, exec and apply. The repo owner decided
-  # on 2026-11-06 to waive it like the two above rather than keep the
-  # gc-controller image scan red until a fixed kubectl ships.
+  # is a denial-of-service finding in x/net's HTML parser (quadratic text-node
+  # coalescing), fixed in x/net 0.62.0. kubectl links only x/net's HTML
+  # tokenizer, for apimachinery's rewriteHTML, so the parser is not compiled
+  # into kubectl either, as its statement explains. The repo owner decided on
+  # 2026-11-06 to waive it like the two above rather than keep the gc-controller
+  # image scan red until a fixed kubectl ships. Re-check it at each pin bump:
+  # `strings -a kubectl | grep -E '^golang\.org/x/net/html\.(Parse|\(\*parser\))'`
+  # must print nothing.
   #
   # The horizon is one month rather than three. The previous three-month
   # horizon was set when nothing in the kubectl set was fixable from this repo.
@@ -76,7 +78,7 @@ vulnerabilities:
     paths:
       - "usr/local/bin/kubectl"
     expired_at: 2026-12-07
-    statement: Reached through golang.org/x/net (kubectl v1.36.6 ships v0.56.0; fixed in 0.62.0). Denial of service in the golang.org/x/net/html tokenizer. The tokenizer is compiled into kubectl, but its only caller is k8s.io/apimachinery/pkg/util/proxy rewriteHTML, which rewrites proxied HTML responses for kubectl proxy; gc runs kubectl only for attach, exec and apply, never proxy. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-11-06 the newest releases (v1.36.6 on x/net v0.56.0, v1.37.2 on v0.57.0) are both below 0.62.0, so none clears it yet; drop this entry once one ships that does.
+    statement: Reached through golang.org/x/net (kubectl v1.36.6 ships v0.56.0; fixed in 0.62.0). GO-2026-6860 is quadratic text-node coalescing in the golang.org/x/net/html parser (Parse/ParseFragment -> parser.addText/fosterParent), and the parser is not compiled into kubectl. kubectl links only the x/net/html tokenizer (for k8s.io/apimachinery's rewriteHTML), and the binary's function table (pclntab) has no html.Parse* or parser function, so Trivy matches only the module version recorded in the build info. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-11-06 the newest releases (v1.36.6 on x/net v0.56.0, v1.37.2 on v0.57.0) are both below 0.62.0, so none clears it yet; drop this entry once one ships that does.
   # gc-mcp-mail Python packages, added 2026-10-26. The repo owner decided to hold
   # filelock below 4 and GitPython on 3.1.x after the review of #8307
   # (https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708)

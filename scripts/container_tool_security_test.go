@@ -870,11 +870,12 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
-// two kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669 and the
-// owner-approved CVE-2026-56851); kubectl is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies, and a kubectl
-// waiver outside that reviewed set fails here too. gc's module waivers
-// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// three kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669, the
+// owner-approved CVE-2026-56851 and CVE-2026-78661); kubectl is an upstream-signed
+// prebuilt this repo installs rather than builds, so nothing here can move its
+// dependencies, and a kubectl waiver outside that reviewed set fails here too.
+// gc's module waivers are enforced separately by
+// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -922,9 +923,8 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		// reasoning.
 		"CVE-2026-56851": {"usr/local/bin/kubectl": true},
 		// Owner-approved 2026-11-06: no kubectl release ships x/net >= 0.62.0 yet,
-		// and the x/net/html tokenizer it fixes is reached only through
-		// `kubectl proxy`, which gc never runs. The statement in .trivyignore.yaml
-		// carries the reasoning.
+		// and the x/net/html parser it fixes is not compiled into kubectl. The
+		// statement in .trivyignore.yaml carries the reasoning.
 		"CVE-2026-78661": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
