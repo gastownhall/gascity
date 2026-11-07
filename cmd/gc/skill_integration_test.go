@@ -519,6 +519,89 @@ func TestBuildAssignedSkillsPromptFragmentOmitsDescriptionWhenMissing(t *testing
 	}
 }
 
+func TestBuildAssignedSkillsPromptFragmentShowsFrontmatterName(t *testing.T) {
+	t.Parallel()
+	city := &materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "core.gc-work", Source: "/x", Origin: "core", Description: "Working with beads", FrontmatterName: "gc-work"},
+			{Name: "core.bare", Source: "/y", Origin: "core", FrontmatterName: "  bare-skill  "},
+		},
+	}
+	agentCat := materialize.AgentCatalog{
+		Entries: []materialize.SkillEntry{
+			{Name: "local-dir", Source: "/a", Origin: "agent", Description: "Local skill", FrontmatterName: "local-name"},
+			{Name: "tools.lint", Source: "/l", Origin: "agent", FrontmatterName: "lint"},
+			// No description: the annotation still renders.
+			{Name: "bare", Source: "/b", Origin: "agent", FrontmatterName: "bare-tool"},
+		},
+	}
+	got := buildAssignedSkillsPromptFragment(&config.Agent{Name: "worker", Scope: "city"}, city, agentCat)
+	for _, want := range []string{
+		"### Assigned to you\n\n- `local-dir` (SKILL.md name: `local-name`) — Local skill\n",
+		"- `tools.lint` (SKILL.md name: `lint`)\n",
+		"- `bare` (SKILL.md name: `bare-tool`)\n",
+		"- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n",
+		"- `core.bare` (SKILL.md name: `bare-skill`) *(core)*\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fragment missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildAssignedSkillsPromptFragmentFrontmatterNameMatchesOrEmpty(t *testing.T) {
+	t.Parallel()
+	entries := func(clearNames bool) []materialize.SkillEntry {
+		out := []materialize.SkillEntry{
+			{Name: "plan", Source: "/a", Origin: "city", Description: "Plan the work", FrontmatterName: "plan"},
+			{Name: "padded", Source: "/b", Origin: "city", FrontmatterName: "  padded  "},
+			{Name: "unnamed", Source: "/c", Origin: "core", Description: "No name key"},
+			{Name: "blank", Source: "/d", Origin: "core", Description: "Blank name", FrontmatterName: "   "},
+		}
+		if clearNames {
+			for i := range out {
+				out[i].FrontmatterName = ""
+			}
+		}
+		return out
+	}
+	a := &config.Agent{Name: "worker", Scope: "city"}
+	got := buildAssignedSkillsPromptFragment(a,
+		&materialize.CityCatalog{Entries: entries(false)},
+		materialize.AgentCatalog{Entries: entries(false)[:2]})
+	want := buildAssignedSkillsPromptFragment(a,
+		&materialize.CityCatalog{Entries: entries(true)},
+		materialize.AgentCatalog{Entries: entries(true)[:2]})
+	if got != want {
+		t.Errorf("fragment changed for names that match or are empty:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Contains(got, "SKILL.md name") {
+		t.Errorf("fragment annotates a name that matches or is empty:\n%s", got)
+	}
+	if !strings.Contains(got, "- `plan` — Plan the work\n") || !strings.Contains(got, "- `unnamed` — No name key *(core)*\n") {
+		t.Errorf("fragment lost the existing bullet shape:\n%s", got)
+	}
+
+	// Shared entries whose name matches, is absent, or is whitespace-only
+	// keep their exact unannotated bullets.
+	shared := buildAssignedSkillsPromptFragment(&config.Agent{Name: "x", Scope: "city"},
+		&materialize.CityCatalog{Entries: []materialize.SkillEntry{
+			{Name: "plan", Source: "/p", Origin: "city", Description: "d", FrontmatterName: "plan"},
+			{Name: "blank", Source: "/b", Origin: "city", Description: "d"},
+			{Name: "spaces", Source: "/s", Origin: "city", Description: "d", FrontmatterName: "   "},
+		}},
+		materialize.AgentCatalog{})
+	for _, want := range []string{
+		"- `plan` — d *(city)*\n",
+		"- `blank` — d *(city)*\n",
+		"- `spaces` — d *(city)*\n",
+	} {
+		if !strings.Contains(shared, want) {
+			t.Errorf("shared fragment missing %q:\n%s", want, shared)
+		}
+	}
+}
+
 func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	t.Parallel()
 	existing := []string{"mkdir -p .cache", "./setup.sh"}
