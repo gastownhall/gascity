@@ -170,7 +170,8 @@ func (s *Store) ApplyLifecycle(id string, patch MetadataPatch) (MetadataPatch, e
 // ApplySleep writes a sleep (a drain's completion, an idle sleep, a kill
 // site's sleep) decided on an older read: patch's lifecycle with the
 // disposition's Sleep cell, on a fresh read. An operator's suspend, a wait
-// and its intent stay (D-J 3); the idle stop's transient goes. It returns
+// and its intent stay (D-J 3); the idle stop's transient goes, and a
+// user-hold reason is written only while the suspend stays. It returns
 // the caller's fold: the patch written with the row's whole disposition as it
 // now stands, so a fold onto an older snapshot shows a hold that landed since;
 // nil with no error when the row is closed, and an error when every CAS
@@ -185,7 +186,7 @@ func (s *Store) ApplySleep(id string, patch MetadataPatch) (MetadataPatch, error
 		at = time.Now()
 	}
 	w, err := s.ApplyDispositionFresh(id, ActorController, DispEvent{Kind: EvSleep}, func(from, _ Disposition, info Info) MetadataPatch {
-		return KeepQuarantineReason(maps.Clone(life), from, info.SleepReason, at)
+		return KeepQuarantineReason(DropReleasedHoldReason(maps.Clone(life), from), from, info.SleepReason, at)
 	}, time.Time{})
 	switch {
 	case err != nil:
