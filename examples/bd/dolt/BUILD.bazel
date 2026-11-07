@@ -122,6 +122,7 @@ go_test(
         "journal_recovery_runbook_test.go",
         "logs_test.go",
         "main_test.go",
+        "packroot_test.go",
         "port_resolve_test.go",
         "proxied_scope_test.go",
         "pull_remote_selection_test.go",
