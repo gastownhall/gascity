@@ -32,7 +32,7 @@ func TrackItemIn(classes MemberClasses, convoyID, itemID string) error {
 	if err := classes.requireConvoyHandle(); err != nil {
 		return fmt.Errorf("tracking %s in convoy %s: %w", itemID, convoyID, err)
 	}
-	_, owner, err := classes.resolveMember(itemID)
+	_, owner, err := classes.resolveMember(itemID, readHandle)
 	if err != nil {
 		return fmt.Errorf("getting tracked item %s: %w", itemID, err)
 	}
@@ -94,10 +94,25 @@ func UntrackItem(store beads.WorkStore, convoyID, itemID string) error {
 //     instead of degrading the member to a placeholder, so an unreachable
 //     store never looks like a deleted bead.
 func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]beads.Bead, error) {
+	return membersIn(classes, convoyID, includeClosed, readHandle)
+}
+
+// MembersInLive is MembersIn read past every cache: the convoy's legacy
+// children and tracks edges, and each member bead, are read through the named
+// class stores' live handles (beads.LiveFor). A caller that acts
+// destructively on what a membership says reads it this way, so an item
+// tracked, or a member reopened, out of process is seen before a cache has
+// absorbed the write.
+func MembersInLive(classes MemberClasses, convoyID string, includeClosed bool) ([]beads.Bead, error) {
+	return membersIn(classes, convoyID, includeClosed, readLive)
+}
+
+// membersIn is MembersIn with every class store read as mode selects.
+func membersIn(classes MemberClasses, convoyID string, includeClosed bool, mode readMode) ([]beads.Bead, error) {
 	if err := classes.requireConvoyHandle(); err != nil {
 		return nil, fmt.Errorf("listing members of convoy %s: %w", convoyID, err)
 	}
-	store := classes.Convoy
+	store := workHandle("convoy", classes.Convoy).reader(mode)
 	legacyChildren, err := store.List(beads.ListQuery{
 		ParentID:      convoyID,
 		IncludeClosed: includeClosed,
@@ -131,7 +146,7 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 		if dep.Type != TrackingDepType {
 			continue
 		}
-		item, _, err := classes.resolveMember(dep.DependsOnID)
+		item, _, err := classes.resolveMember(dep.DependsOnID, mode)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) || errors.Is(err, beads.ErrMetadataParse) {
 				// Convoy membership is an edge inventory. Keep the edge visible

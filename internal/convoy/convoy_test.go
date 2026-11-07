@@ -1,7 +1,10 @@
 package convoy
 
 import (
+	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -235,6 +238,72 @@ func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
 	if members[0].Status != "unknown" {
 		t.Errorf("member status = %q, want unknown", members[0].Status)
 	}
+}
+
+// TestMembersInLiveReadsEveryNamedClassPastItsCache: a caching store answers
+// MembersIn from its cache, the convoy's tracks edges and each member bead
+// alike, so an item tracked, and a member reopened, out of process stay
+// invisible to it until the cache absorbs them. MembersInLive reads the
+// convoy's edges, and every member in each named class, through that class's
+// live handle, so it sees both, a member owned by another class included.
+func TestMembersInLiveReadsEveryNamedClassPastItsCache(t *testing.T) {
+	convoyBacking := beads.NewMemStore()
+	memberBacking := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "fe-1", Title: "reopened item", Type: "task", Status: "open"}}, nil)
+	convoy, err := convoyBacking.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoyBacking.DepAdd(convoy.ID, "fe-1", TrackingDepType); err != nil {
+		t.Fatal(err)
+	}
+	convoyCache := beads.NewCachingStoreForTest(convoyBacking, nil)
+	memberCache := beads.NewCachingStoreForTest(memberBacking, nil)
+	for _, cache := range []*beads.CachingStore{convoyCache, memberCache} {
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := memberCache.Close("fe-1"); err != nil {
+		t.Fatal(err)
+	}
+	classes := MemberClasses{Convoy: beadstest.Work(convoyCache), Work: []beads.WorkStore{beadstest.Work(memberCache)}}
+	if got := memberStatuses(t, MembersIn, classes, convoy.ID); got != "fe-1=closed" {
+		t.Fatalf("cached members = %s, want the closed item the cache holds", got)
+	}
+
+	added, err := convoyBacking.Create(beads.Bead{Title: "added item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoyBacking.DepAdd(convoy.ID, added.ID, TrackingDepType); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberBacking.Reopen("fe-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := memberStatuses(t, MembersIn, classes, convoy.ID); got != "fe-1=closed" {
+		t.Fatalf("cached members = %s; the cache must still miss both writes, or this test proves nothing", got)
+	}
+	if got, want := memberStatuses(t, MembersInLive, classes, convoy.ID), "fe-1=open "+added.ID+"=open"; got != want {
+		t.Fatalf("live members = %s, want %s", got, want)
+	}
+}
+
+// memberStatuses reads convoyID's members, closed included, with read and
+// renders them as "id=status" pairs in id order.
+func memberStatuses(t *testing.T, read func(MemberClasses, string, bool) ([]beads.Bead, error), classes MemberClasses, convoyID string) string {
+	t.Helper()
+	members, err := read(classes, convoyID, true)
+	if err != nil {
+		t.Fatalf("reading members of %s: %v", convoyID, err)
+	}
+	pairs := make([]string, 0, len(members))
+	for _, m := range members {
+		pairs = append(pairs, m.ID+"="+m.Status)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, " ")
 }
 
 func TestConvoyAddItemsOps(t *testing.T) {

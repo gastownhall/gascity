@@ -103,8 +103,8 @@ func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
 			return workflowInputDone(beadstest.Work(f.work), candidate, ids)
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(f.work, rootID)
+		SkipDoneWorkflow: func(ctx context.Context, _ string, _ []string, rootID string) error {
+			return skipDoneWorkflow(ctx, f.work, rootID)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return f.work.Get(beadID)
@@ -194,6 +194,29 @@ func TestClassRoutedHookRetiresABindingResidentDoneWorkflowRoot(t *testing.T) {
 		t.Fatalf("root candidate %s kept (stderr=%q), want retired", root.ID, stderr)
 	}
 	f.assertSkipped(t, f.root.ID, f.step.ID)
+}
+
+// The retirement leaves a binding-resident workflow's teardown tail open in
+// the binding, the attempt linked to the teardown step only by gc.step_id
+// included, and once the root is settled a candidate from that tail is kept
+// for the stop gate rather than retired again.
+func TestClassRoutedHookRetiresABindingResidentDoneWorkflowButLeavesItsTeardownTail(t *testing.T) {
+	f := newDoneWorkflowSplitFixture(t, true)
+	control, attempt := seedTeardownTail(t, f.binding, f.root.ID)
+	ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+
+	kept, stderr := f.retire(t, ops, f.step)
+	if len(kept) != 0 {
+		t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has terminal input work and must be retired", f.step.ID, stderr, f.root.ID)
+	}
+	f.assertSkipped(t, f.root.ID, f.step.ID)
+	f.assertOpen(t, control.ID, attempt.ID)
+
+	kept, stderr = f.retire(t, ops, attempt)
+	if len(kept) != 1 || kept[0].ID != attempt.ID {
+		t.Fatalf("kept %v (stderr=%q); the teardown attempt %s of the settled workflow must stay a candidate", kept, stderr, attempt.ID)
+	}
+	f.assertOpen(t, control.ID, attempt.ID)
 }
 
 // Open input work keeps the workflow live.

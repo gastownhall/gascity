@@ -80,6 +80,13 @@ const RunCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 // its own copy; a cmd/gc test pins that the two agree).
 const HookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
+// HookRetirePurgedWorkflowCloseReason is the close_reason `gc hook --claim`
+// stamps on every open bead under a workflow root (by gc.root_bead_id) whose
+// input convoy, or the work it tracked, was proved purged (cmd/gc
+// retirePurgedWorkflow, which keeps its own copy; a cmd/gc test pins that the
+// two agree).
+const HookRetirePurgedWorkflowCloseReason = "hook --claim: workflow input convoy or tracked work purged; nothing to run"
+
 // StaleOrderWispCloseReason is the close_reason the order-tracking sweep
 // stamps on every bead of a stale order wisp subtree it closes (cmd/gc
 // closeStaleOrderWispIDs, which keeps its own copy; a cmd/gc test pins that

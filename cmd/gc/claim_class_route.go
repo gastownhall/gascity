@@ -830,17 +830,17 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
 	// keeps the exact unrouted call.
-	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates)
 		}
 		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
 		if err != nil {
-			return rootID, false, err
+			return workflowInputVerdict{RootID: rootID}, err
 		}
 		if !resident {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
 		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
@@ -852,9 +852,23 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return err
 		}
 		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+			return skipDoneWorkflow(ctx, route.class, rootID)
 		}
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+	}
+
+	// A workflow whose input is proved purged retires in the store that
+	// holds its root, by the same residence read: only the input's absence
+	// is judged across the city, by InputPurged.
+	ops.RetirePurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return retirePurgedWorkflow(ctx, route.class, rootID)
+		}
+		return base.RetirePurgedWorkflow(ctx, dir, env, rootID)
 	}
 
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.

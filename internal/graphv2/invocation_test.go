@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -65,7 +66,7 @@ title = "Inspect {{convoy_id}}"
 	if created.Type != "convoy" {
 		t.Fatalf("input convoy type = %q, want convoy", created.Type)
 	}
-	wantMetadata := map[string]string{"gc.synthetic": "true"}
+	wantMetadata := map[string]string{"gc.synthetic": "true", beadmeta.InputTargetIDMetadataKey: target.ID}
 	if !maps.Equal(created.Metadata, wantMetadata) {
 		t.Fatalf("input convoy metadata = %+v, want %+v", created.Metadata, wantMetadata)
 	}
@@ -1314,5 +1315,54 @@ title = "Item {{convoy_id}} on {{subject}}"
 	}
 	if len(matches) != 0 {
 		t.Fatalf("input convoys = %+v, want none before validation succeeds", matches)
+	}
+}
+
+func TestCreateSingleItemInputConvoyRecordsTargetIndependentlyOfTrackingEdge(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := CreateSingleItemInputConvoy(beadstest.Work(mem), target)
+	if err != nil {
+		t.Fatalf("CreateSingleItemInputConvoy: %v", err)
+	}
+	if got := created.Metadata[beadmeta.InputTargetIDMetadataKey]; got != target.ID {
+		t.Fatalf("created %s = %q, want %q", beadmeta.InputTargetIDMetadataKey, got, target.ID)
+	}
+	// A purge cascades the tracks edge away with the target; the recorded
+	// target must still name it.
+	if err := mem.DepRemove(created.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := mem.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := RecordedInputTargetIDs(stored); len(got) != 1 || got[0] != target.ID {
+		t.Fatalf("RecordedInputTargetIDs = %v, want [%s]", got, target.ID)
+	}
+}
+
+func TestRecordedInputTargetIDsReadsTargetAndDrainMemberDistinctly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		want []string
+	}{
+		{name: "unstamped", meta: map[string]string{beadmeta.SyntheticMetadataKey: "true"}, want: nil},
+		{name: "target only", meta: map[string]string{beadmeta.InputTargetIDMetadataKey: "ga-1"}, want: []string{"ga-1"}},
+		{name: "drain member only", meta: map[string]string{beadmeta.DrainMemberIDMetadataKey: " ga-2 "}, want: []string{"ga-2"}},
+		{name: "same id twice", meta: map[string]string{beadmeta.InputTargetIDMetadataKey: "ga-1", beadmeta.DrainMemberIDMetadataKey: "ga-1"}, want: []string{"ga-1"}},
+		{name: "both", meta: map[string]string{beadmeta.InputTargetIDMetadataKey: "ga-1", beadmeta.DrainMemberIDMetadataKey: "ga-2"}, want: []string{"ga-1", "ga-2"}},
+		{name: "blank", meta: map[string]string{beadmeta.InputTargetIDMetadataKey: "  "}, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RecordedInputTargetIDs(beads.Bead{ID: "cv-1", Metadata: tc.meta})
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("RecordedInputTargetIDs = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
