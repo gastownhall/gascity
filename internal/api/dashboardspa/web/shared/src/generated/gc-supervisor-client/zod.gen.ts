@@ -11695,7 +11695,8 @@ export const zGetV0CityByCityNameSessionsQuery = z.object({
     state: z.string().optional(),
     template: z.string().optional(),
     peek: z.boolean().optional(),
-    wake_reasons: z.boolean().optional()
+    wake_reasons: z.boolean().optional(),
+    enrich: z.boolean().optional().default(true)
 });
 
 /**
