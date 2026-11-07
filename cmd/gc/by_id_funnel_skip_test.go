@@ -434,8 +434,11 @@ func TestByIDFunnelSkipTakesTheVerdictWhenTheConfigNoLongerNamesTheBinding(t *te
 }
 
 // TestByIDFunnelSkipWaitsForTheServedBindingNote pins the one write the skip
-// would otherwise starve. A split nothing has served since its cutover has no
-// served-binding note, and the funnel is the note's only writer. Were twin-free
+// would otherwise starve, for a city migrated by an EARLIER build (v1.5.0 or
+// v1.5.1, whose `gc storage migrate` wrote no served-binding note; the fixture
+// migrates through the test helper, which models exactly that) and served by
+// nothing since its cutover. That city has no note, and the funnel is the
+// note's only writer. (This build's migrate writes the note itself.) Were twin-free
 // reads to skip it there, the note would never be written, and the holds that
 // read it would pass: here, a city rolled back to work by the runbook, whose
 // cleared note the operator has removed, would read as one that never split

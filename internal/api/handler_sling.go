@@ -253,6 +253,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 	}
+	// Who launched this is server fact from the verified write grant, never
+	// a client field or var.
+	opts.Initiator, _ = VerifiedPrincipal(ctx)
 	mode := "direct"
 	switch {
 	case attachedBeadID != "":
@@ -277,9 +280,21 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		err = nil
 	}
 	if err != nil {
+		// A probe that could not read an attachment is a store fault: the
+		// guard cannot tell whether a live molecule is attached. It is checked
+		// before the conflicts, which it may accompany in a batch.
+		var probeErr *sling.AttachmentProbeError
+		if errors.As(err, &probeErr) {
+			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", err) //nolint:errcheck
+			return nil, http.StatusInternalServerError, "attachment_probe_failed", probeErr.Error(), nil
+		}
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
 			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
+		}
+		var attachedErr *sling.MoleculeAttachedError
+		if errors.As(err, &attachedErr) {
+			return nil, http.StatusConflict, "molecule_attached", err.Error(), nil
 		}
 		var lookupErr *sling.BeadLookupError
 		if errors.As(err, &lookupErr) {
@@ -457,10 +472,10 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 // refuses the sling instead of degrading to the tolerated non-source-store
 // warning, because a binding fault is an error, never absence.
 //
-// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
-// CityBeadStore(), so the single-store enumeration stays byte-identical and no
-// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
-// spelling so the store_ref round trip has one parse, not two.
+// It is skipped on a default (non-relocated) city, where Stores().Graph()
+// wraps CityBeadStore(), so the single-store enumeration stays byte-identical
+// and no store is scanned twice. Its ref reuses workflowStores()'s
+// "graph:<city>" spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()
@@ -626,9 +641,11 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// The core names the store that holds the bead. Honor it only when it is
 	// the relocated graph binding (a --formula wisp root minted there, #6054);
 	// on a city that relocates nothing the request keeps routing through the
-	// sling's own store, unchanged.
+	// sling's own store, unchanged. Identity is SameStore's: a class handle
+	// over the binding is the binding, where == between a handle and the raw
+	// store would be false.
 	store := r.store
-	if req.Store != nil && req.Store == relocatedGraphStore(r.server.state) {
+	if req.Store != nil && beads.SameStore(req.Store, relocatedGraphStore(r.server.state)) {
 		store = req.Store
 	}
 	if store == nil {

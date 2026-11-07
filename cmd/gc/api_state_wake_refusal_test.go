@@ -123,7 +123,7 @@ func TestWakeStartRefusalReadsTheWorkStoreOnASplitCity(t *testing.T) {
 	work, binding := beads.NewMemStore(), beads.NewMemStore()
 	agent := config.Agent{Name: "worker", SleepAfterIdle: "1m"}
 	cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{agent}}, cityBeadStore: work, storageRoutes: splitRoutes(binding), sp: runtime.NewFake()}
-	if cs.SessionsBeadStore().Store != binding {
+	if cs.Stores().Sessions().Store != binding {
 		t.Fatal("fixture: the sessions store is not the binding")
 	}
 	if _, err := work.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "gc-1"}); err != nil {
@@ -133,5 +133,46 @@ func TestWakeStartRefusalReadsTheWorkStoreOnASplitCity(t *testing.T) {
 	info.SleepPolicyFingerprint = resolveSessionSleepPolicyInfo(info, cs.cfg, cs.sp).Fingerprint
 	if got, _ := cs.WakeStartRefusal(info); got != "" {
 		t.Fatalf("WakeStartRefusal = %q, want none: the work store's claim overrides the latch", got)
+	}
+}
+
+// TestWakeStartRefusalReadsTheQuarantineInTheSessionsBinding pins the
+// startup-health read to the sessions class on a split city (typed-stores
+// T6c): a quarantine episode recorded in the sessions binding refuses the
+// wake, though the work store beside it holds none.
+func TestWakeStartRefusalReadsTheQuarantineInTheSessionsBinding(t *testing.T) {
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityBeadStore: work, storageRoutes: splitRoutes(binding), sp: runtime.NewFake()}
+	if err := sessionpkg.NewStore(beads.SessionStore{Store: binding}).SaveStartupHealthEpisode(sessionpkg.StartupHealthEpisode{
+		SessionName: "worker", QuarantinedUntil: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info := sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker"}
+	if got, _ := cs.WakeStartRefusal(info); !strings.Contains(got, "startup-health quarantine") {
+		t.Fatalf("WakeStartRefusal = %q, want the binding's startup-health quarantine", got)
+	}
+}
+
+// TestWakeStartRefusalRefusesUnknownStateRows: a row in a state the
+// controller skips is refused for certain, naming the raw state and the close
+// that releases it, with or without a loaded city config, so the API wake
+// answers 409 wake-will-not-start. Kills a predicate that returns early on a
+// nil config or never consults the controller's skip.
+func TestWakeStartRefusalRefusesUnknownStateRows(t *testing.T) {
+	for _, withConfig := range []bool{true, false} {
+		for _, info := range []sessionpkg.Info{
+			{ID: "gc-1", Template: "worker", MetadataState: "future-state"},
+			{ID: "gc-1", Template: "worker", MetadataState: "archived", ContinuityEligible: "true"},
+		} {
+			cs := &controllerState{cityPath: t.TempDir(), cityBeadStore: beads.NewMemStore(), sp: runtime.NewFake()}
+			if withConfig {
+				cs.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			}
+			got, certain := cs.WakeStartRefusal(info)
+			if !certain || !strings.Contains(got, `"`+info.MetadataState+`"`) || !strings.Contains(got, "gc session close gc-1") {
+				t.Fatalf("config=%v state=%q: WakeStartRefusal = %q, certain %v; want a certain refusal naming the state and `gc session close gc-1`", withConfig, info.MetadataState, got, certain)
+			}
+		}
 	}
 }

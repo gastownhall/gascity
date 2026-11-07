@@ -243,7 +243,7 @@ func TestMain(m *testing.M) {
 	} else if bazeltest.IsBazel() {
 		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_2", "bd"); bd != "" {
+		if bd := runfilesBinaryAt("bd_bin_v1_3_4", "bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -656,7 +656,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.2"
+const wantPinnedBeadsModuleVersion = "v1.3.4"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -977,7 +977,7 @@ func isSubprocessTestLeaf(cmd, agentScript string) bool {
 	switch {
 	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
 		return true
-	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
+	case strings.Contains(cmd, "bd ready --assignee=worker --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"):
 		return true
 	case strings.Contains(cmd, agentScript):
 		return true
@@ -1111,6 +1111,9 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
+		// Presence-only switch that stops dolt forking a detached
+		// `dolt send-metrics`; internal/testenv sets it for the test process.
+		"DOLT_DISABLE_EVENT_FLUSH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -2343,6 +2346,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
@@ -2384,6 +2388,12 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
+	// internal/testenv sets this process-wide and the allowlist rebuilds the
+	// child env from scratch, so a standalone bd/dolt command forks a detached
+	// `dolt send-metrics` unless the allowlist carries it.
+	if got["DOLT_DISABLE_EVENT_FLUSH"] != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q, want 1 carried into standalone bd env", got["DOLT_DISABLE_EVENT_FLUSH"])
 	}
 	for _, key := range []string{
 		"GC_DOLT",
@@ -2674,6 +2684,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
 		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
+	}
+	if !strings.Contains(string(data), `"versioncheck.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt's release version check on (a synchronous HTTPS fetch inside every `dolt version`): %s", string(data))
 	}
 }
 

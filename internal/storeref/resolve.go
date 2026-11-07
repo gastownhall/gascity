@@ -696,7 +696,9 @@ func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, erro
 		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
 			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
 		}
-		b, err := leg.Leg.Store.Get(id)
+		// Each leg is a planned residence probe: missing here is how the walk
+		// moves to the next leg, so the read is marked federated.
+		b, err := beads.FederatedGet(leg.Leg.Store, id)
 		switch {
 		case err == nil:
 			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil

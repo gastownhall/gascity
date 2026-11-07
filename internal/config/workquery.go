@@ -29,6 +29,12 @@ type QueryTopology struct {
 	//
 	// The zero value is the single-store city every deployment has today, and
 	// the generated command for it is byte-for-byte the one it already runs.
+	//
+	// It is also the switch for reading through the federated reader on a city
+	// that relocates nothing: cmd/gc sets it per agent for the discovery
+	// placeholders a cross-store-eligible agent's prompt renders on a city with
+	// rigs (promptQueryTopology). A topology built that way describes that
+	// agent's prompt, not the city.
 	FederatedReady bool
 }
 
@@ -182,11 +188,28 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
-// probes: they must drop a held bead and nothing else, so they never take the
-// pool-demand serve rules' wider label set.
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped probes (the
+// in_progress ones and the bd-1.0.4 assigned-ready wisp probe): they must drop
+// a held bead and nothing else, so they never take the pool-demand serve rules'
+// wider label set.
 func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
+}
+
+// mailMessageBeadType is the issue_type every mail bead carries
+// (internal/mail/beadmail). Mail is read, never claimed as work (#4419).
+const mailMessageBeadType = "message"
+
+// excludeMailMessagesJQClause returns a jq select(...) clause dropping mail
+// beads, for the jq filters over reads that can return them: the ephemeral
+// `bd query` snapshots, which bd's own ready-path message exclusion never
+// reaches, and the federated in_progress window (servableInProgressRowsScript).
+// The type is trimmed and case-folded the way the
+// hook's hookClaimCandidateIsMessage compares it, so no tier serves a row the
+// hook is certain to refuse; tostring keeps a non-string type from erroring
+// the filter, which its discarded stderr would read as an empty tier.
+func excludeMailMessagesJQClause() string {
+	return ` | select(((.issue_type // .type // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) != "` + mailMessageBeadType + `")`
 }
 
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
@@ -199,6 +222,11 @@ func excludeHoldLabelsJQClause() string {
 func heldLabelCountJQ() string {
 	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
+
+// openBlockerCountJQ counts the blockers in a blocked_by array that are not
+// closed. Status interpretation is otherwise left to the shared Go filter, so
+// any non-closed status counts.
+const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
 
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
@@ -256,7 +284,14 @@ func (r PoolDemandServeRules) ShellArgs() string {
 	for _, typ := range r.ExcludeTypes {
 		args += " --exclude-type=" + typ
 	}
-	for _, label := range r.ExcludeLabels {
+	return args + excludeLabelArgs(r.ExcludeLabels)
+}
+
+// excludeLabelArgs renders labels as the repeated --exclude-label flags both
+// readers take.
+func excludeLabelArgs(labels []string) string {
+	var args string
+	for _, label := range labels {
 		args += ` --exclude-label "` + label + `"`
 	}
 	return args
@@ -334,15 +369,20 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
-// every label the routed pool-demand tier refuses
+// plus the epic exclusion, the mail exclusion and, when excludeServeLabels is
+// set, the exclusion of every label the routed pool-demand tier refuses
 // (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// Mail is excluded before any tier truncates: a mail bead is ephemeral and
+// assigned to its recipient, so an assigned tier that served it as its only
+// row would exit before the routed tier ran, and the hook refuses it (#4419,
+// #5815). bd's own ready path already omits messages; this jq path is the
+// bd-1.0.4 stand-in for it.
 // Dependency gating is layered on top by each caller, since `bd query --json`
 // exposes only a `dependency_count` scalar — never a `dependencies` array —
 // which is precise enough to prove "definitely no dependencies" but not to
 // resolve whether a nonzero count is still open.
 func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
-	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))` + excludeMailMessagesJQClause()
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
@@ -479,6 +519,13 @@ func preferExecutablePoolDemandScript() string {
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
+// RoutedReadyClaimWindow is how many routed ready rows a pool worker's claim
+// tier reads (routedReadyTierCommand). A worker claims only from these rows,
+// so the controller names pool demand bound to a managed worktree only for
+// rows inside this window: a seat placed for a row behind it would be served
+// none of its own work.
+const RoutedReadyClaimWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path rides the reader's canonical
@@ -491,12 +538,12 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
 	// rows — the bounded window contained zero P0s until the older rows
 	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// created_at term. The tier stays widened past a single row
+	// (RoutedReadyClaimWindow, not limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -629,24 +676,104 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 //     deferral time. Adoption of an in_progress row performs no status CAS, and
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
+//
+// The federated read is not one row. `gc ready` merges every store into one
+// ready-ordered answer, so --limit=1 there is one row for the whole city, and
+// the serve gate skips that row when it is blocked or held: a claim the session
+// could resume, in another store or further down the same one, was then never
+// read, and the fresh-claim tiers behind it handed the session another bead —
+// the accumulation this tier exists to stop. A single-store `bd list` answers
+// for one store, and `gc hook` runs it once per store, so there one store's
+// blocked row never costs another store its read. The federated form reads the
+// candidates window instead, with the dispatch holds excluded and the answer
+// ended at its first unblocked row (`gc ready --until-unblocked`), and keeps
+// its first servable row (servableInProgressRowsScript).
+//
+// The cut keeps the window from widening the read's failure. The reader fails a
+// read whose rows' blockers it cannot resolve, so a window read whole failed on
+// a row the tier never serves: a claim behind the session's resumable one,
+// blocked by a bead no store holds, hid the resumable claim and failed the
+// query. With the holds excluded the first unblocked row is the first servable
+// one, so a row past it is never resolved, and one at or ahead of it still
+// fails the query, as the one-row read did.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+	if topo.FederatedReady {
+		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.DispatchHoldLabels)+" --until-unblocked", inProgressCandidatesLimit) +
+			servableInProgressRowsScript(1)
+	}
+	return assignedInProgressRead(shellVar, topo, "", 1)
 }
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
 // after the stock one-row recovery tier has identified a graph workflow root.
 // This preserves that tier's byte and fail-open contracts while preventing the
-// root from hiding another in-progress step owned by the same session.
+// root from hiding another in-progress step owned by the same session. The
+// federated form keeps only the window's servable rows, so the first non-anchor
+// row serveOrdinaryInProgressCandidateScript picks is one the gate can serve.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
+	command := assignedInProgressRead(shellVar, topo, "", inProgressCandidatesLimit)
+	if topo.FederatedReady {
+		command += servableInProgressRowsScript(0)
+	}
+	return command
 }
 
-func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
+// inProgressCandidatesLimit bounds the crash-recovery tier's multi-row reads:
+// the candidates read behind a graph anchor, and the federated tier's own read.
+// A servable claim behind more than this many gated ones is not read, and the
+// tier falls through as it does when its window has no servable row.
+const inProgressCandidatesLimit = 20
+
+// servableInProgressRowsScript narrows the federated in_progress read held in
+// $r to the rows the crash-recovery serve gate would serve, in the reader's
+// order, keeping the first limit of them (0 keeps them all).
+//
+// It reads each row the way the gate reads a federated row: the carried
+// blocked_by, where an open blocker skips the row (the reader attaches the field
+// to every row with a blocking edge, so a row without it has none), and the
+// dispatch hold labels. On the tier's own read the reader has already excluded
+// the holds and ended the answer at its first unblocked row, so the row kept is
+// that one; on the candidates read behind a graph anchor every servable row is
+// kept. It runs before the gate, not instead of it: the row it keeps still goes
+// through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
+// for a row that carries no blocked_by.
+//
+// It also drops mail the way the hook refuses it. The read already drops type
+// message (assignedInProgressRead), but its match is exact, so a padded or
+// differently cased spelling reaches this script, which must not serve a row
+// the hook refuses (#5815).
+//
+// It fails open like the gate. Output jq cannot parse leaves $r as the reader
+// printed it, and the gate then serves it unchanged; a window with no servable
+// row becomes "[]", so the tier falls through to the ready tiers, as it did when
+// its one row was blocked.
+func servableInProgressRowsScript(limit int) string {
+	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `gc_servable_in_progress=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$gc_servable_in_progress" ] && r="$gc_servable_in_progress"; `
+}
+
+// assignedInProgressRead is the crash-recovery tier's in_progress read for one
+// identity, with args after the assignee, bounded to limit rows. The failure
+// clause names the reader alone, whatever args the read carries.
+//
+// The federated read drops mail itself (--exclude-type=message). It lists both
+// storage tiers, so it holds the session's mail wisps, and a --status read
+// applies no infra-type exclusion, unlike bd's ready path and `bd list`. The
+// reader drops the type before its bound and its --until-unblocked cut, which a
+// filter on its answer cannot do: a claimed mail wisp has no blocker and sorts
+// ahead of a newer claim, so the cut would end the answer at the mail and the
+// claim behind it would never be read (#5815).
+func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
 	reader := bdListInProgressCommand
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
+		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) + `)` +
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -694,14 +821,12 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // ready queue. The hold dimension is the same defect class as the dependency
 // dimension above, so it shares the same fall-through.
 //
-// Scope (ga-5736js): the hold check is the WORK-SERVING decision only. The
-// assignee-scoped probes that answer "does a session still need to exist" —
-// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
-// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
-// assignment still keeps its owner visible to demand and recovery accounting.
-// Those callers pass checkHold=false, which omits every `.labels` reference
-// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
-// pins the omission, not just the outcome.
+// Scope (ga-5736js): the hold check is the WORK-SERVING decision only, and it
+// reads the candidate row after the tier's read has cut it to one. The wisp
+// probes (ephemeralAssignedInProgressProbeScript and
+// ephemeralAssignedReadyProbeScript) drop held rows inside their own jq
+// selection, ahead of their `.[:1]` cut, so they pass checkHold=false: the
+// count here would always read zero for them.
 //
 // Enrichment is fail-open: a failed or unparseable `bd show`, or an
 // unparseable `bd list` row, degrades to the stock behavior of serving the
@@ -767,7 +892,6 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
 		`.dependency_type == "conditional-blocks") | {id, status}]`
-	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
 
 	const enrichJQ = `map(. + {blocked_by: $bb})`
 	const carriedBlockedByJQ = `.[0].blocked_by // empty`
@@ -817,10 +941,19 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// The read excludes beadmeta.DispatchHoldLabels (never the human label) before
+// its --limit=1. Its callers serve the first row and exit the query, so a held
+// row it returned would be stripped by the hook's held-candidate filter and
+// starve every tier below (#8010); filtering ahead of the limit also keeps a
+// held head from hiding an unheld assignment for the same identity. On bd-1.0.4
+// the wisp probe behind it (ephemeralAssignedReadyProbeScript) filters the same
+// way.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1)` +
+		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
+		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -899,20 +1032,22 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // this probe's jq consumes the `bd query` snapshot, never raw stdout, so it
 // never serves an unparseable row. An unparseable or failed scan does not fall
 // through as an empty tier either: the snapshot read itself fails the query
-// (ephemeralStatusSnapshotShell). The hold-transparent existence
-// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+// (ephemeralStatusSnapshotShell). The open tier's wisp probe,
+// ephemeralAssignedReadyProbeScript, drops held rows the same way (#8010).
 //
 // It must also apply the same inProgressBlockedByEnrichmentScript gate before
 // serving a surviving candidate, or a blocked in_progress wisp step is
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
-	// the post-truncation nheld check here would always read zero.
+	// the post-truncation nheld check here would always read zero. Mail is
+	// dropped there too: a claimed mail wisp is never work, so it must not hold
+	// the crash-recovery slot (#5815).
 	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
 		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
@@ -923,7 +1058,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -945,19 +1080,25 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 // front door put the wisp somewhere a plain read cannot see it, which is the
 // single-store city.
 //
+// It is the wisp half of the assigned-ready tier: like assignedReadyTierCommand
+// ahead of it, it serves its first row and exits the query. So it drops
+// beadmeta.DispatchHoldLabels (never the human label) inside its jq selection,
+// before the `.[:1]` cut. A held wisp it served would be stripped by the hook's
+// held-candidate filter and starve every tier below it (#8010), and filtering
+// ahead of the cut keeps a held wisp from hiding an unheld one assigned to the
+// same identity.
+//
 // It tries the fast dependency_count == 0 candidate first, then falls back to
 // a dependency_count > 0 candidate enriched via a real bd show --json call,
 // so a step whose dependencies have since all closed is still reachable —
-// see ephemeralReadyDependencyCandidateFilterJQ. The enrichment call passes
-// checkHold=false: this is an assignee-scoped existence probe, not the
-// in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
-// pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
+// see ephemeralReadyDependencyCandidateFilterJQ.
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause()
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -965,8 +1106,9 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		// federated=false: this row comes from `bd query`, which never
 		// carries a resolved blocked_by, so skip straight to the bd show
-		// fallback. checkHold=false: ga-5736js, this probe must stay
-		// hold-transparent.
+		// fallback. checkHold=false: the selector above already excludes
+		// held candidates before the `.[:1]` truncation, so the
+		// post-truncation nheld check here would always read zero.
 		inProgressBlockedByEnrichmentScript(false, false) +
 		`fi; `
 }
@@ -1133,6 +1275,17 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // work_query in their agent config; that custom query is returned unchanged
 // above.
 //
+// The assigned-ready tier skips dispatch-held rows (never the human label),
+// in its ready read and in its bd-1.0.4 wisp probe alike, so a held assignment
+// is neither served nor able to mask other work.
+//
+// Mail (issue_type=message) is withheld from every tier: it is read, never
+// claimed (#4419). bd's ready path and `bd list` omit it natively, the
+// federated in_progress read passes --exclude-type=message, and the
+// jq-filtered tiers drop it before they truncate, so a recipient's mail wisp
+// cannot stand in for that tier's only row and end the query before the
+// routed tier runs (#5815).
+//
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
@@ -1193,10 +1346,9 @@ func (a *Agent) EffectiveAssignedInProgressQuery() string {
 }
 
 // EffectiveAssignedInProgressQueryFor returns the assigned-in-progress query
-// built for a city topology. It is topology-BLIND today: the crash-recovery tier
-// reads `bd list`, not the ready set — see
-// standardAssignedInProgressWorkQueryScript for why federating it is ga-601v2's
-// slice and not this one's.
+// built for a city topology. On a federated topology its crash-recovery read is
+// `gc ready --status in_progress` rather than single-store `bd list` — see
+// assignedInProgressTierCommand.
 func (a *Agent) EffectiveAssignedInProgressQueryFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryAssignedInProgress, topo)
 }

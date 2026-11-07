@@ -1941,7 +1941,7 @@ func TestExecConformance(t *testing.T) {
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
-		return NewSeamBacked(execConformanceScript(caseT, t, &fixture)),
+		return NewSeamBackedForCity(execConformanceScript(caseT, t, &fixture), "exec-conformance", "/exec-conformance"),
 			runtime.Config{WorkDir: caseT.TempDir()},
 			fmt.Sprintf("exec-conform-%06d", atomic.AddInt64(&counter, 1))
 	})

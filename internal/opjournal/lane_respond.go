@@ -65,13 +65,6 @@ func definitiveLook(probe Probe, conv ConversationView) (pending string, looked 
 	}
 }
 
-// undecodableRow reports an error that a retry will not clear: a row this
-// build cannot decode.
-func undecodableRow(err error) bool {
-	return errors.Is(err, ErrCorruptOp) || errors.Is(err, ErrUnsupportedSchema) ||
-		errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrUnsupportedKind)
-}
-
 // noteRaisings notes what a definitive look shows (noteLook), then reads the
 // occurrence each respond candidate answers. A probe sees one prompt where a
 // runtime's request ids repeat; RecordRaising numbers it the next occurrence
@@ -106,7 +99,7 @@ func (l *ConversationLane) noteLook(ctx context.Context, rt *runtimeSnap, rp rul
 	if pending != "" {
 		r, _, err := l.store.RecordRaising(conv.ID, conv.Generation, pending, FactBasisObserved, l.now())
 		switch {
-		case errors.Is(err, ErrInvalidRequest), undecodableRow(err):
+		case errors.Is(err, ErrInvalidRequest), Undecodable(err):
 			probe.Pending = PendingUnknown
 			if req, _, perr := ParseInteractionOccurrence(last); perr == nil && req == pending {
 				shown = last
@@ -180,7 +173,7 @@ func (l *ConversationLane) clearGone(occs []string, conv ConversationView, pendi
 		}
 		f := interactionFact(FactInteractionResolved, conv.ID, conv.Generation, occ)
 		f.At, f.Basis, f.Reason = l.now(), FactBasisObserved, ResolvedCleared
-		if err := l.store.endRaising(f); err != nil && !undecodableRow(err) {
+		if err := l.store.endRaising(f); err != nil && !Undecodable(err) {
 			return fmt.Errorf("ending interaction %s of conversation %s: %w", occ, conv.ID, err)
 		}
 	}
@@ -356,7 +349,7 @@ func (s *Store) endItem(next Op, closing map[string]bool, now time.Time) (beads.
 		ok = raised && !resolved
 	}
 	switch {
-	case err != nil && undecodableRow(err):
+	case err != nil && Undecodable(err):
 		return beads.GuardedItem{}, false, nil
 	case err != nil || !ok:
 		return beads.GuardedItem{}, false, err
@@ -397,7 +390,7 @@ func (s *Store) endClosed(next Op, now time.Time) error {
 	if !ok && readErr == nil {
 		return nil
 	}
-	if err := s.endRaising(f); err != nil && !undecodableRow(err) {
+	if err := s.endRaising(f); err != nil && !Undecodable(err) {
 		return errors.Join(readErr, err)
 	}
 	return readErr
@@ -417,7 +410,7 @@ func (s *Store) endTerminal(next Op, now time.Time) error {
 	case f.Reason == ResolvedUnanswered:
 		return s.endClosed(next, now)
 	}
-	if err := s.endRaising(f); err != nil && !undecodableRow(err) {
+	if err := s.endRaising(f); err != nil && !Undecodable(err) {
 		return err
 	}
 	return nil

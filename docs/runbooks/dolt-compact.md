@@ -11,7 +11,7 @@ In production cities, `mol-dog-compactor` handles compaction automatically. If y
 
 ## How It Runs
 
-The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours. For each eligible database without shared remote history, `gc dolt compact` collapses history after the provenance watermark into one commit, then runs `CALL DOLT_GC('--full')` to reclaim orphaned chunks. Databases with configured remotes default to working-set GC without rewriting shared history. If a database has fewer than `GC_DOLT_COMPACT_THRESHOLD_COMMITS` compactable commits (default: 2000), that database is skipped on that run.
+The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours. For each eligible database without shared remote history, `gc dolt compact` collapses history after the provenance watermark into one commit, then runs `CALL DOLT_GC('--full', '--archive-level=0')` to reclaim orphaned chunks. The flag keeps Dolt from writing archives whose duplicated zstd dictionaries can exhaust memory mid-GC (see [Dolt Bloat Recovery](/troubleshooting/dolt-bloat-recovery)). Databases with configured remotes default to working-set GC without rewriting shared history. If a database has fewer than `GC_DOLT_COMPACT_THRESHOLD_COMMITS` compactable commits (default: 2000), that database is skipped on that run.
 
 The order file ships in the dolt pack, which is synced automatically, so do not edit `orders/mol-dog-compactor.toml` directly — local edits are overwritten. To change the cadence or the compactor's environment, add a city-level override to `city.toml`:
 

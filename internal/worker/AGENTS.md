@@ -73,8 +73,10 @@ when the context ends. Take the bound from the caller's own context.
   did not get, while the check refuses as unknown (`idleUnknown`), since only
   a busy reading counts as the turn running, and the settle counts it a
   failed read, never the turn's end nor the turn running: a settle whose
-  reads all failed, after family waits that passed or could not answer, is
-  `session.TurnEndUnreadError`, which withholds a restart on failure. That
+  reads all failed, after family waits that passed, could not answer
+  (`runtime.ErrRuntimeUnavailable`) or timed out without one reading that
+  showed the session busy (`runtime.ErrWaitUnobserved`, RUNTIME-CONTRACT-016),
+  is `session.TurnEndUnreadError`, which withholds a restart on failure. That
   includes `ErrObservationOutstanding`, which every later check's own
   reading gets at once while one an earlier check left wedged is still out.
   A read that decides which turn to act on, such as the lane interrupt's
@@ -129,6 +131,17 @@ end between two reads can fall out of it. `CurrentTurn` scans the transcript's
 last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
 since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
 about a turn that began before that window.
+
+For a family whose ends are inferred (Claude), the idle overlay ends a quiet
+open turn after two idle readings, at the observer's clock. A turn the
+transcript shows stopped at a provider error (`sessionlog.TurnScan.Stopped`)
+ends failed on that error instead, at the error's own time: the end the
+transcript records once the next turn starts. So every handle reads the same
+end from the unchanged transcript, and a refusal never reads as newer than it
+is. A failed turn carries the error its transcript recorded
+(`runtime.EndedTurn.Failure`): the source's own class and HTTP status, whether
+the source classed it a rate limit, and the text, for people only. Claude and
+Codex transcripts record it; a family that records none leaves it zero.
 
 ## Keyed deliveries
 

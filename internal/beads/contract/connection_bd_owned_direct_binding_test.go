@@ -1,7 +1,9 @@
 package contract
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -30,13 +32,51 @@ func TestScopeCarriesBdOwnedDirectBinding(t *testing.T) {
 		},
 		// The gc-managed legacy non-regression: bd's `init --server` records
 		// whichever server it was pointed at, gc's own managed one included, so
-		// a gc-managed legacy scope carries a binding too. The host is what
-		// tells the two apart, and that scope must still be canonicalised.
-		"loopback binding is gc's own managed server": {
+		// a gc-managed legacy scope carries a binding too. A loopback host does
+		// not tell the two apart; the port gc recorded for the city's managed
+		// Dolt does, and that scope must still be canonicalised.
+		"loopback binding on gc's recorded managed port is gc's own server": {
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
+				`"dolt_server_host":"127.0.0.1","dolt_server_port":3307,"dolt_database":"hq"}`,
+			config: func(t *testing.T, scopeRoot string) {
+				writeBdTemplateConfig(t, fs, scopeRoot, "gc")
+				dir := filepath.Join(scopeRoot, ".gc", "runtime", "packs", "dolt")
+				if err := fs.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.WriteFile(filepath.Join(dir, "dolt-state.json"), []byte(`{"running":false,"pid":0,"port":3307}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: false,
+		},
+		// And the shape the old host rule refused: a dolt sql-server the
+		// operator runs on this machine, in a city gc runs no Dolt for.
+		"loopback binding with no gc-managed record is bd's": {
 			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
 				`"dolt_server_host":"127.0.0.1","dolt_server_port":3307,"dolt_database":"hq"}`,
 			config: func(t *testing.T, scopeRoot string) { writeBdTemplateConfig(t, fs, scopeRoot, "gc") },
-			want:   false,
+			want:   true,
+		},
+		// The record settles a loopback binding only. A hosted binding is bd's
+		// even on a port both of gc's records name: 3307 is gc's legacy default
+		// and a common Dolt port, so a record must never claim a hosted store.
+		"hosted binding on gc's recorded managed port is bd's": {
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
+				`"dolt_server_host":"db.example","dolt_server_port":3307,"dolt_database":"hosted"}`,
+			config: func(t *testing.T, scopeRoot string) {
+				writeBdTemplateConfig(t, fs, scopeRoot, "gc")
+				dir := filepath.Join(scopeRoot, ".gc", "runtime", "packs", "dolt")
+				if err := fs.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+					if err := fs.WriteFile(filepath.Join(dir, name), []byte(`{"running":true,"pid":1,"port":3307}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: true,
 		},
 		"socket binding names this host": {
 			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
@@ -97,5 +137,188 @@ func TestScopeCarriesBdOwnedDirectBindingIgnoresTheManagedHostOverride(t *testin
 	}
 	if got {
 		t.Fatalf("a binding naming gc's own managed host classified as bd-owned")
+	}
+}
+
+// A loopback binding names a server on this host, and gc's own managed Dolt is
+// only one of the servers that can be spelled that way. Only gc's own runtime
+// record for the city can claim a loopback port.
+func TestLoopbackBindingClassifiedByManagedRuntimeRecord(t *testing.T) {
+	fs := fsys.OSFS{}
+	const loopbackBinding = `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
+		`"dolt_server_host":"127.0.0.1","dolt_server_port":17333,"dolt_database":"hv"}`
+	for name, tc := range map[string]struct {
+		published string
+		provider  string
+		want      bool
+	}{
+		"no gc-managed runtime record: the loopback server is bd's upstream": {want: true},
+		"gc's published record names another port": {
+			published: `{"running":true,"pid":1,"port":3307,"data_dir":"x"}`, want: true,
+		},
+		"gc's published record names this port, server stopped": {
+			published: `{"running":false,"pid":0,"port":17333,"data_dir":"x"}`, want: false,
+		},
+		"gc's provider state names this port": {
+			provider: `{"running":false,"pid":0,"port":17333,"data_dir":"x"}`, want: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "hv")
+			writeRawMetadata(t, fs, rig, loopbackBinding)
+			writeBdTemplateConfig(t, fs, rig, "hv")
+			runtimeDir := filepath.Join(city, ".gc", "runtime", "packs", "dolt")
+			if err := fs.MkdirAll(runtimeDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.published != "" {
+				if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(tc.published), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.provider != "" {
+				if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-provider-state.json"), []byte(tc.provider), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, rig, "hv")
+			if err != nil {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding(): %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A record gc cannot read is not a guess either way; the classification must
+// fail and name the file.
+func TestMalformedManagedRuntimeRecordIsAnError(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "hv")
+			writeRawMetadata(t, fs, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+				`"dolt_server_host":"127.0.0.1","dolt_server_port":17333,"dolt_database":"hv"}`)
+			writeBdTemplateConfig(t, fs, rig, "hv")
+			dir := filepath.Join(city, ".gc", "runtime", "packs", "dolt")
+			if err := fs.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.WriteFile(filepath.Join(dir, name), []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, rig, "hv")
+			if err == nil {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, nil; want an error naming %s", got, name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("error %q does not name %s", err, name)
+			}
+		})
+	}
+}
+
+// Every loopback spelling DoltHostIsLocal accepts is classified by the record,
+// not by its spelling.
+func TestLoopbackSpellingsWithNoRecordAreBds(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, host := range []string{"127.0.0.1", "localhost", "::1", "127.0.0.2"} {
+		t.Run(host, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "hv")
+			writeRawMetadata(t, fs, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+				`"dolt_server_host":"`+host+`","dolt_server_port":17333,"dolt_database":"hv"}`)
+			writeBdTemplateConfig(t, fs, rig, "hv")
+			got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, rig, "hv")
+			if err != nil {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding(): %v", err)
+			}
+			if !got {
+				t.Fatalf("loopback %q binding with no gc record classified as gc's", host)
+			}
+		})
+	}
+}
+
+// The record is read only where it decides the answer, so a malformed record
+// never fails a scope whose gc-authoritative config already says it is gc's.
+func TestMalformedRecordIsNotReadWhenConfigDecides(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeRawMetadata(t, fs, city, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+		`"dolt_server_host":"127.0.0.1","dolt_server_port":3307,"dolt_database":"hq"}`)
+	if _, err := EnsureCanonicalConfig(fs, filepath.Join(city, ".beads", "config.yaml"), ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+		DoltMode:       "server",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(city, ".gc", "runtime", "packs", "dolt")
+	if err := fs.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(dir, "dolt-state.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, city, "gc")
+	if err != nil || got {
+		t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, %v; want false, nil", got, err)
+	}
+}
+
+// gc.endpoint_origin is gc's own stamp, so a config carrying one is gc's claim
+// whether or not it still validates. Validity is the reconciler's question: an
+// inherited_city mirror the city's endpoint has moved away from is drift the
+// boot sync re-mirrors, and gc initializes such a rig with `bd init --server`
+// against the city's server, so its metadata.json carries bd's binding too.
+// Strict validation here would fail that rig's classification, and with it
+// every boot and port sync, before the repair runs.
+func TestGCStampedConfigIsGCsEvenWhenItDrifted(t *testing.T) {
+	fs := fsys.OSFS{}
+	for name, tc := range map[string]struct {
+		host     string
+		cityPort string
+		rigUser  string
+	}{
+		"loopback mirror of a dolt.user the city cleared": {host: "127.0.0.1", cityPort: "3307", rigUser: "stale-user"},
+		"hosted mirror of a dolt.user the city cleared":   {host: "db.example", cityPort: "3307", rigUser: "stale-user"},
+		"loopback mirror of a port the city moved off":    {host: "127.0.0.1", cityPort: "3308"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "fe")
+			cityConfig := "issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\n" +
+				"dolt.host: " + tc.host + "\ndolt.port: " + tc.cityPort + "\n"
+			rigConfig := "issue_prefix: fe\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n" +
+				"dolt.host: " + tc.host + "\ndolt.port: 3307\n"
+			if tc.rigUser != "" {
+				rigConfig += "dolt.user: " + tc.rigUser + "\n"
+			}
+			for scope, cfg := range map[string]string{city: cityConfig, rig: rigConfig} {
+				if err := fs.MkdirAll(filepath.Join(scope, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(cfg), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeRawMetadata(t, fs, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+				`"dolt_server_host":"`+tc.host+`","dolt_server_port":3307,"dolt_database":"fe"}`)
+			var invalid *InvalidCanonicalConfigError
+			if _, err := ResolveScopeConfigState(fs, city, rig, "fe"); !errors.As(err, &invalid) {
+				t.Fatalf("fixture: ResolveScopeConfigState() error = %v, want the drifted mirror rejected", err)
+			}
+
+			got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, rig, "fe")
+			if err != nil || got {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, %v; want false, nil", got, err)
+			}
+		})
 	}
 }
