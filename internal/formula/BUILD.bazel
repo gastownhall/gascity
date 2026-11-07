@@ -50,6 +50,7 @@ go_test(
         "fragment_test.go",
         "graph_test.go",
         "graphv2_validation_test.go",
+        "input_lifecycle_test.go",
         "parser_test.go",
         "ralph_iteration_test.go",
         "ralph_test.go",

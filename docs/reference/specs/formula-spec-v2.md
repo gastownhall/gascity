@@ -180,6 +180,7 @@ declaration as an error.
 | `description` | string | Human-readable description; supports `{{var}}` substitution |
 | `requires` | table | Host capability requirements. `formula_compiler` (a semver comparator) is the only axis; unknown axes fail with `formula.requirement_unknown` (section 5) |
 | `contract` | string | Deprecated v2 opt-in. Only valid value: `"graph.v2"`; anything else fails validation. Prefer `[requires]` (section 5) |
+| `input_lifecycle` | string | `graph` or `external`; missing retains external-input retirement. Inherited from the first declaring parent unless the child overrides it |
 | `extends` | []string | Parent formulas to compose from (section 1.7) |
 | `vars` | table | Template variable declarations (section 1.4) |
 | `steps` | []table | Work items to create (section 1.3) |
@@ -194,6 +195,47 @@ declaration as an error.
 
 Unknown top-level keys are silently ignored, with one exception: unknown
 keys inside `[requires]` are hard errors (section 5).
+
+#### Input completion policy
+
+A workflow that closes its sources before finalization can declare:
+
+```toml
+formula = "settle-and-report"
+input_lifecycle = "graph"
+[requires]
+formula_compiler = ">=2.1.0"
+```
+
+For formulas v2, compilation stamps a declared policy as `gc.input_lifecycle`
+on the workflow root only. Undeclared recipes gain no new metadata. Child
+steps, sources and separately compiled item formulas do not inherit the root's
+stamp. Existing persisted roots keep their own policy; editing a formula does
+not migrate or reopen an existing run. Declaring this field on a single-agent
+v1 formula is rejected.
+
+With `graph`, terminal or foreign-handed-off input does not retire the workflow.
+Dependencies, cancellation and finalization still govern its remaining work,
+including ordinary finalization and post-settlement reporting. This grants no
+authority over foreign sources. To abandon an obsolete graph-owned run, cancel
+the run explicitly rather than closing or handing off its sources.
+
+Missing or `external` preserves input-terminal retirement, including handoff
+and sibling-worker classification. Unknown declarations fail validation. An
+unknown persisted root policy logs the root and invalid value, withholds the
+candidate and retires nothing. A hook that does not recognize a future persisted
+value keeps withholding that work, potentially leaving demand with no delivered
+work until a compatible hook is deployed. Ordinary storage-error handling is unchanged.
+
+The proposed compiler capability is 2.1.0, subject to maintainer agreement.
+Adopters must require that capability: older compilers otherwise ignore this
+unknown field. Validation does not check that a formula's compiler constraint
+excludes 2.0.0; authors must set the minimum explicitly as above.
+Every worker-side `gc hook` must also run a policy-aware binary.
+A compiler requirement cannot prevent an older hook from ignoring the persisted
+root policy. Verify worker executables before enabling the declaration. This
+policy adds no stronger cancellation transaction or external-retirement cleanup
+guarantee.
 
 ### 1.3. Steps
 
