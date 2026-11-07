@@ -136,6 +136,7 @@ go_test(
         "caching_store_reconcile_recovery_internal_test.go",
         "caching_store_reconcile_twopass_test.go",
         "caching_store_refresh_row_internal_test.go",
+        "caching_store_refreshing_list_test.go",
         "caching_store_runid_test.go",
         "caching_store_scan_fences_internal_test.go",
         "caching_store_scan_internal_test.go",

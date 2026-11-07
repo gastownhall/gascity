@@ -16,6 +16,7 @@ import (
 var localWriteCensusExempt = map[string]string{
 	// Reads.
 	"CachingStore.CachedList":                            "read",
+	"CachingStore.CachedListRefreshing":                  "read",
 	"CachingStore.CachedReady":                           "read",
 	"CachingStore.Children":                              "read",
 	"CachingStore.ChildrenOfAny":                         "read",

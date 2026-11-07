@@ -102,22 +102,41 @@ store, or nothing, and never falls back to the other rigs' stores
 
 The list responses (`GET /sessions`, legacy `/v0/sessions`, `GET /agents`)
 resolve their rows' active beads through one `activeWorkLookup` per request:
-a single `statusStoreReadTimeout` window from the request context, shared by
-every row. A clean cache answer, hit or authoritative miss, is used even
-after the window closes. Any other read goes through
-`statusListStoreWithTimeout`: a bd-backed store is read through the
-context-bound clone `ScopedStoreLike` hands out, which bypasses its cache,
-and any other store is read as it is, in a goroutine the window abandons
-when it closes first. The first failed read (timeout, cancellation, error,
-or a partial result) fails the lookup, and no store is read after it: a row
-whose search reaches a store its cache cannot answer reports no work-store
-bead (that unread store may hold the winner), while a row the caches answer
-still resolves. The response is 200. The session lists report the failure
-in `active_work_errors` and keep `partial` for gaps in the list itself,
-which `gc session list` and the dashboard refuse to read as whole. The
-agent list reports it in `partial_errors`, since each row's state follows
-its active bead, and a partial agent list is never cached. Detail, create
-and rename views read live, outside any list window.
+a single `statusStoreReadTimeout` budget shared by every row and charged
+only for the time its reads take, so the runtime probes between rows spend
+none of it. The lookup reads a store's cache first, through
+`beads.RefreshingCachedLister`, which the controller's bead-policy layer
+forwards; that layer hides `CachedList`. A clean cache answers at once, hit
+or authoritative miss, so it needs no budget and is used even once the
+budget is spent. A cache holding a few dirty rows (at most the overlay's
+`dirtyOverlayMaxGets`) answers once its own refresh of them ends: List's
+dirty overlay, reading each row from the cache's backing (on bd a `bd show`,
+and a `bd dep list` for a row whose show carries no edges) on a goroutine of
+its own, one at a time per cache, which the row waits for under what is left
+of the budget. The refresh is not bound to the request: when it outlasts the
+budget, the row fails as waiting for its cache, the refresh runs on to the
+backing's own command timeouts, and a later request reads the rows it
+refreshed. Once the lookup has failed, or its budget is spent, a row neither
+starts a refresh nor waits for one, so a dirty cache the request first
+reaches after that stays dirty through the request. It heals when a later
+request reaches it with budget left, or when another read through the cache
+(`List`'s dirty overlay) or its reconcile refreshes it: of several dirty
+caches whose refreshes each outlast the budget, the lookup heals no more
+than one per request. Any other read runs under what is left
+of the budget, in a goroutine abandoned when it runs out first
+(`statusListStoreWithTimeout`), through the context-bound clone
+`ScopedStoreLike` hands out for a bd-backed store; any other store is read
+as it is. The first failed read (timeout, cancellation, error, or a partial
+result), a refresh the budget ran out waiting for, or a read the spent
+budget refuses, fails the lookup, and no store is read after it: a row whose
+search reaches a store its cache cannot answer reports no work-store bead
+(that unread store may hold the winner), while a row the caches answer still
+resolves. The response is 200. The session lists report the failure in
+`active_work_errors` and keep `partial` for gaps in the list itself, which
+`gc session list` and the dashboard refuse to read as whole. The agent list
+reports it in `partial_errors`, since each row's state follows its active
+bead, and a partial agent list is never cached. Detail, create and rename
+views read live, outside any list budget.
 
 ## Deferred creation baseline
 

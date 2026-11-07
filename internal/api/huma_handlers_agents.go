@@ -152,7 +152,6 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 	pools := newRequestSessionListing(sp)
 	activeWork := newActiveWorkLookup(ctx)
-	defer activeWork.close()
 	var agents []agentResponse
 	var partialErrors []string
 	for _, a := range cfg.Agents {

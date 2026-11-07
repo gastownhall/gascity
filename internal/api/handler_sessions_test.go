@@ -271,6 +271,12 @@ func (s *cachedOnlyListStoreForSessionTest) CachedList(query beads.ListQuery) ([
 	return rows, true
 }
 
+// CachedListRefreshing answers as CachedList: the stand-in cache holds no
+// dirty rows to refresh.
+func (s *cachedOnlyListStoreForSessionTest) CachedListRefreshing(_ context.Context, query beads.ListQuery) ([]beads.Bead, bool) {
+	return s.CachedList(query)
+}
+
 type apiListQueryCaptureStore struct {
 	beads.Store
 	listCalls []beads.ListQuery

@@ -1,8 +1,10 @@
 package beads
 
+import "context"
+
 // The bead cache's own read capabilities, named so a caller holding a class
 // handle reaches them through As instead of asserting an anonymous interface
-// on the store, which answers "no" on a handle (typed-stores T6a). All three
+// on the store, which answers "no" on a handle (typed-stores T6a). All four
 // are class-neutral reads, so As looks past a class guard for them
 // (passesClassGate).
 
@@ -25,8 +27,16 @@ type CachedLister interface {
 	CachedList(ListQuery) ([]Bead, bool)
 }
 
+// RefreshingCachedLister is a store that can answer a ListQuery from its
+// in-memory cache once the cache has refreshed its dirty rows, waiting for
+// that refresh no longer than ctx allows (CachingStore.CachedListRefreshing).
+type RefreshingCachedLister interface {
+	CachedListRefreshing(ctx context.Context, query ListQuery) ([]Bead, bool)
+}
+
 var (
-	_ CacheStatsReporter    = (*CachingStore)(nil)
-	_ CacheLivenessReporter = (*CachingStore)(nil)
-	_ CachedLister          = (*CachingStore)(nil)
+	_ CacheStatsReporter     = (*CachingStore)(nil)
+	_ CacheLivenessReporter  = (*CachingStore)(nil)
+	_ CachedLister           = (*CachingStore)(nil)
+	_ RefreshingCachedLister = (*CachingStore)(nil)
 )

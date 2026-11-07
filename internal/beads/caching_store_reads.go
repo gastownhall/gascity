@@ -227,7 +227,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, false
 	}
-	return c.collectCachedListLocked(query), true
+	return c.collectCachedListLocked(query, nil), true
 }
 
 // ObservedList returns a detached active-only cache census and an opaque stamp
@@ -249,7 +249,7 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 	if !c.observationAdmissibleLocked() {
 		return nil, CacheObservation{}, false
 	}
-	return c.collectCachedListLocked(query), CacheObservation{
+	return c.collectCachedListLocked(query, nil), CacheObservation{
 		owner:    c,
 		revision: c.observationRevision,
 		cacheRev: CacheRevision{Epoch: c.epoch, Seq: c.mutationSeq},
@@ -302,11 +302,16 @@ func (c *CachingStore) observationAdmissibleLocked() bool {
 		c.observationRevision != 0
 }
 
-// collectCachedListLocked materializes CachedList and ObservedList results.
-// Caller must hold c.mu for reading or writing.
-func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
+// collectCachedListLocked materializes CachedList, CachedListRefreshing and
+// ObservedList results, omitting the rows in suppressed, which a refresh of
+// the dirty rows found gone from the backing. Caller must hold c.mu for
+// reading or writing.
+func (c *CachingStore) collectCachedListLocked(query ListQuery, suppressed map[string]struct{}) []Bead {
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
+		if _, gone := suppressed[b.ID]; gone {
+			continue
+		}
 		if !query.Matches(b) {
 			continue
 		}

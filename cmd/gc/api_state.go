@@ -2348,17 +2348,19 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 // unwrap-and-rebuild work, reusing the same credential/env resolution as
 // every other bd-CLI store this package constructs. A class handle hides the
 // bd backing scopedStoreLike looks for, so a handle over the city or a rig
-// store, as the api's work reads pass from Stores(), is read as that store.
+// store, as the api's work reads pass from Stores(), is read as that store:
+// under the split-strict gate, as the work view the handle wraps, which
+// scopedStoreLike sees through and puts the clone back behind.
 func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
 	cs.mu.RLock()
 	cityPath := cs.cityPath
 	cfg := cs.cfg
-	if beads.SameStore(existing, cs.cityBeadStore) {
-		existing = cs.cityBeadStore
+	if city := splitStrictWorkView(cs.cityBeadStore); beads.SameStore(existing, city) {
+		existing = city
 	} else {
 		for _, store := range cs.beadStores {
-			if beads.SameStore(existing, store) {
-				existing = store
+			if rig := splitStrictWorkView(store); beads.SameStore(existing, rig) {
+				existing = rig
 				break
 			}
 		}

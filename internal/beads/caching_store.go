@@ -232,6 +232,10 @@ type CachingStore struct {
 	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
 
+	// dirtyRefreshRun is the latest refresh of the dirty rows that
+	// CachedListRefreshing starts (startDirtyRefresh), nil before the first.
+	dirtyRefreshRun atomic.Pointer[dirtyRefresh]
+
 	// ownEmits holds, per row, the snapshots this cache emitted within the
 	// recency window, so applyEvent tells its own echoes from other writers'
 	// events (ownEmission). ownEmitMu guards both and is never held while
@@ -267,9 +271,10 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //
 // A census is admitted only while the whole store's dirty set is empty, so any
 // dirty row withholds a covering census from every consumer. A dirty row is
-// refreshed by its next Get, by a List or Ready that overlays dirty rows, or
-// by the next reconcile. Count and CachedList never refresh one: Count falls
-// back to the backing and CachedList declines. Rows go dirty after:
+// refreshed by its next Get, by a List or Ready that overlays dirty rows, by
+// the refresh CachedListRefreshing starts, or by the next reconcile. Count
+// and CachedList never refresh one: Count falls back to the backing and
+// CachedList declines. Rows go dirty after:
 //   - a conditional write that failed and evicted (precondition, exhausted
 //     retries, or a lost CAS);
 //   - an ambiguous failure of a conditional write or SetMetadataBatch, whose

@@ -83,7 +83,6 @@ func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListIn
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	page := make([]sessionResponse, len(pageSessions))
 	activeWork := newActiveWorkLookup(ctx)
-	defer activeWork.close()
 	for j, sess := range pageSessions {
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeWork, false, 0, keyedTranscriptPaths)

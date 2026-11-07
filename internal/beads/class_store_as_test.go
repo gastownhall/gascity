@@ -464,6 +464,7 @@ func TestClassGateAllowlist(t *testing.T) {
 		"ConditionalAssignmentReleaser": passesClassGate[ConditionalAssignmentReleaser](),
 		"ConditionalAssigneeTransferer": passesClassGate[ConditionalAssigneeTransferer](),
 		"AbsentBlockedReader":           passesClassGate[AbsentBlockedReader](),
+		"RefreshingCachedLister":        passesClassGate[RefreshingCachedLister](),
 	} {
 		if !got {
 			t.Errorf("%s is not class-neutral: a gate hides it", name)

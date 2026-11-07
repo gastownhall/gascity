@@ -312,7 +312,9 @@ func TestScopedStoreLikePreservesBeadPolicyWrapper(t *testing.T) {
 // hands out, and a handle hides the bd backing scopedStoreLike rebuilds from.
 // The controller reads a handle over its city or rig store as that store, so
 // the read still gets the ctx-bound clone the raw store gets (ga-cdmx6x), and
-// a handle over a store that is not bd-backed still gets none.
+// a handle over a store that is not bd-backed still gets none. Under the
+// split-strict gate a handle wraps the gate's work view of the store, and the
+// clone comes back behind that view.
 func TestControllerScopedStoreLikeReadsWorkHandlesAsTheirStores(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
@@ -335,20 +337,25 @@ func TestControllerScopedStoreLikeReadsWorkHandlesAsTheirStores(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		existing beads.Store
+		handle   bool
 		wantDir  string
 	}{
-		{"city work handle", cs.Stores().Work(), cityDir},
-		{"rig work handle", rig, rigDir},
-		{"raw rig store", rigStore, rigDir},
+		{"city work handle", cs.Stores().Work(), true, cityDir},
+		{"rig work handle", rig, true, rigDir},
+		{"raw rig store", rigStore, false, rigDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scoped, err := cs.ScopedStoreLike(context.Background(), tc.existing)
 			if err != nil {
 				t.Fatalf("ScopedStoreLike: %v", err)
 			}
-			bs, ok := scoped.(*beads.BdStore)
+			clone, _, viewed := splittest.ViewFront(scoped)
+			if wantViewed := tc.handle && splitStrictSeam != nil; viewed != wantViewed {
+				t.Fatalf("ScopedStoreLike() = %T, behind the gate's view %v, want %v", scoped, viewed, wantViewed)
+			}
+			bs, ok := clone.(*beads.BdStore)
 			if !ok {
-				t.Fatalf("ScopedStoreLike() = %T, want the *beads.BdStore clone", scoped)
+				t.Fatalf("ScopedStoreLike() = %T, want the *beads.BdStore clone", clone)
 			}
 			if got := bs.Dir(); got != tc.wantDir {
 				t.Errorf("clone Dir() = %q, want %q", got, tc.wantDir)

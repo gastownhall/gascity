@@ -18,12 +18,10 @@ type listResponse struct {
 }
 
 // newTestActiveWorkLookup is a list response's active-work lookup for a test
-// that resolves rows directly; it closes when the test ends.
+// that resolves rows directly.
 func newTestActiveWorkLookup(t testing.TB) *activeWorkLookup {
 	t.Helper()
-	lookup := newActiveWorkLookup(context.Background())
-	t.Cleanup(lookup.close)
-	return lookup
+	return newActiveWorkLookup(context.Background())
 }
 
 // newTestCityHandler returns an http.Handler that wraps a single State

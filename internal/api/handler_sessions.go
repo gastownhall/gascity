@@ -355,7 +355,6 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	activeWork := newActiveWorkLookup(r.Context())
-	defer activeWork.close()
 	for i, sess := range pageSessions {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeWork, false, 0, keyedTranscriptPaths)

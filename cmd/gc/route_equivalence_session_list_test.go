@@ -581,6 +581,7 @@ func TestSessionListAPIRouteListsPastAnActiveWorkFailure(t *testing.T) {
 	}
 	h.cs.mu.Lock()
 	h.cs.beadStores["broken"] = sessionListActiveWorkDownStore{Store: beads.NewMemStore()}
+	h.cs.rigStoresGen++ // Stores() mints a new epoch with rig broken in it
 	h.cs.mu.Unlock()
 	var (
 		mu       sync.Mutex

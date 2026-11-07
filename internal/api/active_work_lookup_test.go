@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -107,7 +109,7 @@ func getActiveWorkList(t *testing.T, h http.Handler, req *http.Request) (activeW
 	return body, elapsed
 }
 
-// pinStatusStoreReadTimeout sets the active-work window for the test.
+// pinStatusStoreReadTimeout sets the active-work budget for the test.
 func pinStatusStoreReadTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
 	old := statusStoreReadTimeout
@@ -185,7 +187,7 @@ func newActiveWorkListState(t *testing.T, work beads.Store) *fakeState {
 
 // TestListActiveWorkLookupHonorsRequestDeadline: every row of a list resolves
 // its active bead from the work stores. When an uncached read stalls, the
-// response waits for one shared statusStoreReadTimeout window, not the
+// response waits for one shared statusStoreReadTimeout budget, not the
 // store's own timeout once per row, answers 200 reporting the failure as the
 // route does, and reads no store again after the failure.
 func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
@@ -201,7 +203,7 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 			body, elapsed := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
 
 			if elapsed > statusStoreReadTimeout+2*time.Second {
-				t.Errorf("answered after %s, want within one %s window plus slack", elapsed, statusStoreReadTimeout)
+				t.Errorf("answered after %s, want within one %s budget plus slack", elapsed, statusStoreReadTimeout)
 			}
 			if len(body.Items) < 2 {
 				t.Fatalf("items = %+v, want both rows", body.Items)
@@ -255,8 +257,8 @@ func scopeActiveWorkReads(fs *fakeState) (entered, canceled <-chan struct{}) {
 
 // TestActiveWorkLookupCancelsScopedStore: an uncached active-work read goes
 // through the context-bound clone ScopedStoreLike supplies, never the shared
-// store, and the clone's context ends when the lookup's window does or the
-// client goes away, which kills a bd child instead of abandoning it.
+// store, and the clone's context ends when the lookup's budget runs out or
+// the client goes away, which kills a bd child instead of abandoning it.
 func TestActiveWorkLookupCancelsScopedStore(t *testing.T) {
 	for _, route := range activeWorkListRoutes {
 		t.Run("deadline/"+route.name, func(t *testing.T) {
@@ -414,15 +416,15 @@ func TestActiveWorkLookupFailureIsNamedAndLoggedOnce(t *testing.T) {
 }
 
 // TestActiveWorkLookupUsesCleanCacheAfterDeadline: a clean cache answers a
-// row, hit or authoritative miss, after the lookup's window has closed, with
+// row, hit or authoritative miss, after the lookup's budget is spent, with
 // no uncached read and no reported failure. Once a read has failed, though,
 // a row whose search reaches the store that failed resolves nothing, even
 // when a lower-priority cached store holds its work. The session lists show
-// the expired window: the agents list's own session snapshot shares
-// statusStoreReadTimeout, so a zero window would fail it first.
+// the spent budget: the agents list's own session snapshot shares
+// statusStoreReadTimeout, so a zero budget would fail it first.
 func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
 	for _, route := range activeWorkListRoutes[:2] {
-		t.Run("expired window/"+route.name, func(t *testing.T) {
+		t.Run("spent budget/"+route.name, func(t *testing.T) {
 			pinStatusStoreReadTimeout(t, 0)
 			work := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
 			city := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
@@ -444,7 +446,7 @@ func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
 				t.Errorf("idle active_bead = %q, want none (authoritative cache miss)", got)
 			}
 			if body.Partial || len(body.ActiveWorkErrors) > 0 {
-				t.Errorf("partial_errors = %q, active_work_errors = %q; want none: cache answers need no window", body.PartialErrors, body.ActiveWorkErrors)
+				t.Errorf("partial_errors = %q, active_work_errors = %q; want none: cache answers need no budget", body.PartialErrors, body.ActiveWorkErrors)
 			}
 			if work.listCalls != 0 || city.listCalls != 0 {
 				t.Errorf("uncached reads = %d work, %d city; want 0", work.listCalls, city.listCalls)
@@ -481,9 +483,9 @@ func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
 
 // TestActiveWorkLookupUsesRealCacheAfterDeadline: a primed CachingStore
 // answers a row, hit or authoritative miss, after the lookup's parent context
-// ended, with no backing read and no reported failure; once rig a's read has
-// failed, a separately scoped row in rig z still resolves from z's clean
-// cache, and rig a is not read again.
+// ended and its budget is spent, with no backing read and no reported
+// failure; once rig a's read has failed, a separately scoped row in rig z
+// still resolves from z's clean cache, and rig a is not read again.
 func TestActiveWorkLookupUsesRealCacheAfterDeadline(t *testing.T) {
 	t.Run("clean cache answers after the deadline expired", func(t *testing.T) {
 		backing := &listCountingStore{Store: beads.NewMemStore()}
@@ -498,8 +500,8 @@ func TestActiveWorkLookupUsesRealCacheAfterDeadline(t *testing.T) {
 		srv := New(fs)
 		parent, cancelParent := context.WithCancel(context.Background())
 		lookup := newActiveWorkLookup(parent)
-		defer lookup.close()
-		cancelParent() // the window is spent; nothing has failed
+		cancelParent()  // the request is gone, and
+		lookup.left = 0 // the budget is spent; nothing has failed
 
 		if got := srv.findActiveBeadForAssignees(lookup, "myrig", "session-id"); got != hit {
 			t.Fatalf("cache hit after expiry = %q, want %q", got, hit)
@@ -508,7 +510,7 @@ func TestActiveWorkLookupUsesRealCacheAfterDeadline(t *testing.T) {
 			t.Fatalf("authoritative cache miss after expiry = %q, want empty", got)
 		}
 		if errs := lookup.failures(); len(errs) != 0 {
-			t.Fatalf("failures = %q, want none: an expired window alone is not a failure", errs)
+			t.Fatalf("failures = %q, want none: a spent budget alone is not a failure", errs)
 		}
 		if backing.listCalls != readsAfterPrime {
 			t.Fatalf("uncached reads after expiry = %d, want 0", backing.listCalls-readsAfterPrime)
@@ -603,8 +605,8 @@ func TestActiveWorkLookupFailureSparesCacheAnsweredRows(t *testing.T) {
 	})
 }
 
-// slowActiveWorkStore answers every active-work read after delay and counts
-// those reads.
+// slowActiveWorkStore answers every active-work read after delay, on the
+// clock of the synctest bubble it is read in, and counts those reads.
 type slowActiveWorkStore struct {
 	beads.Store
 	delay time.Duration
@@ -614,38 +616,319 @@ type slowActiveWorkStore struct {
 func (s *slowActiveWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if isActiveWorkLookupQuery(query) {
 		s.reads.Add(1)
-		time.Sleep(s.delay)
+		<-time.After(s.delay)
 	}
 	return s.Store.List(query)
 }
 
-// TestActiveWorkLookupRowsShareOneWindow: every row's read draws on the one
-// window the lookup started with, so reads that each fit the window but
+// TestActiveWorkLookupRowsShareOneBudget: every row's read draws on the one
+// budget the lookup started with, so reads that each fit the budget but
 // together outlast it fail the lookup, and the total wait cannot grow with
-// the number of rows.
-func TestActiveWorkLookupRowsShareOneWindow(t *testing.T) {
+// the number of rows. The failure says how much of the budget the reads
+// before it spent, so it does not read as a stall of the rig it timed out on.
+func TestActiveWorkLookupRowsShareOneBudget(t *testing.T) {
 	pinStatusStoreReadTimeout(t, 400*time.Millisecond)
 	work := &slowActiveWorkStore{Store: beads.NewMemStore(), delay: 300 * time.Millisecond}
 	fs := newFakeState(t)
 	fs.stores = map[string]beads.Store{"myrig": work}
 	srv := New(fs)
-	lookup := newTestActiveWorkLookup(t)
+	synctest.Test(t, func(t *testing.T) {
+		defer func() { <-time.After(work.delay) }() // a read the budget abandoned returns
+		lookup := newTestActiveWorkLookup(t)
+		start := time.Now()
 
-	for range 3 {
-		srv.findActiveBeadForAssignees(lookup, "myrig", "nobody")
+		for range 3 {
+			srv.findActiveBeadForAssignees(lookup, "myrig", "nobody")
+		}
+
+		if elapsed := time.Since(start); elapsed > statusStoreReadTimeout {
+			t.Errorf("rows took %s, want at most the %s budget", elapsed, statusStoreReadTimeout)
+		}
+		errs := lookup.failures()
+		if len(errs) != 1 {
+			t.Fatalf("%d reads of %s each under one %s budget left failures %q, want one: each read had a budget of its own", work.reads.Load(), work.delay, statusStoreReadTimeout, errs)
+		}
+		if n := work.reads.Load(); n != 2 {
+			t.Fatalf("reads = %d, want 2 under one shared budget", n)
+		}
+		if want := "(earlier reads had spent 300ms of the 400ms active-work budget)"; !strings.Contains(errs[0], want) {
+			t.Fatalf("failure = %q, want it to say %q", errs[0], want)
+		}
+	})
+}
+
+// TestActiveWorkLookupChargesOnlyStoreReads: time a list response spends
+// between store reads, such as each row's runtime probes, spends none of the
+// budget, so a read late in the row loop still gets what the reads before it
+// left.
+func TestActiveWorkLookupChargesOnlyStoreReads(t *testing.T) {
+	pinStatusStoreReadTimeout(t, 400*time.Millisecond)
+	work := &slowActiveWorkStore{Store: beads.NewMemStore(), delay: 300 * time.Millisecond}
+	want := addActiveWork(t, work.Store, "late")
+	fs := newFakeState(t)
+	fs.stores = map[string]beads.Store{"myrig": work}
+	srv := New(fs)
+	synctest.Test(t, func(t *testing.T) {
+		lookup := newTestActiveWorkLookup(t)
+		<-time.After(time.Second) // the rows before it probe their runtimes
+
+		if got := srv.findActiveBeadForAssignees(lookup, "myrig", "late"); got != want {
+			t.Fatalf("late row = %q, want %q: the probes before it spent none of the budget", got, want)
+		}
+		if errs := lookup.failures(); len(errs) != 0 {
+			t.Fatalf("failures = %q, want none", errs)
+		}
+	})
+}
+
+// TestActiveWorkLookupNamesASpentBudget: a read the spent budget refuses
+// fails the lookup with an error that says so, not as a timeout of the rig it
+// never read, and that rig's store is not read.
+func TestActiveWorkLookupNamesASpentBudget(t *testing.T) {
+	work := &listCountingStore{Store: beads.NewMemStore()}
+	fs := newFakeState(t)
+	fs.stores = map[string]beads.Store{"myrig": work}
+	lookup := newTestActiveWorkLookup(t)
+	lookup.left = 0
+
+	if got := New(fs).findActiveBeadForAssignees(lookup, "myrig", "nobody"); got != "" {
+		t.Fatalf("active bead = %q, want none", got)
 	}
-	if !lookup.failed() {
-		t.Fatalf("%d reads of %s each under one %s window did not fail the lookup: each read had a window of its own", work.reads.Load(), work.delay, statusStoreReadTimeout)
+
+	errs := lookup.failures()
+	want := `looking up active work in rig "myrig": not read: earlier reads spent the ` + statusStoreReadTimeout.String() + " active-work budget"
+	if len(errs) != 1 || errs[0] != want {
+		t.Fatalf("failures = %q, want %q", errs, want)
 	}
-	if n := work.reads.Load(); n > 2 {
-		t.Fatalf("reads = %d, want at most 2 under one shared window", n)
+	if work.listCalls != 0 {
+		t.Fatalf("store reads = %d, want 0", work.listCalls)
+	}
+}
+
+// refreshingActiveWorkBacking is a bd-backed cache's backing. While fail is
+// set its Get fails, so the cache's refresh after a write it forwards fails
+// and leaves the written row dirty; otherwise each point read, Get and
+// DepList, first takes delay on the clock of the synctest bubble it runs in,
+// as a bd show or a bd dep list does. It counts its point reads and lists.
+type refreshingActiveWorkBacking struct {
+	beads.Store
+	fail              atomic.Bool
+	delay             time.Duration
+	gets, deps, lists atomic.Int32
+}
+
+func (s *refreshingActiveWorkBacking) Get(id string) (beads.Bead, error) {
+	s.gets.Add(1)
+	if s.fail.Load() {
+		return beads.Bead{}, errors.New("bd show: connection refused")
+	}
+	if s.delay > 0 {
+		<-time.After(s.delay)
+	}
+	return s.Store.Get(id)
+}
+
+func (s *refreshingActiveWorkBacking) DepList(id, direction string) ([]beads.Dep, error) {
+	s.deps.Add(1)
+	if s.delay > 0 {
+		<-time.After(s.delay)
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func (s *refreshingActiveWorkBacking) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists.Add(1)
+	return s.Store.List(query)
+}
+
+// activeWorkQuery is the lookup's read of assignee's work in one store.
+func activeWorkQuery(assignee string) beads.ListQuery {
+	return beads.ListQuery{Assignee: assignee, Status: "in_progress", Limit: 1, Sort: beads.SortCreatedDesc}
+}
+
+// newDirtyActiveWorkCache is a bd-backed store's primed cache holding work
+// claimed for assignee through it, a claim whose post-write refresh failed,
+// so the cache holds the claimed row dirty. It returns the cache, its
+// backing, answering again with its read counts zeroed, and the work's id.
+func newDirtyActiveWorkCache(t *testing.T, assignee string) (*beads.CachingStore, *refreshingActiveWorkBacking, string) {
+	t.Helper()
+	mem := beads.NewMemStore()
+	backing := &refreshingActiveWorkBacking{Store: mem}
+	work, err := mem.Create(beads.Bead{Title: "work", Status: "open"})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.fail.Store(true)
+	status := "in_progress"
+	if err := cache.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("claim through the cache: %v", err)
+	}
+	if _, ok := cache.CachedList(activeWorkQuery(assignee)); ok {
+		t.Fatal("fixture: the claim whose refresh failed left the cache clean")
+	}
+	backing.fail.Store(false)
+	backing.gets.Store(0)
+	backing.deps.Store(0)
+	backing.lists.Store(0)
+	return cache, backing, work.ID
+}
+
+// countCacheClones is a ScopedStoreLike that counts the context-bound clones
+// asked of cache, through a handle or the split-strict gate's work view of
+// it, and hands out none.
+func countCacheClones(cache beads.Store, clones *atomic.Int32) func(context.Context, beads.Store) (beads.Store, error) {
+	return func(_ context.Context, existing beads.Store) (beads.Store, error) {
+		if beads.SameStore(existing, splittest.GateWorkView(cache)) {
+			clones.Add(1)
+		}
+		return nil, nil
+	}
+}
+
+// TestActiveWorkLookupRefreshesADirtyCache: a bd-backed store whose cache
+// holds a dirty row, a claim whose post-write refresh failed, is answered from
+// its cache once the cache's refresh has re-read that one row from the
+// backing, a Get and a DepList and no scan: no context-bound clone is asked
+// for, the dirty mark clears, and the other rows are answered by the clean
+// cache.
+func TestActiveWorkLookupRefreshesADirtyCache(t *testing.T) {
+	for _, route := range activeWorkListRoutes[:2] {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			first := createTestSession(t, fs.cityBeadStore, fs.sp, "First")
+			second := createTestSession(t, fs.cityBeadStore, fs.sp, "Second")
+			cache, backing, work := newDirtyActiveWorkCache(t, first.ID)
+			fs.stores["myrig"] = cache
+			var clones atomic.Int32
+			fs.scopedStoreFn = countCacheClones(cache, &clones)
+
+			body, _ := getActiveWorkList(t, route.handler(t, fs, New(fs)), httptest.NewRequest("GET", route.path(fs), nil))
+
+			if got := body.activeBeadOf(t, first.ID); got != work {
+				t.Errorf("active_bead = %q, want the claimed %q", got, work)
+			}
+			if got := body.activeBeadOf(t, second.ID); got != "" {
+				t.Errorf("idle active_bead = %q, want none", got)
+			}
+			if body.Partial || len(body.ActiveWorkErrors) > 0 {
+				t.Errorf("partial_errors = %q, active_work_errors = %q; want none", body.PartialErrors, body.ActiveWorkErrors)
+			}
+			if g, d, l := backing.gets.Load(), backing.deps.Load(), backing.lists.Load(); g != 1 || d != 1 || l != 0 {
+				t.Errorf("backing reads: %d Gets, %d DepLists, %d Lists; want the dirty row's one Get and DepList", g, d, l)
+			}
+			if n := clones.Load(); n != 0 {
+				t.Errorf("clones asked of the cached store = %d, want none", n)
+			}
+			if _, ok := cache.CachedList(activeWorkQuery(first.ID)); !ok {
+				t.Error("the dirty mark is still set after the lookup refreshed the row")
+			}
+		})
+	}
+}
+
+// TestActiveWorkLookupRefreshOutlivesTheBudget is the regression for a dirty
+// row whose refresh ended with the response that started it: at bd's
+// latency, 750ms each for the row's Get and DepList, the refresh outlasts the
+// 1s budget. That response reports the store's cache as still refreshing, not
+// the store as stalled, but the refresh runs on, so the next response
+// resolves the row from the cache with no wait, its mark cleared, after the
+// one refresh's backing reads and no clone.
+func TestActiveWorkLookupRefreshOutlivesTheBudget(t *testing.T) {
+	pinStatusStoreReadTimeout(t, time.Second)
+	cache, backing, work := newDirtyActiveWorkCache(t, "worker")
+	backing.delay = 750 * time.Millisecond
+	fs := newFakeState(t)
+	fs.stores = map[string]beads.Store{"myrig": cache}
+	var clones atomic.Int32
+	fs.scopedStoreFn = countCacheClones(cache, &clones)
+	srv := New(fs)
+	synctest.Test(t, func(t *testing.T) {
+		lookup := newTestActiveWorkLookup(t)
+		start := time.Now()
+
+		if got := srv.findActiveBeadForAssignees(lookup, "myrig", "worker"); got != "" {
+			t.Fatalf("first response's row = %q, want none: the refresh outlasts the budget", got)
+		}
+		if elapsed := time.Since(start); elapsed > statusStoreReadTimeout {
+			t.Errorf("first response's row took %s, want at most the %s budget", elapsed, statusStoreReadTimeout)
+		}
+		errs := lookup.failures()
+		if want := `looking up active work in rig "myrig": waiting for its cache to refresh its dirty rows`; len(errs) != 1 || !strings.HasPrefix(errs[0], want) {
+			t.Fatalf("failures = %q, want one starting %q", errs, want)
+		}
+
+		<-time.After(time.Second) // the next poll
+		synctest.Wait()
+		lookup = newTestActiveWorkLookup(t)
+		start = time.Now()
+
+		if got := srv.findActiveBeadForAssignees(lookup, "myrig", "worker"); got != work {
+			t.Fatalf("next response's row = %q, want %q from the refreshed cache", got, work)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("next response's row took %s, want no wait on a clean cache", elapsed)
+		}
+		if errs := lookup.failures(); len(errs) != 0 {
+			t.Errorf("failures = %q, want none", errs)
+		}
+	})
+	if g, d, l := backing.gets.Load(), backing.deps.Load(), backing.lists.Load(); g != 1 || d != 1 || l != 0 {
+		t.Errorf("backing reads: %d Gets, %d DepLists, %d Lists; want the one refresh's Get and DepList", g, d, l)
+	}
+	if n := clones.Load(); n != 0 {
+		t.Errorf("clones asked of the cached store = %d, want none", n)
+	}
+	if _, ok := cache.CachedList(activeWorkQuery("worker")); !ok {
+		t.Error("the dirty mark is still set after the refresh ended")
+	}
+}
+
+// TestActiveWorkLookupRefreshesNothingOnceFailed: once the lookup has failed,
+// or its budget is spent, a row whose search reaches a dirty cache starts no
+// refresh and waits for none. It resolves nothing, and nothing is read, not
+// even by a refresh left running once the row returns: the counters are read
+// only when every goroutine of the bubble has finished or blocked.
+func TestActiveWorkLookupRefreshesNothingOnceFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*activeWorkLookup)
+	}{
+		{name: "failed", setup: func(l *activeWorkLookup) { l.fail("a", errors.New("store a is down")) }},
+		{name: "budget spent", setup: func(l *activeWorkLookup) { l.left = 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache, backing, _ := newDirtyActiveWorkCache(t, "worker")
+			fs := newFakeState(t)
+			fs.stores = map[string]beads.Store{"myrig": cache}
+			srv := New(fs)
+			synctest.Test(t, func(t *testing.T) {
+				lookup := newTestActiveWorkLookup(t)
+				tc.setup(lookup)
+
+				if got := srv.findActiveBeadForAssignees(lookup, "myrig", "worker"); got != "" {
+					t.Fatalf("row = %q, want none", got)
+				}
+				synctest.Wait()
+
+				if g, d, l := backing.gets.Load(), backing.deps.Load(), backing.lists.Load(); g != 0 || d != 0 || l != 0 {
+					t.Fatalf("backing reads: %d Gets, %d DepLists, %d Lists; want none", g, d, l)
+				}
+				if _, ok := cache.CachedList(activeWorkQuery("worker")); ok {
+					t.Fatal("the dirty row was refreshed")
+				}
+			})
+		})
 	}
 }
 
 // TestListActiveWorkLookupPreservesPrecedence: with healthy stores the bounded
 // list lookup answers as before: identity order beats store order, the newest
 // match wins within a store, and a rig-scoped agent row reads its rig alone.
-// A single-session read stays live and outside the list's window.
+// A single-session read stays live and outside the list's budget.
 func TestListActiveWorkLookupPreservesPrecedence(t *testing.T) {
 	for _, route := range activeWorkListRoutes[:2] {
 		t.Run(route.name, func(t *testing.T) {
@@ -832,10 +1115,9 @@ func TestSessionListClientReadsAWholeListPastAnActiveWorkFailure(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, New(fs))
 	served, _ := getActiveWorkList(t, h, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
 	activeWorkListRoutes[0].checkActiveWorkFailure(t, served, "a")
-	ts := httptest.NewServer(h)
-	t.Cleanup(ts.Close)
+	client := NewCityScopedClientWithHTTPClient("http://example.com", fs.CityName(), &http.Client{Transport: sessionPeekTransport{h: h}})
 
-	cr, err := NewCityScopedClient(ts.URL, fs.CityName()).ListSessions(ListSessionsOpts{})
+	cr, err := client.ListSessions(ListSessionsOpts{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}

@@ -17,11 +17,12 @@ import (
 // capabilityStore has every optional capability the API reaches for on a
 // store it is handed, counting each call: the count that bounds /v0/beads and
 // /status, the context-aware ready read /status prefers, the row witness
-// store health trusts, the parent-projection wait a reparent awaits, and the
-// cache-only list /agents and the order history read first.
+// store health trusts, the parent-projection wait a reparent awaits, the
+// cache-only list the order history reads first, and the refreshing cache
+// list the list active-work lookup reads first.
 type capabilityStore struct {
 	*beads.MemStore
-	counts, readyCtx, waits, cachedLists atomic.Int64
+	counts, readyCtx, waits, cachedLists, refreshingLists atomic.Int64
 }
 
 func (s *capabilityStore) Count(context.Context, beads.ListQuery, ...string) (int, error) {
@@ -43,6 +44,12 @@ func (s *capabilityStore) WaitForParentProjection(context.Context, string, strin
 
 func (s *capabilityStore) CachedList(q beads.ListQuery) ([]beads.Bead, bool) {
 	s.cachedLists.Add(1)
+	rows, err := s.List(q)
+	return rows, err == nil
+}
+
+func (s *capabilityStore) CachedListRefreshing(_ context.Context, q beads.ListQuery) ([]beads.Bead, bool) {
+	s.refreshingLists.Add(1)
 	rows, err := s.List(q)
 	return rows, err == nil
 }
@@ -112,13 +119,12 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 			if _, err := orderHistoryBeadsAcrossStoreInfosCachedFirst([]workflowStoreInfo{{ref: "city", store: wrap(store)}}, "o", 10, time.Time{}); err != nil || store.cachedLists.Load() != 1 {
 				t.Errorf("order history made %d cache-only lists (%v), want 1", store.cachedLists.Load(), err)
 			}
-			// handler_agents.go findActiveBeadForAssigneesWithFreshness: CachedLister.
+			// active_work_lookup.go activeWorkLookup.list: RefreshingCachedLister.
 			state.stores = map[string]beads.Store{"myrig": wrap(store)}
 			routed := asHandedState{state}
-			store.cachedLists.Store(0)
 			New(routed).findActiveBeadForAssignees(newTestActiveWorkLookup(t), "myrig", "worker")
-			if store.cachedLists.Load() != 1 {
-				t.Errorf("the active-bead lookup made %d cache-only lists, want 1", store.cachedLists.Load())
+			if store.refreshingLists.Load() != 1 {
+				t.Errorf("the active-bead lookup made %d refreshing cache lists, want 1", store.refreshingLists.Load())
 			}
 			// huma_handlers_beads.go humaHandleBeadUpdate: ParentProjectionWaiter.
 			parent, err := store.Create(beads.Bead{Title: "parent"})
