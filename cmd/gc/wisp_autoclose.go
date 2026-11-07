@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -131,13 +132,15 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			parked, err := attachedMoleculeIsParked(attachedStore, attached)
 			run.note(err)
 			// A parked root found through its input convoy has nothing left to
-			// run once that whole input is terminal and no step is held or
-			// gated: it retires here rather than waiting for a seat to claim
-			// a step only to find the work done.
+			// run once that whole input is terminal, nothing in it is held,
+			// and only idle steps are left (inputConvoyWorkflowIdle): it
+			// retires here, all but its teardown tail
+			// (retireIdleInputWorkflow), rather than waiting for a seat to
+			// claim one of those steps only to find the work done.
 			input, retireIdle := inputOf[attached.ID]
 			retireIdle = retireIdle && parked && err == nil
 			if retireIdle {
-				idle, err := inputConvoyWorkflowIdle(input)
+				_, idle, err := inputConvoyWorkflowIdle(input)
 				run.note(err)
 				parked = !idle
 			}
@@ -163,16 +166,12 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			if !rootStill {
 				continue
 			}
+			var closed int
 			if retireIdle {
-				// The idle decision rests on many rows; read them all again
-				// live so a claim, a gate, or a reopened member since is seen.
-				idle, err := inputConvoyWorkflowIdle(input)
-				run.note(err)
-				if !idle {
-					continue
-				}
+				closed, err = retireIdleInputWorkflow(graphMolecule, input)
+			} else {
+				closed, err = closeAttachedWispSubtree(attachedStore, attached)
 			}
-			closed, err := closeAttachedWispSubtree(attachedStore, attached)
 			run.note(err)
 			if err != nil || closed == 0 {
 				continue
@@ -239,7 +238,7 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // are still in flight stays open and closes later via its workflow-finalize
 // control instead. A failed read is returned with whatever was found: the
 // caller reports it so the run is retried. graphMolecule is graphStore as the
-// molecule target a root's subtree is read through.
+// molecule target a root's workflow members are read through.
 func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, graphMolecule beads.MoleculeTarget, parent beads.Bead, seen map[string]bool) ([]inputConvoyRoot, error) {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class
@@ -311,9 +310,11 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, graphMol
 		}
 		convoyID := convoy.bead.ID
 		reads := inputWorkflowReads{
-			root:    beads.HandlesFor(graphStore).Live.Get,
-			members: func() ([]beads.Bead, error) { return convoycore.MembersIn(classes, convoyID, true) },
-			subtree: func(rootID string) ([]beads.Bead, error) { return molecule.ListSubtree(graphMolecule, rootID) },
+			root:    beads.LiveFor(graphStore).Get,
+			members: func() ([]beads.Bead, error) { return convoycore.MembersInLive(classes, convoyID, true) },
+			workflow: func(rootID string) ([]beads.Bead, error) {
+				return sourceworkflow.ListWorkflowBeads(graphMolecule, rootID)
+			},
 		}
 		for _, root := range matches {
 			if seen[root.ID] {
@@ -353,59 +354,141 @@ type inputConvoyRoot struct {
 	reads    inputWorkflowReads
 }
 
-// inputWorkflowReads are the live reads behind an input-convoy workflow's idle
-// check: the root by id from the graph store, the convoy's members (a
-// convoy.MembersIn read over the convoy's own store and the member store), and
-// the root's subtree from the graph store.
+// inputWorkflowReads are the reads behind an input-convoy workflow's idle
+// check, all of them live, so a claim, a reopen or a tracks edge a cache has
+// not absorbed yet is seen: the root by id and the workflow's members, read
+// from the graph store, and the convoy's members (a convoy.MembersInLive read
+// over the convoy's own store and the member store). The workflow's members
+// are what sourceworkflow.ListWorkflowBeads reads: the root and every bead
+// naming it in gc.root_bead_id, the very set a retirement closes.
 type inputWorkflowReads struct {
-	root    func(id string) (beads.Bead, error)
-	members func() ([]beads.Bead, error)
-	subtree func(rootID string) ([]beads.Bead, error)
+	root     func(id string) (beads.Bead, error)
+	members  func() ([]beads.Bead, error)
+	workflow func(rootID string) ([]beads.Bead, error)
 }
 
-// inputConvoyWorkflowIdle reports, from live reads, whether a parked graph.v2
-// workflow has nothing left to run: its root still names input.convoyID; that
-// convoy's membership is non-empty, fully resolved and terminal; and no
-// non-terminal root or step (spec sidecars aside, as the parked guard skips
-// them) is held — assigned, or past open — or declares a gate (gc.gate_type;
-// Type=gate alone also marks deferred routing). Anything else keeps the
-// workflow: a claim, finalize, or a later close carries it on.
-func inputConvoyWorkflowIdle(input inputConvoyRoot) (bool, error) {
+// inputConvoyWorkflowIdle reports whether a parked graph.v2 workflow has
+// nothing left to run but steps a seat would claim only to find the work done
+// and, if so, returns the workflow members it judged. That holds when its root
+// still names input.convoyID; that convoy's membership is non-empty, fully
+// resolved and terminal; and the workflow's members leave only such idle
+// steps (inputWorkflowIdleWork). Anything else keeps the workflow: a claim,
+// the dispatcher and its finalizer, or a later close carries it on.
+func inputConvoyWorkflowIdle(input inputConvoyRoot) ([]beads.Bead, bool, error) {
 	root, err := input.reads.root(input.root.ID)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	if convoycore.IsTerminalStatus(root.Status) || strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) != input.convoyID {
-		return false, nil
+		return nil, false, nil
 	}
 	members, err := input.reads.members()
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	if len(members) == 0 {
-		return false, nil
+		return nil, false, nil
 	}
 	for _, m := range members {
 		if convoycore.IsUnresolvedTrackedItem(m) || !convoycore.IsTerminalStatus(m.Status) {
-			return false, nil
+			return nil, false, nil
 		}
 	}
-	subtree, err := input.reads.subtree(root.ID)
+	workflow, err := input.reads.workflow(root.ID)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
-	for _, b := range subtree {
-		if b.ID == root.ID {
+	if !inputWorkflowIdleWork(root, workflow) {
+		return nil, false, nil
+	}
+	return workflow, true, nil
+}
+
+// inputWorkflowIdleWork reports whether workflow, the members of the
+// input-convoy workflow rooted at root, leaves only idle work: no non-terminal
+// member is held (inputWorkflowMemberHeld), and an open step a seat would
+// claim is left (inputWorkflowWorkerStep), outside the teardown tail, which
+// runs after the root settles by contract. A workflow whose open members are
+// only its controls, scope latches and teardown tail is the dispatcher's to
+// drive, and its finalizer settles the root. Spec sidecars are skipped, as
+// the parked guard skips them. root is the live read of the root and stands
+// in for its row in workflow.
+func inputWorkflowIdleWork(root beads.Bead, workflow []beads.Bead) bool {
+	teardown := molecule.TeardownTailExclusionFromMembers(workflow)
+	claimable := false
+	for _, b := range workflow {
+		isRoot := b.ID == root.ID
+		if isRoot {
 			b = root
 		}
 		if sourceworkflow.IsGeneratedSpecSidecar(b) || convoycore.IsTerminalStatus(b.Status) {
 			continue
 		}
-		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" || strings.TrimSpace(b.Metadata[beadmeta.GateTypeMetadataKey]) != "" {
-			return false, nil
+		if inputWorkflowMemberHeld(b, isRoot) {
+			return false
+		}
+		if !isRoot && inputWorkflowWorkerStep(b) && !teardown(b) {
+			claimable = true
 		}
 	}
-	return true, nil
+	return claimable
+}
+
+// inputWorkflowMemberHeld reports whether a non-terminal member keeps its
+// input-convoy workflow from retiring: an assignee, or a declared gate
+// (gc.gate_type; Type=gate alone also marks deferred routing), holds any
+// member; a step is held once it is past open; and so is a drain whose items
+// are still running (inputWorkflowDrainInFlight). The root's status says
+// nothing of a claim: gc sling promotes every graph.v2 root to in_progress
+// when it launches the workflow (sling.PromoteWorkflowLaunchBead).
+func inputWorkflowMemberHeld(b beads.Bead, isRoot bool) bool {
+	if strings.TrimSpace(b.Assignee) != "" || strings.TrimSpace(b.Metadata[beadmeta.GateTypeMetadataKey]) != "" ||
+		inputWorkflowDrainInFlight(b) {
+		return true
+	}
+	return !isRoot && b.Status != "open"
+}
+
+// inputWorkflowDrainInFlight reports whether b is a drain control from the
+// start of its expansion until it records its items' outcomes (gc.drain_state
+// expanding, expanded or completing). Each item workflow it mints runs under a
+// root of its own, outside the members the idle check reads, and its last
+// step closes the drained input member, so that input reads terminal while
+// the items still run.
+func inputWorkflowDrainInFlight(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindDrain {
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata[beadmeta.DrainStateMetadataKey]) {
+	case beadmeta.DrainStateExpanding, beadmeta.DrainStateExpanded, beadmeta.DrainStateCompleting:
+		return true
+	default:
+		return false
+	}
+}
+
+// inputWorkflowWorkerStep reports whether b is a step a seat claims: neither a
+// control the dispatcher processes, open and unassigned, nor a bead that
+// structures the workflow (a root, a scope latch, a spec).
+func inputWorkflowWorkerStep(b beads.Bead) bool {
+	kind := strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])
+	return !graphroute.IsControlDispatcherKind(kind) && !graphroute.IsWorkflowTopologyKind(kind)
+}
+
+// retireIdleInputWorkflow reads an input-convoy workflow's idle decision again
+// right before its close, so a claim, a gate, a reopened step or an input
+// reopened or tracked since is seen, and while the workflow is still idle
+// closes its root and every open member in graph as skipped. Its teardown
+// tail stays open (molecule.TeardownTailExclusionFromMembers over the members
+// the decision read): teardown runs after the root settles by contract, and
+// the claim's stop gate serves it then. It returns how many beads it closed.
+func retireIdleInputWorkflow(graph beads.MoleculeTarget, input inputConvoyRoot) (int, error) {
+	workflow, idle, err := inputConvoyWorkflowIdle(input)
+	if err != nil || !idle {
+		return 0, err
+	}
+	return sourceworkflow.CloseWorkflowSubtreeAsExcept(graph, input.root.ID, beadmeta.OutcomeSkipped,
+		sourceworkflow.WorkflowSubtreeClosedReason, nil, molecule.TeardownTailExclusionFromMembers(workflow))
 }
 
 // dedupeConvoysByID merges tracking-convoy lists from the work and graph

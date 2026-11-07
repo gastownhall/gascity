@@ -204,7 +204,7 @@ func TestResolveMemberDuplicateResidenceIsTypedError(t *testing.T) {
 	}
 
 	classes := MemberClasses{Convoy: beadstest.Work(first), Graph: beadstest.Graph(second)}
-	_, _, err = classes.resolveMember(bead.ID)
+	_, _, err = classes.resolveMember(bead.ID, readHandle)
 	if !errors.Is(err, ErrDuplicateResidence) {
 		t.Fatalf("resolveMember err = %v, want ErrDuplicateResidence", err)
 	}
@@ -241,7 +241,7 @@ func TestCandidatesNamesEachHandleOnce(t *testing.T) {
 	if got := len(classes.candidates()); got != 1 {
 		t.Fatalf("candidates = %d, want 1: the same handle named three times is one store", got)
 	}
-	if _, _, err := classes.resolveMember(bead.ID); err != nil {
+	if _, _, err := classes.resolveMember(bead.ID, readHandle); err != nil {
 		t.Fatalf("resolveMember over one shared handle: %v", err)
 	}
 }
@@ -258,7 +258,7 @@ func TestCandidatesSkipsUnnamedAndTypedNilClasses(t *testing.T) {
 	if len(cands) != 1 {
 		t.Fatalf("candidates = %d (%+v), want only the named convoy handle", len(cands), cands)
 	}
-	if _, _, err := classes.resolveMember("gc-absent"); !errors.Is(err, beads.ErrNotFound) {
+	if _, _, err := classes.resolveMember("gc-absent", readHandle); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("resolveMember err = %v, want ErrNotFound", err)
 	}
 }
@@ -273,7 +273,7 @@ func TestResolveMemberPrefixOwnerIsRecordedOwnership(t *testing.T) {
 	work := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
 
 	classes := MemberClasses{Convoy: beadstest.Work(graph), Work: []beads.WorkStore{beadstest.Work(work)}}
-	got, owner, err := classes.resolveMember(graphID)
+	got, owner, err := classes.resolveMember(graphID, readHandle)
 	if err != nil {
 		t.Fatalf("resolveMember: %v", err)
 	}

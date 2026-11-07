@@ -2309,10 +2309,11 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 
 // hookSkipIfInputDone reports whether candidate belongs to a workflow whose
 // input convoy work is already terminal and, if so, retires that workflow
-// (root + open steps closed with gc.outcome=skipped). An input left unjudged
-// goes to the purge probe (hookRetireIfInputPurged). Lookup and close
-// failures are logged and treated as not-done so a store hiccup can never
-// suppress real work.
+// (its root and open steps, all but the teardown tail, closed with
+// gc.outcome=skipped). An input left unjudged goes to the purge probe
+// (hookRetireIfInputPurged).
+// Lookup and close failures are logged and treated as not-done so a store
+// hiccup can never suppress real work.
 func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
@@ -2332,17 +2333,18 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", rootID, err) //nolint:errcheck
 		return false
 	}
-	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input convoy work is already terminal or handed off to another lane; root and open steps closed as skipped\n", candidate.ID, rootID) //nolint:errcheck
+	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input convoy work is already terminal or handed off to another lane; root and open steps closed as skipped, its teardown tail left to run\n", candidate.ID, rootID) //nolint:errcheck
 	return true
 }
 
-// workflowInputDone resolves candidate to its workflow root (itself when it
-// carries gc.input_convoy_id, else via gc.root_bead_id) and reports whether
+// workflowInputDone resolves candidate to its workflow root
+// (workflowRootIDForInputCheck: its gc.root_bead_id when that names another
+// bead, else itself when it carries gc.input_convoy_id) and reports whether
 // every member the root's input convoy tracks is terminal, or non-terminal
 // but handed off to an assignee outside identityCandidates (no longer ours to
 // wait on). A member that is still unassigned, or still assigned to one of
-// identityCandidates, blocks. A root with no input convoy, or a convoy with
-// no resolvable members, is never "done".
+// identityCandidates, blocks. A root with no input convoy, a convoy with no
+// resolvable members, or a root that already settled is never "done".
 func workflowInputDone(store beads.WorkStore, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	verdict, err := workflowInputDoneAcross(store, store, candidate, identityCandidates)
 	return verdict.RootID, verdict.Done, err
@@ -2401,6 +2403,11 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // convoy and its members from work. On a single-store city both are the same
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
+//
+// A root that already settled leaves nothing to retire, so its input is not
+// judged: the claim's stop gate (hookClaimWorkflowStop) closes a step stranded
+// under it and serves its teardown tail, which a retirement leaves open and
+// which runs after the root settles by contract.
 func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
 	rootID := workflowRootIDForInputCheck(candidate)
 	if rootID == "" {
@@ -2414,7 +2421,7 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 		}
 	}
 	verdict := workflowInputVerdict{RootID: root.ID, ConvoyID: strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])}
-	if verdict.ConvoyID == "" {
+	if verdict.ConvoyID == "" || convoy.IsTerminalStatus(root.Status) {
 		return verdict, nil
 	}
 	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: work}, verdict.ConvoyID, true)
@@ -2488,8 +2495,9 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 	return seats, nil
 }
 
-// skipDoneWorkflow closes rootID and every open/in_progress step under it
-// with gc.outcome=skipped so pool demand and continuation claims drop.
+// skipDoneWorkflow closes rootID and every open/in_progress step under it but
+// its teardown tail with gc.outcome=skipped so pool demand and continuation
+// claims drop (closeWorkflowOpenMembers).
 func skipDoneWorkflow(ctx context.Context, store beads.Store, rootID string) error {
 	return closeWorkflowOpenMembers(ctx, store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
@@ -2508,21 +2516,27 @@ type workflowCloseStore interface {
 // closeWorkflowOpenMembers closes rootID and every non-terminal step under it
 // (by gc.root_bead_id, both tiers) with one CloseAll stamping disposition.
 // Terminal steps are left out, so they keep the disposition they closed with,
-// and so is the root when a re-read finds it already terminal. The root goes
-// last: a CloseAll that stops part-way leaves the root open for the next claim
-// to retire the rest. Nothing is written once ctx is done.
+// and so is the root when a re-read finds it already terminal. So is the
+// workflow's teardown tail (molecule.TeardownTailExclusionFromMembers, judged
+// over every step, closed ones included, so each attempt of a teardown step is
+// spared too): teardown runs after the root settles by contract, and once the
+// root is closed the claim's stop gate serves it. The root goes last: a
+// CloseAll that stops part-way leaves the root open for the next claim to
+// retire the rest. Nothing is written once ctx is done.
 func closeWorkflowOpenMembers(ctx context.Context, store workflowCloseStore, rootID string, disposition map[string]string) error {
 	steps, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		TierMode: beads.TierBoth,
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return fmt.Errorf("listing steps of %s: %w", rootID, err)
 	}
+	teardown := molecule.TeardownTailExclusionFromMembers(steps)
 	ids := make([]string, 0, len(steps)+1)
 	seen := map[string]bool{}
 	for _, step := range steps {
-		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
+		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) || teardown(step) {
 			continue
 		}
 		seen[step.ID] = true

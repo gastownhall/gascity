@@ -317,6 +317,105 @@ func TestSkipDoneWorkflowClosesRootAndSteps(t *testing.T) {
 	}
 }
 
+// TestSkipDoneWorkflowSparesATeardownFanoutWhoseStepAlreadyClosed: a fanout
+// control is stamped gc.scope_role=control and keeps only gc.step_id as its
+// link back to its teardown step, which may already have closed. The
+// retirement judges the teardown tail over every step, closed ones included,
+// so the open fanout is spared while the root and the ordinary step close.
+func TestSkipDoneWorkflowSparesATeardownFanoutWhoseStepAlreadyClosed(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed")
+	teardown, err := store.Create(beads.Bead{Title: "cleanup-worktree", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleTeardown,
+		beadmeta.StepIDMetadataKey:     "cleanup-worktree",
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+	}})
+	if err != nil {
+		t.Fatalf("create teardown step: %v", err)
+	}
+	if err := store.Close(teardown.ID); err != nil {
+		t.Fatalf("close teardown step: %v", err)
+	}
+	fanout, err := store.Create(beads.Bead{Title: "cleanup-worktree-fanout", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.KindMetadataKey:       beadmeta.KindFanout,
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
+		beadmeta.StepIDMetadataKey:     "cleanup-worktree",
+	}})
+	if err != nil {
+		t.Fatalf("create teardown fanout: %v", err)
+	}
+
+	if err := skipDoneWorkflow(context.Background(), store, root.ID); err != nil {
+		t.Fatalf("skipDoneWorkflow: %v", err)
+	}
+	for id, want := range map[string]string{root.ID: "closed", step.ID: "closed", fanout.ID: "open"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != want {
+			t.Fatalf("%s = %s %v; want %s", id, got.Status, got.Metadata, want)
+		}
+	}
+}
+
+// TestDoHookClaimRetiresDoneWorkflowButLeavesItsTeardownTailToRun: the
+// done-check retirement settles the root and its open steps as skipped but
+// leaves the teardown tail open, the attempt linked to the teardown step only
+// by gc.step_id included: teardown runs after the root settles by contract.
+// The settled workflow's input is not judged again, so the next claim of the
+// attempt is served rather than retired.
+func TestDoHookClaimRetiresDoneWorkflowButLeavesItsTeardownTailToRun(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{Title: "the work"})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	if err := store.Close(work.ID); err != nil {
+		t.Fatalf("close work: %v", err)
+	}
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if err := convoy.TrackItemIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, conv.ID, work.ID); err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	root, open, inProgress, finished := seedInputWorkflow(t, store, conv.ID)
+	control, attempt := seedTeardownTail(t, store, root.ID)
+
+	claimed := ""
+	ops := purgeClaimOps(t, store, nil, []beads.Bead{open}, &claimed)
+	ops.SkipDoneWorkflow = func(ctx context.Context, _ string, _ []string, rootID string) error {
+		return skipDoneWorkflow(ctx, store, rootID)
+	}
+	stderr := runPurgeClaim(t, ops, 1)
+
+	if claimed != "" {
+		t.Fatalf("claimed %s, a step of a workflow whose input is done (stderr=%q)", claimed, stderr)
+	}
+	for _, id := range []string{root.ID, open.ID, inProgress.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("%s = %s %v; want closed as skipped", id, got.Status, got.Metadata)
+		}
+	}
+	for id, want := range map[string]string{control.ID: "open", attempt.ID: "open", finished.ID: "closed"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != want || got.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeSkipped {
+			t.Fatalf("%s = %s %v; want %s and not skipped", id, got.Status, got.Metadata, want)
+		}
+	}
+	requireTeardownServed(t, store, attempt, nil)
+}
+
 func TestDoHookClaimSkipsWorkflowWhoseInputIsDone(t *testing.T) {
 	candidates := []beads.Bead{{
 		ID:     "root-1",

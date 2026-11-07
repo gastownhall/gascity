@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -922,7 +924,8 @@ func TestWispAutocloseFailsClosedOnPartialGraphView(t *testing.T) {
 // inputWorkflowFixture is a graph.v2 workflow dispatched over an input convoy:
 // the tracked issues in the work store, the convoy and its tracks edges in
 // convoyStore, and the root, an open step and a step that already finished
-// in the graph store.
+// in the graph store. The root is in_progress, as gc sling leaves every
+// graph.v2 root it launches (sling.PromoteWorkflowLaunchBead).
 type inputWorkflowFixture struct {
 	work, convoyStore, graph beads.Store
 	issues                   []beads.Bead
@@ -954,6 +957,12 @@ func newInputWorkflowFixture(t *testing.T, work, convoyStore, graph beads.Store,
 		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
 	}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sling.PromoteWorkflowLaunchBead(graph, f.root.ID); err != nil {
+		t.Fatalf("promoting the launched root: %v", err)
+	}
+	if f.root, err = graph.Get(f.root.ID); err != nil {
 		t.Fatal(err)
 	}
 	f.step, err = graph.Create(beads.Bead{Title: "idle step", Type: "task", Metadata: map[string]string{
@@ -1027,11 +1036,14 @@ func (f inputWorkflowFixture) assertPreserved(t *testing.T) {
 // last input retires its root and open steps as skipped from the close hook —
 // no seat has to claim a step to discover it — while the close of an earlier
 // input leaves it running. The convoy may sit beside the work (a post-split
-// launch) or on the graph side (a single-store-era migration).
+// launch) or on the graph side (a single-store-era migration). The root is
+// in_progress from its launch, which is no claim; a root that was never
+// promoted retires the same way.
 func TestWispAutocloseRetiresIdleInputWorkflowWhenItsLastInputCloses(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		stores func() (work, convoyStore, graph beads.Store)
+		name     string
+		stores   func() (work, convoyStore, graph beads.Store)
+		openRoot bool
 	}{
 		{name: "single store", stores: func() (beads.Store, beads.Store, beads.Store) {
 			s := beads.NewMemStore()
@@ -1045,10 +1057,17 @@ func TestWispAutocloseRetiresIdleInputWorkflowWhenItsLastInputCloses(t *testing.
 			graph := &beads.MemStore{IDPrefix: "gcg"}
 			return beads.NewMemStore(), graph, graph
 		}},
+		{name: "root never promoted", openRoot: true, stores: func() (beads.Store, beads.Store, beads.Store) {
+			s := beads.NewMemStore()
+			return s, s, s
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			work, convoyStore, graph := tc.stores()
 			f := newInputWorkflowFixture(t, work, convoyStore, graph, 2)
+			if tc.openRoot {
+				updateInputWorkflowBead(t, graph, f.root.ID, beads.UpdateOpts{Status: strPtr("open")})
+			}
 
 			run, _ := f.closeInput(t, 0, graph)
 			if !run.finished() {
@@ -1113,6 +1132,128 @@ func TestWispAutocloseRechecksIdleInputWorkflowLiveBeforeRetiring(t *testing.T) 
 		t.Fatalf("run = %+v, want finished", run)
 	}
 	f.assertPreserved(t)
+}
+
+// TestWispAutocloseKeepsAnInputWorkflowWhoseStepWasClaimedBehindItsCache: the
+// controller runs the close hook over caching stores, and a seat's claim,
+// written out of process, can still be missing from the cache when the last
+// input closes. The idle check reads the workflow live, so it sees the claim
+// and keeps the workflow instead of closing the claimed step as skipped.
+func TestWispAutocloseKeepsAnInputWorkflowWhoseStepWasClaimedBehindItsCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	f := newInputWorkflowFixture(t, backing, backing, backing, 1)
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Update(f.step.ID, beads.UpdateOpts{Status: strPtr("in_progress"), Assignee: strPtr("worker-1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cached.Close(f.issues[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	run := doWispAutocloseWith(cached, f.issues[0].ID, &stdout, beads.GraphStore{Store: cached})
+
+	if !run.finished() {
+		t.Fatalf("run = %+v, want finished", run)
+	}
+	f.assertPreserved(t)
+	if got, err := backing.Get(f.step.ID); err != nil || got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("claimed step = %s %q (err=%v); want it still in_progress with worker-1", got.Status, got.Assignee, err)
+	}
+}
+
+// TestWispAutocloseKeepsAnInputWorkflowWhoseInputChangedBehindItsCache: an
+// input tracked by the convoy, or reopened, out of process can still be
+// missing from the controller's cache when the last input it knows of closes.
+// The idle decision reads the input convoy's membership live, its tracks
+// edges and every member's status, so it sees that input open and keeps the
+// workflow. The same write through the cache is the control.
+func TestWispAutocloseKeepsAnInputWorkflowWhoseInputChangedBehindItsCache(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		members int
+		// change writes, through writer, the input that keeps the workflow
+		// open, and returns its id.
+		change func(t *testing.T, f inputWorkflowFixture, cached *beads.CachingStore, writer beads.Store) string
+	}{
+		{name: "input tracked", members: 1, change: func(t *testing.T, f inputWorkflowFixture, cached *beads.CachingStore, writer beads.Store) string {
+			if _, err := cached.DepList(f.convoyID, "down"); err != nil {
+				t.Fatal(err)
+			}
+			added, err := f.work.Create(beads.Bead{Title: "input tracked later", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.DepAdd(f.convoyID, added.ID, "tracks"); err != nil {
+				t.Fatal(err)
+			}
+			return added.ID
+		}},
+		{name: "input reopened", members: 2, change: func(t *testing.T, f inputWorkflowFixture, cached *beads.CachingStore, writer beads.Store) string {
+			if err := cached.Close(f.issues[1].ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Reopen(f.issues[1].ID); err != nil {
+				t.Fatal(err)
+			}
+			return f.issues[1].ID
+		}},
+	} {
+		for _, behindCache := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/behind cache=%t", tc.name, behindCache), func(t *testing.T) {
+				backing := beads.NewMemStore()
+				f := newInputWorkflowFixture(t, backing, backing, backing, tc.members)
+				cached := beads.NewCachingStoreForTest(backing, nil)
+				if err := cached.Prime(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				var writer beads.Store = cached
+				if behindCache {
+					writer = backing
+				}
+				openInput := tc.change(t, f, cached, writer)
+				if err := cached.Close(f.issues[0].ID); err != nil {
+					t.Fatal(err)
+				}
+
+				var stdout bytes.Buffer
+				run := doWispAutocloseWith(cached, f.issues[0].ID, &stdout, beads.GraphStore{Store: cached})
+
+				if !run.finished() {
+					t.Fatalf("run = %+v, want finished", run)
+				}
+				if root, err := backing.Get(f.root.ID); err != nil || root.Status == "closed" {
+					t.Fatalf("root = %s %v (err=%v); want it kept while input %s is open (stdout=%q)", root.Status, root.Metadata, err, openInput, stdout.String())
+				}
+				f.assertPreserved(t)
+			})
+		}
+	}
+}
+
+// TestWispAutocloseRetiresIdleInputWorkflowButLeavesItsTeardownTailToRun: the
+// close of the last input retires the root and every open step but the
+// teardown tail — a retry control scoped gc.scope_role=teardown and the
+// attempt minted from it without the scope role — which runs after the root
+// settles by contract and releases the workflow's resources. The settled
+// workflow's input is not judged again at the next claim of the attempt,
+// which the stop gate serves.
+func TestWispAutocloseRetiresIdleInputWorkflowButLeavesItsTeardownTailToRun(t *testing.T) {
+	store := beads.NewMemStore()
+	f := newInputWorkflowFixture(t, store, store, store, 1)
+	control, attempt := seedTeardownTail(t, store, f.root.ID)
+
+	run, _ := f.closeInput(t, 0, store)
+
+	if !run.finished() {
+		t.Fatalf("run = %+v, want finished", run)
+	}
+	f.assertRetiredAsSkipped(t)
+	assertNotRetired(t, store, map[string]string{control.ID: "open", attempt.ID: "open"})
+	requireTeardownServed(t, store, attempt, nil)
 }
 
 // TestWispAutoclosePreservesInputWorkflowThatIsHeldGatedOrUnresolved: the close
@@ -1181,6 +1322,171 @@ func TestWispAutoclosePreservesInputWorkflowThatIsHeldGatedOrUnresolved(t *testi
 			}
 		})
 	}
+}
+
+// TestWispAutocloseKeepsAnInputWorkflowWithNoStepLeftToClaim: the close of the
+// last input retires a workflow to spare a seat a claim that would only find
+// the work done. A workflow with no open step a seat would claim is left to the
+// dispatcher, which drives its controls open and unassigned until its
+// finalizer settles the root. That is the state a workflow is in when its last
+// step closed the input and then itself before the close hook ran.
+func TestWispAutocloseKeepsAnInputWorkflowWithNoStepLeftToClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// seed adds the open members beside the finalizer and returns their
+		// ids with the status each must keep.
+		seed func(t *testing.T, store beads.Store, rootID string) map[string]string
+	}{
+		{name: "only the finalizer"},
+		{name: "the finalizer and a scope latch", seed: func(t *testing.T, store beads.Store, rootID string) map[string]string {
+			scope := createInputWorkflowMember(t, store, rootID, "body scope", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScope})
+			return map[string]string{scope.ID: "open"}
+		}},
+		{name: "the finalizer and the teardown tail", seed: func(t *testing.T, store beads.Store, rootID string) map[string]string {
+			control, attempt := seedTeardownTail(t, store, rootID)
+			return map[string]string{control.ID: "open", attempt.ID: "open"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			f := newInputWorkflowFixture(t, store, store, store, 1)
+			updateInputWorkflowBead(t, store, f.step.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}})
+			if err := store.Close(f.step.ID); err != nil {
+				t.Fatal(err)
+			}
+			finalize := createInputWorkflowMember(t, store, f.root.ID, "workflow-finalize", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize})
+			kept := map[string]string{f.root.ID: "in_progress", finalize.ID: "open"}
+			if tc.seed != nil {
+				for id, status := range tc.seed(t, store, f.root.ID) {
+					kept[id] = status
+				}
+			}
+
+			run, stdout := f.closeInput(t, 0, store)
+
+			if !run.finished() {
+				t.Fatalf("run = %+v, want finished", run)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want nothing retired", stdout)
+			}
+			assertNotRetired(t, store, kept)
+		})
+	}
+}
+
+// TestWispAutocloseKeepsAnInputWorkflowWhoseDrainIsInFlight: a workflow that
+// drains its own input convoy closes that input itself. Each drained member's
+// item workflow runs under a root of its own, outside the workflow's members,
+// and its last step closes the member. From the drain's expansion until it
+// records its items' outcomes, the close of the last input keeps the
+// workflow, the step after the drain included, and the item workflow whose
+// step still runs. A pending drain has minted no item workflow and would
+// expand over no open input, so that workflow retires with its idle step.
+func TestWispAutocloseKeepsAnInputWorkflowWhoseDrainIsInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		state       string
+		wantRetired bool
+	}{
+		{state: beadmeta.DrainStatePending, wantRetired: true},
+		{state: beadmeta.DrainStateExpanding},
+		{state: beadmeta.DrainStateExpanded},
+		{state: beadmeta.DrainStateCompleting},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			store := beads.NewMemStore()
+			// f.step is the step after the drain, open and unassigned while
+			// the drain waits on its items.
+			f := newInputWorkflowFixture(t, store, store, store, 1)
+			drain := createInputWorkflowMember(t, store, f.root.ID, "drain", map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindDrain,
+				beadmeta.DrainStateMetadataKey: tc.state,
+			})
+			finalize := createInputWorkflowMember(t, store, f.root.ID, "workflow-finalize", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize})
+
+			if tc.wantRetired {
+				run, _ := f.closeInput(t, 0, store)
+				if !run.finished() {
+					t.Fatalf("run = %+v, want finished", run)
+				}
+				f.assertRetiredAsSkipped(t)
+				for _, id := range []string{drain.ID, finalize.ID} {
+					if got, err := store.Get(id); err != nil || got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+						t.Fatalf("%s = %s %v (err=%v); want closed as skipped with the workflow", id, got.Status, got.Metadata, err)
+					}
+				}
+				return
+			}
+			itemRoot, itemStep := seedDrainItemWorkflow(t, store, drain.ID, f.issues[0].ID)
+
+			run, stdout := f.closeInput(t, 0, store)
+
+			if !run.finished() {
+				t.Fatalf("run = %+v, want finished", run)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want nothing retired while the drain drives its items", stdout)
+			}
+			assertNotRetired(t, store, map[string]string{
+				f.root.ID:   "in_progress",
+				f.step.ID:   "open",
+				drain.ID:    "open",
+				finalize.ID: "open",
+				itemRoot.ID: "open",
+				itemStep.ID: "in_progress",
+			})
+		})
+	}
+}
+
+// createInputWorkflowMember creates an open member of the workflow rootID in
+// store, with metadata beside its gc.root_bead_id.
+func createInputWorkflowMember(t *testing.T, store beads.Store, rootID, title string, metadata map[string]string) beads.Bead {
+	t.Helper()
+	meta := map[string]string{beadmeta.RootBeadIDMetadataKey: rootID}
+	for k, v := range metadata {
+		meta[k] = v
+	}
+	member, err := store.Create(beads.Bead{Title: title, Type: "task", Metadata: meta})
+	if err != nil {
+		t.Fatalf("create %s: %v", title, err)
+	}
+	return member
+}
+
+// seedDrainItemWorkflow adds, in store, the item workflow drainID minted for
+// memberID as a drain mints it: a unit convoy tracking the member, and a
+// graph.v2 root of its own reading that convoy and linked to the drain, with
+// the step that closes the member claimed and in progress.
+func seedDrainItemWorkflow(t *testing.T, store beads.Store, drainID, memberID string) (root, step beads.Bead) {
+	t.Helper()
+	unit, err := store.Create(beads.Bead{Title: "drain unit 0 for " + memberID, Type: "convoy", Metadata: map[string]string{
+		beadmeta.SyntheticMetadataKey:      "true",
+		beadmeta.DrainControlIDMetadataKey: drainID,
+		beadmeta.DrainMemberIDMetadataKey:  memberID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(unit.ID, memberID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	root, err = store.Create(beads.Bead{Title: "item workflow root", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   unit.ID,
+		beadmeta.DrainControlIDMetadataKey:  drainID,
+		beadmeta.DrainMemberIDMetadataKey:   memberID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step = createInputWorkflowMember(t, store, root.ID, "close-source-anchor", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	updateInputWorkflowBead(t, store, step.ID, beads.UpdateOpts{Status: strPtr("in_progress"), Assignee: strPtr("worker-2")})
+	if step, err = store.Get(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	return root, step
 }
 
 func updateInputWorkflowBead(t *testing.T, store beads.Store, id string, opts beads.UpdateOpts) {

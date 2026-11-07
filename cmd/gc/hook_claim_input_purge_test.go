@@ -273,6 +273,86 @@ func TestDoHookClaimRetiresWorkflowWhoseRecordedInputTargetWasPurgedWithItsEdge(
 	}
 }
 
+// seedTeardownTail adds a teardown tail under rootID in store: a retry control
+// scoped gc.scope_role=teardown, and the attempt retry expansion minted from
+// it, which drops the scope role and keeps only gc.step_id as its link back
+// to the teardown step. The attempt is routed to worker.
+func seedTeardownTail(t *testing.T, store beads.Store, rootID string) (control, attempt beads.Bead) {
+	t.Helper()
+	control, err := store.Create(beads.Bead{Title: "cleanup-worktree", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: rootID,
+		beadmeta.KindMetadataKey:       beadmeta.KindRetry,
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleTeardown,
+		beadmeta.StepIDMetadataKey:     "cleanup-worktree",
+	}})
+	if err != nil {
+		t.Fatalf("create teardown control: %v", err)
+	}
+	attempt, err = store.Create(beads.Bead{Title: "cleanup-worktree attempt 1", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    rootID,
+		beadmeta.StepIDMetadataKey:        "cleanup-worktree",
+		beadmeta.LogicalBeadIDMetadataKey: control.ID,
+		beadmeta.AttemptMetadataKey:       "1",
+		beadmeta.RoutedToMetadataKey:      "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create teardown attempt: %v", err)
+	}
+	return control, attempt
+}
+
+// requireTeardownServed runs a claim for worker-1 whose only candidate is
+// attempt, a teardown attempt of a workflow a retirement settled, over the
+// real input verdict, both retirements, the purge probe inputPurged and the
+// stop gate, all on store. The claim must serve it: the input check leaves a
+// settled workflow to the stop gate, which exempts the teardown tail.
+func requireTeardownServed(t *testing.T, store beads.Store, attempt beads.Bead, inputPurged hookInputPurgedFunc) {
+	t.Helper()
+	claimed := ""
+	ops := purgeClaimOps(t, store, inputPurged, []beads.Bead{attempt}, &claimed)
+	ops.SkipDoneWorkflow = func(ctx context.Context, _ string, _ []string, rootID string) error {
+		return skipDoneWorkflow(ctx, store, rootID)
+	}
+	ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return store }
+	stderr := runPurgeClaim(t, ops, 0)
+	if claimed != attempt.ID {
+		t.Fatalf("claimed %q, want the teardown attempt %s served (stderr=%q)", claimed, attempt.ID, stderr)
+	}
+}
+
+// TestDoHookClaimRetiresPurgedWorkflowButLeavesItsTeardownTailToRun: the
+// purge retirement settles the root and every other open step as
+// fail/hard/input_purged but leaves the teardown tail open and unstamped, the
+// attempt linked to the teardown step only by gc.step_id included: teardown
+// runs after the root settles by contract, and it is what releases the
+// workflow's resources. The next claim of the attempt is served.
+func TestDoHookClaimRetiresPurgedWorkflowButLeavesItsTeardownTailToRun(t *testing.T) {
+	store := beads.NewMemStore()
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	root, open, inProgress, finished := seedInputWorkflow(t, store, conv.ID)
+	control, attempt := seedTeardownTail(t, store, root.ID)
+	if err := store.Delete(conv.ID); err != nil {
+		t.Fatalf("purge convoy: %v", err)
+	}
+	frame := purgeFrameOverWork(t, store)
+
+	claimed := ""
+	stderr := runPurgeClaim(t, purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open}, &claimed), 1)
+
+	if claimed != "" {
+		t.Fatalf("claimed %s, a step of a workflow whose input is purged (stderr=%q)", claimed, stderr)
+	}
+	assertRetiredAsInputPurged(t, store, root.ID, open.ID, inProgress.ID)
+	assertNotRetired(t, store, map[string]string{control.ID: "open", attempt.ID: "open"})
+	if got, err := store.Get(finished.ID); err != nil || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("finished step = %v %v; want its pass outcome kept", got.Metadata, err)
+	}
+	requireTeardownServed(t, store, attempt, proveOver(frame))
+}
+
 // TestDoHookClaimServesWorkflowWhoseInputPurgeIsNotProved: an input the
 // done-check cannot judge is retired only on proof. Evidence that is
 // incomplete (the frame leaves part of the city out), erroneous (a read

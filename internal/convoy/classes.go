@@ -127,12 +127,37 @@ func (c classHandle) isNil() bool {
 	return beads.IsNilStore(c.work)
 }
 
-// get reads id from c's store.
-func (c classHandle) get(id string) (beads.Bead, error) {
-	if c.isGraph() {
-		return c.graph.Get(id)
+// readMode selects how an operation reads each class store it spans.
+type readMode int
+
+const (
+	// readHandle reads through the handle the caller named, which a caching
+	// store answers from its cache.
+	readHandle readMode = iota
+	// readLive reads through the store's live handle (beads.LiveFor), past
+	// any cache.
+	readLive
+)
+
+// classReader is the slice of a class store a membership read uses.
+type classReader interface {
+	Get(id string) (beads.Bead, error)
+	List(query beads.ListQuery) ([]beads.Bead, error)
+	DepList(id, direction string) ([]beads.Dep, error)
+}
+
+// reader is c's store, read as mode selects.
+func (c classHandle) reader(mode readMode) classReader {
+	switch {
+	case c.isGraph() && mode == readLive:
+		return beads.LiveFor(c.graph)
+	case c.isGraph():
+		return c.graph
+	case mode == readLive:
+		return beads.LiveFor(c.work)
+	default:
+		return c.work
 	}
-	return c.work.Get(id)
 }
 
 // idPrefix is the id prefix c's store mints, if it reports one.
@@ -210,7 +235,8 @@ func prefixOwner(id string, cands []classHandle) (classHandle, bool) {
 // *DuplicateResidenceError; a read failure from a named (participating) class
 // is returned with that class as provenance even when another class holds the
 // bead, because uniqueness cannot be proven while a participant is unreadable.
-func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error) {
+// Each class is read as mode selects.
+func (m MemberClasses) resolveMember(id string, mode readMode) (beads.Bead, classHandle, error) {
 	cands := m.candidates()
 	if len(cands) == 0 {
 		return beads.Bead{}, classHandle{}, fmt.Errorf("resolving %s: no class handle named: %w", id, beads.ErrNotFound)
@@ -219,7 +245,7 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 	// Recorded ownership first: a store that mints id's prefix owns it, so no
 	// probe of the other classes is needed and no second residence is possible.
 	if c, ok := prefixOwner(id, cands); ok {
-		got, err := c.get(id)
+		got, err := c.reader(mode).Get(id)
 		if err == nil {
 			return got, c, nil
 		}
@@ -238,7 +264,7 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 		duplicates []string
 	)
 	for _, c := range cands {
-		got, err := c.get(id)
+		got, err := c.reader(mode).Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue

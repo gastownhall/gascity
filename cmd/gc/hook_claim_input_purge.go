@@ -215,14 +215,15 @@ func hookRetireIfInputPurged(candidate beads.Bead, verdict workflowInputVerdict,
 		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input is purged: %v\n", verdict.RootID, err) //nolint:errcheck
 		return false
 	}
-	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input is purged (absent from every store: %s); root and open steps closed as failed (%s)\n", candidate.ID, verdict.RootID, strings.Join(evidence, ", "), beadmeta.FailureReasonInputPurged) //nolint:errcheck
+	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input is purged (absent from every store: %s); root and open steps closed as failed (%s), its teardown tail left to run\n", candidate.ID, verdict.RootID, strings.Join(evidence, ", "), beadmeta.FailureReasonInputPurged) //nolint:errcheck
 	return true
 }
 
-// retirePurgedWorkflow closes rootID and its open steps with the input_purged
-// hard failure: the disposition a seat would write after burning its claim
-// cycle on the missing spec, written once instead of once per seat. Nothing
-// is written once ctx — the fresh post-proof mutation deadline — is done.
+// retirePurgedWorkflow closes rootID and its open steps but the teardown tail
+// (closeWorkflowOpenMembers) with the input_purged hard failure: the
+// disposition a seat would write after burning its claim cycle on the missing
+// spec, written once instead of once per seat. Nothing is written once ctx —
+// the fresh post-proof mutation deadline — is done.
 func retirePurgedWorkflow(ctx context.Context, store workflowCloseStore, rootID string) error {
 	return closeWorkflowOpenMembers(ctx, store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
