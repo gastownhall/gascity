@@ -1,6 +1,8 @@
 package sling
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -138,6 +140,135 @@ func TestSlingTargetEnvNamesTheSessionInTheSessionsStore(t *testing.T) {
 
 		if got := ResolveSlingEnv(a, deps, "")["GC_SLING_TARGET"]; got != "s-current" {
 			t.Fatalf("GC_SLING_TARGET = %q, want the sessions store's s-current", got)
+		}
+	})
+}
+
+// rigScopeGraphFormula writes a graph.v2 formula whose one step is assigned
+// to assignee, and returns the config of a city whose rig "frontend" holds
+// the sling's work and graph beads.
+func rigScopeGraphFormula(t *testing.T, assignee string) *config.City {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "graph-direct.toml"), []byte(`
+formula = "graph-direct"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+assignee = "`+assignee+`"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := graphV2SlingTestConfig(t, dir)
+	cfg.Rigs = []config.Rig{{Name: "frontend", Path: t.TempDir(), Prefix: "fe"}}
+	dispatcher := slingControlDispatcherAgent()
+	dispatcher.Dir = "frontend"
+	cfg.Agents = append(cfg.Agents, dispatcher, rigWorker())
+	return cfg
+}
+
+// rigWorker is the single-session agent of rig "frontend" the rig-scope
+// tests sling to.
+func rigWorker() config.Agent {
+	return config.Agent{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)}
+}
+
+// rigScopeDeps is deps for a rig-scope sling on a city that relocates
+// nothing: the rig store is the work and the graph store, and the city's
+// sessions store is the city store, which holds every session bead.
+func rigScopeDeps(t *testing.T, cfg *config.City, rig, city beads.Store) SlingDeps {
+	t.Helper()
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps = withStore(deps, rig)
+	deps.Sessions = beadstest.Sessions(city)
+	deps.StoreRef = "rig:frontend"
+	return deps
+}
+
+// stepBead is the one non-root bead a graph.v2 launch minted in store.
+func stepBead(t *testing.T, store beads.Store, rootID string) beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.ID != rootID && b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID && b.Title == "Do work" {
+			return b
+		}
+	}
+	t.Fatalf("no step of root %s in the store: %+v", rootID, all)
+	return beads.Bead{}
+}
+
+// TestRigScopeGraphSlingBindsSessionsInTheCitySessionsStore is E3b: a
+// graph.v2 sling resolves its steps' session targets through a sessions
+// store. It was handed the graph store relabelled as one, which for a
+// rig-scope sling on a city that relocates nothing is the rig store, and a
+// rig store holds no session beads: a step assigned to a live session failed
+// to bind (the API path), a configured named session was materialized in the
+// rig store where the controller never reads it (the CLI path's resolver),
+// and the default route's session name fell back to the computed name.
+func TestRigScopeGraphSlingBindsSessionsInTheCitySessionsStore(t *testing.T) {
+	worker := rigWorker()
+
+	t.Run("a step assigned to a live session binds to it", func(t *testing.T) {
+		city, rig := beads.NewMemStore(), beads.NewMemStoreFrom(500, nil, nil)
+		sb := createNamedSessionBead(t, city, "reviewer", "s-reviewer")
+		cfg := rigScopeGraphFormula(t, sb.ID)
+		deps := rigScopeDeps(t, cfg, rig, city)
+
+		result, err := DoSling(SlingOpts{Target: worker, BeadOrFormula: "graph-direct", IsFormula: true}, deps, nil)
+		if err != nil {
+			t.Fatalf("rig-scope graph.v2 sling with a step assigned to live session %s: %v", sb.ID, err)
+		}
+		if got := stepBead(t, rig, result.WorkflowID).Assignee; got != sb.ID {
+			t.Errorf("step assignee = %q, want the live session %s", got, sb.ID)
+		}
+	})
+
+	t.Run("a named session is materialized in the city sessions store", func(t *testing.T) {
+		city, rig := beads.NewMemStore(), beads.NewMemStoreFrom(500, nil, nil)
+		cfg := rigScopeGraphFormula(t, "mayor")
+		deps := rigScopeDeps(t, cfg, rig, city)
+		var handed beads.SessionStore
+		deps.DirectSessionResolver = func(store beads.SessionStore, _, _ string, _ *config.City, target, _ string) (string, bool, error) {
+			if target != "mayor" {
+				return "", false, nil
+			}
+			handed = store
+			sb, err := store.Create(beads.Bead{Title: "mayor", Type: "session", Labels: []string{"gc.session"}})
+			return sb.ID, err == nil, err
+		}
+
+		result, err := DoSling(SlingOpts{Target: worker, BeadOrFormula: "graph-direct", IsFormula: true}, deps, nil)
+		if err != nil {
+			t.Fatalf("rig-scope graph.v2 sling with a step assigned to named session mayor: %v", err)
+		}
+		if !beads.SameStore(handed, city) {
+			t.Fatalf("the direct-session resolver was handed %v, want the city sessions store: a session row materialized anywhere else is stranded", handed)
+		}
+		bound := stepBead(t, rig, result.WorkflowID).Assignee
+		if _, err := city.Get(bound); err != nil {
+			t.Errorf("the step is bound to %q, which the city sessions store does not hold: %v", bound, err)
+		}
+	})
+
+	t.Run("the default route names the session the city store records", func(t *testing.T) {
+		city, rig := beads.NewMemStore(), beads.NewMemStoreFrom(500, nil, nil)
+		createNamedSessionBead(t, city, worker.QualifiedName(), "s-worker-bound")
+		cfg := rigScopeGraphFormula(t, "")
+		deps := rigScopeDeps(t, cfg, rig, city)
+
+		result, err := DoSling(SlingOpts{Target: worker, BeadOrFormula: "graph-direct", IsFormula: true}, deps, nil)
+		if err != nil {
+			t.Fatalf("rig-scope graph.v2 sling: %v", err)
+		}
+		if got := stepBead(t, rig, result.WorkflowID).Metadata[beadmeta.SessionNameMetadataKey]; got != "s-worker-bound" {
+			t.Errorf("step %s = %q, want the city store's s-worker-bound", beadmeta.SessionNameMetadataKey, got)
 		}
 	})
 }
