@@ -405,7 +405,7 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// the is-running-after-stop assertion on interrupt's side effect.
 	// Post-stop it exercises the documented missing-session contract:
 	// best-effort, exit 0.
-	c.checkDrivingOp(ctx, nil, "interrupt", name)
+	c.checkDrivingOp(ctx, "interrupt", name)
 }
 
 // checkServerLifecycle runs the server-stop a script declaring
@@ -552,11 +552,11 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkProcessAlive(ctx, name)
 	c.checkNudge(ctx, name)
 	c.checkMetadataRoundTrip(ctx, name)
-	c.checkDrivingOp(ctx, nil, "peek", name, "10")
+	c.checkDrivingOp(ctx, "peek", name, "10")
 	c.checkListRunning(ctx, name)
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
-		c.checkDrivingOp(ctx, nil, "send-keys", name, "Enter")
-		c.checkDrivingOp(ctx, nil, "clear-scrollback", name)
+		c.checkDrivingOp(ctx, "send-keys", name, "Enter")
+		c.checkDrivingOp(ctx, "clear-scrollback", name)
 	}
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
 		c.checkObserve(ctx, observeCheck, name, "running")
@@ -736,13 +736,13 @@ func (c *checker) drivingCheckName(op string) string {
 
 // checkDrivingOp keeps the optional path unchanged; an explicit carrier.ops
 // declaration obliges the op, so an unsupported op is a failed promise.
-func (c *checker) checkDrivingOp(ctx context.Context, stdin []byte, args ...string) {
+func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
 	check := c.drivingCheckName(args[0])
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
-		c.checkOptional(ctx, check, stdin, args...)
+		c.checkOptional(ctx, check, nil, args...)
 		return
 	}
-	res := c.runOp(ctx, stdin, args...)
+	res := c.runOp(ctx, nil, args...)
 	switch {
 	case res.unsupported:
 		c.record(check, StatusFail, "carrier.ops declared but op not implemented (exit 2)")

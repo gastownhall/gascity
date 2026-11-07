@@ -55,12 +55,14 @@ esac
 `, dir))
 	return pk
 }
+
 func (pk opsPack) put(t *testing.T, name, text string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(pk.dir, name), []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
+
 func (pk opsPack) log(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(pk.dir, "log"))
@@ -72,6 +74,7 @@ func (pk opsPack) log(t *testing.T) string {
 	}
 	return string(b)
 }
+
 func tmuxInvocations(log string) []string {
 	var found []string
 	for _, line := range strings.Split(log, "\n") {
@@ -82,6 +85,7 @@ func tmuxInvocations(log string) []string {
 	}
 	return found
 }
+
 func (pk opsPack) noTmux(t *testing.T) {
 	t.Helper()
 	if got := tmuxInvocations(pk.log(t)); len(got) > 0 {
@@ -340,10 +344,10 @@ func TestOpsCarrierIdleReadings(t *testing.T) {
 
 func TestOpsCarrierSleepCapability(t *testing.T) {
 	for name, ctor := range opsConstructors {
-		for _, missing := range []string{"", "report-activity", "report-attachment", "idle-boundary", "carrier.ops", "malformed", "proc.exec"} {
+		for _, missing := range []string{"", "report-activity", "report-attachment", "idle-boundary", "carrier.ops", "malformed", "with-proc.exec"} {
 			t.Run(name+"/"+missing, func(t *testing.T) {
 				caps := []string{"carrier.ops", "report-activity", "report-attachment", "idle-boundary"}
-				if missing == "proc.exec" {
+				if missing == "with-proc.exec" {
 					caps = append(caps, "proc.exec")
 				}
 				var kept []string
@@ -360,7 +364,7 @@ func TestOpsCarrierSleepCapability(t *testing.T) {
 				p := ctor(pk.script)
 				want := runtime.SessionSleepCapabilityTimedOnly
 				budget := time.Duration(0)
-				if missing == "" || missing == "proc.exec" {
+				if missing == "" || missing == "with-proc.exec" {
 					want = runtime.SessionSleepCapabilityFull
 					budget = 5 * time.Second
 				}

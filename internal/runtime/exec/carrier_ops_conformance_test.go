@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,10 +39,9 @@ func TestExecV2ConformanceNonTmux(t *testing.T) {
 	if !runtime.FreshReadable(sp) || !runtime.ListRunningAttested(sp) {
 		t.Fatal("non-tmux golden not v2-ready")
 	}
-	n := 0
+	var n atomic.Int64
 	runtimetest.RunProviderTests(t, func(ct *testing.T) (runtime.Provider, runtime.Config, string) {
-		n++
-		return sp, runtime.Config{WorkDir: ct.TempDir(), Command: "sleep 300", ProcessNames: []string{"sleep"}, AcceptStartupDialogs: new(bool)}, fmt.Sprintf("ops-v2-%06d", n)
+		return sp, runtime.Config{WorkDir: ct.TempDir(), Command: "sleep 300", ProcessNames: []string{"sleep"}, AcceptStartupDialogs: new(bool)}, fmt.Sprintf("ops-v2-%06d", n.Add(1))
 	})
 	if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
 		t.Error("production composition sent tmux to ops golden")

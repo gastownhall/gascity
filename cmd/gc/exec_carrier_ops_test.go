@@ -41,6 +41,7 @@ func TestExecFencingPredicateLockstep(t *testing.T) {
 		}
 	}
 }
+
 func TestExecInputFenceWarningUnderCarrierOps(t *testing.T) {
 	script := writeHandshakePack(t, `{"version":0,"capabilities":["observe.v1","report-attachment","proc.exec","input-fence","carrier.ops"]}`)
 	cfg := v2DefaultCity(func(c *config.City) { c.Session.Provider = "exec:" + script; c.Daemon.SessionReconciler = "v2" })
@@ -53,6 +54,7 @@ func TestExecInputFenceWarningUnderCarrierOps(t *testing.T) {
 		t.Errorf("hint = %q", r.FixHint)
 	}
 }
+
 func TestRuntimeConformanceCmd_NonTmuxCarrierPasses(t *testing.T) {
 	state := t.TempDir()
 	script := filepath.Join(t.TempDir(), "golden")

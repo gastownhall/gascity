@@ -320,18 +320,6 @@ func unobservedTimeout() error {
 	return fmt.Errorf("%w: %w", context.DeadlineExceeded, runtime.ErrWaitUnobserved)
 }
 
-// boundedPeek captures the pane under a context that expires after limit and
-// returns no later than that (see bounded).
-func boundedPeek(ctx context.Context, c runtime.Carrier, name string, limit time.Duration) (out string, expired bool, err error) {
-	out, expired, err = bounded(ctx, limit, func(ctx context.Context) (string, error) {
-		return c.Peek(ctx, name, tmux.PromptObservationLines)
-	})
-	if err != nil && expired {
-		err = fmt.Errorf("exec provider: capturing %q: %w", name, err)
-	}
-	return out, expired, err
-}
-
 // bounded runs f under a context derived from ctx that expires after limit,
 // and returns no later than that, even if f does not return promptly on
 // cancellation (an exec op can outlive its context while a child of the pack

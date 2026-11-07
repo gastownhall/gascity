@@ -38,8 +38,13 @@ func TestNonTmuxIdleBoundaryIsGated(t *testing.T) {
 		t.Fatalf("golden = %s, %s", r.Status, r.Detail)
 	}
 	for _, tc := range []struct{ op, body string }{
-		{"is-running", "echo false"}, {"is-running", "echo maybe"}, {"is-running", "exit 2"},
-		{"peek", "exit 2"}, {"peek", "exit 1"}, {"peek", "echo unrelated fixed text"}, {"peek", "exit 66"},
+		{"is-running", "echo false"},
+		{"is-running", "echo maybe"},
+		{"is-running", "exit 2"},
+		{"peek", "exit 2"},
+		{"peek", "exit 1"},
+		{"peek", "echo unrelated fixed text"},
+		{"peek", "exit 66"},
 	} {
 		t.Run(tc.op+tc.body, func(t *testing.T) {
 			if r := runNonTmuxIdle(t, map[string]string{tc.op: tc.body}); r.Status != StatusFail {

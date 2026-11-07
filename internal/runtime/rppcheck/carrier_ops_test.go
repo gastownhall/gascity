@@ -26,6 +26,7 @@ func checkOpsReference(t *testing.T, overrides map[string]string, opts Options) 
 	}
 	return result
 }
+
 func TestRun_CarrierOpsIsKnown(t *testing.T) {
 	for _, extra := range []string{"", `,"carrier.future"`} {
 		t.Run(extra, func(t *testing.T) {
@@ -44,6 +45,7 @@ func TestRun_CarrierOpsIsKnown(t *testing.T) {
 		})
 	}
 }
+
 func TestRun_NonTmuxGoldenFullyConformant(t *testing.T) {
 	r := checkOpsReference(t, nil, Options{})
 	if r.Failed() {
@@ -55,6 +57,7 @@ func TestRun_NonTmuxGoldenFullyConformant(t *testing.T) {
 		}
 	}
 }
+
 func TestRun_CarrierOpsRequiresDrivingOps(t *testing.T) {
 	for _, op := range []string{"nudge", "peek", "send-keys", "interrupt", "clear-scrollback"} {
 		for _, body := range []string{"exit 2", "exit 1"} {
@@ -77,6 +80,7 @@ func TestRun_CarrierOpsRequiresDrivingOps(t *testing.T) {
 		t.Error("extra checks for undeclared carrier")
 	}
 }
+
 func TestRun_CarrierOpsNamingPrecedesRequireNudge(t *testing.T) {
 	for _, failStart := range []bool{false, true} {
 		t.Run(map[bool]string{false: "running", true: "failed-start"}[failStart], func(t *testing.T) {
@@ -105,6 +109,7 @@ func TestRun_CarrierOpsNamingPrecedesRequireNudge(t *testing.T) {
 		})
 	}
 }
+
 func TestRun_IdleBoundaryWarningFollowsTheCarrier(t *testing.T) {
 	for _, tc := range []struct {
 		caps     string
