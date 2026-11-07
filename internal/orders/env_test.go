@@ -1,6 +1,9 @@
 package orders
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestReservedExecEnvKeysIncludeBdAutoBackup guards ga-0eq: the controller
 // forces bd's PersistentPostRun auto-backup off via BD_BACKUP_ENABLED, so an
@@ -42,5 +45,22 @@ func TestValidateExecEnvOverridesRejectsBdContributorRouting(t *testing.T) {
 	order := Order{Name: "o", Env: map[string]string{"BD_ROUTING_MODE": "auto"}}
 	if err := ValidateExecEnvOverrides(order); err == nil {
 		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved BD_ROUTING_MODE override")
+	}
+}
+
+// TestValidateExecEnvOverridesRejectsCityName guards the city's identity: the
+// controller stamps each exec order with its own GC_CITY_NAME, so an order's
+// [order.env] must not be able to repoint it at another city.
+func TestValidateExecEnvOverridesRejectsCityName(t *testing.T) {
+	if !IsReservedExecEnvKey("GC_CITY_NAME") {
+		t.Error(`IsReservedExecEnvKey("GC_CITY_NAME") = false, want true`)
+	}
+	order := Order{Name: "o", Env: map[string]string{"GC_CITY_NAME": "other-city"}}
+	err := ValidateExecEnvOverrides(order)
+	if err == nil {
+		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved GC_CITY_NAME override")
+	}
+	if !strings.Contains(err.Error(), "GC_CITY_NAME") || !strings.Contains(err.Error(), "controller-owned") {
+		t.Fatalf("error = %q, want controller-owned GC_CITY_NAME diagnostic", err)
 	}
 }

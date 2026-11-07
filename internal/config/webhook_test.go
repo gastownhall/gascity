@@ -472,6 +472,11 @@ func TestValidateWebhooks_Rejects(t *testing.T) {
 			w.Rules = []WebhookRule{{Event: "e", Order: "o", Args: map[string]string{"GC_CITY": "{{action}}"}}}
 			return w
 		}(), "reserved controller-owned env key"},
+		{"reserved city name arg key", func() Webhook {
+			w := base(Webhook{Name: "h"})
+			w.Rules = []WebhookRule{{Event: "e", Order: "o", Args: map[string]string{"GC_CITY_NAME": "{{city}}"}}}
+			return w
+		}(), "reserved controller-owned env key"},
 		{"secret_env outside operator namespace", func() Webhook {
 			w := base(Webhook{Name: "h"})
 			w.Verify.SecretEnv = "MY_SECRET"
