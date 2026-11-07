@@ -85,8 +85,9 @@ func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery work
 // the screen can show no turn while one runs (the 2026-11-04 Tier-4 cohort:
 // 9 of 16 long Codex turns aborted by this bypass). A vetoed bypass holds,
 // as a turn on screen does: nothing is claimed or charged, and the next pass
-// asks again. Every other delivery, the quiescence gate's own included,
-// decides as without the record. Under the shadow switch the bypass's
+// asks again. The poller's other deliveries, the quiescence gate's own
+// included, decide as without the record; the conversation lane's quiescence
+// boundary takes the same hold (laneRecordTypingHold). Under the shadow switch the bypass's
 // verdict is recorded beside the record's (starved_bypass), read fresh.
 func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.Time) (worker.NudgeDelivery, bool, error) {
 	how, hold, _, err := starvedBypassLook(target, sp, now)

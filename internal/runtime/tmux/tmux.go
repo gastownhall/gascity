@@ -505,6 +505,10 @@ type Tmux struct {
 	// shadow is the program-status shadow mode's soft state (see
 	// program_status_shadow.go).
 	shadow programShadow
+	// handbacks are the startup nudges Starts left undelivered behind a
+	// program-reported dialog, for their callers to take (see
+	// program_status_decide.go).
+	handbacks startupHandbacks
 	// dialogs is each session's dialog watch, kept from parser captures
 	// while the program-status switch is not off (see
 	// program_status_pending.go).
@@ -5732,8 +5736,16 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // beside the program's own record (shadowIdleWait), on a reading taken after
 // it is decided and before it returns, unless ctx carries
 // [runtime.WithShadowCallerRecords]; the outcome returned is the scan's
-// alone.
+// alone. With the switch on, a wait that follows an interrupt the leaf sent,
+// or one its caller noted before sending its keys (Provider.NoteInterrupt),
+// is also the interrupt's settle (programSettle): each poll reads the
+// program's record fresh first, and the wait returns at the first root
+// boundary past the pre-interrupt baseline, or at once with an error
+// wrapping [runtime.ErrPendingInteraction] on a live blocked root past it.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	if settle, ok := t.programSettle(session, time.Now()); ok {
+		return t.waitForIdleSettling(ctx, session, timeout, settle)
+	}
 	if !t.shadowing() {
 		return t.waitForIdle(ctx, session, timeout)
 	}
@@ -5745,6 +5757,14 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 
 // waitForIdle is WaitForIdle's scan.
 func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	return t.waitForIdleSettling(ctx, session, timeout, nil)
+}
+
+// waitForIdleSettling is WaitForIdle's scan with settle, when set, asked on
+// every poll before the scan's look (programSettle): settled ends the wait
+// at once, and an error ends it with that error. A settle that decides
+// nothing leaves the poll to the scan.
+func (t *Tmux) waitForIdleSettling(ctx context.Context, session string, timeout time.Duration, settle func() (bool, error)) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
@@ -5764,6 +5784,15 @@ func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Dur
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if settle != nil {
+			settled, err := settle()
+			if err != nil {
+				return err
+			}
+			if settled {
+				return nil
+			}
 		}
 		idle, err := t.snapshotPaneIdleWithPrefix(target, promptPrefix)
 		if err != nil {

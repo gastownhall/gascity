@@ -126,12 +126,16 @@ func observeProgram(ps runtime.ProgramStatus, transcriptActivity string) program
 // included, decided nothing and records nothing; an indeterminate would
 // count as a disagreement beside a valid record, and alternate with the
 // readings the session's other producers record, every change kept. The
-// leaf records only when the pair changes and only while it is shadowing
-// too; nothing in the response reads it. The agent reads record nothing:
-// an agent's activity is its session's transcript, read only for a claude
-// agent whose session file is unambiguous (canAttributeSession), and the
-// session reads cover every running session.
-func shadowObservation(published runtime.ProgramStatusMode, sp runtime.Provider, sessionName, sessionID, family, transcriptActivity string) {
+// record is judged on ps, the reading the response shows
+// (runtime.ShadowObserveIdle), which observeProgram decides the activity
+// with under on, so the shadow measures what on would serve, the state
+// cache's lag included; it takes no reading of its own. The leaf records
+// only when the pair changes and only while it is shadowing too; nothing in
+// the response reads it. The agent reads record nothing: an agent's activity
+// is its session's transcript, read only for a claude agent whose session
+// file is unambiguous (canAttributeSession), and the session reads cover
+// every running session.
+func shadowObservation(published runtime.ProgramStatusMode, sp runtime.Provider, ps runtime.ProgramStatus, sessionName, sessionID, family, transcriptActivity string) {
 	if published != runtime.ProgramStatusShadow {
 		return
 	}
@@ -144,7 +148,7 @@ func shadowObservation(published runtime.ProgramStatusMode, sp runtime.Provider,
 	default:
 		return
 	}
-	runtime.ShadowCompareIdle(sp, strings.TrimSpace(sessionName), sessionID, family, runtime.ProgramPointObservation, scrape)
+	runtime.ShadowObserveIdle(sp, strings.TrimSpace(sessionName), sessionID, family, scrape, ps)
 }
 
 // programStatusFrames tracks the program-status view a session stream last

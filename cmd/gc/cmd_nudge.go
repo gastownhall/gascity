@@ -2778,12 +2778,29 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 }
 
 // Under the program-status shadow switch the verdict is recorded beside the
-// record's hold (queued_delivery); the verdict returned is today's alone.
+// record's hold (queued_delivery) on a reading of the record taken fresh
+// with the decision; the verdict returned is today's alone.
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	return pollerSessionIdleEnoughOn(target, sp, quiescence, obs, nil)
+}
+
+// pollerSessionIdleEnoughOn is pollerSessionIdleEnough judging the record
+// on reading, the fresh reading the decision shares with its other points
+// (the op lane's look); nil takes one for this decision alone.
+func pollerSessionIdleEnoughOn(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, reading *runtime.ShadowReading) bool {
 	programShadowDecideForTarget(target)
 	deliver := pollerSessionQuietEnough(target, sp, quiescence, obs)
-	shadowHold(sp, target.sessionName, target.sessionID, target.providerFamily(),
-		runtime.ProgramPointQueuedDelivery, !deliver, time.Now(), runtime.ProgramHoldVerdict)
+	if target.sessionName == "" || sp == nil {
+		return deliver
+	}
+	if reading == nil {
+		reading = runtime.NewShadowReading(sp, target.sessionName)
+	}
+	scrape := runtime.ProgramVerdictNoHold
+	if !deliver {
+		scrape = runtime.ProgramVerdictHold
+	}
+	reading.Compare(target.sessionID, target.providerFamily(), runtime.ProgramPointQueuedDelivery, scrape, time.Now(), runtime.ProgramHoldVerdict)
 	return deliver
 }
 

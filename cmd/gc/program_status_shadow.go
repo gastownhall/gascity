@@ -304,11 +304,11 @@ func flushProgramStatusShadow(timeout time.Duration) {
 }
 
 // shadowHold records a hold point's comparison (execution_backstop,
-// claim_nudge_hold, work_ladder, queued_delivery, drain_reminder) for sp's
-// session sessName: held is today's verdict, rule the record's, judged with
-// the runtime's last activity at now; the comparison carries both, so its
-// hold_live is the rule's own. It does nothing unless the leaf serving the
-// session is shadowing, and never feeds the decision.
+// claim_nudge_hold, work_ladder, drain_reminder) for sp's session sessName:
+// held is today's verdict, rule the record's, judged with the runtime's last
+// activity at now; the comparison carries both, so its hold_live is the
+// rule's own. It does nothing unless the leaf serving the session is
+// shadowing, and never feeds the decision.
 func shadowHold(sp runtime.Provider, sessName, sessionID, family string, point runtime.ProgramStatusPoint, held bool, now time.Time, rule func(runtime.ProgramStatus, time.Time, time.Time) runtime.ProgramVerdict) {
 	scrape := runtime.ProgramVerdictNoHold
 	if held {
