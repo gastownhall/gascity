@@ -324,6 +324,16 @@ func TestIntegrationFileAppliesOnLinuxAMD64(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "go:build integration && unix applies on linux",
+			path: writeFile("unix_tagged_test.go", "//go:build integration && unix\n\npackage integration\n"),
+			want: true,
+		},
+		{
+			name: "go:build integration && !unix never applies on linux",
+			path: writeFile("not_unix_tagged_test.go", "//go:build integration && !unix\n\npackage integration\n"),
+			want: false,
+		},
+		{
 			name: "go:build !integration excludes the integration lane build",
 			path: writeFile("unit_only_test.go", "//go:build !integration\n\npackage integration\n"),
 			want: false,
