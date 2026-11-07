@@ -62,11 +62,12 @@ func scopedShadowCity(t *testing.T, mode runtime.ProgramStatusMode, sessions []s
 	return runtime.FullFake{Fake: f}, sc, c, r.(*programShadowRecorder)
 }
 
-// observeAll is a gc session list-style read: every session's observation
-// and pending reading, the reads a list takes and decides nothing with.
+// observeAll is a gc session list-style read: every session's observation,
+// judged on the reading the list shows, and pending reading, the reads a
+// list takes and decides nothing with.
 func observeAll(sp runtime.Provider, sessions []string) {
 	for _, name := range sessions {
-		runtime.ShadowCompareIdle(sp, name, "", "claude", runtime.ProgramPointObservation, runtime.ProgramVerdictIdle)
+		runtime.ShadowObserveIdle(sp, name, "", "claude", runtime.ProgramVerdictIdle, worker.ProgramStatusOf(sp, name))
 		runtime.ShadowCompare(sp, name, "", "claude", runtime.ProgramPointPending, runtime.ProgramVerdictNone,
 			func(s runtime.ProgramStatus) runtime.ProgramVerdict {
 				return runtime.ProgramPendingVerdict(s, time.Time{}, time.Now())

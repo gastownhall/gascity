@@ -334,9 +334,10 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return State{}, err
 		}
 		// Under the program-status shadow switch, the phase this view
-		// settles on is recorded beside the record (observation); the
+		// settles on is recorded beside the record this view read
+		// (observation), the reading its phase decides with under on; the
 		// phase returned is this view's alone.
-		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
+		defer func() { h.manager.RecordObservationShadow(info, state.Program, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending

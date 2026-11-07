@@ -719,7 +719,7 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	if resp.Running {
 		published, sp := configuredProgramStatusMode(cfg), s.state.SessionProvider()
 		ps := programStatusUnder(published, sp, info.SessionName)
-		shadowObservation(published, sp, info.SessionName, info.ID, session.ProviderFamilyFromInfo(info, ""), resp.Activity)
+		shadowObservation(published, sp, ps, info.SessionName, info.ID, session.ProviderFamilyFromInfo(info, ""), resp.Activity)
 		obs := observeProgram(ps, resp.Activity)
 		resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 	}

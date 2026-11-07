@@ -118,6 +118,11 @@ type conversationLaneExec struct {
 	// including the leaf's runtime.ErrIdleIndeterminate for a family whose
 	// busy reading it does not trust, which leaves the quiescence rule alone.
 	turnOnScreen func(nudgeTarget) (running, known bool, err error)
+	// lookReading is the program-status shadow's record reading of the look
+	// in progress (look): its idle gate (queued_delivery) and its screen
+	// pre-read (wait_idle_preread) are one decision, so they share one
+	// fresh read. Only one look runs at a time (worker.ObserveBounded).
+	lookReading *runtime.ShadowReading
 	// paneActivity is the session's last activity read from its runtime
 	// now, after turnOnScreen showed a turn, not from the snapshot the
 	// look's observation may have come from: production reads
@@ -246,7 +251,7 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 			strings.TrimSpace(t.providerFamily()), strings.TrimSpace(t.sessionTransport()), t.processNames())
 	}
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
-		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
+		return pollerSessionIdleEnoughOn(t, e.deps.sp, defaultNudgePollQuiescence, obs, e.lookReading)
 	}
 	e.turnOnScreen = func(t nudgeTarget) (bool, bool, error) {
 		return laneTurnOnScreen(e.deps.sp, t)
@@ -406,6 +411,7 @@ type laneLook struct {
 // content_block wait does not use. A pass runs only for a row with open
 // ops, so an idle draining or stop-requested row pays nothing.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, withTurns bool, contentSince time.Time) (laneLook, error) {
+	e.lookReading = runtime.NewShadowReading(e.deps.sp, e.target.sessionName)
 	obs, err := e.observe(e.target)
 	if err != nil {
 		return laneLook{}, err
@@ -581,8 +587,9 @@ func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjourn
 // runs (laneTurnOnScreen), which stands where the worker's and the session's
 // wait-idle deliveries take runtime.IdleBoundaryNow before they wait. A
 // reading the leaf does not take, or does not trust, is indeterminate; a
-// read that failed decided nothing and records nothing. It never feeds the
-// boundary.
+// read that failed decided nothing and records nothing. The record is the
+// look's fresh reading (lookReading), shared with its idle gate. It never
+// feeds the boundary.
 func (e *conversationLaneExec) shadowPreread(running, known bool, err error) {
 	if err != nil {
 		return
@@ -594,7 +601,11 @@ func (e *conversationLaneExec) shadowPreread(running, known bool, err error) {
 	case running:
 		scrape = runtime.ProgramVerdictBusy
 	}
-	runtime.ShadowCompareIdle(e.deps.sp, e.target.sessionName, e.info.ID, e.target.providerFamily(), runtime.ProgramPointWaitIdlePreread, scrape)
+	reading := e.lookReading
+	if reading == nil {
+		reading = runtime.NewShadowReading(e.deps.sp, e.target.sessionName)
+	}
+	reading.Compare(e.info.ID, e.target.providerFamily(), runtime.ProgramPointWaitIdlePreread, scrape, time.Now(), runtime.ProgramIdleVerdict)
 }
 
 // staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
