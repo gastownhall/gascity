@@ -358,6 +358,32 @@ func TestFinalizeSoftFailsTransientLaneWithoutAwaitingFinalize(t *testing.T) {
 	}
 }
 
+func TestFinalizeSoftFailsTransientLaneWithoutReadOnlyProof(t *testing.T) {
+	got := finalize([]LaneOutput{
+		{
+			LaneID:        lanePrimary,
+			Provider:      "local",
+			Model:         "model-a",
+			Verdict:       VerdictBlocked,
+			FailureClass:  FailureClassTransient,
+			FailureReason: "provider_rate_limited",
+		},
+	})
+
+	if got.Verdict != VerdictBlocked {
+		t.Fatalf("Verdict = %q, want %q", got.Verdict, VerdictBlocked)
+	}
+	if got.FailureClass != FailureClassTransient {
+		t.Fatalf("FailureClass = %q, want transient", got.FailureClass)
+	}
+	if got.FailureReason != "lane=primary reason=provider_rate_limited" {
+		t.Fatalf("FailureReason = %q, want lane=primary reason=provider_rate_limited", got.FailureReason)
+	}
+	if strings.Contains(got.FailureReason, "read_only") {
+		t.Fatalf("FailureReason = %q, want no read-only failure for transient blocked lane", got.FailureReason)
+	}
+}
+
 func TestFinalizeFindingsRequestChanges(t *testing.T) {
 	got := finalize([]LaneOutput{
 		{
