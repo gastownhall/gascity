@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -478,8 +479,10 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // startFresh's token-gated cleanup removes the box it provisioned. It then
 // dismisses startup dialogs — the same
 // Go-side orchestration the welded Start runs. The `exec` op runs in the box's
-// working directory and the box env is set at provision time, so neither an
-// explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+// working directory and the box env is set at provision time, so no explicit -c
+// is needed; a respawn into a warm box adds -e for the operator-authored env,
+// which is launch-half and may have changed since the box was provisioned.
+// (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
@@ -494,7 +497,15 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 		if cfg.FreshOnly {
 			return fmt.Errorf("exec provider: fresh launch in %q found an existing agent session", name)
 		}
-		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
+		// respawn-pane inherits the session's environment as the box was
+		// provisioned, so an operator-env change that took this launch-only
+		// path is carried on the respawn itself (-e KEY=VALUE).
+		envArgs, err := respawnEnvArgs(cfg)
+		if err != nil {
+			return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
+		}
+		argv = append([]string{"tmux", "respawn-pane", "-k"}, envArgs...)
+		argv = append(argv, "-t", execTmuxSession, command)
 	} else {
 		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
 	}
@@ -509,6 +520,31 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	}
 	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
+}
+
+// respawnEnvArgs returns the `-e KEY=VALUE` flags that carry cfg's operator-env
+// onto a warm-box respawn-pane, in key order. A value that must stay out of argv
+// (see [runtime.ArgvSecretEnvValue]) cannot travel on one, and a relaunch that
+// silently dropped it would report an env it did not apply, so it is an error:
+// the caller falls back to a full restart, which stages it privately.
+func respawnEnvArgs(cfg runtime.Config) ([]string, error) {
+	env := runtime.RelaunchEnv(cfg)
+	keys := make([]string, 0, len(env))
+	for k, v := range env {
+		if k == "" || strings.Contains(k, "=") {
+			return nil, fmt.Errorf("operator env name %q is not a valid environment variable name", k)
+		}
+		if runtime.ArgvSecretEnvValue(k, v) {
+			return nil, fmt.Errorf("operator env %s must not travel in argv and cannot be applied by a warm-box relaunch", k)
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	args := make([]string, 0, 2*len(keys))
+	for _, k := range keys {
+		args = append(args, "-e", k+"="+env[k])
+	}
+	return args, nil
 }
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path

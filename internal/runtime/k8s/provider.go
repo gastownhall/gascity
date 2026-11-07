@@ -377,9 +377,12 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // The pod must be Running with a live tmux "main" session, else
 // [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
-// too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). The remote-stage record is the exception: it is written again before
+// NOT re-run here (k8s treats PreStart as provision-half). Env is set in the pod
+// spec at create time and respawn-pane carries none, so a launch-only change to
+// the operator env cannot reach the agent here: a config with operator env is
+// refused with [runtime.ErrRelaunchUnsupported], and the reconciler falls back to
+// a full restart, which applies the env and records the new hash only then. The
+// remote-stage record is the exception: it is written again before
 // the respawn, so a warm pod an older provider created is marked too. NOTE: tmux
 // diverges — as of the relaunch pre_start fix it re-runs PreStart on Relaunch
 // (launch-half), while k8s and ssh intentionally do not.
@@ -392,6 +395,9 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if len(runtime.RelaunchEnv(cfg)) > 0 {
+		return fmt.Errorf("%w: k8s respawn-pane cannot carry operator env that a launch-only change may have altered", runtime.ErrRelaunchUnsupported)
 	}
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {

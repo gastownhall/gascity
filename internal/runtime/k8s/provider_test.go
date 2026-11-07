@@ -2363,6 +2363,24 @@ func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
 	}
 }
 
+// respawn-pane carries no env, so a relaunch of a config with operator env
+// would report an env it did not apply: it is refused, nothing is respawned,
+// and the reconciler's full restart applies the env.
+func TestProvider_RelaunchRefusesOperatorEnv(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", OperatorEnv: map[string]string{"K": "v"}})
+	if !errors.Is(err, runtime.ErrRelaunchUnsupported) {
+		t.Fatalf("Relaunch err = %v, want ErrRelaunchUnsupported", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("respawn-pane must not be issued for a refused relaunch")
+	}
+}
+
 func TestProvider_RelaunchMissingPodIsErrSessionNotFound(t *testing.T) {
 	fake := newFakeK8sOps() // no pods
 	p := newProviderWithOps(fake)

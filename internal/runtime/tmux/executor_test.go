@@ -582,6 +582,45 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	}
 }
 
+// applySessionEnv sets each key in the session environment in key order, and
+// refuses an invalid name before it sets any. A key that must stay out of argv
+// goes through Tmux.SetEnvironment's private command file instead, so its value
+// is never in a tmux argument.
+func TestApplySessionEnvSetsKeysInOrder(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	if err := ops.applySessionEnv("gc-test-apply", map[string]string{"TZ": "UTC", "LANG": "C"}); err != nil {
+		t.Fatalf("applySessionEnv: %v", err)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("tmux calls = %v, want 2 set-environment calls", exec.calls)
+	}
+	for i, want := range []string{"set-environment -t =gc-test-apply LANG C", "set-environment -t =gc-test-apply TZ UTC"} {
+		if got := strings.Join(exec.calls[i][1:], " "); got != want {
+			t.Errorf("call %d = %q, want %q", i, got, want)
+		}
+	}
+
+	exec.calls = nil
+	if err := ops.applySessionEnv("gc-test-apply", map[string]string{"OP_SECRET": "hunter2"}); err != nil {
+		t.Fatalf("applySessionEnv (private key): %v", err)
+	}
+	if got := fmt.Sprint(exec.calls); strings.Contains(got, "hunter2") {
+		t.Errorf("a non-argv-safe value reached a tmux argument: %v", exec.calls)
+	}
+
+	exec.calls = nil
+	if err := ops.applySessionEnv("gc-test-apply", map[string]string{"GOOD": "1", "bad name": "2"}); err == nil {
+		t.Fatal("applySessionEnv with an invalid name = nil, want an error")
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("tmux calls = %v, want none when a name is invalid", exec.calls)
+	}
+}
+
 // Relaunch respawns the agent pane, never the active one. "=name:" resolves to
 // the current window's active pane, so a human who left another window or pane
 // focused would have that pane killed and the old agent left running. The

@@ -169,3 +169,25 @@ func keysOf(m map[string]string) []string {
 	}
 	return out
 }
+
+func TestRelaunchEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want map[string]string
+	}{
+		{"no operator env", Config{Env: map[string]string{"GC_CITY": "/c"}}, nil},
+		{"operator key with its own value", Config{OperatorEnv: map[string]string{"K": "op"}}, map[string]string{"K": "op"}},
+		{"merged env overrides the operator layer", Config{Env: map[string]string{"K": "merged"}, OperatorEnv: map[string]string{"K": "op"}}, map[string]string{"K": "merged"}},
+		{"keys outside the operator env are not re-sent", Config{Env: map[string]string{"K": "v", "OTHER": "x"}, OperatorEnv: map[string]string{"K": "op"}}, map[string]string{"K": "v"}},
+		{"an empty value is a withholding, not applied", Config{OperatorEnv: map[string]string{"K": ""}}, nil},
+		{"an empty merged override withholds the key", Config{Env: map[string]string{"K": ""}, OperatorEnv: map[string]string{"K": "op"}}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RelaunchEnv(tc.cfg); !maps.Equal(got, tc.want) {
+				t.Errorf("RelaunchEnv = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

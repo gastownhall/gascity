@@ -54,6 +54,7 @@ type fakeStartOps struct {
 	createIdx  int
 
 	respawnErr  error
+	applyEnvErr error
 	respawnHook func()
 
 	isSessionRunningResult     *bool
@@ -129,6 +130,11 @@ func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[strin
 		f.respawnHook()
 	}
 	return f.respawnErr
+}
+
+func (f *fakeStartOps) applySessionEnv(name string, env map[string]string) error {
+	f.calls = append(f.calls, startCall{method: "applySessionEnv", name: name, env: env})
+	return f.applyEnvErr
 }
 
 func (f *fakeStartOps) isSessionRunning(name string) bool {
@@ -2620,6 +2626,34 @@ func TestDoRelaunchSession_AppliesOperatorEnvBeforeRespawn(t *testing.T) {
 	want := map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-env"}
 	if !maps.Equal(got, want) {
 		t.Errorf("applySessionEnv env = %v, want %v", got, want)
+	}
+}
+
+// An env that cannot be applied fails the relaunch and the agent is NOT
+// respawned, so the caller never records a config hash for an env the restarted
+// agent does not have.
+func TestDoRelaunchSession_ApplyEnvFailureSkipsRespawn(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true, applyEnvErr: errors.New("tmux refused")}
+	cfg := runtime.Config{Command: "claude", OperatorEnv: map[string]string{"OP_KEY": "new"}}
+
+	if err := doRelaunchSession(context.Background(), ops, "s", cfg, DefaultConfig().SetupTimeout); err == nil {
+		t.Fatal("doRelaunchSession = nil, want the apply failure")
+	}
+	if containsMethod(ops.callMethods(), "respawnAgent") {
+		t.Errorf("calls = %v, want no respawnAgent after the env was not applied", ops.callMethods())
+	}
+}
+
+// No operator env means no extra tmux call on the relaunch path.
+func TestDoRelaunchSession_NoOperatorEnvAppliesNothing(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+	cfg := runtime.Config{Command: "claude", Env: map[string]string{"GC_CITY": "/c"}}
+
+	if err := doRelaunchSession(context.Background(), ops, "s", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if containsMethod(ops.callMethods(), "applySessionEnv") {
+		t.Errorf("calls = %v, want no applySessionEnv without operator env", ops.callMethods())
 	}
 }
 

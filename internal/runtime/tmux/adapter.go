@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1519,6 +1520,7 @@ func (p *Provider) TeardownServer() error {
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
+	applySessionEnv(name string, env map[string]string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
@@ -1651,6 +1653,27 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// The respawned process inherits the session environment's identity;
 	// the pane's fence names it (best-effort, see republishInputFence).
 	o.tm.republishInputFence(name)
+	return nil
+}
+
+// applySessionEnv sets env in the session's environment, in key order, so the
+// next process tmux starts in it (respawn-pane inherits the session env, not
+// the caller's) sees the values. A key that is not a valid environment name is
+// refused before any is set.
+func (o *tmuxStartOps) applySessionEnv(name string, env map[string]string) error {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		if !validEnvNameRe.MatchString(k) {
+			return fmt.Errorf("invalid environment variable name %q for tmux session env", k)
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := o.tm.SetEnvironment(name, k, env[k]); err != nil {
+			return fmt.Errorf("setting %s in session %q env: %w", k, name, err)
+		}
+	}
 	return nil
 }
 
@@ -2241,6 +2264,15 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
 		return err
+	}
+	// respawn-pane inherits the SESSION's environment, so a launch-only change
+	// to the operator's env reaches the restarted agent only if it is applied
+	// to the session first; a failure here fails the relaunch, so the caller
+	// never records a config hash for an env that was not applied.
+	if env := runtime.RelaunchEnv(cfg); len(env) > 0 {
+		if err := ops.applySessionEnv(name, env); err != nil {
+			return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: applying operator env to session %q: %w", name, err))
+		}
 	}
 	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))

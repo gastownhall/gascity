@@ -293,6 +293,20 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	}
 }
 
+// respawn-pane carries no env, so a relaunch of a config with operator env
+// would report an env it did not apply: it is refused, nothing is respawned,
+// and the reconciler's full restart applies the env.
+func TestProvider_RelaunchRefusesOperatorEnv(t *testing.T) {
+	f := &fakeRunner{respond: answerStaging(nil)}
+	cfg := runtime.Config{Command: "agent", OperatorEnv: map[string]string{"K": "v"}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); !errors.Is(err, runtime.ErrRelaunchUnsupported) {
+		t.Fatalf("Relaunch err = %v, want ErrRelaunchUnsupported", err)
+	}
+	if firstCall(f, isTmux("respawn-pane")) != nil {
+		t.Error("no agent may be respawned for a refused relaunch")
+	}
+}
+
 func TestProvider_RelaunchMissingSessionIsErrSessionNotFound(t *testing.T) {
 	// has-session → 1 (no session): relaunch must error, not silently new-session.
 	f := &fakeRunner{code: 1}

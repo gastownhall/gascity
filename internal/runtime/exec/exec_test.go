@@ -238,6 +238,7 @@ func TestRelaunch_WarmBoxRespawnsPane(t *testing.T) {
 // session's OLD environment, so the respawn must carry the operator-authored
 // keys itself (-e KEY=VALUE). The effective value is Env's when Env overrides
 // it. A key outside OperatorEnv is not part of the drift and is not re-sent.
+// (The keys here are argv-safe; any other name is refused, see below.)
 func TestRelaunch_WarmBoxRespawnAppliesOperatorEnv(t *testing.T) {
 	dir := t.TempDir()
 	logf := filepath.Join(dir, "ops.log")
@@ -245,8 +246,8 @@ func TestRelaunch_WarmBoxRespawnAppliesOperatorEnv(t *testing.T) {
 
 	err := p.Relaunch(context.Background(), "s", runtime.Config{
 		Command:     "agent --resume",
-		Env:         map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-env", "GC_OTHER": "unrelated"},
-		OperatorEnv: map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-operator"},
+		Env:         map[string]string{"TZ": "UTC", "LANG": "from-env", "GC_CITY": "unrelated"},
+		OperatorEnv: map[string]string{"TZ": "UTC", "LANG": "from-operator"},
 	})
 	if err != nil {
 		t.Fatalf("Relaunch: %v", err)
@@ -260,13 +261,35 @@ func TestRelaunch_WarmBoxRespawnAppliesOperatorEnv(t *testing.T) {
 	if respawn == "" {
 		t.Fatalf("no respawn-pane in the log:\n%s", readLog(t, logf))
 	}
-	for _, want := range []string{"OP_KEY=new", "OP_OVERRIDDEN=from-env"} {
+	for _, want := range []string{"TZ=UTC", "LANG=from-env"} {
 		if !strings.Contains(respawn, want) {
 			t.Errorf("respawn-pane must carry %q so the restarted agent sees it:\n%s", want, respawn)
 		}
 	}
-	if strings.Contains(respawn, "GC_OTHER") {
+	if strings.Contains(respawn, "GC_CITY") {
 		t.Errorf("respawn-pane re-sent a key outside OperatorEnv:\n%s", respawn)
+	}
+}
+
+// A value that must stay out of argv (every name not on runtime's argv-safe
+// allow list) cannot ride on the respawn-pane command line, and a relaunch that
+// dropped it would claim an env it did not apply: the Relaunch fails (the
+// reconciler then falls back to a full restart) and no respawn is issued.
+func TestRelaunch_WarmBoxRefusesSecretOperatorEnv(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableWarmScript(logf)))
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{
+		Command:     "agent",
+		Env:         map[string]string{"ANTHROPIC_API_KEY": "sk-secret"},
+		OperatorEnv: map[string]string{"ANTHROPIC_API_KEY": "sk-secret"},
+	})
+	if err == nil {
+		t.Fatal("Relaunch with an argv-unsafe operator env = nil, want an error")
+	}
+	if log := readLog(t, logf); strings.Contains(log, "respawn-pane") || strings.Contains(log, "sk-secret") {
+		t.Errorf("a refused relaunch must not respawn or leak the value:\n%s", log)
 	}
 }
 

@@ -198,3 +198,29 @@ func SplitEnvByArgvSafety(env map[string]string) (safe, secret map[string]string
 	}
 	return safe, secret
 }
+
+// RelaunchEnv returns the environment a warm-box relaunch must hand the
+// restarted agent: the operator-authored keys (cfg.OperatorEnv, the launch-half
+// of the fingerprint), each with its effective value, which is cfg.Env's when
+// the merged environment overrides the operator's layer. respawn-pane
+// inherits the session's OLD environment, so an operator-env change reaches a
+// relaunched agent only if the relaunch applies it. Empty values are skipped:
+// they spell "withhold", which the respawn path handles separately. The result
+// is nil when there is nothing to apply.
+func RelaunchEnv(cfg Config) map[string]string {
+	var env map[string]string
+	for k, operatorValue := range cfg.OperatorEnv {
+		v := operatorValue
+		if merged, ok := cfg.Env[k]; ok {
+			v = merged
+		}
+		if v == "" {
+			continue
+		}
+		if env == nil {
+			env = make(map[string]string, len(cfg.OperatorEnv))
+		}
+		env[k] = v
+	}
+	return env
+}

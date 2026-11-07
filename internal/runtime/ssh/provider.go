@@ -457,13 +457,18 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 //
 // PreStart is NOT re-run (it is provision-half here — it prepares the box).
 // NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs PreStart on
-// Relaunch (launch-half); ssh intentionally keeps it provision-half. Env is
-// also provision-half: respawn-pane has no -e, so the session keeps the env set
-// by the original new-session; a launch-only env change is not re-applied
-// (matching tmux B1's "does not re-inject env hints").
+// Relaunch (launch-half); ssh intentionally keeps it provision-half. The
+// session keeps the env set by the original new-session and respawn-pane carries
+// none, so a launch-only change to the operator env cannot reach the agent
+// here: a config with operator env is refused with
+// [runtime.ErrRelaunchUnsupported], and the reconciler falls back to a full
+// restart, which applies the env and records the new config hash only then.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if len(runtime.RelaunchEnv(cfg)) > 0 {
+		return fmt.Errorf("%w: ssh respawn-pane cannot carry operator env that a launch-only change may have altered", runtime.ErrRelaunchUnsupported)
 	}
 	if err := checkName(name); err != nil {
 		return err
