@@ -1006,6 +1006,16 @@ func (s *emittingClassStore) CreatedForm(b beads.Bead) (beads.Bead, error) {
 	return b, nil
 }
 
+// AcceptsDanglingDep forwards the engine's dangling-edge rule
+// (beads.DanglingDepJudge). An engine without one keeps every edge, which is
+// the answer its absence gives.
+func (s *emittingClassStore) AcceptsDanglingDep(issueID, dependsOnID string) bool {
+	if judge, ok := beads.As[beads.DanglingDepJudge](s.Store); ok {
+		return judge.AcceptsDanglingDep(issueID, dependsOnID)
+	}
+	return true
+}
+
 // DepAddBatch forwards the engine's batch edge write (beads.DepBatchWriter)
 // and emits bead.updated once per issue side, as DepAddWithMetadata does per
 // edge. An engine without it reports beads.ErrBatchCopyUnsupported.

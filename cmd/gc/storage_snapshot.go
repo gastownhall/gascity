@@ -122,6 +122,9 @@ type snapshotOptions struct {
 	// IfBound makes a city with no binding a successful no-op (the order). It
 	// goes with --binding alone.
 	IfBound bool
+	// NoRetention keeps every earlier snapshot: the reverse's mandatory one
+	// (R0) must not prune an older one, the pre-split snapshot among them.
+	NoRetention bool
 }
 
 // storageSnapshotDefaultDir is .gc/snapshots: under .gc, so `gc init --from`
@@ -389,7 +392,10 @@ func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, op
 		return "", nil, err
 	}
 	published = true
-	removed, retention := applySnapshotRetention(to, opts.Keep, id, snapshotOwner{City: request.CityPath, Identity: identity})
+	var removed []string
+	if !opts.NoRetention {
+		removed, retention = applySnapshotRetention(to, opts.Keep, id, snapshotOwner{City: request.CityPath, Identity: identity})
+	}
 	for _, name := range removed {
 		fmt.Fprintf(stdout, "removed %s\n", filepath.Join(to, name)) //nolint:errcheck // best-effort stdout
 	}

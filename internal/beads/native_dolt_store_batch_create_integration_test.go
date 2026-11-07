@@ -4,6 +4,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,6 +73,13 @@ func reverseShapedRows(n int) []Bead {
 		if b.Status == "closed" {
 			b.CloseReason = "done"
 		}
+		if i%4 == 1 {
+			// Sub-second times, as a SQLite binding mints them: Dolt keeps
+			// whole seconds.
+			b.CreatedAt = b.CreatedAt.Add(600 * time.Millisecond)
+			deferred := b.CreatedAt.Add(time.Hour + 300*time.Millisecond)
+			b.DeferUntil = &deferred
+		}
 		if i%6 == 0 {
 			p := i % 4
 			b.Priority = &p
@@ -113,15 +121,62 @@ func TestNativeDoltCreateWithForeignIDBatchKeepsRowsAsCreatedFormSays(t *testing
 	}
 	elapsed := time.Since(started)
 	t.Logf("created %d rows (per-row=%v durable-only=%v) in %s (%.2f ms/row)", n, os.Getenv("GC_TEST_REVERSE_PER_ROW") != "", os.Getenv("GC_TEST_REVERSE_DURABLE") != "", elapsed.Round(time.Millisecond), float64(elapsed.Microseconds())/1000/float64(n))
-	for i := 1; i < len(rows); i += 10 {
-		if err := store.DepAdd(rows[i].ID, rows[i-1].ID, "parent-child"); err != nil {
-			t.Fatalf("adding the parent edge of %s: %v", rows[i].ID, err)
+	// The edges, about 0.45 a row as in MC's binding, in batches of 2000
+	// (DepAddBatch: one commit each): every tenth row a parent-child edge
+	// onto the row before it, the rest of the budget blocks edges.
+	var edges []DepWithPayload
+	for i := 1; i < len(rows); i++ {
+		switch {
+		case i%10 == 1:
+			edges = append(edges, DepWithPayload{Dep: Dep{IssueID: rows[i].ID, DependsOnID: rows[i-1].ID, Type: "parent-child"}})
+			rows[i].ParentID = rows[i-1].ID
+		case i%20 < 8 && rows[i].Ephemeral == rows[i-1].Ephemeral:
+			edges = append(edges, DepWithPayload{Dep: Dep{IssueID: rows[i].ID, DependsOnID: rows[i-1].ID, Type: "blocks"}})
 		}
-		rows[i].ParentID = rows[i-1].ID
 	}
+	edgeStart := time.Now()
+	for start := 0; start < len(edges); start += 2000 {
+		if err := store.DepAddBatch(edges[start:min(start+2000, len(edges))]); err != nil {
+			t.Fatalf("edge batch at %d: %v", start, err)
+		}
+	}
+	edgeElapsed := time.Since(edgeStart)
+	verifyStart := time.Now()
 	listed, err := store.List(ListQuery{IncludeClosed: true, TierMode: TierBoth, AllowScan: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(listed))
+	for _, b := range listed {
+		ids = append(ids, b.ID)
+	}
+	gotEdges := 0
+	for start := 0; start < len(ids); start += 1000 {
+		got, err := store.DepListBatch(ids[start:min(start+1000, len(ids))])
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, deps := range got {
+			gotEdges += len(deps)
+		}
+	}
+	if _, err := store.DepMetadataBatch(ids[:min(1000, len(ids))]); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("added %d edges in %d batches of 2000 in %s (%.2f ms/edge); read back %d rows and %d edges in %s; rows+edges+read %s",
+		len(edges), (len(edges)+1999)/2000, edgeElapsed.Round(time.Millisecond), float64(edgeElapsed.Microseconds())/1000/float64(max(1, len(edges))),
+		len(listed), gotEdges, time.Since(verifyStart).Round(time.Millisecond), (elapsed + edgeElapsed + time.Since(verifyStart)).Round(time.Second))
+	if gotEdges != len(edges) {
+		t.Fatalf("read back %d edges, wrote %d", gotEdges, len(edges))
+	}
+	if err := store.DepAddBatch([]DepWithPayload{{Dep: Dep{IssueID: rows[1].ID, DependsOnID: rows[0].ID, Type: "waits-for"}, Payload: `{"g":1}`}}); !errors.Is(err, ErrDepMetadataUnsupported) {
+		t.Fatalf("a payload edge into native Dolt = %v, want ErrDepMetadataUnsupported", err)
+	}
+	if store.AcceptsDanglingDep("mc-1", "mc-2") || !store.AcceptsDanglingDep("mc-1", "gcg-2") || !store.AcceptsDanglingDep("mc-1", "external:x") {
+		t.Fatal("AcceptsDanglingDep does not follow bd's prefix rule")
+	}
+	if err := store.DepAdd(rows[0].ID, nativeIDPrefix(rows[0].ID)+"zzzzzz", "blocks"); err == nil {
+		t.Fatal("native Dolt took an edge onto an absent row of its own prefix; AcceptsDanglingDep says it refuses")
 	}
 	got := make(map[string]Bead, len(listed))
 	for _, b := range listed {
@@ -160,12 +215,16 @@ func createdFormDifference(want, got Bead) string {
 		Priority                                                                         *int
 		Created                                                                          int64
 		Updated                                                                          int64
+		Deferred                                                                         int64
 		Labels                                                                           []string
 		Metadata                                                                         StringMap
 		Ephemeral, NoHistory                                                             bool
 	}
 	render := func(b Bead) view {
-		v := view{b.ID, b.Title, b.Status, b.Type, b.Assignee, b.From, b.ParentID, b.Ref, b.Description, b.CloseReason, b.Priority, b.CreatedAt.Unix(), 0, b.Labels, b.Metadata, b.Ephemeral, b.NoHistory}
+		v := view{b.ID, b.Title, b.Status, b.Type, b.Assignee, b.From, b.ParentID, b.Ref, b.Description, b.CloseReason, b.Priority, b.CreatedAt.Unix(), 0, 0, b.Labels, b.Metadata, b.Ephemeral, b.NoHistory}
+		if b.DeferUntil != nil {
+			v.Deferred = b.DeferUntil.Unix()
+		}
 		if !b.UpdatedAt.IsZero() {
 			v.Updated = b.UpdatedAt.Unix()
 		}

@@ -16,7 +16,23 @@ import (
 var (
 	_ ForeignIDBatchCreator = (*NativeDoltStore)(nil)
 	_ CreatedFormer         = (*NativeDoltStore)(nil)
+	_ DepBatchWriter        = (*NativeDoltStore)(nil)
+	_ DanglingDepJudge      = (*NativeDoltStore)(nil)
 )
+
+// DanglingDepJudge reports whether a store keeps an edge whose target it does
+// not hold. A copy that has to put such an edge back after deleting the
+// target asks first; a store that does not implement it keeps every edge.
+type DanglingDepJudge interface {
+	AcceptsDanglingDep(issueID, dependsOnID string) bool
+}
+
+// ForeignIDCreateFidelity reports whether a store's ForeignIDCreator really
+// keeps the row, or falls back to a plain create that mints its own status
+// and creation time. A store that does not implement it keeps the row.
+type ForeignIDCreateFidelity interface {
+	ForeignIDCreateKeepsRows() bool
+}
 
 // CreatedFormer reports the form a store reads a bead back in after it has
 // created it with its id preserved (ForeignIDCreator, ForeignIDBatchCreator):
@@ -75,6 +91,57 @@ func (s *NativeDoltStore) CreateWithForeignIDBatch(rows []Bead) error {
 	return nil
 }
 
+// DepAddBatch adds edges in ONE dependency-editor request: one transaction
+// and one Dolt commit, all or nothing. The native store has no edge-payload
+// writer, so a batch with a payload is refused before anything is written,
+// wrapping ErrDepMetadataUnsupported. It satisfies DepBatchWriter.
+func (s *NativeDoltStore) DepAddBatch(edges []DepWithPayload) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+	request := issueops.AddDependenciesRequest{Actor: s.actor, SkipPerEdgeCycleCheck: true}
+	for _, e := range edges {
+		if e.Payload != "" {
+			return fmt.Errorf("adding dep %s -> %s with a payload: %w", e.IssueID, e.DependsOnID, ErrDepMetadataUnsupported)
+		}
+		request.Edges = append(request.Edges, issueops.DependencyEdge{IssueID: e.IssueID, DependsOnID: e.DependsOnID, Type: nativeGraphApplyDependencyType(e.Type)})
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), nativeDepRemoveBatchDeadline(len(edges)))
+	defer cancel()
+	editor, err := storage.DependencyEditor()
+	if err != nil {
+		return nativeStoreError(edges[0].IssueID, err)
+	}
+	if _, err := editor.AddDependencies(ctx, request); err != nil {
+		return fmt.Errorf("adding deps %s -> %s .. %s -> %s: %w", edges[0].IssueID, edges[0].DependsOnID, edges[len(edges)-1].IssueID, edges[len(edges)-1].DependsOnID, nativeStoreError(edges[0].IssueID, err))
+	}
+	return nil
+}
+
+// AcceptsDanglingDep reports bd's rule: an edge onto an id of the source's
+// own prefix must name a row the database holds, while an external: reference
+// or an id of another prefix is stored as an external reference. It
+// satisfies DanglingDepJudge.
+func (s *NativeDoltStore) AcceptsDanglingDep(issueID, dependsOnID string) bool {
+	return strings.HasPrefix(dependsOnID, "external:") || nativeIDPrefix(issueID) != nativeIDPrefix(dependsOnID)
+}
+
+// nativeIDPrefix is bd's prefix of an id: everything through its first '-'.
+func nativeIDPrefix(id string) string {
+	if i := strings.Index(id, "-"); i >= 0 {
+		return id[:i+1]
+	}
+	return ""
+}
+
 // nativeDefaultInfraTypes are the types bd routes to the wisp tables when the
 // scope's types.infra setting is unset (bd's built-in default).
 var nativeDefaultInfraTypes = map[string]bool{"agent": true, "role": true, "message": true}
@@ -121,8 +188,8 @@ func nativeCreateBatchDeadline(rows int) time.Duration {
 // id: the conversion to the upstream issue and back. It drops what the schema
 // does not hold (the step ref, updated_at, which the store stamps itself) and
 // normalizes what it does (an unset priority reads as the default, the close
-// reason as the store derives it, and a row of one of bd's infra types lands
-// in the wisp tables). The parent is the parent-child edge the copy adds, not
+// reason as the store derives it, times as whole seconds, rounded, and a row of
+// one of bd's infra types lands in the wisp tables). The parent is the parent-child edge the copy adds, not
 // a field. It satisfies CreatedFormer.
 func (s *NativeDoltStore) CreatedForm(b Bead) (Bead, error) {
 	parent := b.ParentID
@@ -143,5 +210,11 @@ func (s *NativeDoltStore) CreatedForm(b Bead) (Bead, error) {
 	}
 	got.ParentID = parent
 	got.SourceStatus = ""
+	// Dolt keeps whole seconds and rounds what it is handed to the nearest.
+	got.CreatedAt = got.CreatedAt.Round(time.Second)
+	if got.DeferUntil != nil {
+		rounded := got.DeferUntil.Round(time.Second)
+		got.DeferUntil = &rounded
+	}
 	return got, nil
 }

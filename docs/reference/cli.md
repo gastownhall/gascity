@@ -5387,7 +5387,8 @@ open row the binding minted for a rig's scope, an edge that would join two
 open rows in different stores, and an edge payload its destination cannot
 write. An explicit session_reconciler = "v2" refuses too, unless
 --reconciler=legacy rewrites it in the same edit. --dry-run prints the plan
-and every refusal and writes nothing.
+and every refusal and writes nothing; it takes no lock and needs no
+--fleet-stopped, so it rehearses on a live city.
 
 --to-rigs --rig X returns rig X's imported rows to its store and keeps the
 city split: the binding's copies go once the rig's are proven, and the rig
@@ -5407,7 +5408,7 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
 | `--abort-reverse` | bool |  | abandon an unfinished --to-work or --to-rigs: remove exactly the rows it wrote and put back what it changed |
-| `--dry-run` | bool |  | with --to-work or --to-rigs, print what would move and every refusal, and write nothing |
+| `--dry-run` | bool |  | with --to-work or --to-rigs, print what would move and every refusal, and write nothing (no lock, no --fleet-stopped: a live rehearsal) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |

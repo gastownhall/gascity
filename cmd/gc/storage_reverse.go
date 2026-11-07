@@ -35,6 +35,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -74,8 +75,6 @@ const (
 	// storageSplitJournalName is the guided split's journal (S5-H), which
 	// holds city.toml as it was before the split.
 	storageSplitJournalName = "storage-split.journal.json"
-	// reverseMinGCVersionName is the version floor a split records (§7.4).
-	reverseMinGCVersionName = "min-gc-version"
 )
 
 // The reverse's phases, as the journal records the last one done.
@@ -140,6 +139,18 @@ type storageReverseJournal struct {
 	CityTOMLAfterSHA256 string          `json:"city_toml_after_sha256,omitempty"`
 	MinGCVersion        *string         `json:"min_gc_version,omitempty"`
 	Renamed             []reverseRename `json:"renamed,omitempty"`
+	// Dests are the stores this reverse writes; --abort-reverse touches
+	// these and no other.
+	Dests []string `json:"dests,omitempty"`
+	// Preserved are the edges each destination held onto a planned row
+	// before the reverse wrote anything, put back after a delete of the row.
+	Preserved map[string][]reverseEdge `json:"preserved,omitempty"`
+	// BindingSHA256 fingerprints the binding the copies were planned from;
+	// the binding is re-proven against it before R3 and before it changes.
+	BindingSHA256 string `json:"binding_sha256,omitempty"`
+	// ClearStarted records that a to-rigs R4 has begun to remove rows from
+	// the binding, which then no longer matches its fingerprint.
+	ClearStarted bool `json:"clear_started,omitempty"`
 }
 
 func (j storageReverseJournal) target() infraBindingTarget {
@@ -289,42 +300,61 @@ func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts 
 	}
 	if opts.Mode == reverseToWork && (!open || journal.Phase < reverseR4) && opts.Reconciler == "" {
 		if mode, _, _ := request.Cfg.Daemon.SessionReconcilerMode(); mode == config.SessionReconcilerV2 {
-			return fail(fmt.Errorf("[daemon] session_reconciler names v2, which refuses a city whose sessions class is on the work store (C0.7), so the city would not start after the reverse. Pass --%s=%s to rewrite it in the same city.toml edit, or remove the key yourself first", storageReconcilerFlag, config.SessionReconcilerLegacy))
+			return fail(fmt.Errorf("[daemon] session_reconciler = \"v2\" would refuse to start the reverted city: v2 serves sessions only from a store that fences its writes (C0.7), and with the split gone the sessions class is on the work store. Pass --%s=%s to set it to \"legacy\" in the same city.toml edit, or set it to \"legacy\" yourself first", storageReconcilerFlag, config.SessionReconcilerLegacy))
+		}
+	}
+	if opts.Mode == reverseToRigs {
+		rigs := opts.Rigs
+		if open {
+			rigs = journal.Rigs
+		}
+		if err := reverseRigsRefusal(request.CityPath, request.Cfg, target, rigs, open && journal.Phase >= reverseR4); err != nil {
+			return fail(err)
 		}
 	}
 
-	// The controller lock, the liveness checks and the attestation, then the
-	// guard, then the window: the order every writing storage verb takes.
-	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
-	if err != nil {
-		return fail(err)
+	var window *migrationSourceWindow
+	if !opts.DryRun {
+		// The controller lock, the liveness checks and the attestation, the
+		// shared-store check, then the guard, then the window: the order every
+		// writing storage verb takes. A dry run is a live rehearsal: it takes
+		// none of them and writes nothing.
+		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+		if err != nil {
+			return fail(err)
+		}
+		defer controllerLock.Close() //nolint:errcheck // released last
+		if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
+			return fail(fmt.Errorf("controller PID %d is live on this city. Stop it (%s) and run this again", pid, storageStopCommand))
+		}
+		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+		if err != nil {
+			return fail(err)
+		}
+		defer shared.Release() // the co-tenants stay stopped until the reverse is done
+		if !request.FleetStopped {
+			return fail(fmt.Errorf("pass --%s to attest that %s. A write that lands in the binding during the reverse is not copied back", storageFleetStoppedFlag, storageFleetStoppedAttestation))
+		}
+		guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
+		if err != nil {
+			return fail(err)
+		}
+		defer guard.Release() //nolint:errcheck // released before the lock
+		window, err = openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, reverseRigRoots(request.CityPath, request.Cfg)...)
+		if err != nil {
+			return fail(err)
+		}
+		defer window.closeReporting(logPrefix, stderr, &code)
+		window.setTimeBudget(request.TimeBudget)
+		recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
 	}
-	defer controllerLock.Close() //nolint:errcheck // released last
-	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		return fail(fmt.Errorf("controller PID %d is live on this city. Stop it (%s) and run this again", pid, storageStopCommand))
-	}
-	if !request.FleetStopped {
-		return fail(fmt.Errorf("pass --%s to attest that %s. A write that lands in the binding during the reverse is not copied back", storageFleetStoppedFlag, storageFleetStoppedAttestation))
-	}
-	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
-	if err != nil {
-		return fail(err)
-	}
-	defer guard.Release() //nolint:errcheck // released before the lock
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, reverseRigRoots(request.CityPath, request.Cfg)...)
-	if err != nil {
-		return fail(err)
-	}
-	defer window.closeReporting(logPrefix, stderr, &code)
-	window.setTimeBudget(request.TimeBudget)
-	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
 
 	run := reverseRun{request: request, opts: opts, target: target, journal: journal, logPrefix: logPrefix, stdout: stdout, stderr: stderr}
 	if !open {
 		now := time.Now().UTC()
 		run.journal = storageReverseJournal{
 			Format: storageReverseJournalFormat, Mode: opts.Mode, Rigs: sortedUnique(opts.Rigs), Phase: reverseStarted,
-			Run: now.Format("20060102T150405Z"), StartedAt: now, Reconciler: opts.Reconciler,
+			Run: reverseRunID(now), StartedAt: now, Reconciler: opts.Reconciler,
 			Binding: target.Binding, Root: target.Root, Dir: target.Dir, Database: target.Database,
 		}
 		run.journal.Stamp = target.Binding + "/" + run.journal.Run
@@ -356,16 +386,26 @@ func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts 
 		}
 		return fail(fmt.Errorf("%w. The reverse stopped in %s; run `%s` to continue, or `%s` to abandon it", err, reversePhaseName(run.journal.Phase), storageReverseInstruction(opts.Mode, run.journal.Rigs), storageAbortReverseInstruction()))
 	}
+	// The window closes before the run reports: a provider its stop left
+	// running fails the run.
 	window.closeReporting(logPrefix, stderr, &code)
 	if code != 0 {
 		return code
 	}
 	if opts.Mode == reverseToRigs {
-		fmt.Fprintf(stdout, "Reversed. Rig(s) %s hold their imported rows again and read as awaiting import; the city stays split. Snapshot %s is pinned as the way back. Start the city with `gc start`.\n", strings.Join(run.journal.Rigs, ", "), run.journal.Snapshot) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Reversed. Rig(s) %s hold their imported rows again and read as awaiting import; the city stays split. Snapshot %s, of the stores as they were before the reverse, stays pinned (remove its pinned file to let retention prune it). Start the city with `gc start`.\n", strings.Join(run.journal.Rigs, ", "), run.journal.Snapshot) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	fmt.Fprintf(stdout, "Reversed. Every class is on the work store again; the binding is archived as %s and snapshot %s is pinned as the way back. Start the city with `gc start`.\n", target.Root+run.journal.suffix(), run.journal.Snapshot) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Reversed. Every class is on the work store again; the binding is archived as %s. Snapshot %s, of the stores as they were before the reverse, stays pinned (remove its pinned file to let retention prune it). Start the city with `gc start`.\n", target.Root+run.journal.suffix(), run.journal.Snapshot) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// reverseRunID names one run: its start to the nanosecond and a random
+// suffix, so two runs never share a stamp.
+func reverseRunID(now time.Time) string {
+	var suffix [4]byte
+	_, _ = rand.Read(suffix[:])
+	return now.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(suffix[:])
 }
 
 // reverseRun is one reverse in progress.
@@ -378,6 +418,35 @@ type reverseRun struct {
 	logPrefix string
 	stdout    io.Writer
 	stderr    io.Writer
+}
+
+// reverseRigsRefusal checks the rigs a --to-rigs names, before anything is
+// locked or opened: each must be a rig this city configures with a store of
+// its own, under a name that can name its records, and imported (its marker
+// and manifest read), unless the reverse has already retired its records.
+func reverseRigsRefusal(cityPath string, cfg *config.City, target infraBindingTarget, rigs []string, retired bool) error {
+	own := map[string]bool{}
+	for _, rig := range reverseRigs(cityPath, cfg) {
+		own[rig.Name] = true
+	}
+	for _, name := range rigs {
+		switch {
+		case !rigNameIsFileSafe(name) || strings.ContainsAny(name, "*?[]"):
+			return fmt.Errorf("--%s %q is not a rig name: it cannot name the rig's records", storageRigFlag, name)
+		case !own[name]:
+			return fmt.Errorf("this city configures no rig %q with a store of its own, so there is nothing to return to it", name)
+		case retired:
+			continue
+		}
+		manifest, marked, err := newRigImportLocation(target, cityPath, name).readManifest()
+		if err != nil {
+			return err
+		}
+		if !marked || manifest == nil {
+			return fmt.Errorf("rig %s has no import marker and manifest beside the binding: it was never imported, so there is nothing to return", name)
+		}
+	}
+	return nil
 }
 
 // reverseRigRoots are the scope roots of the rigs with a store of their own.
@@ -411,6 +480,59 @@ type reverseBindingRead struct {
 	rows     []beads.Bead
 	down     map[string][]beads.Dep
 	payloads map[beads.DepPair]string
+}
+
+// fingerprint is a digest of every row, edge and payload the read holds.
+func (r reverseBindingRead) fingerprint() string {
+	rows := sortedBeads(r.rows)
+	sum := sha256.New()
+	for _, b := range rows {
+		b.IsBlocked = nil
+		data, _ := json.Marshal(b)
+		sum.Write(data) //nolint:errcheck // hashing a writer that cannot fail
+		edges := censusEdges(r.down[b.ID])
+		sort.Strings(edges)
+		for _, e := range edges {
+			fmt.Fprintln(sum, e) //nolint:errcheck // hashing a writer that cannot fail
+		}
+	}
+	for _, pair := range sortedPairs(r.payloads) {
+		fmt.Fprintf(sum, "%s>%s=%s\n", pair.IssueID, pair.DependsOnID, r.payloads[pair]) //nolint:errcheck // hashing a writer that cannot fail
+	}
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+func sortedPairs(m map[beads.DepPair]string) []beads.DepPair {
+	out := make([]beads.DepPair, 0, len(m))
+	for p := range m {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IssueID != out[j].IssueID {
+			return out[i].IssueID < out[j].IssueID
+		}
+		return out[i].DependsOnID < out[j].DependsOnID
+	})
+	return out
+}
+
+// reproveBinding re-reads the binding and compares it with the one the
+// copies were planned from (S5 §2.3: a source that moved during the copy is
+// refused). A binding that changed puts the reverse back to R0, so the next
+// run plans and copies again.
+func (r *reverseRun) reproveBinding(before string) error {
+	read, err := readReverseBinding(r.target)
+	if err != nil {
+		return err
+	}
+	if read.fingerprint() == r.journal.BindingSHA256 {
+		return nil
+	}
+	r.journal.Phase = reverseR0
+	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	return fmt.Errorf("the binding changed after its rows were copied (before %s), so a writer still reaches it. Stop it; the next run copies again", before)
 }
 
 // readReverseBinding reads the binding read-only, in batches where it can.
@@ -456,7 +578,10 @@ func (r *reverseRun) plan() (reversePlan, error) {
 		Binding: read.rows, Down: read.down, Payloads: read.payloads,
 		Manifests: map[string]*infraCopyManifest{}, Configured: map[string]bool{},
 		Held: map[string]map[string]beads.Bead{}, CarriesPayload: map[string]bool{},
+		DerivesParent: map[string]bool{}, DropsRef: map[string]bool{},
+		Fresh: r.journal.Phase == reverseStarted && len(r.journal.Dests) == 0,
 	}
+	r.journal.BindingSHA256 = read.fingerprint()
 	var refusals []rigImportRefusal
 	dests := []string{reverseCityDest}
 	for _, rig := range reverseRigs(cityPath, cfg) {
@@ -500,15 +625,61 @@ func (r *reverseRun) plan() (reversePlan, error) {
 			held[b.ID] = b
 		}
 		in.Held[dest], in.CarriesPayload[dest] = held, t.carriesPayload
+		in.DerivesParent[dest], in.DropsRef[dest] = t.form != nil, t.dropsRef()
 	}
 	plan := planReverse(in)
+	// The edges each destination holds onto a planned row, recorded once,
+	// before the reverse first writes: after that the store holds the
+	// reverse's own edges too, and nothing tells them apart.
+	if r.journal.Preserved == nil {
+		r.journal.Preserved = map[string][]reverseEdge{}
+		for _, dest := range sortedMapKeys(plan.Rows) {
+			planned := map[string]bool{}
+			for _, b := range plan.Rows[dest] {
+				planned[b.ID] = true
+			}
+			edges, err := reverseEdgesOnto(targets[dest], planned)
+			if err != nil {
+				return reversePlan{}, err
+			}
+			if len(edges) > 0 {
+				r.journal.Preserved[dest] = edges
+			}
+		}
+	}
+	dests = r.journal.Dests
+	for dest := range plan.Rows {
+		dests = append(dests, dest)
+	}
+	for dest := range plan.Edges {
+		dests = append(dests, dest)
+	}
+	for dest := range r.journal.Preserved {
+		dests = append(dests, dest)
+	}
+	r.journal.Dests = sortedUnique(dests)
+	if note, present, err := readInfraClearedNote(cityPath); err != nil {
+		return reversePlan{}, err
+	} else if present && !note.Complete {
+		// The work store still holds copies of rows the binding holds: one
+		// refusal for the city, not one per row.
+		plan.Refusals = []rigImportRefusal{{IDs: []string{"the city work store"}, Reason: fmt.Sprintf("the city's clear of its retained copies has not finished (%s is pending), so the work store holds copies of rows the binding holds", infraClearedNotePath(cityPath)), Remedy: "finish it with `" + storageClearInstruction() + "`, then re-run"}}
+		return plan, nil
+	}
 	for _, dest := range sortedMapKeys(plan.Rows) {
 		if t := targets[dest]; t != nil && t.unsupported != "" && len(plan.Rows[dest]) > 0 {
 			refusals = append(refusals, rigImportRefusal{IDs: []string{reverseDestNoun(dest)}, Reason: t.unsupported, Remedy: "nothing was written; keep the city split, or roll back by restoring the snapshot (the runbook's restore steps)"})
 		}
 	}
-	if r.opts.Mode == reverseToWork && r.journal.Phase < reverseR4 {
-		if _, _, err := reverseCityTOML(cityPath, r.opts.Reconciler); err != nil {
+	if r.opts.Mode == reverseToWork && r.journal.CityTOMLBefore == nil {
+		// R4's edit, composed in memory now: a city whose [storage] a fragment
+		// declares, or whose edited config would not load, is refused before
+		// the copy, not at R4.
+		edited, _, err := reverseCityTOML(cityPath, r.opts.Reconciler)
+		if err == nil {
+			err = reverseCheckCityTOML(cityPath, edited, r.opts.Reconciler)
+		}
+		if err != nil {
 			refusals = append(refusals, rigImportRefusal{IDs: []string{"city.toml"}, Reason: err.Error(), Remedy: "remove [storage] by hand where it is declared, then re-run"})
 		}
 	}
@@ -523,6 +694,9 @@ func (r *reverseRun) report(plan reversePlan) {
 	}
 	if plan.Restored > 0 {
 		fmt.Fprintf(r.stdout, "%s: %d recorded cross-store edge(s) restored\n", r.logPrefix, plan.Restored) //nolint:errcheck // best-effort stdout
+	}
+	if plan.RefsKept > 0 {
+		fmt.Fprintf(r.stdout, "%s: %d row(s) carry a step ref their store does not hold; each is kept in %s\n", r.logPrefix, plan.RefsKept, beadmeta.StepRefMetadataKey) //nolint:errcheck // best-effort stdout
 	}
 	if plan.Gates > 0 {
 		fmt.Fprintf(r.stdout, "%s: %d closed cross-store gate(s) not carried (each owner's record restores the edge it stood for)\n", r.logPrefix, plan.Gates) //nolint:errcheck // best-effort stdout
@@ -588,6 +762,9 @@ func (r *reverseRun) phases(ctx context.Context) error {
 		}
 	}
 	if r.journal.Phase < reverseR3 {
+		if err := r.reproveBinding("the reverse manifest (R3)"); err != nil {
+			return err
+		}
 		if err := r.writeManifests(); err != nil {
 			return err
 		}
@@ -598,6 +775,11 @@ func (r *reverseRun) phases(ctx context.Context) error {
 	if r.journal.Phase < reverseR4 {
 		var err error
 		if r.opts.Mode == reverseToRigs {
+			if !r.journal.ClearStarted {
+				if err := r.reproveBinding("the binding clear (R4)"); err != nil {
+					return err
+				}
+			}
 			err = r.clearRigRowsFromBinding()
 		} else {
 			err = r.retireSplit()
@@ -606,6 +788,11 @@ func (r *reverseRun) phases(ctx context.Context) error {
 			return err
 		}
 		if err := r.advance(reverseR4); err != nil {
+			return err
+		}
+	}
+	if r.opts.Mode == reverseToWork && fileExists(r.target.Root) {
+		if err := r.reproveBinding("the archive (R5)"); err != nil {
 			return err
 		}
 	}
@@ -634,7 +821,7 @@ func (r *reverseRun) phases(ctx context.Context) error {
 
 // snapshot is R0's mandatory snapshot, pinned.
 func (r *reverseRun) snapshot(ctx context.Context) error {
-	opts := snapshotOptions{Binding: true, Work: r.opts.Mode == reverseToWork, Rigs: true, To: storageSnapshotDefaultDir(r.request.CityPath), Keep: storageSnapshotDefaultKeep}
+	opts := snapshotOptions{Binding: true, Work: r.opts.Mode == reverseToWork, Rigs: true, To: storageSnapshotDefaultDir(r.request.CityPath), Keep: storageSnapshotDefaultKeep, NoRetention: true}
 	identity, err := currentWorkStoreIdentity(r.request.CityPath)
 	if err != nil {
 		return err
@@ -658,6 +845,18 @@ func (r *reverseRun) snapshot(ctx context.Context) error {
 // raises the store's id floor past them.
 func (r *reverseRun) copyInto(dest string, clock infraEngineClock) error {
 	rows, edges := r.planned.Rows[dest], r.planned.Edges[dest]
+	// The edges the store held onto a planned row before the reverse go back
+	// with the row: a resume that deletes and re-copies the row takes them
+	// with it (reverseDeleteRows).
+	planned := map[beads.DepPair]bool{}
+	for _, e := range edges {
+		planned[beads.DepPair{IssueID: e.IssueID, DependsOnID: e.DependsOnID}] = true
+	}
+	for _, e := range r.journal.Preserved[dest] {
+		if !planned[beads.DepPair{IssueID: e.From, DependsOnID: e.To}] {
+			edges = append(edges, e.dep())
+		}
+	}
 	if len(rows) == 0 && len(edges) == 0 {
 		return nil
 	}
@@ -763,6 +962,11 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 		if err != nil {
 			return err
 		}
+		// The rig must still hold every row this reverse returned, under its
+		// stamp, before the binding's copies go.
+		if err := r.reverseRigHolds(rig, m); err != nil {
+			return err
+		}
 		stamped, err := binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rig)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 		if err != nil {
 			return err
@@ -773,6 +977,10 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 			}
 			going = append(going, b.ID)
 		}
+	}
+	r.journal.ClearStarted = true
+	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
+		return err
 	}
 	lister, _ := beads.As[beads.DependencyBatchLister](binding)
 	t := &reverseTarget{
@@ -789,15 +997,47 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 	}
 	var renames []reverseRename
 	for _, rig := range r.journal.Rigs {
-		found, _ := filepath.Glob(filepath.Join(r.target.Root, "infra.rig."+rig+".*"))
-		found = append(found, rigGraphClearedNotePath(r.request.CityPath, rig))
-		renames = append(renames, reverseRenames(found, r.journal.suffix())...)
+		loc := newRigImportLocation(r.target, r.request.CityPath, rig)
+		records := []string{loc.MarkerPath(), loc.ManifestPath(), loc.CleanPath(), loc.BackupPath(), loc.InFlightPath(), loc.NotePath()}
+		renames = append(renames, reverseRenames(records, r.journal.suffix())...)
 	}
 	r.journal.Renamed = append(r.journal.Renamed, renames...)
 	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
 		return err
 	}
 	return applyReverseRenames(r.journal.Renamed)
+}
+
+// reverseRigHolds proves rig's store holds each row its reverse manifest
+// records, under this run's stamp.
+func (r *reverseRun) reverseRigHolds(rig string, m infraCopyManifest) error {
+	t, err := reverseTargetOpener(r.request.CityPath, r.request.Cfg, rigImportStamp(rig))
+	if err != nil {
+		return err
+	}
+	defer t.close()
+	stamped, err := t.rows.List(reverseStampQuery(r.journal.Stamp))
+	if err != nil {
+		return err
+	}
+	held := map[string]bool{}
+	for _, b := range stamped {
+		if b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp {
+			held[b.ID] = true
+		}
+	}
+	var missing []string
+	for _, id := range sortedMapKeys(m.IDs) {
+		if !held[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		r.journal.Phase = reverseR0
+		_ = writeStorageReverseJournal(r.request.CityPath, r.journal)
+		return fmt.Errorf("rig %s no longer holds %d row(s) this reverse returned to it (%s), so the binding keeps its copies; the next run copies them again", rig, len(missing), infraStrandedIDList(missing))
+	}
+	return nil
 }
 
 // reverseRenames pairs each existing path with its retired name.
@@ -813,8 +1053,10 @@ func reverseRenames(paths []string, suffix string) []reverseRename {
 	return out
 }
 
-// applyReverseRenames renames each record; one already renamed is skipped.
+// applyReverseRenames renames each record, durably; one already renamed is
+// skipped.
 func applyReverseRenames(renames []reverseRename) error {
+	dirs := map[string]bool{}
 	for _, rn := range renames {
 		if !fileExists(rn.From) && fileExists(rn.To) {
 			continue
@@ -822,8 +1064,29 @@ func applyReverseRenames(renames []reverseRename) error {
 		if err := os.Rename(rn.From, rn.To); err != nil {
 			return fmt.Errorf("retiring %s: %w", rn.From, err)
 		}
+		dirs[filepath.Dir(rn.To)] = true
+	}
+	for _, dir := range sortedMapKeys(dirs) {
+		syncInfraDir(dir)
 	}
 	return nil
+}
+
+// reverseRigClearedNotes are the rigs' cleared notes in the city's .gc, read
+// from the directory rather than matched by a pattern over the city path.
+func reverseRigClearedNotes(cityPath string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(cityPath, ".gc"))
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() && strings.HasPrefix(name, "storage-infra-cleared.rig.") && strings.HasSuffix(name, ".json") {
+			out = append(out, filepath.Join(cityPath, ".gc", name))
+		}
+	}
+	return out, nil
 }
 
 // retireSplit is a to-work R4: city.toml without [storage], the split's
@@ -847,16 +1110,17 @@ func (r *reverseRun) retireSplit() error {
 		before := string(current)
 		r.journal.CityTOMLBefore = &before
 		r.journal.CityTOMLAfterSHA256 = sha256Hex(edited)
-		if data, err := os.ReadFile(filepath.Join(cityPath, ".gc", reverseMinGCVersionName)); err == nil {
+		if data, err := os.ReadFile(minGCVersionPath(cityPath)); err == nil {
 			floor := string(data)
 			r.journal.MinGCVersion = &floor
 		}
-		var paths []string
-		paths = append(paths, bornSplitServedNotePath(cityPath))
-		notes, _ := filepath.Glob(filepath.Join(cityPath, ".gc", "storage-infra-cleared*.json"))
-		paths = append(paths, notes...)
-		rigRecords, _ := filepath.Glob(filepath.Join(r.target.Root, "infra.rig.*"))
-		paths = append(paths, rigRecords...)
+		paths := []string{bornSplitServedNotePath(cityPath), infraClearedNotePath(cityPath)}
+		rigNotes, err := reverseRigClearedNotes(cityPath)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, rigNotes...)
+		// The rigs' records beside the binding go with its root at R5.
 		r.journal.Renamed = reverseRenames(paths, r.journal.suffix())
 		if err := writeStorageReverseJournal(cityPath, r.journal); err != nil {
 			return err
@@ -873,11 +1137,11 @@ func (r *reverseRun) retireSplit() error {
 		if sha256Hex(edited) != r.journal.CityTOMLAfterSHA256 {
 			return fmt.Errorf("city.toml's edit no longer computes to the one this reverse recorded; abandon it with `%s` and start again", storageAbortReverseInstruction())
 		}
-		if err := writeCityTOMLAtomic(tomlPath, edited); err != nil {
+		if err := reverseCheckCityTOML(cityPath, edited, r.opts.Reconciler); err != nil {
 			return err
 		}
-		if err := reverseCheckCityTOML(cityPath, r.opts.Reconciler); err != nil {
-			return errors.Join(err, writeCityTOMLAtomic(tomlPath, []byte(*r.journal.CityTOMLBefore)))
+		if err := writeCityTOMLAtomic(tomlPath, edited); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("%s changed while the reverse was under way, so this run cannot tell its edit from yours; put it back, or abandon the reverse with `%s`", tomlPath, storageAbortReverseInstruction())
@@ -888,7 +1152,7 @@ func (r *reverseRun) retireSplit() error {
 	if err := applyReverseRenames(r.journal.Renamed); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(cityPath, ".gc", reverseMinGCVersionName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(minGCVersionPath(cityPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -930,7 +1194,9 @@ func reverseCityTOML(cityPath, reconciler string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	edited, how := removed, "[storage] removed in place"
-	if before, ok := readSplitJournalCityTOML(cityPath); ok && config.SameTOMLDocument(before, removed) {
+	if before, after, ok := readSplitJournalCityTOML(cityPath); ok && after == sha256Hex(current) {
+		// Nothing changed since the split wrote the file, comments included:
+		// its bytes from before the split are the file.
 		edited, how = before, "restored to its bytes from before the split ("+storageSplitJournalName+")"
 	}
 	if reconciler != "" {
@@ -943,52 +1209,95 @@ func reverseCityTOML(cityPath, reconciler string) ([]byte, string, error) {
 }
 
 // readSplitJournalCityTOML is city.toml as the guided split's journal (S5-H)
-// recorded it before the split, proven by its sha256; ok is false when there
-// is no journal or it does not prove.
-func readSplitJournalCityTOML(cityPath string) ([]byte, bool) {
+// recorded it before the split, proven by its sha256, and the sha256 of the
+// file the split wrote; ok is false when there is no journal or it does not
+// prove.
+func readSplitJournalCityTOML(cityPath string) ([]byte, string, bool) {
 	data, err := os.ReadFile(filepath.Join(cityPath, ".gc", storageSplitJournalName))
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	var journal struct {
 		CityTOMLBefore       *string `json:"city_toml_before"`
 		CityTOMLBeforeSHA256 string  `json:"city_toml_before_sha256"`
+		CityTOMLAfterSHA256  string  `json:"city_toml_after_sha256"`
 	}
-	if json.Unmarshal(data, &journal) != nil || journal.CityTOMLBefore == nil {
-		return nil, false
+	if json.Unmarshal(data, &journal) != nil || journal.CityTOMLBefore == nil || journal.CityTOMLAfterSHA256 == "" {
+		return nil, "", false
 	}
 	before := []byte(*journal.CityTOMLBefore)
 	if sha256Hex(before) != journal.CityTOMLBeforeSHA256 {
-		return nil, false
+		return nil, "", false
 	}
-	return before, true
+	return before, journal.CityTOMLAfterSHA256, true
 }
 
-// reverseCheckCityTOML reloads the city after R4's edit: it must carry no
-// [storage], and, with --reconciler, name that reconciler.
-func reverseCheckCityTOML(cityPath, reconciler string) error {
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+// reverseCheckCityTOML composes the city with edited in place of its
+// city.toml, in memory, fragments and includes as they are on disk: it must
+// load, carry no [storage], and, with --reconciler, name that reconciler.
+func reverseCheckCityTOML(cityPath string, edited []byte, reconciler string) error {
+	path := filepath.Join(cityPath, "city.toml")
+	cfg, err := loadCityConfigWithoutBuiltinPackRefreshFS(reverseOverlayFS{FS: fsys.OSFS{}, path: path, data: edited}, path, io.Discard)
 	if err != nil {
-		return fmt.Errorf("the edited city.toml does not load: %w", err)
+		return fmt.Errorf("city.toml without [storage] would not load: %w", err)
 	}
 	if cfg.Storage != nil {
-		return errors.New("the edited city.toml still configures [storage]")
+		return errors.New("city.toml without its [storage] section still composes a [storage]: a fragment it includes declares one, and a fragment is the operator's to edit")
 	}
 	if reconciler != "" {
 		if mode, _, _ := cfg.Daemon.SessionReconcilerMode(); mode != reconciler {
-			return fmt.Errorf("the edited city.toml resolves session_reconciler to %q, want %q", mode, reconciler)
+			return fmt.Errorf("the edited city.toml resolves session_reconciler to %q, want %q (a fragment sets it)", mode, reconciler)
 		}
 	}
 	return nil
 }
 
-// writeCityTOMLAtomic replaces city.toml atomically, keeping its mode.
+// reverseOverlayFS reads data in place of the file at path.
+type reverseOverlayFS struct {
+	fsys.FS
+	path string
+	data []byte
+}
+
+func (o reverseOverlayFS) ReadFile(name string) ([]byte, error) {
+	if samePath(name, o.path) {
+		return append([]byte(nil), o.data...), nil
+	}
+	return o.FS.ReadFile(name)
+}
+
+// writeCityTOMLAtomic replaces city.toml atomically and durably, keeping its
+// mode: a synced temp file renamed into place, then the directory synced.
 func writeCityTOMLAtomic(path string, data []byte) error {
 	mode := os.FileMode(0o644)
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, mode)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(mode)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(name, path)
+	}
+	if err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	syncInfraDir(dir)
+	return nil
 }
 
 func sha256Hex(data []byte) string {
@@ -1007,8 +1316,9 @@ func sortedUnique(values []string) []string {
 }
 
 // doStorageAbortReverse is `gc storage migrate --abort-reverse`: it deletes
-// exactly the rows carrying the open reverse's stamp from the work and rig
-// stores, puts back what R4 changed, removes the reverse's records and
+// exactly the rows carrying the open reverse's stamp from the destinations
+// its journal names, puts back the edges those stores held onto them before
+// the reverse, puts back what R4 changed, removes the reverse's records and
 // unpins its snapshot. The binding was never written, so nothing else moves.
 func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) (code int) {
 	logPrefix := "gc storage migrate --" + storageAbortReverseFlag
@@ -1016,6 +1326,29 @@ func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, 
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if _, present, err := readStorageReverseJournal(request.CityPath); err != nil {
+		return fail(err)
+	} else if !present {
+		return fail(errors.New("no reverse migration is in progress, so there is nothing to abandon"))
+	}
+	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+	if err != nil {
+		return fail(err)
+	}
+	defer controllerLock.Close() //nolint:errcheck // released last
+	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
+		return fail(fmt.Errorf("controller PID %d is live on this city. Stop it (%s) and run this again", pid, storageStopCommand))
+	}
+	if !request.FleetStopped {
+		return fail(fmt.Errorf("pass --%s to attest that %s", storageFleetStoppedFlag, storageFleetStoppedAttestation))
+	}
+	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
+	if err != nil {
+		return fail(err)
+	}
+	defer guard.Release() //nolint:errcheck // released before the lock
+	// The phase is judged on the journal as it is under the lock and the
+	// guard, not as it was before them.
 	journal, present, err := readStorageReverseJournal(request.CityPath)
 	if err != nil {
 		return fail(err)
@@ -1035,35 +1368,34 @@ func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, 
 	case journal.Mode == reverseToWork && !fileExists(target.Root):
 		return fail(finish)
 	}
-	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
-	if err != nil {
-		return fail(err)
-	}
-	defer controllerLock.Close() //nolint:errcheck // released last
-	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		return fail(fmt.Errorf("controller PID %d is live on this city. Stop it (%s) and run this again", pid, storageStopCommand))
-	}
-	if !request.FleetStopped {
-		return fail(fmt.Errorf("pass --%s to attest that %s", storageFleetStoppedFlag, storageFleetStoppedAttestation))
-	}
-	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
-	if err != nil {
-		return fail(err)
-	}
-	defer guard.Release() //nolint:errcheck // released before the lock
 	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, reverseRigRoots(request.CityPath, request.Cfg)...)
 	if err != nil {
 		return fail(err)
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
 
-	dests := []string{reverseCityDest}
-	for _, rig := range reverseRigs(request.CityPath, request.Cfg) {
-		dests = append(dests, rigImportStamp(rig.Name))
+	// Every edge a store held onto a row this reverse wrote must go back once
+	// the row is gone. A store that refuses an edge onto a row it does not
+	// hold (native Dolt, for its own prefix) cannot take it back: refused
+	// here, before any row is deleted.
+	var dangling []string
+	for _, dest := range journal.Dests {
+		ids, judge, err := abortReverseStamped(request.CityPath, request.Cfg, dest, journal.Stamp)
+		if err != nil {
+			return fail(err)
+		}
+		for _, e := range journal.Preserved[dest] {
+			if ids[e.To] && !judge(e.From, e.To) {
+				dangling = append(dangling, fmt.Sprintf("%s -[%s]-> %s (%s)", e.From, e.Type, e.To, reverseDestNoun(dest)))
+			}
+		}
+	}
+	if len(dangling) > 0 {
+		return fail(fmt.Errorf("%s held edge(s) onto rows this reverse wrote before it wrote them, and would refuse each back once the row is gone, so abandoning the reverse would lose them: %s. Nothing was removed; finish the reverse with `%s` instead", "the destination store(s)", strings.Join(dangling, ", "), storageReverseInstruction(journal.Mode, journal.Rigs)))
 	}
 	removed := 0
-	for _, dest := range dests {
-		n, err := abortReverseIn(request.CityPath, request.Cfg, dest, journal.Stamp)
+	for _, dest := range journal.Dests {
+		n, err := abortReverseIn(request.CityPath, request.Cfg, dest, journal.Stamp, journal.Preserved[dest])
 		removed += n
 		if err != nil {
 			return fail(fmt.Errorf("%w; %d row(s) removed so far. Run this again to finish abandoning the reverse", err, removed))
@@ -1095,9 +1427,31 @@ func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, 
 	return 0
 }
 
+// abortReverseStamped is the ids dest holds under stamp, and its rule for an
+// edge onto a row it does not hold.
+func abortReverseStamped(cityPath string, cfg *config.City, dest, stamp string) (map[string]bool, func(string, string) bool, error) {
+	t, err := reverseTargetOpener(cityPath, cfg, dest)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer t.close()
+	stamped, err := t.rows.List(reverseStampQuery(stamp))
+	if err != nil {
+		return nil, nil, err
+	}
+	ids := map[string]bool{}
+	for _, b := range stamped {
+		if b.Metadata[beadmeta.InfraReversedFromMetadataKey] == stamp {
+			ids[b.ID] = true
+		}
+	}
+	return ids, t.acceptsDangling, nil
+}
+
 // abortReverseIn removes from dest every row carrying stamp, and nothing
-// else.
-func abortReverseIn(cityPath string, cfg *config.City, dest, stamp string) (int, error) {
+// else, then puts back each edge the store held onto one of them before the
+// reverse (preserved), from a row it still holds.
+func abortReverseIn(cityPath string, cfg *config.City, dest, stamp string, preserved []reverseEdge) (int, error) {
 	t, err := reverseTargetOpener(cityPath, cfg, dest)
 	if err != nil {
 		return 0, err
@@ -1113,7 +1467,30 @@ func abortReverseIn(cityPath string, cfg *config.City, dest, stamp string) (int,
 			ids = append(ids, b.ID)
 		}
 	}
-	return len(ids), reverseDeleteRows(t, ids)
+	if err := reverseDeleteRows(t, ids); err != nil {
+		return 0, err
+	}
+	if len(preserved) == 0 {
+		return len(ids), nil
+	}
+	present, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return len(ids), err
+	}
+	held := map[string]bool{}
+	for _, b := range present {
+		held[b.ID] = true
+	}
+	var back []beads.DepWithPayload
+	for _, e := range preserved {
+		if held[e.From] {
+			back = append(back, e.dep())
+		}
+	}
+	if err := t.addEdges(back); err != nil {
+		return len(ids), fmt.Errorf("putting back the edges %s held before the reverse: %w", reverseDestNoun(dest), err)
+	}
+	return len(ids), nil
 }
 
 // reverseRigRowsLeftBinding reports whether a to-rigs reverse's binding clear
@@ -1170,7 +1547,7 @@ func undoReverseRetirement(cityPath string, journal storageReverseJournal) error
 		}
 	}
 	if journal.MinGCVersion != nil {
-		path := filepath.Join(cityPath, ".gc", reverseMinGCVersionName)
+		path := minGCVersionPath(cityPath)
 		if !fileExists(path) {
 			if err := writeRigImportRecord(path, strings.TrimSuffix(*journal.MinGCVersion, "\n")); err != nil {
 				return err

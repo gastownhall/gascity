@@ -421,7 +421,29 @@ func TestReverseToRigsClearRefusesARowItDidNotReturn(t *testing.T) {
 	}
 	_ = closeBeadStoreHandle(binding)
 	before := workStoreFingerprint(t, r.binding())
+	// The binding's re-proof (S5 §2.3) sees the stray first and puts the
+	// reverse back to R0.
 	code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+	if code == 0 || !strings.Contains(stderr, "the binding changed after its rows were copied") {
+		t.Fatalf("the clear over a changed binding = %d: %s", code, stderr)
+	}
+	if workStoreFingerprint(t, r.binding()) != before {
+		t.Fatal("the refused clear removed rows from the binding")
+	}
+	if journal, _, _ := readStorageReverseJournal(r.request.CityPath); journal.Phase != reverseR0 {
+		t.Fatalf("the reproof left the journal at phase %d, want R0", journal.Phase)
+	}
+	// Behind the re-proof, the clear refuses a row it did not return as well.
+	journal, _, _ := readStorageReverseJournal(r.request.CityPath)
+	read, err := readReverseBinding(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Phase, journal.BindingSHA256 = reverseR3, read.fingerprint()
+	if err := writeStorageReverseJournal(r.request.CityPath, journal); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
 	if code == 0 || !strings.Contains(stderr, "gp-stray") || !strings.Contains(stderr, "nothing was removed") {
 		t.Fatalf("the clear over a stray row = %d: %s", code, stderr)
 	}
@@ -444,5 +466,100 @@ func TestReverseToRigsClearRefusesARowItDidNotReturn(t *testing.T) {
 	var stdout, errOut bytes.Buffer
 	if code := doStorageAbortReverse(context.Background(), r2.request, &stdout, &errOut); code == 0 || !strings.Contains(errOut.String(), "can only be finished") {
 		t.Fatalf("--abort-reverse after the binding clear began = %d: %s", code, errOut.String())
+	}
+}
+
+// TestReverseToWorkIntoARealDoltWorkStore (MUST 4): a city whose work store
+// is native Dolt (embedded Dolt, the engine bd stores rows in) migrates
+// forward and back. The binding minted a retry bead after the cutover, with
+// a parent and no parent-child edge, and a step ref: Dolt holds the parent as
+// that edge, so the reverse writes it, and keeps the ref in gc.step_ref.
+func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Dolt work store")
+	}
+	clearGCEnv(t)
+	prevExport := snapshotBdExport
+	snapshotBdExport = func(_ string, _ *config.City, _, out string) error { return os.WriteFile(out, []byte("{}\n"), 0o644) }
+	t.Cleanup(func() { snapshotBdExport = prevExport })
+	work := newRealDoltRigStore(t)
+	mk := func(b beads.Bead, closed bool) {
+		t.Helper()
+		seedRealDoltRow(t, work, b, closed)
+	}
+	mk(graphRow("gd-root", "gd-root", "", map[string]string{"gc.kind": "workflow"}), false)
+	for i := 0; i < 4; i++ {
+		mk(graphRow(fmt.Sprintf("gd-s%d", i), "gd-root", "", nil), i < 2)
+		if err := work.DepAdd(fmt.Sprintf("gd-s%d", i), "gd-root", "parent-child"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk(beads.Bead{ID: "gd-m1", Title: "mail", Type: "message", Assignee: "mayor"}, false)
+	mk(workRow("gd-w1", ""), false)
+	seeded := map[string]beads.Bead{}
+	for _, b := range rigTestList(t, work) {
+		seeded[b.ID] = b
+	}
+	seededEdges := rigEdgeFingerprint(t, work)
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(reverseCityTOMLText("")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return borrowedStoreWithBeadPolicies(work, cfg), nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	stubInfraControllerPing(t, 0)
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("forward from Dolt = %v: %s", report.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	binding, err := openInfraDestination(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := binding.Create(beads.Bead{Title: "retry of s2", Type: "task", ParentID: "gd-s2", Ref: "step-s2", Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gd-root"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+
+	start := time.Now()
+	var stdout, stderr bytes.Buffer
+	request := storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}
+	if code := doStorageReverse(context.Background(), request, reverseOptions{Mode: reverseToWork}, &stdout, &stderr); code != 0 {
+		t.Fatalf("--to-work into a real Dolt work store = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	t.Logf("--to-work into a real Dolt work store in %s", time.Since(start).Round(time.Millisecond))
+	if !strings.Contains(stdout.String(), "1 row(s) carry a step ref") {
+		t.Fatalf("the reverse did not count the kept ref: %s", stdout.String())
+	}
+	got, err := work.Get(retry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParentID != "gd-s2" || got.Metadata[beadmeta.StepRefMetadataKey] != "step-s2" {
+		t.Fatalf("the retry bead in Dolt = parent %q, step_ref %q", got.ParentID, got.Metadata[beadmeta.StepRefMetadataKey])
+	}
+	for id, want := range seeded {
+		g, err := work.Get(id)
+		if err != nil {
+			t.Fatalf("the Dolt work store lost %s: %v", id, err)
+		}
+		w, gg := withoutReverseStamps(want), withoutReverseStamps(g)
+		w.UpdatedAt, gg.UpdatedAt = w.CreatedAt, g.CreatedAt
+		if diff := beadCopyDifference(w, gg); diff != "" {
+			t.Fatalf("%s differs from the row the Dolt work store held: %s", id, diff)
+		}
+	}
+	want := append(append([]string(nil), seededEdges...), fmt.Sprintf("%s -[parent-child]-> gd-s2", retry.ID))
+	sort.Strings(want)
+	if edges := rigEdgeFingerprint(t, work); strings.Join(edges, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the Dolt work store's edges:\n%s\nwant:\n%s", strings.Join(edges, "\n"), strings.Join(want, "\n"))
 	}
 }

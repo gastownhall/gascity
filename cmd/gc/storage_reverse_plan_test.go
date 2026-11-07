@@ -51,6 +51,7 @@ func planInput(rows []beads.Bead, edges []beads.Dep) reverseInput {
 		Configured:     map[string]bool{"packs": true},
 		Held:           map[string]map[string]beads.Bead{reverseCityDest: {}, rigImportStamp("packs"): {}},
 		CarriesPayload: map[string]bool{reverseCityDest: true, rigImportStamp("packs"): true},
+		DerivesParent:  map[string]bool{}, DropsRef: map[string]bool{},
 	}
 	for _, b := range rows {
 		if b.Metadata[infraMigrationStampKey] == rigImportStamp("packs") {
@@ -81,9 +82,9 @@ func planDests(plan reversePlan) map[string]string {
 	return out
 }
 
-func planEdgeSet(plan reversePlan, dest string) string {
+func planEdgeSet(plan reversePlan) string {
 	var out []string
-	for _, e := range plan.Edges[dest] {
+	for _, e := range plan.Edges[reverseCityDest] {
 		out = append(out, fmt.Sprintf("%s>%s:%s:%s", e.IssueID, e.DependsOnID, e.Type, e.Payload))
 	}
 	return strings.Join(out, ",")
@@ -235,7 +236,7 @@ func TestPlanReverseEdges(t *testing.T) {
 		t.Fatalf("refused: %s", planRefusal(plan))
 	}
 	want := "mc-d>external:x:blocks:,mc-d>mc-e:waits-for:{\"g\":1},mc-d>mc-w:blocks:,mc-v>mc-e:tracks:"
-	if got := planEdgeSet(plan, reverseCityDest); got != want {
+	if got := planEdgeSet(plan); got != want {
 		t.Fatalf("edges = %s\nwant    %s", got, want)
 	}
 	if plan.Restored != 2 {
@@ -279,5 +280,102 @@ func TestPlanReverseToRigsMovesOnlyTheNamedRig(t *testing.T) {
 	open.Mode, open.Rigs = reverseToRigs, map[string]bool{"packs": true}
 	if got := planRefusal(planReverse(open)); !strings.Contains(got, "gcg-born -[parent-child]-> gp-2 (the binding, the store of rig packs)") {
 		t.Fatalf("an open edge from a row the binding keeps did not refuse: %s", got)
+	}
+}
+
+// TestPlanReverseRecordsWhatItDoesNotCarry (SHOULD 10): an edge the reverse
+// drops is recorded as gc.migrated_cross_edges on the moved row it leaves,
+// so a later import can restore it.
+func TestPlanReverseRecordsWhatItDoesNotCarry(t *testing.T) {
+	in := planInput([]beads.Bead{planRow("gp-1", "closed", rigImportStamp("packs"), ""), planRow("gcg-2", "open", "", "")},
+		[]beads.Dep{{IssueID: "gcg-2", DependsOnID: "gp-1", Type: "blocks"}, {IssueID: "gcg-2", DependsOnID: "mc-gone", Type: "related"}})
+	plan := planReverse(in)
+	if len(plan.Refusals) > 0 {
+		t.Fatalf("refused: %s", planRefusal(plan))
+	}
+	records := map[string]string{}
+	for _, rows := range plan.Rows {
+		for _, b := range rows {
+			records[b.ID] = b.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]
+		}
+	}
+	for id, want := range map[string][]string{
+		"gp-1":  {`"dir":"in"`, `"other":"gcg-2"`, `"other_status_at_import":"open"`, `"action":"dropped"`},
+		"gcg-2": {`"dir":"out"`, `"other":"gp-1"`, `"other":"mc-gone"`},
+	} {
+		for _, w := range want {
+			if !strings.Contains(records[id], w) {
+				t.Fatalf("%s records %s, want %s", id, records[id], w)
+			}
+		}
+	}
+}
+
+// TestPlanReverseRestoresARuntimeGatesEdge (SHOULD 11): a closed gate the
+// runtime minted carries no record on its owner; the edge it stood for comes
+// back from the gate's own metadata.
+func TestPlanReverseRestoresARuntimeGatesEdge(t *testing.T) {
+	in := planInput([]beads.Bead{planRow("gcg-x", "open", "", ""), planGate("gcg-xsg-9", "closed", "", "gcg-x", "mc-w")},
+		[]beads.Dep{{IssueID: "gcg-x", DependsOnID: "gcg-xsg-9", Type: "blocks"}})
+	in.Held[reverseCityDest]["mc-w"] = planRow("mc-w", "closed", "", "")
+	plan := planReverse(in)
+	if got := planEdgeSet(plan); got != "gcg-x>mc-w:blocks:" || plan.Restored != 1 {
+		t.Fatalf("edges = %s (restored %d), want the gate's owner -> blocker", got, plan.Restored)
+	}
+}
+
+// TestPlanReverseParentsForAStoreThatDerivesThem (MUST 4): into a store that
+// reads a parent from its parent-child edge (native Dolt), a parent with no
+// edge gets one where the parent lands with the row, a row with only the edge
+// gets the parent, and a parent that lands elsewhere is judged as the edge it
+// would be. A store that keeps the field gets no edge.
+func TestPlanReverseParentsForAStoreThatDerivesThem(t *testing.T) {
+	retry := planRow("gcg-r", "open", "", "")
+	retry.ParentID = "gcg-p"
+	edgeOnly := planRow("gcg-e", "closed", "", "")
+	away := planRow("gcg-a", "closed", "", "")
+	away.ParentID = "gp-p"
+	rows := []beads.Bead{retry, edgeOnly, away, planRow("gcg-p", "open", "", ""), planRow("gp-p", "closed", rigImportStamp("packs"), "")}
+	deps := []beads.Dep{{IssueID: "gcg-e", DependsOnID: "gcg-p", Type: "parent-child"}}
+	in := planInput(rows, deps)
+	in.DerivesParent[reverseCityDest] = true
+	plan := planReverse(in)
+	if len(plan.Refusals) > 0 {
+		t.Fatalf("refused: %s", planRefusal(plan))
+	}
+	if got := planEdgeSet(plan); got != "gcg-e>gcg-p:parent-child:,gcg-r>gcg-p:parent-child:" {
+		t.Fatalf("edges = %s", got)
+	}
+	parents := map[string]string{}
+	for _, b := range plan.Rows[reverseCityDest] {
+		parents[b.ID] = b.ParentID
+	}
+	if parents["gcg-r"] != "gcg-p" || parents["gcg-e"] != "gcg-p" || parents["gcg-a"] != "" {
+		t.Fatalf("parents = %v", parents)
+	}
+	if !strings.Contains(strings.Join(plan.Dropped, "\n"), "gcg-a -[parent-child]-> gp-p") {
+		t.Fatalf("the parent in another store was not reported: %v", plan.Dropped)
+	}
+	keeps := planInput(rows, deps)
+	if got := planEdgeSet(planReverse(keeps)); got != "gcg-e>gcg-p:parent-child:" {
+		t.Fatalf("a store that keeps the field got edges %s", got)
+	}
+}
+
+// TestPlanReverseKeepsARefTheStoreDrops: into a store that stores no step
+// ref, the ref is kept in gc.step_ref when that is absent, and counted.
+func TestPlanReverseKeepsARefTheStoreDrops(t *testing.T) {
+	a, b := planRow("gcg-1", "closed", "", ""), planRow("gcg-2", "closed", "", "")
+	a.Ref, b.Ref = "review", "build"
+	b.Metadata[beadmeta.StepRefMetadataKey] = "already"
+	in := planInput([]beads.Bead{a, b}, nil)
+	in.DropsRef[reverseCityDest] = true
+	plan := planReverse(in)
+	got := map[string]string{}
+	for _, r := range plan.Rows[reverseCityDest] {
+		got[r.ID] = r.Metadata[beadmeta.StepRefMetadataKey]
+	}
+	if got["gcg-1"] != "review" || got["gcg-2"] != "already" || plan.RefsKept != 1 {
+		t.Fatalf("step refs = %v, kept %d", got, plan.RefsKept)
 	}
 }
