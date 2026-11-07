@@ -169,7 +169,7 @@ func additions(path string, recorded, live Entry) []string {
 }
 
 // subset reports whether every type in sub is allowed by super; a recorded
-// "any" allows everything.
+// "any" allows everything, and "number" also allows "integer".
 func subset(sub, super []string) bool {
 	allowed := map[string]bool{}
 	for _, t := range super {
@@ -179,7 +179,7 @@ func subset(sub, super []string) bool {
 		return true
 	}
 	for _, t := range sub {
-		if !allowed[t] {
+		if !allowed[t] && (t != "integer" || !allowed["number"]) {
 			return false
 		}
 	}
