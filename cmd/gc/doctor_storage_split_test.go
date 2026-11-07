@@ -373,6 +373,11 @@ func TestProbeSessionPathGCVersion(t *testing.T) {
 	if path, v, err := probeSessionPathGCVersion(cfg); err != nil || path != ws || v != "1.6.0" {
 		t.Fatalf("workspace.env PATH: %q %q %v", path, v, err)
 	}
+	// A relative entry that does hold a gc, from the probe's working
+	// directory, is still not the session's: the session runs elsewhere.
+	cwd := t.TempDir()
+	writeFakeGC(t, filepath.Join(cwd, "relative", "bin"), "9.9.9")
+	t.Chdir(cwd)
 	cfg.Workspace.Env["PATH"] = "relative/bin"
 	if path, _, err := probeSessionPathGCVersion(cfg); err != nil || path != "" {
 		t.Fatalf("a workspace PATH of relative entries alone found %q (%v)", path, err)
