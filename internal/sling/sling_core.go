@@ -628,7 +628,7 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 		return "", false
 	}
 	target := agentutil.RoutedToIdentity(&a)
-	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && assigneeIsOwnPoolSession(holder.Assignee, target, querier, deps.Store)
+	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && assigneeIsOwnPoolSession(holder.Assignee, target, deps.Sessions)
 	if holder.Assignee == target || claimedByOwnPoolSession {
 		return "", false
 	}

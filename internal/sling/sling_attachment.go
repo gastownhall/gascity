@@ -922,7 +922,7 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 		// work, two sessions. Treat a claim by any of this pool's own sessions
 		// as idempotent (assigneeIsOwnPoolSession); a claim by a different
 		// pool still falls through to the warning below.
-		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
+		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, deps.Sessions)
 		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
@@ -955,10 +955,11 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 // claimed before the upgrade. Since #6324 an unaliased pool session claims
 // under its session bead ID, which carries no pool prefix, so the assignee is
 // also resolved as a bead ID: it is this pool's own when it names an open
-// session bead created from target. getters are tried in order; the first
-// that resolves the exact ID decides (bd resolves partial IDs, so a result
-// whose ID differs from assignee is not a match).
-func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) bool {
+// session bead created from target. The session bead is read in sessions, the
+// city's sessions store, the only store that holds it: a work store either
+// lacks it or, on a migrated city, holds a stale copy. bd resolves partial
+// IDs, so a result whose ID differs from assignee is not a match.
+func assigneeIsOwnPoolSession(assignee, target string, sessions beads.SessionStore) bool {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" || target == "" {
 		return false
@@ -966,8 +967,11 @@ func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) b
 	if strings.HasPrefix(assignee, target+"-") {
 		return true
 	}
-	sb, ok := BeadFromGetters(assignee, getters...)
-	if !ok || sb.ID != assignee {
+	if sessions == (beads.SessionStore{}) {
+		return false
+	}
+	sb, err := sessions.Get(assignee)
+	if err != nil || sb.ID != assignee {
 		return false
 	}
 	return session.IsOpenSessionOfTemplate(sb, target)
