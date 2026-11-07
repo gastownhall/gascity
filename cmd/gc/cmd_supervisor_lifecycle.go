@@ -629,8 +629,33 @@ func doSupervisorRun(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	warnSupervisorIsInit(stderr)
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
+}
+
+// supervisorGetpid is os.Getpid; tests replace it to exercise the PID 1
+// warning without running as init.
+var supervisorGetpid = os.Getpid
+
+// supervisorInitWarning is the line warnSupervisorIsInit writes.
+const supervisorInitWarning = "gc supervisor run: warning: running as PID 1. " +
+	"gc does not reap orphaned child processes, so bd and dolt processes whose parent exits " +
+	"stay as zombies until the process limit stops gc from forking. " +
+	"Run gc under an init that reaps them, such as `tini -- gc supervisor run` or `docker run --init`."
+
+// warnSupervisorIsInit writes supervisorInitWarning when this process is
+// PID 1, as when `gc supervisor run` is a container's entrypoint with no
+// init. Orphans reparent to PID 1, and gc never waits on processes it did
+// not start, so each one stays a zombie and holds a PID until the cgroup or
+// ulimit cap is reached (#4308). contrib/k8s/Dockerfile.controller runs gc
+// under tini for this reason; the warning makes a hand-built image that
+// skips the init visible at startup instead of hours later.
+func warnSupervisorIsInit(stderr io.Writer) {
+	if supervisorGetpid() != 1 {
+		return
+	}
+	fmt.Fprintln(stderr, supervisorInitWarning) //nolint:errcheck // best-effort stderr
 }
 
 // defaultSupervisorBeadsActor sets BEADS_ACTOR=controller in this
