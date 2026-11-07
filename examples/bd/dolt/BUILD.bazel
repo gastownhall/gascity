@@ -111,6 +111,7 @@ go_test(
         "compact_notify_cadence_test.go",
         "compact_real_dolt_callbound_test.go",
         "compact_real_dolt_test.go",
+        "compact_real_dolt_wiring_test.go",
         "compact_rig_endpoint_real_dolt_test.go",
         "compact_rig_endpoint_test.go",
         "docs_recovery_bd_flags_test.go",
