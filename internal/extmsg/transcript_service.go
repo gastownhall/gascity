@@ -902,6 +902,12 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
 				continue
 			}
+			// The frontier is the publication boundary: an entry stored but
+			// not yet covered shares its bucket with published entries and
+			// must stay invisible until a cover publishes it.
+			if record.Sequence >= state.NextSequence {
+				continue
+			}
 			bucketRecords = append(bucketRecords, record)
 		}
 		sortTranscriptRecords(bucketRecords, descending)
