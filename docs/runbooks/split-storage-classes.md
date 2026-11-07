@@ -141,22 +141,29 @@ nothing. On top of every check above it prints the session reconciler the
 split city would resolve to (and, under v2, the boot census v2 refuses over),
 the lane the migration's window would open the work store on, the id floor it
 would set, and **estimates**: how long the copy and the clear take, how much
-disk the snapshot, the binding and its WAL need, and how many times
+disk the snapshot (of the work store and of every rig with a store of its
+own), the binding and its WAL need, and how many times
 `--time-budget` (default 30m) would pause the run. Each estimate is labeled
 ESTIMATE and names its basis: the row and edge counts it read, and rates
 measured on a loaded host (the native-Dolt clear costs about 62 ms an edge in
 batches; the proxied, bd CLI and exec lanes remove an edge per call, and
 their figure is a floor). It starts nothing: on a city whose bead-store
-provider is down it says so and runs no check that reads a store, so rehearse
-on the running city. `gc doctor`'s `storage-split` check reports the
+provider is down, or whose proxied server is stopped, it says so, names what
+lets a later run read, and runs no check that reads a store, so rehearse on
+the running city. A suspended rig or city is left stopped and named with the
+command that resumes it; a proxied server that retired on its idle timeout
+while the city runs is read, as `gc doctor` reads it. `gc doctor`'s
+`storage-split` check reports the
 binding's verdict on a split city; on an unsplit one it stays cheap (the
 reconciler the split city would resolve to, and whether the provider is up)
 and leaves the rehearsal to this command. A city that already carries a
 convergence marker for the split binding (a migration backed out by removing
 `[storage]`) is refused here: restore the block instead of migrating again.
 Ready names the window's commands in order, starting with
-`gc storage snapshot --work --fleet-stopped`, which the disk estimate counts
-and the migration does not take.
+`gc storage snapshot --work --fleet-stopped` (with `--rigs` when the city has
+rigs), which the disk estimate counts and the migration does not take, and
+running the migration under the `--time-budget` its pauses were estimated
+against.
 
 It reports rather than refuses what stopping the city ends: a **live
 controller**, named by PID; the city's registration with the supervisor; its

@@ -70,6 +70,10 @@ type rigCensusRow struct {
 	Reused []string
 	// Plan is the import's plan, on a full census (preflight).
 	Plan *rigImportPlan
+	// Rows is every row the rig's store holds, of every class, on a full
+	// census: what `gc storage snapshot --rigs` exports for the rig, which
+	// `gc storage preflight --split` sizes.
+	Rows []beads.Bead
 	Err  error
 }
 
@@ -137,6 +141,7 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 	var snap rigSnapshot
 	if full {
 		snap, err = readRigSnapshot(store)
+		row.Rows = snap.rows
 	} else {
 		var listed []beads.Bead
 		listed, err = store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})

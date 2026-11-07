@@ -201,22 +201,59 @@ func TestSplitBudgetResumes(t *testing.T) {
 	}
 }
 
-// TestEstimateSplitDisk pins the disk arithmetic for each exact snapshot.
+// TestEstimateSplitDisk pins the disk arithmetic for each exact snapshot,
+// and the rigs' part of the snapshot added to the work store's.
 func TestEstimateSplitDisk(t *testing.T) {
 	const wal = int64(storageSnapshotWALGrowthFloor)
 	for _, tc := range []struct {
-		exact          string
-		snapshot, want int64
+		exact                string
+		rigs, snapshot, want int64
 	}{
-		{snapshotMethodDoltTag, 2000, 2000 + 6000 + wal},
-		{snapshotMethodNone, 2000, 2000 + 6000 + wal},
-		{snapshotMethodBdExport, 4000, 4000 + 6000 + wal},
-		{snapshotMethodFileCopy, 4000, 4000 + 6000 + wal},
+		{snapshotMethodDoltTag, 0, 2000, 2000 + 6000 + wal},
+		{snapshotMethodNone, 0, 2000, 2000 + 6000 + wal},
+		{snapshotMethodBdExport, 0, 4000, 4000 + 6000 + wal},
+		{snapshotMethodFileCopy, 0, 4000, 4000 + 6000 + wal},
+		{snapshotMethodDoltTag, 500, 2500, 2500 + 6000 + wal},
 	} {
-		d := estimateSplitDisk(1000, 1000, tc.exact)
-		if d.snapshot != tc.snapshot || d.binding != 6000 || d.wal != wal || d.total() != tc.want || d.exact != tc.exact {
-			t.Errorf("%s: estimateSplitDisk = %+v (total %d), want snapshot %d, binding 6000, total %d", tc.exact, d, d.total(), tc.snapshot, tc.want)
+		d := estimateSplitDisk(1000, 1000, tc.exact, tc.rigs)
+		if d.snapshot != tc.snapshot || d.rigs != tc.rigs || d.binding != 6000 || d.wal != wal || d.total() != tc.want || d.exact != tc.exact {
+			t.Errorf("%s, rigs %d: estimateSplitDisk = %+v (total %d), want snapshot %d, binding 6000, total %d", tc.exact, tc.rigs, d, d.total(), tc.snapshot, tc.want)
 		}
+	}
+}
+
+// TestSplitRigSnapshotBytesSelectsAsTheSnapshotDoes: the rigs' part counts
+// the rigs `gc storage snapshot --rigs` exports, each from the rows its
+// census read and with its exact copy, and leaves out an unbound rig and one
+// on the city's own store, as snapshotRigs does.
+func TestSplitRigSnapshotBytesSelectsAsTheSnapshotDoes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	city := t.TempDir()
+	rows := func(prefix string, n int) []beads.Bead {
+		out := make([]beads.Bead, 0, n)
+		for i := range n {
+			out = append(out, beads.Bead{ID: fmt.Sprintf("%s-%d", prefix, i), Title: "a row the rig holds", Type: "task"})
+		}
+		return out
+	}
+	own, other := rows("ga", 3), rows("gb", 2)
+	request := storageOperatorRequest{CityPath: city, Cfg: &config.City{Rigs: []config.Rig{
+		{Name: "alpha", Path: t.TempDir()},
+		{Name: "unbound"},
+		{Name: "on-the-city", Path: city},
+		{Name: "beta", Path: t.TempDir()},
+	}}}
+	census := []rigCensusRow{
+		{Rig: "alpha", Rows: own},
+		{Rig: "unbound", State: rigCensusSkipped, Rows: rows("gu", 5)},
+		{Rig: "on-the-city", State: rigCensusSkipped, Rows: rows("gc", 7)},
+		{Rig: "beta", Rows: other},
+	}
+	size, n := splitRigSnapshotBytes(request, census)
+	// A file-provider rig's exact copy is a file the size of its JSONL.
+	want := 2 * splitSnapshotPerJSONByte * (splitJSONBytes(own) + splitJSONBytes(other))
+	if n != 5 || size != want {
+		t.Errorf("splitRigSnapshotBytes = %d bytes over %d row(s), want %d over 5", size, n, want)
 	}
 }
 
@@ -398,20 +435,26 @@ func TestSplitPreflightStartsNothingWhenTheProviderIsDown(t *testing.T) {
 }
 
 // TestSplitStoreReadGate: an open window owns the provider, so the guided
-// split's own rehearsal reads inside it even with the provider down.
+// split's own rehearsal reads inside it even with the provider down. A down
+// provider is the city being stopped only when no controller answers.
 func TestSplitStoreReadGate(t *testing.T) {
 	city := t.TempDir()
 	stubMigrationProviderDown(t, true)
-	if why := splitStoreReadGate(city, &config.City{}); !strings.Contains(why, "is down") {
-		t.Errorf("gate with the provider down = %q", why)
+	stubInfraControllerPing(t, 0)
+	if why, remedy := splitStoreReadGate(city, &config.City{}); !strings.Contains(why, "is down") || remedy != splitUnreadWhileRunning {
+		t.Errorf("gate with the provider down = %q, %q", why, remedy)
+	}
+	stubInfraControllerPing(t, os.Getpid()+1)
+	if why, remedy := splitStoreReadGate(city, &config.City{}); !strings.Contains(why, "is down") || !strings.Contains(remedy, "its bead-store provider went down on its own") {
+		t.Errorf("gate with the provider down under a running controller = %q, %q", why, remedy)
 	}
 	closeWindow := openPreflightLaneWindow(city, &config.City{})
 	defer closeWindow()
-	if why := splitStoreReadGate(city, &config.City{}); why != "" {
+	if why, _ := splitStoreReadGate(city, &config.City{}); why != "" {
 		t.Errorf("gate inside a window = %q, want none", why)
 	}
 	stubMigrationProviderDown(t, false)
-	if why := splitStoreReadGate(t.TempDir(), &config.City{}); why != "" {
+	if why, _ := splitStoreReadGate(t.TempDir(), &config.City{}); why != "" {
 		t.Errorf("gate with the provider up = %q, want none", why)
 	}
 }
@@ -823,23 +866,84 @@ func TestSplitPreflightNeverReplacesAnOpenWindow(t *testing.T) {
 }
 
 // TestSplitPreflightGatesAStoppedProxy: a proxied scope whose proxy is not
-// running, the city's (M2) or a rig's (M3), bd-owned or not, stops every read.
+// running, the city's (M2) or a rig's (M3, at a relative [[rigs]] path too),
+// bd-owned or not, stops every read, judged as doctor's store gate judges it.
+// A suspended scope is named with the command that resumes it; a proxy that
+// retired on its idle timeout is read while the controller runs; and the
+// report says to run it while the city is running only when no controller
+// answers.
 func TestSplitPreflightGatesAStoppedProxy(t *testing.T) {
-	for _, rig := range []bool{false, true} {
-		request, _, provider := splitReadyCity(t, 10, nativeDoltLane)
-		stopped := request.CityPath
-		if rig {
-			stopped = t.TempDir()
-			request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: stopped}}
-		}
-		prev := doctorProxiedStoreNotRunning
-		doctorProxiedStoreNotRunning = func(root string) bool { return root == stopped }
-		refuseInfraMigrationSource(t)
-		code, summary, out := runSplitPreflight(t, request)
-		doctorProxiedStoreNotRunning = prev
-		if code != 1 || !strings.Contains(summary.Unread, "proxied server") || provider.starts != 0 {
-			t.Fatalf("rig %t: exit %d, unread %q, starts %d:\n%s", rig, code, summary.Unread, provider.starts, out)
-		}
+	const (
+		cityScope = iota
+		absoluteRig
+		relativeRig
+	)
+	for _, tc := range []struct {
+		name                   string
+		scope                  int
+		suspended, live, idle  bool
+		unread, remedy, absent string
+	}{
+		{name: "the city's, no controller", scope: cityScope, unread: "the proxied server for the city's work store is not running", remedy: splitUnreadWhileRunning},
+		{name: "a rig's, no controller", scope: absoluteRig, unread: "the proxied server for rig alpha is not running", remedy: splitUnreadWhileRunning},
+		{name: "a relative rig path's, probed at the city's root", scope: relativeRig, unread: "the proxied server for rig alpha is not running", remedy: splitUnreadWhileRunning},
+		{name: "a suspended rig's", scope: absoluteRig, suspended: true, live: true, unread: "rig alpha is suspended", remedy: "resume rig alpha (`gc rig resume alpha`)", absent: splitUnreadWhileRunning},
+		{name: "a suspended city's", scope: cityScope, suspended: true, live: true, unread: "the city is suspended", remedy: "resume the city (`gc resume`)", absent: splitUnreadWhileRunning},
+		{name: "an idle-retired rig's under a running controller is read", scope: absoluteRig, live: true, idle: true},
+		{name: "an idle-retired rig's, no controller", scope: absoluteRig, idle: true, unread: "the proxied server for rig alpha is not running", remedy: splitUnreadWhileRunning},
+		{name: "a never-idle rig's down under a running controller", scope: absoluteRig, live: true, unread: "does not retire on an idle timeout", remedy: "the proxied server for rig alpha went down on its own", absent: splitUnreadWhileRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, _, provider := splitReadyCity(t, 10, nativeDoltLane)
+			stopped := request.CityPath
+			if tc.scope != cityScope {
+				rig := config.Rig{Name: "alpha", Prefix: "ga", Path: t.TempDir(), SuspendedOnStart: tc.suspended}
+				if tc.scope == relativeRig {
+					rig.Path = filepath.Join("rigs", "alpha")
+					if err := os.MkdirAll(filepath.Join(request.CityPath, rig.Path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				request.Cfg.Rigs = []config.Rig{rig}
+				stopped = rigStoreRoot(request.CityPath, rig)
+				store := beads.NewMemStore()
+				store.IDPrefix = "ga"
+				prevOpen := openStorageScopeStore
+				openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+					if samePath(resolveStoreScopeRoot(cityPath, storePath), stopped) {
+						return store, nil
+					}
+					return prevOpen(storePath, cityPath)
+				}
+				t.Cleanup(func() { openStorageScopeStore = prevOpen })
+			} else if tc.suspended {
+				t.Setenv("GC_SUSPENDED", "1")
+			}
+			if tc.live {
+				stubInfraControllerPing(t, os.Getpid()+1)
+			}
+			prevStopped, prevIdle := doctorProxiedStoreNotRunning, doctorProxiedStoreRetiresWhenIdle
+			doctorProxiedStoreNotRunning = func(root string) bool { return samePath(root, stopped) }
+			doctorProxiedStoreRetiresWhenIdle = func(string) bool { return tc.idle }
+			t.Cleanup(func() { doctorProxiedStoreNotRunning, doctorProxiedStoreRetiresWhenIdle = prevStopped, prevIdle })
+			if tc.unread == "" {
+				if code, summary, out := runSplitPreflight(t, request); code != 0 || summary.Unread != "" || summary.Estimate == nil || provider.starts != 0 {
+					t.Fatalf("exit %d, unread %q, starts %d: want the rehearsal read:\n%s", code, summary.Unread, provider.starts, out)
+				}
+				return
+			}
+			refuseInfraMigrationSource(t)
+			code, summary, out := runSplitPreflight(t, request)
+			if code != 1 || !strings.Contains(summary.Unread, tc.unread) || provider.starts != 0 {
+				t.Fatalf("exit %d, unread %q (want %q), starts %d:\n%s", code, summary.Unread, tc.unread, provider.starts, out)
+			}
+			if !strings.Contains(summary.UnreadRemedy, tc.remedy) || !strings.Contains(out, "this command starts nothing. "+summary.UnreadRemedy+".") {
+				t.Errorf("remedy %q, want %q in the footer:\n%s", summary.UnreadRemedy, tc.remedy, out)
+			}
+			if tc.absent != "" && strings.Contains(out, tc.absent) {
+				t.Errorf("the report says %q:\n%s", tc.absent, out)
+			}
+		})
 	}
 }
 
@@ -917,11 +1021,53 @@ func TestSplitPreflightFooterCarriesTheAttestations(t *testing.T) {
 	}
 }
 
+// TestSplitPreflightFooterCarriesTheTimeBudget: the city's migration Ready
+// names runs under the --time-budget its pauses were estimated against, an
+// explicit zero (no budget) included; the rig import, which refuses the
+// flag, carries none.
+func TestSplitPreflightFooterCarriesTheTimeBudget(t *testing.T) {
+	for _, budget := range []time.Duration{storageDefaultTimeBudget, 45 * time.Minute, 0} {
+		t.Run(budget.String(), func(t *testing.T) {
+			request, _, _ := splitReadyCity(t, 10, nativeDoltLane)
+			request.TimeBudget = budget
+			rigPath := t.TempDir()
+			request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
+			rig := beads.NewMemStore()
+			rig.IDPrefix = "ga"
+			mustCreateInfraBead(t, rig, beads.Bead{Title: "a session the rig still holds", Type: "session"})
+			prev := openStorageScopeStore
+			openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+				if storePath == rigPath {
+					return rig, nil
+				}
+				return prev(storePath, cityPath)
+			}
+			t.Cleanup(func() { openStorageScopeStore = prev })
+			code, summary, out := runSplitPreflight(t, request)
+			if code != 0 || !summary.RigImports {
+				t.Fatalf("exit %d, rig imports %t:\n%s", code, summary.RigImports, out)
+			}
+			if want := "3. " + storageClearInstruction() + " --" + storageTimeBudgetFlag + " " + budget.String() + "\n"; !strings.Contains(out, want) {
+				t.Errorf("Ready lacks %q:\n%s", want, out)
+			}
+			if want := "4. " + rigImportAllInstruction() + "\n"; !strings.Contains(out, want) {
+				t.Errorf("Ready lacks %q, a rig import with no --%s:\n%s", want, storageTimeBudgetFlag, out)
+			}
+		})
+	}
+}
+
 // TestSplitBdVouchStatus judges the city's bd from the verdict cache and the
 // vouch file alone: an unjudged binary is "not checked", never OK.
 func TestSplitBdVouchStatus(t *testing.T) {
 	city := storageTestRequest(t, &config.City{}).CityPath
-	bin := t.TempDir()
+	// The PATH entry is a symlink, as macOS's temp dir (/var -> /private/var)
+	// is, so the vouch must name the binary as vouchBdForScope records it:
+	// by the path statBdBinary resolves.
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Symlink(t.TempDir(), bin); err != nil {
+		t.Fatal(err)
+	}
 	bd := filepath.Join(bin, "bd")
 	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -930,13 +1076,17 @@ func TestSplitBdVouchStatus(t *testing.T) {
 	if got, ok := splitBdVouchStatus(city); ok || !strings.HasPrefix(got, "not checked") {
 		t.Fatalf("no verdict: %q, %t", got, ok)
 	}
+	id, err := statBdBinary(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sum, err := fileSHA256(bd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	inv := bdflags.Inventories()[0].Name
 	set := bdflags.InventorySetFingerprint()
-	vouch, _ := json.Marshal(bdVouchFile{Vouches: []bdVouch{{BinaryPath: bd, SHA256: sum, Inventory: inv, InventorySet: set}}})
+	vouch, _ := json.Marshal(bdVouchFile{Vouches: []bdVouch{{BinaryPath: id.Path, SHA256: sum, Inventory: inv, InventorySet: set}}})
 	if err := os.WriteFile(bdVouchPath(city), vouch, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -944,10 +1094,6 @@ func TestSplitBdVouchStatus(t *testing.T) {
 		t.Fatalf("vouched: %q, %t", got, ok)
 	}
 	if err := os.Remove(bdVouchPath(city)); err != nil {
-		t.Fatal(err)
-	}
-	id, err := statBdBinary(bd)
-	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -1051,6 +1197,67 @@ func TestSplitPreflightCountsTheRigsItWouldImport(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("Ready lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestSplitPreflightSizesTheRigsItSnapshots: the snapshot Ready names
+// exports every rig with a store of its own whole, so a small city's estimate
+// grows by a large work-only rig's rows, which its import would not move, and
+// a disk the city alone fits but the rig's snapshot does not blocks.
+func TestSplitPreflightSizesTheRigsItSnapshots(t *testing.T) {
+	request, _, _ := splitReadyCity(t, 5, nativeDoltLane)
+	t.Setenv("GC_DOLT_MIN_FREE_BYTES", "0")
+	t.Setenv("GC_DOLT_WARN_FREE_BYTES", "0")
+	free := int64(1) << 50
+	prevFree := doltContainerFreeBytesFunc
+	doltContainerFreeBytesFunc = func(string) (int64, error) { return free, nil }
+	t.Cleanup(func() { doltContainerFreeBytesFunc = prevFree })
+	code, without, out := runSplitPreflight(t, request)
+	if code != 0 || without.Estimate == nil {
+		t.Fatalf("exit %d without the rig:\n%s", code, out)
+	}
+
+	rigPath := t.TempDir()
+	request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
+	for i := range 400 {
+		mustCreateInfraBead(t, rig, beads.Bead{Title: fmt.Sprintf("rig work %d: %s", i, strings.Repeat("x", 256)), Type: "task"})
+	}
+	listed, err := rig.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevOpen := openStorageScopeStore
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if samePath(resolveStoreScopeRoot(cityPath, storePath), rigPath) {
+			return rig, nil
+		}
+		return prevOpen(storePath, cityPath)
+	}
+	t.Cleanup(func() { openStorageScopeStore = prevOpen })
+	code, with, out := runSplitPreflight(t, request)
+	if code != 0 || with.Estimate == nil || with.RigImports {
+		t.Fatalf("exit %d, %+v: want a work-only rig cleared and imported by nothing:\n%s", code, with, out)
+	}
+	jsonl := splitSnapshotPerJSONByte * splitJSONBytes(listed)
+	grew := with.Estimate.disk.snapshot - without.Estimate.disk.snapshot
+	if grew != with.Estimate.disk.rigs || grew < jsonl || grew > 2*jsonl || with.Estimate.disk.binding != without.Estimate.disk.binding {
+		t.Errorf("the snapshot grew %d (rigs %d), want the rig's JSONL %d, at most doubled by its exact copy; binding %d, want %d unchanged", grew, with.Estimate.disk.rigs, jsonl, with.Estimate.disk.binding, without.Estimate.disk.binding)
+	}
+	if !strings.Contains(out, "the rigs' 400 rows' JSONL and exact copies") {
+		t.Errorf("the disk row does not name the rig's snapshot:\n%s", out)
+	}
+
+	free = without.Estimate.disk.total() + grew/2
+	code, tight, out := runSplitPreflight(t, request)
+	if code != 1 || !slices.Contains(tight.Blocks, "disk") {
+		t.Errorf("exit %d, blocks %v on a disk the rig's snapshot does not fit:\n%s", code, tight.Blocks, out)
+	}
+	request.Cfg.Rigs = nil
+	code, alone, out := runSplitPreflight(t, request)
+	if code != 0 {
+		t.Errorf("exit %d, blocks %v on the same disk without the rig, which fits:\n%s", code, alone.Blocks, out)
 	}
 }
 

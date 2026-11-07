@@ -127,10 +127,14 @@ the id floor, and ESTIMATES of the time the copy and the clear take, the disk
 they need, and how many times --` + storageTimeBudgetFlag + ` would pause the run. The
 estimates come from the row and edge counts read here and from rates measured
 on a loaded host, both printed with them. It starts no bead-store provider: on
-a city whose provider is down it reports that and checks nothing that reads a
-store. Reading a binding already there (a city with a convergence marker, which
-it refuses) opens it read-only, which may leave the -wal and -shm sidecars
-SQLite needs for the read beside a quiescent binding; nothing else is written.`,
+a city whose provider is down, or with a proxied server stopped, it reports
+that and what lets a later run read, and checks nothing that reads a store. A
+suspended rig or city is left stopped; a proxied server that retired on its
+idle timeout while the city's controller runs is read, as gc doctor reads it,
+which restarts it as any bd read would. Reading a binding already there (a
+city with a convergence marker, which it refuses) opens it read-only, which
+may leave the -wal and -shm sidecars SQLite needs for the read beside a
+quiescent binding; nothing else is written.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			force, err := parseStorageForce(forced)
 			if err == nil && cmd.Flags().Changed(storageTimeBudgetFlag) && !split {

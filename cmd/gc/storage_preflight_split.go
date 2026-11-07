@@ -13,18 +13,23 @@ package main
 // estimates of the time the copy and the clear take, the disk the split
 // needs, and how many times --time-budget would pause the run.
 //
-// It is read-only in the preflight's sense, and starts nothing. The
-// migration's window starts the city's bead-store provider when it is down
-// (storage_maintenance.go); a rehearsal must not, so on a city whose provider
-// is down, or whose bd-owned proxy is stopped (any bd read restarts it), it
-// reports that and runs no check that reads a store. Any proxied scope whose
-// proxy is not running counts, bd-owned or not. Where the provider is up it
-// registers, for the reads alone, a window that started nothing, holds no
-// lock and carries the city's own configuration, only so the work-store opens
-// take the lanes the migration's window forces (the proxied-native lane, O9's
-// transport override) and the lane they land on is recorded; closing it stops
-// nothing, because it started nothing. It never replaces a window already
-// open in the process (the guided split's), and the doctor never opens one.
+// It is read-only in the preflight's sense, and starts nothing a running city
+// would not. The migration's window starts the city's bead-store provider when
+// it is down (storage_maintenance.go); a rehearsal must not, so on a city
+// whose provider is down, or whose bd-owned proxy is stopped (any bd read
+// restarts it), it reports that and what lets a later run read, and runs no
+// check that reads a store. Any proxied scope whose proxy is not running
+// counts, bd-owned or not, judged as doctor judges it
+// (doctorStoreGate.decide): a suspended rig or city is left cold, and a proxy
+// that retired on its idle timeout while the city's controller runs is read,
+// which restarts it as any bd read on the running city would, until it retires
+// again. Where the provider is up it registers, for the reads alone, a window
+// that started nothing, holds no lock and carries the city's own
+// configuration, only so the work-store opens take the lanes the migration's
+// window forces (the proxied-native lane, O9's transport override) and the
+// lane they land on is recorded; closing it stops nothing, because it started
+// nothing. It never replaces a window already open in the process (the guided
+// split's), and the doctor never opens one.
 //
 // One race is left, and named here rather than closed: a proxy that
 // idle-retires between the gate and a read is restarted by that read, as any
@@ -43,6 +48,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -213,22 +219,53 @@ func splitBudgetFitting(city time.Duration) time.Duration {
 // splitDiskEstimate is the disk estimate, in bytes.
 type splitDiskEstimate struct {
 	snapshot, binding, wal int64
-	// exact names the snapshot's exact copy (S5 §5.3).
+	// exact names the work store's exact copy in the snapshot (S5 §5.3).
 	exact string
+	// rigs is the part of snapshot the rigs' stores take.
+	rigs int64
 }
 
 func (d splitDiskEstimate) total() int64 { return d.snapshot + d.binding + d.wal }
 
-// estimateSplitDisk sizes the split: the mandatory snapshot of the work store
-// (its JSONL, plus the exact copy when that is a file), the binding root the
-// copy leaves, and the WAL growth S5-E's snapshot allows for.
-func estimateSplitDisk(allJSON, movedJSON int64, exact string) splitDiskEstimate {
-	jsonl := splitSnapshotPerJSONByte * allJSON
-	snapshot := jsonl
+// splitSnapshotBytes sizes one store in the mandatory snapshot from its rows'
+// JSON: its JSONL, plus the exact copy when that is a file.
+func splitSnapshotBytes(rowsJSON int64, exact string) int64 {
+	jsonl := splitSnapshotPerJSONByte * rowsJSON
 	if exact == snapshotMethodBdExport || exact == snapshotMethodFileCopy {
-		snapshot += jsonl
+		return 2 * jsonl
 	}
-	return splitDiskEstimate{snapshot: snapshot, binding: splitBindingPerJSONByte * movedJSON, wal: storageSnapshotWALGrowthFloor, exact: exact}
+	return jsonl
+}
+
+// estimateSplitDisk sizes the split: the mandatory snapshot of the work store
+// and, rigs, of the rigs (splitRigSnapshotBytes), the binding root the copy
+// leaves, and the WAL growth S5-E's snapshot allows for.
+func estimateSplitDisk(allJSON, movedJSON int64, exact string, rigs int64) splitDiskEstimate {
+	return splitDiskEstimate{
+		snapshot: splitSnapshotBytes(allJSON, exact) + rigs,
+		binding:  splitBindingPerJSONByte * movedJSON,
+		wal:      storageSnapshotWALGrowthFloor,
+		exact:    exact,
+		rigs:     rigs,
+	}
+}
+
+// splitRigSnapshotBytes sizes the rigs in the snapshot Ready names (`gc
+// storage snapshot --work --rigs`): every rig snapshotRigs selects, sized as
+// the work store is, from the rows the census read from its store. The chain
+// cleared, so the census read every one. No open reports a rig's lane, so a
+// rig whose kind could take a Dolt tag is sized with a bd export, the larger.
+func splitRigSnapshotBytes(request storageOperatorRequest, census []rigCensusRow) (size int64, rows int) {
+	read := make(map[string][]beads.Bead, len(census))
+	for _, r := range census {
+		read["rig:"+r.Rig] = r.Rows
+	}
+	for _, scope := range snapshotRigs(request) {
+		exact := snapshotExactMethod(rawBeadsProviderForScope(scope.root, request.CityPath), false)
+		size += splitSnapshotBytes(splitJSONBytes(read[scope.name]), exact)
+		rows += len(read[scope.name])
+	}
+	return size, rows
 }
 
 // splitEstimate is everything the rehearsal estimated.
@@ -244,8 +281,9 @@ type splitEstimate struct {
 type splitPreflightSummary struct {
 	// Blocks names each check that would refuse the split.
 	Blocks []string
-	// Unread says why no check that reads a store ran, or "".
-	Unread string
+	// Unread says why no check that reads a store ran, or "", and
+	// UnreadRemedy what lets a later run read them.
+	Unread, UnreadRemedy string
 	// Reconciler is the session reconciler the split city resolves to.
 	Reconciler string
 	// Estimate is nil when the work store was not read.
@@ -307,8 +345,8 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	splitPreflightVouch(request.CityPath, stdout)
 
 	// Nothing below may start the provider.
-	if why := splitStoreReadGate(request.CityPath, request.Cfg); why != "" {
-		summary.Unread = why
+	if why, remedy := splitStoreReadGate(request.CityPath, request.Cfg); why != "" {
+		summary.Unread, summary.UnreadRemedy = why, remedy
 		preflightNote(stdout, "source lane", why+"; the split starts it in its maintenance window, and the lane is decided there")
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
@@ -539,10 +577,15 @@ func splitPreflightEstimate(request storageOperatorRequest, found preflightFindi
 			moved = append(moved, r.Plan.Move...)
 		}
 	}
-	est.disk = estimateSplitDisk(allJSON, splitJSONBytes(moved), exact)
+	rigs, rigRows := splitRigSnapshotBytes(request, found.rigs)
+	est.disk = estimateSplitDisk(allJSON, splitJSONBytes(moved), exact, rigs)
 	dir := filepath.Join(request.CityPath, ".gc")
-	sizes := fmt.Sprintf("ESTIMATE: about %s: the snapshot %s (%s rows' JSONL, exact copy: %s), the binding %s (%d times the moved rows' %s of JSON, measured 4.9), WAL growth %s",
-		splitBytes(est.disk.total()), splitBytes(est.disk.snapshot), strconv.Itoa(len(found.all)), est.disk.exact, splitBytes(est.disk.binding), splitBindingPerJSONByte, splitBytes(splitJSONBytes(moved)), splitBytes(est.disk.wal))
+	snapshot := fmt.Sprintf("the work store's %s rows' JSONL, exact copy: %s", strconv.Itoa(len(found.all)), est.disk.exact)
+	if rigRows > 0 {
+		snapshot += fmt.Sprintf("; the rigs' %d rows' JSONL and exact copies, %s", rigRows, splitBytes(est.disk.rigs))
+	}
+	sizes := fmt.Sprintf("ESTIMATE: about %s: the snapshot %s (%s), the binding %s (%d times the moved rows' %s of JSON, measured 4.9), WAL growth %s",
+		splitBytes(est.disk.total()), splitBytes(est.disk.snapshot), snapshot, splitBytes(est.disk.binding), splitBindingPerJSONByte, splitBytes(splitJSONBytes(moved)), splitBytes(est.disk.wal))
 	free, err := doltContainerFreeBytesFunc(dir)
 	if err != nil {
 		preflightNote(stdout, "disk", sizes+"; free space on "+dir+" not measured: "+err.Error())
@@ -614,10 +657,10 @@ func splitJSONBytes(rows []beads.Bead) int64 {
 }
 
 // splitPreflightFooter closes the report and returns the exit code. Ready
-// names the window's commands in order, each migration carrying the
-// rehearsal's --force attestations: the snapshot the disk estimate counts
-// (migrate takes none), the [storage] block printed above, then the
-// migrations.
+// names the window's commands in order, each carrying the rehearsal's --force
+// attestations: the snapshot the disk estimate counts (migrate takes none),
+// the [storage] block printed above, then the migrations, the city's with the
+// --time-budget the estimate was made against (the rig import takes none).
 func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summary splitPreflightSummary) int {
 	prefix := storagePreflightLogPrefix + " --" + storagePreflightSplitFlag
 	switch {
@@ -625,7 +668,7 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 		fmt.Fprintf(stdout, "\n%s: the split would refuse (%s). Fix the blocking checks above and run this again.\n", prefix, strings.Join(summary.Blocks, ", ")) //nolint:errcheck // best-effort stdout
 		return 1
 	case summary.Unread != "":
-		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. Run it again while the city is running.\n", prefix) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. %s.\n", prefix, summary.UnreadRemedy) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	force := request.Force.flags()
@@ -634,10 +677,11 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 		snapshot = append(snapshot, "--rigs")
 	}
 	snapshot = append(append(snapshot, "--"+storageFleetStoppedFlag), force...)
+	migrate := append(append([]string{storageClearInstruction()}, force...), fmt.Sprintf("--%s %s", storageTimeBudgetFlag, request.TimeBudget))
 	steps := []string{
 		strings.Join(snapshot, " ") + "  (the disk estimate counts this snapshot; migrate takes none)",
 		"add the [storage] block printed above to city.toml",
-		strings.Join(append([]string{storageClearInstruction()}, force...), " "),
+		strings.Join(migrate, " "),
 	}
 	if summary.RigImports {
 		steps = append(steps, strings.Join(append([]string{rigImportAllInstruction()}, force...), " "))
@@ -649,38 +693,103 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 	return 0
 }
 
+// What lets a later rehearsal read the stores this one could not.
+const (
+	// splitUnreadWhileRunning: nothing answered the city's controller, so the
+	// stores are down because the city is; a running city has them up.
+	splitUnreadWhileRunning = "Run it again while the city is running"
+	// splitUnreadResolve: the gate itself could not decide.
+	splitUnreadResolve = "Resolve that, then run this again"
+)
+
 // splitStoreReadGate says why the rehearsal may not read the city's stores
-// without starting something, or "" when it may: every scope's server is up,
-// or the caller holds the migration's window, which owns them. A proxied
-// scope, bd-owned or not, is read only while its proxy runs (any bd read
-// starts a stopped one); the city's other providers, by the window's own
-// down-probe.
-func splitStoreReadGate(cityPath string, cfg *config.City) string {
+// without starting something, or "" when it may, and what lets a later run
+// read them. It may when every scope's server is up, or the caller holds the
+// migration's window, which owns them. A proxied scope, bd-owned or not, is
+// judged by splitScopeGate.stopped, at the root the reads open (rigStoreRoot,
+// for a relative [[rigs]] path too); the city's other providers, by the
+// window's own down-probe.
+func splitStoreReadGate(cityPath string, cfg *config.City) (why, remedy string) {
 	if activeMigrationWindow(cityPath) != nil {
-		return ""
+		return "", ""
 	}
-	if doctorProxiedStoreNotRunning(cityPath) {
-		return "the proxied server for the city's work store is not running, and any bd read would start it"
+	gate := splitScopeGate{
+		suspended: suspendedBeadsScopes(cityPath, cfg),
+		running:   sync.OnceValue(func() bool { return infraMigrationForeignControllerPID(cityPath) != 0 }),
+	}
+	if why, remedy := gate.stopped(cityPath, ""); why != "" {
+		return why, remedy
 	}
 	owned, err := cityScopeProviderOwned(cityPath)
 	if err != nil {
-		return fmt.Sprintf("whether bd owns this city's proxied server cannot be told (%v)", err)
+		return fmt.Sprintf("whether bd owns this city's proxied server cannot be told (%v)", err), splitUnreadResolve
 	}
 	if !owned {
 		down, err := migrationWindowProviderDown(cityPath)
 		if err != nil {
-			return fmt.Sprintf("the bead-store provider could not be checked (%v)", err)
+			return fmt.Sprintf("the bead-store provider could not be checked (%v)", err), splitUnreadResolve
 		}
 		if down {
-			return fmt.Sprintf("the city's bead-store provider (%s) is down", beadsProvider(cityPath))
+			return fmt.Sprintf("the city's bead-store provider (%s) is down", beadsProvider(cityPath)), gate.downRemedy("its bead-store provider", "`gc doctor` shows why")
 		}
 	}
 	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) != "" && doctorProxiedStoreNotRunning(rig.Path) {
-			return fmt.Sprintf("the proxied server for rig %s is not running, and any bd read would start it", rig.Name)
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if why, remedy := gate.stopped(rigStoreRoot(cityPath, rig), rig.Name); why != "" {
+			return why, remedy
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// splitScopeGate judges a scope whose proxied server is not running as
+// doctor's store gate does (doctorStoreGate.decide).
+type splitScopeGate struct {
+	suspended beadsScopeSuspension
+	// running reports a controller answering on the city. It is asked only
+	// when a stopped scope needs the answer.
+	running func() bool
+}
+
+// stopped says why the rehearsal may not read the store at root, rig's or
+// the city's (rig ""), and what lets a later run read it, or "" when it may:
+// its proxy runs, or it retired on its idle timeout while the city's
+// controller runs, and the read restarts it as any bd read would. A suspended
+// scope is left cold and named with the command that resumes it.
+func (g splitScopeGate) stopped(root, rig string) (why, remedy string) {
+	if !doctorProxiedStoreNotRunning(root) {
+		return "", ""
+	}
+	store, scope, resume := "the city's work store", "the city", "gc resume"
+	if rig != "" {
+		store = "rig " + rig
+		if !g.suspended.City() {
+			scope, resume = store, "gc rig resume "+rig
+		}
+	}
+	switch {
+	case g.suspended.Suspended(root):
+		return fmt.Sprintf("%s is suspended, and the proxied server for %s is not running; any bd read would start it", scope, store),
+			fmt.Sprintf("The split's window starts the proxied server for %s. To rehearse with it running, resume %s (`%s`), run this again, then suspend %s again", store, scope, resume, scope)
+	case !g.running():
+		return fmt.Sprintf("the proxied server for %s is not running, and any bd read would start it", store), splitUnreadWhileRunning
+	case doctorProxiedStoreRetiresWhenIdle(root):
+		return "", ""
+	}
+	return fmt.Sprintf("the proxied server for %s is not running while the city's controller is, and it does not retire on an idle timeout", store),
+		g.downRemedy("the proxied server for "+store, "`gc start` (or `gc bd dolt start` in the scope) restarts it, and the proxied-endpoint line in `gc doctor` shows why it is down")
+}
+
+// downRemedy is what lets a later run read a store whose server, what, is
+// down: with no controller answering, a running city; with one running, the
+// server went down on its own, and fix says what restarts it or why.
+func (g splitScopeGate) downRemedy(what, fix string) string {
+	if !g.running() {
+		return splitUnreadWhileRunning
+	}
+	return fmt.Sprintf("The city's controller is running, so %s went down on its own: %s. Run this again once it is up", what, fix)
 }
 
 // openPreflightLaneWindow registers a window on cityPath that started nothing,

@@ -110,7 +110,7 @@ func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
 	_, resolved := doctorReconcilerMode(split, c.cityPath, nil)
 	f.details = append(f.details, "after the split, "+resolved)
 	provider := "up"
-	if why := splitStoreReadGate(c.cityPath, c.cfg); why != "" {
+	if why, _ := splitStoreReadGate(c.cityPath, c.cfg); why != "" {
 		provider = why
 	}
 	f.details = append(f.details, "provider: "+provider)
