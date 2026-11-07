@@ -35,7 +35,7 @@ internal/runtime/t3bridge	raw-param	1
 internal/runtime/t3bridge	raw-result	1
 internal/session/sessiontest	mint	1
 internal/session/sessiontest	raw-result	1
-internal/sling	mint	9
+internal/sling	mint	8
 internal/sling	raw-field	6
 internal/sling	raw-param	10
 internal/sling	raw-result	3

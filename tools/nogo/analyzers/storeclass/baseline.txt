@@ -1866,7 +1866,6 @@ internal/sling/sling.go	SlingDeps	raw-field	1
 internal/sling/sling.go	SourceWorkflowStore	raw-field	1
 internal/sling/sling.go	emitCurrentExecutionFacts	mint	1
 internal/sling/sling.go	graphWorkflowAttachmentInGraphStore	read-marker	1
-internal/sling/sling.go	materializeCompiledSlingFormula	mint	1
 internal/sling/sling_attachment.go	AttachedBead	raw-field	1
 internal/sling/sling_attachment.go	CloseAttachedSubtree	mint	1
 internal/sling/sling_attachment.go	CloseAttachedSubtree	raw-param	1
