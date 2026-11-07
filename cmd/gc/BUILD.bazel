@@ -2151,6 +2151,7 @@ go_test(
         "session_lifecycle_chaos_test.go",
         "session_lifecycle_hang_test.go",
         "session_lifecycle_observation_regression_test.go",
+        "session_lifecycle_orphan_scan_test.go",
         "session_lifecycle_parallel_phase2_test.go",
         "session_lifecycle_parallel_test.go",
         "session_lifecycle_payload_test.go",
