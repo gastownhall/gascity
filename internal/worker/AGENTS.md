@@ -58,7 +58,9 @@ worker surface of it, and `ErrObservationOutstanding` is that same sentinel,
   session name (`postStartObservationKey`), and the conversation lane's
   executor keys by session bead ID under the `lane` prefix
   (`laneObservationKey`), so a wedged lane probe never blocks a lifecycle
-  observation.
+  observation. `internal/session`'s pre-start orphan cleanup keys by city path
+  and session bead ID under the `orphan-scan` prefix
+  (`killExistingOrphans`), so a wedged scan holds a goroutine of its own.
 - `worker.ObserveShared` is the form for reads several callers make of one key
   at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
   idle overlay). A call

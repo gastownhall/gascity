@@ -61,6 +61,12 @@ func newScriptedScanProvider(city string, steps ...scanStep) *scriptedScanProvid
 	}
 }
 
+func (p *scriptedScanProvider) queue(step scanStep) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.steps = append(p.steps, step)
+}
+
 func (p *scriptedScanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	p.mu.Lock()
 	step := scanStep{}
@@ -267,6 +273,97 @@ func TestKillExistingOrphansUsesTheAnswerThatBeatsTheBudget(t *testing.T) {
 		}
 		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4100 {
 			t.Fatalf("terminated %v, want the answered root 4100", got)
+		}
+	})
+}
+
+// TestKillExistingOrphansScansOncePerCityAndSession: while one scan of a
+// city/session key is outstanding, a retry — through the same Manager, a
+// replacement Manager, or an equivalent spelling of the city path — starts no
+// second scan and is refused at once, while a different session or city scans
+// independently.
+func TestKillExistingOrphansScansOncePerCityAndSession(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		city := t.TempDir()
+		release := make(chan struct{})
+		sp := newScriptedScanProvider(city, scanStep{block: release})
+		defer close(release)
+		store := beads.NewMemStore()
+		mgr1 := newTestManager(t, store, sp, WithCityPath(city))
+		first := make(chan error, 1)
+		go func() { first <- mgr1.killExistingOrphans(context.Background(), "gc-a") }()
+		<-sp.started
+
+		for _, tc := range []struct {
+			name string
+			mgr  *Manager
+			sid  string
+		}{
+			{name: "replacement Manager", mgr: newTestManager(t, store, sp, WithCityPath(city+"/")), sid: "gc-a"},
+			{name: "same Manager", mgr: mgr1, sid: "gc-a"},
+		} {
+			begin := time.Now()
+			err := withOrphanScanWatchdog(t, "killExistingOrphans retry", func() error {
+				return tc.mgr.killExistingOrphans(context.Background(), tc.sid)
+			})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s: err = %v, want it to wrap runtime.ErrRuntimeUnavailable", tc.name, err)
+			}
+			if elapsed := time.Since(begin); elapsed >= time.Second {
+				t.Fatalf("%s: refusal waited %v, want an immediate refusal", tc.name, elapsed)
+			}
+			if n := sp.scans.Load(); n != 1 {
+				t.Fatalf("%s: scans begun = %d, want 1: no second scan for an outstanding key", tc.name, n)
+			}
+		}
+
+		// A different session in the same city, and the same session in a
+		// different city, are different keys: both scan independently.
+		for _, tc := range []struct {
+			name string
+			mgr  *Manager
+			sid  string
+		}{
+			{name: "other session, same city", mgr: mgr1, sid: "gc-b"},
+			{name: "same session, other city", mgr: newTestManager(t, store, sp, WithCityPath(t.TempDir())), sid: "gc-a"},
+		} {
+			sp.queue(scanStep{})
+			err := withOrphanScanWatchdog(t, "killExistingOrphans independent key", func() error {
+				return tc.mgr.killExistingOrphans(context.Background(), tc.sid)
+			})
+			if err != nil {
+				t.Fatalf("%s: err = %v, want an independent scan to proceed", tc.name, err)
+			}
+		}
+		if n := sp.scans.Load(); n != 3 {
+			t.Fatalf("scans begun = %d, want 3: independent keys scan independently", n)
+		}
+		<-first // the wedged scan's own caller still ends at its budget
+	})
+}
+
+// TestKillExistingOrphansFreesTheKeyWhenTheScanReturns: a completed scan's
+// key is free, so the next cleanup of that key scans again.
+func TestKillExistingOrphansFreesTheKeyWhenTheScanReturns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{
+			roots: []runtime.LiveRuntime{{PID: 4100, IsTracked: false}},
+		})
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+		if err := mgr.killExistingOrphans(context.Background(), "gc-a"); err != nil {
+			t.Fatalf("first cleanup: %v", err)
+		}
+		sp.queue(scanStep{roots: []runtime.LiveRuntime{{PID: 4200, IsTracked: false}}})
+		if err := mgr.killExistingOrphans(context.Background(), "gc-a"); err != nil {
+			t.Fatalf("second cleanup: %v", err)
+		}
+
+		if n := sp.scans.Load(); n != 2 {
+			t.Fatalf("scans begun = %d, want 2: the key frees when the scan returns", n)
+		}
+		if got := sp.terminatedPIDs(); len(got) != 2 || got[0] != 4100 || got[1] != 4200 {
+			t.Fatalf("terminated %v, want each scan's own root", got)
 		}
 	})
 }

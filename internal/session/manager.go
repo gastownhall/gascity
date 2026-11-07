@@ -784,44 +784,45 @@ const orphanScanBudget = 10 * time.Second
 // yet.
 //
 // The scan itself is bounded (orphanScanBudget, or the caller's earlier
-// deadline): a wait that ends with no answer returns an error wrapping both
+// deadline) and once per city-and-session key (runtime.CallBounded): a wait
+// that ends with no answer returns an error wrapping
 // runtime.ErrRuntimeUnavailable and the context error, and terminates
 // nothing — no answer is never confirmed absence, and no root dies on a scan
-// that answered nothing. An already-ended context launches no scan.
+// that answered nothing. A retry while one scan of the same key is still out
+// is refused at once, without a second scan, whatever Manager made it. An
+// already-ended context launches no scan.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("session %s: scanning for orphaned runtimes: %w: %w", sessionID, runtime.ErrRuntimeUnavailable, err)
-	}
-	type scanAnswer struct {
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	scanCtx, cancelScan := context.WithTimeout(ctx, orphanScanBudget)
+	defer cancelScan()
+	// The closure only scans, and its answer carries a completed scan's own
+	// error: a call error below is always the absence of an answer (the
+	// budget, the caller's context, or an outstanding scan of this key),
+	// never a scan finding to fail closed on.
+	type orphanScanAnswer struct {
 		found []runtime.LiveRuntime
 		err   error
 	}
-	answers := make(chan scanAnswer, 1)
-	go func() {
+	answer, callErr := runtime.CallBounded(scanCtx, "orphan-scan\x00"+cityPath+"\x00"+sessionID, func(context.Context) (orphanScanAnswer, error) {
 		found, err := scanner.FindRuntimesBySessionID(sessionID)
-		answers <- scanAnswer{found: found, err: err}
-	}()
-	scanCtx, cancelScan := context.WithTimeout(ctx, orphanScanBudget)
-	defer cancelScan()
-	var answer scanAnswer
-	select {
-	case answer = <-answers:
-	case <-scanCtx.Done():
-		select {
-		case answer = <-answers: // it answered as the wait ended: use it
-		default:
-			return fmt.Errorf("session %s: scanning for orphaned runtimes: %w: %w", sessionID, runtime.ErrRuntimeUnavailable, scanCtx.Err())
+		return orphanScanAnswer{found: found, err: err}, nil
+	})
+	if callErr != nil {
+		// An outstanding scan of this key is not a failed scan: one is under
+		// way, and this caller's refusal needs no log of its own.
+		if !errors.Is(callErr, runtime.ErrBoundedCallOutstanding) {
+			log.Printf("session: scanning for orphaned runtimes for %s (no answer within %s): %s", sessionID, orphanScanBudget, callErr)
 		}
+		return fmt.Errorf("session %s: scanning for orphaned runtimes: %w", sessionID, callErr)
 	}
 	found, err := answer.found, answer.err
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
-	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
