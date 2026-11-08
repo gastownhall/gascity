@@ -5384,6 +5384,24 @@ ordinary state of every city with a cutover still ahead of it.
 One condition is never checked here, because no process can check it:
 --fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
 
+--split rehearses the split itself on a city with no [storage]: it
+evaluates the city as if the default split block were written (work on the
+work store; graph, sessions, messaging, orders and nudges on one sqlite-beads
+binding at .gc/store), writing nothing. It adds the session reconciler the
+city would resolve to, the source lane the migration's window would open,
+the id floor, and ESTIMATES of the time the copy and the clear take, the disk
+they need, and how many times --time-budget would pause the run. The
+estimates come from the row and edge counts read here and from rates measured
+on a loaded host, both printed with them. It starts no bead-store provider: on
+a city whose provider is down, or with a proxied server stopped, it reports
+that and what lets a later run read, and checks nothing that reads a store. A
+suspended rig or city is left stopped; a proxied server that retired on its
+idle timeout while the city's controller runs is read, as gc doctor reads it,
+which restarts it as any bd read would. Reading a binding already there (a
+city with a convergence marker, which it refuses) opens it read-only, which
+may leave the -wal and -shm sidecars SQLite needs for the read beside a
+quiescent binding; nothing else is written.
+
 ```
 gc storage preflight [flags]
 ```
@@ -5391,6 +5409,8 @@ gc storage preflight [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--split` | bool |  | rehearse the split of a city with no [storage], as if the default split block were written (writes nothing) |
+| `--time-budget` | duration | `30m0s` | with --split: the migration's --time-budget, to estimate how many times it would pause |
 
 ## gc storage recover-stranded
 

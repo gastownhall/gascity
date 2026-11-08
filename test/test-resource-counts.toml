@@ -671,7 +671,6 @@ calls = 7
 path = "cmd/gc/control_dispatch_sigterm_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/controller_test.go"
@@ -904,7 +903,6 @@ calls = 2
 path = "cmd/gc/hook_claim_sigpipe_unwind_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/hosted_beads_gateway_test.go"
@@ -1120,7 +1118,6 @@ calls = 2
 path = "cmd/gc/proc_environ_settled_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/productmetrics_child_env_test.go"
@@ -1387,19 +1384,31 @@ calls = 1
 path = "cmd/gc/tmux_leak_guard_check_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/tmux_leak_guard_check_test.go"
 resource = "subprocess"
 calls = 4
-tagged = true
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_check_test.go"
+resource = "tmux"
+calls = 7
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_mntns_test.go"
+resource = "tmux"
+calls = 1
 
 [[count]]
 path = "cmd/gc/tmux_leak_guard_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
+
+[[count]]
+path = "cmd/gc/tmux_leak_guard_test.go"
+resource = "tmux"
+calls = 1
 
 [[count]]
 path = "cmd/gc/work_query_probe_test.go"
@@ -1962,13 +1971,11 @@ tagged = true
 path = "internal/beads/bdstore_exec_internal_test.go"
 resource = "fixed_sleep"
 calls = 4
-tagged = true
 
 [[count]]
 path = "internal/beads/bdstore_exec_internal_test.go"
 resource = "subprocess"
 calls = 3
-tagged = true
 
 [[count]]
 path = "internal/beads/caching_store_cadence_internal_test.go"
@@ -2157,13 +2164,11 @@ calls = 2
 path = "internal/events/recorder_shortwrite_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/execgrace/apply_unix_test.go"
 resource = "subprocess"
 calls = 8
-tagged = true
 
 [[count]]
 path = "internal/extmsg/http_adapter_test.go"
@@ -2230,7 +2235,6 @@ calls = 2
 path = "internal/orders/trigger_exec_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/packregistry/catalog_test.go"
@@ -2277,43 +2281,36 @@ calls = 4
 path = "internal/processgroup/processgroup_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/control_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/marker_protocol_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/spool_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/spool_unix_test.go"
 resource = "subprocess"
 calls = 3
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/storage_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/storage_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/productmetrics/transport_test.go"
@@ -2474,19 +2471,16 @@ calls = 1
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "internal/runtime/proctable/supervisor_fork_orphan_repro_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "internal/runtime/rppcheck/rppcheck_test.go"
@@ -2711,13 +2705,11 @@ tagged = true
 path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/sdnotify/sdnotify_test.go"
@@ -2781,7 +2773,6 @@ calls = 1
 path = "internal/storebinding/migration_guard_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/storebinding/sqlite/graph_fence_linux_test.go"
