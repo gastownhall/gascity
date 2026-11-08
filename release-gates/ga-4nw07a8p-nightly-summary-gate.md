@@ -48,7 +48,7 @@
 
 ## Failure and hold basis
 
-`TestProxiedSuspensionIsQuiescenceSuspendedCity` fails at `test/acceptance/beads_proxied_suspension_quiescence_test.go:312`: after the initial pair drain, the 30-second suspended-city window records three calls (runtime-lease release update, show, dolt stop). The raw failure log is `c3/evidence/remote/logs/acceptance-d5cadbd9956b31f6437b.log`, SHA256 `bc70e9357be7dffc468f15088c1a5c5513a492065bb0c154d308a80171fc12c4`.
+`TestProxiedSuspensionIsQuiescenceSuspendedCity` fails at `test/acceptance/beads_proxied_suspension_quiescence_test.go:312`: after the initial pair drain, the 30-second suspended-city window records three calls (runtime-lease release update, show, dolt stop). The collected log is `c3/evidence/remote/logs/acceptance-d5cadbd9956b31f6437b.log` (2,557 bytes), SHA256 `1942a6e0f83197de2f11133f6f9da97a289145913ca8a947888301ab5ac19352`. The original BEP/download artifact is separately retained as `acceptance-failed-target.log` (2,561 bytes), SHA256 `bc70e9357be7dffc468f15088c1a5c5513a492065bb0c154d308a80171fc12c4`. The collector removes exactly four 0x16 wrapper markers; byte-for-byte equality after that transformation was independently verified in `hash-artifact-verification.json`. These are two representations of the same failed run, with no test retry.
 
 - Clause 1: not diff-owned; exact failure site UNCHANGED, function untouched, zero shared hunks in that file (`failure-ownership.txt`).
 - Clause 2: open tracker `ga-v3bt9i` predates this run (2026-10-09); opened and existing comments read. New sighting was appended and read back. No duplicate tracker was filed.
