@@ -186,8 +186,11 @@ func canonicalizeLocalGitImportSource(targetDir string) (string, bool, error) {
 	if err != nil || !ok {
 		return "", ok, err
 	}
+	// Normalise both Rel operands: git reports repoRoot as-is, while the
+	// target is normalised, and on darwin the two can disagree on the
+	// /private/var alias. repoRoot is still used unnormalised for the URL.
 	resolvedTarget := pathutil.NormalizePathForCompare(targetDir)
-	rel, err := filepath.Rel(repoRoot, resolvedTarget)
+	rel, err := filepath.Rel(pathutil.NormalizePathForCompare(repoRoot), resolvedTarget)
 	if err != nil {
 		return "", false, fmt.Errorf("computing import subpath: %w", err)
 	}
