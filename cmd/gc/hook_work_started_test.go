@@ -120,7 +120,7 @@ func (r *startedRow) cell(t *testing.T) session.WorkStarted {
 // bd serves sessions through BdStore, whose --if-revision probe fails — so
 // the started write's only path is the checked one. Blind writes succeed, as
 // they do on the real BdStore; the row is fenced by the decide alone.
-func newLegacyStartedRow(t *testing.T, meta map[string]string) *startedRow {
+func newLegacyStartedRow(t *testing.T) *startedRow {
 	t.Helper()
 	m := beads.NewMemStore()
 	m.HonorExplicitIDs = true
@@ -133,11 +133,6 @@ func newLegacyStartedRow(t *testing.T, meta map[string]string) *startedRow {
 		t.Fatal(err)
 	}
 	cs := &casCountingStore{MemStore: m, rowID: b.ID}
-	if len(meta) > 0 {
-		if err := m.Update(b.ID, beads.UpdateOpts{Metadata: meta}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	return &startedRow{store: cs, front: session.NewStore(beads.SessionStore{Store: cs}), id: b.ID}
 }
 
@@ -292,7 +287,7 @@ func TestHookClaimRecordsStartedBeforeTheResult(t *testing.T) {
 // the legacy no-writer store recording nothing (the fence, the drain-ack
 // guards and the backstop all reading no claim started).
 func TestHookClaimRecordsStartedWithoutConditionalWrites(t *testing.T) {
-	row := newLegacyStartedRow(t, nil)
+	row := newLegacyStartedRow(t)
 	l := &startedLog{}
 	stdout := &orderedWriter{l: l}
 	var stderr bytes.Buffer
@@ -619,6 +614,32 @@ func TestUndeliveredClaimForgetsStartedBeforeRelease(t *testing.T) {
 	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
 		t.Fatalf("work_started %+v still names the released claim", row.cell(t))
 	}
+
+	// The default topology's row (ga-6eefx8, #8313, AC-7): auto mode, no
+	// conditional writer, so the hand-over records through the checked write
+	// alone — this seat's answer says its city records by it — and its
+	// unwind forgets the entry the same way, before the release.
+	t.Run("legacy no-writer row", func(t *testing.T) {
+		row := newLegacyStartedRow(t)
+		if res, err := recordWorkStarted(row.front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+			hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, session.WorkStartedViaClaim, time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC)); err != nil || res != hookStartedRecorded {
+			t.Fatalf("record on the no-writer store = %v, %v; want (recorded, nil)", res, err)
+		}
+		l := &startedLog{}
+		stdout := &orderedWriter{l: l, err: syscall.EPIPE}
+		var stderr bytes.Buffer
+		opts := startedOpts(startedEnv(startedToken, "7"))
+		opts.StartedCASOnly = func() bool { return false } // the legacy answer: this city records by the checked write
+		code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+		rec, forget, release := l.index("record:work-1"), l.index("forget:work-1"), l.index("release:work-1")
+		if code != 1 || rec < 0 || forget < 0 || release < 0 || rec >= forget || forget >= release {
+			t.Fatalf("code %d, effects %v; want record, then forget, then release", code, l.log)
+		}
+		if row.cell(t).Names(startedStoreRef, "work-1", 7) {
+			t.Fatalf("work_started %+v still names the released claim", row.cell(t))
+		}
+	})
 }
 
 // TestHookClaimFailsOpenWhenTheStartedWriteFails (T13): a store error, and a
@@ -724,7 +745,7 @@ func TestHookClaimRefusesTheCheckedWriteForACASOnlyCity(t *testing.T) {
 		{"no answer wired at all", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			row := newLegacyStartedRow(t, nil)
+			row := newLegacyStartedRow(t)
 			l := &startedLog{}
 			stdout := &orderedWriter{l: l}
 			var stderr bytes.Buffer
@@ -1267,7 +1288,7 @@ func TestRecordWorkStartedOnPinnedBdSessionStore(t *testing.T) {
 // the claim still in_progress under the seat, so the hook answers
 // action=work reason=started_claim_held and does not acknowledge the drain.
 func TestHookDrainAckFenceHoldsAClaimTheCheckedWriterRecorded(t *testing.T) {
-	row := newLegacyStartedRow(t, nil)
+	row := newLegacyStartedRow(t)
 	if res, err := recordWorkStarted(row.front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
 		hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, session.WorkStartedViaClaim, time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC)); err != nil || res != hookStartedRecorded {
 		t.Fatalf("record on the no-writer store = %v, %v; want (recorded, nil)", res, err)
