@@ -214,6 +214,12 @@ func (s *Store) SaveStartupHealthEpisode(ep StartupHealthEpisode) error {
 	return nil
 }
 
+// OpenStartupHealthEpisodes is the batch counterpart of
+// LoadStartupHealthEpisode. RED-step stub: the GREEN step implements it.
+func (s *Store) OpenStartupHealthEpisodes() (map[string]StartupHealthEpisode, error) {
+	return nil, fmt.Errorf("OpenStartupHealthEpisodes: not implemented")
+}
+
 // ListStartupHealthEpisodes returns every persisted startup-health episode,
 // including ones behind a closed bead: a doctor check surfacing active
 // episodes must not silently miss one because some other path already closed
