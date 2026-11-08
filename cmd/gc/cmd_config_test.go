@@ -273,6 +273,79 @@ command = "uvx"
 	}
 }
 
+// Cities gc start accepts validate cleanly (#8267): identical stage-1
+// payloads — a shared catalog every same-provider agent at the root
+// receives — and agent-local catalogs delivered in the agent's own work
+// directory, where the agent is stage 2 and claims no shared target.
+func TestConfigShowValidateAcceptsMCPCitiesStartAccepts(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		agentTOML string
+		mcp       []string
+	}{
+		{
+			name:      "city-shared catalog",
+			agentTOML: "provider = \"claude\"\nscope = \"city\"\n",
+			mcp:       []string{"mcp/notes.toml"},
+		},
+		{
+			name:      "empty catalog",
+			agentTOML: "provider = \"claude\"\nscope = \"city\"\n",
+		},
+		{
+			name:      "agent-local catalog in separate work dir",
+			agentTOML: "provider = \"claude\"\nscope = \"city\"\nwork_dir = \"worktrees/worker\"\n",
+			mcp:       []string{"agents/worker/mcp/notes.toml"},
+		},
+		{
+			name:      "pool agent with work dir template",
+			agentTOML: "provider = \"claude\"\nscope = \"city\"\nwork_dir = \".gc/worktrees/{{.Agent}}\"\nmax_active_sessions = 2\n",
+			mcp:       []string{"agents/worker/mcp/notes.toml"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityDir := t.TempDir()
+			t.Chdir(cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+			writeCatalogFile(t, cityDir, "agents/worker/agent.toml", tt.agentTOML)
+			for _, rel := range tt.mcp {
+				writeCatalogFile(t, cityDir, rel, "\nname = \"notes\"\ncommand = \"uvx\"\n")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("gc config show --validate = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Config valid.") {
+				t.Fatalf("stdout = %q, want Config valid.", stdout.String())
+			}
+
+			// gc start's stage-1 gate accepts the same city.
+			cfg, err := loadCityConfig(cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			if _, err := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard); err != nil {
+				t.Fatalf("buildStage1MCPTargets: %v, want no conflict", err)
+			}
+		})
+	}
+}
+
 func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 
