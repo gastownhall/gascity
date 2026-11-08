@@ -189,11 +189,15 @@ matching `pool:<name>` can pick it up.
 
 ### The claiming act
 
-For pool agents, claiming happens at the prompt level. The agent runs
-`bd update <id> --claim` (or equivalent) to set itself as assignee and
-transition the status from `open` to `in_progress`. This is not enforced
-by Gas City Go code -- it is prescribed in the agent's prompt template.
-The bd CLI handles the atomic compare-and-swap.
+For pool agents, `gc hook --claim` (`cmd/gc/cmd_hook_claim.go`), which the
+startup claim protocol runs, makes the claim. It claims one ready candidate
+through the store's `Claim()`. On a bd store that runs
+`bd update <id> --claim` with the session as the actor, which sets the
+session as assignee and moves the bead from `open` to `in_progress`. The
+bd CLI handles the atomic compare-and-swap, so when two sessions race for
+one bead only one claim wins. An agent that claims a bead by hand runs
+`bd update <id> --claim` itself. That claim fails when another agent
+already holds the bead, and the agent must then not work it.
 
 For fixed agents, the sling command already sets the assignee. The agent
 transitions status by running `bd update <id> --status=in_progress` (or

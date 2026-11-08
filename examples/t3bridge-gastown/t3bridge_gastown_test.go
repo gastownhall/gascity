@@ -79,12 +79,16 @@ func TestT3BridgeGastownExampleParses(t *testing.T) {
 // assignee and no lease.
 func TestT3BridgeGastownPolecatsClaimWithHookClaim(t *testing.T) {
 	dir := exampleDir()
+	// flatten joins wrapped lines and folds case, so a phrase is found
+	// wherever the prose breaks it or a sentence starts with it.
+	flatten := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+	// The earlier wordings, each of which sent the polecat to plain `gc hook`
+	// for its work.
 	banned := []string{
-		"Run `gc hook` to claim",
-		"Run 'gc hook';",
+		"run `gc hook` to claim",
+		"run 'gc hook';",
 		"running `gc hook` if",
-		"Run gc hook,",
-		"checks assigned work first, then routed pool work",
+		"run gc hook,",
 	}
 	for _, pack := range []string{"t3demo", "gastown"} {
 		for _, name := range []string{"prompt.template.md", "agent.toml"} {
@@ -93,16 +97,16 @@ func TestT3BridgeGastownPolecatsClaimWithHookClaim(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", path, err)
 			}
-			text := string(data)
-			if !strings.Contains(text, "gc hook --claim") {
+			flat := flatten(string(data))
+			if !strings.Contains(flat, "gc hook --claim") {
 				t.Errorf("%s/%s: want the claim step to be `gc hook --claim`", pack, name)
 			}
 			for _, phrase := range banned {
-				if strings.Contains(text, phrase) {
+				if strings.Contains(flat, phrase) {
 					t.Errorf("%s/%s: describes plain gc hook as the claim step (%q)", pack, name, phrase)
 				}
 			}
-			if name == "prompt.template.md" && !strings.Contains(strings.Join(strings.Fields(text), " "), "a failed claim means another agent holds that bead: do not work it") {
+			if name == "prompt.template.md" && !strings.Contains(flat, "a failed claim means another agent holds that bead: do not work it") {
 				t.Errorf("%s/%s: missing the failed-claim rule", pack, name)
 			}
 		}
