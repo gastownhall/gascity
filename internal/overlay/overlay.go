@@ -130,9 +130,11 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		dst := filepath.Join(dstBase, entryRel)
 		if preserveExisting != nil && preserveExisting(entryRel, dst) {
 			if _, err := os.Stat(dst); err == nil {
-				// A dst byte-identical to src is the file this overlay already
-				// staged (e.g. gc's own Kiro AGENTS.md fallback on a re-stage):
-				// nothing is being preserved over the overlay, so skip quietly.
+				// A dst byte-identical to src already holds exactly what this
+				// overlay would stage, whichever writer put it there (typically
+				// gc's own Kiro AGENTS.md fallback from an earlier stage).
+				// Keeping it preserves nothing over the overlay, so skip it
+				// without a warning.
 				if sameFileBytes(src, dst) {
 					continue
 				}
