@@ -1367,3 +1367,32 @@ func TestStartedWriteOnACapableStoreNeverAsksTheMode(t *testing.T) {
 		t.Fatalf("record = %v, %v, work_started %q; want releasing and nothing recorded", res, err, row.meta(t, session.WorkStartedKey))
 	}
 }
+
+// TestUndeliveredClaimForgetsStartedBeforeReleaseWithoutConditionalWrites
+// (AC-7): T10 on a legacy no-writer store. The unwind of a minted claim whose
+// result could not be written (EPIPE) drops the entry the checked write
+// recorded before it gives the claim back. Kills a forget left CAS-only,
+// which fails on this store and leaves the released claim reading as started.
+func TestUndeliveredClaimForgetsStartedBeforeReleaseWithoutConditionalWrites(t *testing.T) {
+	row := newLegacyStartedRow(t)
+	mode := &legacyMode{}
+	l := &startedLog{}
+	stdout := &orderedWriter{l: l, err: syscall.EPIPE}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", legacyStartedOpts(startedEnv(startedToken, "7"), mode), l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+	rec, forget, release := l.index("record:work-1"), l.index("forget:work-1"), l.index("release:work-1")
+	if code != 1 || rec < 0 || forget < 0 || release < 0 || rec >= forget || forget >= release {
+		t.Fatalf("code %d, effects %v; want record, then forget, then release", code, l.log)
+	}
+	raw := row.meta(t, session.WorkStartedKey)
+	if raw == "" || len(l.unrecorded) != 0 {
+		t.Fatalf("work_started %q, unrecorded %v; want the claim recorded before the unwind", raw, l.unrecorded)
+	}
+	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
+		t.Fatalf("work_started %+v still names the released claim", row.cell(t))
+	}
+	if mode.asks != 2 {
+		t.Fatalf("mode asked %d times, want once for the record and once for the forget", mode.asks)
+	}
+}
