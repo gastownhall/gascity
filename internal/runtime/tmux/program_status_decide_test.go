@@ -472,6 +472,47 @@ func TestInterruptSettleUndeclaredPaneDecidesAsOff(t *testing.T) {
 	}
 }
 
+// Kills an interrupt settle that keeps deciding with the record after heal
+// withdrew the pane's settle declaration: heal unsets it under the same
+// nonce (declarePane), so neither the note's nonce nor its sequence tells.
+// A reading whose pane no longer declares the settle decides nothing, and
+// the scan alone decides, as under off, whether the declaration went before
+// the wait began or during it: a boundary past the baseline settles nothing
+// and a dialog raised since ends nothing.
+func TestInterruptSettleWithdrawnDeclarationDecidesAsOff(t *testing.T) {
+	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 4 })
+	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
+	stopped := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 5, 1, time.Now() })
+	for _, c := range []struct {
+		when string
+		// withdrawn is the first read whose pane no longer declares the
+		// settle; read 0 is the note's own.
+		withdrawn int
+		timeout   time.Duration
+	}{
+		{"before the wait", 1, 300 * time.Millisecond},
+		{"during the wait", 2, 700 * time.Millisecond},
+	} {
+		for name, later := range map[string]string{"dialog": blocked, "boundary": stopped} {
+			t.Run(c.when+" "+name, func(t *testing.T) {
+				tm, ex := settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
+					if n < c.withdrawn {
+						return settlingPaneRow(working)
+					}
+					return declaredPaneRow(later, "", "", 0)
+				})
+				err := tm.WaitForIdle(context.Background(), "s", c.timeout)
+				if !errors.Is(err, ErrIdleTimeout) || errors.Is(err, runtime.ErrPendingInteraction) {
+					t.Fatalf("WaitForIdle = %v; want the scan's timeout", err)
+				}
+				if n := ex.holdReads(); n <= c.withdrawn {
+					t.Fatalf("%d record reads; want the wait to read the withdrawn declaration", n)
+				}
+			})
+		}
+	}
+}
+
 // Kills an interrupt note that outlives its interrupt's own wait: a wait
 // that comes past programInterruptWindow is the scan's, and takes no
 // decision read.

@@ -166,18 +166,20 @@ func TestProviderSpecFromWorkerCarriesDecisionOptIns(t *testing.T) {
 
 // Kills a builtin catalog whose resolved declarations opt a family into a
 // record-driven decision without its evidence: of the declaring families,
-// only claude and codex decide the startup ladder and the interrupt settle
-// with the record; every other declaring family decides both as under off.
+// only claude and codex decide the startup ladder with the record, and only
+// claude the interrupt settle (no shadow recorded a codex settle); every
+// other family and decision decides as under off.
 func TestBuiltinDecisionOptInsResolveOnlyForMeasuredFamilies(t *testing.T) {
-	measured := map[string]bool{"claude": true, "codex": true}
+	measuredStartup := map[string]bool{"claude": true, "codex": true}
+	measuredSettle := map[string]bool{"claude": true}
 	for name, spec := range BuiltinProviders() {
 		ps := spec.ProgramStatus
 		if !ps.Declared() {
 			continue
 		}
 		arm, _ := ps.Arm(runtime.ProgramStatusOn, false)
-		if arm.DecideStartup != measured[name] || arm.DecideSettle != measured[name] {
-			t.Errorf("%s: arm = %+v, want decide_startup=decide_settle=%v", name, arm, measured[name])
+		if arm.DecideStartup != measuredStartup[name] || arm.DecideSettle != measuredSettle[name] {
+			t.Errorf("%s: arm = %+v, want decide_startup=%v, decide_settle=%v", name, arm, measuredStartup[name], measuredSettle[name])
 		}
 	}
 }

@@ -366,13 +366,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// pane-output tap alone captures it. Input typed into a running
 		// Codex turn aborts it (the 2026-11-03 shadow: 18 of 20 mid-turn
 		// deliveries aborted their turn), so it declares the hold. The second
-		// shadow measured its startup ladder and interrupt settle against
-		// the record, so both decide with it under the switch on.
+		// shadow measured its startup ladder against the record, so the
+		// ladder decides with it under the switch on. Neither shadow recorded
+		// a Codex interrupt settle (ga-crzq6e), so the settle is not declared
+		// and decides from the screen, as under off.
 		ProgramStatusProtocol:      programStatusOSC7501,
 		ProgramStatusApp:           "codex",
 		ProgramStatusHoldMidTurn:   true,
 		ProgramStatusDecideStartup: true,
-		ProgramStatusDecideSettle:  true,
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",

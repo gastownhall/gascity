@@ -351,7 +351,7 @@ func TestBuiltinProgramStatusDeclarationsInertWhenOff(t *testing.T) {
 	cityPath := newProgramStatusTestCity(t)
 	undeclare := config.ProgramStatusBinding{Protocol: config.ProgramStatusProtocolNone}
 	for family, wantArm := range map[string]runtime.ProgramStatusArm{
-		"codex":  {Capture: true, App: "codex", HoldMidTurn: true, DecideStartup: true, DecideSettle: true},
+		"codex":  {Capture: true, App: "codex", HoldMidTurn: true, DecideStartup: true},
 		"claude": {Capture: true, App: "claude-code", Relay: true, DecideStartup: true, DecideSettle: true},
 	} {
 		t.Run(family, func(t *testing.T) {

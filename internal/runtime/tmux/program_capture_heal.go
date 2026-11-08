@@ -329,7 +329,7 @@ func (t *Tmux) disarmPane(target string, closePipe bool) error {
 	if closePipe {
 		cmds = append(cmds, []string{"pipe-pane", "-t", target})
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 		cmds = append(cmds, []string{"set-option", "-pu", "-t", target, opt})
 	}
 	if _, err := t.run(tmuxArgvList(cmds)...); err != nil {

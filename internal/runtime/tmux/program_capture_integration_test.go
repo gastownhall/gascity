@@ -140,6 +140,23 @@ func armedNonce(t *testing.T, p *Provider, name string) string {
 	return nonce
 }
 
+// declaringArm arms a capture declaring the mid-turn hold and the interrupt
+// settle, so a test that removes the capture sees both declarations go.
+var declaringArm = runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true, DecideSettle: true}
+
+// requireDeclared fails unless name's agent pane, armed under nonce by
+// declaringArm, carries both declarations bound to the pane, so a later
+// check that they are unset can fail.
+func requireDeclared(t *testing.T, p *Provider, name, nonce string) {
+	t.Helper()
+	_, pane, _ := strings.Cut(nonce, ".")
+	for _, opt := range []string{programHoldOption, programSettleOption} {
+		if got := paneOption(t, p, name, opt); got != pane {
+			t.Fatalf("armed pane %s = %q, want it bound to %s", opt, got, pane)
+		}
+	}
+}
+
 // tapRunning reports whether a tap holding nonce's rand is in the process
 // table.
 func tapRunning(t *testing.T, nonce string) bool {
@@ -395,13 +412,14 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	first := armedNonce(t, p, name)
+	requireDeclared(t, p, name, first)
 	awaitRecord(t, p, name, first, runtime.ProgramWorking)
 
 	cfg.Command = emitterCommand(emit, "report state=idle", "hang")
@@ -455,13 +473,14 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	nonce := armedNonce(t, p, name)
+	requireDeclared(t, p, name, nonce)
 	awaitRecord(t, p, name, nonce, runtime.ProgramWorking)
 	eventually(t, "a valid working reading under on", func() bool {
 		p.cache.Invalidate()
@@ -637,13 +656,14 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			cfg := runtime.Config{
 				Command:       emitterCommand(emit, "report state=working", "interactive"),
 				WorkDir:       t.TempDir(),
-				ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+				ProgramStatus: declaringArm,
 			}
 			if err := p.Start(context.Background(), name, cfg); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
 			t.Cleanup(func() { _ = p.Stop(name) })
 			nonce := armedNonce(t, p, name)
+			requireDeclared(t, p, name, nonce)
 			target, err := p.tm.agentPaneTarget(name)
 			if err != nil {
 				t.Fatal(err)

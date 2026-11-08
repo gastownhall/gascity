@@ -34,13 +34,16 @@ type builtinProgramStatus struct {
 //     relay.
 //
 // Startup and Settle opt a family into the record-driven startup ladder and
-// interrupt settle under the switch on; only families the second shadow
-// (ga-f4ovjm.72) measured for that decision declare them. Every other
-// declaring family decides both from the screen, as under off.
+// interrupt settle under the switch on; a family declares each only once a
+// shadow (ga-f4ovjm.72) measured its records against that decision, and
+// decides any other from the screen, as under off.
 var wantBuiltinProgramStatus = map[string]builtinProgramStatus{
 	// codex-cli 0.165.0 reports unprompted (tap only), and input typed into
-	// a running turn aborts it (the 2026-11-03 shadow), so it holds.
-	"codex": {Protocol: "osc7501", App: "codex", Hold: true, Startup: true, Settle: true},
+	// a running turn aborts it (the 2026-11-03 shadow), so it holds. The
+	// second shadow measured its startup ladder, but neither shadow recorded
+	// a Codex interrupt settle (ga-crzq6e), so only the ladder decides with
+	// the record.
+	"codex": {Protocol: "osc7501", App: "codex", Hold: true, Startup: true},
 	// Claude Code 2.1.311 reports only once its support probe is answered,
 	// so it runs under the relay.
 	"claude": {Protocol: "osc7501", App: "claude-code", Relay: true, Startup: true, Settle: true},

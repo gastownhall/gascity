@@ -94,3 +94,32 @@ func TestHealConvergesTheSettleDeclarationOfALiveCapture(t *testing.T) {
 		t.Fatalf("fresh arm: %+v, want the settle bound to %%7 and no hold", fresh)
 	}
 }
+
+// Kills a disarm that leaves a declaration bound to the pane: heal's disarm
+// (the session no longer declares capture) and the switch-off sweep unset
+// the hold and settle options with the nonce, so a disarmed pane notes no
+// interrupt for a settle and holds no delivery.
+func TestDisarmUnsetsTheDeclarations(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	declaring := func(session, window, id string) *healModelPane {
+		return &healModelPane{session: session, window: window, id: id, mark: "agent", pipe: true, tap: "l1vE." + id, hold: id, settle: id}
+	}
+
+	healed := declaring("s", "@1", "%5")
+	server := &healServer{panes: []*healModelPane{healed}, taps: map[string]bool{healed.tap: true}}
+	p := healProvider(server, &now)
+	mustHeal(t, p, "s", runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed)
+	if healed.tap != "" || healed.pipe || healed.hold != "" || healed.settle != "" {
+		t.Fatalf("after heal's disarm: %+v, want the capture removed with both declarations", healed)
+	}
+
+	swept := declaring("a", "@2", "%7")
+	server = &healServer{panes: []*healModelPane{swept}, taps: map[string]bool{swept.tap: true}}
+	p = healProvider(server, &now)
+	if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+		t.Fatalf("DisarmProgramCaptures = %d, %d, %v, want 1 disarmed", n, deferred, err)
+	}
+	if swept.tap != "" || swept.pipe || swept.hold != "" || swept.settle != "" {
+		t.Fatalf("after the switch-off sweep: %+v, want the capture removed with both declarations", swept)
+	}
+}

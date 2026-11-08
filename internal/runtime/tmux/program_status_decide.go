@@ -144,7 +144,10 @@ const programInterruptWindow = 5 * time.Second
 // a dialog raised since the interrupt. A blocked record the interrupt has not
 // moved yet (the dialog its keys may be canceling, before the program
 // reports again) decides nothing. Anything else, a reading that does not
-// decide included, leaves the scan to decide (false, nil). ok is false, and
+// decide included, leaves the scan to decide (false, nil), and so does a
+// reading whose pane no longer declares the settle: heal withdraws the
+// declaration under the same nonce, so a wait the note armed decides as
+// under off from the first reading that shows it gone. ok is false, and
 // the wait is the scan's alone, when the switch is not on or no interrupt
 // was noted within the window.
 func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, error), ok bool) {
@@ -157,7 +160,7 @@ func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, 
 	}
 	return func() (bool, error) {
 		d, ok := t.programDecide(session)
-		if !ok {
+		if !ok || !d.reading.Status.SettleDeclared {
 			return false, nil
 		}
 		s := d.reading.Status
