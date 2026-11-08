@@ -22,7 +22,7 @@ import (
 // in the field.
 
 func TestListenAndDialRoundTrip(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "probe.sock")
+	sock := filepath.Join(shortTempDir(t), "probe.sock")
 
 	lis, err := Listen(sock, Options{DirMode: 0o700})
 	if err != nil {
@@ -61,7 +61,7 @@ func TestListenAndDialRoundTrip(t *testing.T) {
 // supervisor killed hard can leave the socket name behind, and the next one
 // must be able to take the endpoint back.
 func TestListenRebindsOverAStaleSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "stale.sock")
+	sock := filepath.Join(shortTempDir(t), "stale.sock")
 
 	first, err := Listen(sock, Options{DirMode: 0o700})
 	if err != nil {
@@ -92,7 +92,7 @@ func TestListenRebindsOverAStaleSocket(t *testing.T) {
 // cmd/gc depends on: an endpoint nobody is serving answers with an error, not
 // with a hang that would be read as a slow but living supervisor.
 func TestDialWithoutAListenerFailsPromptly(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "absent.sock")
+	sock := filepath.Join(shortTempDir(t), "absent.sock")
 
 	start := time.Now()
 	conn, err := Dial(sock, 2*time.Second)
