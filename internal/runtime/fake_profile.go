@@ -55,6 +55,7 @@ type ProfileBackend interface {
 	FencedInteractionProvider
 	FreshActivityProvider
 	FreshLivenessObserver
+	HeldFileProvider
 	IdleSnapshotProvider
 	IdleWaitProvider
 	ImmediateNudgeProvider
@@ -108,6 +109,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			FencedInteractionProvider:     b,
 			FreshActivityProvider:         b,
 			FreshLivenessObserver:         b,
+			HeldFileProvider:              b,
 			IdleSnapshotProvider:          b,
 			IdleWaitProvider:              b,
 			ImmediateNudgeProvider:        b,
@@ -224,6 +226,7 @@ type (
 		FencedInteractionProvider
 		FreshActivityProvider
 		FreshLivenessObserver
+		HeldFileProvider
 		IdleSnapshotProvider
 		IdleWaitProvider
 		ImmediateNudgeProvider
@@ -649,6 +652,21 @@ func (f FullFake) TurnRunning(name string) (bool, error) {
 		return false, err
 	}
 	return f.ScreenTurnRunning[name], nil
+}
+
+// HeldFiles implements [HeldFileProvider]: a running session's
+// [Fake.HeldOpen]; a read fails as [Fake.HeldOpenErrors] says, and a session
+// that is not running cannot be read.
+func (f FullFake) HeldFiles(name string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, running := f.sessions[name]; !running {
+		return nil, fmt.Errorf("held files of %q: %w", name, ErrSessionNotFound)
+	}
+	if err := f.HeldOpenErrors[name]; err != nil {
+		return nil, err
+	}
+	return slices.Clone(f.HeldOpen[name]), nil
 }
 
 // FreshActivity implements [FreshActivityProvider]: a running session's

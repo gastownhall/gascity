@@ -340,15 +340,28 @@ func TurnSessionGone(err error) bool {
 // conversationTranscript resolves the transcript of info's current
 // conversation: only a file its provider session key finds, and that records
 // that conversation, never a work-directory or newest-file fallback, which
-// can return another conversation's file (KeyedTranscriptPath's rule). A
-// session without a key yet, or whose transcript is not written yet, is
-// runtime.ErrRuntimeUnavailable: its source exists, its turns are unknown.
+// can return another conversation's file (KeyedTranscriptPath's rule). The
+// key is looked up under the transcript search roots, then, where those find
+// none, among the files the session's own agent process holds open
+// (heldConversationTranscript), so a provider home outside the search roots
+// still has turns. A session without a key yet, or whose transcript is not
+// written yet, is runtime.ErrRuntimeUnavailable: its source exists, its turns
+// are unknown.
 func (h *SessionHandle) conversationTranscript(info sessionpkg.Info, provider string) (string, error) {
 	key := strings.TrimSpace(info.SessionKey)
 	if key == "" {
 		return "", fmt.Errorf("turns of session %s: its conversation has no session key yet: %w", info.ID, runtime.ErrRuntimeUnavailable)
 	}
 	path := sessionpkg.ResolveKeyedTranscriptPaths([]sessionpkg.Info{info}, h.adapter.SearchPaths, provider)[info.ID]
+	if path == "" {
+		held, err := h.heldConversationTranscript(info, provider)
+		if err != nil {
+			// The runtime's failure is reported, not wrapped: a pane that
+			// cannot be read leaves the turns unknown, not the session gone.
+			return "", fmt.Errorf("turns of session %s: no single transcript of conversation %s found under the search roots, and its process's open files cannot be read (%s): %w", info.ID, key, err.Error(), runtime.ErrRuntimeUnavailable)
+		}
+		path = held
+	}
 	if path == "" {
 		return "", fmt.Errorf("turns of session %s: no single transcript of conversation %s found: %w", info.ID, key, runtime.ErrRuntimeUnavailable)
 	}
@@ -360,6 +373,23 @@ func (h *SessionHandle) conversationTranscript(info sessionpkg.Info, provider st
 		return "", fmt.Errorf("turns of session %s: transcript %s does not record conversation %s: %w", info.ID, path, key, runtime.ErrRuntimeUnavailable)
 	}
 	return path, nil
+}
+
+// heldConversationTranscript resolves the transcript of info's current
+// conversation among the files its agent process holds open, as the
+// session's runtime names them (Manager.RuntimeHeldFiles, only files the
+// current user owns), by its provider's keyed lookup
+// (sessionpkg.ResolveHeldTranscriptPath). It is "" with a nil error when the
+// runtime cannot name held files or none is the conversation's transcript.
+func (h *SessionHandle) heldConversationTranscript(info sessionpkg.Info, provider string) (string, error) {
+	held, supported, err := h.manager.RuntimeHeldFiles(info)
+	if err != nil {
+		return "", err
+	}
+	if !supported {
+		return "", nil
+	}
+	return sessionpkg.ResolveHeldTranscriptPath(info, held, provider), nil
 }
 
 // TurnCapabilities reports what the worker can tell about its session's turns.

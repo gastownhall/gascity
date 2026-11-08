@@ -99,7 +99,14 @@ runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
 has a work directory, and the family has an exact by-key transcript lookup
 (`session.HasKeyedTranscriptLookup`). The read resolves only the file the
 session key finds and that records that conversation, never the work-directory
-fallback `Manager.TranscriptPath` serves for history. A session without a key
+fallback `Manager.TranscriptPath` serves for history. The key is looked up
+under the transcript search roots first; where they find none, among the files
+the session's own agent process holds open (`runtime.HeldFileProvider`, via
+`session.Manager.RuntimeHeldFiles`; only regular files the current user owns),
+each tried by the family's own keyed lookup rooted at the file's ancestors
+(`session.ResolveHeldTranscriptPath`), so a provider home outside the search
+roots still has turns. A held-file read that fails is
+`runtime.ErrRuntimeUnavailable`, never a gone session. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
 `TurnCapabilities.Replace` is internal/session's answer

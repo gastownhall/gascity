@@ -283,37 +283,19 @@ func heldCodexRollout(panePID int) string {
 // return "": a guess could judge this submit by another conversation's
 // record.
 func selectHeldCodexRollout(records []proctable.ProcessRecord, root int, openFiles func(int) ([]string, error)) string {
-	children := make(map[int][]int, len(records))
-	for _, r := range records {
-		if r.PID != root {
-			children[r.PPID] = append(children[r.PPID], r.PID)
-		}
+	files, err := treeHeldFiles(records, root, openFiles)
+	if err != nil {
+		return ""
 	}
 	held := ""
-	seen := map[int]bool{root: true}
-	queue := []int{root}
-	for len(queue) > 0 {
-		pid := queue[0]
-		queue = queue[1:]
-		files, err := openFiles(pid)
-		if err != nil {
+	for _, file := range files {
+		if !isCodexRolloutPath(file) {
+			continue
+		}
+		if held != "" {
 			return ""
 		}
-		for _, file := range files {
-			if !isCodexRolloutPath(file) || file == held {
-				continue
-			}
-			if held != "" {
-				return ""
-			}
-			held = file
-		}
-		for _, child := range children[pid] {
-			if !seen[child] {
-				seen[child] = true
-				queue = append(queue, child)
-			}
-		}
+		held = file
 	}
 	return held
 }
