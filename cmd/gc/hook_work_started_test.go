@@ -1182,3 +1182,35 @@ func TestRecordWorkStartedOnPinnedBdSessionStore(t *testing.T) {
 		t.Fatalf("work_started = %q; want an entry naming work-1 at generation 7", ledger.bead.Metadata[session.WorkStartedKey])
 	}
 }
+
+// TestHookDrainAckFenceHoldsAClaimTheCheckedWriterRecorded (AC-3 for
+// ga-6eefx8, #8313): on the default topology's session store (auto mode, no
+// conditional writer), the hand-over records the claim through the checked
+// write, and the --claim --drain-ack fence reads that record: no ready work,
+// the claim still in_progress under the seat, so the hook answers
+// action=work reason=started_claim_held and does not acknowledge the drain.
+func TestHookDrainAckFenceHoldsAClaimTheCheckedWriterRecorded(t *testing.T) {
+	row := newLegacyStartedRow(t, nil)
+	if res, err := recordWorkStarted(row.front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, session.WorkStartedViaClaim, time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC)); err != nil || res != hookStartedRecorded {
+		t.Fatalf("record on the no-writer store = %v, %v; want (recorded, nil)", res, err)
+	}
+
+	l := &startedLog{}
+	ops := l.ops(`[]`, nil, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return row.meta(t, session.WorkStartedKey), nil }
+	ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-1", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:        "root-1",
+			beadmeta.ContinuationGroupMetadataKey: "main",
+		}}, nil
+	}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr)
+
+	got := decodeTurnBoundResult(t, stdout.buf.String())
+	if code != 0 || got.Action != "work" || got.Reason != hookClaimWorkReasonStartedClaimHeld || got.BeadID != "work-1" || l.acked {
+		t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held work-1 and no ack", code, got, l.acked)
+	}
+}
