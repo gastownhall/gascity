@@ -1,67 +1,91 @@
-# Release gate: Nightly aggregate summary
+# Nightly aggregate release gate — ga-4nw07a8p
 
 **Verdict:** **FAIL**
 
-**Disposition:** HOLD on the same-store condition tracker `ga-v3bt9i`. The reviewed change is not routed back as an implementation rejection. No push, PR, workflow dispatch, deploy clearance, or merge-request was made.
+**Disposition: HOLD, pre-PASS push guard setup refused.** This is incomplete gate evidence, not a source-code rejection or failed test. Criterion3c requires a real Nightly run; none has been dispatched. Mayor decision ga-aq81v1ys names the exit. No waiver, push, PR, clearance or merge-request.
 
-- Deploy bead: `ga-4nw07a8p`; build lineage: `ga-wsfovk`, `ga-799w0wq`, `ga-clmemp.3`; review: `ga-4wbahtu1` PASS.
-- Reviewed source: `bb9a9780aea8d94cd864b9de3d476adbd0b75288` (resolved in git; source branch is provenance only).
-- Deploy mode: `remote`; base ref: `origin/main`.
-- merge_state: clean (`origin/main@1786ca1ed5fd94d655423151eab9adb190edfa3a`).
-- gate_base_kind: current-tip; gate_base: `1786ca1ed5fd94d655423151eab9adb190edfa3a`.
-- Canonical merge: `1a8b053d3980629530dcbcd5b188ee1395aed3c9`; tree: `39683f6f3f50452798d661332ab4329d290be157`.
-- merge_validation: merge result built and vetted here.
-- Evidence directory: `/var/tmp/gc-heavy-gate/runs/ga-4nw07a8p.20261108-2c97qq2p`; canonical scratch: `/var/tmp/gc-merge-4nw07a8p.623hqkyn` (removed after evidence retention).
-- Preflight: commit-to-PR API returned no associated PR. Interlock passed; round cap admitted round 2.
-- Manifest: `docs/PROJECT_MANIFEST.md` is absent. Mandatory pack release criteria and repository release-gate conventions were read.
+- Recorded: 2026-11-08T23:46:27.464680+00:00
+- Reviewed source: `bb9a9780aea8d94cd864b9de3d476adbd0b75288`; reviewer `ga-4wbahtu1` PASS verified live.
+- Mode: remote; base ref origin/main; observed/gated base `c7a45437fcf9bd35d8cda00928dcf3a7794059be` (pinned).
+- merge_state: clean (origin/main@c7a45437fcf9bd35d8cda00928dcf3a7794059be).
+- gate_base_kind: current-tip; canonical merge `67ac7d14cfdba01c00f9d2d23daa182bda92423b`, tree `d8e4295f60e307b77275586e88d2e9200690c8d4`.
+- Source branch is provenance only; isolated target: deploy/ga-4nw07a8p-gate.
+- Round: adhoc-1794176682-ga-4nw07a8p-r3 (mayor-granted third round; no fourth round).
+- Prior local HOLD commits remain intact. This record supersedes their verdict for the current run, while their history remains in git.
 
-| # | Criterion | Verdict | Evidence |
+| # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 1 | Review PASS present | PASS | Fresh review `ga-4wbahtu1` explicitly passes the exact source above; no carryover is substituted. |
-| 2 | Acceptance criteria met | FAIL | Structural/rebase obligations and 17 owned root/subtest cases pass. The required independent full suite and first real Nightly run remain incomplete after criterion 3 stops. |
-| 3 | Tests pass | FAIL | Canonical full-scope runner exits 1 at acceptance; `criterion3_valid=false`. One unchanged suspended-city test fails; hold protocol applies. Integration, latency and native floor did not run. |
-| 4 | No high-severity review findings open | PASS | Review has zero unresolved HIGH findings. |
-| 5 | Final branch clean | PASS | Exact source and canonical scratch were clean; only this gate record is committed locally on the isolated evidence branch. |
-| 6 | Merge state and build/vet | PASS | Clean canonical merge independently verified against both exact parents and `git merge-tree`; whole-repository Bazel build/nogo/vet passes, 1,456 target completions and zero failed targets. |
-| 7 | Single feature theme | PASS | Nightly always-run aggregate, its tests, policy pin, census row, BUILD listing and historical gate record form one theme. |
+| 1 | Review PASS present | PASS | Live reviewer notes name the exact resolved source above and verdict pass. No carryover substitution. |
+| 2 | Acceptance criteria met | PASS | Nightly summary needs all five existing jobs, always runs and fails closed on every non-success result; both owned roots plus15 generated cases PASS. Ledger/pin/policy checks and full merged suite PASS. GitHub expression evaluation remains separately required by3c. |
+| 3 | Tests and all required gate lanes pass | FAIL (HOLD) | Full suite, native floor, fast checks and owned tests are green, but3c real Nightly run is absent; pre-PASS assert_record_fits refused missing GC_CITY_ROOT before its size check ran. CI-required accounting not run after this refusal. No test failure is attributed or waived. |
+| 4 | No unresolved HIGH review findings | SKIPPED | Stopped at3c push-guard refusal; no final sign-off. |
+| 5 | Final branch is clean | SKIPPED | This local HOLD record is being committed; no final deploy branch sign-off. |
+| 6 | Merge state and whole-tree build/vet | PASS | Correct canonical two-parent scratch verified;1476 successful build target completions, full nogo/vet and hooks checks rc0; c6-canonical-validation.json and raw BEP. |
+| 7 | Single feature theme | SKIPPED | Early scope/denylist check passed one Nightly aggregate theme; final sign-off stopped at3c. |
 
-## Completed checks
+## Completed evidence
 
-- `policy_lane`: PASS — pinned formatting/lint/nogo, required shell guards, hooks, and 14 Bazel policy targets, in a fresh view.
-- `drift_lane`: PASS — `make bazel-sync`, empty tracked/untracked diff, and seven generated-file targets, in a separate fresh view.
-- `openapi_lane`: PASS — pinned-base OpenAPI compatibility target, in a third fresh view.
-- `fast_lane`: PASS before runtime setup or suite launch; canonical merge tree remains unchanged.
-- Runtime: ICU74 provenance check OK; rootless Podman socket/pinned Dolt image verified; pinned test bd v1.3.4 with ref match. Wrapper reports PASS-THROUGH on this disposable worktree; no cloned environment is claimed.
-- `heavy_mode`: none. Remote rollout was inherited enabled, not enabled by the deployer.
-- `test_cmd`: canonical `gate-criterion3.sh --repo <scratch> --base <gate_base> --bead-json bead-current.json --owned owned.tsv --run-dir c3/evidence`, detached through `gate-detached-run.sh`, pinned with `gate-base.sh run`. Phase commands and flags are retained in `c3/evidence/execution.json`.
-- `test_cmd_scope`: full-suite (command scope); **execution stopped at acceptance**, so full-suite coverage is not claimed.
-- `test_exec_mode`: remote-exec; `fallback_reason`: none; no local restart and no stitching.
-- Unit: 301 target summaries / 403 result events PASS. Acceptance: 7 passing / 1 failing target summaries, 24 passing / 1 failing result events. Every one of the 428 result events is remote, uncached, first attempt, within its phase window.
-- `test_counts`: **88,539 PASS / 1 FAIL / 399 SKIP**, top-level result lines summed across 428 retained per-job logs. This is partial-suite evidence; repeated jobs count repeatedly and subtests are excluded.
-- `test_log_dir`: `/var/tmp/gc-heavy-gate/runs/ga-4nw07a8p.20261108-2c97qq2p/c3/evidence/remote/logs`; read with `gate-test-evidence.py`, never deleted.
-- `diff_tests_executed`: `TestNightlyHasOneAlwaysRunAggregateDependingOnEveryJob` PASS; `TestNightlyAggregateFailsForEveryNonSuccessDependency` PASS, including all 15 dependency/conclusion leaf cases. 17/17 named root/subtest cases PASS, zero FAIL/SKIP/MISSING.
-- `skip_inventory`: retained per-job logs contain 399 non-owned SKIPs. Canonical native-floor inventory/top-ups were not reached; no skip waiver or complete coverage is asserted.
-- `owned_topup`: not needed for the two owned roots, both present in full unit output. `floor_topup`: not run. `latency_leg`: not run. `waiver_ref`: none; Gas City has no waiver path.
-- `ci_lane_run`: not run — `nightly.yml` has `workflow_dispatch` and no PR trigger, but pre-PASS dispatch was not reached. No old candidate waiver is inherited.
-- `ci_required_closure`, `ci_required_accounting`, `windows_reach`, `deferred_to_pr_ci`, `not_covered`: not evaluated after criterion-3 fail-fast; no CI coverage claim or PR-open authorization.
-- Static checks: aggregate needs exactly all five existing jobs, uses `always()`, timeout 5 minutes, passes each `needs.<job>.result` through environment, and fails closed on any non-success. Workflow is pure append; existing jobs are unchanged. The prior routed-row fix is an ancestor; TESTING.md is untouched.
+fast_lane: PASS; three distinct fresh views at the pinned base;14 policy/format/lint targets,7 generated-drift targets,1 OpenAPI target PASS, no generated changes. Canonical scratch stayed clean. See fast-validation.json.
 
-## Failure and hold basis
+test_cmd_scope: full-suite
 
-`TestProxiedSuspensionIsQuiescenceSuspendedCity` fails at `test/acceptance/beads_proxied_suspension_quiescence_test.go:312`: after the initial pair drain, the 30-second suspended-city window records three calls (runtime-lease release update, show, dolt stop). The collected log is `c3/evidence/remote/logs/acceptance-d5cadbd9956b31f6437b.log` (2,557 bytes), SHA256 `1942a6e0f83197de2f11133f6f9da97a289145913ca8a947888301ab5ac19352`. The original BEP/download artifact is separately retained as `acceptance-failed-target.log` (2,561 bytes), SHA256 `bc70e9357be7dffc468f15088c1a5c5513a492065bb0c154d308a80171fc12c4`. The collector removes exactly four 0x16 wrapper markers; byte-for-byte equality after that transformation was independently verified in `hash-artifact-verification.json`. These are two representations of the same failed run, with no test retry.
+test_exec_mode: remote-exec (derived independently from raw BEPs, never eligibility alone).
 
-- Clause 1: not diff-owned; exact failure site UNCHANGED, function untouched, zero shared hunks in that file (`failure-ownership.txt`).
-- Clause 2: open tracker `ga-v3bt9i` predates this run (2026-10-09); opened and existing comments read. New sighting was appended and read back. No duplicate tracker was filed.
-- Clause 3: **INCONCLUSIVE**. No base-ref retry, cross-PR comparison or coverage proof was substituted. Combined acceptance/CLI import closure was computed under acceptance_a/gc_testhooks (190 module-directory rows); the conservative nearest-package rule puts changed root data in a reachable root package. No decisive mechanism exclusion is claimed (`failure-causal-reach.json`).
-- Clause 4: failing package/path is unchanged; no same-package non-test edit.
-- `inconclusive-guard`: reachable production inputs conservatively present; **added_test_load=yes** (new subprocess census row and workflow test file). Therefore `guard-load` requires escalation to a dependency hold, never attribution.
-- Previous #7396 quiescence fix is already in the pinned base; stamped remedy `ga-3xnq72` is closed no-op without a new landed fix. The current deploy's `build_bead=ga-wsfovk` is not fix-carrying, so historical repeat does not supply an exemption.
-- `failure_attribution`: none granted. No failure was rerun or erased. Root cause and host-load causation are not asserted.
-- Hold class: `guard-or-clause-4`; missing: `guard-load`; same-store blocks edge: `ga-v3bt9i`. Evidence-regime commit: `9e56903a547d58b9731640b51da8d0268917d526` (resolved in the city repo).
-- Clear condition: a concrete remedy must LAND, or fresh independent evidence must remove the recorded basis, then re-gate fresh. Repoint the tracker dependency to the new fix bead once one is filed. The bead stays open/unassigned with needs-deploy and its existing route, without a hold label or status=blocked.
+test_counts: 149402 PASS,0 FAIL,512 SKIP (top-level lines, summed per job across549 retained farm/native logs; repeated tests count once per job).
 
-## Load and retained execution evidence
+diff_tests_executed:
+- TestNightlyHasOneAlwaysRunAggregateDependingOnEveryJob PASS.
+- TestNightlyAggregateFailsForEveryNonSuccessDependency PASS, with all15 generated dependency/conclusion cases PASS.
+-17/17 owned names PASS;0 FAIL/SKIP/MISSING. owned-by-name-subtests.json.
 
-`load_threshold=15`, `load_waited_seconds=0`, `load_wait_timed_out=false`, `run_start_load=56.71`, `run_max_load=75.92`, `run_mean_load=61.37`, `run_readings=37`; `wait_first_load=56.71`, `wait_max_load=56.71`, `wait_mean_load=56.71`, `wait_readings=1`. Remote admission bypasses the local load wait. These are the orchestration host's readings, not remote-executor load or a diagnosis of the failure. No native-floor load wait ran.
+test_exec_bep: `{"unit":{"results":407,"remote_executed":407,"cached_remotely":0,"cached_locally":0,"other_strategy":0,"retried":0,"window_ok":true},"acceptance":{"results":25,"remote_executed":25,"cached_remotely":0,"cached_locally":0,"other_strategy":0,"retried":0,"window_ok":true},"integration-packages":{"results":86,"remote_executed":86,"cached_remotely":0,"cached_locally":0,"other_strategy":0,"retried":0,"window_ok":true},"integration-full":{"results":14,"remote_executed":14,"cached_remotely":0,"cached_locally":0,"other_strategy":0,"retried":0,"window_ok":true},"integration-latency":{"results":1,"remote_executed":1,"cached_remotely":0,"cached_locally":0,"other_strategy":0,"retried":0,"window_ok":true}}`
 
-`admission`: remote, floor 25 GiB, cap 2, free 80.2748 GiB, admission wait 0.001 seconds. `farm_test_seconds`: 4786.386. `test_exec_bep` and `rbe_state` are retained in `c3/evidence/execution.json`, including matching worker-env pins, certificate expiry, and per-phase uncached/remote/attempt/window predicates. Durable C6, preparation and fast services completed; C3 ended failed exactly once. Every raw log/BEP remains under the evidence directory.
+All533 remote results were uncached, strategy remote, attempt1, inside each phase's start/end window, terminal PASS; all1066 raw log/XML artifact hashes verified. Native floor: all16 canonical steps rc0, including beadstest pin, Darwin compile and both runner self-tests. Farm seconds: 11477.903; fallback_reason: none; owned_topup: none; latency_leg: measured, both budget tests PASS, probe clear on first attempt. Native steps do not change the BEP-derived remote execution mode.
+
+admission: `{"class":"remote","floor_gib":25.0,"free_gib":87.54984283447266,"waited_seconds":0.001,"cap":2}`
+
+rbe_state: `{"rc_marker_present":true,"kill_switch_absent":true,"cert_notAfter":"notAfter=Jan  9 20:13:22 2027 GMT","worker_env_tree":"sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98","worker_env_origin_main":"sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98"}`
+
+skip_inventory:537 farm/native inventory rows,289 sites,131 byte-identical files at base/head. All39 skipping test-binary closures exclude scripts/cipolicy and shared test/workflows helpers; no changed skip body/helper can reach them. Environment-absence native topups completed. Residual non-owned SKIPs are platform, optional backend or fixture limits; per-test reasons and site/reach proofs are retained. No diff-owned SKIP is excused. See skip-audit.json, skip-site-proof.txt, skip-sites-resolved.json, skip-file-blobs.json, skip-reach-proof.json and floor-topup.json.
+
+Actual phase commands (the canonical gate-criterion3.sh driver ran these, with unit make -k check, acceptance, integration-packages, full integration minus latency and separate latency):
+
+- test_cmd: phase=acceptance BAZEL_FLAGS=--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/acceptance.bep.json NOGO_BUILD_FLAGS=--keep_going --output_groups=nogo_fix --config=remote-exec
+- test_cmd: phase=integration-full BAZEL_FLAGS=--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/integration-full.bep.json NOGO_BUILD_FLAGS=--keep_going --output_groups=nogo_fix --config=remote-exec
+- test_cmd: phase=integration-latency BAZEL_FLAGS=--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/integration-latency.bep.json NOGO_BUILD_FLAGS=--keep_going --output_groups=nogo_fix --config=remote-exec
+- test_cmd: phase=integration-packages BAZEL_FLAGS=--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/integration-packages.bep.json NOGO_BUILD_FLAGS=--keep_going --output_groups=nogo_fix --config=remote-exec
+- test_cmd: phase=unit BAZEL_FLAGS=--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/unit.bep.json NOGO_BUILD_FLAGS=--keep_going --output_groups=nogo_fix --config=remote-exec
+
+Native floor commands/individual rc0 results: /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/floor-topup.json. Raw execution record (kept out of this markdown): /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/execution.json; SHA256 0ff668e25bffe27a932257f3072e0dcae584d65214fab8d1fa411b62fbdeff6a.
+
+test_log_dir: /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/c3-run/evidence/remote/logs and adjacent floor-logs (retained).
+
+Observed host telemetry, not executor load or native-floor exemption:
+
+`LOAD_GATE_SUMMARY threshold=15 waited_seconds=0 wait_timed_out=0 run_start_load=33.31 run_max_load=49.15 run_mean_load=22.42 run_readings=73 wait_first_load=33.31 wait_max_load=33.31 wait_mean_load=33.31 wait_readings=1 read_errors=0`
+
+The native floor retains its canonical local bounded load wait; remote admission uses no host-heavy load wait. Runtime/socket/image/ICU and enabled sweep/recent execution proof: runtime-proof.json. Pack evidence at criterion3 start: `c8f51f6381ab7178f45df68228c5a738ab8baa03`.
+
+## Guard refusal and concrete recovery
+
+Pre-PASS preparation service: /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/ci-push-preparation-run; terminal GATE_RUN_EXIT rc=1 state=failed.
+
+Exact diagnostic:
+
+```text
+assert_record_fits: GC_CITY_ROOT is not set; the size check did not run
+```
+
+The ancestry, safe-push-target and reviewed-SHA-presence guards preceding it succeeded. This caller omitted an environment variable; no content-size verdict was reached. No origin dry-run, real push, workflow dispatch or PR ran. Existing local branch still has the exact reviewed source plus only historical gate records; no reset, rebase, repoint or force-push occurred.
+
+Prepared correction, not executed: /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c/prepare-ci-push.py, set os.environ['GC_CITY_ROOT'] from the recorded city context before child guards. SHA256 836bbda03cc6edf2310b514fc67a9d3faa496575ea4cabec9d7daf5019094540. All guards must run normally afterward. A reviewed-SHA refspec can publish the mechanically derived target without dropping local historical gate commits.
+
+Formula mol-deployer-gate3c requires: "treat any refusal as stop-and-ask". Same-store decision ga-aq81v1ys records the concrete correction and named exit; parent remains OPEN, held for mayor. No test tracker, attribution, waiver or new full-suite round is claimed.
+
+ci_lane_run: not-yet-run (.github/workflows/nightly.yml; schedule/workflow_dispatch only, no PR trigger).
+
+ci_required_closure: not run (pre-PASS push guard stopped3c first).
+
+ci_required_accounting: pending; deferred_to_pr_ci: undecided; not_covered: undecided.
+
+Evidence root: /var/tmp/deploy-ga-4nw07a8p-r3.0wxjw73c; .gc-no-reap present. Both scratch views and all raw artifacts/logs are retained until a resolved continuation can finish and perform owner-specific cleanup. The held run does not publish deploy clearance.
