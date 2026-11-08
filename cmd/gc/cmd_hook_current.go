@@ -13,7 +13,7 @@ import (
 
 // hookCurrentSessionFrontDoor is the session-front-door seam `gc hook current`
 // reads through, overridable in tests.
-var hookCurrentSessionFrontDoor = sessionCurrentClaimFrontDoor
+var hookCurrentSessionFrontDoor = observationSessionCurrentClaimFrontDoor
 
 func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 	var idOnly bool
@@ -56,6 +56,9 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 	sessFront, err := hookCurrentSessionFrontDoor()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
+		if _, unavailable := asStoreUnavailable(err); unavailable {
+			return exitStoreUnavailable
+		}
 		return 1
 	}
 	return doHookCurrent(sessFront, sessionID, idOnly, stdout, stderr)
@@ -69,7 +72,13 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 func doHookCurrent(sessFront *session.Store, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
 	beadID, err := sessFront.CurrentClaimBeadID(sessionID)
 	if err != nil {
+		// An outage-shaped read failure is the unreachable state, not a
+		// missing bead.
+		err = observationReadFailure(err, "city")
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
+		if _, unavailable := asStoreUnavailable(err); unavailable {
+			return exitStoreUnavailable
+		}
 		return 1
 	}
 	if beadID == "" {

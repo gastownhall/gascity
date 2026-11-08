@@ -95,7 +95,7 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 	// report nothing to backfill and --fix repaired nothing there (read-audit
 	// R13). A binding the city's routes refuse is reported as skipped by its
 	// own refusal.
-	if graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every workflow root wherever it lives; the binding is the one scope the work-scope walk above cannot reach
+	if graph, relocated := observationStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every workflow root wherever it lives; the binding is the one scope the work-scope walk above cannot reach
 		collectFrom("graph binding", graph)
 	}
 	return targets, skipped

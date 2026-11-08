@@ -259,10 +259,17 @@ func sessionBeadSnapshotLoaded(snapshot *sessionBeadSnapshot) bool {
 }
 
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
+	return loadProviderSessionSnapshotWith(ctx, openSessionProviderStore, cliSessionStore)
+}
+
+// loadProviderSessionSnapshotWith is loadProviderSessionSnapshot reading
+// through open and routing the session class through routeSessions, so an
+// observation caller supplies a verify-only opener and routes.
+func loadProviderSessionSnapshotWith(ctx sessionProviderContext, open func(string) (beads.Store, error), routeSessions func(beads.Store, *config.City, string) beads.Store) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
 	}
-	store, err := openSessionProviderStore(ctx.cityPath)
+	store, err := open(ctx.cityPath)
 	if err != nil {
 		return nil
 	}
@@ -272,7 +279,7 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	// opens its own generic store (independent of the caller), so routing here
 	// closes the gap on both the CLI and controller provider-construction paths.
 	// Identity to the opened store today (resolveClassStore is pure identity).
-	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
+	sessStore := routeSessions(store, ctx.cfg, ctx.cityPath)
 	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
 	// lister is byte-identical to the retired newSessionBeadSnapshot(ListByLabel(
 	// gc:session)) set: same gc:session label scope, same closed exclusion, same

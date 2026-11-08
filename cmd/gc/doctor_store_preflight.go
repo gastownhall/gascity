@@ -2,21 +2,54 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // Bounds the single store probe that gates store-dependent doctor checks (#5064).
 const doctorBeadStorePreflightTimeout = 5 * time.Second
 
 // City + per-rig store checks skipped on outage-shaped preflight; keep in sync with buildDoctorChecks.
+// The city count is every registerCityStoreCheck registration: most are omitted
+// on an outage, and the few registered ahead of the preflight (ops-recording,
+// conversation-lanes, order-firing-current) stay listed but report "not checked".
 const (
-	doctorCityStoreCheckCount   = 25
+	doctorCityStoreCheckCount   = 28
 	doctorPerRigStoreCheckCount = 3
 )
+
+// errDoctorStoreUnreachable is what a store read answers once the shared
+// preflight found the store unreachable: the read is not attempted, so it
+// cannot outlive the preflight's own deadline.
+var errDoctorStoreUnreachable = errors.New("not checked: store unreachable")
+
+// outageGatedCheck is a check registered ahead of the shared preflight that
+// reads the store when it runs. Once the preflight has found the store
+// unreachable (storeOK reports false) it answers "not checked" without running
+// the wrapped check, so its read cannot outlive the preflight's own deadline.
+type outageGatedCheck struct {
+	doctor.Check
+	storeOK func() bool
+}
+
+// Run runs the wrapped check unless the shared preflight found the store
+// unreachable.
+func (c *outageGatedCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if c.storeOK() {
+		return c.Check.Run(ctx)
+	}
+	return &doctor.CheckResult{
+		Name:    c.Name(),
+		Status:  doctor.StatusOK,
+		Message: errDoctorStoreUnreachable.Error() + " (city)",
+		Details: []string{"the bead-store-preflight check found the store unreachable; this check reads it and was not attempted"},
+	}
+}
 
 // City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight

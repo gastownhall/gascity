@@ -98,12 +98,18 @@ func TestSeatHooksResolveStorageRoutesAlongsideTheCityStoreOpen(t *testing.T) {
 			sc.seed(t, f)
 			started := make(chan struct{})
 			var once sync.Once
-			prev := cliStorageRoutesPrewarm
+			// A hook resolves the recovering routes or, as the observation
+			// hooks do, the verify-only ones; either starts the routing read.
+			prev, prevObs := cliStorageRoutesPrewarm, observationStorageRoutesPrewarm
 			cliStorageRoutesPrewarm = func(cityPath string) {
 				once.Do(func() { close(started) })
 				prev(cityPath)
 			}
-			t.Cleanup(func() { cliStorageRoutesPrewarm = prev })
+			observationStorageRoutesPrewarm = func(cityPath string) {
+				once.Do(func() { close(started) })
+				prevObs(cityPath)
+			}
+			t.Cleanup(func() { cliStorageRoutesPrewarm, observationStorageRoutesPrewarm = prev, prevObs })
 			alongside := atFirstStoreOpen(t, func(stdout, stderr io.Writer) int { return sc.run(t, f, stdout, stderr) }, func() bool {
 				return startedWithin(started)
 			})

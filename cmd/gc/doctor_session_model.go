@@ -35,7 +35,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := loadSessionModelDoctorBeads(store, cliSessionStore(store, c.cfg, c.cityPath))
+	all, err := loadSessionModelDoctorBeads(store, observationSessionStore(store, c.cfg, c.cityPath))
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)

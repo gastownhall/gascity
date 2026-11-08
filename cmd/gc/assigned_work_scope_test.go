@@ -37,7 +37,7 @@ func sessionInfosFromBeads(bs []beads.Bead) []sessionpkg.Info {
 // always was; the LEADING arm (ref "") is now reachable too, because that is
 // where claim-time class routing writes an assignee on a split city and where
 // the agent's own hook fan-out reads even on a single-store one
-// (appendCityHookStore) — dropping a claim the session holds there is what left
+// (appendCityHookStoreWith) — dropping a claim the session holds there is what left
 // a live worker with no wake reason at all (ga-whzrt). Another rig's store stays
 // unreachable, which is what keeps this a scoping rule rather than
 // cross-store-for-everyone.

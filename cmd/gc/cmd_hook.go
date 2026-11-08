@@ -363,6 +363,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	city := newHookCity(cityPath, cfg)
+	if !opts.Claim {
+		city = newObservationHookCity(cityPath, cfg)
+	}
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns
@@ -475,13 +478,37 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	resolvedAgentName := a.QualifiedName()
 	agentForQuery := resolvedAgentName
 	sessionForQuery := ""
-	if sessionTemplateContext {
+	switch {
+	case sessionTemplateContext:
 		agentForQuery = hookSessionAgentForQuery()
 		sessionForQuery = os.Getenv("GC_SESSION_NAME")
-	} else {
+	case opts.Claim:
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
+	case strings.TrimSpace(a.WorkQuery) != "":
+		// An operator's own query runs on the static environment the design
+		// gives it: it does not pay, or wait on, a session-bead read.
+		sessionForQuery = sessionName(nil, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
+	default:
+		sessionForQuery = observationSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides, err := hookStoreQueryEnv(cityPath, cfg, &a)
+	// Claiming is a mutating door and keeps the recovering env; discovery is an
+	// observation and must not start or recover a managed store.
+	storeEnvFor, workQueryStoresFor, primaryStoreFor := hookStoreQueryEnv, hookWorkQueryStores, hookWorkQueryPrimaryStore
+	if opts.Claim {
+		storeEnvFor, workQueryStoresFor, primaryStoreFor = hookClaimStoreQueryEnv, hookClaimWorkQueryStores, hookClaimWorkQueryPrimaryStore
+	}
+	overrides, err := storeEnvFor(cityPath, cfg, &a)
+	// A stopped or stale primary scope does not end discovery: an operator's
+	// custom query may read elsewhere, and another scope may have work. The
+	// leg keeps a static env and is answered by hookUnavailableLegRunner.
+	var primaryUnavailable error
+	if unavailable, ok := asStoreUnavailable(err); ok {
+		primaryUnavailable = unavailable
+		overrides, err = unavailableWorkQueryEnv(cityPath, cfg, &a)
+		if err == nil && overrides == nil {
+			overrides = map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		}
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
 		// The query never ran: not the empty-queue exit 1 on the discovery door
@@ -528,10 +555,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// for a custom work_query, where both forms are the same string.
 	var stores []hookStore
 	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
-		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
+		stores = []hookStore{primaryStoreFor(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
 	} else {
-		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
+		stores = workQueryStoresFor(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
 	}
+
+	markUnavailableHookStore(stores, workDir, queryEnv, primaryUnavailable)
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -602,8 +631,71 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	visibility := hookDiscoveryVisibility(city, cityName, &a, identityCandidates, routeTargets, stderr)
-	runner := hookDiscoveryRunner(stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnv), visibility, emitQueryFailure, stderr)
-	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
+	legRunner := hookUnavailableLegRunner(stores, strings.TrimSpace(a.WorkQuery) == "", hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnv))
+	runner := hookObservationDeadlineRunner(hookDiscoveryRunner(stores, legRunner, visibility, emitQueryFailure, stderr))
+	// The typed state the discovery ended on, for the --json envelope.
+	var unavailableOutcome error
+	discoverRunner := runner
+	runner = func(command, dir string) (string, error) {
+		out, err := discoverRunner(command, dir)
+		if down := hookStoreUnavailableOutcome(err); down != nil {
+			unavailableOutcome = down
+		}
+		return out, err
+	}
+	code := hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
+	if code == exitStoreUnavailable && opts.JSON {
+		message := "store unavailable; see stderr"
+		if unavailableOutcome != nil {
+			message = unavailableOutcome.Error()
+		}
+		_ = writeJSONFailure(stdout, "store_unavailable", message, exitStoreUnavailable) //nolint:errcheck // best-effort stdout
+	}
+	return code
+}
+
+// hookObservationDeadlineRunner reports a work query that ran out of time, or
+// that got no answer from its store, as the unreachable store state: a read
+// that never answered is not "no work". The wrapped runner has already recorded
+// the failure for the reconciler.
+func hookObservationDeadlineRunner(run WorkQueryRunner) WorkQueryRunner {
+	return func(command, dir string) (string, error) {
+		out, err := run(command, dir)
+		if err == nil {
+			return out, nil
+		}
+		var secondary *hookSecondaryStoreFailure
+		if errors.As(err, &secondary) {
+			return out, err
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable) {
+			return "", &storeUnavailableError{State: storeStateUnreachable, Scope: "city", Detail: workQueryFailureText(err.Error()), Cause: err}
+		}
+		return out, err
+	}
+}
+
+// hookStoreUnavailableOutcome returns the unavailable scopes behind a failed
+// discovery, or nil when any failure is something else (a real query error
+// keeps exit 2). A fan-out fails as a hookSecondaryStoreFailure; it counts only
+// when every store that failed was unavailable.
+func hookStoreUnavailableOutcome(err error) error {
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		var downs []error
+		for _, failure := range secondary.failures {
+			down, ok := asStoreUnavailable(failure.err)
+			if !ok {
+				return nil
+			}
+			downs = append(downs, down)
+		}
+		return errors.Join(downs...)
+	}
+	if down, ok := asStoreUnavailable(err); ok {
+		return down
+	}
+	return nil
 }
 
 // hookDiscoveryVisibility is what plain `gc hook` may list for the session of
@@ -1256,8 +1348,11 @@ func hookWorkQueryFailureTemplate(explicitTarget, sessionTemplateContext bool, r
 // It includes scope metadata (store root/scope/prefix) plus any rig-scoped
 // runtime overrides so hook queries observe the same routing contract as the
 // controller probes.
+//
+// It is verify-only: a stopped or stale store answers with a typed
+// store-unavailable error and no managed-dolt recovery runs.
 func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
-	env, err := controllerWorkQueryEnv(cityPath, cfg, a)
+	env, err := observationWorkQueryEnv(cityPath, cfg, a)
 	if err != nil {
 		return nil, err
 	}
@@ -1580,6 +1675,9 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 			// hookDrainProbeFailsClosed for why it is not a transient.
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 			return reportHookDrainFenceClosed("gc hook", sessionID, err, stderr)
+		case isStoreUnavailableErr(err):
+			// An observation never recovers the store, so its drain probe has
+			// nothing to read; discovery itself reports the unavailable state.
 		case err != nil:
 			// Fail open on a transient fault, and say so off-pane — same posture and same reasoning as
 			// the claim door: a blind probe must not stop a healthy fleet finding
@@ -1641,6 +1739,12 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	}
 
 	output, err := runner(workQuery, dir)
+	if down := hookStoreUnavailableOutcome(err); down != nil {
+		// Stopped, stale or unreachable: nothing on stdout, and a distinct exit
+		// so a caller does not read it as an empty queue.
+		fmt.Fprintf(stderr, "gc hook: %v\n", down) //nolint:errcheck // best-effort stderr
+		return exitStoreUnavailable
+	}
 	if err != nil {
 		// A store that could not be read is not an empty queue: no partial
 		// stdout (the partial text stays in the stderr diagnostic), token +
@@ -1975,4 +2079,10 @@ func normalizeWorkQueryOutput(output string) string {
 		return output
 	}
 	return string(normalized)
+}
+
+// isStoreUnavailableErr reports whether err carries a *storeUnavailableError.
+func isStoreUnavailableErr(err error) bool {
+	_, ok := asStoreUnavailable(err)
+	return ok
 }

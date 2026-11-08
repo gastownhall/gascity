@@ -412,7 +412,12 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		{name: "nudge drain --inject/empty controller up", seed: controllerUp, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 0, Opens: 0, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
+		// Two opens: the pre-claim reads open the store verify-only, and the
+		// delivery after the claim opens it recovering (invariant 18 lets only
+		// a delivery path recover). The memo keeps the two apart, because the
+		// verify-only handle is bound to the memo's read deadline and carries
+		// no managed-retry runner.
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
 		{name: "nudge drain --inject/empty output dropped", seed: none, run: nudgeDrainInjectDroppedOutput, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty rig agent", seed: none, run: nudgeDrainInjectRigAgent, ceiling: hookBudgetCeiling{Requests: 11, Opens: 2, SessionGets: 0, GetMisses: 0}},
 		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}},

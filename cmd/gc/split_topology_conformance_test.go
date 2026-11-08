@@ -1539,7 +1539,7 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 //     That arm is the relocated class binding on a split city — where claim-time
 //     class routing writes the assignee — and the city store on a legacy one,
 //     which a rig-scoped agent's hook fan-out reaches anyway
-//     (appendCityHookStore). Dropping the claim left a live holder with
+//     (appendCityHookStoreWith). Dropping the claim left a live holder with
 //     AwakeDecision{Reason:""} and the no-wake-reason drain recycled it mid-step
 //     (ga-whzrt).
 //   - The ownership INDEX now grants the same arm to the same identities. It had

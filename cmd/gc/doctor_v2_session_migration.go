@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -47,7 +48,7 @@ func newV2SessionMigrationCheck(cfg *config.City, cityPath string) *v2SessionMig
 		cfg:      cfg,
 		cityPath: cityPath,
 		cityName: loadedCityName(cfg, cityPath),
-		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
+		openLegs: func() []v2SessionLeg { return openV2SessionLegsObserved(cityPath, cfg) },
 	}
 }
 
@@ -180,6 +181,33 @@ func v2SessionMigrationSamples(cfg *config.City, cityName string, m v2SessionMig
 // openV2SessionLegs opens the census legs read-only in the session plan's
 // order: the sessions binding (SQLite mode=ro), the city, the serving rigs.
 func openV2SessionLegs(cityPath string, cfg *config.City) []v2SessionLeg {
+	return openV2SessionLegsWith(cityPath, cfg, func(scopeRoot string) beads.CommandRunner {
+		if samePath(scopeRoot, cityPath) {
+			return bdCommandRunnerForCity(cityPath)
+		}
+		return bdCommandRunnerForRig(cityPath, cfg, scopeRoot)
+	}, nil)
+}
+
+// openV2SessionLegsObserved is openV2SessionLegs for a verify-only caller: each
+// scope is classified before any bd call (a stopped or stale scope becomes a
+// not-checked leg) and its runner has no managed-retry wrapper.
+func openV2SessionLegsObserved(cityPath string, cfg *config.City) []v2SessionLeg {
+	return openV2SessionLegsWith(cityPath, cfg, func(scopeRoot string) beads.CommandRunner {
+		runner, err := observationBdRunner(context.Background(), cityPath, scopeRoot, cfg)
+		if err != nil {
+			return func(_, _ string, _ ...string) ([]byte, error) { return nil, err }
+		}
+		return runner
+	}, func(scopeRoot string) error {
+		return classifyObservationScope(cityPath, scopeRoot, observationScopeLabel(cityPath, scopeRoot, cfg))
+	})
+}
+
+// openV2SessionLegsWith opens the census legs over runnerFor's bd runner per
+// scope. unavailable, when set, is consulted for each bd-backed scope first; a
+// non-nil answer makes the leg not-checked without any bd call.
+func openV2SessionLegsWith(cityPath string, cfg *config.City, runnerFor func(scopeRoot string) beads.CommandRunner, unavailable func(scopeRoot string) error) []v2SessionLeg {
 	var legs []v2SessionLeg
 	if target, ok, err := resolveInfraBindingTarget(cityPath, cfg); err != nil {
 		legs = append(legs, v2SessionLeg{ref: "binding", notChecked: err.Error()})
@@ -196,20 +224,37 @@ func openV2SessionLegs(cityPath string, cfg *config.City) []v2SessionLeg {
 			legs = append(legs, leg)
 		}
 	}
-	legs = append(legs, openV2SessionScopeLeg(cityPath, cfg, "city", cityPath, bdCommandRunnerForCity(cityPath)))
+	legs = append(legs, openV2SessionScopeLegChecked(cityPath, cfg, "city", cityPath, runnerFor, unavailable))
 	suspended := buildSuspendedRigPathsForCity(cfg, cityPath)
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" || suspended[filepath.Clean(rig.Path)] {
 			continue
 		}
-		legs = append(legs, openV2SessionScopeLeg(cityPath, cfg, "rig:"+rig.Name, rig.Path, bdCommandRunnerForRig(cityPath, cfg, rig.Path)))
+		legs = append(legs, openV2SessionScopeLegChecked(cityPath, cfg, "rig:"+rig.Name, rig.Path, runnerFor, unavailable))
 	}
 	return legs
 }
 
+// openV2SessionScopeLegChecked is openV2SessionScopeLeg after the optional
+// unavailable check. A scope whose backend has no read-only open keeps that
+// static reason (no bd call is made for it either way); only a scope that would
+// be read through bd is classified, and one found stopped or stale becomes a
+// not-checked leg whose runner is never built.
+func openV2SessionScopeLegChecked(cityPath string, cfg *config.City, ref, dir string, runnerFor func(string) beads.CommandRunner, unavailable func(string) error) v2SessionLeg {
+	if unavailable != nil {
+		if leg := openV2SessionScopeLeg(cityPath, cfg, ref, dir, nil); leg.store == nil {
+			return leg
+		}
+		if err := unavailable(dir); err != nil {
+			return v2SessionLeg{ref: ref, notChecked: err.Error()}
+		}
+	}
+	return openV2SessionScopeLeg(cityPath, cfg, ref, dir, runnerFor(dir))
+}
+
 // openV2SessionScopeLeg is a scope's bd store running only `bd --readonly list`
 // (no export-file reap), or a not-checked leg when bd has no read-only open.
-func openV2SessionScopeLeg(cityPath string, cfg *config.City, ref, dir string, run beads.CommandRunner) v2SessionLeg {
+func openV2SessionScopeLeg(cityPath string, cfg *config.City, ref, dir string, runner beads.CommandRunner) v2SessionLeg {
 	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(dir))
 	if !ok {
 		backend = beadsBackend(cityPath)
@@ -220,7 +265,7 @@ func openV2SessionScopeLeg(cityPath string, cfg *config.City, ref, dir string, r
 		leg.notChecked, leg.noReadOnlyOpen = err.Error(), false
 	}
 	if leg.notChecked == "" {
-		leg.store = beads.NewBdStoreWithPrefix(dir, readOnlyBdRunner(run), issuePrefixForScope(dir, cityPath, cfg), bdStoreOptionsForConfig(cfg)...)
+		leg.store = beads.NewBdStoreWithPrefix(dir, readOnlyBdRunner(runner), issuePrefixForScope(dir, cityPath, cfg), bdStoreOptionsForConfig(cfg)...)
 	}
 	return leg
 }
@@ -247,11 +292,11 @@ var errV2SessionNotReadOnly = errors.New("v2-session-migration runs only `bd --r
 
 // readOnlyBdRunner runs `bd list` as `bd --readonly list` and refuses all else:
 // bd may open any other subcommand writable (on PostgreSQL even --readonly).
-func readOnlyBdRunner(run beads.CommandRunner) beads.CommandRunner {
+func readOnlyBdRunner(inner beads.CommandRunner) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		if name != "bd" || len(args) == 0 || args[0] != "list" {
 			return nil, fmt.Errorf("%w: %s %s", errV2SessionNotReadOnly, name, strings.Join(args, " "))
 		}
-		return run(dir, name, append([]string{"--readonly"}, args...)...)
+		return inner(dir, name, append([]string{"--readonly"}, args...)...)
 	}
 }

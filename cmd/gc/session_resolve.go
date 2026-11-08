@@ -41,6 +41,45 @@ const templateTargetPrefix = "template:"
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
 
+// configuredNamedSessionResolver resolves identifier as a configured named
+// session: the id, whether the identifier named a configured session at all,
+// and the failure.
+type configuredNamedSessionResolver func(cityPath string, cfg *config.City, store beads.Store, identifier string, opts namedSessionResolveOptions) (string, bool, error)
+
+// lookupConfiguredNamedSessionID is resolveConfiguredNamedSessionID that only
+// reads: it returns the configured named session's live bead and never reopens
+// or creates one, whatever opts asks. A verify-only caller resolves through it.
+func lookupConfiguredNamedSessionID(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	identifier string,
+	_ namedSessionResolveOptions,
+) (string, bool, error) {
+	if cfg == nil || store == nil {
+		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
+	if err != nil {
+		return "", true, fmt.Errorf("looking up configured named session: %w", err)
+	}
+	if lookup.HasCanonical {
+		return lookup.Canonical.ID, true, nil
+	}
+	if lookup.HasConflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)
+	}
+	return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+}
+
 func resolveConfiguredNamedSessionID(
 	cityPath string,
 	cfg *config.City,
@@ -137,6 +176,32 @@ func resolveSessionIDWithOptions(
 	identifier string,
 	opts namedSessionResolveOptions,
 ) (string, error) {
+	return resolveSessionIDVia(resolveConfiguredNamedSessionID, cityPath, cfg, store, identifier, opts)
+}
+
+// resolveObservedSessionID is resolveSessionIDWithOptions for a verify-only
+// caller: a configured named session without a live bead is not found rather
+// than materialized.
+func resolveObservedSessionID(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	identifier string,
+	opts namedSessionResolveOptions,
+) (string, error) {
+	return resolveSessionIDVia(lookupConfiguredNamedSessionID, cityPath, cfg, store, identifier, opts)
+}
+
+// resolveSessionIDVia is the resolution both callers share; resolveNamed
+// decides whether a configured named session may be reopened or created.
+func resolveSessionIDVia(
+	resolveNamed configuredNamedSessionResolver,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	identifier string,
+	opts namedSessionResolveOptions,
+) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
@@ -151,7 +216,7 @@ func resolveSessionIDWithOptions(
 			return "", err
 		}
 	}
-	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
+	if id, matched, err := resolveNamed(cityPath, cfg, store, identifier, opts); err == nil {
 		return id, nil
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)

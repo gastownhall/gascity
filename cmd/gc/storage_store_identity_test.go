@@ -82,13 +82,13 @@ func TestStaleBindingOfAnotherWorkStoreRefusesAsIdentityMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	log.Reset()
-	if boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log); boot.Outcome != infraMigrationUncheckable || !strings.Contains(log.String(), "--"+storageFromBackupFlag) {
+	if boot := checkInfraClassConvergence(cityPath, cfg, &log); boot.Outcome != infraMigrationUncheckable || !strings.Contains(log.String(), "--"+storageFromBackupFlag) {
 		t.Fatalf("the control boot of the same work store = %s, want the stale binding's backup re-copy: %s", boot.Outcome, log.String())
 	}
 
 	writeScopeProjectID(t, cityPath, "prj-recreated")
 	log.Reset()
-	boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	boot := checkInfraClassConvergence(cityPath, cfg, &log)
 	advice := infraMigrationOperatorAdvice(boot, "gc start")
 	if boot.Outcome != infraMigrationIdentityMismatch {
 		t.Fatalf("boot over a stale binding of another work store = %s, want identity-mismatch: %s", boot.Outcome, log.String())
@@ -331,7 +331,7 @@ func TestUnreadableWorkStoreIdentityIsUncheckableNotAMismatch(t *testing.T) {
 			identityPath := contract.ProjectIdentityPath(cityPath)
 			tc.spoil(t, identityPath)
 			var stderr bytes.Buffer
-			report := checkInfraClassConvergence(cityPath, cfg, "gc start", &stderr)
+			report := checkInfraClassConvergence(cityPath, cfg, &stderr)
 			if report.Outcome != infraMigrationUncheckable {
 				t.Fatalf("outcome = %s, want uncheckable; stderr=%s", report.Outcome, stderr.String())
 			}

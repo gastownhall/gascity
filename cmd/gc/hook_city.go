@@ -35,6 +35,10 @@ import (
 type hookCity struct {
 	path string
 	cfg  *config.City
+	// observation opens the city store verify-only: a stopped or stale store
+	// answers with a typed unavailable error and is never started. Plain
+	// `gc hook` discovery sets it; `gc hook --claim` leaves it off.
+	observation bool
 
 	mu    sync.Mutex
 	front *session.Store
@@ -50,12 +54,25 @@ func newHookCity(path string, cfg *config.City) *hookCity {
 	return &hookCity{path: path, cfg: cfg}
 }
 
+// newObservationHookCity is newHookCity for a verify-only invocation.
+func newObservationHookCity(path string, cfg *config.City) *hookCity {
+	return &hookCity{path: path, cfg: cfg, observation: true}
+}
+
 // sessionFront returns the invocation's session front door, opening the city
 // store on first use.
 func (h *hookCity) sessionFront() (*session.Store, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.front != nil {
+		return h.front, nil
+	}
+	if h.observation {
+		store, err := openObservationStoreAt(context.Background(), h.path, h.path, h.cfg)
+		if err != nil {
+			return nil, err
+		}
+		h.front = observationSessionFrontDoor(store, h.cfg, h.path)
 		return h.front, nil
 	}
 	store, err := hookCityStoreOpener(h.path, h.cfg)

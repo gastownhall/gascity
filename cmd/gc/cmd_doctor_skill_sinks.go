@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -41,11 +42,15 @@ func doctorSkillStaticSinks(cityPath string, cfg *config.City) []string {
 // failing the whole check (the static sinks still scan).
 func doctorLiveSessionSinks(cityPath string, cfg *config.City) func() []string {
 	return func() []string {
-		store, err := openSessionProviderStore(cityPath)
+		// Verify-only and bounded: the read is skipped for a stopped or stale
+		// store (the open answers a typed error) and dies with its deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+		defer cancel()
+		store, err := openObservationStoreAt(ctx, cityPath, cityPath, cfg)
 		if err != nil {
 			return nil
 		}
-		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		infos, err := session.NewStore(beads.SessionStore{Store: observationSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
 		if err != nil {
 			return nil
 		}

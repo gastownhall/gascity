@@ -96,7 +96,7 @@ func TestClassEscalationWaitsForEveryWorkLeg(t *testing.T) {
 	route := newFanoutClassRoute(t, class)
 
 	// Both work legs are served the same co-resident row; only the CITY leg's
-	// bd context can resolve it, exactly as appendCityHookStore documents.
+	// bd context can resolve it, exactly as appendCityHookStoreWith documents.
 	row := `[{"id":"gcg-77","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
 	run := func(_, _ string, _ []string) (string, error) { return row, nil }
 

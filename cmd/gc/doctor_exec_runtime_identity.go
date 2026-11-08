@@ -34,7 +34,7 @@ type execRuntimeIdentityCheck struct {
 func newExecRuntimeIdentityCheck(cfg *config.City, cityPath string, sp runtime.Provider, spErr error) *execRuntimeIdentityCheck {
 	return &execRuntimeIdentityCheck{
 		cfg: cfg, cityPath: cityPath,
-		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
+		openLegs: func() []v2SessionLeg { return openV2SessionLegsObserved(cityPath, cfg) },
 		provider: func() (runtime.Provider, error) {
 			if sp == nil {
 				return nil, spErr

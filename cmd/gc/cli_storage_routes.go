@@ -80,6 +80,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -147,10 +148,44 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	if cityPath == "" {
 		return nil
 	}
-	clean := filepath.Clean(cityPath)
+	return cliStorageRoutesKeyed(cityPath, filepath.Clean(cityPath), resolveCLIStorageRoutes)
+}
+
+// observationStorageRoutes is cliStorageRoutes for a verify-only caller: the
+// same routes, resolved by a gate whose born-split check reads the work store
+// through the observation open (openObservationInfraSource), so resolving a
+// city's routes can never start its Dolt. It memoizes under its own key, so an
+// observation's answer is never lent to a mutating caller in the same process.
+func observationStorageRoutes(cityPath string) *storageRoutes {
+	if cityPath == "" {
+		return nil
+	}
+	return cliStorageRoutesKeyed(cityPath, observationRoutesKeyPrefix+filepath.Clean(cityPath), resolveObservationStorageRoutes)
+}
+
+// observationRoutesKeyPrefix keys the observation memo slots apart from the
+// recovering funnel's. closeCLIStorageRoutes closes every slot.
+const observationRoutesKeyPrefix = "observation|"
+
+// resolveObservationStorageRoutes is resolveCLIStorageRoutes under the
+// verify-only boot gate.
+func resolveObservationStorageRoutes(cityPath string) (routes *storageRoutes, unsettled bool) {
+	return resolveCLIStorageRoutesWithGate(observationStorageBootGate, cityPath)
+}
+
+// observationStorageBootGate is storageBootGate with the born-split check's
+// work-store open made verify-only.
+func observationStorageBootGate(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
+	return storageBootGateWithSource(openObservationInfraSource, cityPath, cfg, logPrefix, rec, stderr)
+}
+
+// cliStorageRoutesKeyed is the memoizing body of cliStorageRoutes and
+// observationStorageRoutes: it resolves cityPath's routes with resolver,
+// memoized under clean.
+func cliStorageRoutesKeyed(cityPath, clean string, resolver func(string) (*storageRoutes, bool)) *storageRoutes {
 	resolve := func(entry *cliStorageRoutesEntry) {
 		entry.once.Do(func() {
-			entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityPath)
+			entry.routes, entry.unsettled = resolver(cityPath)
 			if entry.unsettled {
 				entry.expires = time.Now().Add(cliStorageRoutesUnsettledTTL)
 			}
@@ -263,6 +298,21 @@ func prewarmCLIStorageRoutes(cityPath string) (wait func()) {
 	return func() { <-done }
 }
 
+// prewarmObservationStorageRoutes is prewarmCLIStorageRoutes for a verify-only
+// command: it resolves the observation routes, under the verify-only boot gate.
+func prewarmObservationStorageRoutes(cityPath string) (wait func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		observationStorageRoutesPrewarm(cityPath)
+	}()
+	return func() { <-done }
+}
+
+// observationStorageRoutesPrewarm is the resolution prewarmObservationStorageRoutes
+// runs: a seam, so a test can see when it starts.
+var observationStorageRoutesPrewarm = func(cityPath string) { _ = observationStorageRoutes(cityPath) }
+
 // cliStorageRoutesPrewarm is the resolution prewarmCLIStorageRoutes runs: a
 // seam, so a test can see when it starts.
 var cliStorageRoutesPrewarm = func(cityPath string) { _ = cliStorageRoutes(cityPath) }
@@ -313,6 +363,15 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled bool) {
+	return resolveCLIStorageRoutesWithGate(storageBootGate, cityPath)
+}
+
+// storageBootGateFunc is storageBootGate's shape, so the routing read can run
+// under the recovering gate or the verify-only one.
+type storageBootGateFunc func(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error)
+
+// resolveCLIStorageRoutesWithGate is resolveCLIStorageRoutes under bootGate.
+func resolveCLIStorageRoutesWithGate(bootGate storageBootGateFunc, cityPath string) (routes *storageRoutes, unsettled bool) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, cliStorageRoutesLoad)
 	if err != nil && cityTOMLPresent(tomlPath) {
@@ -339,7 +398,7 @@ func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled 
 			return refusingStorageRoutes("", refusal), true
 		}
 	}
-	return resolveCLIStorageRoutesFor(cityPath, cfg)
+	return resolveCLIStorageRoutesForWithGate(bootGate, cityPath, cfg)
 }
 
 // cliStorageRoutesReadyBuiltins is the builtin readiness pass the routing read
@@ -355,19 +414,19 @@ func cityTOMLPresent(tomlPath string) bool {
 	return !errors.Is(err, fs.ErrNotExist)
 }
 
-// resolveCLIStorageRoutesFor is resolveCLIStorageRoutes once the config has
+// resolveCLIStorageRoutesForWithGate is resolveCLIStorageRoutes under bootGate once the config has
 // loaded (cfg) or provably does not exist (nil cfg).
 //
 // unsettled is true for a refusal resting on a read the gate could not make
 // (isTransientStorageGateFault): it is not memoized, so the next resolution
 // tries again.
-func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *storageRoutes, unsettled bool) {
+func resolveCLIStorageRoutesForWithGate(bootGate storageBootGateFunc, cityPath string, cfg *config.City) (routes *storageRoutes, unsettled bool) {
 	// The gate's diagnostics are buffered and printed only with a refusal.
 	// A city served degraded would otherwise repeat the whole containment
 	// paragraph in every gc process; it gets exactly one warning line.
 	var diagnostics bytes.Buffer
 	if cfg == nil {
-		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics)
+		routes, err := bootGate(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics)
 		if err != nil {
 			printCLIStorageDiagnostics(&diagnostics)
 			printCLIStorageRefusal(err)
@@ -384,7 +443,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 		return refusingStorageRoutes(binding, refusal), false
 	}
-	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, &diagnostics)
+	routes, err := bootGate(cityPath, cfg, cliStorageLogPrefix, nil, &diagnostics)
 	if err == nil {
 		warnDegradedServing(routes, cliStorageStderr, cliStorageLogPrefix)
 		// The one and only place a class store is given an emit target. A

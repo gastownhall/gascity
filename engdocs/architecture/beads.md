@@ -244,6 +244,80 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     invisible to CI because the only conformance run over a real bd is
     skipped (ga-e7z613). Tracked in ga-6od57.
 
+18. **Observation commands are verify-only.** A command that only inspects a
+    city may read published runtime state, the process table, and a store that
+    is already running. It never starts or recovers the managed store:
+
+    - **L1, the env-build ladder.** The provider health-then-recover ladder
+      (`healthBeadsProviderContext`, `recoverBeadsProviderContext`) runs only
+      when the env builder is called with recovery allowed. Observation callers
+      build their env with recovery off.
+    - **L2, the managed-retry wrapper.** `bdCommandRunnerWithManagedRetryErr`
+      calls `recoverManagedBDCommand` whatever the env said. Observation
+      runners do not use it, and `recoverManagedBDCommand` is unreachable from
+      an observation entry point.
+    - **L3, bd autostart of a proxied store.** The proxied verdict
+      (`doctor.ProxiedStoreNotRunning`) runs before any bd call.
+      `BEADS_DOLT_AUTO_START=0` is set as well but is inert on the proxied
+      path and is not evidence of compliance.
+
+    An observation also never rewrites a runtime publication and never starts
+    or stops a server or its watchdog. The seam is `openObservationStoreAt` and
+    its siblings in `cmd/gc/observation_store.go` (`observationStorageRoutes`,
+    `observationStores`, `observationSessionStore`).
+
+    A scope is `available`, or it is one of three unavailable states, which
+    render as `store unavailable: <state> scope=<label>` (label `city` or the
+    rig name) and as exit 69 (`exitStoreUnavailable`); `--json` modes emit the
+    `jsonSchemaErrorPayload` envelope with code `store_unavailable`:
+
+    | State | Meaning |
+    |---|---|
+    | `stopped` | gc-managed scope with no publication or `running:false`; proxied scope that is not running. Zero bd calls. |
+    | `stale-publication` | The publication says running, but its pid is dead, is not a process gc owns, or its data dir does not match. Zero bd calls; the report names the dead pid; the publication is not repaired. |
+    | `unreachable` | The endpoint is claimed live, but the bounded read fails with an outage-shaped error or its deadline expires. |
+
+    The observation list: `gc status`; `gc doctor` without `--fix` (every store
+    read, gated by `doctorStoreGate`, with named `not checked:` stand-ins);
+    plain `gc hook <agent>` discovery and `gc hook current`; `gc mail check`,
+    `inbox` and `peek`; `gc prime --hook`; the pre-claim reads of
+    `gc nudge drain --inject`; `gc nudge status`; and the nudge poller's
+    stages before its loop. A command reports the state in its own form:
+    exit 69 for the reading commands, rc 0 with a `<system-reminder>` notice for
+    `mail check --inject`, an empty hook context for `nudge drain --inject`,
+    and one stderr line for `prime --hook`. `gc status` keeps rc 0 for a
+    stopped or stale city with no controller (the monitoring contract) and
+    rc 1 otherwise.
+
+    The only callers allowed to recover the store: the controller's lifecycle
+    and tick paths; the lifecycle commands `gc start`, `stop`, `restart`,
+    `init` and the supervisor start path; and mutating callers (sling, `gc bd`,
+    order exec, `hook --claim` and `--drain-ack`, `doctor --fix`, nudge
+    delivery after a claim, session materialization on an available store). A
+    stopped or stale city is brought back with `gc start`.
+
+    `TestObservationCommandsCannotReachManagedRecovery` walks the go/ast
+    reference graph from each observation entry point and fails when any
+    forbidden recovering opener is reachable; a bool flag cannot hide an edge
+    from it, so an observation entry point and its recovering twin are separate
+    functions. The tripwire integration tests in
+    `cmd/gc/observation_readonly_integration_test.go` pin the behavior on a
+    fixture city.
+
+    Residuals: the proxied verdict proves the proxy supervisor, not its Dolt
+    child, so a live proxy with a dead child can still be respawned by a bd
+    read (only an upstream bd no-autostart option closes this); a due nudge
+    left on a stopped city can still start the store at delivery; and a
+    configured named session without a bead is materialized only on an
+    available store. The accepted design in
+    `engdocs/design/beads-dolt-contract-redesign.md` ("Resolver and lifecycle
+    ownership invariants", "Lifecycle-owner protocol") already says that
+    non-owner flows such as `gc doctor` are not independent recovery actors and
+    that a stale publication resolves to endpoint-unavailable; its owner-record
+    protocol (`dolt-owner.json`, `dolt-owner.lock`) is not implemented, so the
+    code violated that invariant until this one. The proxied half is the
+    doctor-never-starts table in `engdocs/design/beads-proxied-local-default.md`.
+
 ## Metadata vocabulary (gc.*)
 
 `bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the

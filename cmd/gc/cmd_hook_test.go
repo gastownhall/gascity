@@ -120,6 +120,9 @@ func TestShellWorkQueryTimeoutClassifiesTransient(t *testing.T) {
 
 func TestCmdHookQueryKillEmitsCurrentSessionTemplate(t *testing.T) {
 	clearGCEnv(t)
+	// These cities have no store at all; GC_DOLT=skip makes the scope available
+	// so the failing work query, not a stopped store, is what the test exercises.
+	t.Setenv("GC_DOLT", "skip")
 	disableManagedDoltRecoveryForTest(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -146,11 +149,11 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("cmdHookWithFormat() = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
+	if code != 69 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 69 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-		t.Fatalf("stderr = %q, want %s for killed work query", stderr.String(), hookStoreUnavailableToken)
+	if !strings.Contains(stderr.String(), "store unavailable: unreachable scope=") {
+		t.Fatalf("stderr = %q, want the typed store-unavailable line for killed work query", stderr.String())
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {
@@ -179,6 +182,9 @@ work_query = "kill -9 $$"
 
 func TestCmdHookExplicitDifferentTargetSuppressesSessionFailureEvent(t *testing.T) {
 	clearGCEnv(t)
+	// These cities have no store at all; GC_DOLT=skip makes the scope available
+	// so the failing work query, not a stopped store, is what the test exercises.
+	t.Setenv("GC_DOLT", "skip")
 	disableManagedDoltRecoveryForTest(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -209,8 +215,8 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
+	if code != 69 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 69 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {

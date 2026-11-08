@@ -17,12 +17,15 @@ import (
 // after the open, on a reconnect where re-reading current config is the point.
 func TestOpenNativeStoreReusesTheLoadedCityConfig(t *testing.T) {
 	const (
-		// The open body lives in the scoped variant; the WithConfig and
-		// one-shot entry points both forward to it.
-		enclosing = "openStoreResultAtForCityScoped"
+		// The open body lives in the policy variant; the scoped, WithConfig and
+		// one-shot entry points all forward to it.
+		enclosing = "openStoreResultWithPolicy"
 		field     = "OpenNativeStore"
-		callee    = "nativeDoltOpenEnvForScope"
-		wantArg   = "cfg"
+		// The env builder is the open policy's nativeEnv(ctx, city, cfg, scope,
+		// longLived); the open itself passes context.Background() and the
+		// already-loaded cfg, the reopen hook passes its own ctx.
+		callee  = "nativeEnv"
+		wantArg = "cfg"
 	)
 
 	fset := token.NewFileSet()
@@ -46,18 +49,23 @@ func TestOpenNativeStoreReusesTheLoadedCityConfig(t *testing.T) {
 		if !ok {
 			return true
 		}
-		ident, ok := call.Fun.(*ast.Ident)
-		if !ok || ident.Name != callee {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != callee {
+			return true
+		}
+		if len(call.Args) != 5 {
+			t.Fatalf("%s: got %d args, want 5", callee, len(call.Args))
+		}
+		// The reopen hook fires under its own ctx and deliberately re-reads
+		// the current config.
+		if first, ok := call.Args[0].(*ast.Ident); ok && first.Name == "ctx" {
 			return true
 		}
 		checked++
-		if len(call.Args) != 3 {
-			t.Fatalf("%s: got %d args, want 3", callee, len(call.Args))
-		}
-		arg, ok := call.Args[1].(*ast.Ident)
+		arg, ok := call.Args[2].(*ast.Ident)
 		if !ok || arg.Name != wantArg {
 			t.Fatalf("%s in %s.%s passes %s as its config; want the already-loaded %q",
-				callee, enclosing, field, exprText(call.Args[1]), wantArg)
+				callee, enclosing, field, exprText(call.Args[2]), wantArg)
 		}
 		return true
 	})

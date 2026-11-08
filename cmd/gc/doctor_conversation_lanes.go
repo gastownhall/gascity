@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,9 +33,11 @@ type conversationLanesDoctorCheck struct {
 
 func newConversationLanesDoctorCheck(cityPath string, cfg *config.City) *conversationLanesDoctorCheck {
 	return &conversationLanesDoctorCheck{
-		cfg:      cfg,
-		open:     func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
-		sessions: func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
+		cfg: cfg,
+		open: func() (beads.Store, error) {
+			return openObservationStoreAt(context.Background(), cityPath, cityPath, cfg)
+		},
+		sessions: func(store beads.Store) beads.Store { return observationSessionStore(store, cfg, cityPath) },
 		query:    queryConversationLaneStatus,
 	}
 }

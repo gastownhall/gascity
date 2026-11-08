@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -81,6 +82,9 @@ type invocationStoreKey struct {
 	cityPath      string
 	provider      string
 	authoritative bool
+	// observation separates a verify-only open from a recovering one: they
+	// share a scope and must never borrow each other's store.
+	observation bool
 }
 
 // invocationStoreEntry is one scope's store, opened at most once while the
@@ -99,6 +103,13 @@ type invocationStoreEntry struct {
 type invocationStoreMemo struct {
 	mu      sync.Mutex
 	entries map[invocationStoreKey]*invocationStoreEntry
+	// ctx lives as long as the memo (and ends at the observation read
+	// deadline at the latest) and is canceled when the memo closes. A
+	// memoized observation store binds its bd subprocesses to it, because the
+	// store outlives the read that opened it and the memo key carries no
+	// context: a per-read context would be canceled under the next borrower.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 var (
@@ -111,6 +122,7 @@ var (
 // and deactivates the memo. Calling the end function more than once is safe.
 func beginInvocationStoreMemo() (end func() error) {
 	memo := &invocationStoreMemo{entries: make(map[invocationStoreKey]*invocationStoreEntry)}
+	memo.ctx, memo.cancel = observationContext()
 	invocationStoresMu.Lock()
 	previous := invocationStores
 	invocationStores = memo
@@ -146,6 +158,16 @@ func activeInvocationStoreMemo() *invocationStoreMemo {
 	return invocationStores
 }
 
+// observationOpenContext is the context an observation open binds its bd
+// subprocesses to. Under an active memo that is the memo's own, which outlives
+// any one read (see invocationStoreMemo.ctx); without one it is ctx.
+func observationOpenContext(ctx context.Context) context.Context {
+	if memo := activeInvocationStoreMemo(); memo != nil {
+		return memo.ctx
+	}
+	return ctx
+}
+
 // entry returns the memo slot for key, creating it under the memo lock.
 func (m *invocationStoreMemo) entry(key invocationStoreKey) *invocationStoreEntry {
 	key.scopeRoot = filepath.Clean(key.scopeRoot)
@@ -164,6 +186,7 @@ func (m *invocationStoreMemo) entry(key invocationStoreKey) *invocationStoreEntr
 // close releases every store the memo opened. The entries are detached under
 // the lock first, so a close never races a caller into a closed store.
 func (m *invocationStoreMemo) close() error {
+	defer m.cancel()
 	m.mu.Lock()
 	entries := m.entries
 	m.entries = make(map[invocationStoreKey]*invocationStoreEntry)

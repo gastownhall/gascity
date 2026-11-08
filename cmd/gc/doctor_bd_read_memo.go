@@ -107,15 +107,15 @@ func (m *bdReadMemo) invalidate() {
 // withBdReadMemo wraps run, a runner for a store of cityPath, with the active
 // doctor memo. It returns run unchanged when no doctor run is in progress or
 // the run in progress inspects a different city.
-func withBdReadMemo(cityPath string, run beads.CommandRunner) beads.CommandRunner {
-	if run == nil {
-		return run
+func withBdReadMemo(cityPath string, runner beads.CommandRunner) beads.CommandRunner {
+	if runner == nil {
+		return runner
 	}
 	m, ok := activeBdReadMemos.Load(normalizePathForCompare(cityPath))
 	if !ok {
-		return run
+		return runner
 	}
-	return m.(*bdReadMemo).wrap(run)
+	return m.(*bdReadMemo).wrap(runner)
 }
 
 func (m *bdReadMemo) wrap(run beads.CommandRunner) beads.CommandRunner {

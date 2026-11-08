@@ -2021,15 +2021,22 @@ func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg 
 	if err != nil {
 		return env, err
 	}
-	// The env builders above return a caller-owned map (the proxied-scope
-	// cache stores and hands out clones), so setting or deleting the key
-	// here never touches a shared cache entry.
+	applyNativeOpenSchemaDecision(env, cityPath, cfg)
+	return env, nil
+}
+
+// applyNativeOpenSchemaDecision stamps the city's
+// beads.allow_schema_behind_migrate decision onto a native-open env.
+//
+// The env builders return a caller-owned map (the proxied-scope cache stores
+// and hands out clones), so setting or deleting the key here never touches a
+// shared cache entry.
+func applyNativeOpenSchemaDecision(env map[string]string, cityPath string, cfg *config.City) {
 	if cityAllowSchemaBehindMigrate(cityPath, cfg) {
 		env[beads.BDAllowRemoteMigrateEnvKey] = "1"
 	} else {
 		delete(env, beads.BDAllowRemoteMigrateEnvKey)
 	}
-	return env, nil
 }
 
 // nativeDoltOneShotOpenEnvForScope is nativeDoltOpenEnvForScope for a

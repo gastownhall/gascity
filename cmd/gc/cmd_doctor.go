@@ -218,7 +218,9 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	resolveStores := cachedOrderHistoryStoresResolverWith(cityPath, cfg, stderr,
+		openObservationStoreForCity(cityPath, cfg),
+		func(primary beads.Store) beads.OrdersStore { return observationStores(cityPath, primary).Orders() })
 	return func(order orders.Order) (time.Time, error) {
 		stores, err := resolveStores(order)
 		if err != nil {
@@ -256,14 +258,25 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// scope: a store-reading check against a stopped bd-owned proxied store
 	// would start its proxy and Dolt (see doctorStoreGate), so each such check
 	// asks the gate and is replaced by a "not checked" line for a skipped scope.
-	storeGate := newDoctorStoreGate(opts.ControllerRunning, suspendedBeadsScopes(cityPath, cfg).Suspended)
+	storeGate := newDoctorStoreGate(opts.ControllerRunning, suspendedBeadsScopes(cityPath, cfg).Suspended).ForCity(cityPath, cfg)
+	// cityStoreStopped: doctor must not read the city store at all, because it
+	// is stopped, stale, or suspended. An unreachable store is a separate
+	// outcome the preflight below decides.
 	cityStoreStopped := storeGate.Skipped(cityPath)
 	registerCityStoreCheck := func(c doctor.Check) {
 		register(storeGate.Check(c, []string{cityPath}, []string{"city"}))
 	}
-	liveSessionSinks := doctorLiveSessionSinks(cityPath, cfg)
-	if cityStoreStopped {
-		liveSessionSinks = func() []string { return nil }
+	lastRunLookup := doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr)
+	// storeOK is decided by the preflight below; the lazy live-sink read and the
+	// order-history read consult it when they run, so neither queries a store
+	// the shared preflight found unreachable.
+	storeOK := true
+	liveSinkLookup := doctorLiveSessionSinks(cityPath, cfg)
+	liveSessionSinks := func() []string {
+		if cityStoreStopped || !storeOK {
+			return nil
+		}
+		return liveSinkLookup()
 	}
 
 	managedDoltDataDir := filepath.Join(cityPath, ".beads", "dolt")
@@ -349,12 +362,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), liveSessionSinks))
-		registerCityStoreCheck(doctor.NewOrderFiringCurrentCheck(cfg, cityPath,
+		registerCityStoreCheck(&outageGatedCheck{storeOK: func() bool { return storeOK }, Check: doctor.NewOrderFiringCurrentCheck(cfg, cityPath,
 			doctor.WithOrderFiringCurrentLastRunFunc(
-				storeGate.OrderLastRun(cityPath, cfg, doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))),
+				storeGate.OrderLastRun(cityPath, cfg, func(order orders.Order) (time.Time, error) {
+					if !storeOK {
+						return time.Time{}, errDoctorStoreUnreachable
+					}
+					return lastRunLookup(order)
+				})),
 			doctor.WithOrderFiringCurrentInapplicableFunc(func(a orders.Order) (string, bool) {
 				return orderInapplicableBackend(cityPath, cfg, a)
-			})))
+			}))})
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
 		register(doctor.NewOrderDispatchFloorCheck(cfg, cityPath,
 			doctor.WithOrderDispatchFloorInapplicableFunc(func(a orders.Order) (string, bool) {
@@ -416,37 +434,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
 	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
-	// sessionSP is the session provider the session checks read, and the
-	// ownerless-runtimes check after them; sessionSPErr is why there is none.
-	var sessionSP runtime.Provider
-	sessionSPErr := errors.New("the session provider was not built")
-	if cfgErr == nil && cfg != nil {
-		cityName := loadedCityName(cfg, cityPath)
-		st := cfg.Workspace.SessionTemplate
-		// The session provider reads the city store as it is built, so a
-		// stopped proxied city gets the not-running lines without building it.
-		if cityStoreStopped {
-			for _, name := range []string{"agent-sessions", "zombie-sessions", "orphan-sessions"} {
-				register(storeGate.StandIn(name, []string{cityPath}, []string{"city"}))
-			}
-		} else {
-			sp, err := newSessionProvider()
-			if err != nil {
-				register(doctor.ErrorCheck("session-provider", err.Error()))
-				sessionSPErr = err
-			} else {
-				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
-				sessionSP = sp
-			}
-		}
-	}
-
-	storeFactory := storeGate.StoreFactory(perRunStoreFactory(openStoreForCity(cityPath)))
+	storeFactory := storeGate.StoreFactory(perRunStoreFactory(openObservationStoreForCity(cityPath, cfg)))
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
-	storeOK := true
 	// storePreflightPassed is strictly stronger than storeOK: it means the
 	// probe actually ran and the controller's own read succeeded. storeOK stays
 	// true when the probe is skipped and when it failed in a non-outage shape
@@ -478,17 +468,50 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if isBeadStoreUnreachable(probeErr) {
 			storeOK = false
 			storePreflightErr = probeErr
-			// Register early so the preflight error precedes omitted store checks.
-			skipCount := beadStorePreflightSkipCount(len(activeRigs))
-			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
 		}
+	}
+
+	// sessionSP is the session provider the session checks read, and the
+	// ownerless-runtimes check after them; sessionSPErr is why there is none.
+	var sessionSP runtime.Provider
+	sessionSPErr := errors.New("the session provider was not built")
+	if cfgErr == nil && cfg != nil {
+		cityName := loadedCityName(cfg, cityPath)
+		st := cfg.Workspace.SessionTemplate
+		// The session provider reads the city store as it is built, so a
+		// stopped proxied city gets the not-running lines without building it.
+		if cityStoreStopped {
+			for _, name := range []string{"agent-sessions", "zombie-sessions", "orphan-sessions"} {
+				register(storeGate.StandIn(name, []string{cityPath}, []string{"city"}))
+			}
+		} else {
+			// The provider's route table reads the session beads once. That read
+			// is skipped when the preflight found the store unreachable, so a
+			// wedged server cannot stall provider construction.
+			sp, err := newObservationSessionProvider(cfg, cityPath, storeOK)
+			if err != nil {
+				register(doctor.ErrorCheck("session-provider", err.Error()))
+				sessionSPErr = err
+			} else {
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				sessionSP = sp
+			}
+		}
+	}
+
+	if storePreflightErr != nil {
+		// Register early so the preflight error precedes omitted store checks.
+		skipCount := beadStorePreflightSkipCount(len(activeRigs))
+		register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
 	}
 
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
 		if storeOK {
-			registerCityStoreCheck(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
+			registerCityStoreCheck(doctor.NewBeadsStoreCheck(cityPath, openObservationStoreResultForCity(cityPath, cfg)))
 			registerCityStoreCheck(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
@@ -509,7 +532,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 					if err != nil {
 						return nil, err
 					}
-					routes := cliStorageRoutes(cityPath)
+					routes := observationStorageRoutes(cityPath)
 					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil), true), nil
 				}
 			}
@@ -524,7 +547,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				if err != nil {
 					return nil, fmt.Errorf("opening the city bead store: %w", err)
 				}
-				return loadSessionBeadSnapshot(cliSessionStore(store, cfg, cityPath))
+				return loadSessionBeadSnapshot(observationSessionStore(store, cfg, cityPath))
 			}, sessionSP, sessionSPErr))
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
@@ -540,7 +563,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 		}
 	}
-	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	// A stopped or stale managed Dolt is not a fault while no controller is
+	// running, and the check must not report a server doctor never started. A
+	// running controller owns the server, so its absence stays the check's own
+	// read-only ERROR.
+	doltServerCheck := doctor.Check(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	if !opts.ControllerRunning {
+		doltServerCheck = storeGate.Check(doltServerCheck, []string{cityPath}, []string{"city"})
+	}
+	register(doltServerCheck)
 	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
@@ -1227,14 +1258,5 @@ func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (be
 		store, err := open(dirPath)
 		cache[key] = opened{store: store, err: err}
 		return store, err
-	}
-}
-
-// openStoreResultForCity is openStoreForCity's counterpart for checks that
-// need the native/fallback selection diagnostic openStoreForCity discards
-// (gastownhall/gascity#4245).
-func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
-	return func(dirPath string) (beads.StoreOpenResult, error) {
-		return openStoreResultAtForCity(dirPath, cityPath)
 	}
 }

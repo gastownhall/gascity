@@ -1342,9 +1342,12 @@ func TestSessionNudgeRequireNoNudgeStoreRefusesBeforeResolving(t *testing.T) {
 	h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
 	dir := newCLIOpNamedCityWithoutRow(t)
 	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
-	prev := openNudgeBeadStore
+	// Delivery opens the nudge store through the recovering seam; the
+	// verify-only seam serves the observation reads. Neither opens here.
+	prev, prevRecovering := openNudgeBeadStore, openNudgeBeadStoreRecovering
 	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{} }
-	t.Cleanup(func() { openNudgeBeadStore = prev })
+	openNudgeBeadStoreRecovering = func(string) beads.NudgesStore { return beads.NudgesStore{} }
+	t.Cleanup(func() { openNudgeBeadStore, openNudgeBeadStoreRecovering = prev, prevRecovering })
 	var stdout, stderr bytes.Buffer
 	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", true, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "op journal cannot record this request") {

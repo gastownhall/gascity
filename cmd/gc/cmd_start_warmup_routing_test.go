@@ -122,7 +122,7 @@ func TestWarmupRunStrandsNothingOnAMigratedCity(t *testing.T) {
 		t.Fatalf("closing the one-shot routes: %v", err)
 	}
 	var log bytes.Buffer
-	got := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	got := checkInfraClassConvergence(cityPath, cfg, &log)
 	if got.Outcome != infraMigrationConverged {
 		t.Errorf("the boot gate reports %s after one warm-up scan, want %s; stranded=%v\n%s",
 			got.Outcome, infraMigrationConverged, got.Stranded, log.String())

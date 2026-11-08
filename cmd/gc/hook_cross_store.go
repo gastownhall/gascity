@@ -29,6 +29,11 @@ type hookStore struct {
 	// command; the extras are dropped now, so nothing sets it. Retired with the
 	// rest of that mechanism in ga-gu4xg.
 	command string
+	// unavailable is set on a leg whose scope an observation found stopped or
+	// stale (a *storeUnavailableError). The leg is kept, with its static env,
+	// so the answer can name it; hookUnavailableLegRunner answers for it without
+	// opening the store.
+	unavailable error
 }
 
 // hookStoreCommand returns the work query st actually runs: its own command when
@@ -100,8 +105,18 @@ func hookStoresScopeToPrimary(federatedCommand, singleStoreCommand string) bool 
 }
 
 // hookStoreQueryEnv builds one fan-out leg's work-query environment, the
-// agent's own leg included. A variable so tests can count the legs built.
+// agent's own leg included. A variable so tests can count the legs built. It is
+// the verify-only builder `gc hook` discovery uses: a stopped or stale store
+// answers with a typed unavailable error and nothing is recovered.
 var hookStoreQueryEnv = hookQueryEnv
+
+// hookClaimStoreQueryEnv is hookStoreQueryEnv for `gc hook --claim`, which is a
+// mutating caller and keeps the managed-dolt recovery the controller's probes
+// use.
+var hookClaimStoreQueryEnv = controllerWorkQueryEnv
+
+// hookStoreEnvBuilder builds one fan-out leg's work-query environment.
+type hookStoreEnvBuilder func(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error)
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
 // Injectable so the cross-store selection and claim paths can be tested without
@@ -133,31 +148,44 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
+	return hookWorkQueryStoreFanOutWith(hookStoreQueryEnv, cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
+}
+
+// hookClaimWorkQueryStores is hookWorkQueryStores for `gc hook --claim`: the
+// same fan-out over the recovering env builder.
+func hookClaimWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
+	return hookWorkQueryStoreFanOutWith(hookClaimStoreQueryEnv, cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
 
 // hookWorkQueryPrimaryStore is the first entry of hookWorkQueryStores, built
 // without building any other: what a federated claim reads (see
 // scopeFederatedHookStores).
 func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
+	return hookWorkQueryStoreFanOutWith(hookStoreQueryEnv, cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
 }
 
-// hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
-// entry when primaryOnly.
-func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
+// hookClaimWorkQueryPrimaryStore is hookWorkQueryPrimaryStore for `gc hook
+// --claim`.
+func hookClaimWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
+	return hookWorkQueryStoreFanOutWith(hookClaimStoreQueryEnv, cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
+}
+
+// hookWorkQueryStoreFanOutWith is hookWorkQueryStores over envFor, stopping
+// after the first entry when primaryOnly. envFor decides whether a leg's env
+// may recover a managed store.
+func hookWorkQueryStoreFanOutWith(envFor hookStoreEnvBuilder, cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(a) {
 		if primaryOnly {
 			return stores
 		}
-		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides, suspendedRigs)
+		return appendRigHookStoresWith(envFor, stores, cityPath, cfg, a, identityOverrides, suspendedRigs)
 	}
 	rig := rigScopedHookRig(cfg, agentForQuery)
 	if rig == "" {
 		return stores
 	}
-	if rigStores := appendOneRigHookStore(nil, cityPath, cfg, a, rig, identityOverrides); len(rigStores) > 0 {
+	if rigStores := appendOneRigHookStoreWith(envFor, nil, cityPath, cfg, a, rig, identityOverrides); len(rigStores) > 0 {
 		if primaryOnly {
 			return rigStores
 		}
@@ -168,8 +196,8 @@ func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent
 	}
 	// A rig-backed agent's own env above is ALSO rig-scoped, so without this no
 	// entry reaches the CITY store and root-only beads assigned to the agent
-	// stay invisible. Best-effort tertiary; see appendCityHookStore.
-	return appendCityHookStore(stores, cityPath, cfg, a, identityOverrides)
+	// stay invisible. Best-effort tertiary; see appendCityHookStoreWith.
+	return appendCityHookStoreWith(envFor, stores, cityPath, cfg, a, identityOverrides)
 }
 
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
@@ -181,7 +209,7 @@ var hookIdentityEnvKeys = []string{
 	"GC_SESSION_ID", "GC_SESSION_ORIGIN", "GC_TEMPLATE",
 }
 
-// appendRigHookStores adds one hookStore per rig for a cross-store-eligible
+// appendRigHookStoresWith adds one hookStore per rig for a cross-store-eligible
 // (city-scoped) agent — vp-kvp stage iii read federation. Each entry reuses the
 // rig's store env (built the same way controller probes build it, via a per-rig
 // agent view) while keeping the city agent's identity overrides, so the query
@@ -195,7 +223,8 @@ var hookIdentityEnvKeys = []string{
 // work comes back when the rig is resumed. Searched anyway, its store would be
 // one every city-scoped seat fails to read for as long as the rig stays
 // suspended.
-func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
+// The env for each store is built by envFor.
+func appendRigHookStoresWith(envFor hookStoreEnvBuilder, stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
 	}
@@ -203,7 +232,7 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 		if suspendedRigs[cfg.Rigs[i].Name] {
 			continue
 		}
-		stores = appendOneRigHookStore(stores, cityPath, cfg, a, cfg.Rigs[i].Name, identityOverrides)
+		stores = appendOneRigHookStoreWith(envFor, stores, cityPath, cfg, a, cfg.Rigs[i].Name, identityOverrides)
 	}
 	return stores
 }
@@ -213,10 +242,15 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 // that rig, with the agent's identity overrides preserved so the query still
 // matches work routed/assigned to this agent). Best-effort: returns stores
 // unchanged if the rig is unknown or its env cannot be built. Shared by
-// appendRigHookStores (city-scoped read federation, #2877, which keeps the
+// appendRigHookStoresWith (city-scoped read federation, #2877, which keeps the
 // agent's own store first) and the rig-scoped hook path (which puts the rig
 // store first, as the agent's primary store).
 func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
+	return appendOneRigHookStoreWith(hookStoreQueryEnv, stores, cityPath, cfg, a, rigName, identityOverrides)
+}
+
+// appendOneRigHookStoreWith is appendOneRigHookStore over envFor.
+func appendOneRigHookStoreWith(envFor hookStoreEnvBuilder, stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
 	rigName = strings.TrimSpace(rigName)
 	if cfg == nil || a == nil || rigName == "" {
 		return stores
@@ -233,7 +267,12 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 	}
 	view := *a
 	view.Dir = rigName
-	rigEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
+	rigEnv, err := envFor(cityPath, cfg, &view)
+	var unavailable error
+	if down, ok := asStoreUnavailable(err); ok {
+		unavailable = down
+		rigEnv, err = unavailableWorkQueryEnv(cityPath, cfg, &view)
+	}
 	if err != nil || rigEnv == nil {
 		return stores
 	}
@@ -243,13 +282,14 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 		}
 	}
 	return append(stores, hookStore{
-		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
-		env: mergeRuntimeEnv(os.Environ(), rigEnv),
-		rig: rigName,
+		dir:         agentCommandDir(cityPath, &view, cfg.Rigs),
+		env:         mergeRuntimeEnv(os.Environ(), rigEnv),
+		rig:         rigName,
+		unavailable: unavailable,
 	})
 }
 
-// appendCityHookStore appends the CITY store as a best-effort federated entry
+// appendCityHookStoreWith appends the CITY store as a best-effort federated entry
 // for a rig-scoped agent — the mirror of the #2877 city→rig read federation in
 // the opposite direction. Root-only (city-store) beads can be assigned to a
 // rig-scoped agent (e.g. singleton patrol wisps created at city scope for a
@@ -262,13 +302,19 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 // returns stores unchanged when the city env cannot be built, and the city
 // entry is appended LAST so the rig store keeps bestStoreWithWork's
 // emit-on-timeout contract as the primary entry.
-func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
+// The env for each store is built by envFor.
+func appendCityHookStoreWith(envFor hookStoreEnvBuilder, stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
 	}
 	view := *a
 	view.Dir = ""
-	cityEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
+	cityEnv, err := envFor(cityPath, cfg, &view)
+	var unavailable error
+	if down, ok := asStoreUnavailable(err); ok {
+		unavailable = down
+		cityEnv, err = unavailableWorkQueryEnv(cityPath, cfg, &view)
+	}
 	if err != nil || cityEnv == nil {
 		return stores
 	}
@@ -278,8 +324,9 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 		}
 	}
 	return append(stores, hookStore{
-		dir: cityPath,
-		env: mergeRuntimeEnv(os.Environ(), cityEnv),
+		dir:         cityPath,
+		env:         mergeRuntimeEnv(os.Environ(), cityEnv),
+		unavailable: unavailable,
 	})
 }
 
@@ -290,7 +337,7 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 // returns empty, the session spawns, finds nothing, and exits (churn).
 // Returns "" for a city-scoped identity (no "/") or an unknown rig, so a caller
 // only adds a real rig store. City-scoped agents already federate every rig via
-// appendRigHookStores and must not use this path.
+// appendRigHookStoresWith and must not use this path.
 func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 	if cfg == nil {
 		return ""
@@ -1081,4 +1128,44 @@ func sameHookStore(a, b hookStore) bool {
 		}
 	}
 	return true
+}
+
+// markUnavailableHookStore records on every store that reads dir with env that
+// its scope is unavailable. A nil unavailable leaves stores unchanged.
+func markUnavailableHookStore(stores []hookStore, dir string, env []string, unavailable error) {
+	if unavailable == nil {
+		return
+	}
+	leg := hookStore{dir: dir, env: env}
+	for i := range stores {
+		if sameHookStore(stores[i], leg) {
+			stores[i].unavailable = unavailable
+		}
+	}
+}
+
+// hookUnavailableLegRunner is run for plain `gc hook`, answering for the legs
+// whose scope is stopped or stale without opening them. The SDK-default query
+// (skipShell) is never run against such a leg: it would only open a store that
+// is known to be down. An operator's custom query still runs, with the
+// no-recovery env, because it may read something else; when it answers with
+// work that answer stands, and otherwise the leg reports its unavailable state.
+func hookUnavailableLegRunner(stores []hookStore, skipShell bool, run hookStoreRunner) hookStoreRunner {
+	return func(command, dir string, env []string) (string, error) {
+		leg := hookStore{dir: dir, env: env}
+		for _, st := range stores {
+			if st.unavailable == nil || !sameHookStore(st, leg) {
+				continue
+			}
+			if skipShell {
+				return "", st.unavailable
+			}
+			out, err := run(command, dir, env)
+			if err == nil && workQueryHasReadyWork(normalizeWorkQueryOutput(strings.TrimSpace(out))) {
+				return out, nil
+			}
+			return "", st.unavailable
+		}
+		return run(command, dir, env)
+	}
 }

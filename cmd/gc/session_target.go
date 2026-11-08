@@ -59,7 +59,7 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 }
 
 func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) (sessionRuntimeTarget, error) {
-	target, err := resolveNudgeTarget(identifier, warningWriter...)
+	target, err := resolveNudgeTargetRecovering(identifier, warningWriter...)
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}

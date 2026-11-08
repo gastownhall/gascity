@@ -693,6 +693,11 @@ func infraMigrationClassList() string {
 	return strings.Join(names, "/")
 }
 
+// workSourceOpener opens the work store a convergence check reads. The boot
+// gate passes openInfraMigrationSource; a verify-only caller passes an opener
+// that never recovers a managed Dolt (observation_store.go).
+type workSourceOpener func(cityPath string) (beads.Store, error)
+
 // openInfraMigrationSource opens the work store the infrastructure beads are
 // copied out of. Overridden by tests. Inside a maintenance window
 // (storage_maintenance.go) it takes the window's configuration and native
@@ -953,7 +958,13 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 // destination is a genesis city's empty proven copy and marker, which record
 // that a city with nothing to move has nothing to move. That is the zero-row
 // degenerate of the copy the operator command performs, not a copy of its own.
-func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
+func checkInfraClassConvergence(cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
+	return checkInfraClassConvergenceWithSource(openInfraMigrationSource, cityPath, cfg, "gc start", stderr)
+}
+
+// checkInfraClassConvergenceWithSource is checkInfraClassConvergence reading
+// the work store through openSource.
+func checkInfraClassConvergenceWithSource(openSource workSourceOpener, cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
 		// The destination did not resolve, so there is no binding to read
@@ -966,13 +977,13 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 	if !ok {
 		return infraMigrationReport{Outcome: infraMigrationNotConfigured}
 	}
-	report := inspectInfraConvergence(cityPath, target, logPrefix, stderr)
+	report := inspectInfraConvergenceWithSource(openSource, cityPath, target, logPrefix, stderr)
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	return report
 }
 
-// inspectInfraConvergence maps what the binding and the source say to a verdict,
+// inspectInfraConvergenceWithSource maps what the binding and the source say to a verdict,
 // as the inspection half of a report: the outcome and, when the binding has
 // stranded writes, the ids the refusal must name.
 //
@@ -982,7 +993,8 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 // convergence re-proved; a city without one is either a genesis (nothing to
 // move, so it is admitted and recorded) or a city whose infrastructure state is
 // still in the work store, which is the refusal that names the command.
-func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+// The work store is read through openSource.
+func inspectInfraConvergenceWithSource(openSource workSourceOpener, cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	say := func(err error) infraMigrationReport {
 		outcome := infraMigrationUncheckable
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1003,7 +1015,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	}
 	switch state {
 	case infraConvergenceMarked:
-		return confirmInfraConvergence(cityPath, target, logPrefix, stderr)
+		return confirmInfraConvergenceWithSource(openSource, cityPath, target, logPrefix, stderr)
 	case infraConvergenceStale:
 		// A marker recording another work store holds first: the re-copy the
 		// remedy below names would carry that store's rows into this city
@@ -1034,7 +1046,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// A census that could not run says nothing about whether this city
 	// migrated, so its failures are uncheckable — never "has not migrated
 	// onto it" — and transient when they are store I/O.
-	source, err := openInfraMigrationSource(cityPath)
+	source, err := openSource(cityPath)
 	if err != nil {
 		report := say(fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
 		report.Transient = isTransientStoreFault(err)
@@ -1845,11 +1857,17 @@ func removeInfraRecopyRecord(target infraBindingTarget) error {
 // reporting the city unconverged and handing it the revert, which is the one
 // instruction that would abandon everything written since cutover.
 func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return confirmInfraConvergenceWithSource(openInfraMigrationSource, cityPath, target, logPrefix, stderr)
+}
+
+// confirmInfraConvergenceWithSource is confirmInfraConvergence reading the
+// work store through openSource.
+func confirmInfraConvergenceWithSource(openSource workSourceOpener, cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	storeRecorded, current, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr)
 	if hold != nil {
 		return *hold
 	}
-	report := confirmInfraContainment(cityPath, target, logPrefix, stderr)
+	report := confirmInfraContainmentWithSource(openSource, cityPath, target, logPrefix, stderr)
 	if report.Outcome == infraMigrationConverged && !storeRecorded && !current.empty() {
 		// A legacy marker, back-filled once by the first boot that proved
 		// containment against this work store, under the migration guard so
@@ -1896,6 +1914,12 @@ func markerWorkStoreIdentityHold(cityPath string, target infraBindingTarget, log
 // confirmInfraContainment is confirmInfraConvergence's containment re-check,
 // once the marker's work-store identity is known not to contradict this city.
 func confirmInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return confirmInfraContainmentWithSource(openInfraMigrationSource, cityPath, target, logPrefix, stderr)
+}
+
+// confirmInfraContainmentWithSource is confirmInfraContainment reading the
+// work store through openSource.
+func confirmInfraContainmentWithSource(openSource workSourceOpener, cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
@@ -1913,7 +1937,7 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 				target.Database, target.ManifestPath()),
 		}
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
+	gap, err := classifyInfraContainmentGapWithSource(openSource, cityPath, target, manifest, nil)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
@@ -2127,7 +2151,13 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 // by the binding's row under their id: a reverse leaves out the rows it
 // wrote itself, which would otherwise cost one binding read each.
 func classifyInfraContainmentGapLeaving(cityPath string, target infraBindingTarget, manifest infraCopyManifest, leave func(beads.Bead) bool) (infraContainmentGap, error) {
-	source, err := openInfraMigrationSource(cityPath)
+	return classifyInfraContainmentGapWithSource(openInfraMigrationSource, cityPath, target, manifest, leave)
+}
+
+// classifyInfraContainmentGapWithSource is classifyInfraContainmentGapLeaving
+// reading the work store through openSource.
+func classifyInfraContainmentGapWithSource(openSource workSourceOpener, cityPath string, target infraBindingTarget, manifest infraCopyManifest, leave func(beads.Bead) bool) (infraContainmentGap, error) {
+	source, err := openSource(cityPath)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
 	}

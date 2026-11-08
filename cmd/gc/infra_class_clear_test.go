@@ -99,7 +99,7 @@ func TestAnUnclearedMigratedCityRefusesBootAndTheMigrationRepairsIt(t *testing.T
 	}
 
 	log.Reset()
-	report := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	report := checkInfraClassConvergence(cityPath, cfg, &log)
 	if report.Outcome != infraMigrationRetained {
 		t.Fatalf("boot outcome = %s, want retained-copies; a city whose work store still answers for relocated beads must not serve: %s", report.Outcome, log.String())
 	}
@@ -138,7 +138,7 @@ func TestAnUnclearedMigratedCityRefusesBootAndTheMigrationRepairsIt(t *testing.T
 		t.Fatalf("the repair removed the work bead %s: %v", work.ID, err)
 	}
 	log.Reset()
-	if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &log); got.Outcome != infraMigrationConverged {
+	if got := checkInfraClassConvergence(cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("boot after the repair = %s, want converged: %s", got.Outcome, log.String())
 	}
 }
@@ -389,7 +389,7 @@ func TestAnInterruptedClearResumesWithoutLosingTheBackup(t *testing.T) {
 		t.Fatalf("the interrupted clear's refusal does not carry its cause: %+v", first)
 	}
 	target := mustResolveInfraTarget(t, cityPath, cfg)
-	if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); got.Outcome != infraMigrationRetained {
+	if got := checkInfraClassConvergence(cityPath, cfg, &bytes.Buffer{}); got.Outcome != infraMigrationRetained {
 		t.Fatalf("boot after the interrupted clear = %s, want retained-copies", got.Outcome)
 	}
 	// Status counts what the session has left, not the session: the note's
@@ -503,7 +503,7 @@ func TestBackupReCopyRefusesABindingThatIsNotStale(t *testing.T) {
 	if got.Outcome != infraMigrationUncheckable || !strings.Contains(log.String(), "re-copies only a binding whose database is gone") {
 		t.Fatalf("outcome = %s, want a refusal: %s", got.Outcome, log.String())
 	}
-	if report := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); report.Outcome != infraMigrationConverged {
+	if report := checkInfraClassConvergence(cityPath, cfg, &bytes.Buffer{}); report.Outcome != infraMigrationConverged {
 		t.Fatalf("the refused backup re-copy disturbed a serving city: %s", report.Outcome)
 	}
 }

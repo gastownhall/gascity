@@ -1816,6 +1816,15 @@ func openWorkStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.
 // reports that cfg is this one-shot invocation's own fresh load, which lets
 // the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
 func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultWithPolicy(recoveringStoreOpenPolicy(), storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, oneShotConfig, nativeOverride)
+}
+
+// openStoreResultWithPolicy is the shared open body under an explicit
+// recovery policy. It names no recovering helper itself: every opener that can
+// start or repair a managed Dolt arrives through policy, so a verify-only
+// caller supplies observationStoreOpenPolicy and reaches none of them
+// (engdocs/architecture/beads.md, invariant 18).
+func openStoreResultWithPolicy(policy storeOpenPolicy, storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1835,7 +1844,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	// invocation_store_memo.go. Long-lived opens never take the memo.
 	var memoEntry *invocationStoreEntry
 	if memo := activeInvocationStoreMemo(); memo != nil && !longLived && !forceProxied {
-		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
+		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative, observation: policy.observation})
 		memoEntry.mu.Lock()
 		defer memoEntry.mu.Unlock()
 		if memoEntry.opened {
@@ -1878,16 +1887,13 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
 			return nil, err
 		}
-		if oneShotConfig {
-			return openOneShotBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
-		}
-		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
+		return policy.openBd(scopeRoot, runtimeCityPath, cfg, oneShotConfig, nativeTransport)
 	}
 	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:                  scopeRoot,
 		CityPath:                   runtimeCityPath,
 		Provider:                   provider,
-		PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
+		PreflightChecker:           policy.preflight(runtimeCityPath, provider, cfg),
 		Logger:                     slog.Default(),
 		ConditionalWrites:          mode,
 		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
@@ -1909,7 +1915,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		// with the flag off.
 		OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
 		OpenExecStore: func() (beads.Store, error) {
-			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
+			return policy.openExec(provider, scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
 			// Reuse the config this call already loaded. Passing nil made the
@@ -1917,13 +1923,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			// pack expansion included, for the same city at the same moment.
 			// The reopen hook below deliberately keeps re-loading: it fires long
 			// after this open, where re-reading current state is the point.
-			var env map[string]string
-			var err error
-			if longLived {
-				env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
-			} else {
-				env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
-			}
+			env, err := policy.nativeEnv(context.Background(), runtimeCityPath, cfg, scopeRoot, longLived)
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
@@ -1943,13 +1943,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			// rig-store reopen (api_state.go) instead reuses the config it
 			// opened with.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
-				var freshEnv map[string]string
-				var rerr error
-				if longLived {
-					freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
-				} else {
-					freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
-				}
+				freshEnv, rerr := policy.nativeEnv(ctx, runtimeCityPath, nil, scopeRoot, longLived)
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
 				}
@@ -2043,6 +2037,13 @@ func requireBdBinaryForCity(cityPath string) error {
 // A caller that already holds this city's config passes it to avoid reloading
 // it; a nil config is loaded here.
 func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath string, cfg *config.City) (beads.Store, error) {
+	return openExecStoreWithProjectedEnv(provider, scopeRoot, runtimeCityPath, cfg, bdRuntimeEnvForRigWithError, bdRuntimeEnvWithError)
+}
+
+// openExecStoreWithProjectedEnv is openExecStoreAtForCityWithConfig over the
+// env builders that project a bd-backed scope's Dolt endpoint: the recovering
+// pair for mutating callers, the no-recovery pair for observation.
+func openExecStoreWithProjectedEnv(provider, scopeRoot, runtimeCityPath string, cfg *config.City, rigEnv func(cityPath string, cfg *config.City, rigPath string) (map[string]string, error), cityEnv func(cityPath string) (map[string]string, error)) (beads.Store, error) {
 	target, err := resolveConfiguredExecStoreTargetWithConfig(runtimeCityPath, scopeRoot, cfg)
 	if err != nil {
 		return nil, err
@@ -2058,13 +2059,13 @@ func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath strin
 				}
 				rigCfg = loaded
 			}
-			projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, rigCfg, target.ScopeRoot)
+			projected, err := rigEnv(runtimeCityPath, rigCfg, target.ScopeRoot)
 			if err != nil {
 				return nil, err
 			}
 			copyExecProjectedBackendEnv(env, projected)
 		} else {
-			projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+			projected, err := cityEnv(runtimeCityPath)
 			if err != nil {
 				return nil, err
 			}

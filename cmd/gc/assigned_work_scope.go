@@ -408,7 +408,7 @@ func filterAssignedWorkBeadsForSessionWakeOn(
 			// scope: on a split city the binding is where claim-time class
 			// routing writes the assignee (claim_class_route.go), and even on a
 			// single-store city the agent's own hook fan-out reaches the city
-			// store (appendCityHookStore) — so a bead it can claim was being
+			// store (appendCityHookStoreWith) — so a bead it can claim was being
 			// dropped here for a store it demonstrably reads. Dropping it is
 			// what left a claim-holder with AwakeDecision{Reason:""} and drained
 			// it down the no-wake-reason arm while it owned in-progress work

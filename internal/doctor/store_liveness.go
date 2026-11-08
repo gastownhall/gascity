@@ -11,6 +11,11 @@ import (
 // did not run because the scope's bd-owned proxied store is stopped.
 const StoreNotRunningMessage = "not checked: store not running"
 
+// StoreStaleMessage is what doctor reports for a store-reading check it did
+// not run because the scope's managed Dolt publication is stale: it names a
+// server that is gone or is not this city's.
+const StoreStaleMessage = "not checked: store publication stale"
+
 // StoreSuspendedMessage is what doctor reports for a store-reading check it
 // did not run because the scope belongs to a suspended rig or city.
 const StoreSuspendedMessage = "not checked: suspended"
@@ -132,3 +137,28 @@ func (c *storeNotRunningCheck) CanFix() bool { return false }
 func (c *storeNotRunningCheck) Fix(_ *CheckContext) error { return nil }
 
 func (c *storeNotRunningCheck) WarmupEligible() bool { return false }
+
+// StoreStaleCheck stands in for a store-reading check whose scope's managed
+// Dolt runtime publication is stale. A stale publication is a fault whether or
+// not the controller runs (a dead pid recorded as live), so the result is
+// always a warning. detail, when set, names the evidence (the dead pid) and is
+// appended to the message.
+func StoreStaleCheck(name, detail string, scopeLabels ...string) Check {
+	message := StoreStaleMessage
+	if len(scopeLabels) > 0 {
+		message = fmt.Sprintf("%s (%s)", StoreStaleMessage, strings.Join(scopeLabels, ", "))
+	}
+	details := []string{"doctor reads a managed store only while its published Dolt server is alive and owned by this city; doctor never starts or replaces servers. Run `gc start` to republish and re-run doctor to check it."}
+	// The evidence is part of the one line doctor prints, which shows no details
+	// by default: a dead pid recorded as live is what the operator must see.
+	if detail != "" {
+		message += ": " + detail
+	}
+	return &standInCheck{name: name, result: CheckResult{
+		Name:    name,
+		Status:  StatusWarning,
+		Message: message,
+		Details: details,
+		FixHint: "the managed Dolt publication is stale; `gc start` republishes it",
+	}}
+}

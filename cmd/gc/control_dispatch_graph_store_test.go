@@ -22,8 +22,12 @@ import (
 func seedCLIStorageRoutes(t *testing.T, cityPath string, routes *storageRoutes) {
 	t.Helper()
 	resetCLIStorageRoutes(t)
-	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = routes })
+	// Both memo slots: a verify-only caller resolves the same city through
+	// observationStorageRoutes, which keeps its own slot.
+	for _, key := range []string{filepath.Clean(cityPath), observationRoutesKeyPrefix + filepath.Clean(cityPath)} {
+		entry := cliStorageRoutesEntryFor(key)
+		entry.once.Do(func() { entry.routes = routes })
+	}
 }
 
 // newOrphanControlFixture writes a control bead whose workflow root was

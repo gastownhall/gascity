@@ -539,10 +539,7 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
   gc mail check mayor`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdMailCheckWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdMailCheckWithFormat(args, inject, hookFormat, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "output <system-reminder> block for hook injection")
@@ -589,7 +586,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 	// resolve the routes alongside the mail provider's store open
 	// (prewarmCLIStorageRoutes).
 	if configLoaded && (inject || c == nil) {
-		defer prewarmCLIStorageRoutes(cityPath)()
+		defer prewarmObservationStorageRoutes(cityPath)()
 	}
 	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
 }
@@ -873,16 +870,23 @@ func formatMailCheckPartialDegradedNotice() string {
 
 // doMailCheckFallback is the direct-bd path for `gc mail check`.
 func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail check")
+	mp, unavailable, code := openObservationMailProvider(stderr, "gc mail check")
 	if mp == nil {
+		if unavailable != nil {
+			return reportMailCheckUnavailable(unavailable, inject, hookFormat, stdout, stderr)
+		}
 		if inject {
 			return 0 // --inject always exits 0
 		}
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail check")
-	if !ok {
+	target, err := lookupObservedMailTarget(args)
+	if err != nil {
+		if unavailable := mailUnavailableState(err); unavailable != nil {
+			return reportMailCheckUnavailable(unavailable, inject, hookFormat, stdout, stderr)
+		}
+		mailTargetLookupOK(err, stderr, "gc mail check")
 		if inject {
 			return 0
 		}
@@ -947,6 +951,9 @@ func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Me
 func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	messages, inbox, err := unreadMailForTarget(mp, target)
 	if err != nil {
+		if unavailable := mailUnavailableState(err); unavailable != nil {
+			return reportMailCheckUnavailable(unavailable, inject, hookFormat, stdout, stderr)
+		}
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 0                                        // --inject always exits 0
@@ -1511,6 +1518,13 @@ func resolveMailTargetsWithConfig(cityPath string, cfg *config.City, sessStore b
 }
 
 func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
+	return resolveMailTargetsVia(resolveSessionIDWithOptions, cityPath, cfg, sessStore, identifier, cache)
+}
+
+// resolveMailTargetsVia is resolveMailTargetsWithConfigCached resolving a name
+// to a session through resolveSession, which decides whether a configured named
+// session may be created.
+func resolveMailTargetsVia(resolveSession func(string, *config.City, beads.Store, string, namedSessionResolveOptions) (string, error), cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
@@ -1522,7 +1536,7 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessS
 		} else if ok {
 			return mailTargetFromSessionInfo(info, identifier)
 		}
-		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
+		sessionID, err := resolveSession(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
 			return mailTargetFromSessionID(sessStore, sessionID, identifier)
 		}
@@ -1597,13 +1611,19 @@ func mailTargetLookupOK(err error, stderr io.Writer, cmdName string) bool {
 // city's bead store unless the mail provider bypasses it. Its error is the
 // failure the command reports.
 func lookupMailTarget(identifier string) (resolvedMailTarget, error) {
+	return lookupMailTargetWith(openMailTargetResolver, resolveRawMailTargetForStorelessProvider, identifier)
+}
+
+// lookupMailTargetWith is lookupMailTarget over the given resolver opener and
+// storeless-provider resolver, which decide whether a store may be recovered.
+func lookupMailTargetWith(openResolver func() (mailTargetResolverFunc, error), resolveStoreless func(string) (resolvedMailTarget, error), identifier string) (resolvedMailTarget, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
 	if isStorelessMailProvider() {
-		return resolveRawMailTargetForStorelessProvider(identifier)
+		return resolveStoreless(identifier)
 	}
-	resolve, err := openMailTargetResolver()
+	resolve, err := openResolver()
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
@@ -1615,11 +1635,17 @@ func lookupMailTarget(identifier string) (resolvedMailTarget, error) {
 // GC_ALIAS on a pool worker would otherwise block inbox access when
 // GC_SESSION_ID still matches the bead via session_name.
 func lookupDefaultMailTarget() (resolvedMailTarget, error) {
+	return lookupDefaultMailTargetWith(openMailTargetResolver, resolveRawMailTargetForStorelessProvider)
+}
+
+// lookupDefaultMailTargetWith is lookupDefaultMailTarget over the given
+// resolver opener and storeless-provider resolver.
+func lookupDefaultMailTargetWith(openResolver func() (mailTargetResolverFunc, error), resolveStoreless func(string) (resolvedMailTarget, error)) (resolvedMailTarget, error) {
 	candidates := defaultMailIdentityCandidates()
 	if len(candidates) == 1 || isStorelessMailProvider() {
-		return lookupMailTarget(candidates[0])
+		return lookupMailTargetWith(openResolver, resolveStoreless, candidates[0])
 	}
-	resolve, err := openMailTargetResolver()
+	resolve, err := openResolver()
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
@@ -1651,7 +1677,7 @@ func lookupMailTargetFromArgs(args []string) (resolvedMailTarget, error) {
 // as openCityStore does, returning the failure instead of printing it, and
 // returns a resolver over the store's session class. The resolver shares
 // cache's gc:session enumeration across calls; a nil cache disables it.
-func openMailTargetResolver() (func(identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error), error) {
+func openMailTargetResolver() (mailTargetResolverFunc, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nil, err
@@ -1762,23 +1788,7 @@ func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) 
 // provider that bypasses the city bead store: the session it names when the
 // city has a store that knows one, else the identifier as given.
 func resolveRawMailTargetForStorelessProvider(identifier string) (resolvedMailTarget, error) {
-	asGiven := resolvedMailTarget{display: identifier, recipients: []string{identifier}}
-	store, err := openMailTargetStore()
-	if err != nil {
-		if isNoCityStoreError(err) {
-			return asGiven, nil
-		}
-		return resolvedMailTarget{}, err
-	}
-	if store == nil {
-		return asGiven, nil
-	}
-	cityPath, cfg := ambientMailTargetConfig()
-	target, err := resolveMailTargets(cliSessionStore(store, cfg, cityPath), identifier)
-	if errors.Is(err, session.ErrSessionNotFound) {
-		return asGiven, nil
-	}
-	return target, err
+	return resolveRawMailTargetForStorelessProviderWith(openMailTargetStore, cliSessionStore, identifier)
 }
 
 func isNoCityStoreError(err error) bool {
@@ -1938,10 +1948,7 @@ Shows message ID, sender, subject, and body in a table. The recipient defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdMailInboxWithJSON(args, jsonOut, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdMailInboxWithJSON(args, jsonOut, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
@@ -1980,10 +1987,7 @@ Same output as "gc mail read" but does not change the message's read status.
 The message will continue to appear in inbox results.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdMailPeekWithJSON(args, jsonOut, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdMailPeekWithJSON(args, jsonOut, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
@@ -2465,13 +2469,20 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail inbox")
+	mp, unavailable, code := openObservationMailProvider(stderr, "gc mail inbox")
 	if mp == nil {
+		if unavailable != nil {
+			return reportObservationUnavailable("gc mail inbox", unavailable, jsonOut, stdout, stderr)
+		}
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
-	if !ok {
+	target, err := lookupObservedMailTarget(args)
+	if err != nil {
+		if unavailable := mailUnavailableState(err); unavailable != nil {
+			return reportObservationUnavailable("gc mail inbox", unavailable, jsonOut, stdout, stderr)
+		}
+		mailTargetLookupOK(err, stderr, "gc mail inbox")
 		return 1
 	}
 
@@ -2501,6 +2512,9 @@ func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, js
 		messages, err = collectMailMessages(mp.Inbox, target.recipients)
 	}
 	if err != nil {
+		if unavailable := mailUnavailableState(err); unavailable != nil {
+			return reportObservationUnavailable("gc mail inbox", unavailable, jsonOut, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2644,8 +2658,11 @@ func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jso
 
 // doMailPeekFallback is the direct-bd path for `gc mail peek`.
 func doMailPeekFallback(args []string, jsonOut bool, stdout, stderr io.Writer) int {
-	mp, code := openCityMailProvider(stderr, "gc mail peek")
+	mp, unavailable, code := openObservationMailProvider(stderr, "gc mail peek")
 	if mp == nil {
+		if unavailable != nil {
+			return reportObservationUnavailable("gc mail peek", unavailable, jsonOut, stdout, stderr)
+		}
 		return code
 	}
 	return doMailPeekWithJSON(mp, args, jsonOut, stdout, stderr)
@@ -2665,6 +2682,9 @@ func doMailPeekWithJSON(mp mail.Provider, args []string, jsonOut bool, stdout, s
 
 	m, err := mp.Get(id)
 	if err != nil {
+		if unavailable := mailUnavailableState(err); unavailable != nil {
+			return reportObservationUnavailable("gc mail peek", unavailable, jsonOut, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc mail peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -126,7 +126,7 @@ type StoreHealth struct {
 
 var (
 	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
-	openCityStoreAtForStatus      = openCityStoreResultAt
+	openCityStoreAtForStatus      = openObservationCityStoreForStatus
 )
 
 var (
@@ -234,14 +234,19 @@ func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bo
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
+	store, diagnostic, unavailable, code := openCityStatusStoreState(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
 		}
 		return code
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+	if unavailable != nil && jsonOutput {
+		// The JSON payload carries the state as a health signal; stderr names
+		// it for the operator reading both streams.
+		fmt.Fprintf(stderr, "gc status: %v\n", unavailable) //nolint:errcheck // best-effort stderr
+	}
+	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, observationSessionStore(store, cfg, cityPath), stderr)
 	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	if err != nil {
 		message := fmt.Sprintf("gc status: %v", err)
@@ -253,9 +258,9 @@ func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bo
 	}
 	dops := newDrainOps(sp)
 	if jsonOutput {
-		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+		return doCityStatusJSONObserved(namedSessionStatusObserved, sp, cfg, cityPath, store, diagnostic, unavailable, statusSnapshot, stdout, stderr)
 	}
-	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+	return doCityStatusObserved(namedSessionStatusObserved, sp, dops, cfg, cityPath, store, unavailable, statusSnapshot, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
@@ -631,7 +636,27 @@ func doCityStatusWithStoreAndSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
-	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	return doCityStatusObserved(namedSessionStatusForCity, sp, dops, cfg, cityPath, store, nil, statusSnapshot, stdout, stderr)
+}
+
+// doCityStatusObserved renders status text for a store that may be
+// unavailable. An unavailable store is a degraded view, not a load failure,
+// when no controller is running: the exit stays 0 so a monitor polling a
+// stopped city is not paged for a fact it already knows. With a controller
+// running, or with an unreachable store, the missing store is a real fault
+// and the exit is 1.
+func doCityStatusObserved(
+	namedStatus namedSessionStatusFunc,
+	sp runtime.Provider,
+	dops drainOps,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	unavailable *storeUnavailableError,
+	statusSnapshot *sessionBeadSnapshot,
+	stdout, stderr io.Writer,
+) int {
+	snapshot := collectCityStatusSnapshotObserved(namedStatus, sp, cfg, cityPath, store, unavailable, statusSnapshot, stderr)
 	renderCityStatusText(snapshot, dops, stdout)
 
 	// Track session-snapshot degradation so we can render the textual report
@@ -640,21 +665,28 @@ func doCityStatusWithStoreAndSnapshot(
 	snapshotDegraded := statusSnapshot.LoadError() != nil
 
 	if store != nil {
-		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		sessions := collectCitySessionCountsObserved(statusSnapshot)
 		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
 			fmt.Fprintln(stdout)                                                                                            //nolint:errcheck // best-effort stdout
 			fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", sessions.ActiveSessions, sessions.SuspendedSessions) //nolint:errcheck // best-effort stdout
 		}
 	}
 
-	if snapshotDegraded {
+	if snapshotDegraded || statusStoreUnavailableFails(snapshot) {
 		return 1
 	}
 	return 0
+}
+
+// statusStoreUnavailableFails reports whether an unavailable store makes
+// gc status fail: always for an unreachable store, and for a stopped or stale
+// one only while a controller is running (it should have kept the store up).
+func statusStoreUnavailableFails(snapshot cityStatusSnapshot) bool {
+	unavailable := snapshot.StoreUnavailable
+	if unavailable == nil {
+		return false
+	}
+	return unavailable.State == storeStateUnreachable || snapshot.Controller.Running
 }
 
 // doCityStatusJSON outputs city status as JSON. Accepts injected providers
@@ -681,18 +713,30 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
-	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	return doCityStatusJSONObserved(namedSessionStatusForCity, sp, cfg, cityPath, store, diagnostic, nil, statusSnapshot, stdout, stderr)
+}
+
+// doCityStatusJSONObserved is doCityStatusObserved for the JSON payload: the
+// unavailable state is carried as a store_<state> health signal.
+func doCityStatusJSONObserved(
+	namedStatus namedSessionStatusFunc,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	diagnostic *beads.BeadsDiagnostic,
+	unavailable *storeUnavailableError,
+	statusSnapshot *sessionBeadSnapshot,
+	stdout, stderr io.Writer,
+) int {
+	snapshot := collectCityStatusSnapshotObserved(namedStatus, sp, cfg, cityPath, store, unavailable, statusSnapshot, stderr)
 	snapshot.Beads = diagnostic
 	// Track session-snapshot degradation so we can emit the JSON payload AND
 	// signal the failure via exit code. Restores the pre-#2005 contract that
 	// monitoring callers rely on (see #2147).
 	snapshotDegraded := statusSnapshot.LoadError() != nil
 	if store != nil {
-		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		sessions := collectCitySessionCountsObserved(statusSnapshot)
 		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
 		snapshot.Summary.SuspendedSessions = sessions.SuspendedSessions
 	}
@@ -704,7 +748,7 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
-	if snapshotDegraded {
+	if snapshotDegraded || statusStoreUnavailableFails(snapshot) {
 		return 1
 	}
 	return 0
@@ -740,7 +784,7 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 			return ControllerJSON{Running: true, PID: identity.PID, Mode: string(mode)}
 		}
 	}
-	if identity := probeControllerIdentity(cityPath); identity.PID != 0 {
+	if identity := controllerIdentityHook(cityPath); identity.PID != 0 {
 		return ControllerJSON{Running: true, PID: identity.PID, Mode: string(identity.HostingMode)}
 	}
 	if err == nil && registered {

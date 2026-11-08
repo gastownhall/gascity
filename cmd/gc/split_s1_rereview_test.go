@@ -234,8 +234,12 @@ func TestNoMarkerCensusTimeoutsAreTransient(t *testing.T) {
 			expireUnsettledCLIRoutesImmediately(t)
 			unmarkSplitCity(t)
 			prev := openInfraMigrationSource
+			// The drain probe is an observation read, so its census opens through
+			// the observation source; the recovering gate's source stays in step.
+			prevObs := openObservationInfraSource
 			openInfraMigrationSource = func(string) (beads.Store, error) { return tc.store, tc.openErr }
-			t.Cleanup(func() { openInfraMigrationSource = prev })
+			openObservationInfraSource = openInfraMigrationSource
+			t.Cleanup(func() { openInfraMigrationSource, openObservationInfraSource = prev, prevObs })
 			_, err := hookSessionDrainPending(drainPendingTestSessionID)
 			if err == nil || !isTransientStorageGateFault(err) || hookDrainProbeFailsClosed(err) {
 				t.Errorf("err=%v transient=%v; want a transient, fail-open fault", err, isTransientStorageGateFault(err))
@@ -486,8 +490,12 @@ func TestNoMarkerCensusMisconfigurationIsStanding(t *testing.T) {
 			expireUnsettledCLIRoutesImmediately(t)
 			unmarkSplitCity(t)
 			prev := openInfraMigrationSource
+			// The drain probe is an observation read, so its census opens through
+			// the observation source; the recovering gate's source stays in step.
+			prevObs := openObservationInfraSource
 			openInfraMigrationSource = func(string) (beads.Store, error) { return tc.store, tc.openErr }
-			t.Cleanup(func() { openInfraMigrationSource = prev })
+			openObservationInfraSource = openInfraMigrationSource
+			t.Cleanup(func() { openInfraMigrationSource, openObservationInfraSource = prev, prevObs })
 			_, err := hookSessionDrainPending(drainPendingTestSessionID)
 			if err == nil || isTransientStorageGateFault(err) || !hookDrainProbeFailsClosed(err) {
 				t.Errorf("err=%v transient=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err))

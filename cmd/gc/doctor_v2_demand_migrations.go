@@ -133,7 +133,7 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		}
 		rigs[rig.Name] = store
 	}
-	sessionsStore := cliSessionStore(city, c.cfg, c.cityPath)
+	sessionsStore := observationSessionStore(city, c.cfg, c.cityPath)
 	sessions, err := loadSessionBeadSnapshot(sessionsStore)
 	if err != nil {
 		// canonicalizeLegacyBoundAssignedWork then refuses to run, counting 0.

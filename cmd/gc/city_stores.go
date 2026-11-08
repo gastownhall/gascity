@@ -198,6 +198,12 @@ func cliStores(cityPath string, scope beads.Store) storeref.Stores {
 	return scopeStores(cityPath, cliStorageRoutes(cityPath), scope)
 }
 
+// observationStores is cliStores for a verify-only caller: the class handles
+// resolve through observationStorageRoutes, which never starts the city's Dolt.
+func observationStores(cityPath string, scope beads.Store) storeref.Stores {
+	return scopeStores(cityPath, observationStorageRoutes(cityPath), scope)
+}
+
 // rigSet is the rig work stores a holder opened, keyed by rig name, with the
 // generation that names this map. The holder bumps the generation wherever it
 // replaces the map and never writes into a published map in place, so equal

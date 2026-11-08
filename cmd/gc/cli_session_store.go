@@ -25,6 +25,13 @@ func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads
 	return withMainStoreEmission(resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil), cityPath)
 }
 
+// observationSessionStore is cliSessionStore for a verify-only caller: the
+// same session-class routing, resolved through observationStorageRoutes so a
+// read can never start the city's Dolt.
+func observationSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
+	return withMainStoreEmission(resolveSessionStore(observationStorageRoutes(cityPath), store, cfg, cityPath, nil), cityPath)
+}
+
 // cliSessionFrontDoor builds the typed session write front door over the
 // session-class store for a CLI one-shot command. It is the relocation-safe
 // replacement for sessionFrontDoor(store) at CLI command roots. The name
@@ -33,6 +40,11 @@ func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads
 // forbid the unrouted form while allowing this one.
 func cliSessionFrontDoor(store beads.Store, cfg *config.City, cityPath string) *session.Store {
 	return sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+}
+
+// observationSessionFrontDoor is cliSessionFrontDoor for a verify-only caller.
+func observationSessionFrontDoor(store beads.Store, cfg *config.City, cityPath string) *session.Store {
+	return sessionFrontDoor(observationSessionStore(store, cfg, cityPath))
 }
 
 // cliRelocatedSessionStore returns the store a one-shot command must resolve,

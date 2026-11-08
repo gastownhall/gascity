@@ -147,7 +147,7 @@ func runPhaseMatrix(t *testing.T, cascade, refuse bool) {
 					// The fault hit a mutation the run tolerates (an edge
 					// already gone).
 					t.Logf("fault at %d absorbed", k)
-				} else if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); got.serving() {
+				} else if got := checkInfraClassConvergence(cityPath, cfg, &bytes.Buffer{}); got.serving() {
 					t.Fatalf("boot SERVES after a kill at mutation %d (outcome %s)", k, got.Outcome)
 				}
 				log.Reset()
@@ -155,7 +155,7 @@ func runPhaseMatrix(t *testing.T, cascade, refuse bool) {
 					t.Fatalf("resume = %s: %s", got.Outcome, log.String())
 				}
 			}
-			if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); got.Outcome != infraMigrationConverged {
+			if got := checkInfraClassConvergence(cityPath, cfg, &bytes.Buffer{}); got.Outcome != infraMigrationConverged {
 				t.Fatalf("boot after resume = %s", got.Outcome)
 			}
 			for _, id := range []string{f.root.ID, f.s1.ID, f.s2.ID, f.done.ID, f.sess.ID} {

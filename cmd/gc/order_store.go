@@ -787,6 +787,15 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 // the order-firing doctor check fans its per-order lookups out across
 // goroutines, and an unguarded cache map would be a data race there.
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
+	return cachedOrderHistoryStoresResolverWith(cityPath, cfg, stderr,
+		func(scopeRoot string) (beads.Store, error) { return openStoreAtForCity(scopeRoot, cityPath) },
+		func(primary beads.Store) beads.OrdersStore { return cliStores(cityPath, primary).Orders() })
+}
+
+// cachedOrderHistoryStoresResolverWith is cachedOrderHistoryStoresResolver over
+// the given scope opener and orders-leg resolver, so a verify-only caller
+// (gc doctor) reads order history without a recovering open.
+func cachedOrderHistoryStoresResolverWith(cityPath string, cfg *config.City, stderr io.Writer, open func(scopeRoot string) (beads.Store, error), ordersLegFor func(primary beads.Store) beads.OrdersStore) orderStoresResolver {
 	var mu sync.Mutex
 	stores := make(map[string]beads.Store)
 	openCached := func(target execStoreTarget) (beads.Store, error) {
@@ -796,7 +805,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if store, ok := stores[key]; ok {
 			return store, nil
 		}
-		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+		store, err := open(target.ScopeRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -817,7 +826,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		// (orderTrackingFrontDoor): the binding on a split city, and the scope
 		// store itself on a city that relocates nothing, where the append
 		// below folds it into the primary leg.
-		ordersLeg := cliStores(cityPath, primary).Orders()
+		ordersLeg := ordersLegFor(primary)
 		out := []beads.OrdersStore{{Store: primary}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))

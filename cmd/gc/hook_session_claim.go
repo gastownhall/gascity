@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,24 @@ func sessionCurrentClaimFrontDoor() (*session.Store, error) {
 	}
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	return cliSessionFrontDoor(store, cfg, cityPath), nil
+}
+
+// observationSessionCurrentClaimFrontDoor is sessionCurrentClaimFrontDoor for a
+// verify-only reader (`gc hook current`, the drain-pending probe): a stopped or
+// stale store answers with a typed unavailable error, and nothing is started or
+// recovered. The write half of the claim back-channel keeps the recovering
+// front door.
+func observationSessionCurrentClaimFrontDoor() (*session.Store, error) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nil, err
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	store, err := openObservationStoreAt(context.Background(), cityPath, cityPath, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return observationSessionFrontDoor(store, cfg, cityPath), nil
 }
 
 // hookStampSessionCurrentClaim records beadID as the work bead the session
@@ -91,7 +110,7 @@ func stampSessionCurrentClaimVia(front sessionFrontGetter, sessionID, beadID str
 // it. Errors are returned rather than swallowed: the caller fails OPEN on them,
 // and it can only make that choice if it can see them.
 func hookSessionDrainPending(sessionID string) (bool, error) {
-	return sessionDrainPendingVia(sessionCurrentClaimFrontDoor, sessionID)
+	return sessionDrainPendingVia(observationSessionCurrentClaimFrontDoor, sessionID)
 }
 
 // sessionDrainPendingVia is hookSessionDrainPending through front.

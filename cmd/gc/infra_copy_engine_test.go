@@ -510,7 +510,7 @@ func (c engineCity) migrateUntilConverged(t *testing.T, request storageOperatorR
 				phases = append(phases, line)
 			}
 		}
-		if report := checkInfraClassConvergence(c.cityPath, request.Cfg, "gc start", io.Discard); report.serving() {
+		if report := checkInfraClassConvergence(c.cityPath, request.Cfg, io.Discard); report.serving() {
 			t.Fatalf("boot serves the city (%s) after run %d paused: %s", report.Outcome, run, said)
 		}
 	}
@@ -649,7 +649,7 @@ func TestAStaleReCopyKilledPartWayStaysStale(t *testing.T) {
 		t.Fatalf("the killed re-copy left the binding %v (err %v), want stale", state, err)
 	}
 	var boot bytes.Buffer
-	if report := checkInfraClassConvergence(city.cityPath, request.Cfg, "gc start", &boot); report.serving() {
+	if report := checkInfraClassConvergence(city.cityPath, request.Cfg, &boot); report.serving() {
 		t.Fatalf("boot serves the partial binding a killed re-copy left (%s)", report.Outcome)
 	}
 	if !strings.Contains(boot.String(), "has not finished") || !strings.Contains(boot.String(), city.target.RecopyRecordPath()) {

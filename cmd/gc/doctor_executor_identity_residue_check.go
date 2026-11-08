@@ -158,7 +158,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 				skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 				continue
 			}
-			scopes = append(scopes, residueScope{label: label, store: store, sessionless: splitRigGraphRelicFree(cliStorageRoutes(c.cityPath), rig.Name)})
+			scopes = append(scopes, residueScope{label: label, store: store, sessionless: splitRigGraphRelicFree(observationStorageRoutes(c.cityPath), rig.Name)})
 		}
 	}
 	if len(scopes) == 0 {
@@ -183,7 +183,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 		skipped = append(skipped, "all scopes skipped: session-identity index unavailable: city bead store did not open")
 		return nil, skipped
 	}
-	sessionStore := cliSessionStore(cityStore, c.cfg, c.cityPath)
+	sessionStore := observationSessionStore(cityStore, c.cfg, c.cityPath)
 	sessionIdentities, err := buildExecutorRouteIdentityIndex(sessionStore)
 	if err != nil {
 		skipped = append(skipped, fmt.Sprintf("all scopes skipped: building session-identity index: %v", err))

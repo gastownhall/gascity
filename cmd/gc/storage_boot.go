@@ -309,6 +309,14 @@ func storageSplitShapeOf(storage config.StorageConfig) (storageSplitShape, strin
 // A non-nil error is a refusal, already carrying the operator instruction; the
 // caller prints it and stops.
 func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
+	return storageBootGateWithSource(openInfraMigrationSource, cityPath, cfg, logPrefix, rec, stderr)
+}
+
+// storageBootGateWithSource is storageBootGate over the opener of the work
+// store its born-split check reads. A verify-only caller supplies an opener
+// that never recovers a managed Dolt (observation_store.go); the boot gate
+// itself names no recovering opener.
+func storageBootGateWithSource(openSource func(cityPath string) (beads.Store, error), cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
 	// A gc older than the split's recorded floor reads none of it, whatever
 	// the config says (storage_min_gc_version.go). One failed stat on a city
 	// that has none.
@@ -413,7 +421,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	}
 	var report infraMigrationReport
 	if ok {
-		report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
+		report = checkInfraClassConvergenceWithSource(openSource, cityPath, cfg, logPrefix, stderr)
 	} else {
 		// The shape is the supported one, so the only thing that can have
 		// refused the target is the provider: this build carries the migration
@@ -442,7 +450,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			report = blocked
 			report.Target = target
 		} else {
-			report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
+			report = checkBornSplitDisciplineWithSource(openSource, cityPath, logPrefix, stderr)
 			report.Target = target
 		}
 	}
@@ -596,7 +604,7 @@ var writeServedBindingNote = writeBornSplitServedNote
 // say where it serves must not have a note written about it.
 //
 // One spelling remains outside this function: the built-in arm's own hold
-// check in inspectInfraConvergence passes the migration's resolved database
+// check in inspectInfraConvergenceWithSource passes the migration's resolved database
 // directly. The two agree by construction and are kept agreeing by
 // TestServedBindingLocationIsWhereTheProviderOpens; they are not merged here
 // because that call sites holds a resolved target and no plan.
@@ -751,7 +759,13 @@ func servedBindingNoteHold(cityPath, binding, provider, location string) (infraM
 // work store that cannot be opened or listed decides nothing, and the
 // uncheckable outcome withholds both serving and the revert instruction.
 func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Writer) infraMigrationReport {
-	source, err := openInfraMigrationSource(cityPath)
+	return checkBornSplitDisciplineWithSource(openInfraMigrationSource, cityPath, logPrefix, stderr)
+}
+
+// checkBornSplitDisciplineWithSource is checkBornSplitDiscipline over the
+// opener of the work store it reads.
+func checkBornSplitDisciplineWithSource(openSource func(cityPath string) (beads.Store, error), cityPath string, logPrefix string, stderr io.Writer) infraMigrationReport {
+	source, err := openSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err), Transient: isTransientStoreFault(err)}

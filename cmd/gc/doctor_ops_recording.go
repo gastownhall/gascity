@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -50,11 +51,13 @@ func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout
 		cfg:        cfg,
 		flags:      flags,
 		resolveErr: resolveErr,
-		open:       func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
-		sessions:   func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
-		clk:        clock.Real{},
+		open: func() (beads.Store, error) {
+			return openObservationStoreAt(context.Background(), cityPath, cityPath, cfg)
+		},
+		sessions: func(store beads.Store) beads.Store { return observationSessionStore(store, cfg, cityPath) },
+		clk:      clock.Real{},
 		reaperScopes: func() []reaperOpRowsScope {
-			return reaperOpRowsScopes(cityPath, cfg, storeSkipped)
+			return reaperOpRowsScopesObserved(cityPath, cfg, storeSkipped)
 		},
 	}
 }

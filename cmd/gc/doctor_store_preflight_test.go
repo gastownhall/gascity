@@ -43,6 +43,14 @@ var doctorCityStoreDependentNames = []string{
 	"hold-label-conventions:city",
 }
 
+// doctorCityStoreGatedInPlaceNames are registered ahead of the preflight, so
+// they stay in the outage list and answer "not checked" instead of being omitted.
+var doctorCityStoreGatedInPlaceNames = []string{
+	"ops-recording",
+	"conversation-lanes",
+	"order-firing-current",
+}
+
 func TestIsBeadStoreUnreachable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -120,8 +128,8 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
 	// The city checks (doctorCityStoreCheckCount) plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 31 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 31", res.Message)
+	if !strings.Contains(res.Message, "skipped 34 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 34", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)
@@ -307,7 +315,13 @@ func TestBuildDoctorChecks_RigStoreNameSetPreflight(t *testing.T) {
 	// Constant-drift lock: omit N store checks and add one preflight entry.
 	// A silent 12th city store check would make this delta diverge without
 	// updating doctorCityStoreCheckCount / beadStorePreflightSkipCount.
-	wantDelta := beadStorePreflightSkipCount(2) - 1 // -1 for bead-store-preflight
+	// The gated-in-place checks are in both name sets, so they do not widen the delta.
+	wantDelta := beadStorePreflightSkipCount(2) - 1 - len(doctorCityStoreGatedInPlaceNames) // -1 for bead-store-preflight
+	for _, name := range doctorCityStoreGatedInPlaceNames {
+		if doctorCheckIndex(outage, name) < 0 {
+			t.Errorf("outage name-set missing gated-in-place %q", name)
+		}
+	}
 	if got := len(healthy) - len(outage); got != wantDelta {
 		t.Fatalf("healthy-outage name delta = %d, want %d (skipCount-1=%d); healthy=%d outage=%d",
 			got, wantDelta, beadStorePreflightSkipCount(2)-1, len(healthy), len(outage))
@@ -342,8 +356,8 @@ func TestBeadStorePreflightSkipCount(t *testing.T) {
 	if got := beadStorePreflightSkipCount(2); got != doctorCityStoreCheckCount+2*doctorPerRigStoreCheckCount {
 		t.Fatalf("skip count 2 rigs = %d, want %d", got, doctorCityStoreCheckCount+6)
 	}
-	if len(doctorCityStoreDependentNames) != doctorCityStoreCheckCount {
-		t.Fatalf("city name list len %d != doctorCityStoreCheckCount %d", len(doctorCityStoreDependentNames), doctorCityStoreCheckCount)
+	if got := len(doctorCityStoreDependentNames) + len(doctorCityStoreGatedInPlaceNames); got != doctorCityStoreCheckCount {
+		t.Fatalf("city name lists len %d != doctorCityStoreCheckCount %d", got, doctorCityStoreCheckCount)
 	}
 }
 

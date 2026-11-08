@@ -114,7 +114,7 @@ func (c *workOptionMetadataMigrationCheck) collect() (targets []workOptionMigrat
 				migrations: migrations,
 			})
 		}
-		sessStore := cliSessionStore(store, c.cfg, c.cityPath)
+		sessStore := observationSessionStore(store, c.cfg, c.cityPath)
 		sessions, err := loadSessionBeads(sessStore)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, err))

@@ -14,6 +14,33 @@ import (
 )
 
 func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	return queryRuntimeEnvFrom(cityPath, cfg, agentCfg, func(scopeRoot string, rig bool) (map[string]string, error) {
+		if rig {
+			return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+		}
+		return bdRuntimeEnvWithError(cityPath)
+	})
+}
+
+// observationQueryRuntimeEnv is controllerQueryRuntimeEnv for a verify-only
+// caller: it classifies the scope first, so a stopped or stale store answers
+// with a typed unavailable error, and builds the env with managed-dolt
+// recovery off (a literal false, which the census guard reads).
+func observationQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	return queryRuntimeEnvFrom(cityPath, cfg, agentCfg, func(scopeRoot string, rig bool) (map[string]string, error) {
+		if err := classifyObservationScope(cityPath, scopeRoot, observationScopeLabel(cityPath, scopeRoot, cfg)); err != nil {
+			return nil, err
+		}
+		if rig {
+			return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, scopeRoot, false)
+		}
+		return bdRuntimeEnvWithErrorRecovery(cityPath, false)
+	})
+}
+
+// queryRuntimeEnvFrom resolves the query scope and copies the env its builder
+// returns. The builder decides whether managed-dolt recovery may run.
+func queryRuntimeEnvFrom(cityPath string, cfg *config.City, agentCfg *config.Agent, build func(scopeRoot string, rig bool) (map[string]string, error)) (map[string]string, error) {
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil, nil
 	}
@@ -24,18 +51,18 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 			if !scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
 				return nil, nil
 			}
-			source, err = bdRuntimeEnvForRigWithError(cityPath, cfg, rigRoot)
+			source, err = build(rigRoot, true)
 		} else {
 			if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 				return nil, nil
 			}
-			source, err = bdRuntimeEnvWithError(cityPath)
+			source, err = build(cityPath, false)
 		}
 	} else {
 		if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 			return nil, nil
 		}
-		source, err = bdRuntimeEnvWithError(cityPath)
+		source, err = build(cityPath, false)
 	}
 	if err != nil {
 		return nil, err
@@ -51,6 +78,33 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 }
 
 func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	return workQueryEnvFrom(cityPath, cfg, agentCfg, controllerQueryRuntimeEnv)
+}
+
+// observationWorkQueryEnv is controllerWorkQueryEnv over the verify-only
+// runtime env.
+func observationWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	return workQueryEnvFrom(cityPath, cfg, agentCfg, observationQueryRuntimeEnv)
+}
+
+// unavailableWorkQueryEnv is the static work-query env of a scope that
+// classified as stopped or stale: its identity and scope coordinates without a
+// store connection, and managed-dolt auto-start off, so a custom query an
+// operator wrote cannot start the server the observation found down.
+func unavailableWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	env, err := workQueryEnvFrom(cityPath, cfg, agentCfg, func(string, *config.City, *config.Agent) (map[string]string, error) {
+		return nil, nil
+	})
+	if err != nil || env == nil {
+		return env, err
+	}
+	env["BEADS_DOLT_AUTO_START"] = "0"
+	return env, nil
+}
+
+// workQueryEnvFrom builds the work-query env; runtimeEnv supplies the
+// store-connection half, and decides whether recovery may run.
+func workQueryEnvFrom(cityPath string, cfg *config.City, agentCfg *config.Agent, runtimeEnv func(string, *config.City, *config.Agent) (map[string]string, error)) (map[string]string, error) {
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil, nil
 	}
@@ -72,7 +126,7 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 			}
 		}
 	}
-	queryEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, agentCfg)
+	queryEnv, err := runtimeEnv(cityPath, cfg, agentCfg)
 	if err != nil {
 		return nil, err
 	}

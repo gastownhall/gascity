@@ -354,10 +354,7 @@ prints the failure record instead of a partial result.
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgeStatus(args, jsonOutput, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdNudgeStatus(args, jsonOutput, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
@@ -374,10 +371,7 @@ func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgeDrainWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdNudgeDrainWithFormat(args, inject, hookFormat, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "emit <system-reminder> output for hook injection")
@@ -396,10 +390,7 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmdNudgePoll(args, sessionName, interval, quiescence, cmd.Flags().Changed("interval"), stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdNudgePoll(args, sessionName, interval, quiescence, cmd.Flags().Changed("interval"), stdout, stderr))
 		},
 	}
 	cmd.Flags().StringVar(&sessionName, "session", "", "runtime session name (defaults to $GC_SESSION_NAME)")
@@ -455,8 +446,11 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(targetID, stderr)
+	target, err := resolveNudgeTargetMaterializing(targetID, false, stderr)
 	if err != nil {
+		if unavailable, ok := asStoreUnavailable(err); ok {
+			return reportObservationUnavailable("gc nudge status", unavailable, jsonOutput, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -862,10 +856,17 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 
 	// With no explicit target, the drain is the hook's own: GC_SESSION_ID
 	// names its session bead exactly, so it is preferred over GC_ALIAS.
-	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
+	target, err := resolveNudgeTargetMaterializing(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
 			switch {
+			case isStoreUnavailableErr(err):
+				// Nothing was read: the hook context stays empty (not even the
+				// clock line), the typed state goes to the operator's stderr,
+				// and the drain succeeds.
+				fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+				emittedHookContext = true
+				return 0
 			case errors.Is(err, errHookSessionClosed):
 				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
 			case isControlPlaneDescriptorError(err):
@@ -876,6 +877,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			return 0
 		}
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
+		if isStoreUnavailableErr(err) {
+			return exitStoreUnavailable
+		}
 		return 1
 	}
 	if inject {
@@ -936,9 +940,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 		return 1
 	}
-	deliveryStore := openNudgeBeadStore(target.cityPath)
+	deliveryStore := openNudgeBeadStoreRecovering(target.cityPath)
 	// Two-store split: the nudge-queue delivery store stays on the nudges class
-	// (openNudgeBeadStore), while the session-class ops — wait-bead reads in
+	// (openNudgeBeadStoreRecovering), while the session-class ops — wait-bead reads in
 	// splitQueuedNudgesForDelivery and the last-nudge-delivered stamp — route
 	// through the session store. Identity today (single backend).
 	deliverySessStore := cliSessionStore(deliveryStore.Store, target.cfg, target.cityPath)
@@ -1130,9 +1134,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintln(stderr, "gc nudge poll: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
-	target, err := resolveNudgeTarget(targetID, stderr)
+	target, err := resolveNudgeTargetMaterializing(targetID, false, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
+		if isStoreUnavailableErr(err) {
+			return exitStoreUnavailable
+		}
 		return 1
 	}
 	if sessionName != "" {
@@ -1157,19 +1164,28 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	stopRuntime := configureNudgePollRuntime(stderr)
 	defer stopRuntime()
 
-	sp, err := newSessionProvider()
+	// The store opens before the session provider: the provider's route table
+	// reads session beads, and neither may start a store that is down. A
+	// poller that finds its city's store unavailable before the loop leaves
+	// the queue for the next start (the loop's own stopped-city exit, #7264,
+	// is unchanged).
+	store, err := openObservationNudgeBeadStoreErr(target.cityPath)
+	if err != nil || store.Store == nil {
+		if unavailable, ok := asStoreUnavailable(err); ok {
+			fmt.Fprintf(stderr, "gc nudge poll: %v\n", unavailable) //nolint:errcheck
+			return exitStoreUnavailable
+		}
+		fmt.Fprintf(stderr, "gc nudge poll: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
+		return 1
+	}
+	sp, err := newObservationSessionProvider(target.cfg, target.cityPath, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	store, err := openNudgeBeadStoreErr(target.cityPath)
-	if err != nil || store.Store == nil {
-		fmt.Fprintf(stderr, "gc nudge poll: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
-		return 1
-	}
 	// Session-class store for the observe read (nudgeObserveTarget); the raw
 	// nudges store keeps flowing to the queue-delivery path. Identity today.
-	sessStore := cliSessionStore(store.Store, target.cfg, target.cityPath)
+	sessStore := observationSessionStore(store.Store, target.cfg, target.cityPath)
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
@@ -2337,8 +2353,67 @@ func warnMailNotify(format string, args ...any) {
 	}
 }
 
-func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
+// resolveNudgeTarget resolves identifier onto the session it names through a
+// verify-only store open: a stopped, stale or unreachable city store is the
+// typed *storeUnavailableError and nothing is started or recovered, and a
+// configured named session without a bead is not found rather than
+// materialized. Callers that create the row use resolveNudgeTargetMaterializing;
+// callers that are not observation doors resolve through
+// resolveNudgeTargetRecovering.
+func resolveNudgeTarget(identifier string) (nudgeTarget, error) {
+	return resolveObservedNudgeTarget(identifier, false)
+}
+
+// lookupObservedSessionID resolves identifier onto an existing session bead: a
+// configured named session without one is not found, never materialized.
+func lookupObservedSessionID(cityPath string, cfg *config.City, store beads.Store, identifier string, _ io.Writer) (string, error) {
+	return resolveObservedSessionID(cityPath, cfg, store, identifier, namedSessionResolveOptions{})
+}
+
+// resolveNudgeTargetMaterializing is resolveNudgeTarget for a door that has
+// always created a configured named session's row when it has none (nudge
+// status, poll and drain): the verify-only resolution answers first, so a
+// stopped or unreachable store is reported before anything is written, and only
+// a session the available store does not hold falls through to the
+// materializing resolution.
+func resolveNudgeTargetMaterializing(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
+	target, err := resolveObservedNudgeTarget(identifier, preferHookIdentity, warningWriter...)
+	if errors.Is(err, session.ErrSessionNotFound) {
+		return resolveNudgeTargetPreferringHookIdentity(identifier, preferHookIdentity, warningWriter...)
+	}
+	return target, err
+}
+
+// resolveNudgeTargetRecovering is resolveNudgeTarget for a caller that is not
+// an observation door: the city's store is opened with managed recovery.
+func resolveNudgeTargetRecovering(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
 	return resolveNudgeTargetPreferringHookIdentity(identifier, false, warningWriter...)
+}
+
+// resolveObservedNudgeTarget is resolveNudgeTargetPreferringHookIdentity over a
+// verify-only store open (openNudgeBeadStore). A store that does not open is
+// reported with its reason, never as a missing session.
+func resolveObservedNudgeTarget(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nudgeTarget{}, err
+	}
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
+	if err != nil {
+		return nudgeTarget{}, err
+	}
+	defer prewarmObservationStorageRoutes(cityPath)()
+	store := openNudgeBeadStore(cityPath)
+	if store.Store == nil {
+		// The seam returns the zero store for any failed open; ask why.
+		if err := observationNudgeStoreFailure(cityPath); err != nil {
+			return nudgeTarget{}, err
+		}
+	}
+	target, err := resolveNudgeTargetInStoreVia(observationSessionStore, lookupObservedSessionID, cityPath, cfg, store, identifier, preferHookIdentity, resolveLoadCityConfigWarningWriter(warningWriter...))
+	// A store that opened but does not answer is unreachable, not a missing
+	// session.
+	return target, observationReadFailure(err, "city")
 }
 
 // resolveNudgeTargetPreferringHookIdentity is resolveNudgeTarget for a caller
@@ -2368,7 +2443,7 @@ func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before 
 	// The load ran the builtin readiness pass the routing read needs; resolve
 	// the routes alongside the store open (prewarmCLIStorageRoutes).
 	defer prewarmCLIStorageRoutes(cityPath)()
-	store := openNudgeBeadStore(cityPath)
+	store := openNudgeBeadStoreRecovering(cityPath)
 	if before != nil {
 		if err := before(cityPath, cfg, store); err != nil {
 			return nudgeTarget{}, err
@@ -2425,11 +2500,19 @@ func messageOpPreflight(cityPath string, cfg *config.City, store beads.NudgesSto
 // open error first. stderr receives the report of a configured named session
 // the resolution materialized for the reconciler to start; nil discards it.
 func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool, stderr io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetInStoreVia(cliSessionStore, resolveSessionIDMaterializingNamed, cityPath, cfg, store, identifier, preferHookIdentity, stderr)
+}
+
+// resolveNudgeTargetInStoreVia is resolveNudgeTargetInStore with the
+// session-class store derived by sessionStoreFor and the identifier resolved by
+// lookupSession, so a verify-only caller resolves its session class through the
+// observation routes and never materializes a configured named session.
+func resolveNudgeTargetInStoreVia(sessionStoreFor func(beads.Store, *config.City, string) beads.Store, lookupSession func(string, *config.City, beads.Store, string, io.Writer) (string, error), cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool, stderr io.Writer) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
 		// (identity today) while the raw store remains the nudge-queue currency.
-		sessStore := cliSessionStore(store.Store, cfg, cityPath)
+		sessStore := sessionStoreFor(store.Store, cfg, cityPath)
 		if preferHookIdentity {
 			identity, ok, err := resolveHookIdentity(sessStore)
 			if err != nil {
@@ -2442,7 +2525,7 @@ func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.Nu
 				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
 			}
 		}
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier, stderr)
+		sessionID, err := lookupSession(cityPath, cfg, sessStore, identifier, stderr)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {
@@ -2623,7 +2706,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	deliveryStore := store
 	if deliveryStore == nil {
-		deliveryStore = openNudgeBeadStore(target.cityPath).Store
+		deliveryStore = openNudgeBeadStoreRecovering(target.cityPath).Store
 	}
 	// sessStore is the SESSION-class store the caller resolved from the WORK store
 	// (the dispatcher threads cr.sessionsBeadStore().Store; the CLI poll derives it

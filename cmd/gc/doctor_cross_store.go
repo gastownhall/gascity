@@ -41,7 +41,7 @@ type doctorScope struct {
 // namespace is returned in unread so a caller treats every id in it as
 // UNDECIDED rather than absent. skipped names the stores that would not open.
 func splitCityDoctorScopes(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) (scopes []doctorScope, unread []string, skipped []string) {
-	graph, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph) // residency:allow — a doctor scan of every store a split city's blockers may live in
+	graph, relocated := observationStorageRoutes(cityPath).storeFor(coordclass.ClassGraph) // residency:allow — a doctor scan of every store a split city's blockers may live in
 	if !relocated || graph == nil || newStore == nil {
 		return nil, nil, nil
 	}
@@ -117,7 +117,7 @@ func (c *crossStoreGatesCheck) Fix(*doctor.CheckContext) error {
 }
 
 func (c *crossStoreGatesCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
-	graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph) // residency:allow — the gates live in the binding, by construction
+	graph, relocated := observationStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph) // residency:allow — the gates live in the binding, by construction
 	if !relocated || graph == nil {
 		return okCheck(c.Name(), "no class binding; drains need no cross-store gates")
 	}

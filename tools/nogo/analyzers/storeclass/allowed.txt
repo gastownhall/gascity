@@ -13,6 +13,7 @@ cmd/gc/city_stores.go	classRefusal	raw-result	1
 cmd/gc/city_stores.go	cliStores	raw-param	1
 cmd/gc/city_stores.go	mintCityStores	mint	1
 cmd/gc/city_stores.go	mintCityStores	raw-param	2
+cmd/gc/city_stores.go	observationStores	raw-param	1
 cmd/gc/city_stores.go	placeClass	mint	1
 cmd/gc/city_stores.go	placeClass	raw-param	1
 cmd/gc/city_stores.go	placeClass	raw-result	1
@@ -44,6 +45,7 @@ cmd/gc/infra_class_migrate.go	readInfraSnapshotAt	raw-param	1
 cmd/gc/infra_class_migrate.go	readInfraSnapshotWithIDs	raw-param	1
 cmd/gc/infra_class_migrate.go	runInfraClassMigrationFrom	raw-result	1
 cmd/gc/infra_class_migrate.go	verifyInfraCopy	raw-param	2
+cmd/gc/infra_class_migrate.go	workSourceOpener	raw-type	1
 cmd/gc/infra_class_recover.go	newSourceDepReader	raw-param	1
 cmd/gc/infra_class_recover.go	planInfraEdges	raw-param	1
 cmd/gc/infra_class_recover.go	recoveredEdgesDifference	raw-param	1
@@ -57,8 +59,10 @@ cmd/gc/infra_class_relower.go	convergedInfraBinding.openEngine	raw-result	1
 cmd/gc/infra_class_relower.go	newInfraRelowerStore	raw-param	1
 cmd/gc/infra_class_relower.go	newInfraRelowerStore	raw-var	1
 cmd/gc/infra_class_relower.go	relowerNowUnitsOn	raw-param	1
+cmd/gc/storage_boot.go	checkBornSplitDisciplineWithSource	raw-param	1
 cmd/gc/storage_boot.go	openInfraPurgeStores	mint	3
 cmd/gc/storage_boot.go	openPlannedBindingEngine	raw-result	1
+cmd/gc/storage_boot.go	storageBootGateWithSource	raw-param	1
 cmd/gc/storage_boot.go	storageRoutes	raw-field	3
 cmd/gc/storage_boot.go	storageRoutes.distinctEngines	raw-result	1
 cmd/gc/storage_boot.go	storageRoutes.hasLegacyResidents	cache-peel	1

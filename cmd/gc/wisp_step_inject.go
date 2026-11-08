@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -48,12 +49,25 @@ func wispStepInjectionContentInProcess(effective string) string {
 	if len(assignees) == 0 {
 		return ""
 	}
-	store := openWispStepStore(effective)
+	// The observation store's bd subprocesses are bound to ctx, so it covers
+	// the whole read, not just the open.
+	ctx, cancel := observationContext()
+	defer cancel()
+	store := openWispStepStore(ctx, effective)
 	if store == nil {
 		return ""
 	}
-	b, err := resolveActiveWispStep(store, cliStores(effective, store), assignees)
-	if err != nil || b == nil {
+	b, err := resolveActiveWispStep(store, observationStores(effective, store), assignees)
+	if err != nil {
+		// A hook reports a store that answered the open but not the read.
+		scopeRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT"))
+		if scopeRoot == "" {
+			scopeRoot = effective
+		}
+		notePrimeHookReadFailure(effective, scopeRoot, err)
+		return ""
+	}
+	if b == nil {
 		return ""
 	}
 	return formatWispStepReminder(b)
@@ -62,11 +76,13 @@ func wispStepInjectionContentInProcess(effective string) string {
 // openWispStepStore opens the bead store to query for active wisp steps.
 // If GC_RIG_ROOT is set it opens that rig's store (where rig-scoped polecat
 // work lives); otherwise it opens the city store at cityPath.
-// Returns nil on any error — callers treat nil as "no store available".
+// Returns nil on any error — callers treat nil as "no store available". The
+// reminder is an observation: a stopped or stale store reads as no store, and
+// the open never starts or recovers it.
 // This is the WORK store and stays unrouted; see resolveActiveWispStep.
-func openWispStepStore(cityPath string) beads.Store {
+func openWispStepStore(ctx context.Context, cityPath string) beads.Store {
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
-		store, err := openStoreAtForCity(rigRoot, cityPath)
+		store, err := openObservationStoreAt(ctx, rigRoot, cityPath, nil)
 		if err == nil {
 			return store
 		}
@@ -74,7 +90,7 @@ func openWispStepStore(cityPath string) beads.Store {
 	if cityPath == "" {
 		return nil
 	}
-	store, err := openCityStoreAt(cityPath)
+	store, err := openObservationStoreAt(ctx, cityPath, cityPath, nil)
 	if err != nil {
 		return nil
 	}

@@ -289,6 +289,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// proof, the provider-key write, the mail and step-reminder injections and
 	// every store open each loaded it again (see invocationConfigMemo).
 	defer beginInvocationConfigMemo()()
+	if hookMode {
+		// Every store read a hook makes is verify-only, and an unavailable store
+		// is reported once (openPrimeHookStore).
+		defer beginPrimeHookStores(stderr)()
+	}
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false
@@ -368,6 +373,24 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	reapedEarly := hookMode && primeHookSessionStart(hookContext)
 	if reapedEarly {
 		defer startNudgePollerReap(cityPath)()
+	}
+	if hookMode {
+		// A SessionStart hook proves its session against the city store. The
+		// store open loads the city config first (loadCityConfigForStoreOpen:
+		// this loader, this writer), which runs the builtin readiness pass the
+		// routing read needs. Loading it here instead lets the routing read run
+		// alongside the first open (prewarmObservationStorageRoutes); the open
+		// then reuses it.
+		if primeHookSessionStart(hookContext) {
+			if _, err := loadCityConfig(cityPath, io.Discard); err == nil {
+				defer prewarmObservationStorageRoutes(cityPath)()
+			}
+		}
+		// The step reminder and the other reads below treat a store they cannot
+		// read as an absent one. Say once, here, when the store is not running
+		// or does not answer (openPrimeHookStore reports it). It follows the
+		// reap start so the reap runs alongside this first store open.
+		_, _ = openPrimeHookStore(cityPath) //nolint:errcheck // a hook never fails on its store; the notice is the report
 	}
 	// A SessionStart hook proves its live managed session against the city
 	// store; the SessionStart mail context below reuses that same handle rather
@@ -461,7 +484,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		if rErr == nil && hookMode {
 			sessionName := os.Getenv("GC_SESSION_NAME")
 			if sessionName == "" {
-				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+				sessionName = primeHookSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
 			target := withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
 				cityPath:          cityPath,
@@ -550,7 +573,7 @@ func primeHookSessionTemplate(cityPath string) string {
 	if cityPath == "" || sessionID == "" {
 		return ""
 	}
-	store, err := openCityStoreAt(cityPath)
+	store, err := openPrimeHookStore(cityPath)
 	if err != nil {
 		return ""
 	}
@@ -559,9 +582,10 @@ func primeHookSessionTemplate(cityPath string) string {
 	// no-refresh config loader is deliberate: this hook fires frequently, and the
 	// pack-refresh side effect of loadCityConfig is inappropriate on a hot path
 	// (the completion path uses the same no-refresh loader for the same reason).
-	// A failed load yields nil cfg, which cliSessionStore treats as identity.
+	// A failed load yields nil cfg, which the session-class resolution treats as
+	// identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessStore := observationSessionStore(store, cfg, cityPath)
 	// The front-door Get rejects a present-but-non-session bead (ErrSessionNotFound)
 	// where the prior raw store.Get projected it; here that only tightens a
 	// crafted/stale id to the empty-return path below — not a regression.
@@ -691,24 +715,19 @@ func primeHookLiveManagedSession(cityPath string, stderr io.Writer) *primeSessio
 	if sessionName == "" {
 		return nil
 	}
-	// The store open loads the city config first (loadCityConfigForStoreOpen:
-	// this loader, this writer), which runs the builtin readiness pass the
-	// routing read needs. Loading it here instead lets the routing read run
-	// alongside the open (prewarmCLIStorageRoutes); the open then reuses it.
-	if _, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		defer prewarmCLIStorageRoutes(cityPath)()
-	}
-	store, err := openCityStoreAt(cityPath)
+	// The caller started the routing read alongside the hook's first store
+	// open (prewarmObservationStorageRoutes); this open reuses it.
+	store, err := openPrimeHookStore(cityPath)
 	if err != nil {
 		return nil
 	}
 	// Route the session-bead read through the session coordination-class store so
 	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
 	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
-	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
-	// identity.
+	// hot hook path; a failed load yields nil cfg, which the session-class
+	// resolution treats as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessStore := observationSessionStore(store, cfg, cityPath)
 	// The front-door Get rejects a present-but-non-session bead
 	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
 	info, err := sessionFrontDoor(sessStore).Get(sessionID)
@@ -918,18 +937,21 @@ func persistPrimeHookProviderSessionKeyAtCity(hookProviderSessionID, cityPath st
 		}
 		cityPath = resolved
 	}
-	store, err := openCityStoreAt(cityPath)
+	store, err := openPrimeHookStore(cityPath)
 	if err != nil {
-		warn("opening city store for session %q: %v", gcSessionID, err)
+		// An unavailable store was reported once, in the hook's own words.
+		if !isStoreUnavailableErr(err) {
+			warn("opening city store for session %q: %v", gcSessionID, err)
+		}
 		return
 	}
 	// Route the session_key write through the session coordination-class store so
 	// a [beads.classes.sessions] relocation reaches it — otherwise the provider
 	// resume key would silently land on the work store while the real session
 	// bead lives in the relocated store. No-refresh loader on this hot hook path
-	// (see primeHookSessionTemplate); nil cfg → cliSessionStore identity.
+	// (see primeHookSessionTemplate); nil cfg → session-class identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessStore := observationSessionStore(store, cfg, cityPath)
 	// WI-6 R5: route the read through the session front door → Info. Get wraps
 	// absence as "loading session %q" and rejects non-session beads with
 	// ErrSessionNotFound; on this hook path both surface through the existing

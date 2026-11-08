@@ -24,10 +24,17 @@ import (
 // the city at cityPath. cfg is that city's config when the caller has it in
 // hand, or nil to have the opt-in read city.toml when it is needed.
 func newBeadsPreflightChecker(cityPath, provider string, cfg *config.City) contract.PreflightChecker {
+	return newBeadsPreflightCheckerWithContext(cityPath, provider, cfg, preflightBDContextReader(cityPath))
+}
+
+// newBeadsPreflightCheckerWithContext is newBeadsPreflightChecker over a
+// caller-chosen `bd context` reader: the recovering reader for mutating
+// callers, the verify-only one for observation (observation_store.go).
+func newBeadsPreflightCheckerWithContext(cityPath, provider string, cfg *config.City, bdContext func(scope string) (contract.PreflightBDContext, error)) contract.PreflightChecker {
 	return contract.PreflightChecker{
 		FS:                         fsys.OSFS{},
 		Provider:                   provider,
-		BDContext:                  preflightBDContextReader(cityPath),
+		BDContext:                  bdContext,
 		DatabaseProjectID:          preflightDatabaseProjectIDReader(cityPath),
 		DeferIdentityToNativeOpen:  preflightIdentityDeferredReader(cityPath),
 		DatabaseSchemaCursors:      preflightDatabaseSchemaCursorsReader(cityPath),
@@ -46,8 +53,20 @@ func newBeadsPreflightChecker(cityPath, provider string, cfg *config.City) contr
 // the database directly over SQL. See contract.PreflightBDContext's doc
 // comment.
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
+	return preflightBDContextReaderWith(func(string) (beads.CommandRunner, error) {
+		return bdCommandRunnerForCity(cityPath), nil
+	})
+}
+
+// preflightBDContextReaderWith is preflightBDContextReader over the runner
+// that newRunner supplies for a scope.
+func preflightBDContextReaderWith(newRunner func(scope string) (beads.CommandRunner, error)) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+		runner, err := newRunner(scope)
+		if err != nil {
+			return contract.PreflightBDContext{}, err
+		}
+		out, err := runner(scope, "bd", "context", "--json")
 		if err != nil {
 			return contract.PreflightBDContext{}, err
 		}

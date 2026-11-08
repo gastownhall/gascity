@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -18,14 +19,20 @@ const (
 
 type nudgeReference = nudgequeue.Reference
 
-// openNudgeBeadStore is a test seam (mirrors the injectable vars in
-// cmd_nudge.go) so tests can substitute a fake store and assert that
-// per-tick poll helpers close every store they open. Tests that replace this
-// package variable must stay serial; do not use t.Parallel in those tests.
-// It routes the opened work store through resolveNudgesStore and returns the
-// strongly-typed beads.NudgesStore so the nudges class is statically visible to
-// every leaf nudge-bead helper; the wrapper carries the same underlying store
-// value (identity to the work store until the nudges class relocates).
+// openNudgeBeadStore is the verify-only nudges-store seam of the observation
+// doors (nudge status, poll and drain's pre-claim reads, prime --hook): it
+// opens the city's store under the observation policy, so a stopped, stale or
+// unreachable store is never started or recovered here. A failed open returns
+// the zero store; a caller that must tell the reason asks
+// openObservationNudgeBeadStoreErr. The paths that deliver nudges and so may
+// recover the store use openNudgeBeadStoreRecovering instead.
+//
+// It is a test seam (mirrors the injectable vars in cmd_nudge.go) so tests can
+// substitute a fake store and assert that per-tick poll helpers close every
+// store they open. Tests that replace this package variable must stay serial;
+// do not use t.Parallel in those tests. It returns the strongly-typed
+// beads.NudgesStore so the nudges class is statically visible to every leaf
+// nudge-bead helper.
 //
 // It discards the opened handle, so a caller of this form can never close the
 // work store the call opened. Once the nudges class relocates, that work store
@@ -35,8 +42,53 @@ type nudgeReference = nudgequeue.Reference
 // the returned handle, never the class store: closing the class store on a
 // relocated city is the bug openOwnedNudgeBeadStore exists to prevent.
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
+	store, _, _ := openObservationNudgeBeadStoreOwned(cityPath)
+	return store
+}
+
+// openNudgeBeadStoreRecovering is openNudgeBeadStore for a frame that is not an
+// observation door: nudge delivery after a claim, and the session-runtime
+// resolution. It opens through openOwnedNudgeBeadStore, so the store is
+// recovered when it is down, and a test that substitutes that var moves it too.
+var openNudgeBeadStoreRecovering = func(cityPath string) beads.NudgesStore {
 	store, _ := openOwnedNudgeBeadStore(cityPath)
 	return store
+}
+
+// openObservationNudgeBeadStoreOwned is openNudgeBeadStoreOwned for a
+// verify-only caller: the work store opens under the observation policy and
+// the nudges class resolves through the observation routes, so nothing here
+// starts or recovers the city's Dolt. An unavailable store returns the typed
+// *storeUnavailableError unwrapped. The opened handle carries no deadline of
+// its own: a poller keeps it for the life of the process.
+func openObservationNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, error) {
+	store, err := openObservationStoreAt(context.Background(), cityPath, cityPath, nil)
+	if err != nil {
+		if _, ok := asStoreUnavailable(err); ok {
+			return beads.NudgesStore{}, nil, err
+		}
+		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
+	}
+	return observationStores(cityPath, store).Nudges(), store, nil
+}
+
+// openObservationNudgeBeadStoreErr is openNudgeBeadStoreErr for a verify-only
+// caller: the open failure is kept, and an unavailable store is the typed
+// *storeUnavailableError.
+func openObservationNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
+	store, _, err := openObservationNudgeBeadStoreOwned(cityPath)
+	return store, err
+}
+
+// observationNudgeStoreFailure answers why the verify-only open of cityPath's
+// nudges store failed: the typed unavailable error, another open error, or nil
+// when the store opens after all (the handle it opened is closed).
+func observationNudgeStoreFailure(cityPath string) error {
+	_, opened, err := openObservationNudgeBeadStoreOwned(cityPath)
+	if err != nil {
+		return err
+	}
+	return closeBeadStoreHandle(opened)
 }
 
 // openOwnedNudgeBeadStore is the owning-frame form of openNudgeBeadStore: it
@@ -59,8 +111,9 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // (scripts/residency-boundary-patterns.txt, rule b).
 //
 // It is a seam for the same reason openNudgeBeadStore is, and is the one the
-// counting fake replaces: openNudgeBeadStore delegates here, so a test that
-// substitutes this var moves both forms at once and the two can never disagree.
+// counting fake replaces: openNudgeBeadStoreRecovering delegates here, so a test
+// that substitutes this var moves both forms at once and the two can never
+// disagree.
 var openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
 	store, opened, _ := openNudgeBeadStoreOwned(cityPath)
 	return store, opened

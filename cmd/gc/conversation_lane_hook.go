@@ -565,13 +565,17 @@ func (e *hookLaneExec) Respond(context.Context, opjournal.RespondCall) opjournal
 // with guarded batches for the file store a test city opens.
 var hookLaneSessionStore = openHookLaneSessionStore
 
+// openHookLaneSessionStore opens the city store under the observation policy:
+// a hook never starts or recovers a stopped store for the lane pass, and the
+// open shares the invocation memo's observation entry with the step reminder's
+// read, so one drain opens the city store once.
 func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Writer) beads.Store {
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	store, err := openObservationStoreAt(context.Background(), cityPath, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge drain: conversation lanes: opening the city store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil
 	}
-	return cliSessionStore(store, cfg, cityPath)
+	return observationSessionStore(store, cfg, cityPath)
 }
 
 // hookDrainLane runs the in-band pass for an injecting drain when conversation

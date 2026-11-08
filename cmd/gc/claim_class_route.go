@@ -45,7 +45,7 @@ package main
 // above stops being true. The claim runs against one leg of a fan-out
 // (hookWorkQueryStores), and for the rig-scoped agents that are the shipped
 // shape of every worker that claims, the city work store is the leg that runs
-// LAST: the rig store is prepended as the primary and appendCityHookStore
+// LAST: the rig store is prepended as the primary and appendCityHookStoreWith
 // appends the city store at the end. So the not-found the FIRST-selected leg
 // returns proves only that THAT leg does not hold the bead — the city work leg
 // behind it may.

@@ -152,7 +152,7 @@ func primeUnreadMailMessages(mp mail.Provider) []mail.Message {
 // inboxes, every candidate is checked.
 func primeUnreadMailMessagesFromInbox(mp mail.Provider, inbox *beadmail.Inbox) []mail.Message {
 	if mp == nil {
-		mp, _ = openCityMailProvider(io.Discard, "gc prime")
+		mp, _, _ = openObservationMailProvider(io.Discard, "gc prime")
 	}
 	if mp == nil {
 		return nil
@@ -200,8 +200,12 @@ func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjecti
 // sessionStartMail is returned, so a closed own session (ownSessionClosed)
 // still silences the ordinary-mail block.
 func sessionStartMailFromCity(stderr io.Writer) sessionStartMail {
-	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc prime")
-	if store == nil || code != 0 {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return sessionStartMail{}
+	}
+	store, err := openPrimeHookStore(cityPath)
+	if err != nil {
 		return sessionStartMail{}
 	}
 	return sessionStartMailInjection(store, nil, cityPath, stderr)

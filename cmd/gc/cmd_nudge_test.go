@@ -2639,9 +2639,12 @@ dir = "myrig"
 	runtimeName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "myrig/witness")
 	t.Setenv("GC_CITY", cityDir)
 
-	target, err := resolveNudgeTarget("myrig/witness")
+	// Materializing the configured named session is the recovering resolution;
+	// the plain resolveNudgeTarget is the verify-only form and reports it as
+	// not found.
+	target, err := resolveNudgeTargetRecovering("myrig/witness")
 	if err != nil {
-		t.Fatalf("resolveNudgeTarget(alias): %v", err)
+		t.Fatalf("resolveNudgeTargetRecovering(alias): %v", err)
 	}
 	if target.alias != "myrig/witness" {
 		t.Fatalf("alias = %q, want myrig/witness", target.alias)

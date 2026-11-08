@@ -26,6 +26,7 @@ next to that code; read the matching file before changing it.
 |---|---|
 | Asked to run or try Gas City, not change it | README "Get it running" (no build) |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
+| Read-only `cmd/gc` commands, store opens | `engdocs/architecture/beads.md` invariant 18 |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
@@ -37,10 +38,10 @@ next to that code; read the matching file before changing it.
 | Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
 | A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |
-| Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` (lifecycle analysis and cleanup-bug lessons) |
+| Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` |
 | A `release-gates/*.md` deploy gate | `engdocs/contributors/release-gate-criteria-conventions.md` |
 | Bazel builds | `engdocs/bazel-quickstart.md` |
-| Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
+| Where a package lives | `engdocs/contributors/codebase-map.md`, then `go doc` |
 | What is planned | `ROADMAP.md` |
 
 ## How work flows here

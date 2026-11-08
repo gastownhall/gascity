@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,9 @@ type cityStatusSnapshot struct {
 	Controller      ControllerJSON
 	Suspended       bool
 	Beads           *beads.BeadsDiagnostic
+	// StoreUnavailable is the typed state of a store gc status found not
+	// available and did not recover; nil when the store was read (or absent).
+	StoreUnavailable *storeUnavailableError
 	// ConditionalWrites is the daemon's latched §12.5 snapshot; nil on the
 	// local fallback path (a stopped controller has no latched state to show).
 	ConditionalWrites *api.StatusConditionalWrites
@@ -96,19 +100,47 @@ type rigStatusCounts struct {
 	Suspended int
 }
 
+// openObservationCityStoreForStatus is the default openCityStoreAtForStatus:
+// it opens the city store under the verify-only observation policy, so a
+// stopped or stale store answers with a typed *storeUnavailableError instead
+// of being recovered. The store backs the whole command, so its subprocesses
+// carry no deadline of their own; status bounds each read it makes.
+func openObservationCityStoreForStatus(cityPath string) (beads.StoreOpenResult, error) {
+	return openObservationStoreResultAt(context.Background(), cityPath, cityPath, nil)
+}
+
+// openCityStatusStore opens the city store for gc status. A store that is not
+// available is reported on stderr and surfaces as a nil store with code 1;
+// callers that render a degraded view instead use openCityStatusStoreState.
 func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads.BeadsDiagnostic, int) {
+	store, diagnostic, unavailable, code := openCityStatusStoreState(cityPath, stderr)
+	if unavailable != nil {
+		return nil, nil, 1
+	}
+	return store, diagnostic, code
+}
+
+// openCityStatusStoreState is openCityStatusStore that hands a typed
+// unavailable store back to the caller (nil store, non-nil unavailable, code
+// 0) so the caller can render status without it. The one-line diagnostic
+// goes to stderr either way.
+func openCityStatusStoreState(cityPath string, stderr io.Writer) (beads.Store, *beads.BeadsDiagnostic, *storeUnavailableError, int) {
 	if cityPath == "" {
-		return nil, nil, 0
+		return nil, nil, nil, 0
 	}
 	if !cityStatusStorePresent(cityPath) {
-		return nil, nil, 0
+		return nil, nil, nil, 0
 	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
+		if unavailable, ok := asStoreUnavailable(err); ok {
+			fmt.Fprintf(stderr, "gc status: %v\n", unavailable) //nolint:errcheck // best-effort stderr
+			return nil, nil, unavailable, 0
+		}
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, nil, 1
+		return nil, nil, nil, 1
 	}
-	return opened.Store, diagnosticPtr(opened.Diagnostic), 0
+	return opened.Store, diagnosticPtr(opened.Diagnostic), nil, 0
 }
 
 func cityStatusStorePresent(cityPath string) bool {
@@ -169,6 +201,23 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stderr io.Writer,
 ) cityStatusSnapshot {
+	return collectCityStatusSnapshotObserved(namedSessionStatusForCity, sp, cfg, cityPath, store, nil, statusSnapshot, stderr)
+}
+
+// collectCityStatusSnapshotObserved is collectCityStatusSnapshotFromStoreSnapshot
+// for a store that may have been found unavailable (store nil, unavailable
+// set). The snapshot carries the typed state so the renderers can say why the
+// store-derived rows are missing instead of showing them as empty.
+func collectCityStatusSnapshotObserved(
+	namedStatus namedSessionStatusFunc,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	unavailable *storeUnavailableError,
+	statusSnapshot *sessionBeadSnapshot,
+	stderr io.Writer,
+) cityStatusSnapshot {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspended := os.Getenv("GC_SUSPENDED") == "1"
 	if cfg != nil {
@@ -179,9 +228,18 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		EffectiveAPIURL: resolveEffectiveAPIURL(cityPath, cfg),
 		Controller:      controllerStatusForCity(cityPath),
 		Suspended:       suspended,
+
+		StoreUnavailable: unavailable,
 	}
 	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
 	snapshot.CityName = loadedCityName(cfg, cityPath)
+	// A store that opened but whose session read got no answer is unreachable:
+	// the rows below were not read, not empty.
+	if unavailable == nil {
+		if typed, ok := asStoreUnavailable(observationReadFailure(statusSnapshot.LoadError(), "city")); ok {
+			snapshot.StoreUnavailable = typed
+		}
+	}
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
 		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, stderr)
@@ -321,7 +379,10 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	for _, ns := range cfg.NamedSessions {
 		identity := ns.QualifiedName()
 		mode := ns.ModeOrDefault()
-		status := namedSessionStatusForCity(cityPath, cfg, store, statusSnapshot, snapshot.CityName, identity, mode, suspState, suspendedRigs)
+		status := namedStatus(cityPath, cfg, store, statusSnapshot, snapshot.CityName, identity, mode, suspState, suspendedRigs)
+		if store == nil && unavailable != nil {
+			status = unavailable.namedSessionStatus()
+		}
 		snapshot.NamedSessions = append(snapshot.NamedSessions, cityStatusNamedSession{
 			Identity: identity,
 			Status:   status,
@@ -330,6 +391,78 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	}
 
 	return snapshot
+}
+
+// namedSessionStatusFunc computes one named session's status row.
+type namedSessionStatusFunc func(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	cityName string,
+	identity string,
+	mode string,
+	suspState suspensionstate.State,
+	suspendedRigs map[string]bool,
+) string
+
+// namedSessionStatusFromSnapshot answers a named session's status from the
+// already-loaded session snapshot alone. handled is false when the answer needs
+// a store lookup (no snapshot), which only the recovering caller performs: the
+// lookup resolves, and may materialize, a session.
+func namedSessionStatusFromSnapshot(
+	cfg *config.City,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	cityName string,
+	identity string,
+	mode string,
+	suspState suspensionstate.State,
+	suspendedRigs map[string]bool,
+) (status string, handled bool) {
+	status = "reserved-unmaterialized"
+	if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
+		if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspState, suspendedRigs) {
+			status = "degraded blocked"
+		}
+	}
+	if store == nil {
+		return status, true
+	}
+	if statusSnapshot != nil {
+		if info, ok := statusSnapshot.FindInfoByNamedIdentity(identity); ok {
+			if state := strings.TrimSpace(info.MetadataState); state != "" {
+				return state, true
+			}
+			return "materialized", true
+		}
+		// Bead not in snapshot. If the snapshot itself is degraded
+		// (load timeout or list error), surface that as a lookup error
+		// so operators see the same signal the pre-snapshot resolver
+		// path produced. See gastownhall/gascity#2148.
+		if err := statusSnapshot.LoadError(); err != nil {
+			return "lookup error: " + err.Error(), true
+		}
+		return status, true
+	}
+	return status, false
+}
+
+// namedSessionStatusObserved is the verify-only namedSessionStatusFunc: it
+// reads the loaded snapshot and nothing else.
+func namedSessionStatusObserved(
+	_ string,
+	cfg *config.City,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	cityName string,
+	identity string,
+	mode string,
+	suspState suspensionstate.State,
+	suspendedRigs map[string]bool,
+) string {
+	status, _ := namedSessionStatusFromSnapshot(cfg, store, statusSnapshot, cityName, identity, mode, suspState, suspendedRigs)
+	return status
 }
 
 func namedSessionStatusForCity(
@@ -343,29 +476,8 @@ func namedSessionStatusForCity(
 	suspState suspensionstate.State,
 	suspendedRigs map[string]bool,
 ) string {
-	status := "reserved-unmaterialized"
-	if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-		if mode == "always" && namedSessionBlockedBySuspension(cfg, spec.Agent, suspState, suspendedRigs) {
-			status = "degraded blocked"
-		}
-	}
-	if store == nil {
-		return status
-	}
-	if statusSnapshot != nil {
-		if info, ok := statusSnapshot.FindInfoByNamedIdentity(identity); ok {
-			if state := strings.TrimSpace(info.MetadataState); state != "" {
-				return state
-			}
-			return "materialized"
-		}
-		// Bead not in snapshot. If the snapshot itself is degraded
-		// (load timeout or list error), surface that as a lookup error
-		// so operators see the same signal the pre-snapshot resolver
-		// path produced. See gastownhall/gascity#2148.
-		if err := statusSnapshot.LoadError(); err != nil {
-			return "lookup error: " + err.Error()
-		}
+	status, handled := namedSessionStatusFromSnapshot(cfg, store, statusSnapshot, cityName, identity, mode, suspState, suspendedRigs)
+	if handled {
 		return status
 	}
 
@@ -391,6 +503,16 @@ func namedSessionStatusForCity(
 		return state
 	}
 	return "materialized"
+}
+
+// collectCitySessionCountsObserved counts sessions from the loaded snapshot
+// alone. A verify-only status always has a snapshot, so it never builds a
+// session catalog (which needs a provider and a store lookup).
+func collectCitySessionCountsObserved(snapshot *sessionBeadSnapshot) StatusSummaryJSON {
+	if snapshot == nil {
+		return StatusSummaryJSON{}
+	}
+	return countCitySessionsFromSnapshot(snapshot)
 }
 
 func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, snapshot *sessionBeadSnapshot) (StatusSummaryJSON, error) {
@@ -465,6 +587,9 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	}
 	if !snapshot.Controller.Running {
 		signals = append(signals, "controller_not_running")
+	}
+	if unavailable := snapshot.StoreUnavailable; unavailable != nil {
+		signals = append(signals, "store_"+strings.ReplaceAll(string(unavailable.State), "-", "_"))
 	}
 	// A running count of zero is a fact about the agents only when the probe
 	// answered for all of them. During partial status the count is zero
@@ -583,6 +708,9 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 		fmt.Fprintf(stdout, "  Suspended:  yes\n") //nolint:errcheck // best-effort stdout
 	} else {
 		fmt.Fprintf(stdout, "  Suspended:  no\n") //nolint:errcheck // best-effort stdout
+	}
+	if unavailable := snapshot.StoreUnavailable; unavailable != nil {
+		fmt.Fprintf(stdout, "  Store:      %s (%s)\n", unavailable.namedSessionStatus(), unavailable.State) //nolint:errcheck // best-effort stdout
 	}
 
 	if len(snapshot.Agents) > 0 {

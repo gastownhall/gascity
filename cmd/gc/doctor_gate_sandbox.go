@@ -94,8 +94,8 @@ func defaultGateSandboxRead(cityPath string, env []string) error {
 			exact[name] = value
 		}
 	}
-	run := gateSandboxCommandRunnerWithEnvContext(ctx, exact)
-	if _, err := run(cityPath, "bd", "list", "--json", "--limit", "1"); err != nil {
+	runBd := gateSandboxCommandRunnerWithEnvContext(ctx, exact)
+	if _, err := runBd(cityPath, "bd", "list", "--json", "--limit", "1"); err != nil {
 		// The runner already folds bd's stderr/stdout detail into err, so the
 		// message is the whole diagnostic; clip it to one readable line.
 		return errors.New(doctorClipGateOutput(err.Error()))

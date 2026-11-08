@@ -619,7 +619,7 @@ func TestEnsureInfraClassMigratedIsDarkForGenesisCities(t *testing.T) {
 			refuseInfraMigrationSource(t)
 
 			var log bytes.Buffer
-			if got := checkInfraClassConvergence(cityPath, tc.cfg, "gc start", &log); got.Outcome != infraMigrationNotConfigured {
+			if got := checkInfraClassConvergence(cityPath, tc.cfg, &log); got.Outcome != infraMigrationNotConfigured {
 				t.Fatalf("outcome = %v, want not-configured; log: %s", got.Outcome, log.String())
 			}
 			if log.Len() != 0 {
@@ -1253,7 +1253,7 @@ func TestEnsureInfraClassMigratedAcceptsWispGCDeletions(t *testing.T) {
 
 	// The boot check: the GC'd rows are retained copies to clear, never strands.
 	var log bytes.Buffer
-	report := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	report := checkInfraClassConvergence(cityPath, cfg, &log)
 	if report.Outcome != infraMigrationRetained {
 		t.Fatalf("boot outcome = %v, want retained-copies; the binding's own GC must not read as a stranded write. log: %s", report.Outcome, log.String())
 	}

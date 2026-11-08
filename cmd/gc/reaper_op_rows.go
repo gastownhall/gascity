@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -120,28 +121,54 @@ func retainedTypesNameOp(out []byte) (bool, error) {
 // a stopped store starts its proxy and Dolt child, and the gate's stand-ins
 // already report that scope.
 func reaperOpRowsScopes(cityPath string, cfg *config.City, skipped func(scopeRoot string) bool) []reaperOpRowsScope {
+	return reaperOpRowsScopesWith(cityPath, cfg, skipped, func(scopeRoot string) beads.CommandRunner {
+		if samePath(scopeRoot, cityPath) {
+			return bdCommandRunnerForCity(cityPath)
+		}
+		return bdCommandRunnerForRig(cityPath, cfg, scopeRoot)
+	})
+}
+
+// reaperOpRowsScopesObserved is reaperOpRowsScopes for a verify-only caller:
+// each scope's runner is the no-recovery observation runner, so a probe of a
+// scope that died after the gate classified it cannot restart anything.
+func reaperOpRowsScopesObserved(cityPath string, cfg *config.City, skipped func(scopeRoot string) bool) []reaperOpRowsScope {
+	return reaperOpRowsScopesWith(cityPath, cfg, skipped, func(scopeRoot string) beads.CommandRunner {
+		runner, err := observationBdRunner(context.Background(), cityPath, scopeRoot, cfg)
+		if err != nil {
+			return func(_, _ string, _ ...string) ([]byte, error) { return nil, err }
+		}
+		return runner
+	})
+}
+
+// reaperOpRowsScopesWith is reaperOpRowsScopes with runnerFor supplying each
+// scope's bd runner.
+func reaperOpRowsScopesWith(cityPath string, cfg *config.City, skipped func(scopeRoot string) bool, runnerFor func(scopeRoot string) beads.CommandRunner) []reaperOpRowsScope {
 	if cfg == nil {
 		return nil
 	}
 	var scopes []reaperOpRowsScope
 	seen := map[string]bool{}
-	add := func(label, dir string, run func() beads.CommandRunner) {
+	add := func(label, dir string, runnerOf func() beads.CommandRunner) {
 		key := filepath.Clean(dir)
 		if seen[key] || !providerUsesBdStoreContract(rawBeadsProviderForScope(dir, cityPath)) ||
 			orderScopeBackend(cityPath, dir) == "http" || (skipped != nil && skipped(dir)) {
 			return
 		}
 		seen[key] = true
-		scopes = append(scopes, reaperOpRowsScope{label: label, dir: dir, run: run()})
+		scope := reaperOpRowsScope{label: label, dir: dir}
+		scope.run = runnerOf()
+		scopes = append(scopes, scope)
 	}
-	add("city", bdCityScopeTarget(cityPath, cfg).ScopeRoot, func() beads.CommandRunner { return bdCommandRunnerForCity(cityPath) })
+	add("city", bdCityScopeTarget(cityPath, cfg).ScopeRoot, func() beads.CommandRunner { return runnerFor(cityPath) })
 	suspended := buildSuspendedRigPathsForCity(cfg, cityPath)
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" || suspended[filepath.Clean(rig.Path)] {
 			continue
 		}
 		rigPath := rig.Path
-		add("rig:"+rig.Name, bdRigScopeTarget(cityPath, rig).ScopeRoot, func() beads.CommandRunner { return bdCommandRunnerForRig(cityPath, cfg, rigPath) })
+		add("rig:"+rig.Name, bdRigScopeTarget(cityPath, rig).ScopeRoot, func() beads.CommandRunner { return runnerFor(rigPath) })
 	}
 	return scopes
 }

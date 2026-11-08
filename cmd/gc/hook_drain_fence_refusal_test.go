@@ -191,11 +191,13 @@ func TestHookDrainFenceFailsOpenOnATransientGateFault(t *testing.T) {
 	if err := closeCLIStorageRoutes(); err != nil {
 		t.Fatal(err)
 	}
-	prev := openInfraMigrationSource
+	prev, prevObs := openInfraMigrationSource, openObservationInfraSource
 	openInfraMigrationSource = func(string) (beads.Store, error) {
 		return nil, errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`)
 	}
-	t.Cleanup(func() { openInfraMigrationSource = prev })
+	// The drain probe is an observation read: its gate census opens here.
+	openObservationInfraSource = openInfraMigrationSource
+	t.Cleanup(func() { openInfraMigrationSource, openObservationInfraSource = prev, prevObs })
 
 	_, err := hookSessionDrainPending(drainPendingTestSessionID)
 	if err == nil {

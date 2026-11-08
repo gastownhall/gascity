@@ -336,6 +336,9 @@ func TestClaimHookApplicationErrorOnFederatedRevalidationStaysExitOne(t *testing
 func hookExitCodeCity(t *testing.T, workQuery string) {
 	t.Helper()
 	clearGCEnv(t)
+	// These cities have no store at all; GC_DOLT=skip makes the scope available
+	// so the failing work query, not a stopped store, is what the test exercises.
+	t.Setenv("GC_DOLT", "skip")
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -384,11 +387,11 @@ func TestHookCommandRendersStoreUnavailableAsExitTwo(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"hook", "worker"}, &stdout, &stderr)
-			if code != 2 {
-				t.Fatalf("gc hook rendered exit %d, want 2 for a store-unavailable work-query failure; stderr=%s", code, stderr.String())
+			if code != 69 {
+				t.Fatalf("gc hook rendered exit %d, want 69 for a store-unavailable work-query failure; stderr=%s", code, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-				t.Fatalf("stderr %q missing token %q", stderr.String(), hookStoreUnavailableToken)
+			if !strings.Contains(stderr.String(), "store unavailable: unreachable scope=") {
+				t.Fatalf("stderr %q missing the typed store-unavailable line %q", stderr.String(), "store unavailable: unreachable scope=")
 			}
 		})
 	}
@@ -438,11 +441,11 @@ func TestHookCommandRendersFederatedLegTimeoutAsExitTwo(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"hook", "worker"}, &stdout, &stderr)
-			if code != 2 {
-				t.Fatalf("gc hook rendered exit %d, want 2 for a federated leg timeout; stderr=%s", code, stderr.String())
+			if code != 69 {
+				t.Fatalf("gc hook rendered exit %d, want 69 for a federated leg timeout; stderr=%s", code, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-				t.Fatalf("stderr %q missing token %q", stderr.String(), hookStoreUnavailableToken)
+			if !strings.Contains(stderr.String(), "store unavailable: unreachable scope=") {
+				t.Fatalf("stderr %q missing the typed store-unavailable line %q", stderr.String(), "store unavailable: unreachable scope=")
 			}
 			if !strings.Contains(stderr.String(), tc.legErr) {
 				t.Fatalf("stderr %q does not name the failed leg %q", stderr.String(), tc.legErr)
@@ -526,17 +529,24 @@ func TestHookCommandJSONFailurePointsAtStderrOnExitTwo(t *testing.T) {
 	prev := hookClaimQueryRetryInterval
 	hookClaimQueryRetryInterval = time.Nanosecond
 	t.Cleanup(func() { hookClaimQueryRetryInterval = prev })
-	for _, args := range [][]string{
-		{"hook", "worker", "--json"},
-		{"hook", "worker", "--claim", "--json"},
+	// Plain discovery is an observation and exits 69 with the typed line;
+	// --claim is a mutating door and keeps exit 2 with the token.
+	for _, tc := range []struct {
+		args     []string
+		wantExit int
+		wantLine string
+	}{
+		{[]string{"hook", "worker", "--json"}, 69, "store unavailable: unreachable scope="},
+		{[]string{"hook", "worker", "--claim", "--json"}, 2, hookStoreUnavailableToken},
 	} {
+		args := tc.args
 		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
 			hookExitCodeCity(t, "printf 'Error: dial tcp 127.0.0.1:3307: connection refused\\n' >&2; exit 1")
 
 			var stdout, stderr bytes.Buffer
 			code := run(args, &stdout, &stderr)
-			if code != 2 {
-				t.Fatalf("gc %s rendered exit %d, want 2; stderr=%s", strings.Join(args, " "), code, stderr.String())
+			if code != tc.wantExit {
+				t.Fatalf("gc %s rendered exit %d, want %d; stderr=%s", strings.Join(args, " "), code, tc.wantExit, stderr.String())
 			}
 			var envelope struct {
 				OK     bool   `json:"ok"`
@@ -550,14 +560,17 @@ func TestHookCommandJSONFailurePointsAtStderrOnExitTwo(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 				t.Fatalf("stdout is not a single JSON failure envelope: %v; stdout=%q", err, stdout.String())
 			}
-			if envelope.OK || envelope.Action != "" || envelope.Error.ExitCode != 2 {
-				t.Fatalf("envelope = %+v, want ok=false exit_code=2 and no action", envelope)
+			if envelope.OK || envelope.Action != "" || envelope.Error.ExitCode != tc.wantExit {
+				t.Fatalf("envelope = %+v, want ok=false exit_code=%d and no action", envelope, tc.wantExit)
 			}
-			if !strings.Contains(envelope.Error.Message, "see stderr") {
+			if tc.wantExit == 69 && envelope.Error.Code != "store_unavailable" {
+				t.Fatalf("envelope code %q, want store_unavailable", envelope.Error.Code)
+			}
+			if tc.wantExit == 2 && !strings.Contains(envelope.Error.Message, "see stderr") {
 				t.Fatalf("envelope message %q does not point at stderr, where the token and cause are", envelope.Error.Message)
 			}
-			if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-				t.Fatalf("stderr %q missing token %q", stderr.String(), hookStoreUnavailableToken)
+			if !strings.Contains(stderr.String(), tc.wantLine) {
+				t.Fatalf("stderr %q missing %q", stderr.String(), tc.wantLine)
 			}
 		})
 	}
@@ -578,11 +591,11 @@ func TestHookCommandRendersWorkQueryTimeoutAsExitTwo(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"hook", "worker"}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("gc hook rendered exit %d, want 2 for a timed-out work query; stderr=%s", code, stderr.String())
+	if code != 69 {
+		t.Fatalf("gc hook rendered exit %d, want 69 for a timed-out work query; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-		t.Fatalf("stderr %q missing token %q", stderr.String(), hookStoreUnavailableToken)
+	if !strings.Contains(stderr.String(), "store unavailable: unreachable scope=") {
+		t.Fatalf("stderr %q missing the typed store-unavailable line %q", stderr.String(), "store unavailable: unreachable scope=")
 	}
 }
 
@@ -611,13 +624,13 @@ func TestHookCommandRendersDefaultWorkQueryTimeoutAsExitTwo(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"hook"}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("gc hook rendered exit %d, want 2 for a default work query that overran its deadline; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	if code != 69 {
+		t.Fatalf("gc hook rendered exit %d, want 69 for a default work query that overran its deadline; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want no output when the store is unavailable", got)
 	}
-	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
-		t.Fatalf("stderr %q missing token %q", stderr.String(), hookStoreUnavailableToken)
+	if !strings.Contains(stderr.String(), "store unavailable: unreachable scope=") {
+		t.Fatalf("stderr %q missing the typed store-unavailable line %q", stderr.String(), "store unavailable: unreachable scope=")
 	}
 }
