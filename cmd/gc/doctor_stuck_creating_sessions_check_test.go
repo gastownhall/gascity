@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // stuckCreatingSessionBead builds a session bead in the given state whose
@@ -41,8 +42,20 @@ func stuckCreatingRoutedBead(id, routedTo, assignee string) beads.Bead {
 	}
 }
 
-func stuckCreatingStoreFactory(store beads.Store) func(string) (beads.Store, error) {
-	return func(string) (beads.Store, error) { return store, nil }
+// stuckCreatingTyped adapts a raw per-scope store opener to the typed handles
+// the check takes, minting them the way the doctor registration does.
+func stuckCreatingTyped(open func(string) (beads.Store, error)) func(string) (storeref.Stores, error) {
+	return func(path string) (storeref.Stores, error) {
+		scope, err := open(path)
+		if err != nil {
+			return storeref.Stores{}, err
+		}
+		return cliStores(path, scope), nil
+	}
+}
+
+func stuckCreatingStoreFactory(store beads.Store) func(string) (storeref.Stores, error) {
+	return stuckCreatingTyped(func(string) (beads.Store, error) { return store, nil })
 }
 
 func stuckCreatingBuilderConfig() *config.City {
@@ -73,12 +86,12 @@ func TestStuckCreatingSessionsCheckWarnsOnAbandonedCreate(t *testing.T) {
 		stuckCreatingRoutedBead("GA-4", "gascity/pm", ""),
 	}, nil)
 
-	result := newStuckCreatingSessionsCheck(stuckCreatingBuilderConfig(), cityDir, func(path string) (beads.Store, error) {
+	result := newStuckCreatingSessionsCheck(stuckCreatingBuilderConfig(), cityDir, stuckCreatingTyped(func(path string) (beads.Store, error) {
 		if path != cityDir {
 			return nil, fmt.Errorf("unexpected store path %q", path)
 		}
 		return store, nil
-	}).Run(&doctor.CheckContext{})
+	})).Run(&doctor.CheckContext{})
 
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
@@ -199,13 +212,13 @@ func TestStuckCreatingSessionsCheckScansRigScopes(t *testing.T) {
 		}, nil),
 	}
 
-	result := newStuckCreatingSessionsCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+	result := newStuckCreatingSessionsCheck(cfg, cityDir, stuckCreatingTyped(func(path string) (beads.Store, error) {
 		store, ok := stores[path]
 		if !ok {
 			return nil, fmt.Errorf("unexpected store path %q", path)
 		}
 		return store, nil
-	}).Run(&doctor.CheckContext{})
+	})).Run(&doctor.CheckContext{})
 
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
@@ -219,9 +232,9 @@ func TestStuckCreatingSessionsCheckScansRigScopes(t *testing.T) {
 func TestStuckCreatingSessionsCheckWarnsOnSkippedStoreScope(t *testing.T) {
 	cityDir := t.TempDir()
 
-	result := newStuckCreatingSessionsCheck(stuckCreatingBuilderConfig(), cityDir, func(string) (beads.Store, error) {
+	result := newStuckCreatingSessionsCheck(stuckCreatingBuilderConfig(), cityDir, stuckCreatingTyped(func(string) (beads.Store, error) {
 		return nil, errors.New("city offline")
-	}).Run(&doctor.CheckContext{})
+	})).Run(&doctor.CheckContext{})
 
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning (an unreadable store must not read as healthy): %#v", result.Status, result)

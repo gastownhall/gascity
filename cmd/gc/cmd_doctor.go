@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -496,7 +497,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
-			registerCityStoreCheck(newStuckCreatingSessionsCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newStuckCreatingSessionsCheck(cfg, cityPath, func(scopePath string) (storeref.Stores, error) {
+				scope, err := storeFactory(scopePath)
+				if err != nil {
+					return storeref.Stores{}, err
+				}
+				return cliStores(cityPath, scope), nil
+			}))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
 			registerCityStoreCheck(newExecRuntimeIdentityCheck(cfg, cityPath, sessionSP, sessionSPErr))

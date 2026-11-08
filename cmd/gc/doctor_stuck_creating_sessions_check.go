@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -25,13 +26,13 @@ import (
 //
 // Detection only: releasing the slot is `gc session close`, an operator call.
 type stuckCreatingSessionsCheck struct {
-	cfg      *config.City
-	cityPath string
-	newStore func(string) (beads.Store, error)
+	cfg       *config.City
+	cityPath  string
+	newStores func(string) (storeref.Stores, error)
 }
 
-func newStuckCreatingSessionsCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *stuckCreatingSessionsCheck {
-	return &stuckCreatingSessionsCheck{cfg: cfg, cityPath: cityPath, newStore: newStore}
+func newStuckCreatingSessionsCheck(cfg *config.City, cityPath string, newStores func(string) (storeref.Stores, error)) *stuckCreatingSessionsCheck {
+	return &stuckCreatingSessionsCheck{cfg: cfg, cityPath: cityPath, newStores: newStores}
 }
 
 func (c *stuckCreatingSessionsCheck) Name() string { return "stuck-creating-sessions" }
@@ -100,7 +101,7 @@ func (f stuckCreatingFinding) describe(now time.Time) string {
 // Run puts the id, age and routed-work count in the Message because doctor
 // prints Details only under -v and a stuck session should be loud without it.
 func (c *stuckCreatingSessionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	if c.cfg == nil || c.newStore == nil {
+	if c.cfg == nil || c.newStores == nil {
 		return warnCheck(c.Name(), "stuck-creating check could not run: no config or bead store available",
 			"fix city.toml and bead store access, then rerun gc doctor", nil)
 	}
@@ -148,12 +149,12 @@ func (c *stuckCreatingSessionsCheck) collect() (findings []stuckCreatingFinding,
 		if strings.TrimSpace(sc.path) == "" {
 			continue
 		}
-		store, err := c.newStore(sc.path)
+		stores, err := c.newStores(sc.path)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		scopeFindings, err := c.collectStoreFindings(store, sc.label)
+		scopeFindings, err := c.collectStoreFindings(stores, sc.label)
 		findings = append(findings, scopeFindings...)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, err))
@@ -173,8 +174,8 @@ func (c *stuckCreatingSessionsCheck) collect() (findings []stuckCreatingFinding,
 // sessionWakeCreateAbandonedInfo, the predicate `gc session wake` and the
 // sweep already use: it checks the pending-create lease before staleness, so a
 // create the reconciler still protects is not reported.
-func (c *stuckCreatingSessionsCheck) collectStoreFindings(store beads.Store, label string) ([]stuckCreatingFinding, error) {
-	sessions, err := cliSessionFrontDoor(store, c.cfg, c.cityPath).List("", "")
+func (c *stuckCreatingSessionsCheck) collectStoreFindings(stores storeref.Stores, label string) ([]stuckCreatingFinding, error) {
+	sessions, err := sessionpkg.NewStore(stores.Sessions()).List("", "")
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +197,7 @@ func (c *stuckCreatingSessionsCheck) collectStoreFindings(store beads.Store, lab
 		if agent := sessionWakeResolveAgentInfo(info, c.cfg); agent != nil {
 			f.maxSessions = agent.EffectiveMaxActiveSessions()
 		}
-		f.routed, f.routedErr = routedWorkCount(store, f.template)
+		f.routed, f.routedErr = routedWorkCount(stores.Work(), f.template)
 		findings = append(findings, f)
 	}
 	return findings, nil
@@ -206,11 +207,11 @@ func (c *stuckCreatingSessionsCheck) collectStoreFindings(store beads.Store, lab
 // filter with an empty value matches every bead that lacks the key, so a
 // session with no template has no measurable lane: report that as an error
 // rather than count all unrouted work against it.
-func routedWorkCount(store beads.Store, template string) (int, error) {
+func routedWorkCount(work beads.WorkStore, template string) (int, error) {
 	if template == "" {
 		return 0, errors.New("session has no template")
 	}
-	ids, err := unclaimedRoutedWork(store, template)
+	ids, err := unclaimedRoutedWork(work, template)
 	if err != nil {
 		return 0, fmt.Errorf("listing routed work for %s: %w", template, err)
 	}
