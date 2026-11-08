@@ -202,6 +202,19 @@ Notes per trigger:
 - **`manual`** — shows up in `gc order list` and `gc order check` (always DUE
   `no`, reason `manual trigger — use gc order run`), but auto-fires never.
 
+Cooldown, cron, and event orders share a dispatch budget:
+`orders.max_dispatches_per_tick` (default 4) orders start per pass, and passes
+are paced by `daemon.patrol_interval` (default `30s`). When all nine such
+orders are due together, they take three passes to come all the way round, so
+with every order due together a `30s` cooldown beside eight others fires only
+about every `ceil(9 / 4) × 30s = 1m30s` — an estimate of budget pressure, not
+an exact cadence: the next pass is paced from the end of the previous one, so
+slow passes stretch it further. Orders that are not due spend no budget, so
+quieter neighbours let it fire sooner. `gc doctor`'s `order-dispatch-floor`
+check flags any order whose interval sits below that worst-case estimate; raise
+`orders.max_dispatches_per_tick`, lengthen the interval, or suspend orders to
+clear it.
+
 ![Cooldown vs cron timing on two timelines: cooldown fires a fixed interval after each run ends, so its wall-clock times drift later as runs take longer; cron fires at fixed clock times no matter how long runs take.](/diagrams/excalidraw-rendered/cooldown-vs-cron.svg)
 
 <Accordion title="Cron catch-up after a missed minute">
