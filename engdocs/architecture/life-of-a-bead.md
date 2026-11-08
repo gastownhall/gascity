@@ -2,9 +2,10 @@
 title: "Life of a Bead"
 ---
 
-> Last verified against code: 2026-11-08 for Phase 2 (Discovery), Phase 3
-> (Claiming) and the Code Map; 2026-03-01 for the other phases. File line
-> numbers are omitted because they drift; search for the function name.
+> Last verified against code: 2026-11-08 for Phase 1 paths B, D and E,
+> Phase 2 (Discovery), Phase 3 (Claiming) and the Code Map; 2026-03-01 for
+> the rest. File line numbers are omitted because they drift; search for
+> the function name.
 
 This document traces a single bead through its entire lifecycle in Gas
 City, from creation to garbage collection. It names every function, file,
@@ -53,14 +54,20 @@ timestamps, and status from its embedded Dolt database.
 
 `gc sling` does not create beads -- they already exist. But with
 `--formula`, sling instantiates a wisp first. `sling.DoSling()`
-(`internal/sling/sling_core.go`) calls `InstantiateSlingFormula()`
-(`internal/sling/sling.go`), which compiles the formula and hands the
-recipe to `molecule.Instantiate()` (`internal/molecule/molecule.go`).
-Gas City writes the root and step beads itself through the store; it does
-not shell out to `bd mol`. `molecule.Cook()` and `molecule.CookOn()` are
-the compile-and-instantiate wrappers other callers use.
+(`internal/sling/sling_core.go`) compiles the formula once and hands the
+recipe to `InstantiateCompiledSlingFormula()` (`internal/sling/sling.go`),
+which stamps the recipe's routes (see Phase 3) and calls
+`molecule.Instantiate()` (`internal/molecule/molecule.go`). Every sling
+launch instantiates through that function; `InstantiateSlingFormula()` is
+its compile-first wrapper for `--on` and default-formula launches. Gas City
+writes the root and step beads itself through the store; it does not shell
+out to `bd mol`. `molecule.Cook()` and `molecule.CookOn()` are the
+compile-and-instantiate wrappers other callers use.
 
-The root bead ID is returned to sling for routing.
+The root bead ID is returned to sling, which routes it with
+`finalizeInStore()`. A graph.v2 workflow skips that step:
+`doStartGraphWorkflow()` (`internal/sling/sling_core.go`) marks the root
+`in_progress`, and the routes stamped at instantiation stand.
 
 ### Path C: Mail send
 
@@ -83,8 +90,11 @@ same invariants.
 ### Path D: Convoy creation
 
 `doConvoyCreate()` in `cmd/gc/cmd_convoy.go` creates a bead with Type
-`"convoy"`, then links child beads to it via `Store.Update()` setting
-their ParentID. Sling also creates auto-convoys (`finalizeInStore()` in
+`"convoy"`, then records each child bead as a member with a `tracks`
+dependency from the convoy (`convoy.TrackItemIn()` in
+`internal/convoy/membership.go`), leaving the child's ParentID alone.
+`convoy.MembersIn()` reads those members plus any legacy parent-child
+children. Sling also creates auto-convoys (`finalizeInStore()` in
 `internal/sling/sling_core.go`) to track individual bead routing.
 
 ### Path E: Order dispatch
@@ -122,8 +132,9 @@ Every agent has a `work_query` config field. `gc hook`
 (`cmd/gc/cmd_hook.go`) runs that query for plain discovery, and
 `gc hook --claim` runs the same query to pick its candidates. The flow:
 
-1. `cmdHookWithOptions()` resolves the agent from `$GC_AGENT` or a
-   positional arg
+1. `cmdHookWithOptions()` resolves the agent from a positional arg or,
+   without one, from `$GC_TEMPLATE` inside a session, else `$GC_ALIAS` or
+   `$GC_AGENT`
 2. Loads city config, checks suspension status
 3. Calls `hookWorkQuery()`, which builds the query with
    `a.EffectiveWorkQueryFor(topo)` (`internal/config/workquery.go`) for the
@@ -131,19 +142,22 @@ Every agent has a `work_query` config field. `gc hook`
 4. Plain discovery runs the query through `doHookDiscovery()`, which calls
    `doHook()`; `--claim` hands it to `claimHookWork()`. Both run the shell
    command with `shellWorkQueryWithEnv()` against each store the agent can
-   see
+   see, or only against the agent's own store when the generated query
+   already reads city-wide through `gc ready` (see below)
 
 A custom `work_query` is run verbatim. Otherwise the default is the shell
 script built by `buildWorkQuery()` in `internal/config/workquery.go`. It is
-the same for every agent, fixed or pooled, and runs these tiers in order,
-stopping at the first one that returns work:
+the same for every agent, fixed or pooled (the control dispatcher also
+probes its legacy `workflow-control` identity), and runs these tiers in
+order, stopping at the first one that returns work:
 
 1. **Assigned, in progress** (crash recovery): `bd list --status in_progress`
    for beads whose assignee is one of the session's identities. The tier
    loops over `$GC_SESSION_ID`, `$GC_SESSION_NAME` and `$GC_ALIAS` in that
    order, skipping empty and repeated values, so work is found whichever
-   identifier assigned it. An assigned graph.v2 workflow root found here is
-   remembered as a fallback instead of being returned at once.
+   identifier assigned it. A candidate that is blocked or parked on a
+   dispatch hold is skipped. An assigned graph.v2 workflow root found here
+   is remembered as a fallback instead of being returned at once.
 2. **Assigned, ready**: `bd ready --assignee=<identity> --limit=1` over the
    same identities, skipping dispatch-held rows.
 3. **Origin gate**: only an ephemeral (pool) session, a session with no
@@ -157,23 +171,30 @@ stopping at the first one that returns work:
 5. **Pool demand**: `bd ready --metadata-field "gc.routed_to=<route>"
    --unassigned --exclude-type=epic` plus `--exclude-label` for the dispatch
    holds and the human label, reading up to `RoutedReadyClaimWindow` (20) rows
-   in bd's priority order. Legacy fallbacks follow for workflow roots routed
-   only by `gc.run_target` and for older wisp rows. `<route>` is the agent's
-   pool name when it has one, else its qualified name.
+   in bd's priority order. A fallback follows for graph.v2 workflow roots
+   created before roots carried `gc.routed_to`, which are routed only by
+   `gc.run_target`. `<route>` is the agent's pool name when it has one, else
+   its qualified name.
 
-The script prints `[]` when no tier has work. Mail (`issue_type=message`)
-is withheld from every tier. Parent epics are excluded from the routed
-tiers only, because an assigned epic wisp must still be resumable. On a
-city that serves a coordination class from a store `bd` cannot reach from
-the work directory, the topology swaps `bd ready` for the federated reader
-`gc ready`. When the reconciler runs the query with no session identity,
-the assigned tiers skip and only pool demand fires.
+The script prints `[]` when no tier has work, or nothing at all when the
+origin gate ends it; the hook reads both as no work. Mail
+(`issue_type=message`) is withheld from every tier. Parent epics are
+excluded from the routed tiers only, because an assigned epic wisp must
+still be resumable. Wisps (ephemeral beads) need reads of their own: the
+in-progress tier always adds a `bd query` read of them, and the
+assigned-ready and pool-demand tiers add one only in the default
+`bd_compatibility = "bd-1.0.4"` mode; under `"bd-1.0.5"` the ready reads
+pass `bd ready --include-ephemeral` instead. On a city that serves a
+coordination class from a store `bd` cannot reach from the work directory,
+the topology swaps the `bd ready` and `bd list` reads for the federated
+reader `gc ready`. When the reconciler runs the query with no session
+identity, the assigned tiers skip and only pool demand fires.
 `EffectivePoolDemandQuery()` shares the pool-demand tier's predicates, so
 the reconciler's spawn decision and the worker's claim decision read the
 same demand.
 
-The default query shells out to `bd` directly; it does not go through
-`BdStore.Ready()`.
+The default query shells out to `bd` (or `gc ready`) directly; it does
+not go through `BdStore.Ready()`.
 
 An empty queue and a failed query are different answers. A default work
 query whose store read fails (bd missing from PATH, a store bd cannot read,
@@ -218,9 +239,11 @@ This is a status transition and assignee update.
 
 Before claiming, the bead must be routed to the agent. `doSling()` in
 `cmd/gc/cmd_sling.go` calls `sling.DoSling()`, and the route is written in
-`finalizeInStore()` (`internal/sling/sling_core.go`). Routing stamps
-metadata; it sets no assignee and no label. `DefaultSlingQuery()`
-(`internal/config/workquery.go`) is the same for every agent:
+`finalizeInStore()` (`internal/sling/sling_core.go`); for a convoy,
+`sling.DoSlingBatch()` routes each open child the same way. Default
+routing stamps metadata; it sets no assignee and no label.
+`DefaultSlingQuery()` (`internal/config/workquery.go`) is the same for
+every agent:
 
 ```
 bd update {} --set-metadata gc.routed_to=<route>
@@ -231,15 +254,25 @@ name. `EffectiveSlingQuery()` returns the agent's `sling_query` verbatim
 when one is configured, else this default.
 
 The CLI and the API route through a typed `BeadRouter` (`cliBeadRouter`
-in `cmd/gc/cmd_sling.go`, `apiBeadRouter` in the API). For an agent on the
-default query it writes `gc.routed_to` through the store's
-`SetMetadata()` instead of running the shell command. A custom
-`sling_query` is expanded with `sling.BuildSlingCommandForAgent()`
-(`internal/sling/sling.go`) and run through the shell runner.
+in `cmd/gc/cmd_sling.go`, `apiBeadRouter` in
+`internal/api/handler_sling.go`). For an agent on the default query it
+writes `gc.routed_to` through the store's `SetMetadata()` instead of
+running the shell command. A custom `sling_query` is expanded with
+`sling.BuildSlingCommandForAgent()` (`internal/sling/sling.go`) and run
+through the shell runner.
+
+Formula steps get their routes before they are written:
+`graphroute.ApplyGraphRouting()` (`internal/graphroute/graphroute.go`)
+stamps `gc.routed_to` on the compiled recipe, so the step beads
+`molecule.Instantiate()` creates come out already routed (a legacy formula
+attached to a bead routes only that bead). A graph.v2 step whose formula
+sets `assignee` to a session (a session bead ID, a named session, or a
+live session's name) is bound to that session's bead instead of routed.
 
 A routed bead stays open and unassigned. Any session whose work query
 reaches the pool-demand tier for that route can claim it; the reconciler
-counts it as demand and starts a session if none is free.
+counts it as demand and starts or wakes a session to serve it, within the
+agent's session limits.
 
 ### The claiming act
 
@@ -265,17 +298,19 @@ one bead only one claim wins. An agent that claims a bead by hand runs
 already holds the bead, and the agent must then not work it.
 
 Sling assigns no one, for fixed and pooled agents alike. A bead gets an
-assignee before the claim only when someone sets one explicitly (for
-example `bd update <id> --assignee=<session>`, or graph routing that binds
-a step to a named session); the assigned tiers then find it and step 2
-above claims it.
+assignee before the claim only when something sets one explicitly: for
+example `bd update <id> --assignee=<session>`, graph routing that binds a
+step to the session its formula names, or `gc hook --claim` pinning the
+open siblings in a claimed step's continuation group to the same session
+(`preassignHookContinuationGroup()`). The assigned tiers then find it and
+step 2 above claims it.
 
 `BdStore.Claim()` (`internal/beads/bdstore.go`) runs
 `bd update <id> --claim --json` and reports a lost race as "not claimed"
 rather than an error. Other bead edits go through `BdStore.Update()`:
 
 ```
-bd update --json <id> --description "..." --label "..."
+bd update --json <id> --description "..." --add-label "..."
 ```
 
 The `Store.Update()` contract: only non-nil fields in `UpdateOpts` are
@@ -284,9 +319,10 @@ store specification.
 
 ### Container expansion
 
-When `gc sling` receives a convoy ID, `doSlingBatch()` expands it. It
-calls `querier.Children(b.ID)` to get child beads, filters to open ones,
-and routes each child individually. Epics are no longer first-class
+When `gc sling` receives a convoy ID, `doSlingBatch()` expands it through
+`sling.DoSlingBatch()` (`internal/sling/sling_core.go`). That reads the
+convoy's members with `convoy.MembersIn()`, filters to open ones, and
+routes each child individually. Epics are no longer first-class
 containers and are rejected by `gc sling`. The container itself is the
 convoy -- no auto-convoy is created.
 
@@ -456,20 +492,24 @@ also normalized to open.
 |---|---|---|
 | Create | `BdStore.Create()` | `internal/beads/bdstore.go` |
 | Create | `exec.Store.Create()` | `internal/beads/exec/exec.go` |
-| Create (molecule) | `InstantiateSlingFormula()` | `internal/sling/sling.go` |
+| Create (molecule) | `InstantiateCompiledSlingFormula()` / `InstantiateSlingFormula()` | `internal/sling/sling.go` |
 | Create (molecule) | `molecule.Instantiate()` / `molecule.Cook()` / `molecule.CookOn()` | `internal/molecule/molecule.go` |
 | Create (mail) | `beadmail.Provider.Send()` | `internal/mail/beadmail/beadmail.go` |
 | Create (convoy) | `doConvoyCreate()` | `cmd/gc/cmd_convoy.go` |
+| Create (convoy) | `convoy.TrackItemIn()` / `convoy.MembersIn()` | `internal/convoy/membership.go` |
 | Discovery | `cmdHookWithOptions()` / `hookWorkQuery()` / `doHook()` | `cmd/gc/cmd_hook.go` |
 | Discovery | `EffectiveWorkQueryFor()` / `buildWorkQuery()` | `internal/config/workquery.go` |
 | Discovery | `EffectivePoolDemandQuery()` | `internal/config/workquery.go` |
 | Discovery | `BdStore.Ready()` | `internal/beads/bdstore.go` |
 | Routing | `doSling()` / `doSlingBatch()` / `cliBeadRouter.Route()` | `cmd/gc/cmd_sling.go` |
-| Routing | `DoSling()` / `finalizeInStore()` | `internal/sling/sling_core.go` |
+| Routing | `apiBeadRouter.Route()` | `internal/api/handler_sling.go` |
+| Routing | `DoSling()` / `DoSlingBatch()` / `finalizeInStore()` / `doStartGraphWorkflow()` | `internal/sling/sling_core.go` |
 | Routing | `EffectiveSlingQuery()` / `DefaultSlingQuery()` | `internal/config/workquery.go` |
 | Routing | `BuildSlingCommandForAgent()` | `internal/sling/sling.go` |
+| Routing | `ApplyGraphRouting()` | `internal/graphroute/graphroute.go` |
 | Claim | `claimHookWork()` | `cmd/gc/cmd_hook.go` |
-| Claim | `tryHookClaim()` / `hookClaimExistingAssignment()` / `claimFirstEligibleHookCandidate()` | `cmd/gc/cmd_hook_claim.go` |
+| Claim | `tryHookClaim()` / `hookClaimExistingAssignment()` / `claimFirstReadyHookAssignment()` / `claimFirstEligibleHookCandidate()` | `cmd/gc/cmd_hook_claim.go` |
+| Claim | `preassignHookContinuationGroup()` | `cmd/gc/cmd_hook_claim.go` |
 | Claim | `BdStore.Claim()` | `internal/beads/bdstore.go` |
 | Execution | `BdStore.Update()` | `internal/beads/bdstore.go` |
 | Execution | `BdStore.SetMetadata()` | `internal/beads/bdstore.go` |
