@@ -6871,7 +6871,7 @@ func TestCandidateWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 		},
 	}
 
-	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", nil, clock.Real{})
+	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", nil, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard))
 	if ok {
 		t.Fatal("expected serial fallback for cycle")
 	}
@@ -6937,7 +6937,7 @@ func TestCandidateWaveOrder_UsesLegacyAgentLabelTemplate(t *testing.T) {
 		},
 	}
 
-	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", store, clock.Real{})
+	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", store, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard))
 	if !ok {
 		t.Fatal("unexpected serial fallback")
 	}

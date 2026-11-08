@@ -943,6 +943,7 @@ func dependencyTemplateAlive(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
+	_ *dependencyProbePass,
 ) bool {
 	if cfg == nil || template == "" {
 		return false
@@ -1024,6 +1025,7 @@ func candidateWaveOrder(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
+	pass *dependencyProbePass,
 ) (map[int]int, bool) {
 	if len(candidates) == 0 {
 		return map[int]int{}, true
@@ -1048,7 +1050,7 @@ func candidateWaveOrder(
 			continue
 		}
 		for _, dep := range cfgAgent.DependsOn {
-			if dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk) {
+			if dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk, pass) {
 				continue
 			}
 			if candidateTemplates[dep] {
@@ -4843,7 +4845,7 @@ func executePlannedStartsTraced(
 	if startOpts.async && asyncLimiter == nil {
 		asyncLimiter = newAsyncStartLimiter(maxWakes)
 	}
-	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk)
+	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store, clk, newDependencyProbePass(ctx, cityPath, stderr))
 	if !ok {
 		fmt.Fprintln(stderr, "session reconciler: dependency graph fallback to serial start order") //nolint:errcheck
 	}
@@ -4903,11 +4905,12 @@ func executePlannedStartsTraced(
 			continue
 		}
 		var ready []startCandidate
+		firstFilter := newDependencyProbePass(ctx, cityPath, stderr)
 		for _, candidate := range waveCandidates {
 			if ctx != nil && ctx.Err() != nil {
 				return wakeCount
 			}
-			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
+			if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, firstFilter) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 				continue
 			}
@@ -4936,11 +4939,12 @@ func executePlannedStartsTraced(
 			batchCandidates := ready[offset:end]
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
+			recheck := newDependencyProbePass(ctx, cityPath, stderr)
 			for _, candidate := range batchCandidates {
 				if ctx != nil && ctx.Err() != nil {
 					return wakeCount
 				}
-				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
+				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk, recheck) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
 					continue
 				}

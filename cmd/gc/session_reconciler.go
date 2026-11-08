@@ -1377,7 +1377,7 @@ func allDependenciesAliveForTemplate(
 	cityName string,
 	store beads.Store,
 ) bool {
-	return allDependenciesAliveForTemplateWithClock(template, cfg, desiredState, sp, cityName, store, clock.Real{})
+	return allDependenciesAliveForTemplateWithClock(template, cfg, desiredState, sp, cityName, store, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard))
 }
 
 func allDependenciesAliveForTemplateWithClock(
@@ -1388,6 +1388,7 @@ func allDependenciesAliveForTemplateWithClock(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
+	pass *dependencyProbePass,
 ) bool {
 	cfgAgent := findAgentByTemplate(cfg, template)
 	if cfgAgent == nil || len(cfgAgent.DependsOn) == 0 {
@@ -1398,7 +1399,7 @@ func allDependenciesAliveForTemplateWithClock(
 		if depCfg == nil {
 			continue // dependency not in config — skip
 		}
-		if !dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk) {
+		if !dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store, clk, pass) {
 			return false
 		}
 	}
@@ -1416,7 +1417,7 @@ func allDependenciesAlive(
 	cityName string,
 	store beads.Store,
 ) bool {
-	return allDependenciesAliveForTemplateWithClock(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store, clock.Real{})
+	return allDependenciesAliveForTemplateWithClock(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard))
 }
 
 // pendingCreateSessionStillLeasedInfo reports whether a session bead's pending
