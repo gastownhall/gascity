@@ -445,6 +445,9 @@ func TestConfigShowValidateReportsMCPServersAgentsCannotReceive(t *testing.T) {
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
 	}
+	// Validation checks the stage-1 MCP targets without consuming their
+	// once-per-process skip warnings: gc start's pass still prints them.
+	requireStage1MCPPlanWarning(t, cityDir, cursorAgentCitySkipWarning)
 
 	// The same server in the agent's own mcp/ directory keeps that agent
 	// from starting. gc start starts the rest of the city, so validation
@@ -461,6 +464,7 @@ url = "https://mcp.example.test/private"
 	if !strings.Contains(stderr.String(), `gc config show: warning: agent "mayor" cannot start: MCP servers [private (http)] are declared in this agent's own mcp/ directory (`) {
 		t.Fatalf("stderr missing the agent warning:\n%s", stderr.String())
 	}
+	requireStage1MCPPlanWarning(t, cityDir, `gc: warning: city "test-city": agent "mayor" cannot start: MCP servers [private (http)]`)
 
 	// Plain gc config show --json reports the same validation.
 	stdout.Reset()
@@ -470,6 +474,23 @@ url = "https://mcp.example.test/private"
 	}
 	if !strings.Contains(stdout.String(), `cannot start: MCP servers [private (http)]`) {
 		t.Fatalf("config show --json validation lacks the MCP warning:\n%s", stdout.String())
+	}
+}
+
+// requireStage1MCPPlanWarning fails the test unless a stage-1 plan of
+// cityDir, which writes nothing, prints want.
+func requireStage1MCPPlanWarning(t *testing.T, cityDir, want string) {
+	t.Helper()
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var stderr bytes.Buffer
+	if _, err := planStage1MCPProjection(cityDir, cfg, stubLookPath, &stderr); err != nil {
+		t.Fatalf("planStage1MCPProjection: %v", err)
+	}
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stage-1 plan stderr missing\n want: %s\n got: %s", want, stderr.String())
 	}
 }
 
