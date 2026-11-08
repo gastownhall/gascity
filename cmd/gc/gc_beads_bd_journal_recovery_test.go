@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -701,20 +702,86 @@ func expectPipeEOF(t *testing.T, r *os.File, timeout time.Duration, what string)
 	}
 }
 
+// runWithTimeoutRun is what runWithTimeoutInGroup observed of one harness run.
+type runWithTimeoutRun struct {
+	out     string
+	elapsed time.Duration
+	pgid    int
+	// lineGaps[i] is the time from the previous stdout line (or from the
+	// harness start, for the first line) to stdout line i.
+	lineGaps []time.Duration
+}
+
+// lineStampWriter collects output and the time each newline arrived, so a
+// harness that prints one line per call shows how long each call took.
+type lineStampWriter struct {
+	mu    sync.Mutex
+	start time.Time
+	buf   bytes.Buffer
+	at    []time.Time
+}
+
+func (w *lineStampWriter) Write(p []byte) (int, error) {
+	now := time.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for range bytes.Count(p, []byte("\n")) {
+		w.at = append(w.at, now)
+	}
+	return w.buf.Write(p)
+}
+
+func (w *lineStampWriter) snapshot() (string, []time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	gaps := make([]time.Duration, len(w.at))
+	prev := w.start
+	for i, at := range w.at {
+		gaps[i] = at.Sub(prev)
+		prev = at
+	}
+	return w.buf.String(), gaps
+}
+
+// slowestLineGaps describes the n largest gaps in gaps, slowest first, as
+// "line <n>: <gap>" entries, numbering lines from 1.
+func slowestLineGaps(gaps []time.Duration, n int) string {
+	idx := make([]int, len(gaps))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return gaps[idx[a]] > gaps[idx[b]] })
+	if len(idx) > n {
+		idx = idx[:n]
+	}
+	parts := make([]string, 0, len(idx))
+	for _, i := range idx {
+		parts = append(parts, fmt.Sprintf("line %d: %s", i+1, gaps[i].Round(time.Millisecond)))
+	}
+	if len(parts) == 0 {
+		return "(no output lines)"
+	}
+	return strings.Join(parts, ", ")
+}
+
 // runWithTimeoutInGroup runs harness under shell as the leader of a new
-// process group, with extraFiles as fds 3 and up, and returns its stdout and
-// wall time. It fails the test when the harness exits non-zero or outlives
-// budget. stderr is not checked: dash reports a TERM-killed job there.
-func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Duration, extraFiles ...*os.File) (string, time.Duration, int) {
+// process group, with extraFiles as fds 3 and up, and returns its stdout,
+// wall time, pgid and per-line arrival gaps. It fails the test when the
+// harness exits non-zero or outlives budget, reporting how far the harness
+// got and its slowest output lines. stderr is not checked: dash reports a
+// TERM-killed job there.
+func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Duration, extraFiles ...*os.File) runWithTimeoutRun {
 	t.Helper()
 	env := journalRecoveryEnv{binDir: t.TempDir(), shell: shell}
 	cmd := env.command(harness)
 	cmd.ExtraFiles = extraFiles
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	stdout := &lineStampWriter{}
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	start := time.Now()
+	stdout.start = start
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start run_with_timeout harness: %v", err)
 	}
@@ -733,12 +800,15 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 		if err != nil {
 			t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s", elapsed, err, stderr.String())
 		}
-		return stdout.String(), elapsed, cmd.Process.Pid
+		out, gaps := stdout.snapshot()
+		return runWithTimeoutRun{out: out, elapsed: elapsed, pgid: cmd.Process.Pid, lineGaps: gaps}
 	case <-timer.C:
+		_, gaps := stdout.snapshot()
 		_ = cmd.Process.Kill()
 		<-done
-		t.Fatalf("run_with_timeout harness still running after %s", budget)
-		return "", 0, 0
+		t.Fatalf("run_with_timeout harness still running after %s (%d output lines so far; slowest: %s)",
+			budget, len(gaps), slowestLineGaps(gaps, 5))
+		return runWithTimeoutRun{}
 	}
 }
 
@@ -797,22 +867,48 @@ func processGroupMembers(t *testing.T, pgid int) string {
 	return "PID PPID PGID STAT COMMAND\n" + strings.Join(rows, "\n")
 }
 
+// instantCommandsWatchdogTimeout is the timeout each call arms in
+// TestRunWithTimeoutLeavesNothingAfterInstantCommands. It is long so that a
+// call that waits out its watchdog instead of returning when the command
+// exits (a TERM to the watchdog that is only acted on once its sleep ends)
+// stands far apart from a call that is merely slow on a loaded runner.
+const instantCommandsWatchdogTimeout = 30 * time.Second
+
+// instantCommandsSlowCall is the longest one call may take. Runner slowness
+// does not come near it (the slowest passing macOS runs averaged about 70ms
+// a call), while a call that waited out its watchdog takes the full
+// instantCommandsWatchdogTimeout.
+const instantCommandsSlowCall = instantCommandsWatchdogTimeout / 3
+
+// instantCommandsBudget bounds the whole 200-call harness. macOS runners
+// running a full cmd/gc process shard have taken over 16s for the 200 calls
+// (about 0.3s on Linux) with no single call near its watchdog timeout, so the
+// budget only bounds a hang; the per-call check is what catches a stall.
+const instantCommandsBudget = 60 * time.Second
+
 func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
 	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
 		heldR, heldW := newRunWithTimeoutPipe(t, "held-descriptor")
-		harness := "set -eu\n" + runWithTimeoutFunction(t) + `
+		harness := "set -eu\n" + runWithTimeoutFunction(t) + fmt.Sprintf(`
 i=0
 while [ "$i" -lt 200 ]; do
-	run_with_timeout 2 true
+	run_with_timeout %d true
 	i=$((i + 1))
+	printf 'call %%s\n' "$i"
 done
-printf 'calls=%s\n' "$i"
-`
-		out, _, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout+3*2*time.Second, heldW)
-		if want := "calls=200\n"; out != want {
-			t.Errorf("harness output = %q, want %q", out, want)
+`, int(instantCommandsWatchdogTimeout/time.Second))
+		run := runWithTimeoutInGroup(t, shell, harness, instantCommandsBudget, heldW)
+		if got := strings.Count(run.out, "\n"); got != 200 || !strings.HasSuffix(run.out, "call 200\n") {
+			t.Errorf("harness output has %d lines ending %q, want 200 ending \"call 200\\n\"", got, run.out[max(0, len(run.out)-20):])
 		}
-		expectProcessGroupGone(t, pgid)
+		for i, gap := range run.lineGaps {
+			if gap >= instantCommandsSlowCall {
+				t.Errorf("call %d took %s, at least %s with a %s watchdog timeout: run_with_timeout waited on its watchdog after the command exited (slowest: %s)",
+					i+1, gap.Round(time.Millisecond), instantCommandsSlowCall, instantCommandsWatchdogTimeout, slowestLineGaps(run.lineGaps, 5))
+			}
+		}
+		t.Logf("200 calls took %s; slowest: %s", run.elapsed.Round(time.Millisecond), slowestLineGaps(run.lineGaps, 5))
+		expectProcessGroupGone(t, run.pgid)
 		expectPipeEOF(t, heldR, time.Second, "caller fd 3")
 	})
 }
@@ -824,14 +920,14 @@ status=0
 run_with_timeout 1 sleep 5 || status=$?
 printf 'rc=%s\n' "$status"
 `
-		out, elapsed, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
-		if want := "rc=143\n"; out != want {
-			t.Errorf("harness output = %q, want %q", out, want)
+		run := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
+		if want := "rc=143\n"; run.out != want {
+			t.Errorf("harness output = %q, want %q", run.out, want)
 		}
-		if elapsed < time.Second || elapsed >= 4*time.Second {
-			t.Errorf("run_with_timeout 1 sleep 5 took %s, want at least 1s and well under 5s", elapsed)
+		if elapsed := run.elapsed; elapsed < time.Second || elapsed >= 4*time.Second {
+			t.Errorf("run_with_timeout 1 sleep 5 took %s, want at least 1s and well under 5s", run.elapsed)
 		}
-		expectProcessGroupGone(t, pgid)
+		expectProcessGroupGone(t, run.pgid)
 	})
 }
 
@@ -842,14 +938,14 @@ status=0
 run_with_timeout abc sleep 5 || status=$?
 printf 'rc=%s\n' "$status"
 `
-		out, elapsed, pgid := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
-		if want := "rc=143\n"; out != want {
-			t.Errorf("harness output = %q, want %q", out, want)
+		run := runWithTimeoutInGroup(t, shell, harness, testutil.ExecRaceTimeout)
+		if want := "rc=143\n"; run.out != want {
+			t.Errorf("harness output = %q, want %q", run.out, want)
 		}
-		if elapsed < time.Second || elapsed >= 4*time.Second {
-			t.Errorf("run_with_timeout abc sleep 5 took %s, want at least the 1s fallback and well under 5s", elapsed)
+		if elapsed := run.elapsed; elapsed < time.Second || elapsed >= 4*time.Second {
+			t.Errorf("run_with_timeout abc sleep 5 took %s, want at least the 1s fallback and well under 5s", run.elapsed)
 		}
-		expectProcessGroupGone(t, pgid)
+		expectProcessGroupGone(t, run.pgid)
 	})
 }
 
