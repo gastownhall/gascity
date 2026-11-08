@@ -25,6 +25,10 @@ type Counter interface{ Count() int }
 
 type CachingStore struct{ Store }
 
+func (*CachingStore) Lookup(string) (Bead, error) { return Bead{}, nil }
+
+type StoreReader interface{ Lookup(id string) (Bead, error) }
+
 type WorkStore struct{ Store }
 
 type GraphStore struct{ Store }
@@ -155,6 +159,8 @@ func assertAnon(g beads.GraphStore) { s := g.Raw(); _, _ = s.(interface{ Count()
 
 func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert
 
+func readerAssert(r beads.StoreReader) { _, _ = r.(beads.Counter); _, _ = r.(*beads.CachingStore) } // cap-assert cap-assert
+
 func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { case beads.Counter: } } // cap-assert
 
 func assertBoxed(g beads.GraphStore) { _, _ = any(g).(beads.Counter) } // cap-assert
@@ -253,6 +259,7 @@ func config() storeclass.Config {
 		MintFuncs:        []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
 		RawCarriers:      []string{module + "internal/storeref.Leg"},
 		TestMintPackages: []string{module + "internal/beads/beadstest"},
+		StoreReaders:     []string{module + "internal/beads.StoreReader"},
 		Markers:          []string{module + "internal/beads.FederatedRead"},
 		Allow: []storeclass.Allow{
 			{Package: "internal/beads", Reason: "the engines and handles"},

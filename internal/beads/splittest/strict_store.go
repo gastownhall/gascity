@@ -147,8 +147,9 @@ import (
 // same way when PRODUCTION code made it: it landed a row where no reader of its
 // class looks. Test code seeding plain rows into a class leaf as stand-ins
 // makes no production frame and is not recorded. A read inside
-// beads.FederatedRead or beads.RelicRead is a declared leg and is not
-// recorded; a write is recorded whatever marker it runs under. Optional leaf
+// beads.FederatedRead or beads.RelicRead, or through a federated or relic leg
+// layer, is a declared leg and is not recorded; a write is recorded whatever
+// marker or leg it runs under. Optional leaf
 // capabilities that production code discovers by type-assertion are forwarded
 // (see the method set and the "deliberately dropped" notes on Strict).
 type StrictStore struct {
@@ -320,13 +321,14 @@ func (s *StrictStore) holdsWork() bool {
 }
 
 // recordSplit records one split violation charged to the caller's production
-// call site. A READ the caller marked (beads.FederatedRead, beads.RelicRead)
-// is not one — a marker vouches for a miss, never for a write — and neither
-// is a call with no production frame on the stack: that is the test itself
-// probing the wrong store, usually to assert a row is NOT there.
+// call site. A READ the caller declared (beads.FederatedRead, beads.RelicRead,
+// or a federated or relic leg layer: stackFacts.declared) is not one — a
+// declaration vouches for a miss, never for a write — and neither is a call
+// with no production frame on the stack: that is the test itself probing the
+// wrong store, usually to assert a row is NOT there.
 func (s *StrictStore) recordSplit(op, id, class string, read bool) {
 	facts := captureStack()
-	if facts.site.File == "" || (read && facts.marker != beads.NoReadMarker) {
+	if facts.site.File == "" || (read && facts.declared() != beads.NoReadMarker) {
 		return
 	}
 	if os.Getenv(StrictPanicEnv) == "1" {

@@ -3100,9 +3100,7 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.Ready(query)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -3366,9 +3364,7 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store, leg string) 
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return c.liveSnapshot(store, leg)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
