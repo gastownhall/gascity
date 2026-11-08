@@ -128,7 +128,11 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
-		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
+		routedID := opts.BeadOrFormula
+		if opts.InlineText {
+			routedID = NewBeadPreviewID
+		}
+		if err := validateBuiltInRouteStoreReachable(deps, routedID, a); err != nil {
 			return result, fmt.Errorf("%w", err)
 		}
 	}
@@ -1087,6 +1091,7 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 	return &CrossStoreRouteError{
 		BeadID:            beadID,
+		NewBead:           beadID == NewBeadPreviewID,
 		StoreRef:          deps.StoreRef,
 		Target:            a.QualifiedName(),
 		ReachableStoreRef: agentutil.AgentReachableStoreLabel(&a, deps.CityPath, deps.CityName, deps.Cfg),

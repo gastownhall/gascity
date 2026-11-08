@@ -2073,7 +2073,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		// ID a real run would attach to or route.
 		previewBeadID := opts.BeadOrFormula
 		if opts.InlineText {
-			previewBeadID = "<new-bead-id>"
+			previewBeadID = sling.NewBeadPreviewID
 		}
 		if opts.OnFormula != "" {
 			preCheckConclusive := true

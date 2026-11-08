@@ -837,10 +837,16 @@ func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossR
 	}
 }
 
+// NewBeadPreviewID stands in for the ID of a bead that inline task text would
+// create, in dry-run previews and refusals that run before any bead exists.
+const NewBeadPreviewID = "<new-bead-id>"
+
 // CrossStoreRouteError reports that a target agent cannot read the workflow
-// store containing the routed bead.
+// store containing the routed bead. NewBead marks a bead that does not exist
+// yet (inline task text), whose BeadID is NewBeadPreviewID.
 type CrossStoreRouteError struct {
 	BeadID            string
+	NewBead           bool
 	StoreRef          string
 	Target            string
 	ReachableStoreRef string
@@ -850,11 +856,15 @@ type CrossStoreRouteError struct {
 func (e *CrossStoreRouteError) Error() string {
 	source := routeStoreLabel(e.StoreRef)
 	reachable := routeStoreLabel(e.ReachableStoreRef)
+	bead := fmt.Sprintf("bead %s lives in %s", e.BeadID, source)
+	if e.NewBead {
+		bead = fmt.Sprintf("new bead %s would be created in %s", e.BeadID, source)
+	}
 	return fmt.Sprintf(
-		"gc sling: refusing cross-store route: bead %s lives in %s but target %q reads %s; "+
+		"gc sling: refusing cross-store route: %s but target %q reads %s; "+
 			"re-file the bead in %s (or pick a target reachable from %s). "+
 			"Cross-store routes silently wedge pools — see tr-6s7yx",
-		e.BeadID, source, e.Target, reachable, reachable, source)
+		bead, e.Target, reachable, reachable, source)
 }
 
 func routeStoreLabel(storeRef string) string {
