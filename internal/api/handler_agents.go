@@ -618,15 +618,19 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 }
 
 // agentProviderName is the provider an agent's sessions run under: its own,
-// else the workspace default. The SDK's control dispatcher
-// (config.IsDeterministicControlDispatcher) is providerless by design — its
-// start_command runs `gc convoy control --serve` — so it inherits none.
+// else the workspace default — unless the agent's start_command bypasses
+// normal provider-command resolution entirely, in which case the workspace
+// default would be a guess, not a fact, so it reports none. This subsumes
+// the SDK's deterministic control dispatcher (config.IsDeterministicControlDispatcher),
+// whose start_command runs `gc convoy control --serve` with no provider set
+// (gastownhall/gascity#8211) — the same reasoning now applies to any such
+// agent (gastownhall/gascity#8975).
 func agentProviderName(a *config.Agent, cfg *config.City) string {
-	if config.IsDeterministicControlDispatcher(a) {
-		return ""
-	}
 	if a.Provider != "" {
 		return a.Provider
+	}
+	if a.StartCommand != "" {
+		return ""
 	}
 	return cfg.Workspace.Provider
 }
