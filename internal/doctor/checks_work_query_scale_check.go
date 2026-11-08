@@ -56,10 +56,12 @@ func (c *ScaleCheckWorkQueryCorrespondenceCheck) Run(_ *CheckContext) *CheckResu
 			// remedy. Narrowing scale_check to match a raw work_query
 			// override closes the divergence the WRONG way: demand goes
 			// label-narrowed and routed-but-unlabelled beads become
-			// silently stranded instead of noisily churning. The sanctioned
-			// fix widens claim instead — delete the raw override and use
-			// route_label/route_label_any (ga-atvk13). See ga-f57vc7.
-			remedy = "; remove the raw work_query override and use route_label/route_label_any instead (ga-atvk13) rather than adding a matching scale_check"
+			// silently stranded instead of noisily churning. So the advice
+			// is to review the override against the default routed-work
+			// probe, using only keys config.Agent has today; it must not
+			// name route_label/route_label_any until those fields exist
+			// (ga-atvk13). See ga-f57vc7.
+			remedy = "; review the work_query override against the default routed-work probe (ready, unassigned work routed to this agent): remove it if the default claim path suffices, otherwise keep scale_check counting the routed work the claim path can serve — do not narrow scale_check to the override alone, which strands routed work outside it"
 		}
 		details = append(details, fmt.Sprintf(
 			"agent %q overrides %s but not %s: the reconciler's spawn decision (scale_check) and the worker's claim decision (work_query) can silently diverge — see engdocs/architecture/dispatch.md \"scale_check ↔ work_query correspondence\" (Invariant 11)%s",
