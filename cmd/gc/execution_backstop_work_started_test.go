@@ -208,3 +208,69 @@ func TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained(t *testing.T) {
 		t.Fatalf("hold breadcrumb long after the last nudge = %q, want %s", got, executionHoldExecuting)
 	}
 }
+
+// TestExecutionBackstopHoldsAClaimRecordedWithoutConditionalWrites (AC-4,
+// ga-6eefx8): on a legacy city whose session store resolves no conditional
+// writer (the fixture's), the hook's checked write records the claim at the
+// row's generation, and the backstop reads it as started evidence: a formula
+// step and a plain bead alike, with the claim nudge configured (its attempts
+// spent) or none, are nudged as before and held as executing at terminal
+// escalation, never drained. Kills an inert started write, which leaves the
+// seat drained at 0/3.
+func TestExecutionBackstopHoldsAClaimRecordedWithoutConditionalWrites(t *testing.T) {
+	const token = "incarnation-2"
+	for _, tc := range []struct {
+		name  string
+		plain bool
+		nudge string
+	}{
+		{"a formula step, nudged", false, "gc hook --claim --drain-ack --json"},
+		{"a formula step, no nudge", false, ""},
+		{"a plain bead, nudged", true, "gc hook --claim --drain-ack --json"},
+		{"a plain bead, no nudge", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Agents[0].Nudge = tc.nudge
+			f.workStoreRef = "gascity" // AssignedWorkStoreRefs' bare rig name
+			if tc.plain {
+				if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+					beadmeta.RootBeadIDMetadataKey: "", beadmeta.StepIDMetadataKey: "",
+					beadmeta.SessionIDMetadataKey: "", beadmeta.SessionNameMetadataKey: "",
+				}); err != nil {
+					t.Fatalf("stripping the claim's graph-step stamps: %v", err)
+				}
+			}
+			f.setSessionMeta(t, map[string]string{
+				"instance_token": token,
+				"generation":     "2",
+				"last_woke_at":   f.now.Add(-20 * time.Minute).Format(time.RFC3339),
+			})
+			legacy := func() bool { return false }
+			res, err := recordWorkStarted(sessionpkg.NewStore(beads.SessionStore{Store: f.store}), f.session.ID,
+				hookStartedFence{Token: token, Gen: 2, HasGen: true}, hookStartedKey{Store: "rig:gascity", Bead: f.work.ID},
+				sessionpkg.WorkStartedViaClaim, f.now, legacy)
+			if err != nil || res != hookStartedRecorded {
+				t.Fatalf("recordWorkStarted = (%v, %v), want the claim recorded by the checked write", res, err)
+			}
+
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t) // first sighting: the grace clock starts
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t) // the grace has run
+			if len(f.nudgesDelivered()) == 0 {
+				t.Fatalf("no nudge delivered once the grace ran; want the ordinary claim nudge; stdout=%s", f.stdout.String())
+			}
+
+			f.tickStale(t)
+			if len(f.drained) != 0 || f.stalledEvents() != 0 {
+				t.Fatalf("drains %v, step_stalled %d; want neither for a seat whose hook recorded the claim started; stdout=%s",
+					f.drained, f.stalledEvents(), f.stdout.String())
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+				t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+			}
+		})
+	}
+}
