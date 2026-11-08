@@ -10,6 +10,33 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
+// complexityFixtureRoot is the root the complexity tests drive complexity.sh
+// from: today the whole repository tree.
+func complexityFixtureRoot(t *testing.T) string {
+	t.Helper()
+	return repoRoot(t)
+}
+
+func TestComplexityFixtureRootIsAOneCommitScriptOnlyRepo(t *testing.T) {
+	root := complexityFixtureRoot(t)
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := testCommand("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	if got := git("ls-files"); got != "scripts/ci/complexity.sh" {
+		t.Fatalf("fixture tracks %q, want only scripts/ci/complexity.sh", got)
+	}
+	if got := git("rev-list", "--count", "HEAD"); got != "1" {
+		t.Fatalf("fixture has %s commits, want 1", got)
+	}
+}
+
 func TestComplexityReportUpdateAndDiffUseStableJSONKeys(t *testing.T) {
 	repoRoot := repoRoot(t)
 	if err := bazeltest.EnsureGitRepo(t, repoRoot); err != nil {
