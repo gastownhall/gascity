@@ -100,6 +100,12 @@ func TestDialWithoutAListenerFailsPromptly(t *testing.T) {
 		conn.Close() //nolint:errcheck // test cleanup
 		t.Fatal("dial to an absent endpoint succeeded")
 	}
+	// A path refused before the dial would also be an error, but it would
+	// never reach the kernel, so the liveness shape would go unmeasured.
+	var tooLong *PathTooLongError
+	if errorAs(err, &tooLong) {
+		t.Fatalf("dial to %q was refused as too long (%v); the absent-endpoint case never dialed", sock, err)
+	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("dial to an absent endpoint took %v, past its own timeout", elapsed)
 	}
@@ -141,7 +147,7 @@ func TestListenInsideAPrivateDirectory(t *testing.T) {
 // above it. A kernel that tightened would otherwise show up as an unexplained
 // "bind: invalid argument" in the field.
 func TestPathLimitIsTheRealCeiling(t *testing.T) {
-	base := t.TempDir()
+	base := shortTempDir(t)
 
 	atLimit, err := padPathTo(base, PathLimit)
 	if err != nil {
@@ -164,7 +170,7 @@ func TestPathLimitIsTheRealCeiling(t *testing.T) {
 // neither the limit nor the path; a caller resolving its own endpoint path
 // needs both to know what to shorten.
 func TestOverLongPathIsRejectedWithItsLimit(t *testing.T) {
-	base := t.TempDir()
+	base := shortTempDir(t)
 	long, err := padPathTo(base, PathLimit+8)
 	if err != nil {
 		t.Skipf("cannot build a %d-byte path under %q: %v", PathLimit+8, base, err)
@@ -227,6 +233,34 @@ func TestFallbackDirIsUsableForItsOwnPurpose(t *testing.T) {
 	os.Remove(dir) //nolint:errcheck // best-effort; a shared namespace dir may be busy
 }
 
+// TestPadPathToLandsOnEveryTarget keeps the two ceiling cases above from
+// skipping. They build on a temp dir whose length varies with the platform's
+// TMPDIR and the MkdirTemp nonce, so padPathTo has to reach every target at or
+// above its minimum, including a 1-byte remainder, with no component over 40.
+func TestPadPathToLandsOnEveryTarget(t *testing.T) {
+	sep := string(filepath.Separator)
+	for _, base := range []string{sep + "t", sep + strings.Repeat("b", 60)} {
+		minimum := len(base) + len(sep) + len("p.sock")
+		for target := minimum; target <= minimum+200; target++ {
+			got, err := padPathTo(base, target)
+			if err != nil {
+				t.Fatalf("padPathTo(%q, %d): %v", base, target, err)
+			}
+			if len(got) != target {
+				t.Fatalf("padPathTo(%q, %d) = %d bytes: %s", base, target, len(got), got)
+			}
+			if !strings.HasPrefix(got, base+sep) {
+				t.Fatalf("padPathTo(%q, %d) = %q, not under base", base, target, got)
+			}
+			for _, part := range strings.Split(strings.TrimPrefix(got, base+sep), sep) {
+				if part == "" || len(part) > 40 {
+					t.Fatalf("padPathTo(%q, %d) = %q has a component of %d bytes", base, target, got, len(part))
+				}
+			}
+		}
+	}
+}
+
 // shortTempDir is t.TempDir for cases that must stay inside PathLimit.
 // t.TempDir embeds the test name and a nonce, which alone can exceed the
 // pathname budget an endpoint has to fit in.
@@ -259,6 +293,11 @@ func errorAs(err error, target **PathTooLongError) bool {
 
 // padPathTo builds a pathname under base of exactly target bytes, split across
 // components so no single one exceeds a filesystem's name limit.
+//
+// Every padding segment costs its own length plus a separator, so a lone
+// 1-byte remainder cannot be spent on a segment. Each chunk leaves at least two
+// bytes behind, and a padding of exactly one byte lengthens the leaf instead,
+// so every target at or above the minimum is reachable.
 func padPathTo(base string, target int) (string, error) {
 	const leaf = "p.sock"
 	prefix := base + string(filepath.Separator)
@@ -267,25 +306,27 @@ func padPathTo(base string, target int) (string, error) {
 		return "", fmt.Errorf("target %d is below the %d-byte minimum under %q", target, minimum, base)
 	}
 	padding := target - minimum
-	if padding == 0 {
-		return prefix + leaf, nil
+	if padding == 1 {
+		return prefix + "p" + leaf, nil
 	}
 	var segments []string
 	for padding > 0 {
 		chunk := padding
-		if chunk > 40 {
-			chunk = 40
+		if chunk > 41 {
+			chunk = 41
 		}
-		if chunk < 2 {
-			segments = append(segments, "x")
-			padding -= 2
-			continue
+		if padding-chunk == 1 {
+			chunk--
 		}
 		segments = append(segments, strings.Repeat("x", chunk-1))
 		padding -= chunk
 	}
-	if padding < 0 {
-		return "", fmt.Errorf("cannot land on %d bytes exactly", target)
+	path := prefix + leaf
+	if len(segments) > 0 {
+		path = prefix + strings.Join(segments, string(filepath.Separator)) + string(filepath.Separator) + leaf
 	}
-	return prefix + strings.Join(segments, string(filepath.Separator)) + string(filepath.Separator) + leaf, nil
+	if len(path) != target {
+		return "", fmt.Errorf("built a %d-byte path, want %d bytes exactly", len(path), target)
+	}
+	return path, nil
 }
