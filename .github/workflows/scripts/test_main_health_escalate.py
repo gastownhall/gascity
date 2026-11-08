@@ -124,6 +124,13 @@ class CreateIssueTests(unittest.TestCase):
         (call,) = fake.calls
         self.assertIn(escalate_script.P0_LABEL, call)
 
+    def test_p0_label_matches_repo_priority_label_convention(self):
+        # gastownhall/gascity's real label taxonomy is priority/p0..priority/p3
+        # (no bare "P0" label exists) -- gh issue create --label errors on an
+        # unrecognized label, so the constant must match the repo convention
+        # or every escalation issue-create call fails outright.
+        self.assertEqual(escalate_script.P0_LABEL, "priority/p0")
+
 
 class EscalateTests(unittest.TestCase):
     def test_creates_new_issue_when_none_exists(self):
