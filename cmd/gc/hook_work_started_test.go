@@ -453,6 +453,39 @@ func TestStartedWriteSurvivesAControllerWriteBetweenReadAndCAS(t *testing.T) {
 	}
 }
 
+// TestHookClaimRecordsACapableStoreByCASWithoutAskingTheMode (AC-6 for
+// ga-6eefx8, #8313): on a session store with a conditional writer the record
+// and the forget are one revision CAS each, and the mode answer is never
+// consulted — a capable store fences by the row's revision whatever the
+// city's mode is, so even an answer that would refuse cannot refuse it.
+// Contention still re-decides (the surviving write above) and the ladder's
+// release still refuses the hand-over (T3).
+func TestHookClaimRecordsACapableStoreByCASWithoutAskingTheMode(t *testing.T) {
+	row := newStartedRow(t, nil)
+	asked := 0
+	wouldRefuse := func() bool { asked++; return true }
+	if res, err := recordWorkStarted(row.front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, session.WorkStartedViaClaim,
+		time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), wouldRefuse); err != nil || res != hookStartedRecorded {
+		t.Fatalf("record on the capable store = %v, %v; want (recorded, nil)", res, err)
+	}
+	if row.store.rowWrites != 1 {
+		t.Fatalf("conditional row writes = %d, want exactly one CAS for the record", row.store.rowWrites)
+	}
+	if err := forgetWorkStarted(row.front, startedSessionID, hookStartedKey{Store: startedStoreRef, Bead: "work-1"}, wouldRefuse); err != nil {
+		t.Fatalf("forget on the capable store: %v", err)
+	}
+	if row.store.rowWrites != 2 {
+		t.Fatalf("conditional row writes = %d, want the forget's CAS too", row.store.rowWrites)
+	}
+	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
+		t.Fatalf("work_started %+v still names the forgotten claim", row.cell(t))
+	}
+	if asked != 0 {
+		t.Fatalf("the mode answer was asked %d times, want never", asked)
+	}
+}
+
 // TestHookDrainAckFenceHoldsAStartedClaim (T6, OD9; mc-ilr3b's e2e): no ready
 // work (the started step is gate-blocked, so the work query does not serve
 // it), and the seat's work_started names a claim still in_progress under its
