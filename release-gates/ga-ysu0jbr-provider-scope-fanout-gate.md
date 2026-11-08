@@ -2,7 +2,8 @@
 
 **Verdict:** **PASS**
 
-Reviewed source: `4658068e759b9391c7af2002b70eb36db165dea9`. Build ga-b4a91c; review ga-v26yxbm PASS at the exact resolved source. No review carryover or added-test exception.
+Reviewed source: `b05c42d023a6f009b73a8031a8a94867b19b3b51` (current head, merged with origin/main; originally reviewed at `4658068e759b9391c7af2002b70eb36db165dea9`). Build ga-b4a91c; review ga-v26yxbm PASS at the exact resolved source. No review carryover or added-test exception.
+Current head: the gate covers ten diff-owned tests: `TestProviderOwnedFanOutIsBoundedPerCall`, `TestProviderOwnedFanOutLeavesOrdinaryCallsAlone`, `TestProviderOwnedFanOutResumesAtTheFirstUnvisitedScope`, `TestProviderOwnedRecoverCooldownIsPerScope`, `TestProviderOwnedRecoverStillGetsItsConfirmingProbeAfterTheBudget`, `TestProviderOwnedFailedRecoverDoesNotSkipSiblingConfirmations`, `TestProviderOwnedRepeatedCallsRecoverEveryUnhealthyScope`, `TestProviderOwnedRecoverSkippedByTheBudgetGoesFirstOnTheNextCall`, `TestProviderOwnedRecoverCooldownClaimIsAtomic` and `TestProviderOwnedRecoverStampsOnlyStartedRecovers`. The acceptance now also includes the longest-waiting-first recover order and the atomic cooldown claim. The Criterion 3 evidence below refers to the earlier source and is refreshed at re-gate.
 Follow-up `746b343` (after the reviewed source) adds a sixth owned test, `TestProviderOwnedFailedRecoverDoesNotSkipSiblingConfirmations`; it is covered by head CI and by a by-name PASS on the tree merged with current main.
 Canonical merge: `ae4a3163b165451695f018b76a569db42ac2de62`; tree `e0f87fa496b932d50acf7f6d0104ddc7c0f16c05`.
 DEPLOY_MODE: remote. BASE_REF: origin/main.
