@@ -143,3 +143,62 @@ func TestConfigDrift_KiroAgentsMDUpgradeIsNotDrift(t *testing.T) {
 		})
 	}
 }
+
+// Once the first tick has staged gc's own Kiro fallback into a fresh work dir,
+// every later desired-state build and every session start re-stage the same
+// overlay over it. Keeping a file that already matches the overlay preserves
+// nothing, so none of those passes may log a preservation warning. A
+// repository's own AGENTS.md is still reported on every pass, which also shows
+// that each pass really re-stages the overlay.
+func TestKiroAgentsMDRestageWarnsOnlyForRepositoryInstructions(t *testing.T) {
+	current, err := core.PackFS.ReadFile("overlay/per-provider/kiro/AGENTS.md")
+	if err != nil {
+		t.Fatalf("read embedded kiro AGENTS.md: %v", err)
+	}
+	repoOwned := []byte("# Repository agent instructions\n\nRun make test.\n")
+	cases := map[string]struct {
+		seed        []byte
+		want        []byte
+		wantWarning bool
+	}{
+		"gc's own fallback":     {seed: nil, want: current, wantWarning: false},
+		"repository-owned body": {seed: repoOwned, want: repoOwned, wantWarning: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			cityPath, cfg, workFile := kiroAgentsMDStagingCity(t)
+			if c.seed != nil {
+				if err := os.MkdirAll(filepath.Dir(workFile), 0o755); err != nil {
+					t.Fatalf("mkdir work dir: %v", err)
+				}
+				if err := os.WriteFile(workFile, c.seed, 0o644); err != nil {
+					t.Fatalf("seed %s: %v", workFile, err)
+				}
+			}
+			checkPass := func(pass, output string) {
+				t.Helper()
+				if got := strings.Contains(output, overlay.PreserveExistingWarningPrefix); got != c.wantWarning {
+					t.Errorf("%s: preservation warning logged = %v, want %v; output:\n%s", pass, got, c.wantWarning, output)
+				}
+				if got, _ := os.ReadFile(workFile); !bytes.Equal(got, c.want) {
+					t.Fatalf("%s left %s as:\n%s\nwant:\n%s", pass, workFile, got, c.want)
+				}
+			}
+
+			var firstBuild bytes.Buffer
+			first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, &firstBuild)
+			checkPass("first desired-state build", firstBuild.String())
+			_, tp := onlyDesiredSession(t, first.State)
+
+			var sessionStart bytes.Buffer
+			if err := runtime.StageSessionWorkDirWithWarnings(templateParamsToConfig(tp), &sessionStart); err != nil {
+				t.Fatalf("StageSessionWorkDirWithWarnings: %v", err)
+			}
+			checkPass("session-start staging", sessionStart.String())
+
+			var secondBuild bytes.Buffer
+			buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, &secondBuild)
+			checkPass("second desired-state build", secondBuild.String())
+		})
+	}
+}
