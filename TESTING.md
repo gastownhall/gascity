@@ -2307,13 +2307,13 @@ instead of waiting out the bound. It first waits one second and checks
 again, and signals only a process that still has the file open under the
 same dead stamp: a new holder rewrites the stamp just after it wins the
 lock, and a waiter probing the slot holds the file only for an instant.
-Never delete the slot file to "unlock" it. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
-already lists as required; if it is absent the run proceeds uncapped with a
-warning rather than blocking. The run likewise proceeds uncapped, with a
-diagnostic, if no descriptor in `[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
-PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
-contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
-invocation.
+Never delete the slot file to "unlock" it. The gate needs `flock(1)`,
+which `docs/getting-started/installation.md` already lists as required; if
+it is absent the run proceeds uncapped with a warning rather than blocking.
+The run likewise proceeds uncapped, with a diagnostic, if no descriptor in
+`[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN)` is free — an
+environment defect is never misreported as contention.
+`GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one invocation.
 
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`

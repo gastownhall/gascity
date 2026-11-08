@@ -422,7 +422,7 @@ push_gate_acquire_slot() {
         return 0
     fi
 
-    local _pgl_i _pgl_slot _pgl_fd _pgl_try _pgl_announced=0 _pgl_start=0
+    local _pgl_i _pgl_slot _pgl_fd _pgl_try _pgl_ts _pgl_announced=0 _pgl_start=0
 
     while :; do
         for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
@@ -447,9 +447,12 @@ push_gate_acquire_slot() {
                 eval "$_pgl_fd_var="
                 return 0
             fi
+            _pgl_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
             if flock -n "$_pgl_fd"; then
-                printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
+                # Stamp with builtins only, right after flock, so the reaper's
+                # settle interval cannot catch a live holder mid-stamp.
+                printf '%s %s %s %s\n' "$$" "$_pgl_ts" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"
                 if [[ "$_pgl_announced" -eq 1 ]]; then
                     echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
