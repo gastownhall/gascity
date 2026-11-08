@@ -473,6 +473,56 @@ url = "https://mcp.example.test/private"
 	}
 }
 
+// A city whose only MCP diagnostics are capability skips and blocked agents
+// keeps its warning-and-success behavior under the stage-1 validation
+// (#8267), and validation leaves the once-per-process stage-1 warning state
+// untouched: a later stage-1 pass still prints its own skip warning.
+func TestConfigShowValidateKeepsCapabilityWarningsAndStage1OnceState(t *testing.T) {
+	cityDir := cursorAgentCity(t)
+	t.Setenv("GC_CITY", cityDir)
+
+	// The only diagnostic is a capability skip: validation warns and succeeds.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config show --validate = %d, want 0 (a capability skip is a warning); stderr=%s", code, stderr.String())
+	}
+	want := `gc config show: warning: agents "editor" (the implicit agent for provider "editor"), "mayor" start without MCP server "search" (http, from the city pack)`
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+	}
+
+	// A capability-blocked agent — its own mcp/ declares a server its
+	// provider cannot receive — stays a warning too.
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/private.toml", `
+name = "private"
+url = "https://mcp.example.test/private"
+`)
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config show --validate = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `cannot start: MCP servers [private (http)]`) {
+		t.Fatalf("stderr missing the blocked-agent warning:\n%s", stderr.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var stage1 bytes.Buffer
+	if _, err := buildStage1MCPTargets(cityDir, cfg, stubLookPath, &stage1); err != nil {
+		t.Fatalf("buildStage1MCPTargets: %v, want no conflict", err)
+	}
+	// mayor is blocked here, so its skip group is the implicit agent alone
+	// and the line reads "starts without"; the assertion stays verb-neutral.
+	for _, want := range []string{`gc: warning: city "test-city"`, `without MCP server "search"`} {
+		if !strings.Contains(stage1.String(), want) {
+			t.Fatalf("stage-1 pass stderr missing %q (validation consumed the once-per-process warning):\n%s", want, stage1.String())
+		}
+	}
+}
+
 func TestDoImportAddWarnsAboutMCPServersAgentsCannotReceive(t *testing.T) {
 	cityDir := cursorAgentCity(t)
 	packDir := filepath.Join(cityDir, "packs", "search")
