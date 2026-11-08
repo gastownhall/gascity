@@ -13,6 +13,48 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Classify Your Assignment
+
+Read the bead the hook returned once, with `gc bd show <id>`, and look at its
+METADATA before you do anything else. That bead is your whole assignment.
+Decide which kind it is, in this order:
+
+1. **Workflow step** — its metadata has `gc.root_bead_id`. It is one
+   materialized step of a workflow graph, claimed for you by the hook. Follow
+   "Workflow Steps". This holds even when the step also carries `molecule_id`:
+   check `gc.root_bead_id` first, and never widen the assignment to the step's
+   siblings or root.
+2. **Molecule attachment** — no `gc.root_bead_id`, but its metadata has
+   `molecule_id`. Follow "Molecules", which verifies the molecule before you
+   navigate it.
+3. **Plain bead or formula root** — neither. Follow "Following Your Formula".
+
+Classify only the hook-returned bead. The steps you reach inside a verified
+legacy molecule are run by its loop in "Molecules"; do not reclassify them,
+even when they carry `gc.root_bead_id`.
+
+## Workflow Steps
+
+A claimed workflow step is the only bead you own. The orchestrator owns the
+rest of the graph: it advances the workflow, unlocks later steps and runs the
+control beads.
+
+1. Execute exactly the claimed step's description — nothing more.
+2. Record its outcome and close it (see "Closing a Bead"): `gc.outcome=pass`
+   on success; on failure, `gc.outcome=fail` with its failure class and
+   reason. If the step's own instructions already closed it, leave it closed
+   and keep its outcome.
+3. Get your next assignment only from `gc hook --claim --json`.
+
+Do NOT run `gc bd mol current` on a workflow step, its root or its
+`molecule_id`. Do NOT select, claim, execute or close sibling steps, the
+workflow root, an expanded root, scope latches (`gc.kind=workflow`,
+`gc.kind=scope`) or control beads (`gc.kind=check`, `fanout`, `drain`,
+`retry`, `retry-eval`, `ralph`, `scope-check`, `workflow-finalize`): a sibling
+is yours only once a later `gc hook --claim` returns it. A teardown step
+(`gc.scope_role=teardown`) is cleanup: when the hook returns one, run it even
+if earlier steps failed.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT

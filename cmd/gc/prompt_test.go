@@ -1659,3 +1659,123 @@ func TestRenderPromptCityRootFragmentsAbsentNoEffect(t *testing.T) {
 		t.Errorf("renderPrompt(no city-root fragments) = %q, want %q", got, want)
 	}
 }
+
+// renderCorePoolWorkerPrompt renders the shipped pool-worker prompt with the
+// core pack on the pack-dir list, the way a composed city does, and returns
+// it with whitespace runs folded to single spaces so assertions do not depend
+// on line wrapping.
+func renderCorePoolWorkerPrompt(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	coreDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core")
+	promptPath := filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", promptPath, PromptContext{AgentName: "claude"}, "", &stderr,
+		[]string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("renderPrompt(pool-worker) wrote to stderr: %s", stderr.String())
+	}
+	return strings.Join(strings.Fields(got), " ")
+}
+
+// flatPromptSection returns the section of a whitespace-folded prompt that
+// starts at the "## <heading>" line, up to the next "## " heading, and its
+// offset in the prompt. A missing section fails the test.
+func flatPromptSection(t *testing.T, flat, heading string) (string, int) {
+	t.Helper()
+	start := strings.Index(flat, "## "+heading)
+	if start < 0 {
+		t.Fatalf("rendered pool-worker prompt has no %q section:\n%s", "## "+heading, flat)
+	}
+	body := flat[start+len("## "+heading):]
+	if end := strings.Index(body, " ## "); end >= 0 {
+		body = body[:end]
+	}
+	return body, start
+}
+
+// requireInOrder fails unless every want appears in text, each after the
+// one before it.
+func requireInOrder(t *testing.T, where, text string, wants ...string) {
+	t.Helper()
+	at := 0
+	for _, want := range wants {
+		i := strings.Index(text[at:], want)
+		if i < 0 {
+			t.Errorf("%s: missing %q after offset %d:\n%s", where, want, at, text)
+			return
+		}
+		at += i + len(want)
+	}
+}
+
+// TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules pins the
+// two execution contracts the pool-worker prompt serves. A graph.v2 step the
+// hook claimed is the worker's whole assignment: it executes and closes that
+// step only, leaves siblings, roots and control beads to the orchestrator,
+// and gets its next step from the hook. A legacy molecule attachment is
+// navigated with gc bd mol current, but only after its root is read and shown
+// not to be a graph workflow, because molecule_id alone can name either. Each
+// subtest asserts within the section that carries the guidance, so a guard
+// moved to the wrong place fails.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	flat := renderCorePoolWorkerPrompt(t)
+
+	t.Run("AC-1 claimed workflow step owns only itself", func(t *testing.T) {
+		startup, startupAt := flatPromptSection(t, flat, "Startup Protocol")
+		classify, classifyAt := flatPromptSection(t, flat, "Classify Your Assignment")
+		_, moleculesAt := flatPromptSection(t, flat, "Molecules")
+		_, formulaAt := flatPromptSection(t, flat, "Following Your Formula")
+		if startupAt >= classifyAt || classifyAt >= moleculesAt || classifyAt >= formulaAt {
+			t.Errorf("Classify Your Assignment must follow the Startup Protocol and precede Molecules and Following Your Formula (offsets startup=%d classify=%d molecules=%d formula=%d)",
+				startupAt, classifyAt, moleculesAt, formulaAt)
+		}
+		// Classification reads the bead the claim fragment just returned, so
+		// it must be the very next section, not merely a later one.
+		if nextAt := startupAt + len("## Startup Protocol") + len(startup) + len(" "); nextAt != classifyAt {
+			t.Errorf("Classify Your Assignment (offset %d) must be the first section after the Startup Protocol; the next section starts at offset %d",
+				classifyAt, nextAt)
+		}
+		// The step cue is checked before molecule_id, so a step that also
+		// carries molecule_id is still a single step.
+		requireInOrder(t, "Classify Your Assignment", classify,
+			"gc.root_bead_id", `"Workflow Steps"`, "molecule_id", `"Molecules"`, `"Following Your Formula"`)
+		for _, want := range []string{
+			"even when the step also carries `molecule_id`",
+			"never widen the assignment to the step's siblings or root",
+			"Classify only the hook-returned bead",
+		} {
+			if !strings.Contains(classify, want) {
+				t.Errorf("Classify Your Assignment missing %q:\n%s", want, classify)
+			}
+		}
+
+		steps, _ := flatPromptSection(t, flat, "Workflow Steps")
+		for _, want := range []string{
+			"Execute exactly the claimed step's description",
+			"gc.outcome=pass",
+			"gc.outcome=fail",
+			`"Closing a Bead"`,
+			"leave it closed and keep its outcome",
+			"Do NOT run `gc bd mol current`",
+			"Do NOT select, claim, execute or close sibling steps",
+			"the workflow root, an expanded root, scope latches",
+			"control beads",
+			"`gc.kind=check`",
+			"`workflow-finalize`",
+			"The orchestrator owns the rest of the graph",
+			"a sibling is yours only once a later `gc hook --claim` returns it",
+			"`gc.scope_role=teardown`",
+			"run it even if earlier steps failed",
+		} {
+			if !strings.Contains(steps, want) {
+				t.Errorf("Workflow Steps missing %q:\n%s", want, steps)
+			}
+		}
+	})
+}
