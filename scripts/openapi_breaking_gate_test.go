@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestOpenAPIBreakingBaseSpecDoesNotSymlinkClientFile(t *testing.T) {
+	rule := readFile(t, repoRoot(t), "tools/bazel/rules/openapi_base_spec.bzl")
+	clientBranch := regexp.MustCompile(`(?ms)^    if path:\n(.*?)^    else:\n`).FindStringSubmatch(rule)
+	if len(clientBranch) != 2 {
+		t.Fatal("cannot locate the client-supplied base spec branch; update this guard for the repository rule's current structure")
+	}
+	// A client file under /tmp is invisible in the test sandbox's private
+	// /tmp. Linking it makes the gate fail with ENOENT before comparing specs.
+	// The unset branch may still link the committed spec from the workspace.
+	if regexp.MustCompile(`(?m)^\s*rctx\.symlink\s*\(`).MatchString(clientBranch[1]) {
+		t.Error("client-supplied OpenAPI base spec must be materialized in the repository, not symlinked from the client filesystem")
+	}
+}
+
 // The OpenAPI breaking-change gate runs under Bazel only
 // (//cmd/openapi-breaking:openapi-breaking_test, in the unit lane's //...):
 // on pull requests and merge groups bazel.yml's unit lane writes the base
