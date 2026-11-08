@@ -1778,4 +1778,71 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-2 graph steps continue through the hook", func(t *testing.T) {
+		// A workflow step does not end the session on its own: the opening
+		// and GUPP lines must not teach an unconditional exit.
+		for _, forbidden := range []string{
+			"Find it, execute it, close it, and exit.",
+			"When you're done, exit.",
+		} {
+			if strings.Contains(flat, forbidden) {
+				t.Errorf("pool-worker prompt still teaches an unconditional exit with %q", forbidden)
+			}
+		}
+
+		after, _ := flatPromptSection(t, flat, "After a Workflow Step")
+		requireInOrder(t, "After a Workflow Step", after,
+			"gc hook --claim --json",
+			"one hook invocation per tool call",
+			`"action":"work"`,
+			"`no_work`",
+			"at most three times, each in a new tool call",
+			"gc hook --claim --drain-ack --json",
+			"If that returns `work`",
+			"`drain_pending`",
+			"gc runtime drain-ack",
+		)
+		for _, want := range []string{
+			"Never wrap the claim in a `sleep`/retry loop inside one tool call",
+			"never another query",
+			"one-step lane",
+			"already ran `gc runtime drain-ack`",
+			"do not poll the hook again",
+		} {
+			if !strings.Contains(after, want) {
+				t.Errorf("After a Workflow Step missing %q:\n%s", want, after)
+			}
+		}
+
+		steps, _ := flatPromptSection(t, flat, "Workflow Steps")
+		if !strings.Contains(steps, `"After a Workflow Step"`) {
+			t.Errorf("Workflow Steps does not route the next assignment through \"After a Workflow Step\":\n%s", steps)
+		}
+
+		howTo, _ := flatPromptSection(t, flat, "How to Work")
+		requireInOrder(t, "How to Work", howTo,
+			"**Workflow step:**", `"After a Workflow Step"`,
+			"**Molecule attachment:**",
+			"**Plain bead or formula root:**",
+		)
+		// The mandatory final drain-ack is the one-assignment lifetime of a
+		// legacy or plain bead, not of a workflow step.
+		mandatory := strings.Index(howTo, "**MANDATORY")
+		if mandatory < 0 {
+			t.Fatalf("How to Work lost the mandatory final drain-ack:\n%s", howTo)
+		}
+		lead := howTo[mandatory:]
+		if end := strings.Index(lead, "gc runtime drain-ack"); end >= 0 {
+			lead = lead[:end]
+		}
+		if !strings.Contains(lead, "molecule attachment or plain bead") {
+			t.Errorf("How to Work makes the final drain-ack mandatory for every assignment; scope it to molecule attachments and plain beads:\n%s", lead)
+		}
+
+		restart, _ := flatPromptSection(t, flat, "Context Exhaustion")
+		if !strings.Contains(restart, "gc hook --claim --drain-ack --json") {
+			t.Errorf("Context Exhaustion does not recover the assignment through the hook:\n%s", restart)
+		}
+	})
 }
