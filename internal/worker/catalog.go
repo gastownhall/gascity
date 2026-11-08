@@ -125,3 +125,9 @@ const (
 func (c *SessionCatalog) PruneBefore(before time.Time, states ...SessionState) (SessionPruneResult, error) {
 	return c.manager.PruneDetailed(before, states...)
 }
+
+// sessionRecordPersisted is the persisted-only session read. RED scaffold: the
+// GREEN commit replaces this body; it exists so the RED tests compile.
+func sessionRecordPersisted(_ *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, fmt.Errorf("sessionRecordPersisted(%q): not implemented", id)
+}
