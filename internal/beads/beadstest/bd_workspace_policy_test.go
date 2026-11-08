@@ -221,6 +221,8 @@ type fnFacts struct {
 	initArgs     bool   // builds an argv slice that starts with "init"
 	takesDir     bool   // has a parameter that names a directory
 	gitLit       bool   // has a "git" string literal (exec.Command("git", ...))
+	gitDirLit    bool   // has a ".git" string literal
+	headLit      bool   // has a "HEAD" string literal
 	fakeBD       bool   // names a fake* identifier: the bd under test is a stub
 	calls        map[string]bool
 }
@@ -255,25 +257,35 @@ func unboundedBdWorkspaceDirs(t testing.TB, sources map[string][]byte) []string 
 		}
 	}
 
-	// A function that calls a git-root maker (gitInitWorkspace, createGitRig, ...)
-	// hands its dir to that helper, so it is bounded too.
+	// gitRoot holds the fixtures that hand back a git-rooted dir: helpers that
+	// run git init or write a .git skeleton, and the dir-making or dir-taking
+	// helpers that call one. A test that calls any of them is bounded, but the
+	// reach stops at tests, or one common callee name would bound everything.
 	gitRoot := map[string]bool{}
 	for changed := true; changed; {
 		changed = false
 		for _, fn := range fns {
-			if gitRoot[fn.name] {
+			if gitRoot[fn.name] || strings.HasPrefix(fn.name, "Test") {
 				continue
 			}
 			hit := fn.makesGitRoot
-			for callee := range fn.calls {
-				if gitRoot[callee] {
-					hit = true
+			if fn.dirSource || fn.takesDir {
+				for callee := range fn.calls {
+					if gitRoot[callee] {
+						hit = true
+					}
 				}
 			}
 			if hit {
 				gitRoot[fn.name] = true
-				fn.bounded = true
 				changed = true
+			}
+		}
+	}
+	for _, fn := range fns {
+		for callee := range fn.calls {
+			if gitRoot[callee] {
+				fn.bounded = true
 			}
 		}
 	}
@@ -371,6 +383,12 @@ func scanFunc(fd *ast.FuncDecl) *fnFacts {
 			if n.Kind == token.STRING && n.Value == `"git"` {
 				facts.gitLit = true
 			}
+			if n.Kind == token.STRING && n.Value == `".git"` {
+				facts.gitDirLit = true
+			}
+			if n.Kind == token.STRING && n.Value == `"HEAD"` {
+				facts.headLit = true
+			}
 		case *ast.CallExpr:
 			name := calleeName(n.Fun)
 			if name != "" {
@@ -382,7 +400,6 @@ func scanFunc(fd *ast.FuncDecl) *fnFacts {
 			}
 			if gitInitCall(n, name) {
 				facts.makesGitRoot = true
-				facts.bounded = true
 			}
 			if bdInitCall(n, name) {
 				facts.bdInit = true
@@ -393,6 +410,12 @@ func scanFunc(fd *ast.FuncDecl) *fnFacts {
 	if facts.initArgs && facts.gitLit {
 		// {"init", dir} run as exec.Command("git", args...): a git init.
 		facts.makesGitRoot = true
+	}
+	if facts.gitDirLit && facts.headLit {
+		// A plain-file .git skeleton (markGitRoot, markWorkspaceGitRoot).
+		facts.makesGitRoot = true
+	}
+	if facts.makesGitRoot {
 		facts.bounded = true
 	}
 	return facts

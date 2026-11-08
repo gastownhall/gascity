@@ -58,7 +58,7 @@ func requireBD(t *testing.T, dir string, args ...string) string {
 func initBeadsDir(t *testing.T) string {
 	t.Helper()
 	helpers.RequireBD(t)
-	dir := beadstest.GuardedTempDir(t)
+	dir := beadstest.GuardedBdWorkspaceDir(t)
 	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
 	return dir
 }

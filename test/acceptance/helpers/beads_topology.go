@@ -370,7 +370,26 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	e.ProjectID = identity.ProjectID
 }
 
-// provisionCommand is ProvisionBeadsDatabase's `bd init --server`.
+// markWorkspaceGitRoot makes workspace its own git root with a plain-file .git
+// skeleton (no git subprocess), which bounds bd's walk up for a .beads at the
+// workspace. Without it a database-less .beads above the workspace captures
+// the `bd init` and the provisioned database lands in the ancestor (ga-l7otw9).
+// The dir is created when it is missing.
+func markWorkspaceGitRoot(t *testing.T, workspace string) {
+	t.Helper()
+	gitDir := filepath.Join(workspace, ".git")
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(gitDir, sub), 0o700); err != nil {
+			t.Fatalf("mark %s as a git root: %v", workspace, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatalf("mark %s as a git root: %v", workspace, err)
+	}
+}
+
+// provisionCommand is ProvisionBeadsDatabase's `bd init --server`, run in a
+// workspace that is its own git root.
 //
 // It runs under the Env's tool home, never the real HOME. This is the command
 // that started the operator's own shared Dolt server on 2026-09-29: bd init in
@@ -378,6 +397,7 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 // explicit --server-host/--server-port and starts the host-wide server under
 // ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
 func (e *ExternalDolt) provisionCommand(t *testing.T, env *Env, bdPath, workspace, prefix string) (*exec.Cmd, context.Context) {
+	markWorkspaceGitRoot(t, workspace)
 	cmd, ctx := boundedToolCommand(t, acceptanceToolCommandTimeout, bdPath, "init", "--server",
 		"--server-host", e.Host, "--server-port", e.Port,
 		"--database", e.Database, "-p", prefix,

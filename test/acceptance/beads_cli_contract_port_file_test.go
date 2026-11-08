@@ -40,7 +40,7 @@ func TestBdReadsScopePortFileUnderWithheldSessionEnv(t *testing.T) {
 	}
 
 	port := closedLoopbackPort(t)
-	dir := beadstest.GuardedTempDir(t)
+	dir := beadstest.GuardedBdWorkspaceDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)

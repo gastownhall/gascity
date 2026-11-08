@@ -42,7 +42,7 @@ func TestRunBDIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", pollutedHome)
 
-	dir := beadstest.GuardedTempDir(t)
+	dir := beadstest.GuardedBdWorkspaceDir(t)
 	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
 	id := createBead(t, dir, "home-isolation probe")
 

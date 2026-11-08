@@ -6406,7 +6406,7 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	}
 	pinTestOwnedBDHome(t)
 
-	cityPath := beadstest.GuardedTempDir(t)
+	cityPath := beadstest.GuardedBdWorkspaceDir(t)
 	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))

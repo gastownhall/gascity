@@ -30,7 +30,7 @@ func TestPoolWorkQueryFromWorktree(t *testing.T) {
 	bdPath := helpers.RequireBD(t)
 
 	// Set up a city with a rig.
-	cityDir := beadstest.GuardedTempDir(t)
+	cityDir := beadstest.GuardedBdWorkspaceDir(t)
 	rigDir := filepath.Join(cityDir, "myrig")
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecats", "polecat-1")
 
@@ -122,7 +122,7 @@ func TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", pollutedHome)
 
-	dir := beadstest.GuardedTempDir(t)
+	dir := beadstest.GuardedBdWorkspaceDir(t)
 	bdRun(t, bdPath, dir, "init")
 	bdRun(t, bdPath, dir, "create", "--title", "home-isolation probe", "--priority=P2")
 
