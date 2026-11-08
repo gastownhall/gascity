@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -349,5 +351,190 @@ func TestProviderOwnedFanOutLeavesOrdinaryCallsAlone(t *testing.T) {
 			t.Fatalf("healthBeadsProviderContext() = %v, want nil", err)
 		}
 		assertOps(t, ops, []string{"health s0", "health s1", "health s2", "health s3"})
+	})
+}
+
+// recoverNames returns the scopes ops recovered, as "s<index>".
+func recoverNames(ops []string) []string {
+	var out []string
+	for _, op := range ops {
+		if name, ok := strings.CutPrefix(op, "recover "); ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// recoverStamp reads the recover-start stamp for a scope root.
+func recoverStamp(root string) (time.Time, bool) {
+	v, ok := lastProviderScopeRecover.Load(normalizePathForCompare(root))
+	if !ok {
+		return time.Time{}, false
+	}
+	at, _ := v.(time.Time)
+	return at, true
+}
+
+// Probe order alone must not decide who is recovered: with the budget letting
+// one recover through per call, ten unhealthy scopes that are probed two per
+// call must each be recovered within ten calls. The scope that has waited
+// longest (never recovered, or recovered earliest) goes first among the two a
+// call probed.
+func TestProviderOwnedRepeatedCallsRecoverEveryUnhealthyScope(t *testing.T) {
+	fx := newFanOutFixture(t, 9)
+	fx.setUnhealthy(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+	installFanOutClock(t, fx, 100*time.Second)
+
+	var order []string
+	recovered := make(map[string]bool)
+	for call := 1; call <= 10; call++ {
+		ops, _ := fx.health()
+		got := recoverNames(ops)
+		if len(got) != 1 {
+			t.Fatalf("call %d started %d recovers (%v), want exactly 1 (ops %v)", call, len(got), got, ops)
+		}
+		order = append(order, got[0])
+		recovered[got[0]] = true
+	}
+	var never []string
+	for i := range fx.scopes {
+		if name := fmt.Sprintf("s%d", i); !recovered[name] {
+			never = append(never, name)
+		}
+	}
+	if len(never) > 0 {
+		t.Errorf("scopes never recovered across ten calls: %s (recover order %s)", strings.Join(never, ","), strings.Join(order, ","))
+	}
+	if got, want := strings.Join(order, ","), "s0,s2,s4,s6,s8,s1,s3,s5,s7,s9"; got != want {
+		t.Errorf("recover order = %s, want %s", got, want)
+	}
+}
+
+// A recover the budget skipped keeps no stamp, so on the next call that scope
+// has waited longest and goes first.
+func TestProviderOwnedRecoverSkippedByTheBudgetGoesFirstOnTheNextCall(t *testing.T) {
+	fx := newFanOutFixture(t, 1)
+	fx.setUnhealthy(0, 1)
+	installFanOutClock(t, fx, 100*time.Second)
+
+	ops, err := fx.health()
+	assertOps(t, ops, []string{"health s0", "health s1", "recover s0", "health s0"})
+	if want := fmt.Sprintf("provider-owned scope %q recovery skipped (fan-out budget)", fx.scopes[1]); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("first call error = %v, want it to name the budget skip (%s)", err, want)
+	}
+
+	ops, err = fx.health()
+	assertOps(t, ops, []string{"health s0", "health s1", "recover s1", "health s1"})
+	if want := fmt.Sprintf("provider-owned scope %q recovery skipped (fan-out budget)", fx.scopes[0]); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("second call error = %v, want it to name the budget skip (%s)", err, want)
+	}
+}
+
+// Overlapping health calls in one process must not both start a recover for
+// one scope inside its cooldown. The clock stub is a rendezvous: it holds each
+// caller until all of them have reached it (or a short wait passes), so a
+// check-then-stamp that is not one atomic step lets every caller through the
+// check before any stamps, deterministically.
+func TestProviderOwnedRecoverCooldownClaimIsAtomic(t *testing.T) {
+	const callers = 8
+	fx := newFanOutFixture(t, 0)
+	scope := fx.scopes[0]
+
+	instant := time.Unix(1_700_000_000, 0).UTC()
+	var arrived atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	open := func() { releaseOnce.Do(func() { close(release) }) }
+	prevNow, prevCooldown := providerRecoverNow, providerRecoverCooldown
+	providerRecoverNow = func() time.Time {
+		if arrived.Add(1) == callers {
+			open()
+		}
+		select {
+		case <-release:
+		case <-time.After(250 * time.Millisecond):
+			open()
+		}
+		return instant
+	}
+	providerRecoverCooldown = func() time.Duration { return 30 * time.Second }
+	t.Cleanup(func() { providerRecoverNow, providerRecoverCooldown = prevNow, prevCooldown })
+
+	type result struct {
+		started         []string
+		skips, failures []error
+	}
+	results := make(chan result, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started, skips, failures := startProviderOwnedRecovers(context.Background(), fx.city, []string{scope}, nil)
+			results <- result{started, skips, failures}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var started, skips int
+	for r := range results {
+		started += len(r.started)
+		skips += len(r.skips)
+		for _, err := range r.skips {
+			if !strings.Contains(err.Error(), "recovery skipped (cooldown)") {
+				t.Errorf("skip = %v, want it to name the cooldown", err)
+			}
+		}
+		for _, err := range r.failures {
+			t.Errorf("recover failed: %v", err)
+		}
+	}
+	if got := countOp(fx.ops(), "recover s0"); got != 1 {
+		t.Errorf("provider ran recover s0 %d times across %d overlapping callers, want 1 (ops %v)", got, callers, fx.ops())
+	}
+	if started != 1 || skips != callers-1 {
+		t.Errorf("callers started %d recovers and skipped %d, want 1 and %d", started, skips, callers-1)
+	}
+}
+
+// Only a recover that started leaves a stamp, and a cooldown skip does not
+// refresh it: both keep the scope's place in the longest-waiting order.
+func TestProviderOwnedRecoverStampsOnlyStartedRecovers(t *testing.T) {
+	t.Run("a budget skip leaves no stamp", func(t *testing.T) {
+		fx := newFanOutFixture(t, 1)
+		fx.setUnhealthy(0, 1)
+		installFanOutClock(t, fx, 100*time.Second)
+
+		ops, _ := fx.health()
+		assertOps(t, ops, []string{"health s0", "health s1", "recover s0", "health s0"})
+		if _, ok := recoverStamp(fx.scopes[0]); !ok {
+			t.Errorf("recovered scope s0 has no stamp")
+		}
+		if at, ok := recoverStamp(fx.scopes[1]); ok {
+			t.Errorf("budget-skipped scope s1 has a stamp (%v), want none", at)
+		}
+	})
+	t.Run("a cooldown skip does not refresh the stamp", func(t *testing.T) {
+		fx := newFanOutFixture(t, 0)
+		fx.setUnhealthy(0)
+		installFanOutClock(t, fx, time.Second)
+
+		ops, _ := fx.health()
+		if got := countOp(ops, "recover s0"); got != 1 {
+			t.Fatalf("first call recovered s0 %d times, want 1 (ops %v)", got, ops)
+		}
+		first, ok := recoverStamp(fx.scopes[0])
+		if !ok {
+			t.Fatal("recovered scope s0 has no stamp")
+		}
+
+		ops, _ = fx.health()
+		if got := countOp(ops, "recover s0"); got != 0 {
+			t.Fatalf("second call inside the cooldown recovered s0 %d times, want 0 (ops %v)", got, ops)
+		}
+		if second, _ := recoverStamp(fx.scopes[0]); !second.Equal(first) {
+			t.Errorf("stamp after a cooldown skip = %v, want it unchanged at %v", second, first)
+		}
 	})
 }
