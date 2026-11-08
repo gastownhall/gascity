@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"time"
@@ -39,7 +40,10 @@ func SignalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 const managedGroupPollInterval = 25 * time.Millisecond
 
 // TerminateManagedProcess sends SIGTERM to the process group, waits up to
-// grace for the whole group to exit, then SIGKILLs what is left of it.
+// grace for the whole group to exit, then SIGKILLs what is left of it and waits
+// at most [ManagedProcessReapGrace] for done to close. A process that outlives
+// its SIGKILL for that long (uninterruptible sleep) yields an error satisfying
+// errors.Is([ErrProcessNotConfirmedDead]); it is retryable and not "gone".
 //
 // The leader exiting is not the group exiting. A member that handles or
 // ignores SIGTERM outlives a leader that does not (a wrapper shell dies at
@@ -47,6 +51,12 @@ const managedGroupPollInterval = 25 * time.Millisecond
 // stops), and nothing would kill it afterwards: for a provider whose control
 // socket lives in the stopping process, nothing can even reach it.
 func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) error {
+	return terminateManagedProcessGraces(cmd, done, grace, ManagedProcessReapGrace)
+}
+
+// terminateManagedProcessGraces is TerminateManagedProcess with the post-SIGKILL
+// reap wait named, so tests can run it in milliseconds.
+func terminateManagedProcessGraces(cmd *exec.Cmd, done <-chan struct{}, grace, reapGrace time.Duration) error {
 	_ = SignalProcessGroup(cmd, syscall.SIGTERM)
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
@@ -60,14 +70,14 @@ func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Dur
 	}
 
 	_ = SignalProcessGroup(cmd, syscall.SIGKILL)
-	<-done
-	return nil
-}
-
-// terminateManagedProcessGraces is TerminateManagedProcess with the post-SIGKILL
-// reap wait named, so tests can run it in milliseconds.
-func terminateManagedProcessGraces(cmd *exec.Cmd, done <-chan struct{}, grace, _ time.Duration) error {
-	return TerminateManagedProcess(cmd, done, grace)
+	reap := time.NewTimer(reapGrace)
+	defer reap.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-reap.C:
+		return fmt.Errorf("%w: still running %v after SIGKILL", ErrProcessNotConfirmedDead, reapGrace)
+	}
 }
 
 // startedAsGroupLeader reports whether cmd was started as the leader of a new

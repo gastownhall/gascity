@@ -298,6 +298,12 @@ func MetaValue(v string, err error) (string, error) {
 // A wrap over a join is judged by the join, not by the wrap's text. An error
 // tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
+	// A process that may still be alive is never gone, whatever else the error
+	// says: a join with a "not found" leaf or a wrapped ErrSessionNotFound must
+	// not certify it dead.
+	if errors.Is(err, ErrProcessNotConfirmedDead) {
+		return false
+	}
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
 	case nil:
 		return false
