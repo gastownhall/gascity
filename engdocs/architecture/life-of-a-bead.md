@@ -112,8 +112,10 @@ A bead exists, but no agent knows about it yet. Discovery is how agents
 find work. Gas City uses the **pull model**: agents poll for available
 work rather than being pushed assignments. Routed agents normally discover
 work through the claim protocol rendered into the session startup prompt:
-the protocol calls `gc hook`, claims exactly one returned bead with
-`bd update --claim`, and then the agent works that claimed bead.
+the protocol runs `gc hook --claim --drain-ack --json`, which finds existing
+assigned work or atomically claims exactly one routed bead (or acknowledges a
+runtime drain when nothing is available), and then the agent works that
+claimed bead. Plain `gc hook` only lists routed work; it claims nothing.
 
 ### The hook mechanism (gc hook)
 
@@ -154,7 +156,7 @@ own store's failure is escalated as the session's work-query failure event.
 
 `gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without
 running the work query and emits no output. Routed discovery belongs in the
-session startup claim protocol or an explicit plain `gc hook` invocation.
+session startup claim protocol or an explicit `gc hook --claim` invocation.
 
 ### Ready() and the run-what-you-find rule
 

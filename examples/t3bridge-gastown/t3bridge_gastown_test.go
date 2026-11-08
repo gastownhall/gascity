@@ -1,6 +1,7 @@
 package t3bridge_gastown_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -68,6 +69,42 @@ func TestT3BridgeGastownExampleParses(t *testing.T) {
 	for _, want := range []string{"example/t3demo.witness", "example/t3demo.refinery"} {
 		if !slices.ContainsFunc(cfg.NamedSessions, func(s config.NamedSession) bool { return s.QualifiedName() == want }) {
 			t.Fatalf("missing named session %q; sessions=%v", want, namedSessionNames(cfg.NamedSessions))
+		}
+	}
+}
+
+// TestT3BridgeGastownPolecatsClaimWithHookClaim pins the polecat prompt and
+// nudge text to `gc hook --claim`. Plain `gc hook` only lists routed work, so
+// a polecat told that it claims can work a bead it never claimed, with no
+// assignee and no lease.
+func TestT3BridgeGastownPolecatsClaimWithHookClaim(t *testing.T) {
+	dir := exampleDir()
+	banned := []string{
+		"Run `gc hook` to claim",
+		"Run 'gc hook';",
+		"running `gc hook` if",
+		"Run gc hook,",
+		"checks assigned work first, then routed pool work",
+	}
+	for _, pack := range []string{"t3demo", "gastown"} {
+		for _, name := range []string{"prompt.template.md", "agent.toml"} {
+			path := filepath.Join(dir, "packs", pack, "agents", "polecat", name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			text := string(data)
+			if !strings.Contains(text, "gc hook --claim") {
+				t.Errorf("%s/%s: want the claim step to be `gc hook --claim`", pack, name)
+			}
+			for _, phrase := range banned {
+				if strings.Contains(text, phrase) {
+					t.Errorf("%s/%s: describes plain gc hook as the claim step (%q)", pack, name, phrase)
+				}
+			}
+			if name == "prompt.template.md" && !strings.Contains(strings.Join(strings.Fields(text), " "), "a failed claim means another agent holds that bead: do not work it") {
+				t.Errorf("%s/%s: missing the failed-claim rule", pack, name)
+			}
 		}
 	}
 }
