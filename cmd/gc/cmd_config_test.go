@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -223,5 +224,50 @@ func TestConfigShowValidateReportsImplicitAgentLocalMCPConflict(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// gc config show --validate --json fails the same conflicting city, with
+// gc start's conflict error, unchanged, among its validation errors.
+func TestConfigShowValidateJSONReportsImplicitAgentLocalMCPConflict(t *testing.T) {
+	cityDir := writeAgentLocalMCPConflictCity(t, "echo")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "show", "--validate", "--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("gc config show --validate --json = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	validateConfigShowJSONSchema(t, stdout.Bytes())
+	var payload struct {
+		Validation struct {
+			OK     bool     `json:"ok"`
+			Errors []string `json:"errors"`
+		} `json:"validation"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, stdout.String())
+	}
+	if payload.Validation.OK {
+		t.Fatalf("validation.ok = true, want false:\n%s", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	_, startErr := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard)
+	if startErr == nil {
+		t.Fatal("buildStage1MCPTargets: want the MCP target conflict gc start refuses, got nil")
+	}
+	for _, want := range []string{"MCP target conflict at ", filepath.Join(cityDir, "agents", "worker", "mcp")} {
+		if !strings.Contains(startErr.Error(), want) {
+			t.Fatalf("start error %q, want it to contain %q", startErr, want)
+		}
+	}
+	found := false
+	for _, e := range payload.Validation.Errors {
+		found = found || e == startErr.Error()
+	}
+	if !found {
+		t.Fatalf("validation.errors = %#v, want gc start's error %q", payload.Validation.Errors, startErr)
 	}
 }
