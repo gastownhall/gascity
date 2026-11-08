@@ -245,15 +245,32 @@ if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || com
         # reaper must kill only what still holds the file after it settles.
         bash -c 'exec 7<"$1"; sleep 0.5; exec 7<&-; exec sleep 30' _ "$REAP_SLOTS/slot-0.lock" &
         PROBER_PID=$!
+        # The wait bound is wide on purpose. A successful reap sleeps 1.2s
+        # (the 1s settle look plus 0.2s of TERM grace) and runs two
+        # lsof/fuser scans, each of which walks every process on the host:
+        # about 2.5s per scan on a shared agent host with ~3,800 processes
+        # at load ~50, so this acquire takes 6-7s there and grows with the
+        # host's process count. The check therefore asserts what its name
+        # says -- the acquire returned before the configured bound --
+        # instead of a tight wall-clock budget. A reaper that never fires
+        # times out at the bound and fails this check and the ACQUIRED
+        # check below.
+        REAP_MAX_WAIT=20
         START="$(date +%s)"
         REAP_OUT="$(LIB="$LIB" DIR="$REAP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
-            PUSH_GATE_MAX_WAIT_SECONDS=6 PUSH_GATE_POLL_SECONDS=1 \
+            PUSH_GATE_MAX_WAIT_SECONDS="$REAP_MAX_WAIT" PUSH_GATE_POLL_SECONDS=1 \
             bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
         ELAPSED=$(( $(date +%s) - START ))
         REAP_TAIL="$(printf '%s\n' "$REAP_OUT" | tail -1)"
         assert_eq "reap.acquire_succeeds_after_reaping_leak" "$REAP_TAIL" "ACQUIRED"
         assert_contains "reap.diagnostic_names_leaked_descendant" "$REAP_OUT" "reaping leaked descendant"
-        assert_true "reap.did_not_burn_full_wait_bound" test "$ELAPSED" -le 4
+        if (( ELAPSED < REAP_MAX_WAIT )); then
+            record_pass "reap.did_not_burn_full_wait_bound"
+        else
+            REAP_LOAD="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || uptime 2>/dev/null | sed 's/.*load average[s]*: //' || echo unknown)"
+            record_fail "reap.did_not_burn_full_wait_bound" \
+                "acquire took ${ELAPSED}s, not under the ${REAP_MAX_WAIT}s wait bound (host load: ${REAP_LOAD:-unknown})"
+        fi
         if [[ -n "$SLEEPER_PID" ]] && kill -0 "$SLEEPER_PID" 2>/dev/null; then
             record_fail "reap.leaked_descendant_killed" "sleeper pid $SLEEPER_PID still alive"
             kill "$SLEEPER_PID" 2>/dev/null || true
