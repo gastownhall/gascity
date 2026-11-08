@@ -39,6 +39,7 @@ go_test(
         "exec_provider_test.go",
         "name_test.go",
         "pod_test.go",
+        "provider_deadline_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",
         "seams_test.go",

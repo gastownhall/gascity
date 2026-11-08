@@ -44,17 +44,37 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool                // skip staging + init container for prebaked images
-	cityName           string              // the controller's city name, for the pod's remote-stage record
-	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
-	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
-	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
-	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration       // settle time before post-start liveness check
-	stderr             io.Writer           // warning output (default os.Stderr)
-	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
-	now                func() time.Time    // the poke ledger's clock; nil is time.Now
+	serviceAccount     string                                         // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool                                           // skip staging + init container for prebaked images
+	cityName           string                                         // the controller's city name, for the pod's remote-stage record
+	nodeSelector       map[string]string                              // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations        []corev1.Toleration                            // GC_K8S_TOLERATIONS (JSON)
+	affinity           *corev1.Affinity                               // GC_K8S_AFFINITY (JSON)
+	priorityClassName  string                                         // GC_K8S_PRIORITY_CLASS_NAME
+	postStartSettle    time.Duration                                  // settle time before post-start liveness check
+	stderr             io.Writer                                      // warning output (default os.Stderr)
+	pokes              runtime.PokeLedger                             // gc's own input, discounted from GetLastActivity
+	now                func() time.Time                               // the poke ledger's clock; nil is time.Now
+	requestBound       time.Duration                                  // per-verb deadline of the request-style verbs; zero is verbRequestBound
+	copyBound          time.Duration                                  // CopyTo's deadline; zero is verbCopyBound
+	run                func(ctx context.Context, args []string) error // runs kubectl for Attach; nil execs the real kubectl
+}
+
+// verbRequestBound is the default deadline over a whole request-style verb.
+const verbRequestBound = 15 * time.Second
+
+// verbCopyBound is the default deadline over CopyTo's lookup plus tar stream.
+const verbCopyBound = 120 * time.Second
+
+// requestTimeout resolves the request bound.
+func (p *Provider) requestTimeout() time.Duration { return p.requestBound }
+
+// copyTimeout resolves the copy bound.
+func (p *Provider) copyTimeout() time.Duration { return p.copyBound }
+
+// verbCtx returns a context for one verb.
+func (p *Provider) verbCtx(_ time.Duration) (context.Context, context.CancelFunc) {
+	return context.Background(), func() {}
 }
 
 type schedulingFields struct {
