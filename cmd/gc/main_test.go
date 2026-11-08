@@ -5982,13 +5982,17 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 	sp.release("db")
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("doStop did not finish")
+	}, "doStop finishing")
+	if code != 0 {
+		t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
 	}
 }
 

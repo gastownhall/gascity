@@ -1534,16 +1534,20 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
 	}
 
-	select {
-	case got := <-commands:
-		if got.command != "stop-force" {
-			t.Fatalf("controller command = %q, want stop-force", got.command)
+	var got observedForceCommand
+	awaitCond(t, func() bool {
+		select {
+		case got = <-commands:
+			return true
+		default:
+			return false
 		}
-		if !got.registeredBeforeCommand {
-			t.Fatal("force stop reached controller after supervisor registry entry was removed")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for force controller command")
+	}, "force controller command")
+	if got.command != "stop-force" {
+		t.Fatalf("controller command = %q, want stop-force", got.command)
+	}
+	if !got.registeredBeforeCommand {
+		t.Fatal("force stop reached controller after supervisor registry entry was removed")
 	}
 }
 
@@ -2223,11 +2227,7 @@ shutdown_timeout = "100ms"
 
 	// Cleanup: cancel the city goroutine and wait for it to exit.
 	if done := cr.CancelCity(canonicalTestPath(cityPath)); done != nil {
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("city goroutine did not exit in time")
-		}
+		awaitClose(t, done, "city goroutine exiting after cancel")
 	}
 }
 

@@ -5425,15 +5425,23 @@ func TestReloadControllerConfigUsesControllerReloadCommand(t *testing.T) {
 		t.Fatalf("reloadControllerConfig(): %v", err)
 	}
 
-	select {
-	case cmd := <-cmdCh:
-		if cmd != "reload\n" {
-			t.Fatalf("controller command = %q, want %q", cmd, "reload\n")
+	var cmd string
+	var acceptErr error
+	awaitCond(t, func() bool {
+		select {
+		case cmd = <-cmdCh:
+			return true
+		case acceptErr = <-errCh:
+			return true
+		default:
+			return false
 		}
-	case err := <-errCh:
-		t.Fatalf("controller accept/read: %v", err)
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for controller reload command")
+	}, "controller reload command arriving")
+	if acceptErr != nil {
+		t.Fatalf("controller accept/read: %v", acceptErr)
+	}
+	if cmd != "reload\n" {
+		t.Fatalf("controller command = %q, want %q", cmd, "reload\n")
 	}
 }
 
@@ -5478,15 +5486,23 @@ func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
 		t.Fatalf("pokeSupervisor() took %v, want it to return immediately after queueing reload", elapsed)
 	}
 
-	select {
-	case cmd := <-cmdCh:
-		if cmd != "reload\n" {
-			t.Fatalf("supervisor command = %q, want %q", cmd, "reload\n")
+	var cmd string
+	var acceptErr error
+	awaitCond(t, func() bool {
+		select {
+		case cmd = <-cmdCh:
+			return true
+		case acceptErr = <-errCh:
+			return true
+		default:
+			return false
 		}
-	case err := <-errCh:
-		t.Fatalf("supervisor accept/read: %v", err)
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for supervisor reload command")
+	}, "supervisor reload command arriving")
+	if acceptErr != nil {
+		t.Fatalf("supervisor accept/read: %v", acceptErr)
+	}
+	if cmd != "reload\n" {
+		t.Fatalf("supervisor command = %q, want %q", cmd, "reload\n")
 	}
 }
 

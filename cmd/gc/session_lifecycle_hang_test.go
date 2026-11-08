@@ -115,6 +115,10 @@ func TestExecuteTargetWave_BoundedByPerTargetTimeout(t *testing.T) {
 		if fast.outcome != "success" {
 			t.Fatalf("fast.outcome = %q, want success", fast.outcome)
 		}
+	// Latency assertion, not a generic hang guard: asserts executeTargetWave
+	// returns promptly relative to the 100ms perTargetTimeout configured above
+	// (the function name says BoundedByPerTargetTimeout). hangBudget would be
+	// the wrong tool — it could hide a real per-target-timeout regression.
 	case <-time.After(2 * time.Second):
 		t.Fatal("executeTargetWave did not return within 2s — perTargetTimeout regression")
 	}
@@ -216,15 +220,19 @@ func TestInterruptTargetsBounded_PoolManagedStopDoesNotWedge(t *testing.T) {
 		done <- interruptTargetsBounded(targets, nil, store, sp, &stderr)
 	}()
 
-	select {
-	case sent := <-done:
-		if sent != 0 {
-			t.Fatalf("sent = %d, want 0 for pool-managed stop-only target", sent)
+	var sent int
+	awaitCond(t, func() bool {
+		select {
+		case sent = <-done:
+			return true
+		default:
+			return false
 		}
-		if !strings.Contains(stderr.String(), "outcome=timed_out") {
-			t.Fatalf("stderr = %q, want timed_out lifecycle outcome", stderr.String())
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("pool-managed stop wedged interruptTargetsBounded")
+	}, "pool-managed stop wedged interruptTargetsBounded")
+	if sent != 0 {
+		t.Fatalf("sent = %d, want 0 for pool-managed stop-only target", sent)
+	}
+	if !strings.Contains(stderr.String(), "outcome=timed_out") {
+		t.Fatalf("stderr = %q, want timed_out lifecycle outcome", stderr.String())
 	}
 }

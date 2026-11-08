@@ -849,11 +849,7 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 			done <- adoptionBarrierOutcome{result: result, passed: passed}
 		}()
 
-		select {
-		case <-store.listed:
-		case <-time.After(time.Second):
-			t.Fatal("adoption barrier did not list existing session beads")
-		}
+		awaitClose(t, store.listed, "adoption barrier to list existing session beads")
 
 		_, createErr := baseStore.Create(beads.Bead{
 			Title:  agentName,
@@ -875,11 +871,14 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 	})
 
 	var outcome adoptionBarrierOutcome
-	select {
-	case outcome = <-done:
-	case <-time.After(time.Second):
-		t.Fatal("adoption barrier did not finish after session_name lock released")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case outcome = <-done:
+			return true
+		default:
+			return false
+		}
+	}, "adoption barrier to finish after session_name lock released")
 	if !outcome.passed {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}

@@ -815,13 +815,17 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 	}
 	sp.release("worker")
 
-	select {
-	case woken := <-done:
-		if woken != 3 {
-			t.Fatalf("woken = %d, want 3", woken)
+	var woken int
+	awaitCond(t, func() bool {
+		select {
+		case woken = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("reconcile did not finish")
+	}, "reconcile finishing")
+	if woken != 3 {
+		t.Fatalf("woken = %d, want 3", woken)
 	}
 
 	if sp.maxInFlight != 2 {
@@ -2953,11 +2957,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 
 	sp.release("worker")
-	select {
-	case <-shutdownDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("shutdown did not finish after the async start completed")
-	}
+	awaitClose(t, shutdownDone, "shutdown finishing after the async start completed")
 	select {
 	case <-sp.listCalled:
 	default:
@@ -3363,11 +3363,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 	}
 
 	sp.release("worker")
-	select {
-	case <-followUp:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for async completion follow-up")
-	}
+	awaitClose(t, followUp, "async completion follow-up arriving")
 }
 
 func TestAllDependenciesAliveForTemplate_TreatsPendingCreateDependencyAsNotAlive(t *testing.T) {
@@ -5868,13 +5864,17 @@ func TestStopSessionsBounded_StopsDependentsBeforeDependencies(t *testing.T) {
 	}
 	sp.release("db")
 
-	select {
-	case stopped := <-done:
-		if stopped != 4 {
-			t.Fatalf("stopped = %d, want 4", stopped)
+	var stopped int
+	awaitCond(t, func() bool {
+		select {
+		case stopped = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stopSessionsBounded did not finish")
+	}, "stopSessionsBounded finishing")
+	if stopped != 4 {
+		t.Fatalf("stopped = %d, want 4", stopped)
 	}
 }
 
@@ -5937,13 +5937,17 @@ func TestStopSessionsBounded_UsesSessionBeadTemplateForCustomSessionNames(t *tes
 	}
 	sp.release("custom-db")
 
-	select {
-	case stopped := <-done:
-		if stopped != 2 {
-			t.Fatalf("stopped = %d, want 2", stopped)
+	var stopped int
+	awaitCond(t, func() bool {
+		select {
+		case stopped = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stopSessionsBounded did not finish")
+	}, "stopSessionsBounded finishing")
+	if stopped != 2 {
+		t.Fatalf("stopped = %d, want 2", stopped)
 	}
 }
 
@@ -6007,13 +6011,17 @@ func TestStopSessionsBounded_UsesLegacyAgentLabelTemplateForOrdering(t *testing.
 	}
 	sp.release("custom-db")
 
-	select {
-	case stopped := <-done:
-		if stopped != 2 {
-			t.Fatalf("stopped = %d, want 2", stopped)
+	var stopped int
+	awaitCond(t, func() bool {
+		select {
+		case stopped = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stopSessionsBounded did not finish")
+	}, "stopSessionsBounded finishing")
+	if stopped != 2 {
+		t.Fatalf("stopped = %d, want 2", stopped)
 	}
 }
 
@@ -6041,13 +6049,17 @@ func TestInterruptSessionsBounded_BroadcastsAllTargets(t *testing.T) {
 		sp.releaseInterrupt(name)
 	}
 
-	select {
-	case interrupted := <-done:
-		if interrupted != 4 {
-			t.Fatalf("interrupted = %d, want 4", interrupted)
+	var interrupted int
+	awaitCond(t, func() bool {
+		select {
+		case interrupted = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("interruptSessionsBounded did not finish")
+	}, "interruptSessionsBounded finishing")
+	if interrupted != 4 {
+		t.Fatalf("interrupted = %d, want 4", interrupted)
 	}
 }
 
@@ -6334,13 +6346,17 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 	}
 	sp.release("custom")
 
-	select {
-	case stopped := <-done:
-		if stopped != 3 {
-			t.Fatalf("stopped = %d, want 3", stopped)
+	var stopped int
+	awaitCond(t, func() bool {
+		select {
+		case stopped = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stopTargetsBounded did not finish")
+	}, "stopTargetsBounded finishing")
+	if stopped != 3 {
+		t.Fatalf("stopped = %d, want 3", stopped)
 	}
 
 	if !strings.Contains(stderr.String(), "falling back to serial stop order") {
@@ -6402,13 +6418,17 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 	}
 	sp.release("orphan-d")
 
-	select {
-	case stopped := <-done:
-		if stopped != 4 {
-			t.Fatalf("stopped = %d, want 4", stopped)
+	var stopped int
+	awaitCond(t, func() bool {
+		select {
+		case stopped = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stopTargetsBounded did not finish")
+	}, "stopTargetsBounded finishing")
+	if stopped != 4 {
+		t.Fatalf("stopped = %d, want 4", stopped)
 	}
 
 	if sp.maxInFlight != 1 {
@@ -6658,13 +6678,17 @@ func TestInterruptTargetsBounded_BroadcastsAllTargetsConcurrently(t *testing.T) 
 		sp.releaseInterrupt(name)
 	}
 
-	select {
-	case sent := <-done:
-		if sent != len(targets) {
-			t.Fatalf("sent = %d, want %d", sent, len(targets))
+	var sent int
+	awaitCond(t, func() bool {
+		select {
+		case sent = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("interruptTargetsBounded did not finish")
+	}, "interruptTargetsBounded finishing")
+	if sent != len(targets) {
+		t.Fatalf("sent = %d, want %d", sent, len(targets))
 	}
 }
 
@@ -6693,13 +6717,17 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 	second := sp.waitForInterrupts(t, 1)
 	sp.releaseInterrupt(second[0])
 
-	select {
-	case sent := <-done:
-		if sent != len(targets) {
-			t.Fatalf("sent = %d, want %d", sent, len(targets))
+	var sent int
+	awaitCond(t, func() bool {
+		select {
+		case sent = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("interruptTargetsBounded did not finish")
+	}, "interruptTargetsBounded finishing")
+	if sent != len(targets) {
+		t.Fatalf("sent = %d, want %d", sent, len(targets))
 	}
 }
 

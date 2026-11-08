@@ -6992,20 +6992,23 @@ func slicesContain(values []string, want string) bool {
 
 func orderDispatchTestEnv(t *testing.T, envCh <-chan []string) map[string]string {
 	t.Helper()
-	select {
-	case entries := <-envCh:
-		env := map[string]string{}
-		for _, entry := range entries {
-			key, value, ok := strings.Cut(entry, "=")
-			if ok {
-				env[key] = value
-			}
+	var entries []string
+	awaitCond(t, func() bool {
+		select {
+		case entries = <-envCh:
+			return true
+		default:
+			return false
 		}
-		return env
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for order exec env")
+	}, "order exec env")
+	env := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
 	}
-	return nil
+	return env
 }
 
 // --- rig-scoped dispatch tests ---
@@ -7748,11 +7751,7 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 
 	ad.dispatch(context.Background(), cityDir, time.Now())
 
-	select {
-	case <-ran:
-	case <-time.After(2 * time.Second):
-		t.Fatal("condition order did not dispatch with scoped cwd/env")
-	}
+	awaitClose(t, ran, "condition order dispatching with scoped cwd/env")
 }
 
 func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
@@ -9391,11 +9390,7 @@ func TestOrderDispatcherDrainWaitsForInFlightDispatch(t *testing.T) {
 
 	close(release)
 
-	select {
-	case <-drainDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("drain did not return after in-flight dispatch released")
-	}
+	awaitClose(t, drainDone, "drain returning after in-flight dispatch released")
 
 	all := trackingBeads(t, store, "order-run:drain-test")
 	hasExec := false
@@ -10188,6 +10183,9 @@ func TestOrderDispatchCancelsConditionCheckOnContextCancel(t *testing.T) {
 
 	select {
 	case <-done:
+	// Latency assertion, not a generic hang guard: asserts prompt return well
+	// under the documented 30s check_timeout constant. hangBudget would be the
+	// wrong tool — it could mask a real cancellation-promptness regression.
 	case <-time.After(20 * time.Second):
 		t.Fatal("dispatch did not return within 20s of ctx cancel; want prompt return well under the 30s check_timeout")
 	}
@@ -10806,11 +10804,7 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", nil, nil)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runDispatchGuarded did not return — a dispatch-goroutine panic was not recovered")
-	}
+	awaitClose(t, done, "runDispatchGuarded returning after a recovered panic")
 	if !strings.Contains(logs.String(), "panic") {
 		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
 	}

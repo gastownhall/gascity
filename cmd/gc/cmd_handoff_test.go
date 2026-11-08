@@ -250,19 +250,23 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	cancel()
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel", code)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-		if !dops.restartRequested["worker"] {
-			t.Error("restart flag should remain set after context cancel")
-		}
-		if got := stderr.String(); !strings.Contains(got, "gc handoff: signal received; restart request remains set") {
-			t.Errorf("stderr = %q, want pending restart warning", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("waitForControllerRestart did not exit on context cancel")
+	}, "waitForControllerRestart exiting on context cancel")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 on context cancel", code)
+	}
+	if !dops.restartRequested["worker"] {
+		t.Error("restart flag should remain set after context cancel")
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc handoff: signal received; restart request remains set") {
+		t.Errorf("stderr = %q, want pending restart warning", got)
 	}
 }
 
@@ -1014,13 +1018,17 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 		done <- handoffForTest([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr)
 	}()
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("cmdHandoff blocked for named on-demand session")
+	}, "cmdHandoff returning for named on-demand session")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "restart skipped") {
 		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())

@@ -53,11 +53,7 @@ func TestStartNudgeWakeListenerSignalsOnConnect(t *testing.T) {
 	defer lis.Close() //nolint:errcheck
 
 	pingNudgeWakeSocket(dir)
-	select {
-	case <-wakeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("wakeCh not signaled within 2s of producer ping")
-	}
+	awaitClose(t, wakeCh, "wakeCh signaling after producer ping")
 }
 
 func TestStartNudgeWakeListenerCoalescesBurst(t *testing.T) {
@@ -987,11 +983,7 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now())); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
-	select {
-	case <-wakeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("wakeCh not signaled after enqueue")
-	}
+	awaitClose(t, wakeCh, "wakeCh signaling after enqueue")
 }
 
 // legBDispatchFixture is a supervisor-mode city with one running worker

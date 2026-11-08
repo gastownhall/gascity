@@ -232,22 +232,17 @@ func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) 
 		cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, true)
 		close(bootDone)
 	}()
-	select {
+	select { // three-way race check, not a bare hang detector, so awaitClose doesn't fit
 	case <-bootDone:
 	case <-store.hit:
 		t.Fatal("#3288: boot reconcile attempted a wisp-tier read; the undesired-pool sweep was NOT deferred")
-	case <-time.After(10 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("#3288: boot reconcile blocked (~watchdog); the undesired-pool sweep was NOT deferred")
 	}
 
 	// Steady-state tick MUST reach the wisp-tier sweep read.
 	go cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, false)
-	select {
-	case <-store.hit:
-		// good: the steady-state tick ran the sweep and reached the wisp read.
-	case <-time.After(10 * time.Second):
-		t.Fatal("steady-state reconcile did not reach the wisp-tier sweep read; sweep did not run")
-	}
+	awaitClose(t, store.hit, "steady-state reconcile reaching the wisp-tier sweep read")
 	unblock()
 }
 
@@ -6030,11 +6025,7 @@ func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T
 	}()
 	od.waitForDrainCalls(t, 2)
 	close(od.release)
-	select {
-	case <-shutdownDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("shutdown did not return after retained dispatcher was released")
-	}
+	awaitClose(t, shutdownDone, "shutdown returning after retained dispatcher was released")
 }
 
 func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
@@ -6592,11 +6583,7 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	if err := os.WriteFile(packFile, []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("edit pack file: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after editing newly watched pack file")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -7483,11 +7470,7 @@ func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *
 	close(release)
 	<-execDone
 
-	select {
-	case <-shutdownDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown did not return after dispatch completed")
-	}
+	awaitClose(t, shutdownDone, "shutdown returning after dispatch completed")
 
 	// Tracking bead outcome must be persisted before shutdown returned.
 	all := trackingBeads(t, store, "order-run:blocked")

@@ -4912,13 +4912,17 @@ while :; do sleep 1; done
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	cancel()
 
-	select {
-	case err := <-resultCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("native env recovery error = %v, want context canceled", err)
+	var err error
+	awaitCond(t, func() bool {
+		select {
+		case err = <-resultCh:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("native env recovery did not return after parent cancellation")
+	}, "native env recovery returning after parent cancellation")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("native env recovery error = %v, want context canceled", err)
 	}
 	waitForProviderTestPIDExit(t, pid, "native env recovery")
 }

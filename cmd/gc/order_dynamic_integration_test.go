@@ -73,7 +73,10 @@ func TestControllerDiscoversAddedCronOrderWithoutRestart(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 	waitForController(t, dir)

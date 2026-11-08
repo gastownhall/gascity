@@ -253,11 +253,7 @@ func TestTraceControllerSocketInvalidRequestDoesNotPoke(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("controller socket handler did not exit")
-	}
+	awaitClose(t, done, "controller socket handler exiting")
 }
 
 func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
@@ -409,11 +405,7 @@ func sendTraceSocketCommand(t *testing.T, cityDir, command string, req traceCont
 	}
 	reply := readTraceSocketReply(t, client)
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("controller socket handler did not exit")
-	}
+	awaitClose(t, done, "controller socket handler exiting")
 	return reply
 }
 
@@ -436,11 +428,7 @@ func sendTraceStatusSocketCommand(t *testing.T, cityDir string, pokeCh chan stru
 	}
 	reply := readTraceSocketReply(t, client)
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("controller socket handler did not exit")
-	}
+	awaitClose(t, done, "controller socket handler exiting")
 	return reply
 }
 

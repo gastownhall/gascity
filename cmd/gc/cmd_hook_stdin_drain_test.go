@@ -115,6 +115,11 @@ func TestHookRunReturnsWithinTimeoutWhenStdinNeverEOFs(t *testing.T) {
 		if code != 124 {
 			t.Fatalf("cmdHookRun = %d, want 124 (fail-open timeout); stderr=%q", code, stderr.String())
 		}
+	// Latency assertion, not a generic hang guard: the 5s check above already
+	// asserts a bound relative to the configured timeout; this outer 10s is a
+	// backstop for the exact regression under test (drain blocking past the
+	// hard timeout). hangBudget would be the wrong tool — it could hide that
+	// regression by returning "eventually" instead of "within the timeout".
 	case <-time.After(10 * time.Second):
 		t.Fatalf("cmdHookRun did not return within 10s: the pre-spawn stdin drain blocked past the hard timeout (the regression)")
 	}

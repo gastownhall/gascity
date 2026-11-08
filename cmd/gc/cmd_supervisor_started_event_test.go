@@ -130,11 +130,14 @@ func TestRunSupervisorEmitsStartedEventWithRestartCause(t *testing.T) {
 			done <- runSupervisor(&stdout, &stderr)
 		}()
 		var sigCh chan<- os.Signal
-		select {
-		case sigCh = <-sigChReady:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
-		}
+		awaitCond(t, func() bool {
+			select {
+			case sigCh = <-sigChReady:
+				return true
+			default:
+				return false
+			}
+		}, "supervisor signal hook registering")
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) && !strings.Contains(stdout.String(), "Supervisor started.") {
 			time.Sleep(10 * time.Millisecond)
@@ -146,13 +149,17 @@ func TestRunSupervisorEmitsStartedEventWithRestartCause(t *testing.T) {
 			whileRunning()
 		}
 		sigCh <- syscall.SIGTERM
-		select {
-		case code := <-done:
-			if code != 0 {
-				t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		var code int
+		awaitCond(t, func() bool {
+			select {
+			case code = <-done:
+				return true
+			default:
+				return false
 			}
-		case <-time.After(15 * time.Second):
-			t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}, "runSupervisor exiting after SIGTERM")
+		if code != 0 {
+			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 	}
 

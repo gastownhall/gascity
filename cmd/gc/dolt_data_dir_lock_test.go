@@ -194,12 +194,16 @@ func TestWaitForManagedDoltDataDirLockFreeRecoversOnRelease(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond)
 	release()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected wait to succeed after release, got %v", err)
+	var err error
+	awaitCond(t, func() bool {
+		select {
+		case err = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("wait did not observe lock release")
+	}, "waitForManagedDoltDataDirLockFree returning after lock release")
+	if err != nil {
+		t.Fatalf("expected wait to succeed after release, got %v", err)
 	}
 }

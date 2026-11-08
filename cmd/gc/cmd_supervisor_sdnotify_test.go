@@ -53,11 +53,14 @@ func TestRunSupervisorEmitsSdNotifyLifecycle(t *testing.T) {
 	}()
 
 	var sigCh chan<- os.Signal
-	select {
-	case sigCh = <-sigChReady:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
+	awaitCond(t, func() bool {
+		select {
+		case sigCh = <-sigChReady:
+			return true
+		default:
+			return false
+		}
+	}, "supervisor signal hook registering")
 
 	readDatagram := func() string {
 		t.Helper()
@@ -128,13 +131,17 @@ func TestRunSupervisorEmitsSdNotifyLifecycle(t *testing.T) {
 		t.Fatalf("never received STOPPING=1 after SIGTERM; saw %v; stdout=%q stderr=%q", lifecycle, stdout.String(), stderr.String())
 	}
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}, "runSupervisor exiting after SIGTERM")
+	if code != 0 {
+		t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Supervisor stopped.") {
 		t.Fatalf("stdout = %q, want supervisor stop message", stdout.String())
@@ -171,24 +178,31 @@ func TestRunSupervisorNoNotifySocketIsSilentNoop(t *testing.T) {
 	}()
 
 	var sigCh chan<- os.Signal
-	select {
-	case sigCh = <-sigChReady:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
+	awaitCond(t, func() bool {
+		select {
+		case sigCh = <-sigChReady:
+			return true
+		default:
+			return false
+		}
+	}, "supervisor signal hook registering")
 	waitDeadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(waitDeadline) && !strings.Contains(stdout.String(), "Supervisor started.") {
 		time.Sleep(10 * time.Millisecond)
 	}
 	sigCh <- syscall.SIGTERM
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}, "runSupervisor exiting after SIGTERM")
+	if code != 0 {
+		t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if strings.Contains(stderr.String(), "sd_notify") {
 		t.Fatalf("stderr = %q, want no sd_notify noise when NOTIFY_SOCKET is unset", stderr.String())

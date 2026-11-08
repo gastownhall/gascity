@@ -120,7 +120,9 @@ func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName s
 		}
 		select {
 		case <-waitCh:
-		case <-time.After(time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: log and let cleanup continue rather than fail the
+			// test; awaitClose would fail here instead of just logging.
 			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
 		}
 	})
@@ -1775,7 +1777,9 @@ func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t 
 		}
 		select {
 		case <-waitCh:
-		case <-time.After(time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: log and let cleanup continue rather than fail the
+			// test; awaitClose would fail here instead of just logging.
 			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
 		}
 	})
@@ -4829,13 +4833,17 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 	}
 	sigCh <- syscall.SIGTERM
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}, "runSupervisor exiting after SIGTERM")
+	if code != 0 {
+		t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	got := stdout.String()
 	for _, want := range []string{
@@ -5741,11 +5749,7 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 	}, func() {}, io.Discard)
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case <-shutdownStarted:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for preserve shutdown request")
-	}
+	awaitClose(t, shutdownStarted, "preserve shutdown request")
 	sigCh <- syscall.SIGINT
 	defer close(done)
 
@@ -5772,13 +5776,17 @@ func TestSupervisorSignalLoopRecordsSignalAttribution(t *testing.T) {
 	}, func() {}, io.Discard)
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case mode := <-gotMode:
-		if mode != supervisorShutdownDestructive {
-			t.Fatalf("mode = %v, want destructive (SIGTERM without preserve env)", mode)
+	var mode supervisorShutdownMode
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-gotMode:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for shutdown request after SIGTERM")
+	}, "shutdown request after SIGTERM")
+	if mode != supervisorShutdownDestructive {
+		t.Fatalf("mode = %v, want destructive (SIGTERM without preserve env)", mode)
 	}
 	trigger := <-gotTrigger
 	if trigger.Source != "signal" {
@@ -5807,11 +5815,7 @@ func TestRequestSupervisorShutdownRecordsBreadcrumbAndEvent(t *testing.T) {
 	if !ctl.preservesSessions() {
 		t.Fatal("shutdown controller did not record preserve-sessions mode")
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("shutdown cancel was not called")
-	}
+	awaitClose(t, ctx.Done(), "shutdown cancel to be called")
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
@@ -5852,11 +5856,7 @@ func TestRequestSupervisorShutdownWithoutRecorderStillLogsAndCancels(t *testing.
 	if ctl.preservesSessions() {
 		t.Fatal("shutdown controller recorded preserve-sessions mode for destructive shutdown")
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("shutdown cancel was not called")
-	}
+	awaitClose(t, ctx.Done(), "shutdown cancel to be called")
 }
 
 // TestHandleSupervisorConnStopRecordsSocketAttribution ensures the
@@ -5883,13 +5883,17 @@ func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
 	if _, err := client.Write([]byte("stop\n")); err != nil {
 		t.Fatalf("Write(stop): %v", err)
 	}
-	select {
-	case mode := <-gotMode:
-		if mode != supervisorShutdownDestructive {
-			t.Fatalf("mode = %v, want destructive (socket stop is always destructive)", mode)
+	var mode supervisorShutdownMode
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-gotMode:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for shutdown request after socket stop")
+	}, "shutdown request after socket stop")
+	if mode != supervisorShutdownDestructive {
+		t.Fatalf("mode = %v, want destructive (socket stop is always destructive)", mode)
 	}
 	trigger := <-gotTrigger
 	if trigger.Source != "socket_stop" {
@@ -5906,11 +5910,7 @@ func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
 	if string(ack) != "ok\n" {
 		t.Fatalf("ack = %q, want %q", string(ack), "ok\n")
 	}
-	select {
-	case <-handlerDone:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for socket handler to exit")
-	}
+	awaitClose(t, handlerDone, "socket handler to exit")
 }
 
 func TestSupervisorShutdownModeNameHandlesKnownAndUnknownModes(t *testing.T) {
@@ -6001,13 +6001,17 @@ func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
 	defer close(done)
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case mode := <-shutdowns:
-		if mode != supervisorShutdownDestructive {
-			t.Fatalf("first signal mode = %v, want destructive", mode)
+	var mode supervisorShutdownMode
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-shutdowns:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}, "first SIGTERM to trigger requestShutdown")
+	if mode != supervisorShutdownDestructive {
+		t.Fatalf("first signal mode = %v, want destructive", mode)
 	}
 	select {
 	case code := <-hardExitCalls:
@@ -6016,13 +6020,17 @@ func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
 	}
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case code := <-hardExitCalls:
-		if code != supervisorHardExitCodeRepeatedShutdown {
-			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-hardExitCalls:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("second SIGTERM did not trigger hard exit")
+	}, "second SIGTERM to trigger hard exit")
+	if code != supervisorHardExitCodeRepeatedShutdown {
+		t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
 	}
 	select {
 	case mode := <-shutdowns:
@@ -6044,13 +6052,17 @@ func TestSupervisorSignalLoopHardExitsAfterSocketShutdownThenDestructiveSignal(t
 	defer close(done)
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case code := <-hardExitCalls:
-		if code != supervisorHardExitCodeRepeatedShutdown {
-			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-hardExitCalls:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("SIGTERM after socket shutdown did not trigger hard exit")
+	}, "SIGTERM after socket shutdown to trigger hard exit")
+	if code != supervisorHardExitCodeRepeatedShutdown {
+		t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
 	}
 	select {
 	case mode := <-shutdowns:
@@ -6072,23 +6084,30 @@ func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *te
 	defer close(done)
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case mode := <-shutdowns:
-		if mode != supervisorShutdownPreserveSessions {
-			t.Fatalf("first signal mode = %v, want preserve", mode)
+	var mode supervisorShutdownMode
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-shutdowns:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}, "first SIGTERM to trigger requestShutdown")
+	if mode != supervisorShutdownPreserveSessions {
+		t.Fatalf("first signal mode = %v, want preserve", mode)
 	}
 
 	sigCh <- syscall.SIGINT
-	select {
-	case mode := <-shutdowns:
-		if mode != supervisorShutdownDestructive {
-			t.Fatalf("escalation mode = %v, want destructive", mode)
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-shutdowns:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("SIGINT escalation did not trigger requestShutdown")
+	}, "SIGINT escalation to trigger requestShutdown")
+	if mode != supervisorShutdownDestructive {
+		t.Fatalf("escalation mode = %v, want destructive", mode)
 	}
 	select {
 	case code := <-hardExitCalls:
@@ -6097,13 +6116,17 @@ func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *te
 	}
 
 	sigCh <- syscall.SIGINT
-	select {
-	case code := <-hardExitCalls:
-		if code != supervisorHardExitCodeRepeatedShutdown {
-			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-hardExitCalls:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("second destructive signal after escalation did not trigger hard exit")
+	}, "second destructive signal after escalation to trigger hard exit")
+	if code != supervisorHardExitCodeRepeatedShutdown {
+		t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
 	}
 }
 
@@ -6124,11 +6147,7 @@ func TestSupervisorSignalLoopSIGHUPDoesNotCountTowardHardExit(t *testing.T) {
 	sigCh <- syscall.SIGHUP
 	sigCh <- syscall.SIGHUP
 	for i := 0; i < 2; i++ {
-		select {
-		case <-reconciles:
-		case <-time.After(time.Second):
-			t.Fatalf("SIGHUP %d did not trigger reconcile", i+1)
-		}
+		awaitClose(t, reconciles, fmt.Sprintf("SIGHUP %d to trigger reconcile", i+1))
 	}
 	select {
 	case code := <-hardExitCalls:
@@ -6137,13 +6156,17 @@ func TestSupervisorSignalLoopSIGHUPDoesNotCountTowardHardExit(t *testing.T) {
 	}
 
 	sigCh <- syscall.SIGTERM
-	select {
-	case mode := <-shutdowns:
-		if mode != supervisorShutdownDestructive {
-			t.Fatalf("SIGTERM after SIGHUPs mode = %v, want destructive", mode)
+	var mode supervisorShutdownMode
+	awaitCond(t, func() bool {
+		select {
+		case mode = <-shutdowns:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("SIGTERM after SIGHUPs did not trigger requestShutdown")
+	}, "SIGTERM after SIGHUPs to trigger requestShutdown")
+	if mode != supervisorShutdownDestructive {
+		t.Fatalf("SIGTERM after SIGHUPs mode = %v, want destructive", mode)
 	}
 	select {
 	case code := <-hardExitCalls:

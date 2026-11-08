@@ -2858,16 +2858,20 @@ func TestRegistryBrowserLoginReturnsTokenEndToEnd(t *testing.T) {
 		t.Fatalf("token POST status = %d, want 200", resp.StatusCode)
 	}
 
-	select {
-	case got := <-done:
-		if got.err != nil {
-			t.Fatalf("registryBrowserLogin: %v", got.err)
+	var got loginResult
+	awaitCond(t, func() bool {
+		select {
+		case got = <-done:
+			return true
+		default:
+			return false
 		}
-		if got.token != "gcr_e2e_token" {
-			t.Fatalf("token = %q, want gcr_e2e_token", got.token)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("registryBrowserLogin did not return after callback")
+	}, "registryBrowserLogin returning after callback")
+	if got.err != nil {
+		t.Fatalf("registryBrowserLogin: %v", got.err)
+	}
+	if got.token != "gcr_e2e_token" {
+		t.Fatalf("token = %q, want gcr_e2e_token", got.token)
 	}
 }
 

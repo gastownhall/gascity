@@ -287,16 +287,20 @@ func TestEmitComputeFactForBeadHungSinkReturnsPromptly(t *testing.T) {
 	go func() {
 		done <- emitComputeFactForBead(context.Background(), sink, store, b, "fake", "demo", start.Add(time.Minute), nil, true)
 	}()
-	select {
-	case ok := <-done:
-		if elapsed := time.Since(began); elapsed > 5*time.Second {
-			t.Fatalf("reconcile compute path blocked on a hung sink: took %s", elapsed)
+	var ok bool
+	awaitCond(t, func() bool {
+		select {
+		case ok = <-done:
+			return true
+		default:
+			return false
 		}
-		if ok {
-			t.Fatal("a timed-out sink write must report failure, not success")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("reconcile compute path did not return under a hung sink")
+	}, "reconcile compute path returning under a hung sink")
+	if elapsed := time.Since(began); elapsed > 5*time.Second {
+		t.Fatalf("reconcile compute path blocked on a hung sink: took %s", elapsed)
+	}
+	if ok {
+		t.Fatal("a timed-out sink write must report failure, not success")
 	}
 	refreshed, err := store.Get(b.ID)
 	if err != nil {

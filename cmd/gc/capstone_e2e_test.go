@@ -541,11 +541,7 @@ func TestCapstoneInflightReplayAndNameConflict(t *testing.T) {
 	go func() { r, e := client.RigCreate(reqA, nil); firstCh <- outcome{r, e} }()
 
 	// Wait until the first provision is parked on the gate inside the clone.
-	select {
-	case <-h.cloneEntered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("first provision never reached the gated clone")
-	}
+	awaitClose(t, h.cloneEntered, "first provision reaching the gated clone")
 
 	// (i) A second POST with the SAME request_id + body replays the in-flight
 	// provision (no second clone). It also blocks on the SSE for the terminal, so

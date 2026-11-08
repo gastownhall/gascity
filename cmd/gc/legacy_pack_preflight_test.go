@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -71,13 +70,17 @@ func TestEnsureBundledLockedRemoteImportsCachedValidatesWarmCacheWithoutWriteLoc
 
 	warm := make(chan error, 1)
 	go func() { warm <- ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()) }()
-	select {
-	case err := <-warm:
-		if err != nil {
-			t.Fatalf("warm hydration returned error: %v", err)
+	var err error
+	awaitCond(t, func() bool {
+		select {
+		case err = <-warm:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("warm hydration blocked on the repo-cache write lock; want lock-free validation when the cache already validates")
+	}, "warm hydration completing without blocking on the repo-cache write lock")
+	if err != nil {
+		t.Fatalf("warm hydration returned error: %v", err)
 	}
 }
 

@@ -978,13 +978,17 @@ func TestConvergence_EnqueueTimeout(t *testing.T) {
 		}
 	}()
 
-	select {
-	case timedOut := <-done:
-		if !timedOut {
-			t.Error("expected channel send to block when full")
+	var timedOut bool
+	awaitCond(t, func() bool {
+		select {
+		case timedOut = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("test timed out")
+	}, "convergence request send-attempt result")
+	if !timedOut {
+		t.Error("expected channel send to block when full")
 	}
 
 	// Drain the channel.

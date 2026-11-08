@@ -502,27 +502,23 @@ func TestReadManagedDoltTestWatchdogPIDTimeoutUnblocksReaderAfterClose(t *testin
 		done <- err
 	}()
 
-	select {
-	case <-reader.started:
-	case <-time.After(time.Second):
-		t.Fatal("reader did not start")
-	}
+	awaitClose(t, reader.started, "reader to start")
 
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("readManagedDoltTestWatchdogPID error = %v, want timeout", err)
+	var err error
+	awaitCond(t, func() bool {
+		select {
+		case err = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("readManagedDoltTestWatchdogPID did not time out")
+	}, "readManagedDoltTestWatchdogPID to time out")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("readManagedDoltTestWatchdogPID error = %v, want timeout", err)
 	}
 
 	reader.Close()
-	select {
-	case <-reader.done:
-	case <-time.After(time.Second):
-		t.Fatal("watchdog PID reader goroutine stayed blocked after close")
-	}
+	awaitClose(t, reader.done, "watchdog PID reader goroutine to unblock after close")
 }
 
 func TestManagedDoltTestModeEnabledHonorsEnv(t *testing.T) {
@@ -593,11 +589,7 @@ func TestManagedDoltTestParentDoneClosesOnPipeEOF(t *testing.T) {
 	if err := parentPipeWrite.Close(); err != nil {
 		t.Fatalf("close parent pipe writer: %v", err)
 	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("parent pipe EOF did not close done channel")
-	}
+	awaitClose(t, done, "parent pipe EOF to close done channel")
 }
 
 func TestManagedDoltWatchdogExternalParentSurvivesSpawnerExit(t *testing.T) {
@@ -738,14 +730,18 @@ func TestManagedDoltWatchdogParentPipeEOFHonorsDisarm(t *testing.T) {
 	if err := parentPipeWrite.Close(); err != nil {
 		t.Fatalf("close parent pipe writer: %v", err)
 	}
-	select {
-	case code := <-result:
-		if code != 0 {
-			stderrData, _ := os.ReadFile(stderrPath)
-			t.Fatalf("watchdog exit code = %d, want 0; stderr:\n%s", code, stderrData)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-result:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("watchdog did not exit after disarm file and parent pipe EOF")
+	}, "watchdog exiting after disarm file and parent pipe EOF")
+	if code != 0 {
+		stderrData, _ := os.ReadFile(stderrPath)
+		t.Fatalf("watchdog exit code = %d, want 0; stderr:\n%s", code, stderrData)
 	}
 	if !pidAlive(doltPID) {
 		t.Fatalf("fake dolt pid %d exited; disarm file should win over parent pipe EOF", doltPID)

@@ -981,11 +981,7 @@ func TestTraceCloseDoesNotDependOnMutableFlushChannelField(t *testing.T) {
 	go tracer.runFlushLoop(flushCh)
 	close(flushCh)
 
-	select {
-	case <-tracer.flushDone:
-	case <-time.After(time.Second):
-		t.Fatal("flush loop did not exit after the original channel closed")
-	}
+	awaitClose(t, tracer.flushDone, "flush loop to exit after the original channel closed")
 }
 
 func TestTraceFlushCurrentBatchWaitBudgetDegrades(t *testing.T) {

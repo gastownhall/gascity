@@ -624,13 +624,17 @@ func TestDoRigRestart_UsesFullCityGraphForStopOrdering(t *testing.T) {
 	}
 	sp.release("frontend--cache")
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0", code)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("doRigRestart did not finish")
+	}, "doRigRestart finishing")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
 	}
 }
 

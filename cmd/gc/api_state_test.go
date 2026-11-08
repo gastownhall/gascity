@@ -3844,11 +3844,7 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 	})
 	cs.startBeadEventWatcher(ctx)
 
-	select {
-	case <-cs.pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("bead event written after watcher start did not poke controller")
-	}
+	awaitClose(t, cs.pokeCh, "controller poke after post-start bead event")
 
 	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
 		template: "claude",
@@ -3885,11 +3881,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.startBeadEventWatcher(ctx)
 
-	select {
-	case <-ep.failed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("bead event watcher did not attempt initial watch")
-	}
+	awaitClose(t, ep.failed, "bead event watcher attempting initial watch")
 
 	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
 	if err != nil {
@@ -3906,11 +3898,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 		Payload: payload,
 	})
 
-	select {
-	case <-cs.pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("bead event watcher did not recover after setup watch error")
-	}
+	awaitClose(t, cs.pokeCh, "bead event watcher recovering after setup watch error")
 }
 
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
@@ -3971,11 +3959,7 @@ func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) 
 		Payload: payload,
 	})
 
-	select {
-	case <-cs.pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("external file bead event did not poke controller")
-	}
+	awaitClose(t, cs.pokeCh, "controller poke after external file bead event")
 
 	// This test's contract is that the watcher consumes the external file event
 	// and pokes the controller (asserted above). Demand-count behavior after an
