@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -205,14 +207,108 @@ func TestReverseToRigsNeverGoesBackBelowR3AfterItsClearBegan(t *testing.T) {
 			t.Fatal("the refused abort changed the rig")
 		}
 	})
+	// lostAfterRecordedClear stops --to-rigs at its R3 advance, records the
+	// clear as begun with no row yet deleted from the binding, then deletes
+	// a returned row from the rig as bd does, with the edges onto it.
+	lostAfterRecordedClear := func(t *testing.T) *reverseRigFixture {
+		t.Helper()
+		r := newReverseRigFixture(t)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse phase "+reversePhaseName(reverseR3) {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill did not stop the reverse")
+		}
+		journal, _, _ := readStorageReverseJournal(r.request.CityPath)
+		journal.ClearStarted = true
+		if err := writeStorageReverseJournal(r.request.CityPath, journal); err != nil {
+			t.Fatal(err)
+		}
+		rig := r.rig("packs")
+		for _, from := range []string{"gp-step2", "gp-w2"} {
+			if err := rig.DepRemove(from, "gp-step1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := rig.Delete("gp-step1"); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	finished := func(t *testing.T, r *reverseRigFixture) {
+		t.Helper()
+		r.assertRigAsSeeded(t)
+		for _, b := range rigTestList(t, r.binding()) {
+			if b.Metadata[infraMigrationStampKey] == rigImportStamp("packs") {
+				t.Fatalf("the binding still holds %s from rig packs", b.ID)
+			}
+		}
+	}
+	t.Run("a row the rig lost that the binding still holds is copied back", func(t *testing.T) {
+		r := lostAfterRecordedClear(t)
+		code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		if code != 0 || !strings.Contains(stdout, "1 row(s) a rig lost after the binding clear began were copied back") {
+			t.Fatalf("the resume over a rig that lost a row the binding holds = %d: %s%s", code, stdout, stderr)
+		}
+		finished(t, r)
+	})
+	t.Run("a faulty re-copy is caught, and the next run finishes it", func(t *testing.T) {
+		r := lostAfterRecordedClear(t)
+		prev := reverseTargetOpener
+		reverseTargetOpener = func(cityPath string, cfg *config.City, dest string) (*reverseTarget, error) {
+			target, err := openReverseTarget(cityPath, cfg, dest)
+			if err == nil {
+				target.addEdges = func([]beads.DepWithPayload) error { return nil }
+			}
+			return target, err
+		}
+		code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		reverseTargetOpener = prev
+		if code == 0 || !strings.Contains(stderr, "verifying") {
+			t.Fatalf("a re-copy that dropped its edges = %d: %s", code, stderr)
+		}
+		if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+			t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
+		}
+		finished(t, r)
+	})
+	t.Run("a re-copy killed after its rows is finished by the next run", func(t *testing.T) {
+		r := lostAfterRecordedClear(t)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse rig:packs re-copy rows" {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill did not stop the re-copy")
+		}
+		if journal, _, _ := readStorageReverseJournal(r.request.CityPath); strings.Join(journal.Recopying, ",") != "gp-step1" {
+			t.Fatalf("the journal records re-copying %v, want gp-step1", journal.Recopying)
+		}
+		if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+			t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
+		}
+		finished(t, r)
+	})
 	t.Run("a rig that lost a row refuses, deleting nothing", func(t *testing.T) {
 		r := halfCleared(t)
 		if err := r.rig("packs").Delete("gp-step2"); err != nil {
 			t.Fatal(err)
 		}
+		journal, _, _ := readStorageReverseJournal(r.request.CityPath)
 		rigBefore, bindingBefore := workStoreFingerprint(t, r.rig("packs")), workStoreFingerprint(t, r.binding())
 		code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
-		if code == 0 || !strings.Contains(stderr, "gp-step2") || !strings.Contains(stderr, "snapshot") {
+		if code == 0 || !strings.Contains(stderr, "gp-step2") || !strings.Contains(stderr, beadmeta.InfraReversedFromMetadataKey+"="+journal.Stamp) {
 			t.Fatalf("a resume over a rig that lost a row after the clear began = %d: %s", code, stderr)
 		}
 		if journal, _, _ := readStorageReverseJournal(r.request.CityPath); journal.Phase < reverseR3 {
@@ -668,4 +764,48 @@ func TestReverseRefusesASharedRigStore(t *testing.T) {
 	if code := doStorageAbortReverse(context.Background(), r.request, &stdout, &errOut); code == 0 || !strings.Contains(errOut.String(), "--force=shared-store:packs@loopback:3399") {
 		t.Fatalf("the abort over a shared rig store = %d: %s", code, errOut.String())
 	}
+}
+
+// TestReverseJudgesTheJournalUnderTheGuard: a journal another run moved
+// while this one waited for the lock and the guard (an abort that began, or
+// a reverse that started) refuses the run, and it writes nothing.
+func TestReverseJudgesTheJournalUnderTheGuard(t *testing.T) {
+	moved := func(t *testing.T, city reverseEngineCity, move func(storageReverseJournal) storageReverseJournal) {
+		t.Helper()
+		before := workStoreFingerprint(t, city.source)
+		var wrote storageReverseJournal
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p != reverseGuardedSeam {
+				return nil
+			}
+			journal, _, _ := readStorageReverseJournal(city.cityPath)
+			wrote = move(journal)
+			return writeStorageReverseJournal(city.cityPath, wrote)
+		}
+		code, _, stderr := city.reverse(t, reverseOptions{})
+		infraEngineCrashPoint = prev
+		if code == 0 || !strings.Contains(stderr, "changed while this run waited") {
+			t.Fatalf("--to-work over a journal moved under the guard = %d: %s", code, stderr)
+		}
+		if after, _, _ := readStorageReverseJournal(city.cityPath); !reflect.DeepEqual(after, wrote) {
+			t.Fatalf("the refused run rewrote the journal: %+v, want %+v", after, wrote)
+		}
+		if workStoreFingerprint(t, city.source) != before {
+			t.Fatal("the refused run changed the work store")
+		}
+	}
+	t.Run("an abort began", func(t *testing.T) {
+		city := newReverseEngineCity(t, 60, "")
+		closeBindingGates(t, city)
+		killReverseAt(t, city, "reverse phase "+reversePhaseName(reverseR2))
+		moved(t, city, func(j storageReverseJournal) storageReverseJournal { j.Aborting = true; return j })
+	})
+	t.Run("a reverse started", func(t *testing.T) {
+		city := newReverseEngineCity(t, 60, "")
+		closeBindingGates(t, city)
+		moved(t, city, func(storageReverseJournal) storageReverseJournal {
+			return storageReverseJournal{Format: storageReverseJournalFormat, Mode: reverseToRigs, Rigs: []string{"packs"}, Phase: reverseR1, Run: "other", Stamp: "infra/other"}
+		})
+	})
 }

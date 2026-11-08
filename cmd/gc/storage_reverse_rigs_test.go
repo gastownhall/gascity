@@ -195,7 +195,12 @@ func TestReverseToRigsResumesFromEveryBoundary(t *testing.T) {
 	{
 		r := newReverseRigFixture(t)
 		prev := infraEngineCrashPoint
-		infraEngineCrashPoint = func(p string) error { points = append(points, p); return nil }
+		infraEngineCrashPoint = func(p string) error {
+			if p != reverseGuardedSeam {
+				points = append(points, p)
+			}
+			return nil
+		}
 		code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
 		infraEngineCrashPoint = prev
 		if code != 0 {
@@ -474,7 +479,11 @@ func TestReverseToRigsClearRefusesARowItDidNotReturn(t *testing.T) {
 // forward and back. The binding minted a retry bead after the cutover, with
 // a parent and no parent-child edge, and a step ref: Dolt holds the parent as
 // that edge, so the reverse writes it, and keeps the ref in gc.step_ref.
-func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
+// realDoltReverseCity is a city split from a real (embedded) Dolt work store
+// holding a workflow, its steps, a mail row and a work row; edge, if set,
+// runs on the work store before the forward migration.
+func realDoltReverseCity(t *testing.T, edge func(*beads.NativeDoltStore)) (*beads.NativeDoltStore, string, *config.City, map[string]beads.Bead, []string) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("real Dolt work store")
 	}
@@ -513,11 +522,19 @@ func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
 	prev := openInfraMigrationSource
 	openInfraMigrationSource = func(string) (beads.Store, error) { return borrowedStoreWithBeadPolicies(work, cfg), nil }
 	t.Cleanup(func() { openInfraMigrationSource = prev })
+	if edge != nil {
+		edge(work)
+	}
 	stubInfraControllerPing(t, 0)
 	var log bytes.Buffer
 	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
 		t.Fatalf("forward from Dolt = %v: %s", report.Outcome, log.String())
 	}
+	return work, cityPath, cfg, seeded, seededEdges
+}
+
+func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
+	work, cityPath, cfg, seeded, seededEdges := realDoltReverseCity(t, nil)
 	target := mustResolveInfraTarget(t, cityPath, cfg)
 	binding, err := openInfraDestination(target)
 	if err != nil {
@@ -604,4 +621,48 @@ func TestReverseToRigsReListsTheRigBeforeTheClear(t *testing.T) {
 		t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
 	}
 	r.assertRigAsSeeded(t)
+}
+
+// TestAbortReverseRefusesAnEdgeARealDoltStoreWouldNotTakeBack: a native Dolt
+// work store refuses an edge onto its own prefix it does not hold, so the
+// abort of a reverse that wrote such an edge's target refuses, before it
+// deletes anything, rather than lose the edge. bd keeps no such edge through
+// its own API (it refuses the add, and a delete takes a row's edges with it),
+// so the edge an older clear wrote is recorded as the first plan records it.
+func TestAbortReverseRefusesAnEdgeARealDoltStoreWouldNotTakeBack(t *testing.T) {
+	work, cityPath, cfg, _, _ := realDoltReverseCity(t, nil)
+	request := storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "reverse city verify" {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := doStorageReverse(context.Background(), request, reverseOptions{Mode: reverseToWork}, &stdout, &stderr)
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatalf("the kill did not stop the reverse: %s", stdout.String())
+	}
+	if _, err := work.Get("gd-s3"); err != nil {
+		t.Fatalf("precondition: the reverse wrote gd-s3 into the Dolt work store: %v", err)
+	}
+	journal, _, err := readStorageReverseJournal(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Preserved = map[string][]reverseEdge{reverseCityDest: {{From: "gd-w1", To: "gd-s3", Type: "blocks"}}}
+	if err := writeStorageReverseJournal(cityPath, journal); err != nil {
+		t.Fatal(err)
+	}
+	before := workStoreFingerprint(t, work)
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageAbortReverse(context.Background(), request, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "gd-w1 -[blocks]-> gd-s3") || !strings.Contains(stderr.String(), "Nothing was removed") {
+		t.Fatalf("--abort-reverse over an edge Dolt would not take back = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if workStoreFingerprint(t, work) != before {
+		t.Fatal("the refused abort changed the Dolt work store")
+	}
 }

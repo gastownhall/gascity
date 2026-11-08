@@ -256,7 +256,7 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 	}
 	if len(onlyCopy) > 0 {
 		sort.Strings(onlyCopy)
-		return 0, fmt.Errorf("%s holds %d row(s) under this reverse's stamp that the binding no longer holds, so each may be the only copy: %s. Nothing was removed", reverseDestNoun(t.dest), len(onlyCopy), infraStrandedIDList(onlyCopy))
+		return 0, fmt.Errorf("%s holds %d row(s) under this reverse's stamp that the binding no longer holds, so each may be the only copy: %s. Nothing was removed. Inspect each in that store (`bd show <id>`); delete one that is not wanted (`bd delete <id>`) and run this again, or abandon the reverse with `%s`, which removes every row under its stamp", reverseDestNoun(t.dest), len(onlyCopy), infraStrandedIDList(onlyCopy), storageAbortReverseInstruction())
 	}
 	if err := reverseDeleteRows(t, drop); err != nil {
 		return 0, err
@@ -276,13 +276,25 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 	if err != nil {
 		return 0, err
 	}
+	if err := reverseAddEdges(t, edges, clock, phase); err != nil {
+		return len(create), err
+	}
+	if err := reverseVerify(reopen, rows, edges, stamp, false); err != nil {
+		return len(create), fmt.Errorf("verifying %s: %w", reverseDestNoun(t.dest), err)
+	}
+	return len(create), infraEngineCrashPoint(phase + " verify")
+}
+
+// reverseAddEdges adds each edge t does not hold as planned, replacing one
+// held with another type or wanting a payload.
+func reverseAddEdges(t *reverseTarget, edges []beads.DepWithPayload, clock infraEngineClock, phase string) error {
 	sources := map[string]bool{}
 	for _, e := range edges {
 		sources[e.IssueID] = true
 	}
 	present, err := t.down(sortedMapKeys(sources))
 	if err != nil {
-		return len(create), err
+		return err
 	}
 	var add []beads.DepWithPayload
 	for _, e := range edges {
@@ -297,29 +309,23 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 			continue
 		case have != "":
 			if err := t.rows.DepRemove(e.IssueID, e.DependsOnID); err != nil {
-				return len(create), fmt.Errorf("replacing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
+				return fmt.Errorf("replacing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
 			}
 		}
 		add = append(add, e)
 	}
-	err = runInfraBatches(clock, phase+" copying edges", len(add), infraCopyEdgeBatch, func(start, end int) error {
+	return runInfraBatches(clock, phase+" copying edges", len(add), infraCopyEdgeBatch, func(start, end int) error {
 		return t.addEdges(add[start:end])
 	})
-	if err != nil {
-		return len(create), err
-	}
-	if err := reverseVerify(reopen, rows, edges, stamp); err != nil {
-		return len(create), fmt.Errorf("verifying %s: %w", reverseDestNoun(t.dest), err)
-	}
-	return len(create), infraEngineCrashPoint(phase + " verify")
 }
 
 // reverseVerify proves a destination against a reopened store: it holds
 // exactly the planned rows under this run's stamp, each equal to the row
 // written; each planned row's edges are exactly the planned ones; each
 // planned edge from a row the store already held is there; and every planned
-// payload reads back.
-func reverseVerify(reopen func() (*reverseTarget, error), rows []beads.Bead, edges []beads.DepWithPayload, stamp string) error {
+// payload reads back. A partial verify (rows re-copied among others under the
+// stamp) skips the check that the store holds nothing more.
+func reverseVerify(reopen func() (*reverseTarget, error), rows []beads.Bead, edges []beads.DepWithPayload, stamp string, partial bool) error {
 	t, err := reopen()
 	if err != nil {
 		return err
@@ -345,7 +351,7 @@ func reverseVerify(reopen func() (*reverseTarget, error), rows []beads.Bead, edg
 		}
 	}
 	for id := range held {
-		if !want[id] {
+		if !want[id] && !partial {
 			return fmt.Errorf("the store holds %s under this reverse's stamp, which the plan does not", id)
 		}
 	}
