@@ -340,7 +340,12 @@ func reverseBoundaries(t *testing.T) []string {
 	closeBindingGates(t, city)
 	var points []string
 	prev := infraEngineCrashPoint
-	infraEngineCrashPoint = func(point string) error { points = append(points, point); return nil }
+	infraEngineCrashPoint = func(point string) error {
+		if point != reverseGuardedSeam {
+			points = append(points, point)
+		}
+		return nil
+	}
 	defer func() { infraEngineCrashPoint = prev }()
 	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
 		t.Fatalf("dry run = %d: %s%s", code, stdout, stderr)

@@ -1521,9 +1521,17 @@ compared with the one the copies were planned from; a binding that changed
 copies again. Before R4 and before the archive, each store it wrote is listed
 again under its stamp against its manifest: a row gone puts it back to R0 the
 same way. Once a `--to-rigs` has begun clearing the binding, it never goes
-back: a rig that lost a row refuses, naming the snapshot to restore from. A
-re-copy never deletes a stamped row the binding no longer holds; it refuses,
-since that row may be the only copy.
+back: a row a rig lost that the binding still holds is copied back from the
+binding, with the stamp and every edge the binding still records for it (an
+edge onto it from a row the clear already removed is not recorded there, so
+it comes back only if the rig kept it). A row gone from both refuses, nothing changed: put
+it back into its rig by hand carrying `gc.infra_reversed_from=<stamp>` (the
+refusal prints the stamp; the snapshot taken before the reverse holds the
+row as it was), then run the reverse again. A re-copy never deletes a
+stamped row the binding no longer holds; it refuses, since that row may be
+the only copy. Inspect it in that store (`bd show <id>`), then delete it with
+`bd delete <id>` if it is not wanted and run the reverse again, or abandon
+the reverse with `--abort-reverse`.
 
 Every row it writes carries `gc.infra_reversed_from=<binding>/<run>`, the run
 being its start to the nanosecond and a random suffix. Before it writes

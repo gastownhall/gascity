@@ -44,6 +44,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -153,6 +154,10 @@ type storageReverseJournal struct {
 	// the rig may hold the only copy, so the reverse never goes back below
 	// R3 and cannot be abandoned.
 	ClearStarted bool `json:"clear_started,omitempty"`
+	// Recopying is the rows a re-copy after the clear began is returning to
+	// their rigs, recorded before it writes: until one proves them, every
+	// run finishes it.
+	Recopying []string `json:"recopying,omitempty"`
 	// PreservedRecorded records that Preserved was computed, on the run's
 	// first plan and only then: an empty Preserved is an answer, not a
 	// question still open.
@@ -262,6 +267,11 @@ type reverseOptions struct {
 	DryRun     bool
 }
 
+// reverseGuardedSeam is the point a run passes once it holds the lock and the
+// guard, before it judges the journal again: nothing has been written there,
+// so it is a seam for tests, not a boundary to resume from.
+const reverseGuardedSeam = "reverse guarded"
+
 // doStorageReverse is `gc storage migrate --to-work` and `--to-rigs`.
 func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts reverseOptions, stdout, stderr io.Writer) (code int) {
 	logPrefix := "gc storage migrate --" + string(opts.Mode)
@@ -311,9 +321,6 @@ func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts 
 		}
 		if err != nil || state != infraConvergenceMarked {
 			return fail(fmt.Errorf("the binding %s has not converged (no proven copy behind %s), so it is not the authority a reverse copies from. Finish the migration (`%s`) or restore the binding first", target.Binding, target.MarkerPath(), storageClearInstruction()))
-		}
-		if err := infraRestoreRecopyRefusal(target); err != nil {
-			return fail(err)
 		}
 	}
 	if opts.Mode == reverseToWork && (!open || journal.Phase < reverseR4) && opts.Reconciler == "" {
@@ -372,6 +379,19 @@ func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts 
 			return fail(err)
 		}
 		defer guard.Release() //nolint:errcheck // released before the lock
+		if err := infraEngineCrashPoint(reverseGuardedSeam); err != nil {
+			return fail(err)
+		}
+		// The journal is judged again as it is under the lock and the guard:
+		// another reverse, or an abort, may have moved it while this one
+		// waited.
+		again, againOpen, err := readStorageReverseJournal(request.CityPath)
+		if err != nil {
+			return fail(err)
+		}
+		if againOpen = againOpen && again.Phase < reverseComplete; againOpen != open || (open && !reflect.DeepEqual(again, journal)) {
+			return fail(fmt.Errorf("the reverse journal %s changed while this run waited for the controller lock and the migration guard; nothing was written. Run this again", storageReverseJournalPath(request.CityPath)))
+		}
 		window, err = openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, reverseRigRoots(request.CityPath, request.Cfg)...)
 		if err != nil {
 			return fail(err)
@@ -1103,10 +1123,160 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 // stores it wrote still hold every row its reverse manifests record, under
 // this run's stamp: an abort killed partway, or a writer, can have removed
 // some. Before a to-rigs clear has begun, a shortfall puts the reverse back
-// to R0, and the next run copies again. Once it has begun the rigs may hold
-// the only copy of what the binding no longer does, so it only refuses,
-// naming the snapshot.
+// to R0, and the next run copies again. Once it has begun the reverse never
+// goes back: a row the binding still holds is copied back from it, and one
+// gone from both is refused.
 func (r *reverseRun) destinationsHold(before string) error {
+	missing, err := r.missingReturned()
+	if err != nil {
+		return err
+	}
+	if r.journal.ClearStarted && len(missing)+len(r.journal.Recopying) > 0 {
+		return r.recopyAfterClear(sortedUnique(append(missing, r.journal.Recopying...)))
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	r.journal.Phase = reverseR0
+	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	return fmt.Errorf("the stores this reverse wrote no longer hold %d row(s) it returned (%s), checked before %s, so the binding and the split's records are left as they are; the next run copies them again", len(missing), infraStrandedIDList(missing), before)
+}
+
+// recopyAfterClear returns to its rig, once a to-rigs clear has begun, each
+// returned row the rig no longer holds under the stamp that the binding still
+// does, with its edges: its binding copy is the authority it was before the
+// clear. A row gone from both is refused, nothing written, naming the stamp a
+// row put back by hand must carry. The rows are recorded in the journal
+// before anything is written, and the re-copy writes only what is absent, so
+// a run that stops partway is finished by the next.
+func (r *reverseRun) recopyAfterClear(missing []string) error {
+	binding, err := openInfraBindingReadOnly(r.target)
+	if err != nil {
+		return err
+	}
+	all, err := binding.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	_ = closeBeadStoreHandle(binding)
+	if err != nil {
+		return err
+	}
+	inBinding := make(map[string]bool, len(all))
+	for _, b := range all {
+		inBinding[b.ID] = true
+	}
+	var gone []string
+	for _, id := range missing {
+		if !inBinding[id] {
+			gone = append(gone, id)
+		}
+	}
+	if len(gone) > 0 {
+		return fmt.Errorf("neither the rigs nor the binding hold %d row(s) this reverse returned (%s): its binding clear removed them, and the rig has lost them since. Nothing more was changed. Put each back into its rig by hand carrying %s=%s (snapshot %s in %s, taken before the reverse, holds each as it was), then run this again", len(gone), infraStrandedIDList(gone), beadmeta.InfraReversedFromMetadataKey, r.journal.Stamp, r.journal.Snapshot, r.journal.SnapshotTo)
+	}
+	plan, err := r.plan()
+	if err != nil {
+		return err
+	}
+	if len(plan.Refusals) > 0 {
+		reasons := make([]string, 0, len(plan.Refusals))
+		for _, refusal := range plan.Refusals {
+			reasons = append(reasons, refusal.String())
+		}
+		return fmt.Errorf("the rigs no longer hold %d row(s) this reverse returned (%s), and copying them back from the binding is refused: %s", len(missing), infraStrandedIDList(missing), strings.Join(reasons, "; "))
+	}
+	r.journal.Recopying = missing
+	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	lost := setOf(missing)
+	found := map[string]bool{}
+	for _, dest := range sortedMapKeys(plan.Rows) {
+		var rows []beads.Bead
+		for _, b := range plan.Rows[dest] {
+			if lost[b.ID] {
+				rows = append(rows, b)
+				found[b.ID] = true
+			}
+		}
+		var edges []beads.DepWithPayload
+		for _, e := range plan.Edges[dest] {
+			if lost[e.IssueID] || lost[e.DependsOnID] {
+				edges = append(edges, e)
+			}
+		}
+		if len(rows) > 0 {
+			if err := r.recopyRows(dest, rows, edges); err != nil {
+				return err
+			}
+		}
+	}
+	if len(found) != len(lost) {
+		return fmt.Errorf("the rigs no longer hold %d row(s) this reverse returned (%s), and the binding no longer routes each to a rig; nothing more was changed", len(missing), infraStrandedIDList(missing))
+	}
+	if still, err := r.missingReturned(); err != nil || len(still) > 0 {
+		return errors.Join(err, fmt.Errorf("the rigs still do not hold %s after copying them back", infraStrandedIDList(still)))
+	}
+	r.journal.Recopying = nil
+	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	fmt.Fprintf(r.stdout, "%s: %d row(s) a rig lost after the binding clear began were copied back from the binding\n", r.logPrefix, len(missing)) //nolint:errcheck // best-effort stdout
+	return nil
+}
+
+// recopyRows creates each of rows dest does not hold, adds each edge it does
+// not hold, and proves them, among the rows it already holds under the stamp.
+// It deletes nothing.
+func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.DepWithPayload) error {
+	open := func() (*reverseTarget, error) {
+		return reverseTargetOpener(r.request.CityPath, r.request.Cfg, dest)
+	}
+	t, err := open()
+	if err != nil {
+		return err
+	}
+	defer t.close()
+	for _, e := range edges {
+		if e.Payload != "" && !t.carriesPayload {
+			return fmt.Errorf("%s cannot write the payload on %s -> %s; nothing was written", reverseDestNoun(dest), e.IssueID, e.DependsOnID)
+		}
+	}
+	phase := "reverse " + dest + " re-copy"
+	stamped, err := t.rows.List(reverseStampQuery(r.journal.Stamp))
+	if err != nil {
+		return err
+	}
+	held := map[string]bool{}
+	for _, b := range stamped {
+		held[b.ID] = b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
+	}
+	var create []beads.Bead
+	for _, b := range rows {
+		if !held[b.ID] {
+			create = append(create, b)
+		}
+	}
+	if len(create) > 0 {
+		if err := t.create(create); err != nil {
+			return fmt.Errorf("copying back into %s: %w", reverseDestNoun(dest), err)
+		}
+	}
+	if err := infraEngineCrashPoint(phase + " rows"); err != nil {
+		return err
+	}
+	if err := reverseAddEdges(t, edges, infraEngineClock{}, phase); err != nil {
+		return err
+	}
+	if err := reverseVerify(open, rows, edges, r.journal.Stamp, true); err != nil {
+		return fmt.Errorf("verifying %s: %w", reverseDestNoun(dest), err)
+	}
+	return nil
+}
+
+// missingReturned is each row the reverse manifests record that no store the
+// journal names holds under this run's stamp.
+func (r *reverseRun) missingReturned() ([]string, error) {
 	var manifests []string
 	if r.opts.Mode == reverseToRigs {
 		for _, rig := range r.journal.Rigs {
@@ -1119,10 +1289,10 @@ func (r *reverseRun) destinationsHold(before string) error {
 	for _, path := range manifests {
 		m, recorded, err := readInfraCopyManifestRecordAt(path, "")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !recorded {
-			return fmt.Errorf("the reverse manifest %s is gone, so nothing says which rows this reverse wrote", path)
+			return nil, fmt.Errorf("the reverse manifest %s is gone, so nothing says which rows this reverse wrote", path)
 		}
 		for id := range m.IDs {
 			want[id] = true
@@ -1132,12 +1302,12 @@ func (r *reverseRun) destinationsHold(before string) error {
 	for _, dest := range r.journal.Dests {
 		t, err := reverseTargetOpener(r.request.CityPath, r.request.Cfg, dest)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		stamped, err := t.rows.List(reverseStampQuery(r.journal.Stamp))
 		t.close()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, b := range stamped {
 			if b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp {
@@ -1151,17 +1321,7 @@ func (r *reverseRun) destinationsHold(before string) error {
 			missing = append(missing, id)
 		}
 	}
-	if len(missing) == 0 {
-		return nil
-	}
-	if r.journal.ClearStarted {
-		return fmt.Errorf("the stores this reverse wrote no longer hold %d row(s) it returned (%s), and its binding clear has begun, so the binding may not hold them either. Nothing more was changed; restore them from snapshot %s in %s (the runbook's restore steps)", len(missing), infraStrandedIDList(missing), r.journal.Snapshot, r.journal.SnapshotTo)
-	}
-	r.journal.Phase = reverseR0
-	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
-		return err
-	}
-	return fmt.Errorf("the stores this reverse wrote no longer hold %d row(s) it returned (%s), checked before %s, so the binding and the split's records are left as they are; the next run copies them again", len(missing), infraStrandedIDList(missing), before)
+	return missing, nil
 }
 
 // reverseRenames pairs each existing path with its retired name.
