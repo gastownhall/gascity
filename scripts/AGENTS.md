@@ -21,6 +21,19 @@ ga-sux0ij). Change all four together: `TestRunnerTestEnvsPinPaneShell` in
 `SHELL`: its panes start with an explicit command, which tmux runs as
 `$SHELL -c`, so they never reach the wizard.
 
+## Test runners build under a private GOTMPDIR
+
+`go` removes its `go-build` WORK dir only when it exits on its own or on
+SIGINT; SIGTERM and SIGKILL leave it behind, and a whole-module `go test`
+keeps up to ~1 GB of test binaries there. `scripts/test-local-parallel`,
+`scripts/test-go-test-shard` and `scripts/test-integration-shard` therefore
+pass go a private `gc-gotmp-<PID>-<random>` GOTMPDIR inside the caller's
+GOTMPDIR (else TMPDIR, else `/var/tmp`). Their EXIT and signal traps remove it,
+and a later run sweeps one whose creator is gone, untouched for the go test
+budget, and held by no process (`scripts/lib/harness-reap.sh`). A nested runner
+shares its parent's dir. A new runner that invokes `go` follows the same
+pattern; `harness_reap_test.go` covers it.
+
 ## Git hooks chain to beads
 
 Each `.githooks` hook forwards to `.githooks/lib/beads-chain.sh`. Adding a
