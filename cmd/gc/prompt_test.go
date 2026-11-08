@@ -1917,6 +1917,23 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			"is not your work",
 		)
 	})
+
+	t.Run("AC-5 startup protocol separates drain-aware calls from plain polls", func(t *testing.T) {
+		startup, _ := flatPromptSection(t, flat, "Startup Protocol")
+		if strings.Contains(startup, "the drain was acknowledged for you") {
+			t.Errorf("Startup Protocol says every drain was acknowledged, but a plain poll acknowledges nothing and a drain-ack can fail:\n%s", startup)
+		}
+		requireInOrder(t, "Startup Protocol", startup,
+			"gc hook --claim --drain-ack --json",
+			"A `--drain-ack` call like this one acknowledges the drain itself",
+			"if it exited 0, your session is done",
+			"`drain_acknowledged: true`",
+			"also exits 0 without that field",
+			"If it exited non-zero, the acknowledgement failed: run `gc runtime drain-ack`, then exit.",
+			"A plain `gc hook --claim --json` poll (no `--drain-ack`) acknowledges nothing",
+			"is a fault, not a drain",
+		)
+	})
 }
 
 // TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the
