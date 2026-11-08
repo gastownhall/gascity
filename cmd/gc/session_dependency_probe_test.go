@@ -595,13 +595,21 @@ func TestDependencyProbe_AbandonBudgetStopsAfterThreeConsecutiveWaits(t *testing
 	if took > 3*bound+bound/2 {
 		t.Fatalf("the pass took %v, want at most three %v bounds", took, bound)
 	}
+	// A probed session sees one liveness observation (building its handle reads
+	// the session's metadata first, so its total call count is higher); a session
+	// the budget skipped sees no provider call of any kind.
 	for j, dep := range env.deps {
 		want := 1
 		if j >= 3 {
 			want = 0
 		}
-		if got := env.sp.callCount(dep); got != want {
-			t.Errorf("wedged dependency %d received %d provider calls, want %d", j, got, want)
+		if got := env.sp.observationCount(dep); got != want {
+			t.Errorf("wedged dependency %d received %d liveness observations, want %d", j, got, want)
+		}
+		if j >= 3 {
+			if got := env.sp.callCount(dep); got != 0 {
+				t.Errorf("wedged dependency %d received %d provider calls, want 0: the budget must skip the provider", j, got)
+			}
 		}
 	}
 }
@@ -654,8 +662,8 @@ func TestDependencyProbe_OutstandingAnswerNeitherCountsNorResets(t *testing.T) {
 	if got := env.sp.callCount(env.deps[2]); got != 0 {
 		t.Errorf("dependency with an outstanding observation received %d provider calls, want 0", got)
 	}
-	if got := env.sp.callCount(env.deps[3]); got != 1 {
-		t.Errorf("third abandoned wait received %d provider calls, want 1", got)
+	if got := env.sp.observationCount(env.deps[3]); got != 1 {
+		t.Errorf("third abandoned wait received %d liveness observations, want 1", got)
 	}
 	if got := env.sp.callCount(env.deps[4]); got != 0 {
 		t.Errorf("session after the third abandoned wait received %d provider calls, want 0: the outstanding answer must not reset the count", got)

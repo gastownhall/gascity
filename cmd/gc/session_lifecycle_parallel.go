@@ -943,7 +943,7 @@ func dependencyTemplateAlive(
 	cityName string,
 	store beads.Store,
 	clk clock.Clock,
-	_ *dependencyProbePass,
+	pass *dependencyProbePass,
 ) bool {
 	if cfg == nil || template == "" {
 		return false
@@ -952,57 +952,53 @@ func dependencyTemplateAlive(
 	if cfgAgent == nil {
 		return false
 	}
+	// probeAlive asks, at most once per pass, whether a dependency session is
+	// alive: by the id of its one open bead, bounded, under the session's key.
+	var list listOpenSessions
+	if store != nil {
+		list = func() ([]sessionpkg.Info, error) { return loadOpenSessionInfos(store) }
+	}
+	probeAlive := func(name string, processNames []string) bool {
+		return pass.sessionAlive(list, name, func(target string) (bool, error) {
+			obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(pass.cityPath, store, sp, cfg, target, processNames)
+			return obs.Alive, err
+		})
+	}
 	if isMultiSessionCfgAgent(cfgAgent) {
 		for name, tp := range desiredState {
 			if tp.TemplateName != template {
 				continue
 			}
-			if dependencySessionStartInFlight(store, name, cfg, clk) {
+			if dependencySessionStartInFlight(store, name, cfg, clk, pass) {
 				continue
 			}
-			if alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
+			if probeAlive(name, tp.Hints.ProcessNames) {
 				return true
 			}
 		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
-	if dependencySessionStartInFlight(store, sessionName, cfg, clk) {
+	if dependencySessionStartInFlight(store, sessionName, cfg, clk, pass) {
 		return false
 	}
 	depTP := desiredState[sessionName]
-	alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, sessionName, depTP.Hints.ProcessNames)
-	return err == nil && alive
+	return probeAlive(sessionName, depTP.Hints.ProcessNames)
 }
 
-func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *config.City, clk clock.Clock) bool {
-	sessionName = strings.TrimSpace(sessionName)
-	if store == nil || sessionName == "" {
-		return false
-	}
-	// WI-6 R1: the session-name match moves from a raw ListByMetadata query to the
-	// canonical open-session Info union (loadOpenSessionInfos == ListAll's type+label
-	// union, closed excluded, IsSessionBeadOrRepairable-filtered). Exact session_name
-	// equality is preserved by comparing the verbatim Info.SessionNameMetadata mirror,
-	// so a padded/mismatched name still misses just as ListByMetadata's exact-value
-	// match did. This is a desired-state read, so the Live tier is not required; a
-	// list error stays fail-safe (treat the dependency as still starting).
-	infos, err := loadOpenSessionInfos(store)
-	if err != nil {
-		return true
-	}
+// dependencySessionStartInFlight reports whether a create of sessionName is
+// still in flight. The open sessions are listed once per pass (the first check
+// of the pass pays for it); a list error stays fail-safe and answers true
+// (still starting).
+func dependencySessionStartInFlight(store beads.Store, sessionName string, cfg *config.City, clk clock.Clock, pass *dependencyProbePass) bool {
 	var startupTimeout time.Duration
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	for _, info := range infos {
-		if info.SessionNameMetadata != sessionName {
-			continue
-		}
-		if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
-			return true
-		}
+	var list listOpenSessions
+	if store != nil {
+		list = func() ([]sessionpkg.Info, error) { return loadOpenSessionInfos(store) }
 	}
-	return false
+	return pass.startInFlight(list, sessionName, startupTimeout, clk)
 }
 
 func isSessionBead(session beads.Bead) bool {

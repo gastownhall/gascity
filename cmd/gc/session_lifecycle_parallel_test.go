@@ -3444,14 +3444,14 @@ func TestDependencySessionStartInFlightIgnoresClosedMetadataMatches(t *testing.T
 		t.Fatalf("close session bead: %v", err)
 	}
 
-	if dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}) {
+	if dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard)) {
 		t.Fatal("closed failed-create bead should not count as an in-flight dependency start")
 	}
 }
 
 func TestDependencySessionStartInFlightFailsClosedOnSessionListError(t *testing.T) {
 	store := &listErrorStore{Store: beads.NewMemStore()}
-	if !dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}) {
+	if !dependencySessionStartInFlight(store, "db", &config.City{}, clock.Real{}, newDependencyProbePass(context.Background(), "", io.Discard)) {
 		t.Fatal("session list errors should block dependent starts until the store recovers")
 	}
 }
