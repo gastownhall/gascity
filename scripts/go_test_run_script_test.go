@@ -1,3 +1,5 @@
+//go:build unix
+
 package scripts_test
 
 import (
