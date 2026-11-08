@@ -592,6 +592,13 @@ Equality is checked after:
 
 `description` is excluded from this equality check.
 
+`gc config show --validate` reports the stage-1 (scope-root) conflict that
+startup refuses, with the same error, before any session starts. It reads
+config only and writes nothing: provider families resolve without their
+binaries, and work dirs are not created. So it also reports a conflict among
+agents whose provider is not installed on this host, which startup there skips
+instead.
+
 Lifecycle semantics:
 
 - equality is evaluated for the concrete target context every time that target
