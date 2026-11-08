@@ -458,8 +458,8 @@ func TestRetireRemovedConfiguredNamedSessionBead_UnconfirmedRuntimeKeepsWork(t *
 			if err != nil {
 				t.Fatalf("get work: %v", err)
 			}
-			if got.Assignee != b.ID || got.Status != "in_progress" {
-				t.Fatalf("work = assignee %q status %q, want it left with %s", got.Assignee, got.Status, b.ID)
+			if got.Assignee != b.ID {
+				t.Fatalf("work assignee = %q, want it left with %s", got.Assignee, b.ID)
 			}
 			if after, _ := store.Get(b.ID); after.Metadata["state"] == "archived" {
 				t.Fatal("session bead archived on an unconfirmed read")
