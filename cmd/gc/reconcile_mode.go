@@ -348,7 +348,7 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		if warn != "" {
 			r.Status = doctor.StatusWarning
 			r.Message += "; " + warn
-			hint := "declare proc.exec and input-fence in the script's handshake if its box's tmux fences input"
+			hint := "declare proc.exec and input-fence in the script's handshake if it fences input"
 			if script, ok := execRuntimeScript(c.cfg, v2SessionRuntimeName(c.cfg, c.lookupEnv)); ok {
 				if h := execReadiness(script, c.cfg.EffectiveCityName(), cityPathOf(ctx)); h.info.Has(runtime.ProtocolCapabilityCarrierOps) {
 					hint = "a carrier.ops runtime takes no fenced input; use a runtime that supports input fencing for fenced turns or nudges"

@@ -296,15 +296,22 @@ func probeOpsIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInf
 	readLimit := min(3*time.Second, r.opts.OpTimeout)
 	readCtx, cancel := context.WithTimeout(ctx, readLimit)
 	defer cancel()
+	// lastDetail describes the last peek that completed inside the window. A
+	// peek the window's deadline cut short says nothing about the pack, so it
+	// never replaces an earlier, real read.
+	lastDetail := "no peek completed within the window"
 	for {
 		out := r.peek(readCtx, name, tmux.PromptObservationLines)
+		if out.err == nil && !out.unsupported && strings.Contains(out.stdout, sentinel) {
+			break
+		}
+		if readCtx.Err() != nil {
+			return StatusFail, fmt.Sprintf("carrier.ops idle read timed out after %s: %s", readLimit, lastDetail)
+		}
 		if out.unsupported {
 			return StatusFail, "declares carrier.ops and idle-boundary but peek is unimplemented (exit 2)"
 		}
-		if out.err == nil && strings.Contains(out.stdout, sentinel) {
-			break
-		}
-		lastDetail := fmt.Sprintf("peek does not show the started agent's command line or output (last output = %q)", out.stdout)
+		lastDetail = fmt.Sprintf("peek does not show the started agent's command line or output (last output = %q)", out.stdout)
 		if out.err != nil {
 			lastDetail = fmt.Sprintf("carrier.ops peek failed: %v (last output = %q)", out.err, out.stdout)
 		}

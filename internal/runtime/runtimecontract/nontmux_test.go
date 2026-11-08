@@ -86,6 +86,19 @@ func TestNonTmuxIdleBoundaryFailureDetails(t *testing.T) {
 	}
 }
 
+// A peek the window's deadline cuts short must not replace the last real
+// read in the failure detail: the first peek shows the screen, every later
+// one hangs past the window.
+// Kills: a canceled peek's empty output or context error reported instead
+// of the screen the pack actually showed.
+func TestNonTmuxIdleBoundaryKeepsTheLastRealRead(t *testing.T) {
+	peek := `if [ -f "$box/peeked" ]; then exec sleep 30; fi; : > "$box/peeked"; echo first-screen`
+	r := runNonTmuxIdleOptions(t, map[string]string{"peek": peek}, Options{OpTimeout: 500 * time.Millisecond})
+	if r.Status != StatusFail || !strings.Contains(r.Detail, "first-screen") || strings.Contains(r.Detail, "canceled") {
+		t.Errorf("got %s, %s; want FAIL naming first-screen, not the canceled peek", r.Status, r.Detail)
+	}
+}
+
 func TestNonTmuxIdleBoundaryPeekBound(t *testing.T) {
 	start := time.Now()
 	r := runNonTmuxIdleOptions(t, map[string]string{"peek": "exec sleep 30"}, Options{OpTimeout: 100 * time.Millisecond})

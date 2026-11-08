@@ -18,8 +18,9 @@ var _ runtime.FencedInputProvider = (*Provider)(nil)
 // (input-fence), without carrier.ops, whose input the tmux carrier guards with
 // the tmux provider's if-shell on the agent pane's fence; none for any other
 // pack, whose box tmux need not hold a fence, or which is driven by the
-// dedicated wire ops that cannot condition input on an incarnation. Like the pack's other traits it
-// is read from the handshake, so it is static once the handshake succeeds.
+// dedicated wire ops that cannot condition input on an incarnation. Like the
+// pack's other traits it is read from the handshake, so it is static once the
+// handshake succeeds.
 // A failed handshake reads none until a retry succeeds (handshakeRetryAfter):
 // a session started meanwhile published no fence, and fenced input to it
 // misses once the retry reads atomic, until that session restarts.

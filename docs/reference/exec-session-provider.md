@@ -188,8 +188,9 @@ required for this carrier. `gc runtime check` exercises all five and fails
 unsupported or broken ops. `gc runtime conformance` checks only the `peek`
 read under `idle-boundary`, not the other four driving ops. In production,
 a missing `nudge`, `send-keys`, `interrupt` or `clear-scrollback` op that exits
-2 is a silent no-op under `carrier.ops`; only `gc runtime check` enforces
-those four op obligations. `watch-startup` stays a dedicated streaming op
+2 is a silent no-op under `carrier.ops`, and a missing `peek` on a script that
+is not v2-ready reads as an empty screen with no error; only
+`gc runtime check` enforces those op obligations. `watch-startup` stays a dedicated streaming op
 for either carrier.
 
 ### Protocol Handshake (`protocol`)
