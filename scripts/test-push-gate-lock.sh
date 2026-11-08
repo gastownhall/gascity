@@ -245,12 +245,16 @@ if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || com
         # reaper must kill only what still holds the file after it settles.
         bash -c 'exec 7<"$1"; sleep 0.5; exec 7<&-; exec sleep 30' _ "$REAP_SLOTS/slot-0.lock" &
         PROBER_PID=$!
-        # The wait bound is wide on purpose: a loaded shared host (load 35-55
-        # seen on the pre-push fast suite) can stall this subshell for
-        # seconds, so the check asserts what its name says -- the acquire
-        # returned before the configured bound -- instead of a tight
-        # wall-clock budget. A reaper that never fires times out at the
-        # bound and fails this check and the ACQUIRED check below.
+        # The wait bound is wide on purpose. A successful reap sleeps 1.2s
+        # (the 1s settle look plus 0.2s of TERM grace) and runs two
+        # lsof/fuser scans, each of which walks every process on the host:
+        # about 2.5s per scan on a shared agent host with ~3,800 processes
+        # at load ~50, so this acquire takes 6-7s there and grows with the
+        # host's process count. The check therefore asserts what its name
+        # says -- the acquire returned before the configured bound --
+        # instead of a tight wall-clock budget. A reaper that never fires
+        # times out at the bound and fails this check and the ACQUIRED
+        # check below.
         REAP_MAX_WAIT=20
         START="$(date +%s)"
         REAP_OUT="$(LIB="$LIB" DIR="$REAP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
