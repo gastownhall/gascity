@@ -787,12 +787,11 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 	cmd := env.command(harness)
 	cmd.ExtraFiles = extraFiles
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var stderr bytes.Buffer
-	stdout := &lineStampWriter{}
+	stdout, stderr := &lineStampWriter{}, &lineStampWriter{}
 	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 	start := time.Now()
-	stdout.start = start
+	stdout.start, stderr.start = start, start
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start run_with_timeout harness: %v", err)
 	}
@@ -817,7 +816,8 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 		case err := <-done:
 			elapsed := time.Since(start)
 			if err != nil {
-				t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s%s", elapsed, err, stderr.String(), stallSnapshot)
+				errOut, _ := stderr.snapshot()
+				t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s%s", elapsed, err, errOut, stallSnapshot)
 			}
 			out, gaps := stdout.snapshot()
 			if stallSnapshot != "" {
@@ -837,11 +837,22 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 			}
 			if idle := now.Sub(stdout.lastLine()); idle >= runWithTimeoutStallSnapshotAfter {
 				_, gaps := stdout.snapshot()
-				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s",
-					cmd.Process.Pid, idle.Round(time.Millisecond), len(gaps), processGroupMembers(t, cmd.Process.Pid))
+				errOut, _ := stderr.snapshot()
+				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s\nstderr so far: %d lines \"command reaped\", %d lines \"watchdog signaled\"; last lines:\n%s",
+					cmd.Process.Pid, idle.Round(time.Millisecond), len(gaps), processGroupMembers(t, cmd.Process.Pid),
+					strings.Count(errOut, "command reaped\n"), strings.Count(errOut, "watchdog signaled\n"), lastLines(errOut, 4))
 			}
 		}
 	}
+}
+
+// lastLines returns the last n lines of s.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runWithTimeoutStallSnapshotAfter is how long runWithTimeoutInGroup lets a
@@ -923,10 +934,27 @@ const instantCommandsSlowCall = instantCommandsWatchdogTimeout / 3
 // budget only bounds a hang; the per-call check is what catches a stall.
 const instantCommandsBudget = 60 * time.Second
 
+// markRunWithTimeoutSteps makes run_with_timeout report on stderr when it
+// has reaped the command and when it has signaled the watchdog, so a stall
+// snapshot shows which wait a stalled call is blocked in.
+func markRunWithTimeoutSteps(t *testing.T, fn string) string {
+	t.Helper()
+	for _, step := range []struct{ after, mark string }{
+		{`wait "$cmd_pid" || status=$?`, "command reaped"},
+		{`kill "$watchdog_pid" 2>/dev/null || true`, "watchdog signaled"},
+	} {
+		if strings.Count(fn, step.after) != 1 {
+			t.Fatalf("run_with_timeout no longer has exactly one %q line", step.after)
+		}
+		fn = strings.Replace(fn, step.after, step.after+"\n    printf '"+step.mark+"\\n' >&2", 1)
+	}
+	return fn
+}
+
 func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
 	forEachRunWithTimeoutShell(t, func(t *testing.T, shell string) {
 		heldR, heldW := newRunWithTimeoutPipe(t, "held-descriptor")
-		harness := "set -eu\n" + runWithTimeoutFunction(t) + fmt.Sprintf(`
+		harness := "set -eu\n" + markRunWithTimeoutSteps(t, runWithTimeoutFunction(t)) + fmt.Sprintf(`
 i=0
 while [ "$i" -lt 200 ]; do
 	run_with_timeout %d true
