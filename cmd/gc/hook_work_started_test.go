@@ -1233,3 +1233,30 @@ func TestDrainAckRefusesAClaimStartedWithoutConditionalWrites(t *testing.T) {
 		}
 	}
 }
+
+// TestHookDrainAckFenceHoldsAClaimStartedWithoutConditionalWrites (AC-3): a
+// claim the hook recorded by the checked write on a legacy no-writer store
+// holds the --claim --drain-ack fence: once the work query serves nothing,
+// the hook answers work, started_claim_held, and acknowledges nothing. Kills
+// an inert record, which the fence reads as no started claim, and acks.
+func TestHookDrainAckFenceHoldsAClaimStartedWithoutConditionalWrites(t *testing.T) {
+	row := newLegacyStartedRow(t)
+	mode := &legacyMode{}
+	l := &startedLog{}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", legacyStartedOpts(startedEnv(startedToken, "7"), mode), l.ops(startedRoutedWork, row, nil), stdout, &stderr); code != 0 {
+		t.Fatalf("hand-over: code %d; stderr=%s", code, stderr.String())
+	}
+
+	l = &startedLog{}
+	ops := l.ops(`[]`, row, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return row.meta(t, session.WorkStartedKey), nil }
+	stdout = &orderedWriter{l: l}
+	code := doHookClaim("q", "/rig", legacyStartedOpts(startedEnv(startedToken, "7"), mode), ops, stdout, &stderr)
+
+	got := decodeTurnBoundResult(t, stdout.buf.String())
+	if code != 0 || got.Action != "work" || got.Reason != hookClaimWorkReasonStartedClaimHeld || got.BeadID != "work-1" || l.acked || got.DrainAcknowledged {
+		t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held work-1 and no ack; stderr=%s", code, got, l.acked, stderr.String())
+	}
+}
