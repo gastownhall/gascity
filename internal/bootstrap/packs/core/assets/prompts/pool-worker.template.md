@@ -80,16 +80,33 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
-section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+**CRITICAL:** This section is for an assignment whose metadata has
+`molecule_id` but no `gc.root_bead_id` (see "Classify Your Assignment"). A
+workflow step that carries `molecule_id` is not a molecule assignment: follow
+"Workflow Steps". Otherwise your work is governed by that molecule's steps. Do
+NOT just read the description and start coding.
 
-Run `gc bd mol current <molecule-id>` to see your steps:
+**First verify the molecule.** `molecule_id` alone does not say how the
+molecule runs: it can name a legacy molecule or the root of a graph workflow.
+Read the root before you navigate it:
 
-- `[done]` — step is complete
-- `[current]` — step is in progress (you are here)
-- `[ready]` — step is ready to start
-- `[blocked]` — step is waiting on dependencies
+```bash
+gc bd show <molecule-id>
+```
+
+- If its metadata has `gc.formula_contract=graph.v2` or `gc.kind=workflow`, it
+  is a graph workflow the orchestrator drives. Do NOT run `gc bd mol current`
+  on it, and do NOT close it or its steps. Leave your assignment open and
+  escalate (see "Escalation") with both ids.
+- If the read fails or the molecule does not exist, that is an error, not a
+  legacy molecule: do not navigate it. Leave your assignment open and
+  escalate.
+- Otherwise it is a legacy molecule. Run `gc bd mol current <molecule-id>` to
+  see your steps:
+  - `[done]` — step is complete
+  - `[current]` — step is in progress (you are here)
+  - `[ready]` — step is ready to start
+  - `[blocked]` — step is waiting on dependencies
 
 **Work one step at a time.** For each `[ready]` step:
 1. `gc bd show <step-id>` — read what to do

@@ -1845,4 +1845,41 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			t.Errorf("Context Exhaustion does not recover the assignment through the hook:\n%s", restart)
 		}
 	})
+
+	t.Run("AC-3 molecules are verified before navigation", func(t *testing.T) {
+		molecules, _ := flatPromptSection(t, flat, "Molecules")
+		if strings.Contains(molecules, "in step 4") {
+			t.Errorf("Molecules still cites a How to Work step number that no longer reads the bead:\n%s", molecules)
+		}
+		// Workflow steps that carry molecule_id are routed away before
+		// anything else, then the root read comes before any navigation.
+		requireInOrder(t, "Molecules", molecules,
+			"`molecule_id` but no `gc.root_bead_id`",
+			`"Workflow Steps"`,
+			"gc bd show <molecule-id>",
+			"`gc.formula_contract=graph.v2`",
+			"`gc.kind=workflow`",
+			"Do NOT run `gc bd mol current` on it",
+			"If the read fails or the molecule does not exist",
+			"not a legacy molecule",
+			"gc bd mol current <molecule-id>",
+		)
+		if first, read := strings.Index(molecules, "gc bd mol current <molecule-id>"), strings.Index(molecules, "gc bd show <molecule-id>"); read < 0 || first < read {
+			t.Errorf("Molecules runs gc bd mol current before reading the molecule root:\n%s", molecules)
+		}
+		for _, want := range []string{
+			"do NOT close it or its steps",
+			`(see "Escalation")`,
+			"`[ready]`",
+			"gc bd show <step-id>",
+			"gc bd update <step-id> --set-metadata gc.outcome=pass",
+			`gc bd close <step-id> --reason "<what the step did>"`,
+			`Do not close a step that cannot be done (see "Closing a Bead")`,
+			"Do NOT close steps you didn't execute",
+		} {
+			if !strings.Contains(molecules, want) {
+				t.Errorf("Molecules missing %q:\n%s", want, molecules)
+			}
+		}
+	})
 }
