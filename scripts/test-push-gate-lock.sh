@@ -14,7 +14,8 @@
 # Coverage: acquire/hold/deny/release, the bounded wait and its return code,
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
 # diagnostics, automatic reap of leaked descendants when the stamped holder
-# PID is dead (ga-34a), the missing-flock degrade path, malformed tunables,
+# PID is dead (ga-34a), slot-holder discovery (fuser first, lsof fallback),
+# the missing-flock degrade path, malformed tunables,
 # the GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
 # slots-dir fallback, and static assertions that scripts/test-local-parallel
 # wires all of it up — including closing the gate FD before the fan-out.
@@ -288,6 +289,44 @@ if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || com
 else
     echo "  skip reap.leaked_descendant_* — need setsid and lsof/fuser"
 fi
+
+# ---------------- reap: holder discovery prefers fuser, falls back to lsof ----------------
+# lsof walks every process's descriptor table and costs seconds on a loaded
+# host; fuser answers the same question for one file far faster. Discovery
+# must use fuser when it is present and only fall back to lsof without it.
+HOLDER_FILE="$WORK/holder-probe.lock"
+: >"$HOLDER_FILE"
+STUB_BIN="$WORK/stub-lsof-bin"
+mkdir -p "$STUB_BIN"
+LSOF_MARK="$WORK/lsof-called"
+# Absolute interpreter: the fallback case runs with a PATH that has no bash.
+cat >"$STUB_BIN/lsof" <<STUB
+#!$BASH
+: >"$LSOF_MARK"
+echo 424242
+STUB
+chmod +x "$STUB_BIN/lsof"
+if command -v fuser >/dev/null 2>&1; then
+    rm -f "$LSOF_MARK"
+    exec 8<"$HOLDER_FILE"
+    PREFER_OUT="$(PATH="$STUB_BIN:$PATH" _push_gate_slot_holder_pids "$HOLDER_FILE" | tr '\n' ' ')"
+    exec 8<&-
+    assert_false "holders.prefers_fuser_over_lsof" test -e "$LSOF_MARK"
+    assert_contains "holders.fuser_finds_open_holder" " $PREFER_OUT " " $$ "
+else
+    echo "  skip holders.prefers_fuser_over_lsof — need fuser"
+fi
+# Fallback: a PATH holding only the stub lsof and tr (no fuser).
+FALLBACK_BIN="$WORK/fallback-bin"
+mkdir -p "$FALLBACK_BIN"
+cp -f "$STUB_BIN/lsof" "$FALLBACK_BIN/lsof"
+if TR_BIN="$(command -v tr)"; then
+    ln -sf "$TR_BIN" "$FALLBACK_BIN/tr"
+fi
+rm -f "$LSOF_MARK"
+FALLBACK_OUT="$(PATH="$FALLBACK_BIN" _push_gate_slot_holder_pids "$HOLDER_FILE" | tr '\n' ' ')"
+assert_true "holders.falls_back_to_lsof_without_fuser" test -e "$LSOF_MARK"
+assert_contains "holders.lsof_fallback_output" " $FALLBACK_OUT " " 424242 "
 
 # ---------------- reap: a live holder still writing its stamp is spared ----------------
 # A new holder wins flock before it rewrites the stamp, so for an instant the
