@@ -230,15 +230,30 @@ type observation struct {
 	err      error
 }
 
-// awaitObservation waits for the provider's answer or for ctx to end.
+// classifyObservation turns a provider answer into the tri-state result: an
+// error wrapping ErrRuntimeUnavailable is incomplete with the provider's own
+// Liveness preserved; any other answer is complete.
+func classifyObservation(obs observation) (Liveness, ObservationStatus, error) {
+	if obs.err != nil && errors.Is(obs.err, ErrRuntimeUnavailable) {
+		return obs.liveness, ObservationIncomplete, obs.err
+	}
+	return obs.liveness, ObservationComplete, obs.err
+}
+
+// awaitObservation waits for the provider's answer or for ctx to end. When
+// both are ready Go's select picks at random, so after ctx ends it reads
+// results once more without blocking: an answer that is already waiting is
+// honored, and only a missing one yields the context error.
 func awaitObservation(ctx context.Context, results <-chan observation) (Liveness, ObservationStatus, error) {
 	select {
 	case obs := <-results:
-		if obs.err != nil && errors.Is(obs.err, ErrRuntimeUnavailable) {
-			return obs.liveness, ObservationIncomplete, obs.err
-		}
-		return obs.liveness, ObservationComplete, obs.err
+		return classifyObservation(obs)
 	case <-ctx.Done():
-		return Liveness{}, ObservationIncomplete, ctx.Err()
+		select {
+		case obs := <-results:
+			return classifyObservation(obs)
+		default:
+			return Liveness{}, ObservationIncomplete, ctx.Err()
+		}
 	}
 }
