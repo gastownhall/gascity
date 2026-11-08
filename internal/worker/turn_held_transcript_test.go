@@ -87,7 +87,7 @@ func TestCurrentTurnWithoutAHeldTranscriptIsUnavailable(t *testing.T) {
 			ff.HeldOpen = map[string][]string{s.info.SessionName: {renamed}}
 		}},
 		{name: "held files unreadable", set: func(_ *testing.T, s turnSession, ff runtime.FullFake) {
-			ff.HeldOpenErrors = map[string]error{s.info.SessionName: errors.New("permission denied")}
+			ff.HeldOpenErrors = map[string]error{s.info.SessionName: errors.New("reading open files of pid 4300: input/output error")}
 		}},
 	}
 	for _, tc := range cases {
@@ -100,5 +100,30 @@ func TestCurrentTurnWithoutAHeldTranscriptIsUnavailable(t *testing.T) {
 				t.Fatalf("CurrentTurn error = %v, want unavailable, not a gone session", err)
 			}
 		})
+	}
+}
+
+// Kills a held-file read made apart from the turn read's other runtime probes
+// (observeTurnRead): a read of the session's held files in flight, which a
+// wedged runtime holds, keeps CurrentTurn, which shares it, only until ctx
+// ends, its turns unknown; FreshTurn, whose reads are its own, still reads
+// the held rollout.
+func TestTurnReadsTheHeldFilesAsARuntimeProbe(t *testing.T) {
+	s, ff := heldTurnSession(t)
+	rollout := outsideRolloutPath(t, s.info.SessionKey)
+	writeTranscriptLines(t, rollout, codexMeta(s.info.SessionKey, s.info.WorkDir),
+		codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142), codexComplete(codexTurn1, "2026-10-08T02:22:30.500Z"))
+	ff.HeldOpen = map[string][]string{s.info.SessionName: {rollout}}
+	startSharedRead(t, turnObservationKey("held", s.handle.turnObservationScope(), s.info.SessionName), heldFileReading{})
+
+	joined, cancelJoined := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelJoined()
+	got, err := s.handle.CurrentTurn(joined)
+	assertNoHistory(t, got, err, runtime.ErrRuntimeUnavailable)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err = s.handle.FreshTurn(ctx)
+	if err != nil || len(got.Recent) != 1 || got.Recent[0].TurnID != codexTurn1 {
+		t.Fatalf("FreshTurn beside the held read in flight = %+v, %v; want %s from a read of its own", got, err, codexTurn1)
 	}
 }

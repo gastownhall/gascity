@@ -8,10 +8,12 @@ package runtime
 //
 // HeldFiles returns the absolute paths of the regular files the process tree
 // of session name holds open that are owned by the current user; files
-// another user owns are never named, so a caller never reads them. A non-nil
-// err means the tree could not be read; the caller must not take an empty
-// answer then. Composites do not implement it: it is read on the session's
-// routed leaf ([HeldFilesFor]).
+// another user owns are never named, so a caller never reads them. A process
+// in the tree whose open files the current user may not read, such as a
+// root-owned sandbox wrapper above the agent or a zombie, is skipped. A
+// non-nil err means the tree could not be read; the caller must not take an
+// empty answer then. Composites do not implement it: it is read on the
+// session's routed leaf ([HeldFilesFor]).
 type HeldFileProvider interface {
 	HeldFiles(name string) ([]string, error)
 }

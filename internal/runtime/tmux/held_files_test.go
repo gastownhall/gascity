@@ -2,49 +2,72 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
+// fdTableUnreadable is proctable.OpenFiles' error for a process whose open
+// files the current user may not list: on Linux, another user's process (a
+// root-owned sandbox wrapper such as sudo or bwrap) or a zombie, whose fd
+// directory the kernel shows as root's, mode 0500.
+func fdTableUnreadable(pid int) error {
+	return fmt.Errorf("reading open files of pid %d: %w", pid, &fs.PathError{Op: "open", Path: fmt.Sprintf("/proc/%d/fd", pid), Err: syscall.EACCES})
+}
+
+// fdTableFailed is proctable.OpenFiles' error for a process whose open files
+// cannot be read for a reason other than the current user's permission.
+func fdTableFailed(pid int) error {
+	return fmt.Errorf("reading open files of pid %d: %w", pid, &fs.PathError{Op: "open", Path: fmt.Sprintf("/proc/%d/fd", pid), Err: syscall.EIO})
+}
+
 // treeHeldFiles names every file the pane's process tree holds open, once
-// each, and nothing another tree holds; a process in the tree whose files
-// cannot be read fails the read rather than answering partially.
+// each, and nothing another tree holds. A process whose open files the
+// current user may not read (a root-owned wrapper above the agent, a zombie)
+// is skipped and the walk goes on through its children; a process whose
+// files cannot be read for any other reason fails the read rather than
+// answering partially.
 func TestTreeHeldFiles(t *testing.T) {
 	const (
 		log   = "/home/user/.config/seat/sessions/2026/11/08/rollout-a.jsonl"
 		other = "/home/user/.codex/sessions/2026/11/08/rollout-b.jsonl"
 	)
-	// 4242 is the pane's shell, 4300 a launcher, 4301 the agent; 5000 is
-	// another session's agent.
+	// 4242 is the pane's process, 4300 a launcher, 4301 the agent and 4302
+	// a child of the launcher's that exited unreaped; 5000 is another
+	// session's agent.
 	records := []proctable.ProcessRecord{
-		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 5000, PPID: 1},
+		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 4302, PPID: 4300}, {PID: 5000, PPID: 1},
 	}
 	for _, tt := range []struct {
 		name    string
 		files   map[int][]string
-		err     map[int]bool
+		err     map[int]error
 		want    []string
-		wantErr bool
+		wantErr error
 	}{
-		{"held across the tree", map[int][]string{4242: {"/dev/pts/3"}, 4301: {"/w", log, log}, 5000: {other}}, nil, []string{"/dev/pts/3", "/w", log}, false},
-		{"held twice", map[int][]string{4300: {log}, 4301: {log}}, nil, []string{log}, false},
-		{"nothing held", nil, nil, nil, false},
-		{"an unreadable descendant", map[int][]string{4301: {log}}, map[int]bool{4300: true}, nil, true},
+		{"held across the tree", map[int][]string{4242: {"/dev/pts/3"}, 4301: {"/w", log, log}, 5000: {other}}, nil, []string{"/dev/pts/3", "/w", log}, nil},
+		{"held twice", map[int][]string{4300: {log}, 4301: {log}}, nil, []string{log}, nil},
+		{"nothing held", nil, nil, nil, nil},
+		{"a root-owned pane process above the agent", map[int][]string{4301: {log}}, map[int]error{4242: fdTableUnreadable(4242)}, []string{log}, nil},
+		{"a zombie in the tree", map[int][]string{4301: {log}}, map[int]error{4302: fdTableUnreadable(4302)}, []string{log}, nil},
+		{"a descendant unreadable for another reason", map[int][]string{4301: {log}}, map[int]error{4300: fdTableFailed(4300)}, nil, syscall.EIO},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			openFiles := func(pid int) ([]string, error) {
-				if tt.err[pid] {
-					return nil, errors.New("permission denied")
+				if err := tt.err[pid]; err != nil {
+					return nil, err
 				}
 				return tt.files[pid], nil
 			}
 			got, err := treeHeldFiles(records, 4242, openFiles)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("treeHeldFiles error = %v, wantErr %v", err, tt.wantErr)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("treeHeldFiles error = %v, want %v", err, tt.wantErr)
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("treeHeldFiles = %q, want %q", got, tt.want)
@@ -85,10 +108,10 @@ func TestTmuxHeldFilesNamesOnlyOwnedFilesOfThePaneTree(t *testing.T) {
 func TestTmuxHeldFilesReportsAnUnreadableTree(t *testing.T) {
 	tm := NewTmux()
 	tm.exec = &fakeExecutor{agentPane: true, out: "4242"}
-	tm.paneHeldFiles = func(int) ([]string, error) { return nil, errors.New("permission denied") }
+	tm.paneHeldFiles = func(int) ([]string, error) { return nil, fdTableFailed(4300) }
 	tm.heldFileOwned = func(string) bool { return true }
-	if got, err := tm.HeldFiles("seat"); err == nil {
-		t.Fatalf("HeldFiles = %q, nil; want an error", got)
+	if got, err := tm.HeldFiles("seat"); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("HeldFiles = %q, %v; want the tree's read error", got, err)
 	}
 }
 

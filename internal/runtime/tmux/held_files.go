@@ -1,7 +1,9 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,9 +22,12 @@ func (p *Provider) HeldFiles(name string) ([]string, error) {
 
 // HeldFiles returns the regular files the process tree rooted at session's
 // agent pane holds open that the current user owns, read from the live
-// process table: the same tree codexRolloutOf names a rollout from. A pane
-// whose PID cannot be read, or a process in its tree whose open files cannot
-// be read, is an error, never an empty answer.
+// process table: the same tree codexRolloutOf names a rollout from. A process
+// in the tree whose open files the current user may not read, such as a
+// root-owned sandbox wrapper above the agent or a zombie, is skipped
+// (treeHeldFiles). A pane whose PID cannot be read, or a process in its tree
+// whose open files cannot be read for any other reason, is an error, never an
+// empty answer.
 func (t *Tmux) HeldFiles(session string) ([]string, error) {
 	out, err := t.GetPanePID(session)
 	if err != nil {
@@ -48,9 +53,11 @@ func (t *Tmux) HeldFiles(session string) ([]string, error) {
 }
 
 // paneTreeHeldFiles returns the files the process tree rooted at panePID
-// holds open, read from the live process table.
+// holds open: the tree read from the kernel's process table alone
+// (proctable.SnapshotProcessTree, which reads no process's environment and
+// runs no helper program), then each process's open files.
 func paneTreeHeldFiles(panePID int) ([]string, error) {
-	records, err := proctable.SnapshotProcesses()
+	records, err := proctable.SnapshotProcessTree()
 	if err != nil {
 		return nil, fmt.Errorf("snapshotting the process table: %w", err)
 	}
@@ -59,8 +66,12 @@ func paneTreeHeldFiles(panePID int) ([]string, error) {
 
 // treeHeldFiles returns, once each in the order first found, the files root
 // or any of its descendants in records holds open, per openFiles. A process
-// whose open files cannot be read is an error: the tree's answer would be
-// partial.
+// whose open files the current user may not read (fs.ErrPermission) is
+// skipped, and the walk goes on through its children: another user's
+// process, such as a root-owned sandbox wrapper above the agent (sudo,
+// bwrap), or a zombie, which holds no file but whose fd table the kernel
+// shows as root's. A process whose open files cannot be read for any other
+// reason is an error: the tree's answer would be partial.
 func treeHeldFiles(records []proctable.ProcessRecord, root int, openFiles func(int) ([]string, error)) ([]string, error) {
 	children := make(map[int][]int, len(records))
 	for _, r := range records {
@@ -76,7 +87,7 @@ func treeHeldFiles(records []proctable.ProcessRecord, root int, openFiles func(i
 		pid := queue[0]
 		queue = queue[1:]
 		files, err := openFiles(pid)
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrPermission) {
 			return nil, fmt.Errorf("reading the open files of pid %d: %w", pid, err)
 		}
 		for _, file := range files {

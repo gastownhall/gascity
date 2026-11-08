@@ -636,34 +636,40 @@ func TestCodexSubmitVerdictWithoutItsOwnRolloutStandsUnobserved(t *testing.T) {
 }
 
 // selectHeldCodexRollout names a session's rollout by the process tree under
-// its pane: the one rollout held open there, whichever process holds it.
+// its pane: the one rollout held open there, whichever process holds it. A
+// process whose open files the current user may not read (a root-owned
+// wrapper above Codex, a zombie) is skipped, as treeHeldFiles skips it; one
+// whose files cannot be read for any other reason leaves the rollout unnamed.
 func TestSelectHeldCodexRollout(t *testing.T) {
 	const (
 		own   = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-16-01a13eb9-f318-7c32-87de-d469fe118a8b.jsonl"
 		other = "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T08-42-17-01a13eba-0000-7000-8000-000000000002.jsonl"
 	)
-	// 4242 is the pane's shell, 4300 the codex launcher, 4301 the codex
-	// binary; 5000 is another session's codex.
+	// 4242 is the pane's process, 4300 the codex launcher, 4301 the codex
+	// binary and 4302 a child of the launcher's that exited unreaped; 5000
+	// is another session's codex.
 	records := []proctable.ProcessRecord{
-		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 5000, PPID: 1},
+		{PID: 4242, PPID: 1}, {PID: 4300, PPID: 4242}, {PID: 4301, PPID: 4300}, {PID: 4302, PPID: 4300}, {PID: 5000, PPID: 1},
 	}
 	for _, tt := range []struct {
 		name  string
 		files map[int][]string
-		err   map[int]bool
+		err   map[int]error
 		want  string
 	}{
 		{"held by a descendant", map[int][]string{4242: {"/dev/pts/3"}, 4301: {"/home/user/city", own}, 5000: {other}}, nil, own},
 		{"the same rollout held twice", map[int][]string{4300: {own}, 4301: {own, own}}, nil, own},
 		{"none held yet", map[int][]string{4301: {"/home/user/city"}, 5000: {other}}, nil, ""},
 		{"two rollouts in the tree", map[int][]string{4300: {other}, 4301: {own}}, nil, ""},
-		{"a descendant whose files cannot be read", map[int][]string{4301: {own}}, map[int]bool{4300: true}, ""},
+		{"a root-owned pane process above codex", map[int][]string{4301: {own}}, map[int]error{4242: fdTableUnreadable(4242)}, own},
+		{"a zombie in the tree", map[int][]string{4301: {own}}, map[int]error{4302: fdTableUnreadable(4302)}, own},
+		{"a descendant whose files cannot be read", map[int][]string{4301: {own}}, map[int]error{4300: fdTableFailed(4300)}, ""},
 		{"a rollout-named file outside sessions", map[int][]string{4301: {"/tmp/rollout-x.jsonl"}}, nil, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			openFiles := func(pid int) ([]string, error) {
-				if tt.err[pid] {
-					return nil, errors.New("permission denied")
+				if err := tt.err[pid]; err != nil {
+					return nil, err
 				}
 				return tt.files[pid], nil
 			}
