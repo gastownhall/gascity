@@ -197,8 +197,19 @@ func reverseEdgeKey(d beads.Dep) string { return d.DependsOnID + " (" + d.Type +
 // earlier rows that still equal the plan, delete the rest), create the rows
 // not kept in batches, add the edges not present, then verify against a
 // reopened store. It returns the rows it created.
-func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), rows []beads.Bead, edges []beads.DepWithPayload, stamp string, clock infraEngineClock) (int, error) {
+//
+// inBinding is every id the binding holds: a stamped row whose binding copy
+// is gone may be the only copy left (a to-rigs clear that began), so it is
+// refused, never deleted.
+func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), rows []beads.Bead, edges []beads.DepWithPayload, inBinding map[string]bool, stamp string, clock infraEngineClock) (int, error) {
 	phase := "reverse " + t.dest
+	if !t.carriesPayload {
+		for _, e := range edges {
+			if e.Payload != "" {
+				return 0, fmt.Errorf("%s cannot write the payload on %s -> %s, so the edge is refused rather than removed and lost; nothing was changed", reverseDestNoun(t.dest), e.IssueID, e.DependsOnID)
+			}
+		}
+	}
 	want := make(map[string]beads.Bead, len(rows))
 	for _, b := range rows {
 		want[b.ID] = b
@@ -223,10 +234,14 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 		return 0, err
 	}
 	kept := map[string]bool{}
-	var drop []string
+	var drop, onlyCopy []string
 	for _, b := range stamped {
 		if b.Metadata[beadmeta.InfraReversedFromMetadataKey] != stamp {
 			continue // only this run's rows are ever deleted
+		}
+		if !inBinding[b.ID] {
+			onlyCopy = append(onlyCopy, b.ID)
+			continue
 		}
 		w, ok := want[b.ID]
 		keep := ok && reverseRowDifference(t.form, w, b) == ""
@@ -238,6 +253,10 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 			continue
 		}
 		drop = append(drop, b.ID)
+	}
+	if len(onlyCopy) > 0 {
+		sort.Strings(onlyCopy)
+		return 0, fmt.Errorf("%s holds %d row(s) under this reverse's stamp that the binding no longer holds, so each may be the only copy: %s. Nothing was removed", reverseDestNoun(t.dest), len(onlyCopy), infraStrandedIDList(onlyCopy))
 	}
 	if err := reverseDeleteRows(t, drop); err != nil {
 		return 0, err

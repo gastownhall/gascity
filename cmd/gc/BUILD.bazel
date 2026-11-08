@@ -2344,6 +2344,7 @@ go_test(
         "storage_reverse_plan_test.go",
         "storage_reverse_rigs_test.go",
         "storage_reverse_round2_test.go",
+        "storage_reverse_round3_test.go",
         "storage_reverse_test.go",
         "storage_shared_store_test.go",
         "storage_shutdown_test.go",

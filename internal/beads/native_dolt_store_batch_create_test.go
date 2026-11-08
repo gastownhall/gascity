@@ -37,7 +37,7 @@ func TestNativeDoltCreatedFormFollowsTheStore(t *testing.T) {
 	if got.Ref != "" || !got.UpdatedAt.IsZero() || got.Priority != nil || got.ParentID != "gcg-0" {
 		t.Fatalf("created form = %+v", got)
 	}
-	if want := created.Round(time.Second); !got.CreatedAt.Equal(want) || !got.DeferUntil.Equal(want) {
-		t.Fatalf("created form times = %v, %v, want both rounded to %v", got.CreatedAt, got.DeferUntil, want)
+	if !got.CreatedAt.Equal(created) || !got.DeferUntil.Equal(created) {
+		t.Fatalf("created form times = %v, %v, want %v as given (compared at the second)", got.CreatedAt, got.DeferUntil, created)
 	}
 }

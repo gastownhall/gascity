@@ -523,7 +523,12 @@ func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := binding.Create(beads.Bead{Title: "retry of s2", Type: "task", ParentID: "gd-s2", Ref: "step-s2", Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gd-root"}})
+	// Pinned at x.6 s: Dolt keeps whole seconds and rounds a fraction it is
+	// handed, so only a write that truncates first stores the second the
+	// binding's row reads as.
+	created := time.Date(2026, 8, 1, 12, 0, 5, 600_000_000, time.UTC)
+	deferred := created.Add(time.Hour)
+	retry, err := binding.Create(beads.Bead{Title: "retry of s2", Type: "task", ParentID: "gd-s2", Ref: "step-s2", CreatedAt: created, DeferUntil: &deferred, Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gd-root"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,6 +547,9 @@ func TestReverseToWorkIntoARealDoltWorkStore(t *testing.T) {
 	got, err := work.Get(retry.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got.CreatedAt.Unix() != created.Unix() || got.DeferUntil == nil || got.DeferUntil.Unix() != deferred.Unix() {
+		t.Fatalf("the retry bead's times in Dolt = %v, %v, want the seconds of %v, %v", got.CreatedAt, got.DeferUntil, created, deferred)
 	}
 	if got.ParentID != "gd-s2" || got.Metadata[beadmeta.StepRefMetadataKey] != "step-s2" {
 		t.Fatalf("the retry bead in Dolt = parent %q, step_ref %q", got.ParentID, got.Metadata[beadmeta.StepRefMetadataKey])
@@ -586,7 +594,7 @@ func TestReverseToRigsReListsTheRigBeforeTheClear(t *testing.T) {
 	}
 	before := workStoreFingerprint(t, r.binding())
 	code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
-	if code == 0 || !strings.Contains(stderr, "no longer holds 1 row(s)") || !strings.Contains(stderr, "gp-step1") {
+	if code == 0 || !strings.Contains(stderr, "no longer hold 1 row(s)") || !strings.Contains(stderr, "gp-step1") {
 		t.Fatalf("a clear over a rig that lost a row = %d: %s", code, stderr)
 	}
 	if workStoreFingerprint(t, r.binding()) != before {
