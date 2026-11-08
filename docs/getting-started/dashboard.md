@@ -9,16 +9,8 @@ so there is nothing extra to install or run.
 
 ## Open it
 
-Start the supervisor, then open the URL it prints:
-
-```bash
-gc supervisor start
-# Supervisor API listening on http://127.0.0.1:8372
-# Dashboard:  http://127.0.0.1:8372/
-```
-
-If the supervisor is already running, `gc dashboard` opens it in your browser
-and prints the URL too:
+The dashboard is live as soon as `gc init` (or `gc start`) has started a city.
+`gc dashboard` opens it in your browser and prints the URL:
 
 ```bash
 gc dashboard

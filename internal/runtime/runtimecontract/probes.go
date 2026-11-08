@@ -27,6 +27,23 @@ var probes = map[Code]probe{
 	ReqLifecycleUnknownNotRunning: probeUnknownNotRunning,
 	ReqConnectionExec:             probeExec,
 	ReqProvisionBoxWithoutAgent:   probeProvision,
+
+	ReqObserveDeclaredOpsRespond:   probeObserveDeclaredOps,
+	ReqObserveAbsentNeverStarted:   probeObserveAbsentNeverStarted,
+	ReqObserveRunningWithIdentity:  probeObserveRunningWithIdentity,
+	ReqObserveAbsentAfterStop:      probeObserveAbsentAfterStop,
+	ReqObserveObjectStable:         probeObserveObjectStable,
+	ReqObserveAgentLiveness:        probeObserveAgentLiveness,
+	ReqObserveInventoryComplete:    probeObserveInventoryComplete,
+	ReqObserveMetaIsIdentity:       probeObserveMetaIsIdentity,
+	ReqObserveFreshOnlyRefuses:     probeObserveFreshOnly,
+	ReqObserveKillObjectExact:      probeObserveKillObject,
+	ReqObserveAttachedIsStrict:     probeObserveAttachedStrict,
+	ReqObserveFaultsReadUnknown:    probeObserveFaults,
+	ReqObserveWithinBound:          probeObserveWithinBound,
+	ReqObserveCityScoped:           probeObserveCityScoped,
+	ReqObserveInventoryHasActivity: probeObserveInventoryActivity,
+	ReqObservePeekNoScreen:         probeObservePeekNoScreen,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {

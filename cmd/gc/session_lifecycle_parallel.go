@@ -2019,6 +2019,11 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2737,7 +2742,7 @@ func startPreparedStartCandidate(
 				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil
@@ -2857,17 +2862,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -2888,12 +2887,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
@@ -4249,7 +4248,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return

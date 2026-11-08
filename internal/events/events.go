@@ -262,6 +262,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionConfigDriftDeferred fires when the reconciler defers a
+	// config-drift restart because an ordinary seat holds assigned work. It
+	// fires once when the deferral episode is first recorded and once more,
+	// with escalated=true, when the episode outlives [daemon]
+	// drift_deferral_escalate_after. It is a signal only: the held work stays
+	// protected and the controller never drains, restarts or kills the session
+	// for it. Delivery is best-effort; a write the reconciler loses emits
+	// nothing and a later pass retries. See gastownhall/gascity#8345.
+	SessionConfigDriftDeferred = "session.config_drift_deferred"
 	// SessionWakeRefused fires when a durable explicit wake request
 	// (wake_request=explicit) is refused before the session ever reaches a
 	// live runtime — held, quarantined, or asleep past its idle-sleep
@@ -371,6 +380,22 @@ const (
 	// could also observe expiry and emit; consumers should tolerate a duplicate
 	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
+	// ControlCheckUnlaunchable fires when the control dispatcher first holds a
+	// check step open because its gc.check_path names a script it cannot
+	// launch (missing, not a regular file, or not executable), and again
+	// whenever that refusal's reason changes. The hold itself is right — the
+	// repair is out of band, and closing the step would release its
+	// dependents — but until control.stalled fires at the stall horizon (15
+	// minutes by default) the hold was otherwise silent: the dispatcher
+	// re-swept every few seconds and an operator watching events saw nothing.
+	// It is edge-triggered per bead and reason, deduplicated through the
+	// bead-persisted gc.control_pending_reason, so a verbatim repeat is never
+	// re-announced, across dispatcher restarts included. It is not a stall: the
+	// step stays open and completes the moment the script can launch, and
+	// control.stalled (error_class "pending") still fires once at the horizon.
+	// A duplicate is possible under a misconfigured second dispatcher, same as
+	// ControlStalled.
+	ControlCheckUnlaunchable = "control.check_unlaunchable"
 	// ControlRootSettleFailed fires when a workflow-finalize control bead is
 	// quarantined but the store then refuses the follow-up close of the
 	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
@@ -658,6 +683,7 @@ var KnownEventTypes = []string{
 	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionStrandedClaims,
 	SessionUnknownState,
+	SessionConfigDriftDeferred,
 	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
@@ -684,6 +710,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
+	ControlCheckUnlaunchable,
 	ControlRootSettleFailed,
 	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,

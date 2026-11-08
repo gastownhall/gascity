@@ -80,12 +80,16 @@ type BuiltinProviderSpec struct {
 	// Program-status declaration (OSC 7501), mirrored flat because this
 	// package cannot import config: ProgramStatusProtocol is "osc7501" to
 	// declare, ProgramStatusApp names the reporting program,
-	// ProgramStatusRelay wraps the agent in the probe-answering relay, and
-	// ProgramStatusEnv is forced into the session env when capture is armed.
-	ProgramStatusProtocol string
-	ProgramStatusApp      string
-	ProgramStatusRelay    bool
-	ProgramStatusEnv      map[string]string
+	// ProgramStatusRelay wraps the agent in the probe-answering relay,
+	// ProgramStatusHoldMidTurn declares that input typed mid-turn aborts the
+	// program's turn (config.ProgramStatusBinding.HoldMidTurn says which
+	// deliveries that holds back), and ProgramStatusEnv is forced into the
+	// session env when capture is armed.
+	ProgramStatusProtocol    string
+	ProgramStatusApp         string
+	ProgramStatusRelay       bool
+	ProgramStatusHoldMidTurn bool
+	ProgramStatusEnv         map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -349,9 +353,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
 		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
-		// pane-output tap alone captures it.
-		ProgramStatusProtocol: programStatusOSC7501,
-		ProgramStatusApp:      "codex",
+		// pane-output tap alone captures it. Input typed into a running
+		// Codex turn aborts it (the 2026-11-03 shadow: 18 of 20 mid-turn
+		// deliveries aborted their turn), so it declares the hold.
+		ProgramStatusProtocol:    programStatusOSC7501,
+		ProgramStatusApp:         "codex",
+		ProgramStatusHoldMidTurn: true,
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
@@ -644,6 +651,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
 		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
 		Args:                 []string{"--yolo"},
+		OptionsSchema: []BuiltinProviderOption{
+			// Copilot's ask_user tool blocks the pane on an interactive
+			// question until someone answers it. Most sessions run
+			// unattended, so the default launches with --no-ask-user; an
+			// agent a human attaches to opts back in with
+			// option_defaults = { ask_user = "on" }.
+			{
+				Key:     "ask_user",
+				Label:   "Ask User Tool",
+				Type:    "select",
+				Default: "off",
+				Choices: []BuiltinOptionChoice{
+					{Value: "off", Label: "Disabled (work autonomously)", FlagArgs: []string{"--no-ask-user"}},
+					{Value: "on", Label: "Enabled (may ask questions)", FlagArgs: []string{}},
+				},
+			},
+		},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects

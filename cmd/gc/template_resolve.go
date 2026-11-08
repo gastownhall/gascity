@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -163,7 +164,8 @@ type TemplateParams struct {
 	// without ACP support.
 	ACPLaunch *TemplateACPLaunch
 	// ProgramStatusArm is the OSC 7501 capture arm for the template's
-	// resolved transport (config.ProgramStatusArmFor). It stays out of Hints:
+	// resolved transport (config.ProgramStatusLaunchFor): the provider's
+	// declaration, armed by the leaf only under its live switch. It stays out of Hints:
 	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
 	// launch whose transport is not ACP, so a session kept on its ACP launch
 	// (templateParamsForSession) starts disarmed.
@@ -327,7 +329,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
+		if all, err := session.ExactMetadataSessionCandidates(beads.SessionStore{Store: p.beadStore}, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
@@ -603,12 +605,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
-	// Step 10c: program status (OSC 7501). Empty unless the switch is shadow
-	// or on, the transport is not ACP, and the provider declares the protocol.
-	// The arm and the forced env stay out of hints and env:
+	// Step 10c: program status (OSC 7501). The arm is the provider's
+	// switch-independent declaration (empty for ACP or an undeclared
+	// provider), which the leaf arms only under its live switch, so a cached
+	// resolution follows a flip either way; the forced env is empty unless the
+	// switch is shadow or on. The arm and the forced env stay out of hints and env:
 	// templateParamsToConfig applies them to a launch whose transport is not
 	// ACP, so a session kept on its ACP launch starts disarmed with this env.
-	programStatusArm, programStatusEnv := config.ProgramStatusArmFor(p.city, resolved, sessionTransport)
+	programStatusArm, programStatusEnv := config.ProgramStatusLaunchFor(p.city, resolved, sessionTransport)
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.

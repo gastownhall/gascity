@@ -1006,3 +1006,51 @@ func TestWispAutocloseBeadNotFound(t *testing.T) {
 		t.Errorf("missing bead should produce no output, got %q", stdout.String())
 	}
 }
+
+// TestWispAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed pins the same
+// rejected #8729 arm on the wisp hook: closing the input convoy itself is not a
+// retirement trigger. The reap discovers roots through convoys tracking the
+// CLOSED bead — the convoy's own members, never a workflow dispatched over it —
+// so an in-flight graph.v2 workflow keeps its live root and unfinished steps
+// untouched, and the claim-time input check owns the cancellation verdict.
+func TestWispAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "tracked work", Type: "task"})
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	_ = store.Close(convoy.ID)
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, convoy.ID, &stdout, beads.GraphStore{Store: store})
+
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", stdout.String())
+	}
+	for _, b := range []struct{ name, id string }{{"root", root.ID}, {"step", step.ID}} {
+		got, err := store.Get(b.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("the in-flight workflow's %s was closed by its input convoy's close; cancellation is the claim-time check's verdict", b.name)
+		}
+	}
+}

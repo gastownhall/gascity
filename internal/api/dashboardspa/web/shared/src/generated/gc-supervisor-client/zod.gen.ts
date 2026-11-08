@@ -328,6 +328,15 @@ export const zContextAdvisory = z.object({
     WindowTokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable()
 });
 
+export const zControlCheckUnlaunchablePayload = z.object({
+    bead_id: z.string(),
+    check_path: z.string(),
+    error: z.string(),
+    kind: z.string().optional(),
+    root_bead_id: z.string().optional(),
+    store_path: z.string().optional()
+});
+
 export const zControlDispatcherScopeGapPayload = z.object({
     rig_context: z.string().optional(),
     sample_bead_id: z.string().optional(),
@@ -2014,6 +2023,17 @@ export const zSessionCommandStatusBody = z.object({
     status: z.string()
 });
 
+export const zSessionConfigDriftDeferredPayload = z.object({
+    deferred_since: z.string(),
+    drifted_fields: z.array(z.string()),
+    escalated: z.boolean(),
+    pending_seconds: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string(),
+    session_name: z.string().optional(),
+    template: z.string(),
+    work_bead_id: z.string()
+});
+
 export const zSessionCreateBody = z.object({
     alias: z.string().optional(),
     async: z.boolean().optional(),
@@ -2204,7 +2224,8 @@ export const zSessionProgramStatusShadowPayload = z.object({
         'proved_idle',
         'queued_delivery',
         'drain_reminder',
-        'observation'
+        'observation',
+        'starved_bypass'
     ]),
     program: z.enum([
         'idle',
@@ -4086,6 +4107,7 @@ export const zEventPayload = z.union([
     zCityLifecyclePayload,
     zCityUnregisterSucceededPayload,
     zConditionalWritesDegradedPayload,
+    zControlCheckUnlaunchablePayload,
     zControlDispatcherScopeGapPayload,
     zControlRootSettleFailedPayload,
     zControlStalledPayload,
@@ -4112,6 +4134,7 @@ export const zEventPayload = z.union([
     zRigCreateSucceededPayload,
     zRigProvisionProgressPayload,
     zRotatedPayload,
+    zSessionConfigDriftDeferredPayload,
     zSessionCreateSucceededPayload,
     zSessionDemandClaimDivergencePayload,
     zSessionDrainAckedWithAssignedWorkPayload,
@@ -4592,6 +4615,24 @@ export const zTypedEventStreamEnvelopeCityUnregisterRequested = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('city.unregister_requested'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope control.check_unlaunchable
+ */
+export const zTypedEventStreamEnvelopeControlCheckUnlaunchable = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zControlCheckUnlaunchablePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('control.check_unlaunchable'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5676,6 +5717,24 @@ export const zTypedEventStreamEnvelopeSessionColdStartTimeout = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.config_drift_deferred
+ */
+export const zTypedEventStreamEnvelopeSessionConfigDriftDeferred = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionConfigDriftDeferredPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.config_drift_deferred'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.conversation_reset
  */
 export const zTypedEventStreamEnvelopeSessionConversationReset = z.object({
@@ -6547,6 +6606,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeCityResumed.extend({ type: z.literal('city.resumed') }),
     zTypedEventStreamEnvelopeCitySuspended.extend({ type: z.literal('city.suspended') }),
     zTypedEventStreamEnvelopeCityUnregisterRequested.extend({ type: z.literal('city.unregister_requested') }),
+    zTypedEventStreamEnvelopeControlCheckUnlaunchable.extend({ type: z.literal('control.check_unlaunchable') }),
     zTypedEventStreamEnvelopeControlDispatcherScopeGap.extend({ type: z.literal('control.dispatcher_scope_gap') }),
     zTypedEventStreamEnvelopeControlRootSettleFailed.extend({ type: z.literal('control.root_settle_failed') }),
     zTypedEventStreamEnvelopeControlStalled.extend({ type: z.literal('control.stalled') }),
@@ -6606,6 +6666,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
     zTypedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
+    zTypedEventStreamEnvelopeSessionConfigDriftDeferred.extend({ type: z.literal('session.config_drift_deferred') }),
     zTypedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
@@ -7057,6 +7118,25 @@ export const zTypedTaggedEventStreamEnvelopeCityUnregisterRequested = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('city.unregister_requested'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope control.check_unlaunchable
+ */
+export const zTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zControlCheckUnlaunchablePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('control.check_unlaunchable'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -8201,6 +8281,25 @@ export const zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.config_drift_deferred
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionConfigDriftDeferredPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.config_drift_deferred'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.conversation_reset
  */
 export const zTypedTaggedEventStreamEnvelopeSessionConversationReset = z.object({
@@ -9119,6 +9218,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeCityResumed.extend({ type: z.literal('city.resumed') }),
     zTypedTaggedEventStreamEnvelopeCitySuspended.extend({ type: z.literal('city.suspended') }),
     zTypedTaggedEventStreamEnvelopeCityUnregisterRequested.extend({ type: z.literal('city.unregister_requested') }),
+    zTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable.extend({ type: z.literal('control.check_unlaunchable') }),
     zTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap.extend({ type: z.literal('control.dispatcher_scope_gap') }),
     zTypedTaggedEventStreamEnvelopeControlRootSettleFailed.extend({ type: z.literal('control.root_settle_failed') }),
     zTypedTaggedEventStreamEnvelopeControlStalled.extend({ type: z.literal('control.stalled') }),
@@ -9178,6 +9278,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedTaggedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
     zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
+    zTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred.extend({ type: z.literal('session.config_drift_deferred') }),
     zTypedTaggedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedTaggedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
@@ -11640,7 +11741,8 @@ export const zGetV0CityByCityNameStatusPath = z.object({
 export const zGetV0CityByCityNameStatusQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
-    lite: z.boolean().optional()
+    lite: z.boolean().optional(),
+    fresh: z.boolean().optional()
 });
 
 /**

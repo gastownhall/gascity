@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
@@ -570,5 +571,49 @@ func TestBdStoreBackingGuardsATypedNilProxiedView(t *testing.T) {
 	got, ok := bdStoreBacking(store)
 	if ok || got != nil {
 		t.Fatalf("bdStoreBacking(typed nil) = (%v, %v), want (nil, false)", got, ok)
+	}
+}
+
+// TestScopedStoreLikeRebuildsBehindTheGatesView is the unit-lane half of
+// ga-ylpbsy.94.1: handed one of the split-strict gate's views of a bd-backed
+// store (raw or policy-wrapped), scopedStoreLike builds its ctx-bound clone
+// from the store under the view and returns it behind the same side of the
+// same projection, keeping the policy layer, so the clone's reads stay policed
+// against the original's pins.
+func TestScopedStoreLikeRebuildsBehindTheGatesView(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = splitStrictGate{}
+	t.Cleanup(func() { splitStrictSeam = saved })
+
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cfg := &config.City{}
+	for _, policy := range []bool{false, true} {
+		var raw beads.Store = bdStoreForCity(cityDir, cityDir)
+		if policy {
+			raw = wrapStoreWithBeadPolicies(raw, cfg)
+		}
+		for name, view := range map[string]func(beads.Store) beads.Store{
+			"class": splitStrictClassView, "work": splitStrictWorkView,
+		} {
+			viewed := view(raw)
+			scoped, err := scopedStoreLike(context.Background(), cityDir, cfg, viewed)
+			if err != nil || scoped == nil {
+				t.Fatalf("policy=%v %s: scopedStoreLike = %v, %v; want a clone", policy, name, scoped, err)
+			}
+			front, _, isView := splittest.ViewFront(scoped)
+			if !isView {
+				t.Fatalf("policy=%v %s: clone %T is not behind the gate", policy, name, scoped)
+			}
+			if splittest.ProjectionOf(scoped) != splittest.ProjectionOf(viewed) {
+				t.Fatalf("policy=%v %s: clone is behind a different projection than the store it cloned", policy, name)
+			}
+			if _, ok := bdStoreBacking(front); !ok {
+				t.Fatalf("policy=%v %s: clone front %T is not bd-backed", policy, name, front)
+			}
+			if _, wrapped := beadPolicyConfig(front); wrapped != policy {
+				t.Fatalf("policy=%v %s: clone policy-wrapped = %v", policy, name, wrapped)
+			}
+		}
 	}
 }

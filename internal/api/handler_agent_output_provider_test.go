@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -300,7 +302,7 @@ func newZCodeAgentOutputFixture(t *testing.T) *zcodeAgentOutputFixture {
 	searchRoot := t.TempDir()
 	srv := newServerWithSearchPaths(state, searchRoot)
 
-	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp, session.WithCityPath(state.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(state.cityBeadStore), state.sp, session.WithCityPath(state.cityPath))
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	if _, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		ExplicitName: sessionName,

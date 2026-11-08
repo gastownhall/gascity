@@ -1,0 +1,27 @@
+# binding-snapshot backs up the city's infrastructure binding (the SQLite
+# store a split city serves sessions, mail, orders, nudges and graph rows
+# from). Nothing else does: the jsonl-export order exports bd scopes only, and
+# bd does not serve the binding.
+#
+# Each run writes one snapshot into binding-archive under the pack's state
+# directory, <city>/.gc/runtime/packs/core/binding-archive: VACUUM INTO over a
+# read-only connection, PRAGMA integrity_check on the copy, the universal
+# JSONL of every row with its edges, and a manifest written last. It runs
+# against the live city: it only reads. It takes the migration guard, so a run
+# that lands during a migration or a rig import refuses and the next one
+# snapshots. --keep 4 keeps a day of snapshots at the 6h interval. That
+# directory is not the snapshot commands' default, so pass it as --to to
+# verify or restore one of these snapshots.
+#
+# --if-bound makes the order inert on a city with no binding: the command
+# exits 0 and writes nothing, not even the directory. It tracks no bead work,
+# so it skips the open-work gates; snapshots into one directory are serialized
+# by the command's own lock.
+[order]
+description = "Snapshot the infrastructure binding (split cities only)"
+scope = "city"
+trigger = "cooldown"
+interval = "6h"
+timeout = "30m"
+exec = "gc storage snapshot --binding --if-bound --to \"${GC_PACK_STATE_DIR:?}/binding-archive\" --keep 4"
+no_work_gate = true

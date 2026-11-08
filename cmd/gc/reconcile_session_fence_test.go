@@ -239,29 +239,32 @@ func TestFenceExecAttachTier(t *testing.T) {
 	}
 }
 
-// Kills: an attach probe error read as detached on a reporter backend.
+// Kills: an attach probe error read as detached on a reporter backend,
+// tmux or a v2-ready exec pack (PAR-EXEC §13.3).
 func TestFenceReporterAttachErrorHolds(t *testing.T) {
-	leaf := newFenceLeaf(runtime.ProfileTmux)
-	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-	req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}
-	for _, c := range []struct {
-		err  error
-		want bool
-	}{
-		{runtime.ErrRuntimeUnavailable, false},
-		{errors.New("display-message: no server"), false},
-		{runtime.ErrSessionNotFound, true},
-		{nil, true},
-	} {
-		leaf.AttachedErrors = map[string]error{"rt_a": c.err}
-		if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed != c.want {
-			t.Errorf("attach error %v: %+v, want proceed=%v", c.err, v, c.want)
+	for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+		leaf := newFenceLeaf(p)
+		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+		req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}
+		for _, c := range []struct {
+			err  error
+			want bool
+		}{
+			{runtime.ErrRuntimeUnavailable, false},
+			{errors.New("display-message: no server"), false},
+			{runtime.ErrSessionNotFound, true},
+			{nil, true},
+		} {
+			leaf.AttachedErrors = map[string]error{"rt_a": c.err}
+			if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed != c.want {
+				t.Errorf("%s: attach error %v: %+v, want proceed=%v", p, c.err, v, c.want)
+			}
 		}
-	}
-	leaf.AttachedErrors = nil
-	leaf.SetAttached("rt_a", true)
-	if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed || v.Reason != fenceAttached {
-		t.Fatalf("attached: %+v, want a defer", v)
+		leaf.AttachedErrors = nil
+		leaf.SetAttached("rt_a", true)
+		if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed || v.Reason != fenceAttached {
+			t.Fatalf("%s: attached: %+v, want a defer", p, v)
+		}
 	}
 }
 
@@ -294,19 +297,21 @@ func TestFenceTokenLegPassesOnlyOnCurrent(t *testing.T) {
 		{"unsupported runtime metadata", row, nil, runtime.ErrMetaUnsupported, fenceTokenUnverifiable},
 		{"unreadable", row, nil, errors.New("tmux: server busy"), fenceTokenUnverifiable},
 	}
-	for _, c := range cases {
-		leaf := newFenceLeaf(runtime.ProfileACP)
-		name := c.row.SessionName
-		startRuntime(t, leaf.Fake, name, c.meta)
-		if c.metaErr != nil {
-			leaf.GetMetaErrors = map[string]map[string]error{name: {"GC_INSTANCE_TOKEN": c.metaErr, "GC_SESSION_ID": c.metaErr}}
-		}
-		v, _ := fenceRun(t, leaf.P, fenceRequest{Row: c.row, Legs: legsFull}, fenceOpts{})
-		if v.Proceed != (c.want == "") || v.Reason != c.want {
-			t.Errorf("%s: %+v, want reason %q", c.name, v, c.want)
-		}
-		if v.Escalate != (c.want == fenceTokenAbsent || c.want == fenceTokenUnverifiable) {
-			t.Errorf("%s: escalate=%v; only an unverified token escalates (C8.3)", c.name, v.Escalate)
+	for _, p := range []runtime.Profile{runtime.ProfileACP, runtime.ProfileExecV2} { // identity in a sidecar, or in exec's observe
+		for _, c := range cases {
+			leaf := newFenceLeaf(p)
+			name := c.row.SessionName
+			startRuntime(t, leaf.Fake, name, c.meta)
+			if c.metaErr != nil {
+				leaf.GetMetaErrors = map[string]map[string]error{name: {"GC_INSTANCE_TOKEN": c.metaErr, "GC_SESSION_ID": c.metaErr}}
+			}
+			v, _ := fenceRun(t, leaf.P, fenceRequest{Row: c.row, Legs: legsFull}, fenceOpts{})
+			if v.Proceed != (c.want == "") || v.Reason != c.want {
+				t.Errorf("%s %s: %+v, want reason %q", p, c.name, v, c.want)
+			}
+			if v.Escalate != (c.want == fenceTokenAbsent || c.want == fenceTokenUnverifiable) {
+				t.Errorf("%s %s: escalate=%v; only an unverified token escalates (C8.3)", p, c.name, v.Escalate)
+			}
 		}
 	}
 	// A leaf that cannot read fresh proves nothing: the fence holds on it
@@ -361,11 +366,13 @@ func TestFenceProbesAndStopsThroughSameLeaf(t *testing.T) {
 func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 	ctx := context.Background()
 	t.Run("stop returned nil but the runtime stayed", func(t *testing.T) {
-		leaf := newFenceLeaf(runtime.ProfileTmux)
-		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-		leaf.StopLeavesRunning = map[string]bool{"rt_a": true}
-		if v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); confirmed || v.Reason != fenceStopUnconfirmed {
-			t.Fatalf("%+v confirmed=%v, want stop_unconfirmed", v, confirmed)
+		for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+			leaf := newFenceLeaf(p)
+			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+			leaf.StopLeavesRunning = map[string]bool{"rt_a": true}
+			if v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); confirmed || v.Reason != fenceStopUnconfirmed {
+				t.Fatalf("%s: %+v confirmed=%v, want stop_unconfirmed", p, v, confirmed)
+			}
 		}
 	})
 	t.Run("bool-only absence", func(t *testing.T) {
@@ -390,17 +397,28 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 		}
 	})
 	t.Run("liveness unknown", func(t *testing.T) {
-		leaf := newFenceLeaf(runtime.ProfileTmux)
-		leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
-		if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
-			t.Fatal("an unknown liveness confirmed a stop")
+		for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+			leaf := newFenceLeaf(p)
+			leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
+			if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
+				t.Fatalf("%s: an unknown liveness confirmed a stop", p)
+			}
 		}
 	})
 	t.Run("plain liveness error", func(t *testing.T) {
-		leaf := newFenceLeaf(runtime.ProfileTmux)
-		leaf.LivenessErrors["rt_a"] = errors.New("tmux: server busy") // a complete observation that erred
-		if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
-			t.Fatal("a liveness error confirmed a stop")
+		for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+			leaf := newFenceLeaf(p)
+			leaf.LivenessErrors["rt_a"] = errors.New("tmux: server busy") // a complete observation that erred
+			if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
+				t.Fatalf("%s: a liveness error confirmed a stop", p)
+			}
+		}
+	})
+	t.Run("exec v2: absent after the stop confirms", func(t *testing.T) {
+		leaf := newFenceLeaf(runtime.ProfileExecV2)
+		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+		if v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); !v.Proceed || !confirmed || leaf.CountCalls("Stop", "rt_a") != 1 {
+			t.Fatalf("%+v confirmed=%v, want one stop, confirmed", v, confirmed)
 		}
 	})
 	t.Run("a composite with a bool-only backend", func(t *testing.T) {
@@ -432,12 +450,14 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 // Kills: unknown L1 read as nothing to stop (which a caller may confirm and
 // close on), rather than holding the action.
 func TestFenceUnknownLivenessIsNotNothingToStop(t *testing.T) {
-	leaf := newFenceLeaf(runtime.ProfileTmux)
-	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-	leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
-	v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
-	if v.Proceed || v.Reason != fenceLivenessUnknown || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
-		t.Fatalf("%+v confirmed=%v, want liveness_unknown and nothing stopped", v, confirmed)
+	for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+		leaf := newFenceLeaf(p)
+		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+		leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
+		v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
+		if v.Proceed || v.Reason != fenceLivenessUnknown || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
+			t.Fatalf("%s: %+v confirmed=%v, want liveness_unknown and nothing stopped", p, v, confirmed)
+		}
 	}
 }
 
@@ -510,9 +530,10 @@ func TestPendingUnsupportedPassesUnknownHolds(t *testing.T) {
 func TestFenceL1WaivedAbsentRuntimeNeverProceeds(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
+		p        runtime.Profile
 		leftover bool
-	}{{"never started", false}, {"gone, sidecar left", true}} {
-		leaf := newFenceLeaf(runtime.ProfileACP)
+	}{{"never started", runtime.ProfileACP, false}, {"gone, sidecar left", runtime.ProfileACP, true}, {"exec v2, never started", runtime.ProfileExecV2, false}, {"exec v2, gone", runtime.ProfileExecV2, true}} {
+		leaf := newFenceLeaf(tc.p)
 		if tc.leftover {
 			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 			if err := leaf.Stop("rt_a"); err != nil {
@@ -573,22 +594,24 @@ func TestFenceReadsTheRuntimeClass(t *testing.T) {
 // it did not read, attached, pending-unknown or work-unknown, over a
 // detached runtime with nothing pending.
 func TestFenceUnreadLegsHold(t *testing.T) {
-	leaf := newFenceLeaf(runtime.ProfileTmux)
-	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-	free := func() *txWork { return &txWork{Free: true} }
-	for _, c := range []struct {
-		read fenceLegs
-		want string
-	}{
-		{0, fenceAttached},
-		{legAttach, fencePendingUnknown},
-		{legAttach | legPending, fenceWorkUnknown},
-		{legAttach | legPending | legWork, ""},
-	} {
-		read := c.read
-		v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{read: &read, work: free})
-		if v.Proceed != (c.want == "") || v.Reason != c.want {
-			t.Errorf("legs read %b: %+v, want reason %q", c.read, v, c.want)
+	for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+		leaf := newFenceLeaf(p)
+		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+		free := func() *txWork { return &txWork{Free: true} }
+		for _, c := range []struct {
+			read fenceLegs
+			want string
+		}{
+			{0, fenceAttached},
+			{legAttach, fencePendingUnknown},
+			{legAttach | legPending, fenceWorkUnknown},
+			{legAttach | legPending | legWork, ""},
+		} {
+			read := c.read
+			v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{read: &read, work: free})
+			if v.Proceed != (c.want == "") || v.Reason != c.want {
+				t.Errorf("%s: legs read %b: %+v, want reason %q", p, c.read, v, c.want)
+			}
 		}
 	}
 }
@@ -632,14 +655,16 @@ func TestFenceConfirmReadsFreshSinceTheStop(t *testing.T) {
 // Kills a stop that skips C8.7's re-check: a reporter leaf detached at the
 // fence and attached by the stop is not stopped.
 func TestFenceRechecksAttachBeforeTheStop(t *testing.T) {
-	leaf := newFenceLeaf(runtime.ProfileTmux)
-	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-	v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{})
-	if !v.Proceed {
-		t.Fatalf("fence: %+v, want proceed", v)
-	}
-	leaf.SetAttached("rt_a", true) // an operator attached between the fence and the stop
-	if v, confirmed := stopFenced(context.Background(), leaf.P, v, nil, time.Now); v.Proceed || v.Reason != fenceAttached || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
-		t.Fatalf("%+v confirmed=%t, want held attached and nothing stopped", v, confirmed)
+	for _, p := range []runtime.Profile{runtime.ProfileTmux, runtime.ProfileExecV2} {
+		leaf := newFenceLeaf(p)
+		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+		v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{})
+		if !v.Proceed {
+			t.Fatalf("%s: fence: %+v, want proceed", p, v)
+		}
+		leaf.SetAttached("rt_a", true) // an operator attached between the fence and the stop
+		if v, confirmed := stopFenced(context.Background(), leaf.P, v, nil, time.Now); v.Proceed || v.Reason != fenceAttached || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
+			t.Fatalf("%s: %+v confirmed=%t, want held attached and nothing stopped", p, v, confirmed)
+		}
 	}
 }

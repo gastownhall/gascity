@@ -981,7 +981,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
 
-	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// A city that relocates nothing has no orders binding to name: Stores().Orders()
 	// is the city store, and an orders: ref there would be a second name for a store
 	// the city: ref already resolves.
 	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
@@ -1014,6 +1014,24 @@ func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
 
 	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
 		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheGraphBinding is the graph twin of the
+// orders test above: on a city that relocates graph alone, the graph: ref
+// resolves to the graph binding, not to the orders class's store.
+func TestWorkflowStoreByRefResolvesTheGraphBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.graphBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "graph:bright-lights")
+	if !ok || info.store != beads.Store(binding) {
+		t.Fatalf("workflowStoreByRef(graph:bright-lights) = %+v, %v; want the graph binding", info, ok)
 	}
 }
 

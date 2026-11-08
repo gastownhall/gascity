@@ -22,7 +22,10 @@ package main
 // several class resolvers, so the resolution is memoized per city and the open
 // happens at most once, whichever call site arrives first. The routes are closed
 // where the process ends (main.go), which is the only place that knows the last
-// call site has run.
+// call site has run, or earlier in a long-lived process: registering or
+// unregistering a runtime for the city retires its memo
+// (retireCLIStorageRoutesFor), and while a runtime is registered the funnel
+// answers with that runtime's routes and memoizes nothing.
 //
 // # It resolves the config itself
 //
@@ -100,6 +103,12 @@ type cliStorageRoutesEntry struct {
 	// until expires and then resolved again.
 	unsettled bool
 	expires   time.Time
+	// abandoned marks a slot a retirement or close completed the Once on
+	// before any resolver ran it (retireCLIStorageRoutesFor,
+	// closeCLIStorageRoutes): it holds no answer, so a resolver that finds it
+	// forgets it and resolves again rather than reading its nil routes as a
+	// city that relocates nothing.
+	abandoned bool
 }
 
 // cliStorageRoutesUnsettledTTL is how long an unsettled answer is reused. A
@@ -124,6 +133,15 @@ var (
 //
 // A city this build cannot serve gets routes whose stores refuse. See
 // refusedClassStore.
+//
+// A process that registered a runtime for the city (registerResidencyRoutes)
+// gets that runtime's routes instead. The funnel memoizes for the life of the
+// process, which is right for a one-shot command and wrong for a controller or
+// supervisor that outlives a `gc storage migrate`: its memo would keep
+// answering for the city as it was configured when the process first asked,
+// and every in-process caller of a class resolver would read the wrong store.
+// The registration is replaced on every boot, so it is what this process
+// serves now; residencyRoutesForCity applies the same preference.
 func cliStorageRoutes(cityPath string) *storageRoutes {
 	if cityPath == "" {
 		return nil
@@ -137,14 +155,36 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 			}
 		})
 	}
-	entry := cliStorageRoutesEntryFor(clean)
-	resolve(entry)
-	if entry.unsettled && !time.Now().Before(entry.expires) {
-		forgetCLIStorageRoutesEntry(clean, entry)
-		entry = cliStorageRoutesEntryFor(clean)
+	for {
+		if registered, ok := registeredResidencyEntry(cityPath); ok {
+			return registered.routes
+		}
+		entry := cliStorageRoutesEntryFor(clean)
 		resolve(entry)
+		if entry.abandoned {
+			forgetCLIStorageRoutesEntry(clean, entry)
+			continue
+		}
+		if entry.unsettled && !time.Now().Before(entry.expires) {
+			// An expired unsettled answer is resolved again exactly once; the
+			// fresh answer is returned even if it is unsettled too.
+			forgetCLIStorageRoutesEntry(clean, entry)
+			entry = cliStorageRoutesEntryFor(clean)
+			resolve(entry)
+			if entry.abandoned {
+				forgetCLIStorageRoutesEntry(clean, entry)
+				continue
+			}
+		}
+		// A runtime that registered while this resolution ran retired no slot
+		// (there was none yet), so this one would stay open for the whole
+		// registration: retire it now and answer with the runtime's routes.
+		if registered, ok := registeredResidencyEntry(cityPath); ok {
+			retireCLIStorageRoutesFor(clean, registered.routes)
+			return registered.routes
+		}
+		return entry.routes
 	}
-	return entry.routes
 }
 
 // cliStorageRefusalsPrinted holds every refusal this process has already put
@@ -374,13 +414,54 @@ func cliStorageRoutesEntryFor(cityPath string) *cliStorageRoutesEntry {
 	return entry
 }
 
+// retireCLIStorageRoutesFor drops cityPath's funnel memo and closes the routes it
+// opened, unless they are keep: the routes a runtime is registering, which the
+// one-shot `gc start` pass registers straight from the funnel. Registration and
+// unregistration call it, so a memo taken before a runtime booted (or while it
+// was stopped, around a `gc storage migrate`) does not outlive the boundary:
+// the next resolution reads the city's config again. A close failure is
+// reported on cliStorageStderr; the memo is detached either way.
+func retireCLIStorageRoutesFor(cityPath string, keep *storageRoutes) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	cliStorageRoutesMu.Lock()
+	entry, ok := cliStorageRoutesByCity[key]
+	if !ok {
+		cliStorageRoutesMu.Unlock()
+		return
+	}
+	// A resolution in flight finishes before the entry is judged; sync.Once.Do
+	// returns only after the resolving call has. A slot no resolver has entered
+	// yet is marked abandoned instead, so the resolver about to enter it
+	// resolves again rather than taking the empty answer.
+	cliStorageRoutesMu.Unlock()
+	entry.once.Do(func() { entry.abandoned = true })
+	if keep != nil && entry.routes == keep {
+		return
+	}
+	cliStorageRoutesMu.Lock()
+	if cliStorageRoutesByCity[key] != entry {
+		cliStorageRoutesMu.Unlock()
+		return
+	}
+	delete(cliStorageRoutesByCity, key)
+	cliStorageRoutesMu.Unlock()
+	if err := entry.routes.close(); err != nil {
+		fmt.Fprintf(cliStorageStderr, "%s: closing the one-shot storage routes of %s: %v\n", cliStorageLogPrefix, key, err) //nolint:errcheck // best-effort stderr
+	}
+}
+
 // closeCLIStorageRoutes releases every binding the one-shot funnel opened in this
 // process. It is wired into the CLI's own exit path (main.go), which is the only
 // place that knows the last call site has run.
 //
 // The memo is detached under the lock before anything is closed, so a second
-// call closes nothing and a call that races the first cannot hand out a closed
-// store: the next resolution starts from an empty memo and opens again.
+// call closes nothing and the next resolution starts from an empty memo and
+// opens again. A resolution already in flight when the memo is detached is
+// waited for and its routes closed, so its caller can get a closed store for
+// that one call (it fails closed with the store's own error).
 //
 // The DERIVED memo goes with it. cliResidencyBindings caches the class-to-store
 // grouping it read out of these routes, so leaving it behind would let the next
@@ -401,7 +482,7 @@ func closeCLIStorageRoutes() error {
 		// A resolution still in flight owns a store this close would otherwise
 		// leak: sync.Once.Do returns only after the resolving call has returned,
 		// so waiting on it here is what makes the opened routes visible.
-		entry.once.Do(func() {})
+		entry.once.Do(func() { entry.abandoned = true })
 		if err := entry.routes.close(); err != nil {
 			errs = append(errs, err)
 		}

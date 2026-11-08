@@ -197,6 +197,37 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 // pattern, driven through loadStatusSessionSnapshot itself so the whole
 // call site — not just scopedBdStoreForCity in isolation — is covered.
 func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
+	assertStatusSnapshotKillsBdChild(t, func(store beads.Store) beads.Store { return store })
+}
+
+// TestLoadStatusSessionSnapshotKillsBdChildBehindAGateView is the ga-cdmx6x
+// kill-on-timeout contract for a session store the split-strict gate has
+// viewed (ga-ylpbsy.94.1). Under GC_TEST_SPLIT_STRICT=1 gc status is handed
+// the gate's class view of its bd store. scopedStoreLike did not see through
+// the view and answered "not bd-backed", so the snapshot read through the
+// shared store, whose runner is not bound to the request: the read goroutine
+// outlived the 3s deadline, and its bd exec ran late, off whatever PATH a
+// later test had set (before the fix this test times out waiting for the
+// child's pidfile). The clone must be built behind the same side of the gate,
+// and its child killed.
+func TestLoadStatusSessionSnapshotKillsBdChildBehindAGateView(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = splitStrictGate{}
+	t.Cleanup(func() { splitStrictSeam = saved })
+	assertStatusSnapshotKillsBdChild(t, func(store beads.Store) beads.Store {
+		viewed := splitStrictClassView(store)
+		if _, ok := viewed.(*beads.BdStore); ok {
+			t.Fatal("splitStrictClassView returned the raw store; the test needs the gate's view")
+		}
+		return viewed
+	})
+}
+
+// assertStatusSnapshotKillsBdChild runs loadStatusSessionSnapshot over the
+// store wrap makes of a bd store whose bd blocks, and fails unless the bd
+// child is gone soon after the snapshot's budget expires.
+func assertStatusSnapshotKillsBdChild(t *testing.T, wrap func(beads.Store) beads.Store) {
+	t.Helper()
 	processgrouptest.RequireRealProcessSignals(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh unavailable")
@@ -217,11 +248,11 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 		"wait\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	realStore := bdStoreForCity(cityDir, cityDir)
+	store := wrap(bdStoreForCity(cityDir, cityDir))
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, realStore, &stderr)
+	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, store, &stderr)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("loadStatusSessionSnapshot blocked %s; want bounded by statusSessionSnapshotTimeout", elapsed)
 	}

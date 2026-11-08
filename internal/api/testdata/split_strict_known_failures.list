@@ -48,9 +48,6 @@ TestByIDPlanLeadsWithTheResidenceProbe	fails under the gate: beadStoresForID(mc-
 TestCityEventStreamProjectsWorkflowEventsWhenKeepingUp	fails under the gate: event frame has no workflow projection: map[actor:controller payload:map[bead:map[created_at:2026-10-28T02:22:06.025131653Z id:gc-2 issue_type:task metadata:map
 TestClassArmStillDoesNotCoverMigratedLegacyIDs	fails under the gate: topology has 2 bindings, want 1 (the relocated graph store 0x12e468b460e0)
 TestConvoyDeleteOfAGraphWorkflowLeavesAFinishedStepsOutcomeAlone	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:convoy-not-found","title":"Convoy Not Found","status":404,"detail":"convoy gc-1 not found","code":"convoy-not
-TestFakeStateGraphBeadStoreFallsBackToCityStore	fails under the gate: default backend: GraphBeadStore() must equal CityBeadStore(); got distinct stores
-TestFakeStateNudgesBeadStoreFallsBackToCityStore	fails under the gate: default backend: NudgesBeadStore() must equal CityBeadStore(); got distinct stores
-TestFakeStateSessionsBeadStoreFallsBackToCityStore	fails under the gate: default backend: SessionsBeadStore() must equal CityBeadStore(); got distinct stores
 TestFormulaFeedReturnsWorkflowRunsOnly	fails under the gate: items = [], want exactly 1 workflow item
 TestGenericAPINeverWritesAControllerOwnedRow	fails under the gate: status 404 ({"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead \"gcg-1\" is not in this store: bead not found","cod
 TestGenericAPIWritesAWorkBead	fails under the gate: status 400 ({"type":"urn:gascity:error:invalid-request","title":"Invalid Request","status":400,"detail":"assignee must resolve to a concrete open session bead I
@@ -93,13 +90,12 @@ TestRunCancelUnderLaneProposesOneInterruptPerHolder	fails under the gate: cancel
 TestRunCancelUnderLaneSkipsAHolderWhoseAgentIsDead	fails under the gate: cancel: run not found: gcg-1
 TestRunReadAfterCancelReflectsTheCancel	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
 TestRunViewsAgreeWithBeadAfterOutOfProcessClaim	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
-TestSessionClassRoutingIsIdentityOnSingleStoreCity	fails under the gate: default backend: SessionsBeadStore().Store must be the identical value CityBeadStore() returns
+TestSessionClassRoutingIsIdentityOnSingleStoreCity	fails under the gate: default backend: Stores().Sessions().Store must be the identical value CityBeadStore() returns
 TestSingleStoreCityByIDPerformsNoProbe	fails under the gate: the work store was read 2 times, want 1 — a city that relocates nothing must not pay for the seam
-TestSlingDefaultFormulaCooksWorkflowWhereTheTargetsWorkersLook	fails under the gate: city store holds 1 workflow root(s) [{gcg-1001 graph-work in_progress task 0x17fdfa6fb100 2026-10-28 02:22:40.595803436 +0000 UTC 2026-10-28 02:22:40.595907202 
-TestSlingDefaultFormulaReceivesTitleAndVars	fails under the gate: no step titled "Say hi" in the rig store: the greeting var never reached the default formula
 TestSlingGraphV2RejectsLegacySourceWorkflowConflict	fails under the gate: status = 200, want 409; body = {"status":"slung","target":"myrig/worker","formula":"graph-work","workflow_id":"gcg-4","root_bead_id":"gcg-4","attached_bead_id":
 TestSlingStandaloneFormulaOnASingleStoreCityRigTargetMintsTheRootInTheRigStore	fails under the gate: fixture is not a single-store city
 TestSourceWorkflowStoresOmitsGraphLegOnSingleStoreCity	fails under the gate: fixture is not a single-store city
+TestStatusFullBuildRetriesACheapStoreHealthFailure	fails under the gate: the gate's work view hides beads.Counter, so the row count takes the list fallback and the counter's transient failure is never reached
 TestStatusSessionSnapshotStoreIdentity	fails under the gate: read store = 0x17fdf963cf40, want CityBeadStore 0x17fdf963cfa0 — a city that relocates nothing must stay byte-identical
 TestWaitInspect_ExistingNonWaitIsWaitNotFound	fails under the gate: detail = "not_found: t-1", want not_a_wait: prefix
 TestWaitInspect_NoStoreIsServiceUnavailable	fails under the gate: status = 404, want 503; body="{\"type\":\"urn:gascity:error:wait-not-found\",\"title\":\"Wait Not Found\",\"status\":404,\"detail\":\"not_found: w-any\",\"code\

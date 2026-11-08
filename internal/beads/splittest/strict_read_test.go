@@ -64,7 +64,7 @@ func TestStrictClassLeafDoesNotPoliceRelicIDs(t *testing.T) {
 func TestStrictWorkLeafRecordsAByIDWriteToAClassNamespaceID(t *testing.T) {
 	work := NewWorkStore(t, "gc")
 	// convoy.SetConvoyFields is a production by-id metadata write.
-	_ = convoy.SetConvoyFields(work, "gcs-3", convoy.ConvoyFields{Owner: "x"})
+	_ = convoy.SetConvoyFields(beadstest.Work(work), "gcs-3", convoy.ConvoyFields{Owner: "x"})
 	got := TakeSplitViolations(work)
 	if len(got) != 1 || got[0].Op != "set-metadata" || got[0].Class != "sessions" || got[0].Site.File != "internal/convoy/convoy_fields.go" {
 		t.Fatalf("violations = %+v, want one set-metadata of a sessions id charged to convoy_fields.go", got)

@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package tmux
 
@@ -1286,8 +1286,11 @@ func TestGetPaneCommand_MultiPane(t *testing.T) {
 
 	_ = tm.KillSession(sessionName)
 
-	// Create session running sleep (simulates an agent process in pane 0)
-	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
+	// Create session running sleep (simulates an agent process in pane 0).
+	// exec: tmux runs the command as the default-shell -c, and dash (/bin/sh
+	// on Debian and Ubuntu, the SHELL the test runners pin) would stay the
+	// pane's command with sleep its child.
+	if err := tm.NewSessionWithCommand(sessionName, "", "exec sleep 300"); err != nil {
 		t.Fatalf("NewSessionWithCommand: %v", err)
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
@@ -2797,7 +2800,9 @@ func TestNudgeStartupWithoutProviderUsesOrdinaryDelivery(t *testing.T) {
 
 	tm := testTmux()
 	sessionName := "gt-test-startup-no-provider-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", nil); err != nil {
+	// exec, so the pane runs cat itself under any shell (see
+	// TestGetPaneCommand_MultiPane).
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "exec cat -v", nil); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()

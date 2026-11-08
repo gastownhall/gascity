@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -106,6 +107,10 @@ func TestListIndexDoesNotSkipChangesMissingFromSnapshot(t *testing.T) {
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "test", Subject: "seed"})
 	store := &lateWriteStore{Store: fs.stores["myrig"], rec: ep}
 	fs.stores["myrig"] = store
+	// The city has a work store of its own: BeadStores lists it too, and a
+	// city leg over the rig's rows (the split-strict fixture's shared store)
+	// would read the late write.
+	fs.cityBeadStore = beads.NewMemStore()
 
 	h := newTestCityHandler(t, fs)
 	rec := httptest.NewRecorder()
@@ -276,7 +281,7 @@ func TestStructuredTranscriptFallbackIndexDoesNotSkipLateEvents(t *testing.T) {
 	fs := newSessionFakeState(t)
 	ep := fs.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "test", Subject: "seed"})
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
