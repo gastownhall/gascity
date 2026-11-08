@@ -731,6 +731,17 @@ func (w *lineStampWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
+// lastLine returns when the latest line arrived, or the start time before
+// the first line.
+func (w *lineStampWriter) lastLine() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.at) == 0 {
+		return w.start
+	}
+	return w.at[len(w.at)-1]
+}
+
 func (w *lineStampWriter) snapshot() (string, []time.Duration) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -794,23 +805,49 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 	}()
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
-	select {
-	case err := <-done:
-		elapsed := time.Since(start)
-		if err != nil {
-			t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s", elapsed, err, stderr.String())
+	// The first time the harness goes runWithTimeoutStallSnapshotAfter
+	// without printing a line, record its process group: which of the
+	// caller, the command, the watchdog and its sleep are still there shows
+	// where a stalled call is stuck.
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	var stallSnapshot string
+	for {
+		select {
+		case err := <-done:
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("run_with_timeout harness failed after %s: %v\nstderr: %s%s", elapsed, err, stderr.String(), stallSnapshot)
+			}
+			out, gaps := stdout.snapshot()
+			if stallSnapshot != "" {
+				t.Log(strings.TrimPrefix(stallSnapshot, "\n"))
+			}
+			return runWithTimeoutRun{out: out, elapsed: elapsed, pgid: cmd.Process.Pid, lineGaps: gaps}
+		case <-timer.C:
+			_, gaps := stdout.snapshot()
+			_ = cmd.Process.Kill()
+			<-done
+			t.Fatalf("run_with_timeout harness still running after %s (%d output lines so far; slowest: %s)%s",
+				budget, len(gaps), slowestLineGaps(gaps, 5), stallSnapshot)
+			return runWithTimeoutRun{}
+		case now := <-tick.C:
+			if stallSnapshot != "" {
+				continue
+			}
+			if idle := now.Sub(stdout.lastLine()); idle >= runWithTimeoutStallSnapshotAfter {
+				_, gaps := stdout.snapshot()
+				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s",
+					cmd.Process.Pid, idle.Round(time.Millisecond), len(gaps), processGroupMembers(t, cmd.Process.Pid))
+			}
 		}
-		out, gaps := stdout.snapshot()
-		return runWithTimeoutRun{out: out, elapsed: elapsed, pgid: cmd.Process.Pid, lineGaps: gaps}
-	case <-timer.C:
-		_, gaps := stdout.snapshot()
-		_ = cmd.Process.Kill()
-		<-done
-		t.Fatalf("run_with_timeout harness still running after %s (%d output lines so far; slowest: %s)",
-			budget, len(gaps), slowestLineGaps(gaps, 5))
-		return runWithTimeoutRun{}
 	}
 }
+
+// runWithTimeoutStallSnapshotAfter is how long runWithTimeoutInGroup lets a
+// harness go without output before it records the harness's process group.
+// It is longer than any test here expects one step to take.
+const runWithTimeoutStallSnapshotAfter = 5 * time.Second
 
 // processGroupGoneGrace bounds how long expectProcessGroupGone waits for
 // group pgid to empty after the harness exits. The kernel can still count a
@@ -850,7 +887,7 @@ func expectProcessGroupGone(t *testing.T, pgid int) {
 func processGroupMembers(t *testing.T, pgid int) string {
 	t.Helper()
 	env := journalRecoveryEnv{binDir: t.TempDir(), shell: "sh"}
-	out, err := env.command("ps -A -o pid=,ppid=,pgid=,stat=,command=").CombinedOutput()
+	out, err := env.command("ps -A -o pid=,ppid=,pgid=,stat=,wchan=,command=").CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("(ps failed: %v: %s)", err, bytes.TrimSpace(out))
 	}
@@ -864,7 +901,7 @@ func processGroupMembers(t *testing.T, pgid int) string {
 	if len(rows) == 0 {
 		return "(none listed by ps; likely exited but not yet torn down)"
 	}
-	return "PID PPID PGID STAT COMMAND\n" + strings.Join(rows, "\n")
+	return "PID PPID PGID STAT WCHAN COMMAND\n" + strings.Join(rows, "\n")
 }
 
 // instantCommandsWatchdogTimeout is the timeout each call arms in
