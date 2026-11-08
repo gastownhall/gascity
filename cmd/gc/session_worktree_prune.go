@@ -89,7 +89,11 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 	}
 	var dirty string
 	if reason == worktreeStaleReasonUncommittedWork {
-		if status, statusErr := gp.StatusPorcelain(); statusErr == nil {
+		status, statusErr := gp.StatusPorcelain()
+		if statusErr != nil {
+			// The marker is still worth writing without the listing.
+			fmt.Fprintf(stderr, "session reconciler: reading git status for %s marker in %s: %v\n", worktreeStaleFileName, workerDir, statusErr) //nolint:errcheck
+		} else {
 			dirty = status
 		}
 	}
@@ -98,9 +102,35 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 	header := fmt.Sprintf("branch=%s\nworktree=%s\nreason=%s\nblocking=no\nat=%s\nwritten-by=session-reconciler\n\n",
 		branch, workerDir, reason, time.Now().UTC().Format(time.RFC3339))
 	content := header + worktreeStaleGuidance(reason, dirty)
-	if err := os.WriteFile(filepath.Join(workerDir, worktreeStaleFileName), []byte(content), 0o644); err != nil {
+	if err := writeFileReplacing(filepath.Join(workerDir, worktreeStaleFileName), []byte(content)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: writing %s marker for %s: %v\n", worktreeStaleFileName, workerDir, err) //nolint:errcheck
 	}
+}
+
+// writeFileReplacing writes data to path through a temp file in the same
+// directory and renames it into place, so a reader never sees a torn file
+// and a symlink planted at path is replaced rather than followed.
+func writeFileReplacing(path string, data []byte) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // worktreeStaleGuidance returns the self-contained WHAT HAPPENED / WHAT TO
@@ -114,38 +144,41 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // lives in. The prune that writes these markers is attempted once, when the
 // session bead closes, and nothing re-enters it afterwards, so the guidance
 // must not promise an automatic retry: it states what was found, how to
-// resolve it, and that the marker is advisory (blocking=no).
+// resolve it, that the marker is advisory (blocking=no), and that nothing
+// re-checks it, so the reader removes it once resolved.
 func worktreeStaleGuidance(reason, dirtyPaths string) string {
 	switch reason {
 	case worktreeStaleReasonUncommittedWork:
-		var dirtyBlock string
-		if trimmed := strings.TrimRight(dirtyPaths, "\n"); trimmed != "" {
-			var b strings.Builder
-			b.WriteString("\nDirty paths:\n")
-			for _, line := range strings.Split(trimmed, "\n") {
-				b.WriteString("  ")
-				b.WriteString(strings.TrimSpace(line))
-				b.WriteString("\n")
-			}
-			dirtyBlock = b.String()
-		}
 		return fmt.Sprintf(`WHAT HAPPENED
   This worktree still has uncommitted changes, so the session reconciler
   left it in place instead of removing it. Nothing was discarded. This
   marker is advisory (blocking=no): it does not stop you working here.
 %s
 WHAT TO DO
-  1. Inspect what's dirty:
+  1. Look before you touch anything. These changes may belong to an
+     earlier session, not to you:
        git status --porcelain
-  2. Commit what you want to keep, or discard what you don't:
-       git add -A && git commit -m "..."
-     or
-       git restore .
+       git diff
+  2. Keep what is worth keeping by naming its paths (git prints paths
+     with special characters in quotes):
+       git add <path>... && git commit -m "..."
+  3. Discard only changes you are sure are yours and do not need, one
+     named path at a time:
+       git restore <path>
+     "??" entries are untracked: git restore leaves them alone. Commit one
+     by naming it (git add <path>), or delete it by name (rm <path>) once
+     you are sure it is yours.
+  4. When nothing is left dirty, remove this marker. The session
+     reconciler does not re-check it, so it stays until you do:
+       rm .worktree-stale
 
 NEVER
   Do not delete this worktree by hand with rm -rf. That destroys
   uncommitted work before you've had a chance to look at it.
-`, dirtyBlock)
+  Do not run git restore ., git reset --hard or git clean here. They
+  discard everything at once, and the changes may belong to an
+  earlier session.
+`, formatDirtyBlock(dirtyPaths))
 
 	case worktreeStaleReasonUnpushedCommits:
 		return `WHAT HAPPENED
@@ -157,8 +190,15 @@ NEVER
 WHAT TO DO
   1. See what hasn't been pushed:
        git log HEAD --oneline --not --remotes
-  2. Push the branch so the commits are safe on the remote:
-       git push -u origin HEAD
+  2. Push the branch so the commits are safe on the remote. Do not add
+     -u: a role or session branch must never gain an upstream.
+       git push origin HEAD
+     If this rig has no origin, or this branch must not be pushed,
+     cherry-pick the commits onto the feature branch that owns the work,
+     or sling the work to the agent that does.
+  3. Once the commits are safe, remove this marker. The session
+     reconciler does not re-check it, so it stays until you do:
+       rm .worktree-stale
 
 NEVER
   Do not delete this worktree by hand with rm -rf. That destroys commits
@@ -177,6 +217,9 @@ WHAT TO DO
        git status
        git log --oneline -5
   2. Once you understand what's blocking cleanup, resolve it.
+  3. Then remove this marker. The session reconciler does not re-check
+     it, so it stays until you do:
+       rm .worktree-stale
 
 NEVER
   Do not delete this worktree by hand with rm -rf, and do not run
@@ -184,6 +227,37 @@ NEVER
   here.
 `, reason)
 	}
+}
+
+// maxDirtyPathsListed bounds the dirty-path listing in a marker: agents read
+// the whole marker at session start.
+const maxDirtyPathsListed = 50
+
+// formatDirtyBlock renders git status --porcelain output as the marker's
+// "Dirty paths" section, or "" when there is nothing to list. Each entry
+// keeps its two-column status code (TrimRight, not TrimSpace, so " M" and
+// "M " stay distinguishable), the list is capped at maxDirtyPathsListed, and
+// a legend explains the codes.
+func formatDirtyBlock(dirtyPaths string) string {
+	trimmed := strings.TrimRight(dirtyPaths, "\n")
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	var b strings.Builder
+	b.WriteString("\nDirty paths:\n")
+	for i, line := range lines {
+		if i == maxDirtyPathsListed {
+			fmt.Fprintf(&b, "  ... and %d more; run git status --porcelain\n", len(lines)-maxDirtyPathsListed)
+			break
+		}
+		b.WriteString("  ")
+		b.WriteString(strings.TrimRight(line, " \t\r"))
+		b.WriteString("\n")
+	}
+	b.WriteString("  Codes: ?? untracked, first letter staged, second letter unstaged (M modified,\n" +
+		"  A added, D deleted). The first entry may be missing its leading space.\n")
+	return b.String()
 }
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
