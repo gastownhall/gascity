@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -50,6 +51,7 @@ func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
+
 func (f *fakeGitProbe) StatusPorcelain() (string, error) {
 	return f.statusPorcelain, f.statusPorcelainErr
 }
@@ -736,8 +738,13 @@ func TestWriteWorktreeStaleMarker_UnpushedCommitsGuidanceIsReasonSpecific(t *tes
 		t.Fatalf("reading marker: %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "git push -u origin") {
-		t.Errorf("marker content = %q, want unpushed-specific guidance", content)
+	if !strings.Contains(content, "git push origin HEAD") {
+		t.Errorf("marker content = %q, want unpushed-specific guidance (git push origin HEAD)", content)
+	}
+	// gm-shwey8: a role/session branch must never gain an upstream, and
+	// push -u sets one.
+	if strings.Contains(content, "push -u") || strings.Contains(content, "--set-upstream") {
+		t.Errorf("marker content = %q, want no upstream-setting push (role branches must never have an upstream)", content)
 	}
 	if strings.Contains(content, "git stash") {
 		t.Errorf("marker content = %q, want no stash guidance for unpushed-commits reason", content)
@@ -804,8 +811,8 @@ func TestWorktreeStaleGuidance(t *testing.T) {
 		{
 			name:    "unpushed commits",
 			reason:  worktreeStaleReasonUnpushedCommits,
-			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git log HEAD --oneline --not --remotes", "git push -u origin"},
-			mustNot: []string{"git stash", "@{u}"},
+			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git log HEAD --oneline --not --remotes", "git push origin HEAD", "cherry-pick"},
+			mustNot: []string{"git stash", "@{u}", "push -u", "--set-upstream"},
 		},
 		{
 			name:   "unknown reason falls back rather than leaving no guidance",
@@ -841,6 +848,196 @@ func TestWorktreeStaleGuidance(t *testing.T) {
 				t.Errorf("worktreeStaleGuidance(%q) = %q, want to tell the reader the marker is advisory", c.reason, got)
 			}
 		})
+	}
+}
+
+// staleGuidanceSections splits guidance into the text before its NEVER
+// section and the NEVER section itself, failing the test when there is none.
+func staleGuidanceSections(t *testing.T, guidance string) (beforeNever, never string) {
+	t.Helper()
+	idx := strings.Index(guidance, "\nNEVER\n")
+	if idx < 0 {
+		t.Fatalf("guidance has no NEVER section: %q", guidance)
+	}
+	return guidance[:idx], guidance[idx:]
+}
+
+// TestWorktreeStaleGuidance_EveryBranchEndsWithMarkerRemoval pins the
+// marker's lifecycle (ga-c44vk1 F2): the Go writer writes once, at session
+// close, and never re-checks, so nothing but the reader clears it. Every
+// branch, the unrecognized-reason fallback included, must say to remove
+// the marker once resolved and that the reconciler will not do it.
+func TestWorktreeStaleGuidance_EveryBranchEndsWithMarkerRemoval(t *testing.T) {
+	for _, reason := range []string{
+		worktreeStaleReasonUncommittedWork,
+		worktreeStaleReasonUnpushedCommits,
+		"some-future-reason",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			got := worktreeStaleGuidance(reason, " M a.go\n")
+			beforeNever, _ := staleGuidanceSections(t, got)
+			_, whatToDo, found := strings.Cut(beforeNever, "WHAT TO DO")
+			if !found {
+				t.Fatalf("guidance for %q has no WHAT TO DO section: %q", reason, got)
+			}
+			if !strings.Contains(whatToDo, "rm .worktree-stale") {
+				t.Errorf("WHAT TO DO for %q = %q, want a final rm .worktree-stale step", reason, whatToDo)
+			}
+			if !strings.Contains(got, "does not re-check") {
+				t.Errorf("guidance for %q = %q, want it to say the reconciler does not re-check the marker", reason, got)
+			}
+		})
+	}
+}
+
+// TestWorktreeStaleGuidance_UncommittedAdviceCannotDestroyWork pins
+// ga-c44vk1 F3: the reconciler promises "nothing was discarded", and the
+// dirty paths may be an earlier session's work, so the advice must look
+// before it acts, name paths, and forbid the wholesale commands.
+func TestWorktreeStaleGuidance_UncommittedAdviceCannotDestroyWork(t *testing.T) {
+	got := worktreeStaleGuidance(worktreeStaleReasonUncommittedWork, " M cmd/gc/foo.go\n?? cmd/gc/bar_test.go\n")
+	beforeNever, never := staleGuidanceSections(t, got)
+
+	for _, forbidden := range []string{"git restore .", "git add -A", "git add .", "git reset --hard", "git clean"} {
+		if strings.Contains(beforeNever, forbidden) {
+			t.Errorf("text before NEVER = %q, want no %q as advice", beforeNever, forbidden)
+		}
+		if forbidden == "git add -A" || forbidden == "git add ." {
+			continue
+		}
+		if !strings.Contains(never, forbidden) {
+			t.Errorf("NEVER section = %q, want it to forbid %q", never, forbidden)
+		}
+	}
+	for _, want := range []string{"git diff", "git add <path>", "git restore <path>", "untracked"} {
+		if !strings.Contains(beforeNever, want) {
+			t.Errorf("text before NEVER = %q, want %q", beforeNever, want)
+		}
+	}
+	if !strings.Contains(never, "earlier session") {
+		t.Errorf("NEVER section = %q, want the reason: the changes may belong to an earlier session", never)
+	}
+	if !strings.Contains(never, "rm -rf") {
+		t.Errorf("NEVER section = %q, want the existing rm -rf warning kept", never)
+	}
+}
+
+// TestWorktreeStaleGuidance_UnpushedHasNoOriginFallback pins ga-c44vk1 F1:
+// a rig with no origin, or a branch that must not be pushed, needs a way
+// forward that is not a push.
+func TestWorktreeStaleGuidance_UnpushedHasNoOriginFallback(t *testing.T) {
+	got := worktreeStaleGuidance(worktreeStaleReasonUnpushedCommits, "")
+	beforeNever, _ := staleGuidanceSections(t, got)
+	for _, want := range []string{"no origin", "cherry-pick"} {
+		if !strings.Contains(beforeNever, want) {
+			t.Errorf("unpushed WHAT TO DO = %q, want %q", beforeNever, want)
+		}
+	}
+}
+
+// TestWorktreeStaleGuidance_KeepsStatusColumnWithLegend pins ga-c44vk1 F6:
+// TrimSpace dropped the leading space of " M path", so unstaged and staged
+// entries looked alike and nothing explained the letters.
+func TestWorktreeStaleGuidance_KeepsStatusColumnWithLegend(t *testing.T) {
+	got := worktreeStaleGuidance(worktreeStaleReasonUncommittedWork, " M cmd/gc/unstaged.go\nM  cmd/gc/staged.go\n?? cmd/gc/new.go\n")
+	for _, want := range []string{
+		"\n   M cmd/gc/unstaged.go\n",
+		"\n  M  cmd/gc/staged.go\n",
+		"\n  ?? cmd/gc/new.go\n",
+		"?? untracked",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guidance = %q, want to contain %q", got, want)
+		}
+	}
+}
+
+// TestWorktreeStaleGuidance_CapsDirtyPathList pins ga-c44vk1 F5: agents read
+// the marker in full at session start, so thousands of dirty files must not
+// become thousands of lines.
+func TestWorktreeStaleGuidance_CapsDirtyPathList(t *testing.T) {
+	var status strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&status, " M dir/file%03d.go\n", i)
+	}
+	got := worktreeStaleGuidance(worktreeStaleReasonUncommittedWork, status.String())
+	if n := strings.Count(got, "dir/file"); n > 50 {
+		t.Errorf("guidance lists %d dirty paths, want at most 50", n)
+	}
+	for _, want := range []string{"dir/file000.go", "... and 150 more; run git status --porcelain"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guidance = %q, want to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "dir/file199.go") {
+		t.Errorf("guidance lists the 200th path, want it cut by the cap")
+	}
+
+	short := worktreeStaleGuidance(worktreeStaleReasonUncommittedWork, " M a.go\n M b.go\n")
+	if strings.Contains(short, "more; run") {
+		t.Errorf("guidance for a short list = %q, want no truncation line", short)
+	}
+}
+
+// TestWriteWorktreeStaleMarker_StatusErrorIsLoggedAndMarkerStillWritten
+// pins ga-c44vk1 F4: a failed StatusPorcelain is reported on stderr instead
+// of being dropped, and the marker is still written without a listing.
+func TestWriteWorktreeStaleMarker_StatusErrorIsLoggedAndMarkerStillWritten(t *testing.T) {
+	dir := t.TempDir()
+	gp := &fakeGitProbe{
+		isRepo:             true,
+		currentBranch:      "builder/ga-abc123",
+		statusPorcelainErr: errors.New("status exploded"),
+	}
+	var stderr bytes.Buffer
+	writeWorktreeStaleMarker(gp, dir, worktreeStaleReasonUncommittedWork, &stderr)
+
+	for _, want := range []string{dir, "status exploded"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want to contain %q", stderr.String(), want)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("marker not written after a status error: %v", err)
+	}
+	if !strings.Contains(string(data), "reason=uncommitted-work") || strings.Contains(string(data), "Dirty paths") {
+		t.Errorf("marker = %q, want the uncommitted-work marker without a dirty-path listing", data)
+	}
+}
+
+// TestWriteWorktreeStaleMarker_ReplacesPlantedSymlink pins ga-c44vk1 H1: the
+// marker is written through a temp file and renamed, so a symlink planted
+// at .worktree-stale is replaced rather than followed out of the worktree.
+func TestWriteWorktreeStaleMarker_ReplacesPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(outside, []byte("precious\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(dir, worktreeStaleFileName)
+	if err := os.Symlink(outside, markerPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	writeWorktreeStaleMarker(&fakeGitProbe{isRepo: true, currentBranch: "b"}, dir, worktreeStaleReasonUnpushedCommits, &stderr)
+
+	if got, _ := os.ReadFile(outside); string(got) != "precious\n" {
+		t.Errorf("symlink target = %q, want it untouched", got)
+	}
+	info, err := os.Lstat(markerPath)
+	if err != nil {
+		t.Fatalf("marker missing: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("marker mode = %v, want a regular file replacing the symlink", info.Mode())
+	}
+	if data, _ := os.ReadFile(markerPath); !strings.Contains(string(data), "reason=unpushed-commits") {
+		t.Errorf("marker = %q, want the unpushed-commits marker", data)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("worktree entries = %v, want only the marker (no temp file left behind)", entries)
 	}
 }
 
