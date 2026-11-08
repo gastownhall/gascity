@@ -60,15 +60,24 @@ if earlier steps failed.
 
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Steps are NOT
-materialized as individual beads — they exist in the formula definition.
-Read the step descriptions and work through them in order.
+A plain bead (no `gc.root_bead_id`, no `molecule_id`) is executed from its
+description.
+
+When your assignment is the root of a formula whose steps were not poured as
+beads of their own — the hook returned the root itself and no step beads
+exist for it — the steps live only in the formula definition. Read the step
+descriptions there and work through them in order; do not invent steps. An
+unexpanded workflow root can itself be the work: execute its description. A
+workflow root whose steps already exist as beads is not your work: the
+orchestrator drives it through those step beads, so leave it open and
+escalate.
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 
-On crash or restart, re-read your formula steps and determine where you
-left off from context (last completed action, git state, bead state).
+On crash or restart while working such a root, re-read its formula steps and
+determine where you left off from context (last completed action, git state,
+bead state).
 
 **Never use wide filesystem searches when a CLI command exists.** Wide
 traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
