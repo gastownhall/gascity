@@ -197,6 +197,82 @@ command = "uvx"
 	}
 }
 
+// The JSON form of gc config show --validate reports the same stage-1
+// conflict (#8267): a schema-valid payload with validation.ok=false and
+// the collector's unchanged conflict message in validation.errors.
+func TestConfigShowValidateJSONReportsImplicitAgentLocalMCPConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+	writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"config", "show", "--validate", "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc config show --validate --json = 0, want nonzero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	validateConfigShowJSONSchema(t, stdout.Bytes())
+	var payload struct {
+		Validation struct {
+			OK     bool     `json:"ok"`
+			Errors []string `json:"errors"`
+		} `json:"validation"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Validation.OK || len(payload.Validation.Errors) == 0 {
+		t.Fatalf("validation = %+v, want ok=false with errors", payload.Validation)
+	}
+	// The semantic fragments first, so the assertion does not merely compare
+	// the collector with itself.
+	mcpDir := filepath.Join(cityDir, "agents", "worker", "mcp")
+	var conflict string
+	for _, e := range payload.Validation.Errors {
+		if strings.Contains(e, "MCP target conflict") && strings.Contains(e, mcpDir) {
+			conflict = e
+			break
+		}
+	}
+	if conflict == "" {
+		t.Fatalf("validation.errors = %#v, want the stage-1 conflict naming %s", payload.Validation.Errors, mcpDir)
+	}
+	// The message is the collector's, unchanged: exactly what gc start's
+	// stage-1 gate reports for the same city.
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	_, startErr := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard)
+	if startErr == nil {
+		t.Fatal("buildStage1MCPTargets: want the MCP target conflict gc start refuses, got nil")
+	}
+	if conflict != startErr.Error() {
+		t.Fatalf("validation error %q, want the collector's message %q", conflict, startErr.Error())
+	}
+}
+
 func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 
