@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -850,6 +851,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			"bind_writes":       probe.bindWrites.Load(),
 			"bind_errors":       realized.bindErrors,
 			"worktree_verifies": probe.worktreeVerifies.Load(),
+			"lock_wait_ms":      time.Duration(probe.lockWait.Load()).Milliseconds(),
 			"realized":          realized.realized,
 			"plan_ms":           realized.plan.Milliseconds(),
 			"create_ms":         realized.create.Milliseconds(),
@@ -3995,6 +3997,10 @@ func ensureDependencyOnlyTemplate(
 	// "template" metadata which is always the base.
 	sbInfo, slot, err := selectOrCreateDependencyPoolSessionBeadWithSlot(bp, cfgAgent, qualifiedName)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionIdentifierBusy) {
+			fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: slot stalled on a busy session identifier lock; retrying next tick: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+			return
+		}
 		fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 		return
 	}
@@ -4101,7 +4107,7 @@ type poolRealizeProbe struct {
 	now              func() time.Time
 	worktreeVerifies atomic.Int64 // worktree.Verify calls
 	bindWrites       atomic.Int64 // trigger bindings with a non-empty patch
-	lockWait         atomic.Int64 // nanoseconds spent waiting on identifier locks
+	lockWait         atomic.Int64 // nanoseconds the build spent waiting for session identifier locks, acquired or not
 }
 
 // realizeNow is the clock realization segments are timed with.
@@ -4296,7 +4302,11 @@ func realizePoolDesiredSessionsAt(
 		if item.plan != nil {
 			if item.createErr != nil {
 				stats.createErrors++
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
+				if errors.Is(item.createErr, session.ErrSessionIdentifierBusy) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: slot stalled on a busy session identifier lock; retrying next tick: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
+				}
 				delete(usedSlots, item.plan.slot)
 				continue
 			}
@@ -5970,11 +5980,42 @@ func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 		containsString(i.Labels, "agent:"+canonical)
 }
 
-// sessionIdentifierLockWaitBudget is the per-acquisition wait the build's
-// tick-side session-identifier locks allow. RED skeleton: not yet applied.
+// sessionIdentifierLockWaitBudget is how long one acquisition of a session
+// identifier lock set may wait on the desired-state build's tick path. A
+// create or repair that cannot take its locks in that time fails with
+// session.ErrSessionIdentifierBusy and is retried on the next tick, so one
+// slow holder stalls one slot instead of the whole controller loop. The budget
+// is per acquisition, shared by every identifier in the set, and bounds the
+// wait only, not the work done under the locks. It is a variable so tests can
+// shrink it.
 var sessionIdentifierLockWaitBudget = 5 * time.Second
 
 type poolSessionIdentifierLockFunc func(string, []string, func() error) error
+
+// boundedSessionIdentifierLocks is the poolSessionIdentifierLockFunc the
+// desired-state build's tick-side creates use: session.WithCitySessionIdentifierLocks
+// with the wait capped at sessionIdentifierLockWaitBudget. The time spent
+// waiting, acquired or not, is added to the realize_pools probe's lock wait.
+func boundedSessionIdentifierLocks(bp *agentBuildParams, cityPath string, identifiers []string, fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionIdentifierLockWaitBudget)
+	defer cancel()
+	start := time.Now()
+	acquired := false
+	recordWait := func() {
+		if bp != nil && bp.realizeProbe != nil {
+			bp.realizeProbe.lockWait.Add(int64(time.Since(start)))
+		}
+	}
+	err := session.WithCitySessionIdentifierLocksContext(ctx, cityPath, identifiers, func() error {
+		acquired = true
+		recordWait()
+		return fn()
+	})
+	if !acquired {
+		recordWait()
+	}
+	return err
+}
 
 func poolSessionCreateLockIdentifiers(
 	identifiers poolSessionIdentifiers,
@@ -6025,7 +6066,9 @@ func createPoolSessionBeadWithGuardedAlias(
 		qualifiedInstance,
 		slot,
 		metadata,
-		session.WithCitySessionIdentifierLocks,
+		func(cityPath string, identifiers []string, fn func() error) error {
+			return boundedSessionIdentifierLocks(bp, cityPath, identifiers, fn)
+		},
 	)
 }
 

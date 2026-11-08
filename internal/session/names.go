@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -273,20 +274,55 @@ func releaseSessionIdentifierReservationLock(identifier string, lock *sessionIde
 
 // WithCitySessionNameLock serializes operations that reserve a session name
 // within a city, preventing concurrent callers from claiming the same name.
+// It waits for the lock as long as it takes; a caller that must not wait
+// forever uses WithCitySessionIdentifierLocksContext.
 func WithCitySessionNameLock(cityPath, name string, fn func() error) error {
-	return withCitySessionIdentifierLock(cityPath, name, fn)
+	return withCitySessionIdentifierLock(context.Background(), cityPath, name, fn)
 }
 
 // WithCitySessionAliasLock serializes operations that reserve a session alias
 // within a city, preventing concurrent callers from claiming the same alias.
+// It waits for the lock as long as it takes; a caller that must not wait
+// forever uses WithCitySessionIdentifierLocksContext.
 func WithCitySessionAliasLock(cityPath, alias string, fn func() error) error {
-	return withCitySessionIdentifierLock(cityPath, alias, fn)
+	return withCitySessionIdentifierLock(context.Background(), cityPath, alias, fn)
 }
 
 // WithCitySessionIdentifierLocks serializes operations that reserve multiple
 // identifiers within a city, acquiring deterministic lock order to prevent
-// deadlocks across concurrent creators.
+// deadlocks across concurrent creators. It waits for each lock as long as it
+// takes; a caller that must not wait forever uses
+// WithCitySessionIdentifierLocksContext.
 func WithCitySessionIdentifierLocks(cityPath string, identifiers []string, fn func() error) error {
+	return WithCitySessionIdentifierLocksContext(context.Background(), cityPath, identifiers, fn)
+}
+
+// ErrSessionIdentifierBusy reports that a session identifier lock stayed held
+// until the caller's context ended. The error wraps both this sentinel and the
+// context's cause, so errors.Is matches ErrSessionIdentifierBusy and
+// context.DeadlineExceeded or context.Canceled alike.
+var ErrSessionIdentifierBusy = errors.New("session identifier lock busy")
+
+// sessionIdentifierLockPollInterval is how often a context-bounded acquire
+// retries a non-blocking flock. A blocking flock cannot be interrupted by a
+// context, so the bounded wait polls instead.
+const sessionIdentifierLockPollInterval = 10 * time.Millisecond
+
+// WithCitySessionIdentifierLocksContext is WithCitySessionIdentifierLocks with
+// the wait bounded by ctx. Identifiers are acquired in sorted order and ctx is
+// shared by the whole acquire, so its deadline bounds the total wait, not each
+// lock. When ctx ends while an identifier is still held by someone else the
+// call releases whatever it already holds, does not run fn, and returns an
+// error matching ErrSessionIdentifierBusy and ctx's cause. A free lock is
+// taken even when ctx has already ended. A ctx that can never end
+// (context.Background) waits as long as the blocking form does.
+//
+// The in-process reservation used when cityPath is empty is not bounded by
+// ctx: it exists only for callers with no city on disk.
+//
+// The wait is a 10 ms poll, so it is not queue-fair: a poller can lose to a
+// blocking waiter, and a released lock can sit unclaimed for up to one poll.
+func WithCitySessionIdentifierLocksContext(ctx context.Context, cityPath string, identifiers []string, fn func() error) error {
 	identifiers = normalizeSessionIdentifiers(identifiers...)
 	if len(identifiers) == 0 {
 		return fn()
@@ -296,25 +332,14 @@ func WithCitySessionIdentifierLocks(cityPath string, identifiers []string, fn fu
 		if idx >= len(identifiers) {
 			return fn()
 		}
-		return withCitySessionIdentifierLock(cityPath, identifiers[idx], func() error {
+		return withCitySessionIdentifierLock(ctx, cityPath, identifiers[idx], func() error {
 			return lockRecursive(idx + 1)
 		})
 	}
 	return lockRecursive(0)
 }
 
-// ErrSessionIdentifierBusy reports that a session identifier lock stayed held
-// past the caller's context.
-var ErrSessionIdentifierBusy = errors.New("session identifier lock busy")
-
-// WithCitySessionIdentifierLocksContext is the context-bounded form of
-// WithCitySessionIdentifierLocks. RED skeleton: not implemented yet.
-func WithCitySessionIdentifierLocksContext(ctx context.Context, cityPath string, identifiers []string, fn func() error) error {
-	_, _, _, _ = ctx, cityPath, identifiers, fn
-	return errors.New("WithCitySessionIdentifierLocksContext: not implemented")
-}
-
-func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error) error {
+func withCitySessionIdentifierLock(ctx context.Context, cityPath, identifier string, fn func() error) error {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return fn()
@@ -331,11 +356,46 @@ func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error)
 		return fmt.Errorf("opening session identifier lock: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // best-effort cleanup
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("locking session identifier %q: %w", identifier, err)
+	if err := flockExclusiveContext(ctx, f, identifier); err != nil {
+		return err
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
 	return fn()
+}
+
+// flockExclusiveContext takes an exclusive flock on f. With a ctx that can end
+// it polls a non-blocking flock until the lock is free or ctx ends; only
+// EWOULDBLOCK counts as contention, so a real flock failure is returned as
+// itself and never as a busy lock.
+func flockExclusiveContext(ctx context.Context, f *os.File, identifier string) error {
+	fd := int(f.Fd())
+	if ctx.Done() == nil {
+		if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+			return fmt.Errorf("locking session identifier %q: %w", identifier, err)
+		}
+		return nil
+	}
+	timer := time.NewTimer(sessionIdentifierLockPollInterval)
+	defer timer.Stop()
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, syscall.EINTR):
+			continue
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			return fmt.Errorf("locking session identifier %q: %w", identifier, err)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%w: session identifier %q: %w", ErrSessionIdentifierBusy, identifier, ctxErr)
+		}
+		timer.Reset(sessionIdentifierLockPollInterval)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+	}
 }
 
 func sessionIdentifierLockFileName(identifier string) string {

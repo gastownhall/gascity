@@ -101,6 +101,20 @@ evidence from tests, source, an issue, or a commit.
   and third) take it as their first parameter. A `Manager` or `Store` method that takes a lock-bounding
   `ctx` puts it first and says in its doc comment what it bounds; do not add a
   parallel `...Ctx` variant.
+- The city-scoped identifier locks have a timed acquire too.
+  `WithCitySessionIdentifierLocksContext` waits no longer than its context; a
+  wait that ends with a lock still held returns `ErrSessionIdentifierBusy`
+  (wrapping the context's error), `fn` never ran, and the caller may retry the
+  whole operation. The context bounds only the wait, several identifiers share
+  one budget, and a failed multi-acquire releases what it took. The wait is a
+  10 ms `LOCK_NB` poll, so it is not queue-fair, and the empty-cityPath
+  in-process mutex stays unbounded. `WithCitySessionNameLock`,
+  `WithCitySessionAliasLock` and `WithCitySessionIdentifierLocks` remain
+  blocking wrappers over `context.Background()`. Only the desired-state build's
+  tick-side sites (`sessionIdentifierLockWaitBudget`, cmd/gc) use the bounded
+  form; the sync-phase sites (`session_beads.go`, `allocator_create.go`,
+  `adoption_barrier.go`) keep the blocking acquire, so do not convert one
+  without handling the busy result there.
 - The reconciler's advisory heal (`ApplyPatchIfLifecycleUnchanged`) decides
   from its tick snapshot. Without conditional writes its re-check fences
   nothing unless the check and the write share the row's mutation lock with the

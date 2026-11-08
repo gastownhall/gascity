@@ -589,12 +589,20 @@ func normalizeNonExpandingPoolSessionInfo(
 		})
 	}
 	if patch.aliasNeedsUpdate {
-		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
+		if err := boundedSessionIdentifierLocks(bp, bp.cityPath, []string{canonical}, func() error {
 			if err := session.EnsureAliasAvailableWithConfigForOwner(beads.SessionStore{Store: bp.beadStore}, bp.city, canonical, info.ID, canonical); err != nil {
 				return err
 			}
 			return apply()
-		}); err != nil {
+		}); errors.Is(err, session.ErrSessionIdentifierBusy) {
+			// Another creator holds the alias lock. The collapse is a repair,
+			// not a prerequisite for this tick: leave the row as read and let
+			// the next tick retry instead of stalling the build on the lock.
+			if bp.stderr != nil {
+				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: singleton pool identity normalization for bead %s stalled on a busy session identifier lock; retrying next tick: %v\n", canonical, info.ID, err) //nolint:errcheck
+			}
+			return info, nil
+		} else if err != nil {
 			return info, fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", info.ID, canonical, err)
 		}
 	} else if err := apply(); err != nil {
