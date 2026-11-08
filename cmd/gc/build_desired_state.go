@@ -2933,6 +2933,12 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
+		// A row the routed-ready query excludes (waiting on a person, or under
+		// a dispatch hold) is served to no dispatcher, so it must not wake a
+		// cold seat; a clean row alongside it still does.
+		if beadmeta.HasHumanLabel(wb.Labels) || beadmeta.HasDispatchHold(wb.Labels) {
+			continue
+		}
 		for _, candidate := range controllerDemandRouteCandidates(wb) {
 			if canonical, ok := aliasToCanonical[candidate]; ok {
 				demand[canonical] = true
