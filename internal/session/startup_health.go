@@ -214,10 +214,32 @@ func (s *Store) SaveStartupHealthEpisode(ep StartupHealthEpisode) error {
 	return nil
 }
 
-// OpenStartupHealthEpisodes is the batch counterpart of
-// LoadStartupHealthEpisode. RED-step stub: the GREEN step implements it.
+// OpenStartupHealthEpisodes returns the open startup-health episodes keyed by
+// session name, in one store read. For every session name it answers what
+// LoadStartupHealthEpisode answers: only a bead of StartupHealthEpisodeType
+// counts, a closed bead does not, and the newest bead wins when a name has
+// more than one. A name with no episode is absent from the map, which reads as
+// the zero episode Load returns for it.
+//
+// A failed read returns a nil map and an error, never an empty map a caller
+// could take for "no episodes"; the caller decides whether to fail open.
 func (s *Store) OpenStartupHealthEpisodes() (map[string]StartupHealthEpisode, error) {
-	return nil, fmt.Errorf("OpenStartupHealthEpisodes: not implemented")
+	matches, err := s.store.List(beads.ListQuery{Type: StartupHealthEpisodeType, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		return nil, fmt.Errorf("listing open startup-health episodes: %w", err)
+	}
+	episodes := make(map[string]StartupHealthEpisode, len(matches))
+	for _, b := range matches {
+		name := b.Metadata[StartupHealthSessionNameMetadataKey]
+		if name == "" {
+			continue
+		}
+		if _, seen := episodes[name]; seen {
+			continue // newest first: the first bead per name is the one Load returns
+		}
+		episodes[name] = StartupHealthEpisodeFromMetadata(b.Metadata)
+	}
+	return episodes, nil
 }
 
 // ListStartupHealthEpisodes returns every persisted startup-health episode,
