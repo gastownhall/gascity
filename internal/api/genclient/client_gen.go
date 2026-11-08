@@ -931,6 +931,7 @@ const (
 	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
 	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
 	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
 	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
 	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
 	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
@@ -962,6 +963,8 @@ func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	case Readiness:
 		return true
 	case StartupLadder:
+		return true
+	case StarvedBypass:
 		return true
 	case SubmitConfirm:
 		return true
@@ -2756,6 +2759,16 @@ type ContextAdvisoryTier struct {
 	Enabled   *bool   `json:"Enabled"`
 	Message   *string `json:"Message"`
 	Threshold *int64  `json:"Threshold"`
+}
+
+// ControlCheckUnlaunchablePayload defines model for ControlCheckUnlaunchablePayload.
+type ControlCheckUnlaunchablePayload struct {
+	BeadId     string  `json:"bead_id"`
+	CheckPath  string  `json:"check_path"`
+	Error      string  `json:"error"`
+	Kind       *string `json:"kind,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	StorePath  *string `json:"store_path,omitempty"`
 }
 
 // ControlDispatcherScopeGapPayload defines model for ControlDispatcherScopeGapPayload.
@@ -5409,6 +5422,33 @@ type SessionCommandStatusBody struct {
 	Status string `json:"status"`
 }
 
+// SessionConfigDriftDeferredPayload defines model for SessionConfigDriftDeferredPayload.
+type SessionConfigDriftDeferredPayload struct {
+	// DeferredSince RFC3339 timestamp the deferral episode was first recorded; the escalation clock counts from here.
+	DeferredSince string `json:"deferred_since"`
+
+	// DriftedFields Names of the configuration fields whose fingerprint changed. Never null; empty when the stored fingerprint breakdown is unavailable.
+	DriftedFields []string `json:"drifted_fields"`
+
+	// Escalated False on the first observation; true on the single emission after the episode outlives [daemon] drift_deferral_escalate_after.
+	Escalated bool `json:"escalated"`
+
+	// PendingSeconds Whole seconds the episode had been deferred when the event fired.
+	PendingSeconds int64 `json:"pending_seconds"`
+
+	// SessionId Canonical session bead ID of the deferred seat (also the envelope Subject).
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Template of the seat.
+	Template string `json:"template"`
+
+	// WorkBeadId ID of the assigned work bead observed holding the restart back.
+	WorkBeadId string `json:"work_bead_id"`
+}
+
 // SessionCreateBody defines model for SessionCreateBody.
 type SessionCreateBody struct {
 	// Alias Optional session alias.
@@ -7991,6 +8031,22 @@ type TypedEventStreamEnvelopeCityUnregisterRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeControlCheckUnlaunchable defines model for TypedEventStreamEnvelopeControlCheckUnlaunchable.
+type TypedEventStreamEnvelopeControlCheckUnlaunchable struct {
+	Actor            string                          `json:"actor"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          ControlCheckUnlaunchablePayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedEventStreamEnvelopeControlDispatcherScopeGap.
 type TypedEventStreamEnvelopeControlDispatcherScopeGap struct {
 	Actor            string                           `json:"actor"`
@@ -8949,6 +9005,22 @@ type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionConfigDriftDeferred defines model for TypedEventStreamEnvelopeSessionConfigDriftDeferred.
+type TypedEventStreamEnvelopeSessionConfigDriftDeferred struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionConfigDriftDeferredPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionConversationReset defines model for TypedEventStreamEnvelopeSessionConversationReset.
@@ -10048,6 +10120,23 @@ type TypedTaggedEventStreamEnvelopeCityUnregisterRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable defines model for TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable.
+type TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable struct {
+	Actor            string                          `json:"actor"`
+	City             string                          `json:"city"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          ControlCheckUnlaunchablePayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap.
 type TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap struct {
 	Actor            string                           `json:"actor"`
@@ -11066,6 +11155,23 @@ type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred defines model for TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred.
+type TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionConfigDriftDeferredPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionConversationReset defines model for TypedTaggedEventStreamEnvelopeSessionConversationReset.
@@ -13359,6 +13465,9 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
 	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
+
+	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
 // PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
@@ -14141,6 +14250,32 @@ func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWrites
 	return err
 }
 
+// AsControlCheckUnlaunchablePayload returns the union data inside the EventPayload as a ControlCheckUnlaunchablePayload
+func (t EventPayload) AsControlCheckUnlaunchablePayload() (ControlCheckUnlaunchablePayload, error) {
+	var body ControlCheckUnlaunchablePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlCheckUnlaunchablePayload overwrites any union data inside the EventPayload as the provided ControlCheckUnlaunchablePayload
+func (t *EventPayload) FromControlCheckUnlaunchablePayload(v ControlCheckUnlaunchablePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlCheckUnlaunchablePayload performs a merge with any union data inside the EventPayload, using the provided ControlCheckUnlaunchablePayload
+func (t *EventPayload) MergeControlCheckUnlaunchablePayload(v ControlCheckUnlaunchablePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsControlDispatcherScopeGapPayload returns the union data inside the EventPayload as a ControlDispatcherScopeGapPayload
 func (t EventPayload) AsControlDispatcherScopeGapPayload() (ControlDispatcherScopeGapPayload, error) {
 	var body ControlDispatcherScopeGapPayload
@@ -14807,6 +14942,32 @@ func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
 
 // MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
 func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionConfigDriftDeferredPayload returns the union data inside the EventPayload as a SessionConfigDriftDeferredPayload
+func (t EventPayload) AsSessionConfigDriftDeferredPayload() (SessionConfigDriftDeferredPayload, error) {
+	var body SessionConfigDriftDeferredPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionConfigDriftDeferredPayload overwrites any union data inside the EventPayload as the provided SessionConfigDriftDeferredPayload
+func (t *EventPayload) FromSessionConfigDriftDeferredPayload(v SessionConfigDriftDeferredPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionConfigDriftDeferredPayload performs a merge with any union data inside the EventPayload, using the provided SessionConfigDriftDeferredPayload
+func (t *EventPayload) MergeSessionConfigDriftDeferredPayload(v SessionConfigDriftDeferredPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17884,6 +18045,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityUnregisterRe
 	return err
 }
 
+// AsTypedEventStreamEnvelopeControlCheckUnlaunchable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlCheckUnlaunchable() (TypedEventStreamEnvelopeControlCheckUnlaunchable, error) {
+	var body TypedEventStreamEnvelopeControlCheckUnlaunchable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlCheckUnlaunchable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlCheckUnlaunchable(v TypedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlCheckUnlaunchable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlCheckUnlaunchable(v TypedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlDispatcherScopeGap
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlDispatcherScopeGap() (TypedEventStreamEnvelopeControlDispatcherScopeGap, error) {
 	var body TypedEventStreamEnvelopeControlDispatcherScopeGap
@@ -19536,6 +19725,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionColdStart
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionConfigDriftDeferred returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionConfigDriftDeferred() (TypedEventStreamEnvelopeSessionConfigDriftDeferred, error) {
+	var body TypedEventStreamEnvelopeSessionConfigDriftDeferred
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionConfigDriftDeferred overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionConfigDriftDeferred performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionConversationReset
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionConversationReset() (TypedEventStreamEnvelopeSessionConversationReset, error) {
 	var body TypedEventStreamEnvelopeSessionConversationReset
@@ -20936,6 +21153,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.check_unlaunchable":
+		return t.AsTypedEventStreamEnvelopeControlCheckUnlaunchable()
 	case "control.dispatcher_scope_gap":
 		return t.AsTypedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.root_settle_failed":
@@ -21054,6 +21273,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.config_drift_deferred":
+		return t.AsTypedEventStreamEnvelopeSessionConfigDriftDeferred()
 	case "session.conversation_reset":
 		return t.AsTypedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
@@ -21713,6 +21934,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityU
 // MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
 	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable() (TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable, error) {
+	var body TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable(v TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable(v TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -23375,6 +23624,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred() (TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred(v TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred) error {
+	v.Type = "session.config_drift_deferred"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionConversationReset
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionConversationReset() (TypedTaggedEventStreamEnvelopeSessionConversationReset, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionConversationReset
@@ -24775,6 +25052,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.check_unlaunchable":
+		return t.AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable()
 	case "control.dispatcher_scope_gap":
 		return t.AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.root_settle_failed":
@@ -24893,6 +25172,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.config_drift_deferred":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred()
 	case "session.conversation_reset":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
@@ -38778,6 +39059,22 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 		if params.Lite != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "lite", *params.Lite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

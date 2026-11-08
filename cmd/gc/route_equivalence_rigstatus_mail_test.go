@@ -788,7 +788,7 @@ func TestRenderMailCheckFromAPICountsAllUnread(t *testing.T) {
 		Items: []mail.Message{{ID: "gc-1"}, {ID: "gc-2"}},
 		Total: 150,
 	}}
-	if code := renderMailCheckFromAPI(cr, "lead", false, "", &stdout); code != 0 {
+	if code := renderMailCheckFromAPI(cr, "lead", false, "", &stdout, io.Discard); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 	if got, want := stdout.String(), "150 unread message(s) for lead\n"; got != want {
@@ -797,7 +797,7 @@ func TestRenderMailCheckFromAPICountsAllUnread(t *testing.T) {
 
 	stdout.Reset()
 	empty := api.CachedRead[api.MailListView]{}
-	if code := renderMailCheckFromAPI(empty, "lead", false, "", &stdout); code != 1 {
+	if code := renderMailCheckFromAPI(empty, "lead", false, "", &stdout, io.Discard); code != 1 {
 		t.Fatalf("empty exit = %d, want 1", code)
 	}
 	if stdout.Len() != 0 {

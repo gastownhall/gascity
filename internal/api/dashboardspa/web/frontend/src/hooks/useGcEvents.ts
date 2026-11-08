@@ -38,6 +38,25 @@ const CONNECTING_GRACE_MS = 2_000;
 const DEFAULT_COALESCE_MS = 2_500;
 
 /**
+ * Session events that observe a session without changing it: the
+ * program-status shadow records a comparison at every decision point, often
+ * several a second city-wide. The dashboard BFF skips them when it refreshes
+ * sessions too (sessionObservationEvents).
+ */
+const SESSION_OBSERVATION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'session.program_status_shadow',
+]);
+
+/**
+ * Reports whether event only observes a session. A view that refetches when
+ * its sessions change skips it: refetching would change nothing the view
+ * shows.
+ */
+export function isSessionObservation(event: GcEventEnvelope): boolean {
+  return SESSION_OBSERVATION_EVENT_TYPES.has(event.type);
+}
+
+/**
  * Subscribe to gc events. When an event whose type starts with any of
  * `prefixes` arrives, `onMatch` is invoked. Designed for "refresh this
  * panel when its underlying data changed" — pass refresh().

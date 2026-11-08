@@ -22,11 +22,12 @@ ARG DOLT_SOURCE_SHA256=8bd82ec8f9693d5e69d79fb26e361438859e4af96c48f99a40f324c0f
 ARG GRPC_VERSION=1.83.2
 # Patched module versions forced into the gh and Dolt rebuilds below, matching
 # the versions this repo's own go.mod carries. The rebuilt bd tracks its own
-# GRPC_VERSION, THRIFT_VERSION and XNET_VERSION in contrib/k8s/Dockerfile.agent;
-# both files carry the same thrift floor, 0.24.0, which is where CVE-2026-43871
-# is fixed, and the same x/net floor, 0.62.0, which is where CVE-2026-78669
-# (0.60.0) and GO-2026-6860 / GO-2026-6866 (0.62.0) are fixed. The other
-# overrides here are gh/Dolt only.
+# GRPC_VERSION, THRIFT_VERSION, XNET_VERSION, JOSE_VERSION and COMPRESS_VERSION
+# in contrib/k8s/Dockerfile.agent; both files carry the same thrift floor,
+# 0.24.0, which is where CVE-2026-43871 is fixed, and the same x/net floor,
+# 0.62.0, which is where CVE-2026-78669 (0.60.0) and GO-2026-6860 /
+# GO-2026-6866 (0.62.0) are fixed. The x/crypto, x/text and x/mod overrides
+# here are gh/Dolt only.
 # Each build applies these in ascending-constraint order: a later `go get` can
 # roll an earlier one back, and only the rolled-back module's own assertion
 # would catch it. XMOD_VERSION is the newest constraint, so it goes last.
@@ -36,9 +37,10 @@ ARG XTEXT_VERSION=0.43.0
 ARG XMOD_VERSION=0.41.0
 ARG THRIFT_VERSION=0.24.0
 # Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6, Dolt
-# v1.18.0), where CVE-2026-63209 is fixed. 1.18.7 requires no other module, so
-# its `go get` cannot move any of the pins above.
-ARG COMPRESS_VERSION=1.18.7
+# v1.18.0), where CVE-2026-63209 is fixed; go.mod now pins 1.20.2, which also
+# fixes GO-2026-6865 (panic on two-block frames). 1.20.2 requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG COMPRESS_VERSION=1.20.2
 # Dolt's pinned source selects go-jose/v4 4.1.4, which CVE-2026-116587 (DoS
 # parsing JWKs with RSA keys) affects; 4.1.6 is fixed and requires no other
 # module, so its `go get` cannot move any of the pins above.
@@ -150,7 +152,10 @@ FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194
 ENV DEBIAN_FRONTEND=noninteractive
 ARG CLAUDE_CODE_VERSION=2.1.308
 
-# System packages.
+# System packages. apt and libapt-pkg6.0t64 carry CVE-2026-109518, fixed in
+# 2.8.4ubuntu0.1. The pinned base image ships them, and an install leaves an
+# installed package where it is, so they are upgraded by name, together: Trivy
+# reports each binary package of the source separately.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -166,6 +171,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     # util-linux: provides flock(1) for the bd/Dolt beads lock — runtime hard dep, not optional diagnostics.
     util-linux \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
+    libapt-pkg6.0t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
