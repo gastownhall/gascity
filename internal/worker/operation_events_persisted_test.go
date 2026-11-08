@@ -301,8 +301,10 @@ func TestWorkerOperationEventPayloadIdentityUnchanged(t *testing.T) {
 	if payload.SessionID != info.ID || payload.SessionName != persisted.SessionName {
 		t.Fatalf("payload identity = (%q, %q), want (%q, %q)", payload.SessionID, payload.SessionName, info.ID, persisted.SessionName)
 	}
-	if payload.Provider != "claude" || payload.Template != "probe" {
-		t.Fatalf("payload provider/template = (%q, %q), want (claude, probe)", payload.Provider, payload.Template)
+	// The provider label is seeded when the event begins; the template is the
+	// stored one.
+	if payload.Provider != handle.providerLabel() || payload.Template != "probe" {
+		t.Fatalf("payload provider/template = (%q, %q), want (%q, probe)", payload.Provider, payload.Template, handle.providerLabel())
 	}
 	// A manual chat has no run chain, so the session is its own run root.
 	if payload.RunID != info.ID {
