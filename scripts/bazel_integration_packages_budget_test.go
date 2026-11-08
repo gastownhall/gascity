@@ -41,6 +41,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/beads/exec:exec_test":                            1,
 	"//internal/beads:beads_test":                                11,
 	"//internal/credentialprovider:credentialprovider_test":      1,
+	"//internal/importsvc:importsvc_test":                        1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
 	"//internal/runtime/acp:acp_test":                            1,
@@ -232,20 +233,50 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // first scheduling wave. Farm owner maintainer-city-c3's before/after found
 // no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
 // so #7795 was reverted and the lane is back to running in two waves under
-// the inherited --jobs=64. 85 test actions (aquery-verified, see
-// integrationPackagesShards above) is accepted as a known, pinned exception
-// so the budget check still catches further growth. If the count grows
-// above this pin, that is this lane asking for a bigger second-wave tail,
-// not a smaller one; split it instead of raising --jobs again (e.g. shard
-// out //cmd/gc:gc_test's long tail) — see beads closed PR #7542 and gascity
-// #7795's before/after for what that tail costs. Raised from 81 on
+// the inherited --jobs=64. The pinned count below (aquery-verified, see
+// integrationPackagesShards above) is accepted as a known exception so the
+// budget check still catches further growth. If the count grows above this
+// pin, that is this lane asking for a bigger second-wave tail, not a smaller
+// one; do not give the lane more concurrency (see beads closed PR #7542 and
+// gascity #7795's before/after for what that tail costs). Raised from 81 on
 // 2026-10-24 for //test/conversationlane's split: its one 395-450 s action,
 // the lane's last from #8147 on, became six that run side by side (the
 // longest about 200 s), so its five new actions shorten the lane's tail.
 // Raised to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test (the
 // OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
-// the second wave without lengthening its tail.
-const integrationPackagesTwoWaveExceptionPinned = 86
+// the second wave without lengthening its tail. Raised to 87 on 2026-11-08
+// for //internal/importsvc:importsvc_test (its real-git source test moved
+// behind the integration tag, ga-9vystb): one package-level action.
+//
+// What the pin protects is the lane's wall clock, not the farm's concurrency:
+// --jobs=64 is unchanged by a pin raise, so the in-flight footprint stays at
+// most 64 whatever the pin says. With more test actions than job slots the
+// lane runs in two waves, and Bazel does not start the longest action first,
+// so a long action that lands in the second wave adds its whole length to the
+// lane. The count is a proxy for that cost: it turns each added action into a
+// reviewed decision. The cost itself is measured from the lane's
+// ci-analytics-integration-packages-1 artifact as execution_ms minus
+// critical_path_ms, which is what the cap and scheduling add on top of the
+// longest chain of dependent actions. It was 0.9-4.7 s (median 2 s) over 12
+// lane runs on 2026-11-06..08, for example runs 42333589684 and 42156122198,
+// against lane wall times of 345-2135 s.
+//
+// Raise rule: a change that adds N integration-packages test actions raises
+// the pin by N, in its own commit, when (a) each added action is unit-sized
+// (under 30 s of exec) and (b) the latest nightly's execution_ms minus
+// critical_path_ms is under 15 s (about three times the worst of those 12).
+// To read (b):
+//
+//	gh run download <nightly run id> -n ci-analytics-integration-packages-1 -D <new empty dir>
+//	jq '.invocations[] | select(.command=="test") | .timing |
+//	    {wall_ms, execution_ms, critical_path_ms,
+//	     cap_delay_ms: (.execution_ms - .critical_path_ms)}' <dir>/ci-analytics.json
+//
+// Otherwise (a long solo target, or a measured delay of 15 s or more) it is a
+// design decision for the maintainers: the lane may then need to be split.
+// Re-open the whole question too if the farm guard (OSS queue-wait p95)
+// regresses while the lane grows.
+const integrationPackagesTwoWaveExceptionPinned = 87
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may
@@ -261,7 +292,7 @@ func checkIntegrationPackagesJobsBudget(total, effective int) error {
 		return nil
 	}
 	if total > integrationPackagesTwoWaveExceptionPinned {
-		return fmt.Errorf("integration-packages: %d test actions, more than the pinned two-wave exception (%d) at effective --jobs=%d: the lane is already two waves (second-wave tail, see beads closed PR #7542 and gascity #7795's before/after) and should be split (e.g. shard out //cmd/gc:gc_test's long tail), not given more concurrency", total, integrationPackagesTwoWaveExceptionPinned, effective)
+		return fmt.Errorf("integration-packages: %d test actions, more than the pinned two-wave exception (%d) at effective --jobs=%d: the lane is already two waves (second-wave tail, see beads closed PR #7542 and gascity #7795's before/after) so raise the pin only by the rule on integrationPackagesTwoWaveExceptionPinned's doc comment, and do not give the lane more concurrency", total, integrationPackagesTwoWaveExceptionPinned, effective)
 	}
 	return nil
 }
