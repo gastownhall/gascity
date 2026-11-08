@@ -747,6 +747,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 	bySessionName map[string]beads.Bead,
 	indexBySessionName map[string]int,
 	now time.Time,
+	confirm *runtimeConfirm,
 	stderr io.Writer,
 ) []beads.Bead {
 	if store == nil || cfg == nil {
@@ -785,7 +786,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", confirm, stderr) {
 				continue
 			}
 			batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
@@ -841,6 +842,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 	cityName string,
 	rows []session.ReconcileSession,
 	now time.Time,
+	confirm *runtimeConfirm,
 	stderr io.Writer,
 ) []session.ReconcileSession {
 	if store == nil || cfg == nil {
@@ -880,7 +882,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 			info := rows[idx].Info
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", confirm, stderr) {
 				continue
 			}
 			batch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
@@ -957,12 +959,13 @@ func retireRemovedConfiguredNamedSessionBead(
 	sp runtime.Provider,
 	b beads.Bead,
 	now time.Time,
+	confirm *runtimeConfirm,
 	stderr io.Writer,
 ) bool {
 	if store == nil {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", confirm, stderr) {
 		return false
 	}
 	batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b)))
@@ -1817,6 +1820,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	if store == nil {
 		return nil, nil
 	}
+	// confirm is this pass's runtime-confirmation latch; every destructive
+	// site below reads its runtime through it.
+	confirm := &runtimeConfirm{}
 	// The typed session front door is constructed once at this composition root
 	// and threaded to the session-only leaves (setMeta/setMetaBatch/
 	// closeFailedCreateBead/syncDesiredPoolSlots); the raw store stays for the
@@ -1985,7 +1991,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// real reconfiguration conflict to begin with. The step-aside name is
 			// bounded exactly as poolRuntimeSessionName bounds it.
 			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == boundSessionNameLength(spec.SessionName+poolRuntimeNameSuffix)
-			if !closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "reconfigured", gate: closeGated}, now, stderr) {
+			if !closeSeatIfRuntimeStopped(cityPath, store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "reconfigured", gate: closeGated}, now, confirm, stderr) {
 				if !carveOut {
 					blockedReconfiguredNamedIdentities[identity] = true
 				}
@@ -1995,7 +2001,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
-			cityPath, store, sw, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+			cityPath, store, sw, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, confirm, stderr,
 		)
 	}
 
@@ -2616,7 +2622,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 						fmt.Fprintf(stderr, "session beads: keeping %s: named identity %q matches %d configured named sessions (%s)\n", b.ID, identity, len(candidates), strings.Join(names, ", ")) //nolint:errcheck
 					} else {
-						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
+						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, confirm, stderr) {
 							if idx, ok := indexBySessionName[sn]; ok {
 								openBeads[idx].Status = "open"
 								if openBeads[idx].Metadata == nil {
@@ -2643,7 +2649,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			if configuredNames[sn] {
-				if closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "suspended", gate: closeGated}, now, stderr) {
+				if closeSeatIfRuntimeStopped(cityPath, store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "suspended", gate: closeGated}, now, confirm, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -2657,7 +2663,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 					}
 				}
-				if closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "orphaned", gate: closeGated}, now, stderr) {
+				if closeSeatIfRuntimeStopped(cityPath, store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "orphaned", gate: closeGated}, now, confirm, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -3127,6 +3133,8 @@ func reapStaleSessionBeads(
 	}
 	now := clk.Now()
 	reaped := 0
+	confirm := &runtimeConfirm{}
+	deferLogged := false
 	for _, info := range open {
 		sn := info.SessionNameMetadata
 		if sn == "" {
@@ -3233,6 +3241,16 @@ func reapStaleSessionBeads(
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
+		switch confirm.confirm(cityPath, sp, sn) {
+		case runtimeRunning:
+			continue
+		case runtimeUnknown:
+			if !deferLogged {
+				deferLogged = true
+				fmt.Fprintf(stderr, "session reaper: liveness of %q (bead %s) could not be confirmed; deferring the remaining rows this pass\n", sn, info.ID) //nolint:errcheck
+			}
+			continue
+		}
 		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
 			continue
 		}
@@ -4110,13 +4128,19 @@ func sweepProcessTableOrphans(
 
 // closeSeatIfRuntimeStopped is closeSeat for a row whose runtime must be
 // stopped first: a running runtime declines the close, never stopped here.
-func closeSeatIfRuntimeStopped(store beads.Store, sw *SeatWork, sp runtime.Provider, info session.Info, why closeWhy, now time.Time, stderr io.Writer) bool {
+func closeSeatIfRuntimeStopped(cityPath string, store beads.Store, sw *SeatWork, sp runtime.Provider, info session.Info, why closeWhy, now time.Time, confirm *runtimeConfirm, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if name := strings.TrimSpace(info.SessionNameMetadata); name != "" && sp != nil && sp.IsRunning(name) {
-		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", info.ID, name) //nolint:errcheck
-		return false
+	if name := strings.TrimSpace(info.SessionNameMetadata); name != "" && sp != nil {
+		switch confirm.confirm(cityPath, sp, name) {
+		case runtimeRunning:
+			fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", info.ID, name) //nolint:errcheck
+			return false
+		case runtimeUnknown:
+			fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q liveness could not be confirmed\n", info.ID, name) //nolint:errcheck
+			return false
+		}
 	}
 	return closeSeat(store, sw, info, why, now, stderr)
 }
@@ -4128,6 +4152,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 	cfg *config.City,
 	b beads.Bead,
 	reason string,
+	confirm *runtimeConfirm,
 	stderr io.Writer,
 ) bool {
 	if stderr == nil {
@@ -4137,15 +4162,19 @@ func stopRuntimeBeforeSessionBeadMutation(
 	if sessionName == "" || sp == nil {
 		return true
 	}
-	if !sp.IsRunning(sessionName) {
+	switch confirm.confirm(cityPath, sp, sessionName) {
+	case runtimeStopped:
 		return true
+	case runtimeUnknown:
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): liveness could not be confirmed; deferring\n", reason, sessionName, b.ID) //nolint:errcheck
+		return false
 	}
 	if err := controllerKillSessionRow(cityPath, store, sp, cfg, sessionInfoFromBead(b)); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, b.ID, err) //nolint:errcheck
 		return false
 	}
-	if sp.IsRunning(sessionName) {
-		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, b.ID) //nolint:errcheck
+	if confirm.confirm(cityPath, sp, sessionName) != runtimeStopped {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): not confirmed stopped after stop\n", reason, sessionName, b.ID) //nolint:errcheck
 		return false
 	}
 	return true
@@ -4162,6 +4191,7 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 	cfg *config.City,
 	info session.Info,
 	reason string,
+	confirm *runtimeConfirm,
 	stderr io.Writer,
 ) bool {
 	if stderr == nil {
@@ -4171,15 +4201,19 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 	if sessionName == "" || sp == nil {
 		return true
 	}
-	if !sp.IsRunning(sessionName) {
+	switch confirm.confirm(cityPath, sp, sessionName) {
+	case runtimeStopped:
 		return true
+	case runtimeUnknown:
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): liveness could not be confirmed; deferring\n", reason, sessionName, info.ID) //nolint:errcheck
+		return false
 	}
 	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, info.ID, err) //nolint:errcheck
 		return false
 	}
-	if sp.IsRunning(sessionName) {
-		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, info.ID) //nolint:errcheck
+	if confirm.confirm(cityPath, sp, sessionName) != runtimeStopped {
+		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): not confirmed stopped after stop\n", reason, sessionName, info.ID) //nolint:errcheck
 		return false
 	}
 	return true

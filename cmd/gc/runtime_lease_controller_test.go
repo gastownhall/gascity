@@ -577,7 +577,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 	t.Run("retire", func(t *testing.T) {
 		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
-		if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), env.store, env.sp, env.cfg, mustGetBead(t, env.store, b.ID), "retired", &env.stderr) {
+		if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), env.store, env.sp, env.cfg, mustGetBead(t, env.store, b.ID), "retired", nil, &env.stderr) {
 			t.Fatalf("retire stop refused; stderr %q", env.stderr.String())
 		}
 		stopped(t, env)

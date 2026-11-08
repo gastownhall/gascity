@@ -530,7 +530,7 @@ func TestRetireRemovedNamedSessionAlertsOnKeptClaims(t *testing.T) {
 	rec := events.NewFake()
 	sw := testSeatWork(t.TempDir(), servingCity("worker"), store, nil)
 	sw.alerts = &strandedClaimAlerts{rec: rec}
-	if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+	if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, nil, io.Discard) {
 		t.Fatal("retire failed")
 	}
 	evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
@@ -664,7 +664,7 @@ func TestDetectorFollowsTheStamp(t *testing.T) {
 		cfg := servingCity("worker")
 		sw := testSeatWork(t.TempDir(), cfg, store, nil)
 		sw.alerts = &strandedClaimAlerts{rec: rec}
-		if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+		if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, nil, io.Discard) {
 			t.Fatal("retire failed")
 		}
 		row, _ := store.Get(b.ID)
@@ -1068,7 +1068,7 @@ func TestDetectorReAlertsWithoutAConditionalWriter(t *testing.T) {
 			cfg := servingCity("worker")
 			sw := testSeatWork(t.TempDir(), cfg, store, nil)
 			sw.alerts = &strandedClaimAlerts{rec: rec}
-			if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+			if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, nil, io.Discard) {
 				t.Fatal("retire failed")
 			}
 			if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "true" {
