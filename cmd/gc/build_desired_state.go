@@ -4302,11 +4302,7 @@ func realizePoolDesiredSessionsAt(
 		if item.plan != nil {
 			if item.createErr != nil {
 				stats.createErrors++
-				if errors.Is(item.createErr, session.ErrSessionIdentifierBusy) {
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: slot stalled on a busy session identifier lock; retrying next tick: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
-				} else {
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
-				}
+				logPoolCreateError(stderr, qualifiedName, item.createErr)
 				delete(usedSlots, item.plan.slot)
 				continue
 			}
@@ -5989,6 +5985,17 @@ func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 // wait only, not the work done under the locks. It is a variable so tests can
 // shrink it.
 var sessionIdentifierLockWaitBudget = 5 * time.Second
+
+// logPoolCreateError reports a pool slot whose create failed. A busy session
+// identifier lock is said to be a stall that the next tick retries, so it
+// does not read as a broken slot.
+func logPoolCreateError(stderr io.Writer, qualifiedName string, err error) {
+	if errors.Is(err, session.ErrSessionIdentifierBusy) {
+		fmt.Fprintf(stderr, "buildDesiredState: pool %q request: slot stalled on a busy session identifier lock; retrying next tick: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+}
 
 type poolSessionIdentifierLockFunc func(string, []string, func() error) error
 

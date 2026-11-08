@@ -594,16 +594,8 @@ func normalizeNonExpandingPoolSessionInfo(
 				return err
 			}
 			return apply()
-		}); errors.Is(err, session.ErrSessionIdentifierBusy) {
-			// Another creator holds the alias lock. The collapse is a repair,
-			// not a prerequisite for this tick: leave the row as read and let
-			// the next tick retry instead of stalling the build on the lock.
-			if bp.stderr != nil {
-				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: singleton pool identity normalization for bead %s stalled on a busy session identifier lock; retrying next tick: %v\n", canonical, info.ID, err) //nolint:errcheck
-			}
-			return info, nil
-		} else if err != nil {
-			return info, fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", info.ID, canonical, err)
+		}); err != nil {
+			return info, normalizationLockError(bp, canonical, info.ID, err)
 		}
 	} else if err := apply(); err != nil {
 		return info, fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", info.ID, canonical, err)
@@ -704,4 +696,18 @@ func normalizeNonExpandingPoolSessionInfoForSelection(
 		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: deferring singleton pool identity normalization for bead %s: %v\n", cfgAgent.QualifiedName(), info.ID, err) //nolint:errcheck
 	}
 	return recordDeferredNonExpandingPoolAliasConflictInfo(bp, cfgAgent, info)
+}
+
+// normalizationLockError settles a failed singleton-pool normalization. The
+// collapse is a repair, not a prerequisite for the tick, so a busy alias lock
+// (another creator holds it) leaves the row as read and returns nil for the
+// next tick to retry; any other failure is returned wrapped.
+func normalizationLockError(bp *agentBuildParams, canonical, beadID string, err error) error {
+	if !errors.Is(err, session.ErrSessionIdentifierBusy) {
+		return fmt.Errorf("normalizing singleton pool identity for bead %s to %q: %w", beadID, canonical, err)
+	}
+	if bp.stderr != nil {
+		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: singleton pool identity normalization for bead %s stalled on a busy session identifier lock; retrying next tick: %v\n", canonical, beadID, err) //nolint:errcheck
+	}
+	return nil
 }
