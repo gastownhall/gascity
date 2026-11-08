@@ -3241,6 +3241,9 @@ func reapStaleSessionBeads(
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
+		// A cached IsRunning=false is only a candidate: a fresh bounded read
+		// must find the runtime gone before the release below can stop it or the
+		// close below can run. Running or unanswered holds the row this pass.
 		switch confirm.confirm(cityPath, sp, sn) {
 		case runtimeRunning:
 			continue
