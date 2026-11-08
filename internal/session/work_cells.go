@@ -11,10 +11,13 @@ import (
 // The work cells on a session row (PHASE1-2 §6.1): work_started, written only
 // by the seat's own `gc hook --claim`, and work_ladder, written only by the v2
 // lane's work-ladder step. Each is one JSON value its owner rewrites whole by
-// a CAS on the row (UpdateRowFenced), never blind (CASOnly), and outside the
-// premise (ClassWork): a v2 effect that loses its CAS to one re-reads and
-// re-decides. This file holds the work_started codec and the one field of
-// work_ladder the hook reads, its pending release.
+// a CAS on the row, never blind (CASOnly), and outside the premise
+// (ClassWork): a v2 effect that loses its CAS to one re-reads and re-decides.
+// The one exception is work_started on a legacy city whose session store
+// cannot fence: there the hook writes it by UpdateMetadataChecked's unfenced
+// write from a fresh read (CheckedWrite), which no v2 ladder competes with.
+// This file holds the work_started codec and the one field of work_ladder the
+// hook reads, its pending release.
 const (
 	WorkStartedKey = "work_started"
 	WorkLadderKey  = "work_ladder"

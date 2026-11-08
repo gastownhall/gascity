@@ -300,6 +300,34 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
 	}
+	return s.updateMetadataDecided(id, attempts, writer, decide)
+}
+
+// UpdateMetadataChecked is UpdateMetadataFenced for a write that may go
+// unfenced only where casOnly allows it. With a conditional writer it is
+// UpdateMetadataFenced, and casOnly is never asked. Without one, casOnly is
+// asked before the deciding read, never between that read and the write (it
+// can take seconds: the CLI asks the controller): true, or a nil casOnly,
+// returns beads.ErrConditionalWriteUnsupported and writes nothing; false lets
+// the patch decided from a fresh read be written unfenced right after it.
+// That write is not atomic with its read: a concurrent writer of the row can
+// land between them. A require-mode store that cannot fence returns its
+// refusal. It reports whether a patch was written.
+func (s *Store) UpdateMetadataChecked(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, casOnly func() bool) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil && (casOnly == nil || casOnly()) {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	return s.updateMetadataDecided(id, attempts, writer, decide)
+}
+
+// updateMetadataDecided is the write loop of UpdateMetadataFenced and
+// UpdateMetadataChecked: decide's patch from a fresh read, fenced on that
+// read's revision by writer, or written unfenced when writer is nil.
+func (s *Store) updateMetadataDecided(id string, attempts int, writer beads.ConditionalWriter, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		bead, err := s.validatedBead(id)
 		if err != nil {

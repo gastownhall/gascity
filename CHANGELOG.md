@@ -1222,6 +1222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A legacy city on bd v1.3.2 records the claims its hook hands to a
+  turn.** bd v1.3.2 has no `--if-revision`, so a session store there has no
+  conditional writer, and `gc hook --claim` never recorded `work_started`:
+  drain-ack's keep of a started claim, the hook's `started_claim_held` fence
+  and the execution backstop's hold all read every claim unstarted. On a
+  legacy city the hook now records and forgets the claim by an unfenced
+  write right after a fresh read of the row. A v2 city still writes it only
+  by compare-and-swap, and without a conditional writer reports the claim
+  unrecorded and delivers it, as before.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

@@ -579,7 +579,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
-	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
+	// One controller query per invocation, asked only when needed: the
+	// drain-pending hint and the started write's casOnly share it.
+	runsV2 := sync.OnceValue(func() bool { return cityRunsV2(cityPath, cfg) })
+	strictDrainAck := runsV2
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
@@ -593,7 +596,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 			// The process env, as the pre-claim fence reads the token:
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
-			StartedFence: hookStartedFenceOf(os.Environ()),
+			StartedFence:   hookStartedFenceOf(os.Environ()),
+			StartedCASOnly: cityRecordsOnlyByCAS(cityPath, cfg, runsV2),
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
 		}

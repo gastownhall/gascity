@@ -117,6 +117,8 @@ func TestDecodeWorkLadderRelease(t *testing.T) {
 // through no conditional verb fails the guard, a fixture's seed and a blind
 // set alike; the conditional verbs and UpdateRowFenced pass. Kills
 // registering the work cells without CASOnly, and a guard that ignores it.
+// UpdateMetadataChecked passes for work_started only (CheckedWrite): kills an
+// exception that reaches work_ladder or misses the checked verb.
 func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	for _, key := range []string{WorkStartedKey, WorkLadderKey} {
 		if f, ok := LookupField(key); !ok || !f.CASOnly || f.Class != ClassWork || f.InPremise() || !f.NewKey {
@@ -173,6 +175,28 @@ func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	}
 	if len(failed) != 0 {
 		t.Errorf("conditional writes failed the guard: %q", failed)
+	}
+
+	// A legacy city's checked write, on a store with no conditional writer
+	// (an unstamped one), passes for work_started (CheckedWrite) and fails
+	// for work_ladder.
+	unfenced := beads.NewMemStore()
+	legacyRow, err := unfenced.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := func() bool { return false }
+	for key, wantFailed := range map[string]bool{WorkStartedKey: false, WorkLadderKey: true} {
+		failed = nil
+		wrote, err := NewStore(beads.SessionStore{Store: unfenced}).UpdateMetadataChecked(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+			return MetadataPatch{key: EncodeWorkStarted(WorkStarted{})}
+		}, legacy)
+		if err != nil || !wrote {
+			t.Fatalf("UpdateMetadataChecked(%s) = %v, %v", key, wrote, err)
+		}
+		if got := len(failed) == 1 && strings.Contains(failed[0], "CASOnly but was written blind"); got != wantFailed {
+			t.Errorf("checked write of %s: guard reported %q, want a blind-write failure %v", key, failed, wantFailed)
+		}
 	}
 }
 

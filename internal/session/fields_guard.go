@@ -25,7 +25,9 @@ var keyViolations struct {
 // family). Every test that writes a session row is then a census of the keys
 // written, computed ones included. Tests install it (cmd/gc, internal/api,
 // internal/session, internal/worker); production never does. A CASOnly key
-// written through no conditional verb fails the same way.
+// written through no conditional verb fails the same way, unless the key
+// admits the checked write (CheckedWrite) and Store.UpdateMetadataChecked
+// makes it.
 func GuardSessionKeys(fail func(msg string)) {
 	beads.SetSessionKeyHook(func(key string) {
 		f, ok := LookupField(key)
@@ -33,7 +35,7 @@ func GuardSessionKeys(fail func(msg string)) {
 		switch {
 		case !ok:
 			msg = fmt.Sprintf("session row key %q is not in the session field registry (internal/session/fields.go)\n%s", key, debug.Stack())
-		case f.CASOnly && !conditionalWriteOnStack():
+		case f.CASOnly && !conditionalWriteOnStack() && (!f.CheckedWrite || !verbOnStack(checkedWriteVerb)):
 			msg = fmt.Sprintf("session row key %q is CASOnly but was written blind: write it by a CAS on the row (UpdateRowFenced)\n%s", key, debug.Stack())
 		default:
 			return
@@ -49,14 +51,24 @@ func GuardSessionKeys(fail func(msg string)) {
 // the caller read: a write made under one of them is not blind.
 var conditionalVerbs = []string{".UpdateIfMatch", ".CompareAndSetMetadataKey", ".CloseWithMetadataIfMatch"}
 
+// checkedWriteVerb is the session store verb whose unfenced write a
+// CheckedWrite key admits.
+const checkedWriteVerb = "internal/session.(*Store).UpdateMetadataChecked"
+
 // conditionalWriteOnStack reports whether the store write the hook is seeing
 // runs under a conditional verb, of any backend or wrapper.
 func conditionalWriteOnStack() bool {
+	return verbOnStack(conditionalVerbs...)
+}
+
+// verbOnStack reports whether the store write the hook is seeing runs under
+// a function whose name ends in one of verbs.
+func verbOnStack(verbs ...string) bool {
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
 	for {
 		fr, more := frames.Next()
-		for _, verb := range conditionalVerbs {
+		for _, verb := range verbs {
 			if strings.HasSuffix(fr.Function, verb) {
 				return true
 			}

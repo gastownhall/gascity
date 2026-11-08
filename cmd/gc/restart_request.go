@@ -215,11 +215,21 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 // controller's latched mode, which this then reads instead of the box's
 // config. TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite pins it.
 func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
+	return cityRecordsOnlyByCAS(cityPath, cfg, func() bool { return cityRunsV2(cityPath, cfg) })
+}
+
+// cityRecordsOnlyByCAS is a checked write's casOnly for the city at
+// cityPath, as restartRecordsOnlyByCAS describes it, asking runsV2 (the
+// caller's cityRunsV2 query, which it may share and cache) off a worker site.
+// A worker site decides from its own config (workerSiteRunsV2), whatever
+// runsV2 answers. The hook's started write takes it too
+// (hookClaimOptions.StartedCASOnly).
+func cityRecordsOnlyByCAS(cityPath string, cfg *config.City, runsV2 func() bool) func() bool {
 	return func() bool {
 		if onWorkerSite(cityPath) {
 			return workerSiteRunsV2(cityPath, cfg)
 		}
-		return cityRunsV2(cityPath, cfg)
+		return runsV2()
 	}
 }
 
