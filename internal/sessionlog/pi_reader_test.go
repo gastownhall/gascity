@@ -767,3 +767,40 @@ func TestFindPiSessionCandidatesLegacyWalkSkipsExcludedRoots(t *testing.T) {
 		t.Fatalf("FindPiSessionFileByID(excluded) = %q, want empty (excluded root must not be walked)", got)
 	}
 }
+
+func TestFindPiSessionCandidatesEncodedRootDoesNotHideFlatRoot(t *testing.T) {
+	encodedRoot := t.TempDir()
+	flatRoot := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	encoded := filepath.Join(encodedRoot, piSessionDirName(filepath.Clean(workDir)))
+	if err := os.MkdirAll(encoded, 0o755); err != nil {
+		t.Fatalf("mkdir encoded pi dir: %v", err)
+	}
+	old := filepath.Join(encoded, "old.jsonl")
+	live := filepath.Join(flatRoot, "live.jsonl")
+	for _, item := range []struct{ path, id string }{{old, "old"}, {live, "live"}} {
+		body := `{"type":"session","version":3,"id":"` + item.id + `","cwd":"` + filepath.ToSlash(workDir) + `"}`
+		if err := os.WriteFile(item.path, []byte(body+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	roots := []string{encodedRoot, flatRoot}
+
+	// An encoded directory in one root must not stop the flat root from
+	// being walked.
+	if got := FindPiSessionFileByID(roots, workDir, "live"); got != live {
+		t.Fatalf("FindPiSessionFileByID(live) = %q, want %q", got, live)
+	}
+	// The ambiguity guard sees the same-cwd transcripts of every root.
+	if _, err := FindPiSessionFileStrict(roots, workDir); !errors.Is(err, ErrAmbiguousPiSessionFile) {
+		t.Fatalf("FindPiSessionFileStrict() error = %v, want ErrAmbiguousPiSessionFile", err)
+	}
+
+	// An empty encoded directory still leaves the flat root reachable.
+	if err := os.Remove(old); err != nil {
+		t.Fatalf("remove %s: %v", old, err)
+	}
+	if got := FindPiSessionFileByID(roots, workDir, "live"); got != live {
+		t.Fatalf("FindPiSessionFileByID(live) with empty encoded dir = %q, want %q", got, live)
+	}
+}

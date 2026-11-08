@@ -175,30 +175,26 @@ func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCa
 	if !filepath.IsLocal(dirName) {
 		return nil
 	}
+	// The fallback is decided per root: a root holding the cwd-encoded
+	// directory is read from that directory alone, and any other root uses the
+	// legacy layout (transcripts not under the encoded directory, such as the
+	// flat PI_CODING_AGENT_SESSION_DIR) and is walked, unless it is one of the
+	// excluded generic roots.
+	excluded := make(map[string]bool)
+	for _, p := range piLegacyWalkExcludedRoots() {
+		excluded[filepath.Clean(p)] = true
+	}
 	var candidates []piSessionCandidate
-	encodedDirFound := false
 	for _, root := range roots {
 		dir := filepath.Join(root, dirName)
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+		if entries, err := os.ReadDir(dir); err == nil {
+			candidates = append(candidates, piSessionCandidatesFromDir(dir, entries, workDir)...)
 			continue
 		}
-		encodedDirFound = true
-		candidates = append(candidates, piSessionCandidatesFromDir(dir, entries, workDir)...)
-	}
-	if !encodedDirFound {
-		// Legacy layout (transcripts not under the cwd-encoded directory):
-		// walk the pi roots, never the excluded generic roots.
-		excluded := make(map[string]bool)
-		for _, p := range piLegacyWalkExcludedRoots() {
-			excluded[filepath.Clean(p)] = true
+		if excluded[filepath.Clean(root)] {
+			continue
 		}
-		for _, root := range roots {
-			if excluded[filepath.Clean(root)] {
-				continue
-			}
-			candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
-		}
+		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
