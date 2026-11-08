@@ -346,6 +346,74 @@ prompt_mode = "none"
 	}
 }
 
+// Config validation is read-only (#8267): with MCP catalogs configured and
+// a work directory that does not yet exist, it creates no work directory,
+// no provider-native MCP file, no managed marker, and leaves .gitignore
+// alone. Path-only resolution must hold for plain and templated work dirs.
+func TestConfigShowValidateWritesNothing(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		workDir string
+		wantDir string
+	}{
+		{name: "plain work dir", workDir: "worktrees/worker", wantDir: "worktrees/worker"},
+		{name: "templated pool work dir", workDir: ".gc/worktrees/{{.Agent}}", wantDir: ".gc/worktrees/worker"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityDir := t.TempDir()
+			t.Chdir(cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+			writeCatalogFile(t, cityDir, "agents/worker/agent.toml",
+				"provider = \"claude\"\nscope = \"city\"\nwork_dir = \""+tt.workDir+"\"\nmax_active_sessions = 2\n")
+			writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", "\nname = \"notes\"\ncommand = \"uvx\"\n")
+			writeCatalogFile(t, cityDir, "mcp/shared.toml", "\nname = \"shared\"\ncommand = \"uvx\"\n")
+			gitignore := []byte("sentinel\n")
+			writeCatalogFile(t, cityDir, ".gitignore", string(gitignore))
+
+			absent := []string{
+				filepath.Join(cityDir, filepath.FromSlash(tt.wantDir)),
+				filepath.Join(cityDir, ".mcp.json"),
+				filepath.Join(cityDir, filepath.FromSlash(tt.wantDir), ".mcp.json"),
+				filepath.Join(cityDir, ".gc", "mcp-managed"),
+			}
+			for _, p := range absent {
+				if _, err := os.Stat(p); err == nil {
+					t.Fatalf("%s exists before validation", p)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("gc config show --validate = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+
+			for _, p := range absent {
+				if _, err := os.Stat(p); err == nil {
+					t.Fatalf("validation created %s", p)
+				}
+			}
+			got, err := os.ReadFile(filepath.Join(cityDir, ".gitignore"))
+			if err != nil || !bytes.Equal(got, gitignore) {
+				t.Fatalf(".gitignore = %q (%v), want the sentinel unchanged", got, err)
+			}
+		})
+	}
+}
+
 func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 
