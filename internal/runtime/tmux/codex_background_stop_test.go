@@ -510,6 +510,39 @@ func TestCodexInterruptBoundaryReadsTheSessionsOwnRollout(t *testing.T) {
 	}
 }
 
+// TestCodexInterruptBoundaryWaitsForAWrappedCodexSeat: a seat whose provider
+// is a wrapper around Codex (GC_PROVIDER is the configured provider name, for
+// example "codex-strip") runs the same Codex binary and records the same
+// rollout, so an interrupt_now submit waits for its turn boundary exactly as
+// it does for a plain "codex" seat. Skipping the wait because the name is not
+// literally "codex" lets the follow-up submit land while the interrupted turn
+// is still winding down.
+func TestCodexInterruptBoundaryWaitsForAWrappedCodexSeat(t *testing.T) {
+	pane := newFakeCodexPane(t)
+	pane.provider = "codex-strip"
+	if err := os.WriteFile(pane.rollout, []byte(`{"type":"event_msg","payload":{"type":"task_started"}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	tm := newCodexStopTmux(pane)
+	since := time.Now().Add(-time.Minute)
+
+	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", since, 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("WaitForInterruptBoundary = %v, want ErrIdleTimeout: the wrapped Codex seat's turn has not ended, so the wait must run", err)
+	}
+
+	f, err := os.OpenFile(pane.rollout, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := f.WriteString(codexAbortedRow); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	_ = f.Close()
+	if err := tm.WaitForInterruptBoundary(context.Background(), "codex-bg-stop-g", since, time.Second); err != nil {
+		t.Fatalf("WaitForInterruptBoundary = %v, want nil: the wrapped seat's rollout records the abort", err)
+	}
+}
+
 // TestCodexInterruptBoundaryWithoutItsOwnRolloutIsUnsupported: a session
 // whose rollout cannot be named (none held open, two held in its process
 // tree, or open files that cannot be read) has no boundary to wait for; the
