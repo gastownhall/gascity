@@ -7,7 +7,7 @@
 // All three endpoints speak AF_UNIX on every supported platform, Windows
 // included. Windows has carried AF_UNIX since Windows 10 1803 and Go binds and
 // dials it through the same net.Listen("unix", …) / net.DialTimeout("unix", …)
-// calls, so these endpoints need no second transport. probe_test.go holds that
+// calls, so these endpoints need no second transport. localsocket_test.go holds that
 // to evidence rather than assertion: it binds, dials, echoes, rebinds over a
 // stale socket and measures the pathname ceiling on whatever machine runs it,
 // so a platform where the claim stops being true fails loudly instead of
@@ -79,7 +79,7 @@ type Options struct {
 	// only by its owner. On Unix that is a chmod of the socket. On Windows,
 	// where mode bits are not an access-control boundary, the parent directory
 	// is instead created and verified as owner-only private state and the
-	// socket inherits it — see prepareDir in localsocket_windows.go.
+	// socket inherits it — see the Windows prepareDir implementation.
 	SocketMode os.FileMode
 }
 

@@ -67,10 +67,11 @@ func Acquire(f *os.File, opts Options) (*Lock, error) {
 			if !errors.Is(err, ErrBusy) {
 				return nil, err
 			}
-			if time.Now().After(deadline) {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
 				return nil, fmt.Errorf("timed out after %dms waiting on lock at %s", opts.Timeout.Milliseconds(), opts.label())
 			}
-			time.Sleep(opts.retryEvery())
+			time.Sleep(min(opts.retryEvery(), remaining))
 		}
 	}
 	return tryAcquire(f, opts, opts.NonBlocking)

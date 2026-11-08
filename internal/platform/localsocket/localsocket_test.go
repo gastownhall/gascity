@@ -3,6 +3,7 @@ package localsocket
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,8 +67,16 @@ func TestListenRebindsOverAStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
 	}
+	// Go's UnixListener unlinks its socket file on Close; a crashed owner
+	// would not, so keep the file to leave a real stale socket behind.
+	if ul, ok := first.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first listener: %v", err)
+	}
+	if _, err := os.Lstat(sock); err != nil {
+		t.Fatalf("precondition: stale socket file should remain after close: %v", err)
 	}
 
 	second, err := Listen(sock, Options{DirMode: 0o700})
