@@ -143,7 +143,7 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 		if err != nil || out == "" {
 			return "", false, err
 		}
-		return idlePromptPrefix(out), true, nil
+		return idlePromptPrefix(strings.TrimRight(out, "\r")), true, nil
 	}
 	out, code, err := p.Exec(ctx, name, []string{"tmux", "-u", "show-environment", "-t", execTmuxSession})
 	if err != nil {
@@ -274,7 +274,10 @@ func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time
 		if expired || !now().Before(deadline) {
 			// The capture ran into the deadline: it was canceled there, and
 			// an observation finished at or past the bound does not count.
-			if err != nil {
+			// Only capture errors belong in lastErr. bounded returns a zero
+			// reading for an abandoned read; a completed classification error
+			// must not replace the last capture error, even at the deadline.
+			if err != nil && (reading == readingCaptureError || (expired && reading == 0)) {
 				lastErr = err
 			}
 			break

@@ -15,10 +15,10 @@ var _ runtime.FencedInputProvider = (*Provider)(nil)
 
 // InputFencing reports how the pack's sessions take fenced input: atomic for
 // a pack that declares the exec connection (proc.exec) and input fencing
-// (input-fence), without carrier.ops, whose input the tmux carrier guards with the tmux provider's
-// if-shell on the agent pane's fence; none for any other pack, whose box tmux
-// need not hold a fence, or which is driven by the dedicated wire ops that
-// cannot condition input on an incarnation. Like the pack's other traits it
+// (input-fence), without carrier.ops, whose input the tmux carrier guards with
+// the tmux provider's if-shell on the agent pane's fence; none for any other
+// pack, whose box tmux need not hold a fence, or which is driven by the
+// dedicated wire ops that cannot condition input on an incarnation. Like the pack's other traits it
 // is read from the handshake, so it is static once the handshake succeeds.
 // A failed handshake reads none until a retry succeeds (handshakeRetryAfter):
 // a session started meanwhile published no fence, and fenced input to it

@@ -237,7 +237,7 @@ var catalog = []Requirement{
 	{ReqLifecycleStopIdempotent, GroupLifecycle, "stop on a missing session succeeds (idempotent)", false},
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
-	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
+	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (generic exec is optional: absent = SKIP; output and command exit code are checked when present)", true},
 	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true and peek 120 shows the started agent's command line or output (undeclared = SKIP)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},

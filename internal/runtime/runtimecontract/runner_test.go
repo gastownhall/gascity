@@ -99,8 +99,10 @@ func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 				t.Errorf("golden passed %d/%d (skipped %d) — the golden must exercise every required behavior",
 					report.Summary.Passed, len(catalog), report.Summary.Skipped)
 			}
-			if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
-				t.Error("ops golden received tmux")
+			if name == "ops" {
+				if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
+					t.Error("ops golden received tmux")
+				}
 			}
 		})
 	}

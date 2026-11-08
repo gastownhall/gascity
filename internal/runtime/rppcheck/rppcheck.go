@@ -754,9 +754,9 @@ func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
 }
 
 // nudgeCheckName is the name checkNudge reports its result under. carrier.ops
-// takes precedence over RequireNudge and obliges all five driving ops. Escalated
-// by RequireNudge so remainingCheckNames's start-failure skip listing names
-// the same check checkNudge would have run.
+// takes precedence over RequireNudge and requires all five driving ops.
+// Otherwise RequireNudge selects required rather than optional nudge. The
+// start-failure skip listing uses this same name as checkNudge.
 func (c *checker) nudgeCheckName() string {
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
 		return c.drivingCheckName("nudge")

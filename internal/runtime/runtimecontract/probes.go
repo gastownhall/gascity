@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -280,21 +281,40 @@ func probeOpsIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInf
 	name := r.nextName()
 	sentinel := "GC_RPP_IDLE_READ_" + name
 	started := r.startCommand(ctx, name, "echo "+quoteArgv(sentinel)+"; exec "+r.opts.Command)
-	if !started.ok() {
-		return StatusFail, "start for carrier.ops idle read failed"
+	if started.unsupported {
+		return StatusFail, "start returned exit 2; start is a required op"
+	}
+	if started.err != nil {
+		return StatusFail, "start for carrier.ops idle read failed: " + started.err.Error()
 	}
 	defer r.stop(ctx, name)
 	if status, detail := expectRunning(ctx, r, name, true, "for carrier.ops idle read"); status != StatusPass {
 		return status, detail
 	}
-	out := r.peek(ctx, name, tmux.PromptObservationLines)
-	switch {
-	case out.unsupported:
-		return StatusFail, "declares carrier.ops and idle-boundary but peek is unimplemented (exit 2)"
-	case out.err != nil:
-		return StatusFail, "carrier.ops peek failed: " + out.err.Error()
-	case !strings.Contains(out.stdout, sentinel):
-		return StatusFail, "peek does not show the started agent's command line or output"
+	// A screen-only peek can race the command's first rendered output after
+	// start. Bound the whole polling window, not each individual peek.
+	readLimit := min(3*time.Second, r.opts.OpTimeout)
+	readCtx, cancel := context.WithTimeout(ctx, readLimit)
+	defer cancel()
+	for {
+		out := r.peek(readCtx, name, tmux.PromptObservationLines)
+		if out.unsupported {
+			return StatusFail, "declares carrier.ops and idle-boundary but peek is unimplemented (exit 2)"
+		}
+		if out.err == nil && strings.Contains(out.stdout, sentinel) {
+			break
+		}
+		lastDetail := fmt.Sprintf("peek does not show the started agent's command line or output (last output = %q)", out.stdout)
+		if out.err != nil {
+			lastDetail = fmt.Sprintf("carrier.ops peek failed: %v (last output = %q)", out.err, out.stdout)
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-readCtx.Done():
+			timer.Stop()
+			return StatusFail, fmt.Sprintf("carrier.ops idle read timed out after %s: %s", readLimit, lastDetail)
+		case <-timer.C:
+		}
 	}
 	detail := "carrier.ops is-running is true and peek 120 shows the started agent's command line or output"
 	var missing []string

@@ -515,8 +515,9 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
 // (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
-// over, using the default tmux carrier. carrier.ops never enables it. Otherwise the welded `start` op provisions and launches in one shot
-// (compat). Gates [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
+// over, using the default tmux carrier. carrier.ops never enables it. Otherwise
+// the welded `start` op provisions and launches in one shot (compat). Gates
+// [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
 func (p *Provider) supportsSeparableLaunch() bool {
 	return !p.opsCarrierSelected() &&
 		p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&

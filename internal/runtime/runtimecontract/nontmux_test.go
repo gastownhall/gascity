@@ -6,18 +6,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 func runNonTmuxIdle(t *testing.T, override map[string]string) Result {
 	t.Helper()
+	return runNonTmuxIdleOptions(t, override, Options{OpTimeout: 500 * time.Millisecond})
+}
+
+func runNonTmuxIdleOptions(t *testing.T, override map[string]string, opts Options) Result {
+	t.Helper()
 	b := reference.NonTmuxBodies()
 	for k, v := range override {
 		b[k] = v
 	}
 	state := t.TempDir()
-	report, err := run(context.Background(), writeScript(t, state, b), Options{}, func(c Code) bool { return c == ReqConnectionIdleBoundary })
+	report, err := run(context.Background(), writeScript(t, state, b), opts, func(c Code) bool { return c == ReqConnectionIdleBoundary })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +57,43 @@ func TestNonTmuxIdleBoundaryIsGated(t *testing.T) {
 				t.Errorf("mutant = %s, %s", r.Status, r.Detail)
 			}
 		})
+	}
+}
+
+func TestNonTmuxIdleBoundaryWaitsForScreen(t *testing.T) {
+	peek := `if [ ! -f "$S/peek-called" ]; then touch "$S/peek-called"; echo 'screen not rendered'; exit 0; fi
+` + reference.NonTmuxBodies()["peek"]
+	if r := runNonTmuxIdle(t, map[string]string{"peek": peek}); r.Status != StatusPass {
+		t.Fatalf("delayed screen = %s, %s", r.Status, r.Detail)
+	}
+}
+
+func TestNonTmuxIdleBoundaryFailureDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name, op, body, detail string
+	}{
+		{"start-error", "start", "echo start-exploded >&2; exit 1", "start-exploded"},
+		{"start-unsupported", "start", "exit 2", "start returned exit 2"},
+		{"last-screen", "peek", "echo still-rendering", "still-rendering"},
+		{"last-error", "peek", "echo peek-exploded >&2; exit 1", "peek-exploded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runNonTmuxIdle(t, map[string]string{tc.op: tc.body})
+			if r.Status != StatusFail || !strings.Contains(r.Detail, tc.detail) {
+				t.Errorf("got %s, %s; want FAIL with %q", r.Status, r.Detail, tc.detail)
+			}
+		})
+	}
+}
+
+func TestNonTmuxIdleBoundaryPeekBound(t *testing.T) {
+	start := time.Now()
+	r := runNonTmuxIdleOptions(t, map[string]string{"peek": "exec sleep 30"}, Options{OpTimeout: 100 * time.Millisecond})
+	if r.Status != StatusFail || !strings.Contains(r.Detail, "timed out") {
+		t.Errorf("hung peek = %s, %s", r.Status, r.Detail)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("peek exceeded short bound: %s", elapsed)
 	}
 }
 

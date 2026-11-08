@@ -187,7 +187,13 @@ func TestOpsCarrierWeldedStart(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pk := newOpsPack(t, opsIdleCaps+`,"proc.exec","proc.provision","input-fence"`)
 			p := ctor(pk.script)
-			_, transport := NewProvider(pk.script).Seams()
+			var raw *Provider
+			if name == "seams" {
+				raw = p.(*seamBackedProvider).raw
+			} else {
+				raw = p.(*Provider)
+			}
+			_, transport := raw.Seams()
 			if transport.Capabilities().SeparableLaunch || transport.Name() != "ops" {
 				t.Errorf("transport = %s, %+v", transport.Name(), transport.Capabilities())
 			}
@@ -278,6 +284,32 @@ func TestOpsCarrierReadyPromptAcrossInstances(t *testing.T) {
 				pk.noTmux(t)
 			})
 		}
+	}
+}
+
+func TestOpsCarrierReadyPromptCRLF(t *testing.T) {
+	fastIdlePoll(t)
+	for name, ctor := range opsConstructors {
+		t.Run(name, func(t *testing.T) {
+			pk := newOpsPack(t, opsIdleCaps)
+			pk.put(t, "meta.GC_READY_PROMPT_PREFIX", "› \r\n")
+			pk.put(t, "screen", "previous output\n\n› \n")
+			p := ctor(pk.script)
+			var raw *Provider
+			if name == "seams" {
+				raw = p.(*seamBackedProvider).raw
+			} else {
+				raw = p.(*Provider)
+			}
+			prefix, found, err := raw.readPublishedReadyPrompt(context.Background(), "s")
+			if err != nil || !found || prefix != "› " {
+				t.Errorf("recovered prefix = %q, %t, %v", prefix, found, err)
+			}
+			if err := p.(runtime.IdleWaitProvider).WaitForIdle(context.Background(), "s", 200*time.Millisecond); err != nil {
+				t.Fatal(err)
+			}
+			pk.noTmux(t)
+		})
 	}
 }
 
@@ -417,6 +449,16 @@ func TestCarrierSelectionAfterHandshakeRetry(t *testing.T) {
 		t.Fatal("failure window did not retain legacy path")
 	}
 	pk.put(t, "handshake", `{"version":0,"capabilities":["carrier.ops"]}`)
+	pk.put(t, "log", "")
+	if err := p.Nudge("s", content); err != nil {
+		t.Fatal(err)
+	}
+	if len(tmuxInvocations(pk.log(t))) == 0 || strings.Contains(pk.log(t), "OP nudge s\n") {
+		t.Errorf("failure cache did not retain tmux: %s", pk.log(t))
+	}
+	if strings.Contains(pk.log(t), "OP protocol\n") {
+		t.Errorf("handshake retried before failure cache expired: %s", pk.log(t))
+	}
 	now = now.Add(HandshakeRetryAfter + time.Second)
 	pk.put(t, "log", "")
 	for range 2 {
@@ -443,7 +485,7 @@ func TestUndeclaredCarrierCompatibility(t *testing.T) {
 					pk.put(t, "exec.code", "2")
 				}
 				if mode == "transport" {
-					pk.put(t, "exec.body", "exec sleep 30")
+					pk.put(t, "exec.body", `printf 'OP exec transport\n' >> "$D/log"; exec sleep 30`)
 				}
 				p := ctor(pk.script)
 				if mode == "transport" {
@@ -456,6 +498,14 @@ func TestUndeclaredCarrierCompatibility(t *testing.T) {
 				err := p.Nudge("s", []runtime.ContentBlock{{Type: "text", Text: "x"}})
 				if (err != nil) != (mode == "transport") {
 					t.Errorf("Nudge = %v", err)
+				}
+				if mode == "transport" {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("transport error = %v, want deadline exceeded", err)
+					}
+					if !strings.Contains(pk.log(t), "OP exec transport\n") {
+						t.Errorf("exec was not attempted: %s", pk.log(t))
+					}
 				}
 				if strings.Contains(pk.log(t), "OP nudge s\n") != (mode == "unsupported") {
 					t.Errorf("fallback changed: %s", pk.log(t))

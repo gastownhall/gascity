@@ -50,7 +50,7 @@ func TestExecInputFenceWarningUnderCarrierOps(t *testing.T) {
 		t.Errorf("warning = %q", warn)
 	}
 	r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
-	if !strings.Contains(r.FixHint, "carrier.ops runtime takes no fenced input") {
+	if !strings.Contains(r.FixHint, "carrier.ops runtime takes no fenced input") || strings.Contains(r.FixHint, "declare proc.exec") {
 		t.Errorf("hint = %q", r.FixHint)
 	}
 }

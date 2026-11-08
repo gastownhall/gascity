@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,42 @@ func TestPaneIdleReaderReadings(t *testing.T) {
 			}
 			if (err != nil) != (tc.want == readingUnclassifiable || tc.want == readingCaptureError) {
 				t.Errorf("reading error = %v", err)
+			}
+		})
+	}
+}
+
+type idleReaderFunc func(context.Context, string, string) (idleReading, error)
+
+func (f idleReaderFunc) readIdle(ctx context.Context, name, prefix string) (idleReading, error) {
+	return f(ctx, name, prefix)
+}
+
+func TestIdleReadingAtDeadlinePreservesCaptureError(t *testing.T) {
+	fastIdlePoll(t)
+	for _, priorCapture := range []bool{false, true} {
+		t.Run(fmt.Sprint(priorCapture), func(t *testing.T) {
+			now := time.Now()
+			deadline := now.Add(time.Second)
+			captureErr := errors.New("earlier capture failed")
+			calls := 0
+			r := idleReaderFunc(func(context.Context, string, string) (idleReading, error) {
+				calls++
+				if priorCapture && calls == 1 {
+					return readingCaptureError, captureErr
+				}
+				now = deadline
+				return readingUnclassifiable, runtime.ErrIdleIndeterminate
+			})
+			err := waitForIdleReadings(context.Background(), r, func() time.Time { return now }, "s", "❯ ", time.Second)
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, runtime.ErrWaitUnobserved) {
+				t.Fatalf("deadline = %v", err)
+			}
+			if errors.Is(err, runtime.ErrIdleIndeterminate) {
+				t.Errorf("classification at the deadline became a capture error: %v", err)
+			}
+			if errors.Is(err, captureErr) != priorCapture {
+				t.Errorf("last capture error changed: %v", err)
 			}
 		})
 	}
