@@ -214,23 +214,31 @@ func observeBounded(ctx context.Context, timeout time.Duration, observe func() (
 	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	type observation struct {
-		liveness Liveness
-		err      error
-	}
 	results := make(chan observation, 1)
 	go func() {
 		liveness, err := observe()
 		results <- observation{liveness: liveness, err: err}
 	}()
 
+	return awaitObservation(boundedCtx, results)
+}
+
+// observation is one provider answer on its way from the observing goroutine
+// to the caller.
+type observation struct {
+	liveness Liveness
+	err      error
+}
+
+// awaitObservation waits for the provider's answer or for ctx to end.
+func awaitObservation(ctx context.Context, results <-chan observation) (Liveness, ObservationStatus, error) {
 	select {
 	case obs := <-results:
 		if obs.err != nil && errors.Is(obs.err, ErrRuntimeUnavailable) {
 			return obs.liveness, ObservationIncomplete, obs.err
 		}
 		return obs.liveness, ObservationComplete, obs.err
-	case <-boundedCtx.Done():
-		return Liveness{}, ObservationIncomplete, boundedCtx.Err()
+	case <-ctx.Done():
+		return Liveness{}, ObservationIncomplete, ctx.Err()
 	}
 }
