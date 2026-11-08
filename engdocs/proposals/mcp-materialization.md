@@ -608,6 +608,15 @@ session records for concrete workdir targets. Session exit does not immediately
 delete provider-native MCP files; cleanup happens only through the serialized
 reconcile path after the target is observed to have zero remaining claimants.
 
+`gc config show --validate` applies the same rule read-only: it reuses the
+stage-1 claimant comparison without projecting anything (no work directories
+are created, no target or marker is written, no `.gitignore` entry is added),
+so the conflict surfaces before `gc start` refuses the city. Provider families
+resolve from configuration alone, so validation reports a configured conflict
+even on a host whose provider executable is missing — where `gc start` instead
+skips that provider's agents and proceeds without them. Validation is a
+diagnostic, not a startup preflight: verdicts can differ on such a host.
+
 ## Drift and Restart Semantics
 
 Projected MCP changes participate in session config drift.
