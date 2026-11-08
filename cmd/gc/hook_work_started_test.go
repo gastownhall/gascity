@@ -1323,3 +1323,47 @@ func TestStartedWriteCASOnlyIsTheCitysMode(t *testing.T) {
 		t.Fatal("casOnly() = true on a worker site whose config is legacy, want the checked write allowed")
 	}
 }
+
+// TestStartedWriteOnACapableStoreNeverAsksTheMode (AC-6): with a conditional
+// writer the hook records and forgets by compare-and-swap alone and never
+// asks the city's mode; a CAS lost to a controller write re-decides on the
+// fresh row, and a release the ladder writes in between still refuses the
+// record. The session store here refuses blind writes. Kills asking the mode,
+// or taking the checked write, on a capable store.
+func TestStartedWriteOnACapableStoreNeverAsksTheMode(t *testing.T) {
+	never := func() bool {
+		t.Error("the city's mode was asked on a store with a conditional writer")
+		return false
+	}
+	key := hookStartedKey{Store: startedStoreRef, Bead: "work-1"}
+	fence := hookStartedFence{Token: startedToken, Gen: 7, HasGen: true}
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+
+	row := newStartedRow(t, nil)
+	l := &startedLog{}
+	opts := startedOpts(startedEnv(startedToken, "7"))
+	opts.StartedCASOnly = never
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr); code != 0 || row.store.rowWrites != 1 || !row.cell(t).Names(key.Store, key.Bead, 7) {
+		t.Fatalf("hand-over: code %d, CAS writes %d, cell %+v; want one CAS recording work-1; stderr=%s", code, row.store.rowWrites, row.cell(t), stderr.String())
+	}
+
+	row = newStartedRow(t, nil)
+	ladder := `{"v":1,"gen":7,"entries":[]}`
+	row.store.interleave = map[string]string{session.WorkLadderKey: ladder}
+	res, err := recordWorkStarted(row.front, startedSessionID, fence, key, session.WorkStartedViaClaim, now, never)
+	if err != nil || res != hookStartedRecorded || row.meta(t, session.WorkLadderKey) != ladder || !row.cell(t).Names(key.Store, key.Bead, 7) {
+		t.Fatalf("contended record = %v, %v, row %q / %q; want a re-decided record and both cells intact", res, err, row.meta(t, session.WorkLadderKey), row.meta(t, session.WorkStartedKey))
+	}
+	if err := forgetWorkStarted(row.front, startedSessionID, key, never); err != nil || row.cell(t).Names(key.Store, key.Bead, 7) || row.store.rowWrites != 2 {
+		t.Fatalf("forget = %v, cell %+v, CAS writes %d; want the entry dropped by a second CAS", err, row.cell(t), row.store.rowWrites)
+	}
+
+	row = newStartedRow(t, nil)
+	row.store.interleave = map[string]string{session.WorkLadderKey: `{"v":1,"gen":7,"release":{"store":"rig:repo","bead":"work-1"}}`}
+	res, err = recordWorkStarted(row.front, startedSessionID, fence, key, session.WorkStartedViaClaim, now, never)
+	if err != nil || res != hookStartedReleasing || row.meta(t, session.WorkStartedKey) != "" {
+		t.Fatalf("record = %v, %v, work_started %q; want releasing and nothing recorded", res, err, row.meta(t, session.WorkStartedKey))
+	}
+}
