@@ -172,6 +172,39 @@ func TestReverseToRigsNeverGoesBackBelowR3AfterItsClearBegan(t *testing.T) {
 			t.Fatal("the refused abort changed the rig")
 		}
 	})
+	t.Run("abort refuses at R3 once a row left the binding by another route", func(t *testing.T) {
+		// No clear was recorded, but the binding no longer holds a row the
+		// rig got back: the rig's copy may be the only one.
+		r := newReverseRigFixture(t)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse phase "+reversePhaseName(reverseR3) {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill did not stop the reverse")
+		}
+		binding, err := openInfraDestination(r.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.Delete("gp-step2"); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(binding)
+		rigBefore := workStoreFingerprint(t, r.rig("packs"))
+		var stdout, stderr bytes.Buffer
+		if code := doStorageAbortReverse(context.Background(), r.request, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "can only be finished") {
+			t.Fatalf("--abort-reverse after a row left the binding = %d: %s", code, stderr.String())
+		}
+		if workStoreFingerprint(t, r.rig("packs")) != rigBefore {
+			t.Fatal("the refused abort changed the rig")
+		}
+	})
 	t.Run("a rig that lost a row refuses, deleting nothing", func(t *testing.T) {
 		r := halfCleared(t)
 		if err := r.rig("packs").Delete("gp-step2"); err != nil {
