@@ -91,7 +91,8 @@ type Formula struct {
 	Contract string `json:"contract,omitempty" toml:"contract,omitempty"`
 
 	// InputLifecycle declares whether source completion invalidates this workflow.
-	// Missing or external retains input-terminal retirement; graph leaves it to the graph.
+	// Missing or external retains input-terminal retirement; graph leaves it to
+	// the graph, though input proven purged from every store still retires it.
 	InputLifecycle string `json:"input_lifecycle,omitempty" toml:"input_lifecycle,omitempty"`
 
 	// Requires declares minimum host capabilities needed to compile this formula.

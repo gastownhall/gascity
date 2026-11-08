@@ -9,7 +9,8 @@ import (
 var ErrInvalidInputLifecycle = errors.New("invalid input lifecycle")
 
 const (
-	// InputLifecycleGraph leaves completion to the graph after source settlement.
+	// InputLifecycleGraph leaves completion to the graph after source
+	// settlement; input proven purged from every store still retires it.
 	InputLifecycleGraph = "graph"
 	// InputLifecycleExternal retains terminal-input retirement.
 	InputLifecycleExternal = "external"

@@ -635,6 +635,29 @@ func TestHookInputLifecycleGraphStillPurges(t *testing.T) {
 	}
 }
 
+// runGraphPurgeClaim is runPurgeClaim with the workflow stop gate reading
+// store too, so no claim falls through to a host bd store.
+func runGraphPurgeClaim(t *testing.T, cityDir string, cfg *config.City, store beads.Store, candidates ...beads.Bead) ([]string, string) {
+	t.Helper()
+	ops, claimed := purgeClaimOps(t, cityDir, cfg, store, candidates)
+	ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return store }
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", cityDir, hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "stop check unavailable") {
+		t.Fatalf("stop gate failed open instead of reading the fixture store: %s", stderr.String())
+	}
+	return *claimed, stderr.String()
+}
+
 // End to end through the claim path, a graph-owned workflow whose input was
 // purged retires as a hard failure, as an external one does.
 func TestDoHookClaimRetiresGraphWorkflowWhoseInputWasPurged(t *testing.T) {
@@ -644,12 +667,43 @@ func TestDoHookClaimRetiresGraphWorkflowWhoseInputWasPurged(t *testing.T) {
 	if err := store.SetMetadata(w.root.ID, "gc.input_lifecycle", "graph"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, stderr := runPurgeClaim(t, cityDir, cfg, store, w.open)
+	claimed, stderr := runGraphPurgeClaim(t, cityDir, cfg, store, w.open)
 	if len(claimed) != 0 {
 		t.Fatalf("claimed %v; the graph workflow's input no longer exists anywhere (stderr=%q)", claimed, stderr)
 	}
 	assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID)
 	assertFinishedOutcomeKept(t, store, w.finished.ID)
+}
+
+// A canceled, still-open graph root whose input was purged is retired through
+// the purge path before the stop gate's cancellation recovery, which makes no
+// absence proof, would otherwise withhold it.
+func TestDoHookClaimRetiresCanceledGraphRootWhoseInputWasPurged(t *testing.T) {
+	for _, marker := range []struct{ key, value string }{
+		{"gc.cancel_requested", "true"},
+		{"gc.outcome", "canceled"},
+	} {
+		t.Run(marker.key, func(t *testing.T) {
+			cityDir, cfg := purgeProofCity(t, "")
+			store := openPurgeProofStore(t, cityDir)
+			w := seedPurgedInputWorkflow(t, store, "OP-purged")
+			if err := store.Update(w.root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.input_lifecycle": "graph", marker.key: marker.value}}); err != nil {
+				t.Fatal(err)
+			}
+			root, err := store.Get(w.root.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimed, stderr := runGraphPurgeClaim(t, cityDir, cfg, store, root)
+			if len(claimed) != 0 {
+				t.Fatalf("claimed %v (stderr=%q)", claimed, stderr)
+			}
+			assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID)
+			if !strings.Contains(stderr, "no longer exists in any store") || strings.Contains(stderr, "waiting for terminal input") {
+				t.Fatalf("not retired through the purge path: %s", stderr)
+			}
+		})
+	}
 }
 
 // A graph-owned workflow whose input is terminal but present is neither
@@ -675,7 +729,7 @@ func TestDoHookClaimKeepsGraphWorkflowWithTerminalInput(t *testing.T) {
 	if err := store.SetMetadata(w.root.ID, "gc.input_lifecycle", "graph"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, stderr := runPurgeClaim(t, cityDir, cfg, store, w.open)
+	claimed, stderr := runGraphPurgeClaim(t, cityDir, cfg, store, w.open)
 	if !reflect.DeepEqual(claimed, []string{w.open.ID}) {
 		t.Fatalf("claimed %v, want [%s]; graph-owned tail must survive terminal input (stderr=%q)", claimed, w.open.ID, stderr)
 	}

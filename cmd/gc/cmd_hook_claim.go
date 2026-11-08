@@ -1391,7 +1391,9 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 }
 
 // hookResumeGraphCancellation retries run-cancel with teardown preserved, returning whether the root is closed.
-// Recovery waits for terminal/handoff input only; it makes no absence proof.
+// Recovery waits for terminal/handoff input only; it makes no absence proof:
+// retireDoneWorkflowCandidates has already retired a root whose input is
+// proven purged before any claim reaches this gate.
 func hookResumeGraphCancellation(ctx context.Context, store beads.GraphStore, work beads.WorkStore, root beads.Bead, identities []string, stderr io.Writer) (bool, error) {
 	if root.Status == "closed" {
 		return true, nil
