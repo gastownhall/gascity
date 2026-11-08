@@ -1260,3 +1260,66 @@ func TestHookDrainAckFenceHoldsAClaimStartedWithoutConditionalWrites(t *testing.
 		t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held work-1 and no ack; stderr=%s", code, got, l.acked, stderr.String())
 	}
 }
+
+// TestStartedWriteOfAV2CityWithoutAConditionalWriterFailsOpen (AC-5): a
+// city whose mode says v2 records work_started only by compare-and-swap, so
+// on a session store with no conditional writer the hook writes no entry and
+// still delivers the claim, with the one stderr warning and one
+// work.started_unrecorded whose cause wraps ErrConditionalWriteUnsupported.
+// Kills a checked write that ignores the city's mode, which would write the
+// cell blind beside a v2 ladder.
+func TestStartedWriteOfAV2CityWithoutAConditionalWriterFailsOpen(t *testing.T) {
+	row := newLegacyStartedRow(t)
+	asks := 0
+	opts := startedOpts(startedEnv(startedToken, "7"))
+	opts.StartedCASOnly = func() bool { asks++; return true }
+	l := &startedLog{}
+	ops := l.ops(startedRoutedWork, row, nil)
+	var causes []error
+	emit := ops.EmitWorkStartedUnrecorded
+	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
+		causes = append(causes, cause)
+		emit(sessionID, template, beadID, cause)
+	}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", opts, ops, stdout, &stderr)
+
+	if got := decodeTurnBoundResult(t, stdout.buf.String()); code != 0 || got.Action != "work" || got.BeadID != "work-1" {
+		t.Fatalf("code %d, result %+v; want work-1 delivered", code, got)
+	}
+	if raw := row.meta(t, session.WorkStartedKey); raw != "" || row.store.rowWrites != 0 {
+		t.Fatalf("work_started %q, CAS writes %d; want nothing written", raw, row.store.rowWrites)
+	}
+	if len(causes) != 1 || !errors.Is(causes[0], beads.ErrConditionalWriteUnsupported) || strings.Count(stderr.String(), "delivering it anyway") != 1 {
+		t.Fatalf("causes %v, stderr %q; want one event wrapping ErrConditionalWriteUnsupported and one warning", causes, stderr.String())
+	}
+	if asks != 1 {
+		t.Fatalf("mode asked %d times, want once", asks)
+	}
+}
+
+// TestStartedWriteCASOnlyIsTheCitysMode pins the hook's started-write casOnly
+// (cityRecordsOnlyByCAS): off a worker site it is the invocation's shared
+// cityRunsV2 query's answer, asked once per ask; on a worker site the box's
+// own config decides (here legacy), and the query is never asked. Kills a
+// casOnly that ignores the city's mode, and one that asks an unreachable
+// controller from a worker site.
+func TestStartedWriteCASOnlyIsTheCitysMode(t *testing.T) {
+	for _, v2 := range []bool{false, true} {
+		asks := 0
+		casOnly := cityRecordsOnlyByCAS(t.TempDir(), nil, func() bool { asks++; return v2 })
+		if got := casOnly(); got != v2 || asks != 1 {
+			t.Fatalf("casOnly() = %v after %d asks, want %v after one", got, asks, v2)
+		}
+	}
+	cityDir, _ := newWorkerSiteSessionCity(t, workerSiteRestartSeeds[0].seed)
+	t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+	casOnly := cityRecordsOnlyByCAS(cityDir, nil, func() bool {
+		t.Error("the controller's mode was asked on a worker site")
+		return true
+	})
+	if casOnly() {
+		t.Fatal("casOnly() = true on a worker site whose config is legacy, want the checked write allowed")
+	}
+}
