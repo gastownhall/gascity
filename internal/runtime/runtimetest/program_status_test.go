@@ -167,6 +167,19 @@ func TestProgramStatusContractCatchesBadHeals(t *testing.T) {
 	if err := caseNamed(t, "PS-013").run(t, closer); err == nil {
 		t.Fatal("PS-013 passed a healer that closes a foreign pipe when it disarms")
 	}
+	unsettled := FakeProgramStatusFixtures()
+	unsettled.Armed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+		s := armed(t, m, script...)
+		fake, ok := s.Provider.(runtime.FullFake)
+		if !ok {
+			t.Fatalf("fake fixture provider is %T, want runtime.FullFake", s.Provider)
+		}
+		s.Provider = dropsSettle{FullFake: fake}
+		return s
+	}
+	if err := caseNamed(t, "PS-014").run(t, unsettled); err == nil {
+		t.Fatal("PS-014 passed a healer that ignores the settle declaration")
+	}
 	stuck := FakeProgramStatusFixtures()
 	unarmed := stuck.Unarmed
 	stuck.Unarmed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
@@ -210,6 +223,15 @@ func (c closesPipeOnDisarm) HealProgramCapture(name string, want runtime.Program
 		c.SetProgramPane(name, row)
 	}
 	return action, err
+}
+
+// dropsSettle heals as its fake does, except that it never carries the
+// interrupt-settle declaration to the pane.
+type dropsSettle struct{ runtime.FullFake }
+
+func (d dropsSettle) HealProgramCapture(name string, want runtime.ProgramStatusArm) (runtime.ProgramCaptureAction, error) {
+	want.DecideSettle = false
+	return d.FullFake.HealProgramCapture(name, want)
 }
 
 // neverArms heals by reporting nothing to do.
@@ -310,19 +332,19 @@ func TestProgramStatusContractCatchesBadHoldReads(t *testing.T) {
 }
 
 // nudgedLeaf is a Nudged fixture over the fake fixtures' armed session whose
-// start runs leaf: given the program's record after script, it says whether
-// the start types the nudge (it runs as the program's next step) and whether
-// it hands the nudge back.
-func nudgedLeaf(leaf func(r runtime.ProgramStatus) (types, handsBack bool)) ProgramStatusFixtures {
+// start runs leaf: given the program's record after script and whether the
+// start opts into the record, it says whether the start types the nudge (it
+// runs as the program's next step) and whether it hands the nudge back.
+func nudgedLeaf(leaf func(r runtime.ProgramStatus, decide bool) (types, handsBack bool)) ProgramStatusFixtures {
 	f := FakeProgramStatusFixtures()
 	armed := f.Armed
-	f.Nudged = func(t *testing.T, m runtime.ProgramStatusMode, nudge string, script ...string) ProgramStatusSession {
+	f.Nudged = func(t *testing.T, m runtime.ProgramStatusMode, decide bool, nudge string, script ...string) ProgramStatusSession {
 		s := armed(t, m, script...)
 		r, err := read(s)
 		if err != nil {
 			t.Fatal(err)
 		}
-		types, handsBack := leaf(r)
+		types, handsBack := leaf(r, decide)
 		if types {
 			s.Emit(t, nudge)
 		}
@@ -336,19 +358,24 @@ func nudgedLeaf(leaf func(r runtime.ProgramStatus) (types, handsBack bool)) Prog
 
 // Kills a PS-016 that passes a start typing its nudge into a program-reported
 // dialog, dropping it, handing back one it typed, or handing one back from a
-// start that delivered it.
+// start that delivered it, and one that passes a start deciding with the
+// record without opting into it.
 func TestProgramStatusContractCatchesBadStartupHandbacks(t *testing.T) {
 	ps016 := caseNamed(t, "PS-016")
-	good := func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), r.Blocked() }
+	good := func(r runtime.ProgramStatus, decide bool) (bool, bool) {
+		held := decide && r.Blocked()
+		return !held, held
+	}
 	if err := ps016.run(t, nudgedLeaf(good)); err != nil {
 		t.Fatalf("a leaf that holds the nudge behind the dialog breaks PS-016: %v", err)
 	}
-	for name, leaf := range map[string]func(runtime.ProgramStatus) (bool, bool){
-		"types into the dialog":          func(runtime.ProgramStatus) (bool, bool) { return true, false },
-		"drops the held-back nudge":      func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), false },
-		"types and hands back":           func(r runtime.ProgramStatus) (bool, bool) { return true, r.Blocked() },
-		"hands back a delivered nudge":   func(r runtime.ProgramStatus) (bool, bool) { return !r.Blocked(), true },
-		"never types, always hands back": func(runtime.ProgramStatus) (bool, bool) { return false, true },
+	for name, leaf := range map[string]func(runtime.ProgramStatus, bool) (bool, bool){
+		"types into the dialog":          func(runtime.ProgramStatus, bool) (bool, bool) { return true, false },
+		"drops the held-back nudge":      func(r runtime.ProgramStatus, decide bool) (bool, bool) { return !decide || !r.Blocked(), false },
+		"types and hands back":           func(r runtime.ProgramStatus, decide bool) (bool, bool) { return true, decide && r.Blocked() },
+		"hands back a delivered nudge":   func(r runtime.ProgramStatus, decide bool) (bool, bool) { return !decide || !r.Blocked(), true },
+		"never types, always hands back": func(runtime.ProgramStatus, bool) (bool, bool) { return false, true },
+		"decides without the opt-in":     func(r runtime.ProgramStatus, _ bool) (bool, bool) { return !r.Blocked(), r.Blocked() },
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := ps016.run(t, nudgedLeaf(leaf))

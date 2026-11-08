@@ -120,7 +120,8 @@ func (t programCaptureHealTally) String() string {
 // programCaptureHealNeeded reports whether a session's reading, under the
 // capture its config declares (want), calls for a heal: a declared session
 // whose pane is not armed or whose reader is lost, or whose capture carries
-// another mid-turn hold declaration than want's, or an undeclared session
+// another mid-turn hold or interrupt-settle declaration than want's, or an
+// undeclared session
 // whose pane still carries our capture. Unread and exited readings, and a
 // declared capture that is working as declared, call for nothing.
 func programCaptureHealNeeded(r runtime.ProgramStatus, want runtime.ProgramStatusArm) bool {
@@ -130,7 +131,7 @@ func programCaptureHealNeeded(r runtime.ProgramStatus, want runtime.ProgramStatu
 	case runtime.ProgramStatusReaderLost:
 		return true
 	case runtime.ProgramStatusValid, runtime.ProgramStatusSilent, runtime.ProgramStatusCleared:
-		return !want.Capture || r.HoldDeclared != want.HoldMidTurn
+		return !want.Capture || r.HoldDeclared != want.HoldMidTurn || r.SettleDeclared != want.DecideSettle
 	}
 	return false
 }
