@@ -656,8 +656,8 @@ func TestReservedRulesParseAndReportNothing(t *testing.T) {
 			}
 		}
 	}
-	if !slices.Contains(storeclass.ReservedRules, storeclass.CachePeel) {
-		t.Error("cache-peel is not reserved")
+	if !slices.Contains(storeclass.Rules, storeclass.CachePeel) {
+		t.Error("cache-peel is not enforced")
 	}
 }
 
