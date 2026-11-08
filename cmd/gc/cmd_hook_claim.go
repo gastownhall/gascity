@@ -1701,6 +1701,18 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	return 0
 }
 
+// startedCASOnlyAnswer is the claim options' started-write answer, refused
+// when unwired: a caller that wired no StartedCASOnly is not the legacy
+// answer (the record helpers' absent-argument default), so it reads CAS-only
+// and the checked write refuses a store with no conditional writer instead
+// of writing the entry blind on a v2 city's behalf (#8313).
+func startedCASOnlyAnswer(opts hookClaimOptions) func() bool {
+	if opts.StartedCASOnly != nil {
+		return opts.StartedCASOnly
+	}
+	return func() bool { return true }
+}
+
 // recordHookWorkStarted records bead in this session's work_started cell, as
 // minted ("claim") or adopted ("adopt"), and reports what the write found. A
 // run with no session row records nothing. Every failure, and a seat with no
@@ -1731,7 +1743,7 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	if fence.Token == "" {
 		err = errors.New("no instance token to fence the write by")
 	} else {
-		res, err = ops.RecordWorkStarted(sessionID, fence, key, via, opts.StartedCASOnly)
+		res, err = ops.RecordWorkStarted(sessionID, fence, key, via, startedCASOnlyAnswer(opts))
 	}
 	switch {
 	case errors.Is(err, errWorkStartedRespell):
@@ -1866,7 +1878,7 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // copy of the id, which this unwind does not give back.
 func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStartedKey) {
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && key.Bead != "" {
-		_ = ops.ForgetWorkStarted(sessionID, key, opts.StartedCASOnly)
+		_ = ops.ForgetWorkStarted(sessionID, key, startedCASOnlyAnswer(opts))
 	}
 }
 

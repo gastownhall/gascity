@@ -182,8 +182,8 @@ func (w *orderedWriter) Write(p []byte) (int, error) {
 // started write goes to row, or to record when row is nil.
 func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkStartedFunc) hookClaimOps {
 	if record == nil {
-		record = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, _ func() bool) (hookStartedResult, error) {
-			return recordWorkStarted(row.front, sessionID, fence, key, via, time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC))
+		record = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
+			return recordWorkStarted(row.front, sessionID, fence, key, via, time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), casOnly)
 		}
 	}
 	return hookClaimOps{
@@ -672,6 +672,50 @@ func TestUnrecordedClaimOutsideTheDrainAckFence(t *testing.T) {
 			t.Fatalf("result %+v, acked %v; an unrecorded claim does not hold the ack: D5's stamp keep is its only cover", got, l.acked)
 		}
 	})
+}
+
+// TestHookClaimRefusesTheCheckedWriteForACASOnlyCity (AC-5 for ga-6eefx8,
+// #8313): a write predicate reporting v2 — a city that records only by CAS —
+// never takes the checked write on a session store with no conditional
+// writer. No started entry is written, the claim is still delivered with the
+// same fail-open posture as any recording failure — one stderr line and a
+// work.started_unrecorded event wrapping ErrConditionalWriteUnsupported — and
+// a caller that wired no answer at all refuses the same way: a missing answer
+// is not the legacy answer.
+func TestHookClaimRefusesTheCheckedWriteForACASOnlyCity(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		casOnly func() bool
+	}{
+		{"a CAS-only city", func() bool { return true }},
+		{"no answer wired at all", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newLegacyStartedRow(t, nil)
+			l := &startedLog{}
+			stdout := &orderedWriter{l: l}
+			var stderr bytes.Buffer
+			opts := startedOpts(startedEnv(startedToken, "7"))
+			opts.StartedCASOnly = c.casOnly
+			code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("code = %d; stderr=%s", code, stderr.String())
+			}
+			if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "work" || got.BeadID != "work-1" {
+				t.Fatalf("result %+v, want the claim delivered anyway", got)
+			}
+			if len(row.cell(t).Claims) != 0 {
+				t.Fatalf("work_started = %+v, want no entry", row.cell(t).Claims)
+			}
+			if len(l.unrecorded) != 1 || l.unrecorded[0] != "work-1" || !strings.Contains(l.causes[0], beads.ErrConditionalWriteUnsupported.Error()) {
+				t.Fatalf("unrecorded %v, causes %q; want one work.started_unrecorded event for work-1 wrapping the refusal", l.unrecorded, l.causes)
+			}
+			if got := stderr.String(); !strings.Contains(got, "recording work-1 as started on session sess-1") || !strings.Contains(got, beads.ErrConditionalWriteUnsupported.Error()) {
+				t.Fatalf("stderr %q; want the one recording-failure warning naming the refusal", got)
+			}
+		})
+	}
 }
 
 // alwaysMovedStore loses every CAS, as a row the controller rewrites between
