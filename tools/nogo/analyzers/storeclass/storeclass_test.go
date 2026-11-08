@@ -610,6 +610,32 @@ func TestParseBaseline(t *testing.T) {
 	}
 }
 
+// TestReservedRulesParseAndReportNothing: a baseline or ceiling row may name
+// a reserved rule (so the change that enables it can carry its rows past the
+// merge-base's generator), the analyzer reports nothing under it, and a
+// reserved rule is not also an enforced one.
+func TestReservedRulesParseAndReportNothing(t *testing.T) {
+	for _, r := range storeclass.ReservedRules {
+		if slices.Contains(storeclass.Rules, r) {
+			t.Errorf("rule %s is both reserved and enforced", r)
+		}
+		if _, err := storeclass.ParseBaseline("cmd/gc/a.go\tf\t" + string(r) + "\t3\n"); err != nil {
+			t.Errorf("ParseBaseline refuses a %s row: %v", r, err)
+		}
+		if _, err := storeclass.ParseCeiling("cmd/gc\t" + string(r) + "\t3\n"); err != nil {
+			t.Errorf("ParseCeiling refuses a %s row: %v", r, err)
+		}
+		for _, d := range analyzertest.RunGraph(t, storeclass.New(config()), graph(callers)) {
+			if strings.HasPrefix(d.Message, "storeclass["+string(r)+"]") {
+				t.Errorf("reserved rule %s reported: %s:%d %s", r, d.File, d.Line, d.Message)
+			}
+		}
+	}
+	if !slices.Contains(storeclass.ReservedRules, storeclass.CachePeel) {
+		t.Error("cache-peel is not reserved")
+	}
+}
+
 // TestStoreclassNolintIsAFinding: the baseline is the only exemption, so a
 // //nolint:storeclass directive reports at its file's package clause, where
 // it cannot suppress itself.
