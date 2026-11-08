@@ -113,11 +113,11 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EnqueueContinuationNudge = func(assignee, rootID string, stderr io.Writer) {
 		continuationNudgeEnqueueAt(h.path, assignee, rootID, stderr)
 	}
-	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
-		return recordWorkStartedVia(h.sessionFront, sessionID, fence, key, via)
+	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
+		return recordWorkStartedVia(h.sessionFront, sessionID, fence, key, via, casOnly)
 	}
-	ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey) error {
-		return forgetWorkStartedVia(h.sessionFront, sessionID, key)
+	ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey, casOnly func() bool) error {
+		return forgetWorkStartedVia(h.sessionFront, sessionID, key, casOnly)
 	}
 	ops.ReadWorkStarted = func(sessionID string) (string, error) {
 		return sessionWorkStartedVia(h.sessionFront, sessionID)

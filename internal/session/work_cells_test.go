@@ -123,6 +123,16 @@ func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 			t.Fatalf("%s registered as %+v (found %v); want ClassWork, CASOnly, NewKey, outside the premise", key, f, ok)
 		}
 	}
+	// CheckedWrite is work_started's alone: it is the one CASOnly key the
+	// checked write may land blind on a no-writer store, with its caller's
+	// legacy answer. The ladder is not — a ladder release is a decision to
+	// give a claim back, never a legacy write.
+	if f, _ := LookupField(WorkStartedKey); !f.CheckedWrite {
+		t.Fatal("work_started is not CheckedWrite; the checked write could not admit it")
+	}
+	if f, _ := LookupField(WorkLadderKey); f.CheckedWrite {
+		t.Fatal("work_ladder is CheckedWrite; the checked write would admit it")
+	}
 	var failed []string
 	GuardSessionKeys(func(msg string) { failed = append(failed, msg) })
 	defer GuardSessionKeys(func(msg string) { panic(msg) })
@@ -173,6 +183,43 @@ func TestGuardSessionKeysRefusesBlindCASOnlyWrites(t *testing.T) {
 	}
 	if len(failed) != 0 {
 		t.Errorf("conditional writes failed the guard: %q", failed)
+	}
+
+	// The checked write (ga-6eefx8): through it work_ladder, which is not
+	// CheckedWrite, still cannot be written blind on a store with no
+	// conditional writer, and work_started can, with its caller's legacy
+	// answer. A CAS-only caller of the checked verb is refused by the store
+	// before any write, so it needs no guard case of its own.
+	legacyMem := beads.NewMemStore()
+	legacyMem.DisableConditionalWrites = true
+	if err := beads.StampOpenedStore(legacyMem, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	legacy := NewStore(beads.SessionStore{Store: legacyMem})
+	legacyRow, err := legacyMem.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed = nil
+	if _, err := legacy.UpdateMetadataChecked(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{WorkLadderKey: `{"v":1}`}
+	}, func() bool { return false }); err != nil {
+		t.Fatalf("work_ladder through the checked verb: %v", err)
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0], WorkLadderKey) {
+		t.Errorf("work_ladder through UpdateMetadataChecked: guard reported %q, want one blind-write failure naming the ladder key", failed)
+	}
+	failed = nil
+	if _, err := legacy.UpdateMetadataChecked(legacyRow.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{WorkStartedKey: raw}
+	}, func() bool { return false }); err != nil {
+		t.Fatalf("work_started through the checked verb on a no-writer store: %v", err)
+	}
+	if len(failed) != 0 {
+		t.Errorf("the checked work_started write failed the guard: %q", failed)
+	}
+	if got, err := legacyMem.Get(legacyRow.ID); err != nil || got.Metadata[WorkStartedKey] != raw {
+		t.Fatalf("the checked work_started write = %q, %v; want the cell landed", got.Metadata[WorkStartedKey], err)
 	}
 }
 

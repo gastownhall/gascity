@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -396,5 +397,201 @@ func TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend(t *testing.T) {
 			}
 			assertSuspendSurvived(t, backing, created.ID)
 		})
+	}
+}
+
+// checkedLegacyStores opens one store shape that resolves no conditional
+// writer: an unstamped MemStore, one stamped off, and one stamped auto over an
+// incapable MemStore — the default topology's session store (#8313), where the
+// pinned bd cannot fence a write.
+func checkedLegacyStores(t *testing.T) map[string]func() *beads.MemStore {
+	t.Helper()
+	return map[string]func() *beads.MemStore{
+		"an unstamped store": beads.NewMemStore,
+		"a store stamped off": func() *beads.MemStore {
+			mem := beads.NewMemStore()
+			if err := beads.StampOpenedStore(mem, "MemStore", gate.Off, false, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			return mem
+		},
+		"a store stamped auto with no conditional writer": func() *beads.MemStore {
+			mem := beads.NewMemStore()
+			mem.DisableConditionalWrites = true
+			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			return mem
+		},
+	}
+}
+
+func checkedSessionRow(t *testing.T, store beads.Store, meta map[string]string) beads.Bead {
+	t.Helper()
+	b := beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive)}}
+	for k, v := range meta {
+		b.Metadata[k] = v
+	}
+	created, err := store.Create(b)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return created
+}
+
+// TestUpdateMetadataChecked (AC-1 for ga-6eefx8, #8313): the checked write is
+// the legacy fence's one admission. On a store with no conditional writer it
+// writes the patch unfenced, but only when its caller answers that it is not a
+// CAS-only writer — a missing answer, or a CAS-only caller, refuses wrapping
+// ErrConditionalWriteUnsupported and nothing lands. A require store refuses
+// by its typed error without consulting the caller's answer; a capable store
+// takes the revision CAS without consulting it either. The answer is asked
+// before the deciding read — it can be slow — so a write made inside it is
+// visible to decide. A lost CAS re-decides up to its attempts, writes nothing
+// past them, and leaves no open mint.
+func TestUpdateMetadataChecked(t *testing.T) {
+	for name, open := range checkedLegacyStores(t) {
+		t.Run(name, func(t *testing.T) {
+			mem := open()
+			front := NewStore(beads.SessionStore{Store: mem})
+			b := checkedSessionRow(t, mem, nil)
+
+			// A caller that is not CAS-only gets the legacy write, unfenced.
+			written, err := front.UpdateMetadataChecked(b.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				return MetadataPatch{"state": string(StateAwake)}
+			}, func() bool { return false })
+			if err != nil || !written {
+				t.Fatalf("the legacy write = %v, %v; want written, nil", written, err)
+			}
+			got, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["state"] != string(StateAwake) {
+				t.Fatalf("state = %q, want the patch landed unfenced", got.Metadata["state"])
+			}
+
+			// A missing answer is not the legacy answer: the store refuses,
+			// and nothing lands.
+			written, err = front.UpdateMetadataChecked(b.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				return MetadataPatch{"state": "a2"}
+			}, nil)
+			if written || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				t.Fatalf("without the caller's answer = %v, %v; want refused wrapping ErrConditionalWriteUnsupported", written, err)
+			}
+
+			// A CAS-only caller is refused the legacy write the same way.
+			written, err = front.UpdateMetadataChecked(b.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				return MetadataPatch{"state": "a3"}
+			}, func() bool { return true })
+			if written || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				t.Fatalf("a CAS-only caller = %v, %v; want refused wrapping ErrConditionalWriteUnsupported", written, err)
+			}
+			if got, _ := mem.Get(b.ID); got.Metadata["state"] != string(StateAwake) {
+				t.Fatalf("state = %q after the refusals; want the refused patches unwritten", got.Metadata["state"])
+			}
+
+			// The answer is asked before the deciding read: a write made
+			// inside it is the row decide reads.
+			asked := 0
+			written, err = front.UpdateMetadataChecked(b.ID, 1, func(info Info, _ PersistedResponse) MetadataPatch {
+				if info.MetadataState != string(StateSuspended) {
+					t.Fatalf("decide read state = %q; want the write the answer made", info.MetadataState)
+				}
+				return MetadataPatch{"state": string(StateActive)}
+			}, func() bool {
+				asked++
+				if err := mem.SetMetadataBatch(b.ID, map[string]string{"state": string(StateSuspended)}); err != nil {
+					t.Fatal(err)
+				}
+				return false
+			})
+			if err != nil || !written || asked != 1 {
+				t.Fatalf("the answered write = %v, %v (answer asked %d); want written, nil, asked once", written, err, asked)
+			}
+
+			// An empty patch writes nothing and reports so.
+			written, err = front.UpdateMetadataChecked(b.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+				return nil
+			}, func() bool { return false })
+			if written || err != nil {
+				t.Fatalf("an empty patch = %v, %v; want not written, nil", written, err)
+			}
+		})
+	}
+
+	// A require store refuses without consulting the caller's answer.
+	mem := beads.NewMemStore()
+	mem.DisableConditionalWrites = true
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b := checkedSessionRow(t, mem, nil)
+	consulted := false
+	written, err := NewStore(beads.SessionStore{Store: mem}).UpdateMetadataChecked(b.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{"state": string(StateAwake)}
+	}, func() bool { consulted = true; return false })
+	if written || !beads.IsConditionalWritesRequired(err) {
+		t.Fatalf("a require store = %v, %v; want refused by the typed require error", written, err)
+	}
+	if consulted {
+		t.Fatal("the caller's answer was consulted under require")
+	}
+
+	// A capable store takes the revision CAS without consulting the answer.
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	capable := checkedSessionRow(t, stamped, nil)
+	rec := &rowWriteRecorder{Store: stamped}
+	consulted = false
+	written, err = NewStore(beads.SessionStore{Store: rec}).UpdateMetadataChecked(capable.ID, 1, func(Info, PersistedResponse) MetadataPatch {
+		return MetadataPatch{"state": string(StateAwake)}
+	}, func() bool { consulted = true; return true })
+	if err != nil || !written {
+		t.Fatalf("a capable store = %v, %v; want written, nil", written, err)
+	}
+	if consulted {
+		t.Fatal("the mode answer was consulted on a capable store")
+	}
+	if len(rec.writes) != 1 || rec.writes[0] != "UpdateIfMatch" {
+		t.Fatalf("writes = %q, want exactly one revision CAS", rec.writes)
+	}
+	if got, _ := stamped.Get(capable.ID); got.Metadata["state"] != string(StateAwake) {
+		t.Fatalf("state = %q, want the CAS patch landed", got.Metadata["state"])
+	}
+
+	// A row that is not a session row is not written.
+	foreign, err := beads.NewMemStore().Create(beads.Bead{Title: "f", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written, err := NewStore(beads.SessionStore{Store: beads.NewMemStore()}).UpdateMetadataChecked(foreign.ID, 1,
+		func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": string(StateAwake)} },
+		func() bool { return false }); written || err == nil {
+		t.Fatalf("a non-session row = %v, %v; want refused", written, err)
+	}
+
+	// A CAS that always loses re-decides up to its attempts, writes nothing,
+	// and leaves no open mint.
+	stamped = stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	contended := checkedSessionRow(t, stamped, map[string]string{"wait_hold": "true"})
+	before := OpenDispositionMints(contended.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	decisions := 0
+	written, err = NewStore(beads.SessionStore{Store: loser}).UpdateMetadataChecked(contended.ID, 2, func(info Info, _ PersistedResponse) MetadataPatch {
+		decisions++
+		to, err := DispositionOfInfo(info).Apply(ActorController, DispEvent{Kind: EvWaitEnd}, State(info.MetadataState), dispT0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return to.Changed().Into(info.ID, nil)
+	}, nil)
+	if written || err != nil {
+		t.Fatalf("a CAS that always loses = %v, %v; want not written, nil", written, err)
+	}
+	if decisions != 2 {
+		t.Fatalf("decisions = %d, want one per attempt", decisions)
+	}
+	if n := OpenDispositionMints(contended.ID) - before; n != 0 {
+		t.Errorf("the lost attempts left %d open mints", n)
 	}
 }

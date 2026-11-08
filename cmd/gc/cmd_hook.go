@@ -579,7 +579,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
-	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
+	// runsV2 is asked once and shared: the controller probe can be slow, and
+	// the drain-ack strictness and the started write's CAS-only answer are
+	// the same question about the city's latched mode.
+	runsV2 := sync.OnceValue(func() bool { return cityRunsV2(cityPath, cfg) })
+	strictDrainAck := runsV2
 	if opts.Claim {
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
@@ -590,6 +594,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
 			StrictDrainAck:     strictDrainAck,
+			StartedCASOnly:     cityRecordsOnlyByCAS(cityPath, cfg, runsV2),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 			// The process env, as the pre-claim fence reads the token:
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.

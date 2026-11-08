@@ -1222,6 +1222,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claim made through the default topology's session store is never
+  recorded as started (#8313).** The pinned bd (v1.3.2) has no
+  `--if-revision`, so a default-topology session store in auto mode
+  resolves no conditional writer and the claim hook's `work_started`
+  write — a CAS-only write — failed with `conditional writes unsupported`
+  on every claim: the drain-ack started-claim guards, the hook's
+  `started_claim_held` fence and the execution backstop all read no claim
+  started, so a draining seat could acknowledge a drain over live work and
+  a working seat could be nudged and drained as idle. The hook now records
+  and forgets claims through a checked write
+  (`session.Store.UpdateMetadataChecked`): a revision CAS where the store
+  has a conditional writer, and on a store with none an unfenced write
+  taken only when this city's records are not CAS-only (a v2 city still
+  refuses, failing the claim open with the same `work.started_unrecorded`
+  warning and event as before). The answer is asked before the deciding
+  read, and `work_started` is the one CAS-only session key the session key
+  guard admits through the checked verb — the work ladder never takes it.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

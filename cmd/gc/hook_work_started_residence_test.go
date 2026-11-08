@@ -427,13 +427,13 @@ func TestHookUnwindForgetsTheKeyItRecorded(t *testing.T) {
 	ops := classRoutedHookClaimOps(l.ops(startedRoutedWork, row, nil), route)
 	var recorded, forgotten []hookStartedKey
 	record, forget, publish := ops.RecordWorkStarted, ops.ForgetWorkStarted, ops.PublishRunMap
-	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
 		recorded = append(recorded, key)
-		return record(sessionID, fence, key, via)
+		return record(sessionID, fence, key, via, casOnly)
 	}
-	ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey) error {
+	ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey, casOnly func() bool) error {
 		forgotten = append(forgotten, key)
-		return forget(sessionID, key)
+		return forget(sessionID, key, casOnly)
 	}
 	// After the record and before the result line: the memo learns the id.
 	ops.PublishRunMap = func(runID, beadID string, sessionKeys ...string) error {
@@ -606,7 +606,9 @@ func TestHookRespellFailureIsNotUnrecorded(t *testing.T) {
 		t.Fatalf("record = %v, %v; want already recorded with the re-spell failure", res, err)
 	}
 	l := &startedLog{}
-	ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) { return res, err })
+	ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string, func() bool) (hookStartedResult, error) {
+		return res, err
+	})
 	var stderr bytes.Buffer
 	if got := recordHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, hookStartedKey{Store: "city", Bead: residenceStep, Resident: true}, false, &stderr); got != hookStartedAlreadyRecorded {
 		t.Fatalf("recordHookWorkStarted = %v, want already recorded", got)

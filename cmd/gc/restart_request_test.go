@@ -682,7 +682,7 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 }
 
 // TestRowFirstRestartWorkerSiteTakesTheCheckedWrite pins the worker-site
-// exemption for a legacy box: on a worker site restartRecordsOnlyByCAS
+// exemption for a legacy box: on a worker site cityRecordsOnlyByCAS
 // decides from the box's own config without asking the controller, so a
 // session store with no conditional writer takes the checked write when
 // that config latches legacy (here its conditional writes are off, so an
@@ -705,8 +705,8 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 				return reconcilerV2, true
 			}
 
-			if restartRecordsOnlyByCAS(cityDir, nil)() {
-				t.Fatal("restartRecordsOnlyByCAS = true on a worker site, want false (the exemption)")
+			if cityRecordsOnlyByCAS(cityDir, nil, nil)() {
+				t.Fatal("cityRecordsOnlyByCAS = true on a worker site, want false (the exemption)")
 			}
 			var stdout, stderr bytes.Buffer
 			if code := v.run(&stdout, &stderr); code != 0 {
@@ -724,7 +724,7 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 // state since v2 admits remote exec runtimes (PAR-EXEC; the owner's decision
 // of 2026-11-04): a v2-ready script that declares no locality latches v2,
 // explicit or by default, and counts as remote, but with no worker-site
-// descriptor its city's restart writes stay CAS-only (restartRecordsOnlyByCAS
+// descriptor its city's restart writes stay CAS-only (cityRecordsOnlyByCAS
 // asks the controller, which latched v2). ssh, k8s and hybrid are still
 // refused. TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite pins the
 // worker-site side CN-2 inherits.
@@ -759,8 +759,8 @@ func TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes(t *testing.T) {
 			original := controllerLatchedReconcilerMode
 			t.Cleanup(func() { controllerLatchedReconcilerMode = original })
 			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return reconcilerV2, true }
-			if !restartRecordsOnlyByCAS(cityPath, cfg)() {
-				t.Fatal("restartRecordsOnlyByCAS = false for a v2 city with no worker site, want CAS-only")
+			if !cityRecordsOnlyByCAS(cityPath, cfg, nil)() {
+				t.Fatal("cityRecordsOnlyByCAS = false for a v2 city with no worker site, want CAS-only")
 			}
 		})
 	}
@@ -811,8 +811,8 @@ func TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite(t *testing.T) {
 				asked++
 				return reconcilerV2, true
 			}
-			if !onWorkerSite(cityDir) || !restartRecordsOnlyByCAS(cityDir, nil)() {
-				t.Fatal("restartRecordsOnlyByCAS = false on a v2 city's worker site, want CAS-only (CN-2's precondition)")
+			if !onWorkerSite(cityDir) || !cityRecordsOnlyByCAS(cityDir, nil, nil)() {
+				t.Fatal("cityRecordsOnlyByCAS = false on a v2 city's worker site, want CAS-only (CN-2's precondition)")
 			}
 			var stdout, stderr bytes.Buffer
 			if code := v.run(&stdout, &stderr); code != 1 {
@@ -1098,8 +1098,8 @@ func TestCN2WorkerSiteFailsClosed(t *testing.T) {
 			if !onWorkerSite(cityDir) {
 				t.Fatal("not a worker site")
 			}
-			if got := restartRecordsOnlyByCAS(cityDir, nil)(); got != tc.casOnly {
-				t.Fatalf("restartRecordsOnlyByCAS = %v, want %v (CN-2's precondition: a v2 city's worker site never takes the checked write)", got, tc.casOnly)
+			if got := cityRecordsOnlyByCAS(cityDir, nil, nil)(); got != tc.casOnly {
+				t.Fatalf("cityRecordsOnlyByCAS = %v, want %v (CN-2's precondition: a v2 city's worker site never takes the checked write)", got, tc.casOnly)
 			}
 		})
 	}

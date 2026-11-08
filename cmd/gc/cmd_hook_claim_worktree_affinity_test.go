@@ -89,10 +89,10 @@ func affinityClaimOps(t *testing.T, candidates []beads.Bead, claimed, reclaimed 
 			return true, nil
 		},
 		StampSessionClaim: func(string, string) error { return nil },
-		RecordWorkStarted: func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+		RecordWorkStarted: func(string, hookStartedFence, hookStartedKey, string, func() bool) (hookStartedResult, error) {
 			return hookStartedRecorded, nil
 		},
-		ForgetWorkStarted:           func(string, hookStartedKey) error { return nil },
+		ForgetWorkStarted:           func(string, hookStartedKey, func() bool) error { return nil },
 		ReadWorkStarted:             func(string) (string, error) { return "", nil },
 		StoreRef:                    func(string) string { return "rig:r1" },
 		EmitWorkStartedUnrecorded:   func(string, string, string, error) {},

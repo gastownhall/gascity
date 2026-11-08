@@ -300,6 +300,34 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
 	}
+	return s.updateMetadataVia(writer, id, attempts, decide)
+}
+
+// UpdateMetadataChecked writes a patch decided from a fresh read of the row,
+// fenced by UpdateMetadataFenced's rules, but on a store with no conditional
+// writer it writes the patch unfenced only when its caller answers that it is
+// not a CAS-only writer: casOnly is asked once, before the deciding read —
+// the answer can be slow (it asks the running controller) and the deciding
+// read follows it. A nil casOnly, or a true answer, is refused wrapping
+// beads.ErrConditionalWriteUnsupported, and nothing is written; a require
+// store refuses by its typed error without consulting the answer; a capable
+// store takes the revision CAS without consulting the answer either. It
+// reports whether a patch was written.
+func (s *Store) UpdateMetadataChecked(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch, casOnly func() bool) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil && (casOnly == nil || casOnly()) {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	return s.updateMetadataVia(writer, id, attempts, decide)
+}
+
+// updateMetadataVia is UpdateMetadataFenced's loop, shared with
+// UpdateMetadataChecked: writer nil writes the patch unfenced, else one
+// UpdateIfMatch per attempt, re-reading and re-deciding while the CAS loses.
+func (s *Store) updateMetadataVia(writer beads.ConditionalWriter, id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		bead, err := s.validatedBead(id)
 		if err != nil {

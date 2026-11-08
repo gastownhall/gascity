@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -113,6 +115,32 @@ func (r *startedRow) cell(t *testing.T) session.WorkStarted {
 	return cell
 }
 
+// newLegacyStartedRow is newStartedRow on the default topology's session
+// store (ga-6eefx8, #8313): auto mode and no conditional writer — the pinned
+// bd serves sessions through BdStore, whose --if-revision probe fails — so
+// the started write's only path is the checked one. Blind writes succeed, as
+// they do on the real BdStore; the row is fenced by the decide alone.
+func newLegacyStartedRow(t *testing.T, meta map[string]string) *startedRow {
+	t.Helper()
+	m := beads.NewMemStore()
+	m.HonorExplicitIDs = true
+	m.DisableConditionalWrites = true
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.Create(sessionRow(startedSessionID, "session_name", "worker-1", "state", "active", "generation", "7", "instance_token", startedToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &casCountingStore{MemStore: m, rowID: b.ID}
+	if len(meta) > 0 {
+		if err := m.Update(b.ID, beads.UpdateOpts{Metadata: meta}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &startedRow{store: cs, front: session.NewStore(beads.SessionStore{Store: cs}), id: b.ID}
+}
+
 // startedLog is one hook invocation's ordered effects.
 type startedLog struct {
 	log         []string
@@ -154,7 +182,7 @@ func (w *orderedWriter) Write(p []byte) (int, error) {
 // started write goes to row, or to record when row is nil.
 func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkStartedFunc) hookClaimOps {
 	if record == nil {
-		record = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+		record = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, _ func() bool) (hookStartedResult, error) {
 			return recordWorkStarted(row.front, sessionID, fence, key, via, time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC))
 		}
 	}
@@ -175,11 +203,11 @@ func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkSt
 			return nil
 		},
 		DrainPending: func(string) (bool, error) { return false, nil },
-		RecordWorkStarted: func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+		RecordWorkStarted: func(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
 			l.add("record:" + key.Bead + ":" + via)
-			return record(sessionID, fence, key, via)
+			return record(sessionID, fence, key, via, casOnly)
 		},
-		ForgetWorkStarted: func(sessionID string, key hookStartedKey) error {
+		ForgetWorkStarted: func(sessionID string, key hookStartedKey, _ func() bool) error {
 			l.add("forget:" + key.Bead)
 			if row == nil {
 				return nil
@@ -250,6 +278,44 @@ func TestHookClaimRecordsStartedBeforeTheResult(t *testing.T) {
 	// leg, the residence every reader keys it by (claimStoreRef).
 	if len(cell.Claims) != 1 || cell.Claims[0] != (session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1", Gen: 7, At: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), Via: session.WorkStartedViaClaim, Resident: true}) {
 		t.Fatalf("work_started = %+v, want the one minted entry, marked resident", cell.Claims)
+	}
+	if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "work" || got.BeadID != "work-1" {
+		t.Fatalf("result %+v, want work-1 handed out", got)
+	}
+}
+
+// TestHookClaimRecordsStartedWithoutConditionalWrites (AC-1 for ga-6eefx8,
+// #8313): the default topology's session store — auto mode, no conditional
+// writer, the pinned bd — records the minted claim through the checked write,
+// with the seat's generation and claim provenance, before the result line
+// leaves the process, and no recording failure is warned or evented. Kills
+// the legacy no-writer store recording nothing (the fence, the drain-ack
+// guards and the backstop all reading no claim started).
+func TestHookClaimRecordsStartedWithoutConditionalWrites(t *testing.T) {
+	row := newLegacyStartedRow(t, nil)
+	l := &startedLog{}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	opts := startedOpts(startedEnv(startedToken, "7"))
+	opts.StartedCASOnly = func() bool { return false } // the legacy answer: this city records by the checked write
+	code := doHookClaim("q", "/rig", opts, l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d; stderr=%s", code, stderr.String())
+	}
+	rec, res := l.index("record:work-1:claim"), l.index("result")
+	if rec < 0 || res < 0 || rec > res {
+		t.Fatalf("effects %v: want the started record before the result line", l.log)
+	}
+	if row.store.rowWrites != 0 {
+		t.Fatalf("conditional row writes = %d, want none on a store with no conditional writer", row.store.rowWrites)
+	}
+	cell := row.cell(t)
+	if len(cell.Claims) != 1 || cell.Claims[0] != (session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1", Gen: 7, At: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), Via: session.WorkStartedViaClaim, Resident: true}) {
+		t.Fatalf("work_started = %+v, want the one minted entry at generation 7, marked resident", cell.Claims)
+	}
+	if len(l.unrecorded) != 0 || stderr.Len() != 0 {
+		t.Fatalf("unrecorded %v, stderr %q; want the record silent: no warning, no event", l.unrecorded, stderr.String())
 	}
 	if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "work" || got.BeadID != "work-1" {
 		t.Fatalf("result %+v, want work-1 handed out", got)
@@ -407,7 +473,7 @@ func TestHookDrainAckFenceHoldsAStartedClaim(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := &startedLog{}
-			ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+			ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string, func() bool) (hookStartedResult, error) {
 				return hookStartedRecorded, nil
 			})
 			ops.DrainPending = func(string) (bool, error) { return c.draining, nil }
@@ -536,7 +602,7 @@ func TestHookClaimFailsOpenWhenTheStartedWriteFails(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			l := &startedLog{}
-			ops := l.ops(startedRoutedWork, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+			ops := l.ops(startedRoutedWork, nil, func(string, hookStartedFence, hookStartedKey, string, func() bool) (hookStartedResult, error) {
 				return hookStartedUnrecorded, c.record
 			})
 			stdout := &orderedWriter{l: l}
@@ -571,7 +637,7 @@ func TestHookClaimFailsOpenWhenTheStartedWriteFails(t *testing.T) {
 func TestUnrecordedClaimOutsideTheDrainAckFence(t *testing.T) {
 	row := newStartedRow(t, nil)
 	l := &startedLog{}
-	failing := l.ops(startedRoutedWork, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+	failing := l.ops(startedRoutedWork, nil, func(string, hookStartedFence, hookStartedKey, string, func() bool) (hookStartedResult, error) {
 		return hookStartedUnrecorded, errors.New("sessions store unavailable")
 	})
 	stdout := &orderedWriter{l: l}
@@ -1032,5 +1098,87 @@ func TestPlainHookPassesIdentitiesToTheDiscoveryDoor(t *testing.T) {
 	}
 	if got.Assignee == "" || !slices.Contains(got.IdentityCandidates, sessionID) || !slices.Contains(got.IdentityCandidates, "worker-1") {
 		t.Fatalf("discovery door options %+v; want the assignee and the seat's identities (%s, worker-1)", *got, sessionID)
+	}
+}
+
+// pinnedBdSessionLedger is a one-row fake of the pinned bd CLI (v1.3.2)
+// serving a session row: its update/close/assign/delete help lists the
+// --if-assignee/--if-status guards but not --if-revision, which is what a
+// default-topology (proxied-server) city's BdStore session store probes.
+type pinnedBdSessionLedger struct {
+	mu   sync.Mutex
+	bead beads.Bead
+}
+
+func (l *pinnedBdSessionLedger) run(_, name string, args ...string) ([]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if name != "bd" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command %s %v", name, args)
+	}
+	switch {
+	case len(args) == 2 && args[1] == "--help":
+		return []byte("Usage: bd " + args[0] + "\n      --if-assignee string\n      --if-status string\n"), nil
+	case args[0] == "show":
+		return json.Marshal([]map[string]any{l.render()})
+	case args[0] == "list":
+		return json.Marshal([]map[string]any{l.render()})
+	case args[0] == "query":
+		return []byte(`[]`), nil
+	case args[0] == "update":
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--json", l.bead.ID:
+			case "--set-metadata":
+				i++
+				key, value, _ := strings.Cut(args[i], "=")
+				l.bead.Metadata[key] = value
+			default:
+				return nil, fmt.Errorf("bd update: unsupported arg %q in %v", args[i], args)
+			}
+		}
+		return []byte(`{}`), nil
+	}
+	return nil, fmt.Errorf("bd %v: unsupported by the fake", args)
+}
+
+func (l *pinnedBdSessionLedger) render() map[string]any {
+	return map[string]any{
+		"id":         l.bead.ID,
+		"title":      l.bead.Title,
+		"status":     l.bead.Status,
+		"issue_type": l.bead.Type,
+		"labels":     l.bead.Labels,
+		"created_at": nowForBDJSONTest(),
+		"metadata":   l.bead.Metadata,
+	}
+}
+
+// TestRecordWorkStartedOnPinnedBdSessionStore reproduces ga-6eefx8 (#8313):
+// on the default topology the session store is a BdStore over the pinned bd,
+// which lacks --if-revision, so the seat's own claim hand-over never records
+// work_started, and every started-claim guard (the drain-ack refusal, the
+// hook's started_claim_held fence, the execution backstop) reads the claim
+// as unstarted. The expected behavior: the hand-over records the claim.
+func TestRecordWorkStartedOnPinnedBdSessionStore(t *testing.T) {
+	row := sessionRow(startedSessionID, "session_name", "worker-1", "state", "active", "generation", "7", "instance_token", startedToken)
+	ledger := &pinnedBdSessionLedger{bead: row}
+	bd := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "sess")
+	if err := beads.StampOpenedStore(bd, beads.BeadsStoreNameBdStore, gate.Auto, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	front := session.NewStore(beads.SessionStore{Store: bd})
+
+	res, err := recordWorkStarted(front, startedSessionID, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Bead: "work-1"}, session.WorkStartedViaClaim, time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC))
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("recordWorkStarted on the pinned-bd BdStore = (%v, %v); want (recorded, nil): the claim is never recorded as started", res, err)
+	}
+	cell, err := session.DecodeWorkStarted(ledger.bead.Metadata[session.WorkStartedKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cell.RecordsBead("work-1", 7) {
+		t.Fatalf("work_started = %q; want an entry naming work-1 at generation 7", ledger.bead.Metadata[session.WorkStartedKey])
 	}
 }

@@ -191,15 +191,18 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 		if !ok {
 			return fmt.Errorf("session %q has no session row to record the restart on", target)
 		}
-		return op(fenced, context.Background(), token, restartRecordsOnlyByCAS(cityPath, cfg))
+		return op(fenced, context.Background(), token, cityRecordsOnlyByCAS(cityPath, cfg, nil))
 	}
 }
 
-// restartRecordsOnlyByCAS is the fenced restart write's casOnly for the city
-// at cityPath: a v2 city records only by compare-and-swap and never takes the
-// checked write (the v2 owner's sign-off of 2026-10-27, Q1). The session
-// layer asks it only when a write is due on a store with no conditional
-// writer, so the controller is asked its latched mode (cityRunsV2) only then.
+// cityRecordsOnlyByCAS is the fenced restart and work_started writes' casOnly
+// for the city at cityPath: a v2 city records only by compare-and-swap and
+// never takes the checked write (the v2 owner's sign-off of 2026-10-27, Q1).
+// The session layer asks it only when a write is due on a store with no
+// conditional writer, so the controller is asked its latched mode only then.
+// runsV2, when non-nil, is the caller's memoized cityRunsV2 (the controller
+// probe can be slow, and a caller that already asked shares the answer);
+// nil probes per call.
 //
 // A worker site's remote controller is not reachable from the box to ask, so
 // the box decides from its own config, failing closed (workerSiteRunsV2):
@@ -214,10 +217,13 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 // CAS-only (a conditional writer on its store), or its descriptor carries the
 // controller's latched mode, which this then reads instead of the box's
 // config. TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite pins it.
-func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
+func cityRecordsOnlyByCAS(cityPath string, cfg *config.City, runsV2 func() bool) func() bool {
 	return func() bool {
 		if onWorkerSite(cityPath) {
 			return workerSiteRunsV2(cityPath, cfg)
+		}
+		if runsV2 != nil {
+			return runsV2()
 		}
 		return cityRunsV2(cityPath, cfg)
 	}

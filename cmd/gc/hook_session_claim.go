@@ -367,32 +367,47 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 
 // hookRecordWorkStarted is the production RecordWorkStarted seam, through the
 // same routed session front door as the current-claim stamp.
-func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
-	return recordWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, fence, key, via)
+func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
+	return recordWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, fence, key, via, casOnly)
 }
 
 // recordWorkStartedVia is hookRecordWorkStarted through front.
-func recordWorkStartedVia(front sessionFrontGetter, sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+func recordWorkStartedVia(front sessionFrontGetter, sessionID string, fence hookStartedFence, key hookStartedKey, via string, casOnly func() bool) (hookStartedResult, error) {
 	sessFront, err := front()
 	if err != nil {
 		return hookStartedUnrecorded, err
 	}
-	return recordWorkStarted(sessFront, sessionID, fence, key, via, time.Now())
+	return recordWorkStarted(sessFront, sessionID, fence, key, via, time.Now(), casOnly)
 }
 
-// recordWorkStarted runs decideWorkStarted under UpdateRowFenced. A CAS lost
-// on every attempt is an error, as is a store that cannot fence: the caller
-// fails open. A write that replaced an unreadable cell returns Recorded with
-// an error naming the reset, which the caller reports as it reports a
-// failure: the claims the old cell held are no longer recorded.
-func recordWorkStarted(front *session.Store, sessionID string, fence hookStartedFence, key hookStartedKey, via string, now time.Time) (hookStartedResult, error) {
+// startedCASAnswer is the checked write's caller answer from a record or
+// forget call's optional trailing casOnly: absent or nil — the six-argument
+// spelling legacy callers and tests use — answers not CAS-only, so a store
+// with no conditional writer takes the unfenced write (#8313).
+func startedCASAnswer(casOnly []func() bool) func() bool {
+	if len(casOnly) > 0 && casOnly[0] != nil {
+		return casOnly[0]
+	}
+	return func() bool { return false }
+}
+
+// recordWorkStarted runs decideWorkStarted under the checked write
+// (UpdateMetadataChecked): fenced by a revision CAS where the session store
+// has a conditional writer, unfenced with the caller's not-CAS-only answer
+// where it has none — the default topology's pinned bd (#8313). A CAS lost
+// on every attempt is an error, as is a CAS-only caller on a store that
+// cannot fence: the caller fails open. A write that replaced an unreadable
+// cell returns Recorded with an error naming the reset, which the caller
+// reports as it reports a failure: the claims the old cell held are no
+// longer recorded.
+func recordWorkStarted(front *session.Store, sessionID string, fence hookStartedFence, key hookStartedKey, via string, now time.Time, casOnly ...func() bool) (hookStartedResult, error) {
 	var res hookStartedResult
 	var reset error
-	wrote, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
+	wrote, err := front.UpdateMetadataChecked(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
 		var patch session.MetadataPatch
 		res, patch, reset = decideWorkStarted(fresh, fence, key, via, now)
-		return session.RowPatch{Metadata: patch}, len(patch) > 0
-	})
+		return patch
+	}, startedCASAnswer(casOnly))
 	switch {
 	case err != nil && res == hookStartedAlreadyRecorded:
 		return res, fmt.Errorf("%w: %w", errWorkStartedRespell, err)
@@ -407,32 +422,32 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 }
 
 // hookForgetWorkStarted is the production ForgetWorkStarted seam.
-func hookForgetWorkStarted(sessionID string, key hookStartedKey) error {
-	return forgetWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, key)
+func hookForgetWorkStarted(sessionID string, key hookStartedKey, casOnly func() bool) error {
+	return forgetWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, key, casOnly)
 }
 
 // forgetWorkStartedVia is hookForgetWorkStarted through front.
-func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookStartedKey) error {
+func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookStartedKey, casOnly func() bool) error {
 	sessFront, err := front()
 	if err != nil {
 		return err
 	}
-	return forgetWorkStarted(sessFront, sessionID, key)
+	return forgetWorkStarted(sessFront, sessionID, key, casOnly)
 }
 
-// forgetWorkStarted drops key from the row's work_started cell by a CAS, for
-// an unwind that gives the claim back: a released claim must not read as
-// started. A closed row, a cell that does not name it, and a cell it cannot
-// read are left alone.
-func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey) error {
-	_, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
+// forgetWorkStarted drops key from the row's work_started cell by the checked
+// write, for an unwind that gives the claim back: a released claim must not
+// read as started. A closed row, a cell that does not name it, and a cell it
+// cannot read are left alone.
+func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey, casOnly ...func() bool) error {
+	_, err := front.UpdateMetadataChecked(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
 		cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
 		gen, _ := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
 		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead, gen) {
-			return session.RowPatch{}, false
+			return nil
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}}, true
-	})
+		return session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}
+	}, startedCASAnswer(casOnly))
 	return err
 }
 

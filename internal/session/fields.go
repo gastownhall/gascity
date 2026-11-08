@@ -93,6 +93,14 @@ type Field struct {
 	// (UpdateIfMatch, CompareAndSetMetadataKey): GuardSessionKeys fails a
 	// blind one, a fixture's too.
 	CASOnly bool
+	// CheckedWrite is the one admission past CASOnly: a CASOnly key the
+	// checked write (Store.UpdateMetadataChecked) may write blind on a store
+	// with no conditional writer, with its caller's legacy answer. The
+	// session field registry's WorkStartedKey is its only member — the
+	// default topology's session store cannot fence (#8313) and the claim
+	// record is its one blind write; the work ladder is a release decision
+	// and never takes it.
+	CheckedWrite bool
 }
 
 // InPremise reports whether a fence compares f.
@@ -392,7 +400,7 @@ var registry = slices.Concat([]Field{
 
 	// The work cells (PHASE1-2 §6.1): each written whole, by its one owner,
 	// by a CAS on the row.
-	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
+	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, CheckedWrite: true, Writers: sites(
 		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
 	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.settle"),
