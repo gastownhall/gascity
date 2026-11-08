@@ -73,13 +73,33 @@ func TestScaleCheckWorkQueryCorrespondenceCheckWarnsForWorkQueryOnly(t *testing.
 		"scale_check",
 		`engdocs/architecture/dispatch.md`,
 		"Invariant 11",
-		"remove the raw work_query override",
-		"route_label",
-		"ga-atvk13",
-		"rather than adding a matching scale_check",
+		workQueryOnlyRemedyMarker,
+		"review the work_query override",
+		"do not narrow scale_check",
 	} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("Details[0] = %q, want to contain %q", detail, want)
+		}
+	}
+	assertNoUnavailableAdvice(t, detail)
+}
+
+// workQueryOnlyRemedyMarker is the phrase that identifies the work_query-only
+// remedy: aligning a custom work_query with the default routed-work probe
+// using keys that exist today.
+const workQueryOnlyRemedyMarker = "default routed-work probe"
+
+// assertNoUnavailableAdvice fails when a warning recommends config that the
+// current tree cannot honor. route_label / route_label_any do not exist in
+// config.Agent yet, so naming them (or the ga-atvk13 migration that adds
+// them) sends the operator to a key the loader rejects. The message must also
+// not imply that a matching scale_check holds a cold named seat at zero: the
+// reconciler still probes routed work (FR-S0.1).
+func assertNoUnavailableAdvice(t *testing.T, detail string) {
+	t.Helper()
+	for _, banned := range []string{"route_label", "route_label_any", "ga-atvk13", "at zero"} {
+		if strings.Contains(detail, banned) {
+			t.Fatalf("Details[0] = %q, must not contain %q: that advice is unusable on this tree", detail, banned)
 		}
 	}
 }
@@ -111,15 +131,18 @@ func TestScaleCheckWorkQueryCorrespondenceCheckWarnsForScaleCheckOnly(t *testing
 			t.Fatalf("Details[0] = %q, want to contain %q", detail, want)
 		}
 	}
-	// The route_label remedy is only a safe direction for the work_query-only
-	// case (ga-f57vc7): narrowing scale_check to match a raw work_query
+	// The review/align remedy is only established for the work_query-only
+	// direction (ga-f57vc7): narrowing scale_check to match a raw work_query
 	// override silently strands routed-but-unlabelled beads instead of
-	// noisily churning them. No equivalent safe remedy is established for
-	// the scale_check-only mirror case, so this message must stay generic
-	// rather than asymmetrically implying one.
-	if strings.Contains(detail, "route_label") {
-		t.Fatalf("Details[0] = %q, must not carry the work_query-only remedy wording for the scale_check-only case", detail)
+	// noisily churning them. No equivalent remedy is established for the
+	// scale_check-only mirror case, so this message must stay generic rather
+	// than asymmetrically implying one.
+	for _, banned := range []string{workQueryOnlyRemedyMarker, "review the work_query override"} {
+		if strings.Contains(detail, banned) {
+			t.Fatalf("Details[0] = %q, must not carry the work_query-only remedy wording %q for the scale_check-only case", detail, banned)
+		}
 	}
+	assertNoUnavailableAdvice(t, detail)
 }
 
 func TestScaleCheckWorkQueryCorrespondenceCheckReportsOnlyOneSidedAgents(t *testing.T) {
