@@ -1505,7 +1505,8 @@ func runProviderOwnedScopeRootsLifecycleOp(parent context.Context, cityPath stri
 }
 
 // recoverUnhealthyProviderOwnedScopes recovers only the scopes whose health
-// failed and then re-checks only those that it recovered. Every started
+// failed, the scope that has waited longest since its last recover first, and
+// then re-checks only those that it recovered. Every started
 // recover, whether it failed or succeeded, gets its confirming probe. It
 // returns the joined error of whatever is still unhealthy, including a scope
 // whose recover failed or whose recovery was skipped by its cooldown or the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -156,16 +157,63 @@ func providerScopeRecoverSkipReason(scopeRoot string, started int, fan *provider
 	return ""
 }
 
+// providerScopeRecoverClaim serializes claimProviderScopeRecover so that a
+// scope's cooldown check and its stamp are one step. It is held only around
+// that check and stamp, never across an op, I/O or a semaphore.
+var providerScopeRecoverClaim sync.Mutex
+
+// claimProviderScopeRecover decides whether scopeRoot may start a recover now
+// and, if so, claims it. It returns "" and stamps the scope with the recover's
+// start time, or returns the skip reason (see providerScopeRecoverSkipReason)
+// and leaves the stamp untouched, so a skipped scope neither starts a recover
+// nor has its cooldown refreshed. Concurrent callers for one scope cannot all
+// pass: the first stamps, the rest see its cooldown.
+func claimProviderScopeRecover(scopeRoot string, started int, fan *providerFanOut) string {
+	providerScopeRecoverClaim.Lock()
+	defer providerScopeRecoverClaim.Unlock()
+	if reason := providerScopeRecoverSkipReason(scopeRoot, started, fan); reason != "" {
+		return reason
+	}
+	lastProviderScopeRecover.Store(normalizePathForCompare(scopeRoot), providerRecoverNow())
+	return ""
+}
+
+// longestWaitingFirst returns a copy of scopes ordered for recovery: a scope
+// never recovered first, then the others by the start time of their last
+// recover, oldest first. Scopes that tie keep their order in scopes. Each
+// scope's stamp is read once, so the order cannot change mid-sort.
+func longestWaitingFirst(scopes []string) []string {
+	type waiting struct {
+		scopeRoot string
+		last      time.Time // zero: never recovered
+	}
+	ordered := make([]waiting, len(scopes))
+	for i, scopeRoot := range scopes {
+		ordered[i].scopeRoot = scopeRoot
+		if v, ok := lastProviderScopeRecover.Load(normalizePathForCompare(scopeRoot)); ok {
+			ordered[i].last, _ = v.(time.Time)
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].last.Before(ordered[j].last) })
+	out := make([]string, len(ordered))
+	for i, w := range ordered {
+		out[i] = w.scopeRoot
+	}
+	return out
+}
+
 // startProviderOwnedRecovers runs recover on each unhealthy scope that may be
-// recovered now. It returns the scopes it started and an error naming every
-// scope it skipped or that failed to recover.
+// recovered now, the scope that has waited longest since its last recover
+// first, so the one budget-exempt recover of a call and the budget that
+// follows go to a different scope on each call. It returns the scopes it
+// started and an error naming every scope it skipped or that failed to
+// recover.
 func startProviderOwnedRecovers(ctx context.Context, cityPath string, unhealthy []string, fan *providerFanOut) (started []string, skips, failures []error) {
-	for _, scopeRoot := range unhealthy {
-		if reason := providerScopeRecoverSkipReason(scopeRoot, len(started), fan); reason != "" {
+	for _, scopeRoot := range longestWaitingFirst(unhealthy) {
+		if reason := claimProviderScopeRecover(scopeRoot, len(started), fan); reason != "" {
 			skips = append(skips, fmt.Errorf("provider-owned scope %q recovery skipped (%s)", scopeRoot, reason))
 			continue
 		}
-		lastProviderScopeRecover.Store(normalizePathForCompare(scopeRoot), providerRecoverNow())
 		started = append(started, scopeRoot)
 		if err := runProviderOwnedScopeLifecycleOpContext(ctx, cityPath, scopeRoot, "recover"); err != nil {
 			failures = append(failures, fmt.Errorf("provider-owned scope %q recover: %w", scopeRoot, err))
