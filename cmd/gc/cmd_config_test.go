@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -112,6 +117,84 @@ func TestConfigShowValidateJSONReturnsNonzeroForInvalidConfig(t *testing.T) {
 		t.Fatalf("validation payload = %+v, want ok=false with errors", payload.Validation)
 	}
 	validateConfigShowJSONSchema(t, stdout.Bytes())
+}
+
+// A city-scoped agent with its own mcp/ catalog conflicts with the implicit
+// agent of its provider at the city root, so gc start refuses the city
+// (#8267). gc config show --validate reports the same conflict before start,
+// naming the agent-local directory, the implicit agent, and a remedy. The
+// provider's family resolves from config, so a provider executable this host
+// lacks cannot hide the conflict from validation.
+func TestConfigShowValidateReportsImplicitAgentLocalMCPConflict(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{name: "provider command resolvable", command: "echo"},
+		{name: "provider command absent", command: "gc-no-such-provider-command"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			if tt.command != "echo" {
+				if _, err := exec.LookPath(tt.command); err == nil {
+					t.Fatalf("%s resolves on this host; pick a command LookPath cannot find", tt.command)
+				}
+			}
+			cityDir := t.TempDir()
+			t.Chdir(cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			writeProjectedMCPCity(t, cityDir, fmt.Sprintf(`
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = %q
+prompt_mode = "none"
+`, tt.command))
+			writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+scope = "city"
+`)
+			writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+			cfg, err := loadCityConfig(cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			if _, startErr := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard); startErr == nil {
+				t.Fatal("buildStage1MCPTargets: want the MCP target conflict gc start refuses, got nil")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc config show --validate = 0, want nonzero: gc start refuses this city; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "Config valid.") {
+				t.Fatalf("stdout = %q, want no Config valid. line", stdout.String())
+			}
+			mcpDir := filepath.Join(cityDir, "agents", "worker", "mcp")
+			for _, want := range []string{
+				"MCP target conflict",
+				mcpDir,
+				`"worker" defines an agent-local MCP catalog`,
+				`the implicit agent for provider "claude"`,
+				`give "worker" its own work_dir`,
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
+	}
 }
 
 func validateConfigShowJSONSchema(t *testing.T, data []byte) {

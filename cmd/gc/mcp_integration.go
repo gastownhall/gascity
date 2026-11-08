@@ -264,6 +264,19 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 	return set.targets, err
 }
 
+// validateStage1MCPTargets checks the shared-target rule gc start enforces
+// at stage 1 — every agent claiming one provider-native target must project
+// the same payload — without projecting anything: work dirs resolve without
+// being created, and no target, marker, or .gitignore entry is written. It
+// reads config only, so it reports the conflict on a host whose provider
+// executable is missing too, where gc start instead skips that provider's
+// agents. Stage-1 skip warnings are not printed: stderr is nil, so the
+// once-per-process warning state a later stage-1 pass uses stays untouched.
+func validateStage1MCPTargets(cityPath string, cfg *config.City) error {
+	_, err := collectStage1MCPTargets(cityPath, cfg, resolveAnyProviderBinary, nil, true)
+	return err
+}
+
 // heldStage1MCPKey returns the managed key of the stage-1 target a skipped
 // agent would reconcile: set when its provider family has an MCP projection
 // and its work dir is its scope root. The family resolves from config alone,
