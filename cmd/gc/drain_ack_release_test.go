@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -497,5 +498,45 @@ func TestKilledSeatReadsWorkStarted(t *testing.T) {
 				t.Errorf("%s via %s: B1 outcome %+v; want the claim kept as started", record, name, out)
 			}
 		}
+	}
+}
+
+// TestDrainAckKeepsAClaimTheCheckedWriterRecorded (AC-2 for ga-6eefx8,
+// #8313): on the default topology's session store (auto mode, no conditional
+// writer — the pinned bd), the hook's started write has only the checked
+// path. A claim it records there is started evidence the seat's own
+// drain-ack refuses over: the ack is refused naming the claim, and nothing
+// is released.
+func TestDrainAckKeepsAClaimTheCheckedWriterRecorded(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	started := mustCreateDrainAckBead(t, work, beads.Bead{Title: "started", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	mem.DisableConditionalWrites = true
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Create(sessionRow("sess-1", "session_name", "worker-1", "template", "worker", "state", "active", "generation", "7", "instance_token", "tok-1")); err != nil {
+		t.Fatal(err)
+	}
+	front := session.NewStore(beads.SessionStore{Store: mem})
+	res, err := recordWorkStarted(front, "sess-1", hookStartedFence{Token: "tok-1", Gen: 7, HasGen: true},
+		hookStartedKey{Store: "city", Bead: started.ID}, session.WorkStartedViaClaim, time.Date(2026, 11, 2, 14, 0, 0, 0, time.UTC))
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("record on the no-writer store = %v, %v; want (recorded, nil)", res, err)
+	}
+	seat, err := mem.Get("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	held := releaseDrainAckClaims(testWorkLegs("", servingCity("worker"), work, nil), seat, true, drainAckReleaseBudget, &stderr)
+	if len(held) != 1 || held[0] != started.ID {
+		t.Fatalf("held %v; want the recorded claim %s, so the ack is refused (stderr=%s)", held, started.ID, stderr.String())
+	}
+	if status, assignee := drainAckBeadStatus(t, work, started.ID); status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("recorded claim is %s/%q; want it kept on the seat", status, assignee)
 	}
 }
