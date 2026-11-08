@@ -434,6 +434,7 @@ func TestCorePackClaimTextTreatsFailedClaimAsHeld(t *testing.T) {
 	for _, path := range []string{
 		"skills/gc-work/SKILL.md",
 		"overlay/per-provider/copilot/.github/copilot-instructions.md",
+		"overlay/per-provider/kiro/AGENTS.md",
 	} {
 		data, err := fs.ReadFile(PackFS, path)
 		if err != nil {
@@ -464,6 +465,13 @@ func TestCorePackClaimTextTreatsFailedClaimAsHeld(t *testing.T) {
 		// the routed-pickup texts must point at the one-step claim.
 		if name != doWorkName && !strings.Contains(flat, "gc hook --claim") {
 			t.Errorf("%s must name gc hook --claim (find and claim one routed item in a single step)", name)
+		}
+		// Plain gc hook only lists routed work. Saying it claims sends the
+		// agent to work a bead it never claimed, with no assignee or lease.
+		for _, banned := range []string{"run `gc hook` to check for and claim", "`gc hook` — check for and claim"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s says plain gc hook claims work (%q); only gc hook --claim claims", name, banned)
+			}
 		}
 	}
 	// Step 3 of mol-do-work records gc.work_outcome on the work bead and closes
