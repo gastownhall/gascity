@@ -418,8 +418,10 @@ func TestProcessAliveHasOneDeadlineAcrossItsProbeLoop(t *testing.T) {
 		if elapsed > testRequestBound {
 			t.Fatalf("ProcessAlive took %v, want one %v bound over the whole loop", elapsed, testRequestBound)
 		}
-		if ops.cutCount() != 1 {
-			t.Fatalf("cut calls = %d, want exactly the second probe", ops.cutCount())
+		// The second probe is cut at the bound; the third finds the ctx already
+		// ended and fails at once, so at least one call, not exactly one.
+		if ops.cutCount() == 0 {
+			t.Fatal("no probe was cut by the ctx: the test is vacuous")
 		}
 	})
 }
