@@ -58,6 +58,10 @@ var Default = Config{
 		// T5a: a molecule's store, graph or work class, built only from those
 		// handles (beads.GraphMolecule, beads.WorkMolecule).
 		beads + ".MoleculeTarget",
+		// T7a: a federation's handles, minted by storeref's executors: the
+		// by-id owner or a write-sweep leg, and a read-only leg.
+		beads + ".ResidentStore",
+		beads + ".FederatedReader",
 	},
 	UnwrapMethods: []string{"Raw", "ConditionalWritesResolveTarget"},
 	AsFuncs:       []string{beads + ".As"},
@@ -66,7 +70,12 @@ var Default = Config{
 	// handles or class stores, so they are mints too: outside storeref only
 	// the router's cmd/gc file calls them (its Allow entry below); any other
 	// call is a baseline row.
-	MintFuncs: []string{beads + ".MintClassStores", storeref + ".NewStores", storeref + ".Place"},
+	// The leg mints (T7a) are the residency layer's too: storeref's executors
+	// mint a plan's legs and owners, beadstest a test's.
+	MintFuncs: []string{
+		beads + ".MintClassStores", storeref + ".NewStores", storeref + ".Place",
+		beads + ".MintFederatedLeg", beads + ".MintRelicLeg", beads + ".MintResident", beads + ".MintResidentLeg",
+	},
 	// The storeref types that carry raw stores: the mint's inputs (a Leg or a
 	// Topology would otherwise launder any store into NewStores uncounted) and
 	// the plan executors' outputs (an Owner's or a plan leg's store).
@@ -84,6 +93,9 @@ var Default = Config{
 		beads + "/beadstest",
 		beads + "/splittest",
 	},
+	// The read side the beads read helpers take: an assertion on one is an
+	// assertion on the store it holds.
+	StoreReaders: []string{beads + ".StoreReader"},
 	// D9: the split-strict gate's markers (#8335) are frozen. A call site
 	// lands only as a reviewed baseline row, and as an entry in the gate's
 	// own reviewedMarkers table (the package doc's two ledgers); T7 replaces

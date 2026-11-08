@@ -57,6 +57,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/fsys",
+        "//internal/rollout/gate",
         "//internal/testenv",
     ],
 )

@@ -152,6 +152,12 @@ type Fake struct {
 	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
 	// screen that cannot be captured does.
 	ScreenReadErrors map[string]error
+	// HeldOpen are the files a FullFake's HeldFiles names by session name,
+	// as the files a running session's process tree holds open.
+	HeldOpen map[string][]string
+	// HeldOpenErrors fail a FullFake's HeldFiles by session name, as a
+	// process tree that cannot be read does.
+	HeldOpenErrors map[string]error
 	// PaneActivity is the activity a FullFake's FreshActivity reads by
 	// session name, the session's own clock where it has moved past the
 	// Activity that GetLastActivity serves, as a pane that drew after the

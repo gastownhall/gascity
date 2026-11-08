@@ -15,9 +15,9 @@
 //   - unwrap: a handle's embedded store read back (.Store, through any
 //     embedding) or an unwrap method (Raw) named;
 //   - cap-assert: a type assertion or type switch on a store value (a
-//     beads.Store, an interface that is one, or a store, concrete store or
-//     handle boxed by a conversion): use beads.As or an XFor helper, which
-//     see through the handle;
+//     beads.Store, an interface that is one, a beads.StoreReader, or a store,
+//     concrete store or handle boxed by a conversion): use beads.As or an
+//     XFor helper, which see through the handle;
 //   - test-mint-import: production code importing a test-only minting
 //     package;
 //   - read-marker: a federated or relic read marker named (D9 freezes them:
@@ -232,6 +232,7 @@ type Config struct {
 	MintFuncs        []string // functions that mint handles
 	RawCarriers      []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
 	TestMintPackages []string // packages production code may not import
+	StoreReaders     []string // read interfaces a store passes as (beads.StoreReader): an assertion on one is on a store
 	Markers          []string // federated/relic read marker functions
 	Allow            []Allow
 	Sealed           []string    // module-relative packages with no baseline
@@ -837,7 +838,7 @@ func (c *checker) isConcreteStore(t *types.Named) bool {
 func (c *checker) isStoreValue(x ast.Expr) bool {
 	info := c.pass.TypesInfo
 	t := info.TypeOf(x)
-	if c.isStore(t) {
+	if c.isStore(t) || t != nil && slices.Contains(c.cfg.StoreReaders, fullName(t)) {
 		return true
 	}
 	if t != nil && c.storeIface != nil {

@@ -211,7 +211,6 @@ cmd/gc/build_desired_state.go	poolCreateView	raw-field	2
 cmd/gc/build_desired_state.go	readyAssignedWorkAssignees	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache	raw-field	2
 cmd/gc/build_desired_state.go	readyDemandCache.cachedSnapshot	raw-param	1
-cmd/gc/build_desired_state.go	readyDemandCache.controllerDemandReady	cap-assert	1
 cmd/gc/build_desired_state.go	readyDemandCache.controllerDemandReady	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache.entry	raw-param	2
 cmd/gc/build_desired_state.go	readyDemandCache.gateSnapshot	raw-param	1
@@ -220,7 +219,6 @@ cmd/gc/build_desired_state.go	readyDemandCache.liveSnapshot	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache.storeLabel	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache.withCrossStoreGate	raw-param	2
 cmd/gc/build_desired_state.go	readyForControllerDemand	raw-param	1
-cmd/gc/build_desired_state.go	readyForControllerDemandQuery	cap-assert	1
 cmd/gc/build_desired_state.go	readyForControllerDemandQuery	raw-param	1
 cmd/gc/build_desired_state.go	refreshDesiredStateWithSessionBeads	raw-param	1
 cmd/gc/build_desired_state.go	repairControlDispatcherRoutesForStoreScope	raw-param	1
@@ -933,9 +931,7 @@ cmd/gc/error_store.go	_	raw-var	1
 cmd/gc/execution_backstop.go	clearExecutionClaimMarker	raw-param	1
 cmd/gc/execution_backstop.go	executionClaim	raw-field	1
 cmd/gc/execution_backstop.go	newExecutionClaimSnapshot	raw-param	1
-cmd/gc/execution_backstop.go	nudgeStalledPoolExecution	cap-assert	1
 cmd/gc/execution_backstop.go	nudgeStalledPoolExecution	raw-param	2
-cmd/gc/execution_backstop.go	nudgeStalledPoolExecution	unwrap	1
 cmd/gc/execution_backstop.go	poolExecutionBackstop	raw-field	1
 cmd/gc/execution_backstop.go	poolExecutionBackstop.clear	raw-param	1
 cmd/gc/execution_backstop.go	poolExecutionBackstop.clearHold	raw-param	1
@@ -970,12 +966,8 @@ cmd/gc/idle_nudge.go	clearClaimHold	raw-param	1
 cmd/gc/idle_nudge.go	clearContinuationClaimMarker	raw-param	1
 cmd/gc/idle_nudge.go	clearIdleClaimLatch	raw-param	1
 cmd/gc/idle_nudge.go	clearIdleClaimMarker	raw-param	1
-cmd/gc/idle_nudge.go	nudgeStalledPoolClaims	cap-assert	1
 cmd/gc/idle_nudge.go	nudgeStalledPoolClaims	raw-param	1
-cmd/gc/idle_nudge.go	nudgeStalledPoolClaims	unwrap	1
-cmd/gc/idle_nudge.go	nudgeStalledPoolContinuations	cap-assert	1
 cmd/gc/idle_nudge.go	nudgeStalledPoolContinuations	raw-param	1
-cmd/gc/idle_nudge.go	nudgeStalledPoolContinuations	unwrap	1
 cmd/gc/idle_nudge.go	observeClaimHold	raw-param	1
 cmd/gc/idle_nudge.go	poolClaimBackstop.clear	raw-param	1
 cmd/gc/idle_nudge.go	poolClaimBackstop.clearHold	raw-param	1
