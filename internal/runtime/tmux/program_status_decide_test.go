@@ -21,8 +21,8 @@ type decidedStartOps struct {
 	tm *Tmux
 }
 
-func (o decidedStartOps) programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
-	return o.tm.programStartupLadder(name, send, busy)
+func (o decidedStartOps) programStartupLadder(name string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.programStartupLadder(name, arm, send, busy)
 }
 
 func (o decidedStartOps) handBackStartupNudge(name, nudge string) { o.tm.handbacks.set(name, nudge) }
@@ -45,12 +45,22 @@ type startupRun struct {
 	handed   bool
 }
 
+// decidingStartupArm is the arm of a start whose provider opts the startup
+// ladder into deciding with the record (program_status decide_startup).
+var decidingStartupArm = runtime.ProgramStatusArm{Capture: true, DecideStartup: true}
+
 func runStartupLadder(t *testing.T, mode runtime.ProgramStatusMode, sends []error, rows func(n int) string) startupRun {
+	t.Helper()
+	return runStartupLadderArmed(t, mode, decidingStartupArm, sends, rows)
+}
+
+// runStartupLadderArmed is runStartupLadder for a start carrying arm.
+func runStartupLadderArmed(t *testing.T, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, sends []error, rows func(n int) string) startupRun {
 	t.Helper()
 	fastStartupLadder(t)
 	tm, ex := holdTmux(mode, &fakeExecutor{}, rows)
 	ops := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(sends)}
-	cfg := runtime.Config{Command: "claude", Nudge: "start working"}
+	cfg := runtime.Config{Command: "claude", Nudge: "start working", ProgramStatus: arm}
 	err := doStartSession(context.Background(), decidedStartOps{ops, tm}, "s", cfg, DefaultConfig().SetupTimeout)
 	nudge, handed := tm.handbacks.take("s")
 	return startupRun{err: err, ops: ops, reads: ex.holdReads(), handback: nudge, handed: handed}
@@ -72,9 +82,9 @@ func (r startupRun) count(method string) int {
 func startupRows(base, later string) func(int) string {
 	return func(n int) string {
 		if n == 0 {
-			return holdPaneRow(base, "", 0)
+			return settlingPaneRow(base)
 		}
-		return holdPaneRow(later, "", 0)
+		return settlingPaneRow(later)
 	}
 }
 
@@ -96,6 +106,41 @@ func TestStartupLadderConfirmsOnATurnStartPastTheBaseline(t *testing.T) {
 		if got.err != nil || got.count("sendKeys") != 2 || got.reads != 0 {
 			t.Fatalf("%s: err %v, calls %v, %d reads; want the scan's ladder (two sends) and no read", mode, got.err, got.ops.callMethods(), got.reads)
 		}
+	}
+}
+
+// Kills a startup ladder that decides with the record for a provider that
+// did not opt into it (program_status decide_startup unset): under on, a
+// start whose arm declares capture (and the hold) but not the startup
+// decision runs the scan's ladder exactly as under off. It reads no record,
+// re-sends a nudge the scan could not confirm though the record shows the
+// turn start, types into a dialog the record reports, and hands nothing
+// back.
+func TestStartupLadderUndeclaredDecidesAsOff(t *testing.T) {
+	idle := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince)
+	started := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 2 })
+	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 2 })
+	undecided := runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true, DecideSettle: true}
+	for name, c := range map[string]struct {
+		sends []error
+		rows  func(int) string
+	}{
+		"turn start":     {[]error{ErrNudgeSubmitUnconfirmed, nil}, startupRows(idle, started)},
+		"blocked record": {[]error{ErrNudgeSubmitUnconfirmed, nil}, startupRows(idle, blocked)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			off := runStartupLadderArmed(t, runtime.ProgramStatusOff, undecided, c.sends, c.rows)
+			on := runStartupLadderArmed(t, runtime.ProgramStatusOn, undecided, c.sends, c.rows)
+			if on.err != nil || off.err != nil {
+				t.Fatalf("start failed: on %v, off %v", on.err, off.err)
+			}
+			if !slices.Equal(on.ops.callMethods(), off.ops.callMethods()) {
+				t.Fatalf("on calls %v, off calls %v; want the scan's ladder unchanged", on.ops.callMethods(), off.ops.callMethods())
+			}
+			if on.count("sendKeys") != 2 || on.reads != 0 || on.handed {
+				t.Fatalf("on: %d sends, %d reads, handed back %v; want the scan's two sends, no read, nothing handed back", on.count("sendKeys"), on.reads, on.handed)
+			}
+		})
 	}
 }
 
@@ -166,11 +211,11 @@ func TestStartupLadderBlockedHoldIsLiveOnly(t *testing.T) {
 		rows := func(n int) string {
 			switch {
 			case n == 0:
-				return holdPaneRow(idle, "", 0)
+				return settlingPaneRow(idle)
 			case n <= 2:
-				return holdPaneRow(blocked, "", 0)
+				return settlingPaneRow(blocked)
 			}
-			return holdPaneRow(answered, "", 0)
+			return settlingPaneRow(answered)
 		}
 		got := runStartupLadder(t, runtime.ProgramStatusOn, nil, rows)
 		if got.err != nil || got.count("sendKeys") != 1 || got.handed {
@@ -226,9 +271,9 @@ func TestInterruptSettleEndsAtTheFirstBoundaryPastTheBaseline(t *testing.T) {
 	stopped := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 5, 1, time.Now() })
 	rows := func(n int) string {
 		if n < 2 {
-			return holdPaneRow(working, "", 0)
+			return settlingPaneRow(working)
 		}
-		return holdPaneRow(stopped, "", 0)
+		return settlingPaneRow(stopped)
 	}
 	on, onEx := settleTmux(t, runtime.ProgramStatusOn, rows)
 	start := time.Now()
@@ -257,7 +302,7 @@ func TestInterruptSettleEndsAtTheFirstBoundaryPastTheBaseline(t *testing.T) {
 	}
 
 	t.Run("record not moved since the interrupt", func(t *testing.T) {
-		tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(int) string { return holdPaneRow(working, "", 0) })
+		tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(int) string { return settlingPaneRow(working) })
 		if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
 			t.Fatalf("WaitForIdle = %v; want no settle on an unmoved working record", err)
 		}
@@ -266,9 +311,9 @@ func TestInterruptSettleEndsAtTheFirstBoundaryPastTheBaseline(t *testing.T) {
 		other := psRecord(t, "0th3r.%1", runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 9 })
 		tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
 			if n == 0 {
-				return holdPaneRow(working, "", 0)
+				return settlingPaneRow(working)
 			}
-			return holdPaneRow(other, "", 0)
+			return settlingPaneRow(other)
 		})
 		if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
 			t.Fatalf("WaitForIdle = %v; want no settle on another incarnation's record", err)
@@ -285,9 +330,9 @@ func TestInterruptSettleBlockedIsNotSettled(t *testing.T) {
 	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
 	tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
 		if n == 0 {
-			return holdPaneRow(working, "", 0)
+			return settlingPaneRow(working)
 		}
-		return holdPaneRow(blocked, "", 0)
+		return settlingPaneRow(blocked)
 	})
 	err := tm.WaitForIdle(context.Background(), "s", 5*time.Second)
 	if !errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, ErrIdleTimeout) {
@@ -299,9 +344,9 @@ func TestInterruptSettleBlockedIsNotSettled(t *testing.T) {
 	})
 	tm, _ = settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
 		if n == 0 {
-			return holdPaneRow(working, "", 0)
+			return settlingPaneRow(working)
 		}
-		return holdPaneRow(stale, "", 0)
+		return settlingPaneRow(stale)
 	})
 	if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
 		t.Fatalf("stale blocked: WaitForIdle = %v; want the scan's timeout", err)
@@ -314,7 +359,7 @@ func TestInterruptSettleBlockedIsNotSettled(t *testing.T) {
 func TestDecisionReadIsFreshAndOnOnly(t *testing.T) {
 	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince)
 	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusOff, runtime.ProgramStatusShadow} {
-		tm, ex := holdTmux(mode, &fakeExecutor{}, func(int) string { return holdPaneRow(working, "", 0) })
+		tm, ex := holdTmux(mode, &fakeExecutor{}, func(int) string { return settlingPaneRow(working) })
 		if _, ok := tm.programDecide("s"); ok || ex.holdReads() != 0 {
 			t.Fatalf("%s: decided with %d reads; want nothing read", mode, ex.holdReads())
 		}
@@ -358,9 +403,9 @@ func TestStartupLadderBlockedAfterTypingIsDeliveredUnobserved(t *testing.T) {
 	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 2 })
 	rows := func(n int) string {
 		if n < 2 {
-			return holdPaneRow(idle, "", 0)
+			return settlingPaneRow(idle)
 		}
-		return holdPaneRow(blocked, "", 0)
+		return settlingPaneRow(blocked)
 	}
 	got := runStartupLadder(t, runtime.ProgramStatusOn, []error{ErrNudgeSubmitUnconfirmed}, rows)
 	if got.err != nil {
@@ -381,17 +426,49 @@ func TestInterruptSettleUnmovedBlockedBaselineIsTheScans(t *testing.T) {
 	cleared := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 6, 1, time.Now() })
 	tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
 		if n < 3 {
-			return holdPaneRow(dialog, "", 0)
+			return settlingPaneRow(dialog)
 		}
-		return holdPaneRow(cleared, "", 0)
+		return settlingPaneRow(cleared)
 	})
 	if err := tm.WaitForIdle(context.Background(), "s", 5*time.Second); err != nil {
 		t.Fatalf("WaitForIdle = %v; want settled once the interrupt cleared the dialog", err)
 	}
-	tm, _ = settleTmux(t, runtime.ProgramStatusOn, func(int) string { return holdPaneRow(dialog, "", 0) })
+	tm, _ = settleTmux(t, runtime.ProgramStatusOn, func(int) string { return settlingPaneRow(dialog) })
 	err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond)
 	if !errors.Is(err, ErrIdleTimeout) || errors.Is(err, runtime.ErrPendingInteraction) {
 		t.Fatalf("WaitForIdle = %v; want the scan's timeout, no pending interaction from the baseline's own record", err)
+	}
+}
+
+// Kills an interrupt settle that decides with the record on a pane whose
+// provider did not opt into it (no settle declaration bound to the pane, or
+// one inherited from an outer scope naming another pane): under on, a
+// dialog the record reports after the interrupt ends nothing, and a
+// boundary the record reports past the baseline settles nothing; the scan
+// alone decides, as under off. The hold declaration does not stand in for
+// the settle's.
+func TestInterruptSettleUndeclaredPaneDecidesAsOff(t *testing.T) {
+	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 4 })
+	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
+	stopped := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 5, 1, time.Now() })
+	for _, settle := range []string{"", "%9"} {
+		for name, later := range map[string]string{"dialog": blocked, "boundary": stopped} {
+			t.Run(name+" settle="+settle, func(t *testing.T) {
+				tm, ex := holdTmux(runtime.ProgramStatusOn, &paneScriptExecutor{captures: []scriptedCapture{{out: busyPane}}}, func(n int) string {
+					if n == 0 {
+						return declaredPaneRow(working, "%1", settle, 0)
+					}
+					return declaredPaneRow(later, "%1", settle, 0)
+				})
+				tm.noteProgramInterrupt("s")
+				if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+					t.Fatalf("WaitForIdle = %v; want the scan's timeout", err)
+				}
+				if n := ex.holdReads(); n != 1 {
+					t.Fatalf("%d record reads; want only the note's own, which finds no declaration", n)
+				}
+			})
+		}
 	}
 }
 
@@ -400,7 +477,7 @@ func TestInterruptSettleUnmovedBlockedBaselineIsTheScans(t *testing.T) {
 // decision read.
 func TestInterruptSettleNoteExpires(t *testing.T) {
 	stopped := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
-	tm, ex := holdTmux(runtime.ProgramStatusOn, &paneScriptExecutor{captures: []scriptedCapture{{out: busyPane}}}, func(int) string { return holdPaneRow(stopped, "", 0) })
+	tm, ex := holdTmux(runtime.ProgramStatusOn, &paneScriptExecutor{captures: []scriptedCapture{{out: busyPane}}}, func(int) string { return settlingPaneRow(stopped) })
 	baseline := runtime.ProgramBaseline{Nonce: holdNonce, Seq: 4, State: runtime.ProgramWorking}
 	tm.keepInterrupt("s", shadowInterrupt{baseline: baseline, at: time.Now().Add(-programInterruptWindow - time.Second)})
 	if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
@@ -458,9 +535,9 @@ func dialogAfterTheEscape(t *testing.T) func(pressed []string) string {
 	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
 	return func(pressed []string) string {
 		if slices.Contains(pressed, "key:Escape") {
-			return holdPaneRow(blocked, "", 0)
+			return settlingPaneRow(blocked)
 		}
-		return holdPaneRow(working, "", 0)
+		return settlingPaneRow(working)
 	}
 }
 

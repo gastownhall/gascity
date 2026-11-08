@@ -132,8 +132,8 @@ func (p programPane) ownNonce() bool {
 //     opened in between is never replaced; an open pipe that is not ours, or
 //     ours with its tap gone from the process table (tmux closes it at the
 //     pane's next output), is deferred; our live tap writing a codec this gc
-//     does not read is replaced; a healthy capture of ours whose hold
-//     declaration differs from want's has it set or withdrawn (declared),
+//     does not read is replaced; a healthy capture of ours whose hold or
+//     settle declaration differs from want's has both converged (declared),
 //     guarded by its nonce; anything else is unchanged.
 //   - want declares nothing: a pane carrying our nonce is disarmed by
 //     disarmPipe's rule (its pipe closed only when the process table shows
@@ -184,9 +184,9 @@ func (p *Provider) HealProgramCapture(name string, want runtime.ProgramStatusArm
 				})
 			}
 		}
-		if pane.holdDeclared() != want.HoldMidTurn {
+		if pane.holdDeclared() != want.HoldMidTurn || pane.settleDeclared() != want.DecideSettle {
 			return p.healAct(pane, runtime.ProgramCaptureDeclared, func() (bool, error) {
-				return true, p.tm.declareHold(pane, want.HoldMidTurn)
+				return true, p.tm.declarePane(pane, want)
 			})
 		}
 		return runtime.ProgramCaptureUnchanged, nil

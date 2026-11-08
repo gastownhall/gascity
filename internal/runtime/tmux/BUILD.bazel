@@ -149,6 +149,7 @@ go_test(
         "program_status_pending_integration_test.go",
         "program_status_pending_test.go",
         "program_status_read_test.go",
+        "program_status_settle_test.go",
         "program_status_shadow_nudge_test.go",
         "program_status_shadow_test.go",
         "program_tap_pending_test.go",
