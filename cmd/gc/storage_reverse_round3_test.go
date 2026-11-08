@@ -307,6 +307,33 @@ func TestReverseRefusesAPayloadEdgeItCouldNotPutBack(t *testing.T) {
 	if !hasEdge(t, city.source, w, d) {
 		t.Fatal("the edge pass removed an edge it could not write back")
 	}
+
+	// The abort's pre-check: a preserved payload edge the store cannot put
+	// back refuses the abort before any row is deleted.
+	reverseTargetOpener = prev
+	late := newReverseEngineCity(t, 300, "")
+	closeBindingGates(t, late)
+	lw, ld := withOldClearEdge(t, late)
+	lateUnder, _, _ := unwrapBeadPolicyStore(late.source)
+	if err := lateUnder.(beads.DepMetadataWriter).DepAddWithMetadata(lw, ld, "waits-for", `{"gate":"all-children"}`); err != nil {
+		t.Fatal(err)
+	}
+	killReverseAt(t, late, "reverse phase "+reversePhaseName(reverseR2))
+	before := workStoreFingerprint(t, late.source)
+	reverseTargetOpener = func(cityPath string, cfg *config.City, dest string) (*reverseTarget, error) {
+		target, err := openReverseTarget(cityPath, cfg, dest)
+		if err == nil {
+			target.carriesPayload = false
+		}
+		return target, err
+	}
+	code, _, stderr = late.abort(t)
+	if code == 0 || !strings.Contains(stderr, lw+" -[waits-for]-> "+ld) || !strings.Contains(stderr, "Nothing was removed") {
+		t.Fatalf("--abort-reverse over a payload edge the store could not put back = %d: %s", code, stderr)
+	}
+	if workStoreFingerprint(t, late.source) != before {
+		t.Fatal("the refused abort changed the work store")
+	}
 }
 
 // TestReverseVerifyCatchesADroppedRestoredEdge (M13): a fault that drops each
