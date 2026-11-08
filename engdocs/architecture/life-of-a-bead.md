@@ -112,8 +112,10 @@ A bead exists, but no agent knows about it yet. Discovery is how agents
 find work. Gas City uses the **pull model**: agents poll for available
 work rather than being pushed assignments. Routed agents normally discover
 work through the claim protocol rendered into the session startup prompt:
-the protocol calls `gc hook`, claims exactly one returned bead with
-`bd update --claim`, and then the agent works that claimed bead.
+the protocol runs `gc hook --claim --drain-ack --json`, which finds existing
+assigned work or atomically claims exactly one routed bead (or acknowledges a
+runtime drain when nothing is available), and then the agent works that
+claimed bead. Plain `gc hook` only lists routed work; it claims nothing.
 
 ### The hook mechanism (gc hook)
 
@@ -154,7 +156,7 @@ own store's failure is escalated as the session's work-query failure event.
 
 `gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without
 running the work query and emits no output. Routed discovery belongs in the
-session startup claim protocol or an explicit plain `gc hook` invocation.
+session startup claim protocol or an explicit `gc hook --claim` invocation.
 
 ### Ready() and the run-what-you-find rule
 
@@ -187,11 +189,15 @@ matching `pool:<name>` can pick it up.
 
 ### The claiming act
 
-For pool agents, claiming happens at the prompt level. The agent runs
-`bd update <id> --claim` (or equivalent) to set itself as assignee and
-transition the status from `open` to `in_progress`. This is not enforced
-by Gas City Go code -- it is prescribed in the agent's prompt template.
-The bd CLI handles the atomic compare-and-swap.
+For pool agents, `gc hook --claim` (`cmd/gc/cmd_hook_claim.go`), which the
+startup claim protocol runs, makes the claim. It claims one ready candidate
+through the store's `Claim()`. On a bd store that runs
+`bd update <id> --claim` with the session as the actor, which sets the
+session as assignee and moves the bead from `open` to `in_progress`. The
+bd CLI handles the atomic compare-and-swap, so when two sessions race for
+one bead only one claim wins. An agent that claims a bead by hand runs
+`bd update <id> --claim` itself. That claim fails when another agent
+already holds the bead, and the agent must then not work it.
 
 For fixed agents, the sling command already sets the assignee. The agent
 transitions status by running `bd update <id> --status=in_progress` (or
