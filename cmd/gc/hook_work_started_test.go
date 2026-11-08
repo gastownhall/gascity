@@ -1197,3 +1197,39 @@ func TestRecordWorkStartedOnPinnedBdSessionStore(t *testing.T) {
 		t.Fatalf("work_started = %q; want an entry naming work-1 at generation 7", ledger.bead.Metadata[session.WorkStartedKey])
 	}
 }
+
+// TestDrainAckRefusesAClaimStartedWithoutConditionalWrites (AC-2): the entry
+// the hook's checked write records on a legacy no-writer store is what the
+// drain-ack release pass reads: the seat's own ack is refused naming the
+// claim, and no claim is released, its unrecorded one included. Kills an
+// inert record, which lets the pass release the started claim.
+func TestDrainAckRefusesAClaimStartedWithoutConditionalWrites(t *testing.T) {
+	store := beads.NewMemStore()
+	store.DisableConditionalWrites = true
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	seat := mustCreateDrainAckBead(t, store, beads.Bead{
+		ID: "worker-1", Title: "city/worker-1", Type: session.BeadType,
+		Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "active", "generation": "7", "instance_token": "tok-1"},
+	}, "", "")
+	started := mustCreateDrainAckBead(t, store, beads.Bead{Title: "started", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+	unstarted := mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+	mode := &legacyMode{}
+	res, err := recordWorkStarted(session.NewStore(beads.SessionStore{Store: store}), seat.ID, hookStartedFence{Token: "tok-1", Gen: 7, HasGen: true},
+		hookStartedKey{Bead: started.ID}, session.WorkStartedViaClaim, time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), mode.casOnly)
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("recordWorkStarted = (%v, %v), want the claim recorded by the checked write", res, err)
+	}
+
+	var stderr bytes.Buffer
+	refusal := releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, "worker-1", drainAckCaller{}, &stderr)
+	if !strings.Contains(refusal, "this session holds "+started.ID) {
+		t.Fatalf("refusal %q, want the own ack refused naming %s", refusal, started.ID)
+	}
+	for _, id := range []string{started.ID, unstarted.ID} {
+		if status, assignee := drainAckBeadStatus(t, store, id); status != "in_progress" || assignee != "worker-1" {
+			t.Fatalf("claim %s is %s/%q; want it kept on the seat", id, status, assignee)
+		}
+	}
+}
