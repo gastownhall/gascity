@@ -1,6 +1,7 @@
 package t3bridge_gastown_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -68,6 +69,46 @@ func TestT3BridgeGastownExampleParses(t *testing.T) {
 	for _, want := range []string{"example/t3demo.witness", "example/t3demo.refinery"} {
 		if !slices.ContainsFunc(cfg.NamedSessions, func(s config.NamedSession) bool { return s.QualifiedName() == want }) {
 			t.Fatalf("missing named session %q; sessions=%v", want, namedSessionNames(cfg.NamedSessions))
+		}
+	}
+}
+
+// TestT3BridgeGastownPolecatsClaimWithHookClaim pins the polecat prompt and
+// nudge text to `gc hook --claim`. Plain `gc hook` only lists routed work, so
+// a polecat told that it claims can work a bead it never claimed, with no
+// assignee and no lease.
+func TestT3BridgeGastownPolecatsClaimWithHookClaim(t *testing.T) {
+	dir := exampleDir()
+	// flatten joins wrapped lines and folds case, so a phrase is found
+	// wherever the prose breaks it or a sentence starts with it.
+	flatten := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+	// The earlier wordings, each of which sent the polecat to plain `gc hook`
+	// for its work.
+	banned := []string{
+		"run `gc hook` to claim",
+		"run 'gc hook';",
+		"running `gc hook` if",
+		"run gc hook,",
+	}
+	for _, pack := range []string{"t3demo", "gastown"} {
+		for _, name := range []string{"prompt.template.md", "agent.toml"} {
+			path := filepath.Join(dir, "packs", pack, "agents", "polecat", name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			flat := flatten(string(data))
+			if !strings.Contains(flat, "gc hook --claim") {
+				t.Errorf("%s/%s: want the claim step to be `gc hook --claim`", pack, name)
+			}
+			for _, phrase := range banned {
+				if strings.Contains(flat, phrase) {
+					t.Errorf("%s/%s: describes plain gc hook as the claim step (%q)", pack, name, phrase)
+				}
+			}
+			if name == "prompt.template.md" && !strings.Contains(flat, "a failed claim means another agent holds that bead: do not work it") {
+				t.Errorf("%s/%s: missing the failed-claim rule", pack, name)
+			}
 		}
 	}
 }

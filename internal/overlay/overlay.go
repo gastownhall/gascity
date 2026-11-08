@@ -130,6 +130,14 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		dst := filepath.Join(dstBase, entryRel)
 		if preserveExisting != nil && preserveExisting(entryRel, dst) {
 			if _, err := os.Stat(dst); err == nil {
+				// A dst byte-identical to src already holds exactly what this
+				// overlay would stage, whichever writer put it there (typically
+				// gc's own Kiro AGENTS.md fallback from an earlier stage).
+				// Keeping it preserves nothing over the overlay, so skip it
+				// without a warning.
+				if sameFileBytes(src, dst) {
+					continue
+				}
 				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
 				continue
 			} else if !os.IsNotExist(err) {
@@ -142,6 +150,20 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		}
 	}
 	return nil
+}
+
+// sameFileBytes reports whether src and dst are both readable and hold
+// identical bytes. Any read error reports false.
+func sameFileBytes(src, dst string) bool {
+	srcData, err := os.ReadFile(src)
+	if err != nil {
+		return false
+	}
+	dstData, err := os.ReadFile(dst)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(srcData, dstData)
 }
 
 // SkipFunc reports whether a file or directory should be skipped during copy.

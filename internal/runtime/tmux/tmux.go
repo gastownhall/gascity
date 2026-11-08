@@ -541,6 +541,16 @@ type Tmux struct {
 	// heldCodexRollout; tests inject one so no live process table is read.
 	codexRolloutHeld func(panePID int) string
 
+	// paneHeldFiles returns the files the process tree rooted at a pane's
+	// PID holds open (see paneTreeHeldFiles). Nil selects paneTreeHeldFiles;
+	// tests inject one so no live process table is read.
+	paneHeldFiles func(panePID int) ([]string, error)
+
+	// heldFileOwned reports whether a held file is a regular file the
+	// current user owns (see ownedRegularFile), the only files HeldFiles
+	// names. Nil selects ownedRegularFile; tests inject one.
+	heldFileOwned func(path string) bool
+
 	// snapshotFailures rate-limits the log of the one-shot pane probes'
 	// failed process-table snapshots (see readProcessSnapshot).
 	snapshotFailures processSnapshotFailureLog

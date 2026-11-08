@@ -356,6 +356,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				return orderInapplicableBackend(cityPath, cfg, a)
 			})))
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
+		register(doctor.NewOrderDispatchFloorCheck(cfg, cityPath,
+			doctor.WithOrderDispatchFloorInapplicableFunc(func(a orders.Order) (string, bool) {
+				return orderInapplicableBackend(cityPath, cfg, a)
+			})))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))

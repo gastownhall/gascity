@@ -901,6 +901,7 @@ go_library(
         "//internal/storeref",
         "//internal/supervisor",
         "//internal/suspensionstate",
+        "//internal/tailfile",
         "//internal/telemetry",
         "//internal/testpolicy/resourcecensus",
         "//internal/transcriptmeta",
