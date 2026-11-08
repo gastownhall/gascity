@@ -10,7 +10,9 @@ pass" criterion must contain. No prior doc in the repo defined this — see
 "Tests pass" must name the specific CI jobs that `ci-required`
 (`.github/workflows/ci.yml`) actually gates merge on for the paths the
 change touches, and cite their real result — either an actual CI run on the
-reviewed commit, or a local invocation that exercises the same coverage.
+reviewed commit, or a local invocation that exercises the same coverage. A
+job neither can supply is accounted for under "Jobs the gate cannot run"
+below.
 
 A criterion that only cites `make test-fast-parallel` and/or a package-
 scoped `go test` is **not sufficient** whenever the change touches a path
@@ -31,8 +33,63 @@ filter's scope, does not demonstrate `TestTutorial01` ran. Name
 actual result) explicitly, or don't claim that criterion covers this path.
 
 The general principle behind the example: "tests pass" must mean "the
-gate's actual required checks passed," not "a command I chose passed."
-Don't let convenience substitute for coverage.
+gate's actual required checks passed, and each one that did not run here is
+named with a permitted reason," not "a command I chose passed." Don't let
+convenience substitute for coverage.
+
+## Jobs the gate cannot run
+
+Account for every job `ci-required` depends on, not only the ones a local
+run can reach. Follow its `needs` through roll-up jobs: a job that only
+aggregates its own `needs` takes no status of its own; its `needs` do. Give
+each remaining job exactly one of:
+
+- **ran locally**: the job's own commands, with the exit status;
+- **CI run on the exact commit**: the run and the job's result;
+- **not triggered**: its path filter does not match the diff, or it only
+  runs on `push`;
+- **deferred to PR CI**: only for the two reasons below;
+- **not covered**: see below.
+
+Derive the job list from the merged workflow file for the commit being
+gated (`git show <commit>:.github/workflows/ci.yml`), not from memory or an
+older checkout. The set changes with the commit, and the `changes` job's
+filters decide what a diff triggers: `shared` turns on nearly everything.
+
+"Deferred to PR CI" has two permitted reasons. Slowness, host load, "the
+local suite does not include it" and "unrelated to the diff" are not
+reasons.
+
+- The job's runner is not Linux. Today that is only
+  `credential-provider-windows`; `ci-required` has no macOS job.
+- A precondition its commands need is absent on the gate host. Record the
+  failing probe, its exit status and its stderr.
+
+A deferred non-Linux job also states whether the diff can reach it. Reached
+means a changed file is in a module-internal package of the job's build
+closure for that OS (`GOOS=<os> go list -test -deps <package>`, plain and
+with the job's `-tags`), or `go.mod` or `go.sum` changed. If anything is
+reached, `GOOS=<os> go vet <package>` must pass, plain and with the job's
+tags. That proves the package builds; it does not run the job's tests.
+
+"Not covered" is for a job whose test step no run executes, for example a
+step conditional on a secret that CI does not set, which then succeeds as a
+no-op. Say so; do not call it deferred.
+
+A PR is ready to merge only when `CI / required` is green on the PR head and
+every deferred job is `success` (or `skipped` only because its own path
+filter is false). Name the deferred and not-covered jobs in the PR
+description.
+
+Worked example: a change under `internal/beads/**` matches the `shared`
+filter, so the Windows job runs in the PR's CI although its build closure
+(`internal/credentialprovider`, `internal/loopbackport`,
+`internal/pathutil`, `internal/testenv`, `internal/testutil` at the time of
+writing) is untouched. Its line reads:
+
+```text
+credential-provider-windows: deferred to PR CI (non-Linux runner); closure reach none; no cross-vet needed
+```
 
 ## Why this doc exists
 
