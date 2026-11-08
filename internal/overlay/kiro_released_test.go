@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -113,9 +114,9 @@ func TestCopyDirForProviders_KiroKeepsEditedReleasedFallback(t *testing.T) {
 	}
 }
 
-// A released body staged by a non-kiro provider slot is not this rule's to
-// replace: only Kiro's AGENTS.md is a preserved fallback.
-func TestCopyDirForProviders_ReleasedKiroBodyRuleIsKiroOnly(t *testing.T) {
+// The released-body rule belongs to Kiro's AGENTS.md alone: a released body
+// sitting at any other Kiro overlay path is staged over exactly as before.
+func TestCopyDirForProviders_KiroReleasedBodyRuleIsAgentsMDOnly(t *testing.T) {
 	body := ReleasedKiroAgentsMDBodies()["v1.4.0"]
 	src := t.TempDir()
 	dst := t.TempDir()
@@ -133,6 +134,45 @@ func TestCopyDirForProviders_ReleasedKiroBodyRuleIsKiroOnly(t *testing.T) {
 	if got := string(readFile(t, filepath.Join(dst, ".kiro", "agents", "gascity.json"))); got != `{"name":"gascity"}` {
 		t.Fatalf("gascity.json = %q, want overlay content", got)
 	}
+}
+
+// An AGENTS.md staging cannot read is kept even when it holds a released body:
+// it cannot be compared, so it is preserved as before. The file is write-only
+// (stat succeeds, read fails, a write would succeed), so an overwrite would be
+// observable.
+func TestCopyDirForProviders_KiroKeepsUnreadableAgentsMD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on unix permission bits")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses unix permission checks; cannot simulate stat-ok/read-fail")
+	}
+	body := ReleasedKiroAgentsMDBodies()["v1.4.0"]
+	src := t.TempDir()
+	dst := t.TempDir()
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", "AGENTS.md"), []byte("current fallback\n"), 0o644)
+	target := filepath.Join(dst, "AGENTS.md")
+	mustWriteFile(t, target, body, 0o644)
+	if err := os.Chmod(target, 0o200); err != nil {
+		t.Fatalf("chmod %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o644) })
+
+	var stderr bytes.Buffer
+	if err := CopyDirForProviders(src, dst, []string{"kiro"}, &stderr); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+	if !strings.Contains(stderr.String(), PreserveExistingWarningPrefix) {
+		t.Fatalf("stderr = %q, want preservation warning", stderr.String())
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatalf("chmod %s: %v", target, err)
+	}
+	if got := readFile(t, target); !bytes.Equal(got, body) {
+		t.Fatalf("unreadable AGENTS.md was overwritten with %q", got)
+	}
+	assertOnlyFiles(t, dst, "AGENTS.md")
 }
 
 func nearReleasedVariants(body []byte) map[string][]byte {

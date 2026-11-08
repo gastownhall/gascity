@@ -2,6 +2,9 @@ package hooks
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -98,6 +101,57 @@ func TestInstallKiroWritesAgentsMDWhenMissing(t *testing.T) {
 	}
 	if got := fs.Files["/work/AGENTS.md"]; !bytes.Equal(got, currentKiroAgentsMD(t)) {
 		t.Fatalf("AGENTS.md = %q, want the core fallback", got)
+	}
+}
+
+// An AGENTS.md Install cannot read is kept even when it holds a released body:
+// it cannot be compared, so it is preserved as before. The file is write-only
+// (stat succeeds, read fails, a write would succeed), so an overwrite would be
+// observable. The Fake cannot express stat-ok/read-fail (its Errors map applies
+// to ReadFile and Stat alike), so this runs on the real filesystem.
+func TestInstallKiroKeepsUnreadableAgentsMD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on unix permission bits")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses unix permission checks; cannot simulate stat-ok/read-fail")
+	}
+	body := overlay.ReleasedKiroAgentsMDBodies()["v1.4.0"]
+	if body == nil {
+		t.Fatal("missing released v1.4.0 kiro AGENTS.md body")
+	}
+	workDir := t.TempDir()
+	target := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(target, body, 0o644); err != nil {
+		t.Fatalf("write %s: %v", target, err)
+	}
+	if err := os.Chmod(target, 0o200); err != nil {
+		t.Fatalf("chmod %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o644) })
+
+	if err := Install(fsys.OSFS{}, t.TempDir(), workDir, []string{"kiro"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat %s: %v", target, err)
+	}
+	if got := info.Mode().Perm(); got != 0o200 {
+		t.Errorf("AGENTS.md mode = %o, want the unreadable file left at 200", got)
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatalf("chmod %s: %v", target, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read %s: %v", target, err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("unreadable AGENTS.md was overwritten with %q", got)
+	}
+	if matches, _ := filepath.Glob(target + ".bak*"); len(matches) > 0 {
+		t.Fatalf("unexpected AGENTS.md backups: %v", matches)
 	}
 }
 
