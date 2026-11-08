@@ -17,6 +17,7 @@ go_library(
         "fence.go",
         "fingerprint.go",
         "fingerprint_partition.go",
+        "held_files.go",
         "idle_boundary.go",
         "import_trust.go",
         "interaction_fence.go",

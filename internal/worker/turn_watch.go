@@ -303,7 +303,7 @@ func (w *transcriptWatch) read(ctx context.Context, why turnWake) (runtime.TurnH
 	w.plan.info = info
 	backstop := why == turnWakePoll && w.timing.now().Sub(w.lastResolve) >= turnPollOpen
 	if w.follower == nil || backstop {
-		if err := w.resolve(); err != nil {
+		if err := w.resolve(ctx); err != nil {
 			w.stopNotify()
 			w.follower = nil
 			return runtime.TurnHistory{}, err
@@ -318,10 +318,11 @@ func (w *transcriptWatch) read(ctx context.Context, why turnWake) (runtime.TurnH
 }
 
 // resolve resolves the transcript of the session's conversation, as read last
-// reloaded it, following it when it is not the file already followed.
-func (w *transcriptWatch) resolve() error {
+// reloaded it, its runtime probe bounded by ctx, following it when it is not
+// the file already followed.
+func (w *transcriptWatch) resolve(ctx context.Context) error {
 	w.lastResolve = w.timing.now()
-	path, err := w.h.conversationTranscript(w.plan.info, w.plan.provider)
+	path, err := w.h.conversationTranscript(ctx, w.plan)
 	if err != nil {
 		return err
 	}
