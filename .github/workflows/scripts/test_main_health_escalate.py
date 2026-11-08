@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import pathlib
+import re
 import unittest
 
 import main_health_escalate as escalate_script
@@ -333,6 +335,85 @@ class MainTests(unittest.TestCase):
         }
         exit_code = escalate_script.main(env=env, run=fake)
         self.assertEqual(exit_code, 0)
+
+
+MAIN_HEALTH_WORKFLOW = pathlib.Path(__file__).resolve().parents[1] / "main-health.yml"
+SELF_PATH = ".github/workflows/main-health.yml"
+
+
+def workflow_section(start_pattern):
+    """The text of main-health.yml from the first line matching start_pattern to the next
+    line at the same indentation or less (a top-level key or a sibling job)."""
+    lines = MAIN_HEALTH_WORKFLOW.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if re.match(start_pattern, line):
+            indent = len(line) - len(line.lstrip())
+            block = [line]
+            for rest in lines[i + 1 :]:
+                if rest.strip() and len(rest) - len(rest.lstrip()) <= indent:
+                    break
+                block.append(rest)
+            return "\n".join(block)
+    raise AssertionError(f"main-health.yml has no line matching {start_pattern!r}")
+
+
+class WorkflowSelfTestTriggerTests(unittest.TestCase):
+    """Release criterion 3c: a draft PR that adds or edits main-health.yml must get a real
+    run of the lane, and that run must never be able to page anyone."""
+
+    def test_push_to_main_trigger_is_kept(self):
+        on_block = workflow_section(r"^on:")
+        self.assertRegex(on_block, r"push:\s*\n\s+branches: \[main\]")
+
+    def test_pull_request_trigger_is_limited_to_the_workflow_file(self):
+        pr_block = workflow_section(r"^  pull_request:")
+        paths = re.findall(r"^\s+- (\S.*)$", pr_block, flags=re.MULTILINE)
+        self.assertIn("paths:", pr_block)
+        self.assertEqual([p.strip("'\"") for p in paths], [SELF_PATH])
+
+    def test_workflow_dispatch_is_not_the_self_test_mechanism(self):
+        # A new workflow file cannot be dispatched before it exists on the default branch.
+        self.assertNotIn("workflow_dispatch", workflow_section(r"^on:"))
+
+    def test_escalate_job_runs_only_for_push_events(self):
+        escalate = workflow_section(r"^  escalate:")
+        self.assertRegex(escalate, r"(?m)^    if: .*failure\(\)")
+        self.assertRegex(escalate, r"(?m)^    if: .*github\.event_name == 'push'")
+
+
+class EventSuppressionTests(unittest.TestCase):
+    """Defense in depth behind the workflow's own `if:`: off a push, the script itself
+    makes no gh or git call at all, so a self-test run cannot file or comment."""
+
+    ENV = {
+        "GITHUB_SHA": "cc036a76e",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "gastownhall/gc-management",
+        "GITHUB_RUN_ID": "123456",
+    }
+
+    def test_non_push_events_make_no_gh_or_git_calls_and_succeed(self):
+        for event in ("pull_request", "pull_request_target", "workflow_dispatch"):
+            with self.subTest(event=event):
+                fake = FakeRun()
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    exit_code = escalate_script.main(
+                        env={**self.ENV, "GITHUB_EVENT_NAME": event}, run=fake
+                    )
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(fake.calls, [])
+                self.assertIn(event, stderr.getvalue())
+
+    def test_push_event_still_escalates(self):
+        fake = FakeRun()
+        fake.queue(["gh", "issue", "list"], stdout="[]")
+        fake.queue(["git", "log", "-1", "--format=%an <%ae>"], stdout="Jane Dev <jane@example.com>")
+        fake.queue(["git", "log", "-1", "--format=%B"], stdout="fix: unrelated")
+        fake.queue(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/45")
+        exit_code = escalate_script.main(env={**self.ENV, "GITHUB_EVENT_NAME": "push"}, run=fake)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(calls_to(fake, "gh", "issue", "create")), 1)
 
 
 if __name__ == "__main__":
