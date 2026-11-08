@@ -271,3 +271,108 @@ func TestConfigShowValidateJSONReportsImplicitAgentLocalMCPConflict(t *testing.T
 		t.Fatalf("validation.errors = %#v, want gc start's error %q", payload.Validation.Errors, startErr)
 	}
 }
+
+// gc config show --validate passes the MCP cities gc start accepts: agents
+// of one provider at the city root that project the same servers, or none,
+// and an agent-local catalog delivered in the agent's own work_dir. It
+// checks them without writing: no work dir, provider-native MCP file,
+// ownership marker or .gitignore change.
+func TestConfigShowValidateAcceptsMCPCitiesStartAccepts(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		// agentTOML is the "worker" agent's config beyond its provider
+		// and scope.
+		agentTOML string
+		// catalogs maps a catalog file, relative to the city, to its body.
+		catalogs map[string]string
+		// workDir is the worker's configured work dir, relative to the
+		// city, which validation must not create.
+		workDir string
+	}{
+		{
+			name:     "city catalog shared by every agent",
+			catalogs: map[string]string{"mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n"},
+		},
+		{
+			name: "no catalog",
+		},
+		{
+			name:      "agent-local catalog in its own work_dir",
+			agentTOML: "work_dir = \"worktrees/worker\"\n",
+			catalogs:  map[string]string{"agents/worker/mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n"},
+			workDir:   "worktrees/worker",
+		},
+		{
+			name:      "pool agent-local catalog in its templated work_dir",
+			agentTOML: "max_active_sessions = 2\nwork_dir = \"pool/{{.Agent}}\"\n",
+			catalogs: map[string]string{
+				"mcp/shared.toml":              "name = \"shared\"\ncommand = \"uvx\"\n",
+				"agents/worker/mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n",
+			},
+			workDir: "pool",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityDir := t.TempDir()
+			t.Chdir(cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "claude"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+			writeCatalogFile(t, cityDir, "agents/worker/agent.toml", "provider = \"claude\"\nscope = \"city\"\n"+tt.agentTOML)
+			for rel, body := range tt.catalogs {
+				writeCatalogFile(t, cityDir, rel, body)
+			}
+			const gitignore = "# sentinel\n"
+			writeCatalogFile(t, cityDir, ".gitignore", gitignore)
+
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc config show --validate = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Config valid.") {
+				t.Fatalf("stdout = %q, want Config valid.", stdout.String())
+			}
+
+			unwritten := []string{".mcp.json", filepath.Join(".gc", "mcp-managed")}
+			if tt.workDir != "" {
+				unwritten = append(unwritten, tt.workDir)
+			}
+			for _, rel := range unwritten {
+				if _, err := os.Lstat(filepath.Join(cityDir, rel)); !os.IsNotExist(err) {
+					t.Fatalf("%s exists after validation, which must write nothing (err=%v)", rel, err)
+				}
+			}
+			if got, err := os.ReadFile(filepath.Join(cityDir, ".gitignore")); err != nil || string(got) != gitignore {
+				t.Fatalf(".gitignore = %q (err=%v), want it unchanged: %q", got, err, gitignore)
+			}
+
+			cfg, err := loadCityConfig(cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			if _, err := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard); err != nil {
+				t.Fatalf("buildStage1MCPTargets: %v, want gc start to accept the city validation accepts", err)
+			}
+			// gc start's own pass creates the work dir validation left absent.
+			if tt.workDir != "" {
+				if _, err := os.Stat(filepath.Join(cityDir, tt.workDir)); err != nil {
+					t.Fatalf("%s after gc start's stage-1 pass: %v, want it created", tt.workDir, err)
+				}
+			}
+		})
+	}
+}
