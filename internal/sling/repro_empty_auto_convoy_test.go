@@ -32,7 +32,7 @@ func TestAutoConvoyClosedWhenTrackFails(t *testing.T) {
 		failType: "tracks",
 		err:      errors.New("injected DepAdd failure"),
 	}
-	deps.Store = failing
+	deps = withStore(deps, failing)
 
 	b, err := base.Create(beads.Bead{Title: "work", Type: "task"})
 	if err != nil {
