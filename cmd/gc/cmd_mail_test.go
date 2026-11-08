@@ -5456,8 +5456,7 @@ func TestMailCheckInjectStillAsksAStandaloneControllersAPIPort(t *testing.T) {
 	mailCheckAPIClient = realMailCheckAPIClient
 	f.sendMail(t, "status please")
 
-	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
-	defer srv.Close()
+	srv := newRemoteTestServer(t, partialStoreSlowMailCheckHandler(t).ServeHTTP)
 	cityTOML := filepath.Join(f.cityDir, "city.toml")
 	base, err := os.ReadFile(cityTOML)
 	if err != nil {
