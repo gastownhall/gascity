@@ -58,7 +58,8 @@ type promptDeliveryResult struct {
 	// EffectiveMode is the delivery mode promptDelivery actually selected:
 	// "acp", "none", "argv", "flag", "nudge", "nudge-fallback", or
 	// "hard-fail". "nudge" is selected for a pack-declared (exec/RPP)
-	// runtime, whose start wire carries no argv prompt slot. It can diverge from ConfiguredMode — e.g. a configured_mode=arg prompt
+	// runtime, whose start wire carries no argv prompt slot. It can
+	// diverge from ConfiguredMode — e.g. a configured_mode=arg prompt
 	// that is oversized effectively becomes "nudge-fallback" or
 	// "hard-fail" depending on runtime support.
 	EffectiveMode string
