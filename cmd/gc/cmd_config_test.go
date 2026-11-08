@@ -414,6 +414,200 @@ prompt_mode = "none"
 	}
 }
 
+// Edge contracts of the stage-1 validation (#8267), per the approved test
+// plan: the conflict is reported at a rig root too; an invalid agent set
+// surfaces its own error without a secondary MCP conflict; a collector
+// error the start gate refuses on (undeliverable MCP) surfaces unchanged;
+// plain show stays a success while exposing the diagnostic.
+func TestConfigShowValidateMCPConflictEdges(t *testing.T) {
+	t.Run("rig-root conflict", func(t *testing.T) {
+		clearGCEnv(t)
+		cityDir := t.TempDir()
+		t.Chdir(cityDir)
+		t.Setenv("GC_CITY_PATH", cityDir)
+		writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+
+[[rigs]]
+name = "repo"
+`)
+		writeCatalogFile(t, cityDir, ".gc/site.toml", `
+[[rig]]
+name = "repo"
+path = "repo"
+`)
+		if err := os.MkdirAll(filepath.Join(cityDir, "repo"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(rig): %v", err)
+		}
+		writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+dir = "repo"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("gc config show --validate = 0, want nonzero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		for _, want := range []string{
+			"MCP target conflict at " + filepath.Join(cityDir, "repo", ".mcp.json"),
+			filepath.Join(cityDir, "agents", "worker", "mcp"),
+			"a pack the rig imports",
+		} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+			}
+		}
+	})
+
+	t.Run("invalid agent set skips MCP evaluation", func(t *testing.T) {
+		clearGCEnv(t)
+		cityDir := t.TempDir()
+		t.Chdir(cityDir)
+		t.Setenv("GC_CITY_PATH", cityDir)
+		writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+scope = "planet"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("gc config show --validate = 0, want nonzero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if want := `agent "worker": scope must be`; !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+		if strings.Contains(stderr.String(), "MCP target conflict") {
+			t.Fatalf("stderr = %q, want the agent error without a secondary MCP conflict", stderr.String())
+		}
+	})
+
+	t.Run("undeliverable MCP surfaces unchanged", func(t *testing.T) {
+		clearGCEnv(t)
+		cityDir := t.TempDir()
+		t.Chdir(cityDir)
+		t.Setenv("GC_CITY_PATH", cityDir)
+		writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "subprocess"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+scope = "city"
+work_dir = "worktrees/worker"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"config", "show", "--validate"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("gc config show --validate = 0, want nonzero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "effective MCP cannot be delivered") {
+			t.Fatalf("stderr = %q, want the collector's delivery error", stderr.String())
+		}
+	})
+
+	t.Run("plain show stays a success and exposes the conflict", func(t *testing.T) {
+		clearGCEnv(t)
+		cityDir := t.TempDir()
+		t.Chdir(cityDir)
+		t.Setenv("GC_CITY_PATH", cityDir)
+		writeProjectedMCPCity(t, cityDir, `
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+name = "worker"
+provider = "claude"
+scope = "city"
+`)
+		writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"config", "show"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc config show = %d, want 0; stderr=%q", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "gc config show: warning: MCP target conflict") {
+			t.Fatalf("stderr = %q, want the conflict exposed as a warning", stderr.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"config", "show", "--json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc config show --json = %d, want 0; stderr=%q", code, stderr.String())
+		}
+		validateConfigShowJSONSchema(t, stdout.Bytes())
+		var payload struct {
+			Validation struct {
+				OK     bool     `json:"ok"`
+				Errors []string `json:"errors"`
+			} `json:"validation"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+		}
+		if payload.Validation.OK {
+			t.Fatalf("validation = %+v, want ok=false carrying the conflict", payload.Validation)
+		}
+	})
+}
+
 func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 
