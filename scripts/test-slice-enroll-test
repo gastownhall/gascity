@@ -102,6 +102,25 @@ FAKE
   chmod +x "$path"
 }
 
+# A listing whose matching row is followed by a tail far larger than the
+# 64 KiB pipe buffer: a reader that exits on the first match (grep -q) leaves
+# the writer blocked, and the writer then dies of SIGPIPE. Under pipefail that
+# turns a successful probe into a failure, deterministically.
+write_fake_systemctl_big() {
+  local path="$1" log="$2"
+  cat >"$path" <<FAKE
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log"
+printf 'UNIT FILE          STATE  PRESET\n'
+printf 'gascity-test.slice static -\n'
+printf '\n'
+printf '%0*d\n' 200000 0
+printf '\n1 unit files listed.\n'
+FAKE
+  chmod +x "$path"
+}
+
 write_fake_systemctl_down() {
   local path="$1" log="$2"
   cat >"$path" <<FAKE
@@ -265,6 +284,16 @@ fi
 if ! grep -qF -- "--user list-unit-files gascity-test.slice" "$sct_log"; then
   fail "wrap: expected a '--user list-unit-files gascity-test.slice' systemctl probe: $(tr '\n' ';' <"$sct_log")"
 fi
+
+# Scenario: a unit listing much larger than the pipe buffer, with the match
+# early, must still wrap. Regression for the SIGPIPE race where an
+# early-exiting grep -q made a printf-to-grep pipeline fail under pipefail
+# (ga-7lu4fo; flaked TestSliceEnrollFallbackMatrix on PR #7329).
+new_scenario big-unit-list
+write_fake_systemctl_big "$scen_bin/systemctl" "$sct_log"
+write_fake_systemd_run_ok "$scen_bin/systemd-run" "$sdr_log"
+run_entry big-unit-list "$cgroup_outside"
+expect_log_lines big-unit-list "$sdr_log" 2
 
 if [[ "$failures" -ne 0 ]]; then
   echo "test-slice-enroll-test: $failures failure(s)" >&2
