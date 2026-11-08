@@ -187,6 +187,17 @@ def gather_context(env: dict[str, str]) -> tuple[str, str]:
 def main(env: dict[str, str] | None = None, run: RunFunc = subprocess.run) -> int:
     if env is None:
         env = dict(os.environ)
+    # Only a push to main is a broken-main signal. Any other event (the
+    # pull_request self-test of this workflow) must not file an issue; an unset
+    # variable means a push so direct invocations keep escalating.
+    event = env.get("GITHUB_EVENT_NAME", "push")
+    if event != "push":
+        print(
+            f"main_health_escalate: event {event!r} is not a push to main; "
+            "not escalating",
+            file=sys.stderr,
+        )
+        return 0
     try:
         sha, run_url = gather_context(env)
     except MissingContextError as exc:

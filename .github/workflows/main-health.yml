@@ -3,6 +3,11 @@ name: Main health
 on:
   push:
     branches: [main]
+  # Pre-merge self-test: a change to this file runs the build check on its own
+  # PR. Escalation is push-only, so a PR run can never file a P0 issue.
+  pull_request:
+    paths:
+      - .github/workflows/main-health.yml
 
 permissions: {}
 
@@ -23,7 +28,7 @@ jobs:
   escalate:
     name: Escalate broken main
     needs: build-check
-    if: failure()
+    if: failure() && github.event_name == 'push'
     runs-on: ubuntu-latest
     # One escalation at a time: two pushes failing together must not both miss
     # the other's issue and file twice.
