@@ -6001,10 +6001,12 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 // waitForInterruptBoundary is WaitForInterruptBoundary's rollout wait.
 func (t *Tmux) waitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
-	switch strings.TrimSpace(provider) {
+	switch sessionlog.ProviderFamily(strings.TrimSpace(provider)) {
 	case "", "codex":
-		// Continue below. Empty provider env can happen in tests or with
-		// older sessions; fall back to process-tree detection.
+		// Continue below. GC_PROVIDER carries the configured provider name,
+		// so a wrapped Codex seat (for example "codex-strip") belongs to the
+		// codex family. Empty provider env can happen in tests or with older
+		// sessions; fall back to process-tree detection.
 	default:
 		return runtime.ErrInteractionUnsupported
 	}
