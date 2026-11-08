@@ -186,9 +186,11 @@ Declare `carrier.ops` to select the existing `nudge`, `peek`, `send-keys`,
 `interrupt` and `clear-scrollback` ops directly, without tmux. All five are
 required for this carrier. `gc runtime check` exercises all five and fails
 unsupported or broken ops. `gc runtime conformance` checks only the `peek`
-read under `idle-boundary`, not the other four driving ops. Production keeps
-the ops' existing exit handling. `watch-startup` stays a dedicated streaming
-op for either carrier.
+read under `idle-boundary`, not the other four driving ops. In production,
+a missing `nudge`, `send-keys`, `interrupt` or `clear-scrollback` op that exits
+2 is a silent no-op under `carrier.ops`; only `gc runtime check` enforces
+those four op obligations. `watch-startup` stays a dedicated streaming op
+for either carrier.
 
 ### Protocol Handshake (`protocol`)
 
@@ -237,7 +239,7 @@ the script on the no-capability floor until gc restarts. Before the first
 successful handshake, gc retains tmux-first behavior. A non-tmux pack with a
 broken handshake can therefore receive tmux text through a generic `exec`
 until a retry selects `carrier.ops`. Both checkers report the broken
-handshake. A first driving call can now read `protocol` before `exec`, even
+handshake. A first driving call can read `protocol` before `exec`, even
 if the provider has not started a session.
 
 ### Idle sleep
@@ -287,8 +289,11 @@ prompt using `set-meta <name> GC_READY_PROMPT_PREFIX` with the prefix on
 stdin. Another provider instance recovers it with `get-meta` under the wait's
 deadline. A missing key or failed read uses the default without caching, so
 the next wait retries. Publication is best effort and retried only on the
-next start. Trailing newlines are trimmed from metadata, so prefixes ending
-in a newline cannot be recovered.
+next start. Pack metadata may outlive `stop`. If a new start's `set-meta`
+fails, another provider instance can recover the previous incarnation's
+prompt. Packs should drop session metadata on `stop` to prevent stale prompt
+recovery. Trailing newlines and a trailing carriage return are trimmed from
+metadata, so prefixes ending in either cannot be recovered.
 
 For the default carrier, once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as
