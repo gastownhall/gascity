@@ -87,7 +87,13 @@ type reversePlan struct {
 	// RefsKept counts the rows whose step ref a destination does not store,
 	// kept in gc.step_ref.
 	RefsKept int
-	Refusals []rigImportRefusal
+	// RefsDropped counts the roots whose ref (their formula's name) a
+	// destination does not store.
+	RefsDropped int
+	// BindingIDs is every id the binding held when the plan was read: a
+	// prepare never deletes a stamped row whose binding copy is gone.
+	BindingIDs map[string]bool
+	Refusals   []rigImportRefusal
 }
 
 // reverseRow returns b as a reverse writes it: the forward stamp, the record
@@ -200,8 +206,14 @@ func planReverse(in reverseInput) reversePlan {
 		carried[b.ID] = true
 		row := reverseRow(b, in.Stamp, annotated)
 		if in.DropsRef[dest] && row.Ref != "" && row.Metadata[beadmeta.StepRefMetadataKey] == "" {
-			row.Metadata[beadmeta.StepRefMetadataKey] = row.Ref
-			plan.RefsKept++
+			// A root's ref is its formula's name, not a step's: it is not
+			// copied into gc.step_ref, and only counted.
+			if root := row.Metadata[beadmeta.RootBeadIDMetadataKey]; root == "" || root == row.ID {
+				plan.RefsDropped++
+			} else {
+				row.Metadata[beadmeta.StepRefMetadataKey] = row.Ref
+				plan.RefsKept++
+			}
 		}
 		plan.Rows[dest] = append(plan.Rows[dest], row)
 		if in.Mode == reverseToRigs {

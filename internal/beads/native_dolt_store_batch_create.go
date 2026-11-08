@@ -62,6 +62,13 @@ func (s *NativeDoltStore) CreateWithForeignIDBatch(rows []Bead) error {
 			return fmt.Errorf("creating %d beads with foreign ids: a row has no id", len(rows))
 		}
 		b.Dependencies, b.Needs, b.ParentID = nil, nil, ""
+		// Dolt keeps whole seconds; truncated here, the stored second does
+		// not depend on how the server rounds a fraction.
+		b.CreatedAt = b.CreatedAt.Truncate(time.Second)
+		if b.DeferUntil != nil {
+			deferred := b.DeferUntil.Truncate(time.Second)
+			b.DeferUntil = &deferred
+		}
 		issue, err := nativeIssueFromBead(b)
 		if err != nil {
 			return err
@@ -188,8 +195,9 @@ func nativeCreateBatchDeadline(rows int) time.Duration {
 // id: the conversion to the upstream issue and back. It drops what the schema
 // does not hold (the step ref, updated_at, which the store stamps itself) and
 // normalizes what it does (an unset priority reads as the default, the close
-// reason as the store derives it, times as whole seconds, rounded, and a row of
-// one of bd's infra types lands in the wisp tables). The parent is the parent-child edge the copy adds, not
+// reason as the store derives it, and a row of one of bd's infra types lands
+// in the wisp tables). Times are kept as they are: the batch create truncates
+// them to the second Dolt stores, which is the second a copy compares at. The parent is the parent-child edge the copy adds, not
 // a field. It satisfies CreatedFormer.
 func (s *NativeDoltStore) CreatedForm(b Bead) (Bead, error) {
 	parent := b.ParentID
@@ -210,11 +218,5 @@ func (s *NativeDoltStore) CreatedForm(b Bead) (Bead, error) {
 	}
 	got.ParentID = parent
 	got.SourceStatus = ""
-	// Dolt keeps whole seconds and rounds what it is handed to the nearest.
-	got.CreatedAt = got.CreatedAt.Round(time.Second)
-	if got.DeferUntil != nil {
-		rounded := got.DeferUntil.Round(time.Second)
-		got.DeferUntil = &rounded
-	}
 	return got, nil
 }

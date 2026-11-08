@@ -365,17 +365,18 @@ func TestPlanReverseParentsForAStoreThatDerivesThem(t *testing.T) {
 // TestPlanReverseKeepsARefTheStoreDrops: into a store that stores no step
 // ref, the ref is kept in gc.step_ref when that is absent, and counted.
 func TestPlanReverseKeepsARefTheStoreDrops(t *testing.T) {
-	a, b := planRow("gcg-1", "closed", "", ""), planRow("gcg-2", "closed", "", "")
-	a.Ref, b.Ref = "review", "build"
+	a, b, root := planRow("gcg-1", "closed", "", ""), planRow("gcg-2", "closed", "", ""), planRow("gcg-r", "closed", "", "")
+	a.Metadata[beadmeta.RootBeadIDMetadataKey], b.Metadata[beadmeta.RootBeadIDMetadataKey] = "gcg-r", "gcg-r"
+	a.Ref, b.Ref, root.Ref = "review", "build", "mol-polecat-work"
 	b.Metadata[beadmeta.StepRefMetadataKey] = "already"
-	in := planInput([]beads.Bead{a, b}, nil)
+	in := planInput([]beads.Bead{a, b, root}, nil)
 	in.DropsRef[reverseCityDest] = true
 	plan := planReverse(in)
 	got := map[string]string{}
 	for _, r := range plan.Rows[reverseCityDest] {
 		got[r.ID] = r.Metadata[beadmeta.StepRefMetadataKey]
 	}
-	if got["gcg-1"] != "review" || got["gcg-2"] != "already" || plan.RefsKept != 1 {
-		t.Fatalf("step refs = %v, kept %d", got, plan.RefsKept)
+	if got["gcg-1"] != "review" || got["gcg-2"] != "already" || got["gcg-r"] != "" || plan.RefsKept != 1 || plan.RefsDropped != 1 {
+		t.Fatalf("step refs = %v, kept %d, roots dropped %d; a root's formula name is not a step ref", got, plan.RefsKept, plan.RefsDropped)
 	}
 }

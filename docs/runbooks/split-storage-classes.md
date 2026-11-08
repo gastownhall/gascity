@@ -1518,7 +1518,12 @@ killed or paused at any point is continued by the same command):
 Before R3, and before the binding is archived, the binding is read again and
 compared with the one the copies were planned from; a binding that changed
 (a writer still reaches it) puts the reverse back to R0, and the next run
-copies again.
+copies again. Before R4 and before the archive, each store it wrote is listed
+again under its stamp against its manifest: a row gone puts it back to R0 the
+same way. Once a `--to-rigs` has begun clearing the binding, it never goes
+back: a rig that lost a row refuses, naming the snapshot to restore from. A
+re-copy never deletes a stamped row the binding no longer holds; it refuses,
+since that row may be the only copy.
 
 Every row it writes carries `gc.infra_reversed_from=<binding>/<run>`, the run
 being its start to the nanosecond and a random suffix. Before it writes
@@ -1533,11 +1538,17 @@ city and name both ways out:
   exactly the rows carrying that stamp from the stores the journal names, puts
   back the edges those stores held onto them, puts back `city.toml`, the
   renamed records and the version floor, removes the reverse's records, and
-  unpins the snapshot. The binding was not written, so the city is split again
-  as it was. A store that would refuse one of those edges back (native Dolt,
-  for an edge onto its own prefix) refuses the abort before anything is
-  deleted; finish the reverse instead. Once R5 has renamed the binding root
-  the reverse can only be finished.
+  unpins the snapshot (which it keeps). The binding was not written, so the
+  city is split again as it was. A store that would refuse one of those edges
+  back (native Dolt, for an edge onto its own prefix, or for any edge payload)
+  refuses the abort before anything is deleted; finish the reverse instead.
+  Once the abort has begun deleting, the reverse cannot be resumed: run the
+  abort again to finish it. Once R5 has renamed the binding root the reverse
+  can only be finished.
+
+Like the forward migration, the reverse and its abort refuse a work or rig
+store another registered city also uses, until `--force=shared-store:<token>`
+attests it, and refuse while that city holds its controller lock.
 
 `--time-budget` bounds a reverse as it bounds the copy: it stops at a batch
 boundary, exits 75, and the next run continues.
@@ -1553,7 +1564,9 @@ It refuses, writing nothing, and names each bead and the fix:
 - an **edge joining two open rows that would land in different stores**:
   close one side;
 - an **edge payload** (a `waits_for` gate's) going into a store that cannot
-  write one: native Dolt has no edge-payload writer yet;
+  write one: native Dolt has no edge-payload writer yet. That includes an
+  edge such a store already holds onto a row the reverse writes, which a
+  resume or an abort would have to put back;
 - a generic exec work store whose provider has no `import` op (listed by its
   `capabilities` op): it cannot take a bead under its own id. Roll back by
   restoring the snapshot instead;
@@ -1589,7 +1602,7 @@ then removes them from the binding (with the closed gates the import minted)
 and renames the rig's import records, so the rig reads as awaiting import
 again and its relic legs serve it. `--from-rigs` imports it again. The same
 refusals apply, and `--abort-reverse` abandons it until the binding clear has
-begun. A snapshot taken before a `--to-rigs` no longer restores: its records
+begun; a rig whose clear has begun is finished by running `--to-rigs` again. A snapshot taken before a `--to-rigs` no longer restores: its records
 name the rig's import.
 
 ## Rolling back

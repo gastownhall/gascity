@@ -1023,6 +1023,23 @@ func TestReverseVerifyCatchesAFaultyCopy(t *testing.T) {
 			if journal, _, _ := readStorageReverseJournal(city.cityPath); journal.Phase >= reverseR2 {
 				t.Fatalf("the journal recorded the city copied (phase %d) over a failed verify", journal.Phase)
 			}
+			if name == "an invented row" {
+				// A row under the stamp that the binding does not hold may be
+				// the only copy: the rerun names it and deletes nothing, and
+				// the operator removes it.
+				code, _, stderr := city.reverse(t, reverseOptions{})
+				if code == 0 || !strings.Contains(stderr, "may be the only copy") || !strings.Contains(stderr, "mc-invented-") {
+					t.Fatalf("the rerun over an invented row = %d: %s", code, stderr)
+				}
+				for _, b := range rigTestList(t, city.source) {
+					if strings.HasPrefix(b.ID, "mc-invented-") {
+						under, _, _ := unwrapBeadPolicyStore(city.source)
+						if err := under.Delete(b.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
 			if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
 				t.Fatalf("the honest rerun = %d: %s%s", code, stdout, stderr)
 			}
