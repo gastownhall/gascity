@@ -3,7 +3,6 @@ package scripts_test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +30,7 @@ func complexityFixtureRoot(t *testing.T) string {
 		{"add", "-A"},
 		{"-c", "user.name=complexity test", "-c", "user.email=complexity-test@gascity.invalid", "commit", "-q", "-m", "complexity fixture"},
 	} {
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd := testCommand("git", append([]string{"-C", root}, args...)...)
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
