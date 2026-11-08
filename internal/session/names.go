@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -300,6 +301,17 @@ func WithCitySessionIdentifierLocks(cityPath string, identifiers []string, fn fu
 		})
 	}
 	return lockRecursive(0)
+}
+
+// ErrSessionIdentifierBusy reports that a session identifier lock stayed held
+// past the caller's context.
+var ErrSessionIdentifierBusy = errors.New("session identifier lock busy")
+
+// WithCitySessionIdentifierLocksContext is the context-bounded form of
+// WithCitySessionIdentifierLocks. RED skeleton: not implemented yet.
+func WithCitySessionIdentifierLocksContext(ctx context.Context, cityPath string, identifiers []string, fn func() error) error {
+	_, _, _, _ = ctx, cityPath, identifiers, fn
+	return errors.New("WithCitySessionIdentifierLocksContext: not implemented")
 }
 
 func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error) error {

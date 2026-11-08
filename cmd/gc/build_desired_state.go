@@ -4101,6 +4101,7 @@ type poolRealizeProbe struct {
 	now              func() time.Time
 	worktreeVerifies atomic.Int64 // worktree.Verify calls
 	bindWrites       atomic.Int64 // trigger bindings with a non-empty patch
+	lockWait         atomic.Int64 // nanoseconds spent waiting on identifier locks
 }
 
 // realizeNow is the clock realization segments are timed with.
@@ -5968,6 +5969,10 @@ func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 		strings.TrimSpace(i.Title) == canonical ||
 		containsString(i.Labels, "agent:"+canonical)
 }
+
+// sessionIdentifierLockWaitBudget is the per-acquisition wait the build's
+// tick-side session-identifier locks allow. RED skeleton: not yet applied.
+var sessionIdentifierLockWaitBudget = 5 * time.Second
 
 type poolSessionIdentifierLockFunc func(string, []string, func() error) error
 

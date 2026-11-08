@@ -181,6 +181,7 @@ go_test(
         "named_config_test.go",
         "named_session_ineligible_conflict_test.go",
         "names_alias_conflict_test.go",
+        "names_lock_context_test.go",
         "names_test.go",
         "nocity_guard_test.go",
         "nudge_delivery_key_test.go",

@@ -701,7 +701,7 @@ func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
 	// once per item, a step each.
 	realize := fields("realize_pools", map[string]int{
 		"pools": 1, "requests": 2, "creates": 1, "create_errors": 0,
-		"bind_attempts": 2, "bind_writes": 1, "bind_errors": 0, "worktree_verifies": 0, "realized": 2,
+		"bind_attempts": 2, "bind_writes": 1, "bind_errors": 0, "worktree_verifies": 0, "realized": 2, "lock_wait_ms": 0,
 		"plan_ms": 1, "create_ms": 1101, "bind_ms": 102, "resolve_ms": 2, "side_effects_ms": 2,
 	})
 	// The whole record: 1200ms of writes plus one step for each of the 17
