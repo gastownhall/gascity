@@ -58,6 +58,7 @@ go_test(
         "socket_probe_test.go",
         "startup_test.go",
         "stop_grace_test.go",
+        "stop_not_confirmed_dead_test.go",
         "testenv_import_test.go",
         "turn_events_protocol_test.go",
         "turn_events_test.go",

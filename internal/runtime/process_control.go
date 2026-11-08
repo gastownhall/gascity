@@ -64,6 +64,12 @@ func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Dur
 	return nil
 }
 
+// terminateManagedProcessGraces is TerminateManagedProcess with the post-SIGKILL
+// reap wait named, so tests can run it in milliseconds.
+func terminateManagedProcessGraces(cmd *exec.Cmd, done <-chan struct{}, grace, _ time.Duration) error {
+	return TerminateManagedProcess(cmd, done, grace)
+}
+
 // startedAsGroupLeader reports whether cmd was started as the leader of a new
 // process group, so its PID names that group even after the leader is reaped.
 func startedAsGroupLeader(cmd *exec.Cmd) bool {

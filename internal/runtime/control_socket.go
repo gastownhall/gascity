@@ -21,6 +21,12 @@ const (
 	ControlSocketUnknown
 )
 
+// StopReplyNotConfirmedDead is the control-socket reply to a "stop" command
+// whose process outlived SIGKILL for [ManagedProcessReapGrace]. The owners
+// (subprocess, acp) send it in place of "ok" and their clients map it back to
+// [ErrProcessNotConfirmedDead].
+const StopReplyNotConfirmedDead = "not-confirmed-dead"
+
 // ClassifyControlSocketDial classifies one control-socket dial result for the
 // providers (subprocess, acp) whose owner holds the listener only while its
 // agent runs. An accepted connection is present. A missing socket is absent,

@@ -969,6 +969,9 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 	return nil
 }
 
+// stopSocketTimeout bounds a cross-process stop request.
+func stopSocketTimeout() time.Duration { return 7 * time.Second }
+
 func isUnavailableSocketError(err error) bool {
 	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }

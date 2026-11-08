@@ -119,6 +119,14 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrProcessNotConfirmedDead reports that a provider-managed process was sent
+// SIGKILL but had not left the run/ready set when the bounded reap wait ran
+// out (a process in uninterruptible sleep can outlive its own SIGKILL). The
+// process may still be alive, so the error is retryable and is never "gone":
+// [IsSessionGone] is false for it, and a teardown caller must keep the
+// session's bookkeeping instead of treating Stop as having succeeded.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
