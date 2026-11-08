@@ -179,10 +179,29 @@ const (
 	CachePeel      Rule = "cache-peel"
 	TestMintImport Rule = "test-mint-import"
 	ReadMarker     Rule = "read-marker"
+
+	// CachePeel is reserved: a baseline, ceiling or allowed.txt row may
+	// name it, and nothing reports it yet. It reports a store peeled to its
+	// cache by an assertion that a typed handle answers false to
+	// (typed-stores OD-T7-14) once the change that enables it moves it into
+	// Rules.
+	CachePeel Rule = "cache-peel"
 )
 
 // Rules is every rule, in reporting order.
 var Rules = []Rule{RawParam, RawResult, RawField, RawVar, RawType, Mint, Unwrap, CapAssert, CachePeel, TestMintImport, ReadMarker}
+
+// ReservedRules are rules the baseline files may name before the analyzer
+// enforces them. The growth gate judges a change with the merge-base's
+// generator, which refuses a row naming a rule it does not know; so a new
+// rule lands in two changes: reserved here first, inert, then moved into
+// Rules together with its analyzer code and rows.
+var ReservedRules = []Rule{CachePeel}
+
+// knownRule reports whether a baseline file may name r.
+func knownRule(r Rule) bool {
+	return slices.Contains(Rules, r) || slices.Contains(ReservedRules, r)
+}
 
 // AllRulesBut is every rule except rs, for an Allow entry.
 func AllRulesBut(rs ...Rule) []Rule {
