@@ -21,7 +21,7 @@ from typing import Callable
 RunFunc = Callable[..., "subprocess.CompletedProcess[str]"]
 
 ESCALATION_MARKER = "main-health-escalation-sha"
-P0_LABEL = "P0"
+P0_LABEL = "priority/p0"
 
 _MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+) from ")
 
