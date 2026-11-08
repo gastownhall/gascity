@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -26,7 +27,7 @@ func splitSessionState(t *testing.T) (*fakeState, session.Info) {
 	relocated := beads.NewMemStore()
 	fs.sessionsBeadStore = relocated
 
-	mgr := session.NewManagerWithOptions(relocated, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(relocated), fs.sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Relocated",
@@ -118,7 +119,7 @@ func TestNormalizeRawBeadAssigneeReadsSessionsClass(t *testing.T) {
 	// And the materialized bead is in the sessions binding. This also proves the
 	// create actually fired, so the assertion above is not passing for the
 	// trivial reason that nothing was written at all.
-	if _, err := session.ResolveSessionID(fs.sessionsBeadStore, named); err != nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.sessionsBeadStore), named); err != nil {
 		t.Fatalf("named session was not materialized into the SESSIONS store: %v", err)
 	}
 }
@@ -176,7 +177,7 @@ func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -202,10 +203,10 @@ func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
 	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hello peers", "", "")
 	srv.waitForBackground()
 
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatalf("STRANDED WRITE: session bead %q minted in the WORK store; session-class creates must land in the sessions binding", id)
 	}
-	if _, err := session.ResolveSessionID(fs.sessionsBeadStore, "myrig/worker"); err != nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.sessionsBeadStore), "myrig/worker"); err != nil {
 		t.Fatalf("named member was not materialized into the SESSIONS store: %v", err)
 	}
 }
@@ -221,9 +222,9 @@ func TestMailRecipientResolutionReadsSessionsClass(t *testing.T) {
 		t.Fatalf("resolveMailSendRecipientWithContext: %v", err)
 	}
 
-	recipients := srv.resolveMailQueryRecipientsWithContext(context.Background(), info.SessionName)
+	recipients := srv.resolveMailQueryWithContext(context.Background(), info.SessionName).recipients
 	if len(recipients) == 0 {
-		t.Fatal("resolveMailQueryRecipientsWithContext returned no recipients")
+		t.Fatal("resolveMailQueryWithContext returned no recipients")
 	}
 }
 
@@ -265,14 +266,14 @@ func TestResolveAgentTranscriptReadsSessionKeyFromSessionsClass(t *testing.T) {
 // TestSessionClassRoutingIsIdentityOnSingleStoreCity is the byte-identity proof
 // for a city that relocates nothing: every accessor the fixes moved to resolves
 // to the exact store value CityBeadStore() returns, so each substitution is a
-// no-op there. A regression that made SessionsBeadStore() diverge at the default
+// no-op there. A regression that made Stores().Sessions() diverge at the default
 // backend would fail here rather than in production.
 func TestSessionClassRoutingIsIdentityOnSingleStoreCity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	if fs.sessionsBeadStore != nil {
 		t.Fatal("fixture must not relocate the sessions class")
 	}
-	if got := fs.SessionsBeadStore().Store; got != fs.CityBeadStore() {
-		t.Fatal("default backend: SessionsBeadStore().Store must be the identical value CityBeadStore() returns")
+	if got := fs.Stores().Sessions().Store; got != fs.CityBeadStore() {
+		t.Fatal("default backend: Stores().Sessions().Store must be the identical value CityBeadStore() returns")
 	}
 }

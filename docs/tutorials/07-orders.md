@@ -30,13 +30,13 @@ formulas, agents, and orders relate.
 ```
 orders/
   pancakes-check.toml
-  dep-update.toml
 formulas/
   pancakes.toml
 ```
 
 Here's a minimal order that dispatches the `pancakes` formula from
-[Tutorial 05](/tutorials/05-formulas) every five minutes:
+[Tutorial 05](/tutorials/05-formulas) every five minutes. Create the `orders/`
+directory in `~/my-city` and save this file there:
 
 ```toml
 # orders/pancakes-check.toml
@@ -93,13 +93,13 @@ their triggers look like, and whether any are due.
 $ gc order list
 NAME                 TYPE     TRIGGER      INTERVAL/SCHED  TARGET
 pancakes-check       formula  cooldown     5m              worker
-dep-update           formula  cooldown     1h              worker
-release-notes        formula  cooldown     24h             worker
 ```
 
 Your output will also include built-in housekeeping orders that ship with the
-bundled core pack (`beads-health`, `gate-sweep`, `jsonl-export`, `reaper`,
-etc.). Leave them alone.
+packs your city imports (`beads-health`, `gate-sweep`, `jsonl-export`,
+`reaper`, etc.). Leave them alone. If any order comes from a pack one of your
+rigs imports, the table also has a `RIG` column (see
+[Rig-scoped orders](#rig-scoped-orders)).
 
 The `TARGET` column is the pool the order routes to (the field is still `pool`
 in the TOML).
@@ -126,9 +126,11 @@ To check which orders are due right now:
 $ gc order check
 NAME                 TRIGGER      DUE   REASON
 pancakes-check       cooldown     yes   never run
-dep-update           cooldown     no    cooldown: 59m52s remaining
-release-notes        cooldown     no    cooldown: 23h59m53s remaining
 ```
+
+If the orchestrator has already ticked since you saved the file, the order has
+fired once, and its row reads `no` with a reason such as
+`cooldown: 4m31s remaining`.
 
 ## Running an order manually
 
@@ -140,8 +142,8 @@ $ gc order run pancakes-check
 Order "pancakes-check" executed: wisp mc-2xz → gc.routed_to=worker
 ```
 
-The bead ID (`mc-2xz`) is the dispatched work, stamped `gc.routed_to=worker` so
-the pool sees it (`wisp` is the CLI's label for that v1 materialization). Exec
+The bead ID (`mc-2xz` here; yours will differ) is the dispatched work, stamped
+`gc.routed_to=worker` so the pool sees it (`wisp` is the CLI's label for that v1 materialization). Exec
 orders print `Order "<name>" executed (exec)`. Use this to test a new order or
 kick off work that's almost due anyway.
 
@@ -190,17 +192,38 @@ Notes per trigger:
   would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
-  processed twice.
+  processed twice. An order that has never run fires only on events recorded
+  after the orchestrator started (or, for an order a reload adds, after that
+  reload), so events already on the bus by then don't fire it. Delivery is at
+  least once, though: one bead close can reach
+  the bus as two `bead.closed` events, one from the process that closed it and
+  one from the orchestrator when it notices the close first. Make an event
+  order's action safe to repeat for the same bead.
 - **`manual`** — shows up in `gc order list` and `gc order check` (always DUE
   `no`, reason `manual trigger — use gc order run`), but auto-fires never.
+
+Cooldown, cron, and event orders share a dispatch budget:
+`orders.max_dispatches_per_tick` (default 4) orders start per pass, and passes
+are paced by `daemon.patrol_interval` (default `30s`). When all nine such
+orders are due together, they take three passes to come all the way round, so
+with every order due together a `30s` cooldown beside eight others fires only
+about every `ceil(9 / 4) × 30s = 1m30s` — an estimate of budget pressure, not
+an exact cadence: the next pass is paced from the end of the previous one, so
+slow passes stretch it further. Orders that are not due spend no budget, so
+quieter neighbours let it fire sooner. `gc doctor`'s `order-dispatch-floor`
+check flags any order whose interval sits below that worst-case estimate; raise
+`orders.max_dispatches_per_tick`, lengthen the interval, or suspend orders to
+clear it.
 
 ![Cooldown vs cron timing on two timelines: cooldown fires a fixed interval after each run ends, so its wall-clock times drift later as runs take longer; cron fires at fixed clock times no matter how long runs take.](/diagrams/excalidraw-rendered/cooldown-vs-cron.svg)
 
 <Accordion title="Cron catch-up after a missed minute">
 If no orchestrator tick landed during a scheduled minute (the orchestrator was busy
 or down), the next tick fires the missed occurrence once — `gc order check`
-shows the reason `cron: caught up missed occurrence`. Orders that have never run
-don't backfill; they fire only on an exact match.
+shows the reason `cron: caught up missed occurrence`. An order that has never
+run catches up only an occurrence from the last 25 hours, so a newly added
+order can fire right away for a scheduled minute earlier today, but not for one
+from last week.
 </Accordion>
 
 ## Formula orders vs. exec orders
@@ -321,10 +344,28 @@ schedule = "0 6 * * *"
 ```
 
 Overrides match by order name and can change `enabled`, `trigger`, `interval`,
-`schedule`, `check`, `on`, `pool`, `timeout`, `idempotent`, and `env`. An
-override targeting a nonexistent order is an error, not a silent no-op — `gc
-order` commands fail; `gc start` logs the error and continues with the unmatched
-override skipped.
+`schedule`, `check`, `on`, `pool`, `timeout`, `check_timeout`, `idempotent`,
+and `env`. An override targeting a nonexistent order is an error, not a silent
+no-op — `gc order` commands fail and name every such override; the orchestrator
+logs them and still applies every other override.
+
+An override without `rig` reaches only an order's city-level instance. A pack
+order that also runs once per rig needs `rig = "*"` to reach those instances.
+Because `"*"` matches the city-level instance too, it is the safe choice for an
+order a pack ships:
+
+```toml
+[[orders.overrides]]
+name = "orphan-sweep"
+rig = "*"
+interval = "10m"
+timeout = "5m"
+```
+
+To turn a pack's order off, use one mechanism: an override with
+`enabled = false`, or `[orders] skip`. Not both. `skip` removes the order
+before overrides apply, so an override that names a skipped order matches
+nothing and fails as described above.
 
 <Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
 Many orders expand at scan time into one instance per rig (anything in a rig's
@@ -362,20 +403,16 @@ order name. You can query the history:
 
 ```shell
 ~/my-city
-$ gc order history
-ORDER           BEAD     EXECUTED
-pancakes-check  mc-3hb   2026-04-08T07:36:36Z
-dep-update      mc-784   2026-04-08T06:48:12Z
-pancakes-check  mc-zbd   2026-04-08T07:31:22Z
-release-notes   mc-zb8   2026-04-07T13:00:01Z
-
-~/my-city
 $ gc order history pancakes-check
-ORDER           BEAD     EXECUTED
-pancakes-check  mc-3hb   2026-04-08T07:36:36Z
-pancakes-check  mc-zbd   2026-04-08T07:31:22Z
-pancakes-check  mc-9p8   2026-04-08T07:26:18Z
+ORDER                BEAD            EXECUTED
+pancakes-check       mc-3hb          2026-04-08T07:36:36Z
+pancakes-check       mc-zbd          2026-04-08T07:31:22Z
+pancakes-check       mc-9p8          2026-04-08T07:26:18Z
 ```
+
+Your bead IDs, timestamps, and row count depend on how long the order has been
+running. Run `gc order history` with no name to see every order's runs,
+including the built-in housekeeping orders.
 
 The tracking bead is created synchronously _before_ the dispatch goroutine
 launches — which is what keeps the cooldown trigger from re-firing on the very
@@ -418,6 +455,33 @@ specific orders — and every order defaults opted out. Today the flag is
 consumes it yet, and it changes nothing about gate, suspension, or single-flight
 semantics — a reserved order is still skipped when its city or rig is suspended,
 still subject to the open-work gate, and still single-flighted.
+
+## Backend-specific orders
+
+Some orders only make sense against one kind of bead store: the dolt pack's
+health, sync, compaction and backup orders all manage a Dolt server. Such an
+order declares the backends it needs:
+
+```toml
+[order]
+exec = "gc dolt health --json | gc dolt health-check"
+trigger = "cooldown"
+interval = "30s"
+requires_backend = ["dolt"]
+```
+
+The values are `dolt`, `doltlite`, `postgres` and `http`; any other value, or an
+empty list, fails validation. Omit the key and the order runs on every backend.
+For a scope whose store uses a backend the order does not name, gc never
+dispatches it. It records one `order.inapplicable` event per orchestrator start,
+and `gc order list` and `gc doctor` show the order as
+`inapplicable (backend http)`. `gc order check` shows it as inapplicable and
+never due, a webhook that targets it is rejected, and `gc order run` refuses it
+unless you pass `--force`. The HTTP API's order check
+(`GET /v0/city/{cityName}/orders/check`) does not apply this gate yet: it still
+evaluates the order's trigger and can report the order as due, though gc never
+dispatches it. An inapplicable order is not a failure and is never counted as a
+stale order.
 
 ## Rig-scoped orders
 
@@ -502,8 +566,25 @@ independent scoped instances (`test-suite` vs `test-suite:rig:my-api`).
 
 Two orders: a frequent lint check (exec, no agent) and weekly release notes
 (formula, dispatched to the `worker` agent from
-[Tutorial 05](/tutorials/05-formulas)). The pieces are the two order files and
-the formula they dispatch.
+[Tutorial 05](/tutorials/05-formulas)). The pieces are the script the lint
+check runs, the two order files, and the formula the release notes dispatch.
+Create each file at the path in its first line, relative to `~/my-city`.
+
+An exec order's command runs from the city directory, so
+`scripts/lint-changed.sh` means `~/my-city/scripts/lint-changed.sh`. This
+stand-in exits 0 so the order succeeds; swap in your real linter later:
+
+```shell
+~/my-city
+$ mkdir -p scripts
+$ cat > scripts/lint-changed.sh << 'EOF'
+#!/bin/sh
+# Stand-in lint step: replace with your linter (eslint, ruff, golangci-lint, ...).
+echo "lint-check: nothing to lint yet"
+exit 0
+EOF
+$ chmod +x scripts/lint-changed.sh
+```
 
 ```toml
 # orders/lint-check.toml
@@ -549,24 +630,47 @@ needs = ["summarize"]
 
 ```shell
 ~/my-city
-$ gc start
-City 'my-city' started
+$ gc reload
 
 ~/my-city
 $ gc order list
 NAME                 TYPE     TRIGGER      INTERVAL/SCHED  TARGET
 lint-check           exec     cooldown     30s             -
+pancakes-check       formula  cooldown     5m              worker
 release-notes        formula  cron         0 9 * * 1       worker
 
 ~/my-city
 $ gc order check
 NAME                 TRIGGER      DUE   REASON
 lint-check           cooldown     yes   never run
+pancakes-check       cooldown     no    cooldown: 3m12s remaining
 release-notes        cron         no    cron: schedule not matched
 ```
 
-The lint check fires immediately (never run + cooldown = due), then every 30
-seconds. The release notes fire Monday at 9 AM: the orchestrator compiles the
+As before, the built-in orders appear too, and the cooldown reasons depend on
+when each order last ran. If Monday 09:00 fell in the last 25 hours, the
+release-notes row reads `yes  cron: caught up missed occurrence` instead, and
+the orchestrator runs it on the next tick (see Cron catch-up above). The lint check fires on the next tick (never run +
+cooldown = due), then every 30 seconds, so by the time you run `gc order check`
+its row may already read `no` with a few seconds of cooldown left. Give it a
+minute, then confirm it ran and succeeded:
+
+```shell
+~/my-city
+$ gc order history lint-check
+ORDER                BEAD            EXECUTED
+lint-check           mc-q7v          2026-04-08T09:14:05Z
+lint-check           mc-p2d          2026-04-08T09:13:35Z
+
+~/my-city
+$ gc events --type order.failed --since 5m
+```
+
+Each run adds a history row. `gc events --type order.failed` prints a JSON
+line for each failed run, with the order name as its subject and the error as
+its message (a missing or non-executable script shows up there as `not found`
+or `Permission denied`). With the stand-in script, no `lint-check` lines
+appear. The release notes fire Monday at 9 AM: the orchestrator compiles the
 three-step formula into a graph, makes `gather` Ready, and routes step beads to
 the `worker` pool; `summarize` unblocks only when `gather` closes, `post` only
 after `summarize`. The orchestrator drives the sequence to completion — no one

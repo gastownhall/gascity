@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,41 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// filterIsEmpty gates the unfiltered fast paths of both event lists (the city
+// list's LatestSeq total, the supervisor list's tail read). A Filter field it
+// misses would serve those paths a filtered query, so each field set alone
+// must read as non-empty, including fields added after this test.
+func TestFilterIsEmptyMatchesEventsFilterZeroValue(t *testing.T) {
+	if !filterIsEmpty(events.Filter{}) {
+		t.Fatal("zero-value filter reported non-empty")
+	}
+	filterType := reflect.TypeOf(events.Filter{})
+	for i := range filterType.NumField() {
+		name := filterType.Field(i).Name
+		t.Run(name, func(t *testing.T) {
+			var filter events.Filter
+			field := reflect.ValueOf(&filter).Elem().Field(i)
+			switch field.Kind() {
+			case reflect.String:
+				field.SetString(events.BeadCreated)
+			case reflect.Slice:
+				field.Set(reflect.MakeSlice(field.Type(), 1, 1))
+			case reflect.Int, reflect.Int64:
+				field.SetInt(1)
+			case reflect.Uint64:
+				field.SetUint(1)
+			case reflect.Struct:
+				field.Set(reflect.ValueOf(time.Unix(1, 0)))
+			default:
+				t.Fatalf("events.Filter.%s has kind %s; teach this test to set it", name, field.Kind())
+			}
+			if filterIsEmpty(filter) {
+				t.Errorf("filter with only %s set reported empty", name)
+			}
+		})
+	}
+}
 
 func TestEventList(t *testing.T) {
 	state := newFakeState(t)

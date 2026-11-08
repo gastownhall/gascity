@@ -29,11 +29,11 @@ func ScaleParamsFor(a *config.Agent) ScaleParams {
 	return sp
 }
 
-// LookupSessionName resolves an agent's session name. Tries the bead
+// LookupSessionName resolves an agent's session name. Tries the sessions
 // store first (for bead-derived names); falls back to the canonical
-// agent.SessionNameFor if no bead is found.
-func LookupSessionName(store beads.Store, cityName, qualifiedName, sessionTemplate string) string {
-	if store != nil {
+// agent.SessionNameFor if no bead is found, or for the zero store.
+func LookupSessionName(store beads.SessionStore, cityName, qualifiedName, sessionTemplate string) string {
+	if store != (beads.SessionStore{}) {
 		sn := findSessionNameByTemplate(store, qualifiedName)
 		if sn != "" {
 			return sn
@@ -42,12 +42,9 @@ func LookupSessionName(store beads.Store, cityName, qualifiedName, sessionTempla
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
 }
 
-// findSessionNameByTemplate queries the store for a session bead
+// findSessionNameByTemplate queries the sessions store for a session bead
 // matching the qualified agent name and returns its session_name metadata.
-func findSessionNameByTemplate(store beads.Store, qualifiedName string) string {
-	if store == nil {
-		return ""
-	}
+func findSessionNameByTemplate(store beads.SessionStore, qualifiedName string) string {
 	beadList, err := store.List(beads.ListQuery{
 		Type:   "session",
 		Label:  "gc.session",

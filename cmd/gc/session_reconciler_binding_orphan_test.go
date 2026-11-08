@@ -135,7 +135,7 @@ func (e *bindingOrphanReconcileEnv) tick(t *testing.T) {
 		stdout:              io.Discard,
 		stderr:              io.Discard,
 	}
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:                 map[string]TemplateParams{},
 		AssignedWorkBeads:     []beads.Bead{e.work},
 		AssignedWorkStores:    []beads.Store{e.binding},

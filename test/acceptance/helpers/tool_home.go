@@ -1,25 +1,34 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/test/toolhome"
 )
 
-// The acceptance suite runs gc with the operator's real HOME (the platform
-// supervisor refuses an override; gc isolates through GC_HOME). bd and dolt
-// never see it: every Env carries a tool home, and each bd or dolt child is
-// re-homed under it — through ToolList or ToolCommand when the suite forks it,
-// through LinkBeadsTooling's wrapper when gc finds it on PATH or via BD_BIN.
+// The acceptance suite runs gc with an isolated HOME under GC_HOME (see
+// NewEnv); only the real-provider tiers hand it the operator's own
+// (WithHostHome). A bd or dolt the suite forks itself never sees either: it is
+// re-homed under the Env's tool home through ToolList or ToolCommand. A bd gc
+// forks is, by default, the real bd (Env.WithRealBD), because a split-storage
+// city's gc bd refuses a wrapper script; it resolves user-level state under
+// gc's isolated HOME, which is test-owned. An Env whose gc leaves that HOME
+// (WithHostHome, With("HOME")), or a test that asks (WithWrappedBD), runs bd
+// through LinkBeadsTooling's wrapper instead, re-homed under the tool home.
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 
 // bdSharedServerConfigEnv is bd's viper env binding for dolt.shared-server.
 const bdSharedServerConfigEnv = toolhome.SharedServerConfigEnv
+
+// bdDisableMetricsEnv turns bd's usage metrics off.
+const bdDisableMetricsEnv = toolhome.DisableMetricsEnv
 
 // IsolatedToolEnv is toolhome.Environ: base with HOME and the XDG base
 // directories moved under home, host BEADS_*/BD_* dropped (except names in
@@ -47,25 +56,40 @@ func (e *Env) ToolList() []string {
 	return toolhome.Environ(list, e.toolHome, toolhome.Explicit(list)...)
 }
 
-// ToolCommand is exec.Command for a bd or dolt the suite runs outside any Env
-// (a version or capability probe): the test process's environment, re-homed
-// under a fresh per-test directory.
+// ToolCommand is a bounded exec.Command for a bd or dolt the suite runs outside
+// any Env (a version or capability probe): the test process's environment,
+// re-homed under a fresh per-test directory.
 func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd, _ := toolCommand(t, acceptanceToolCommandTimeout, bin, args...)
+	return cmd
+}
+
+func toolCommand(t *testing.T, timeout time.Duration, bin string, args ...string) (*exec.Cmd, context.Context) {
 	t.Helper()
 	home := filepath.Join(TempDir(t), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create tool home: %v", err)
 	}
-	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
+	cmd, ctx := boundedToolCommand(t, timeout, bin, args...)
 	cmd.Env = toolhome.Environ(os.Environ(), home)
-	return cmd
+	// bd walks up from its working directory looking for a .beads. The test
+	// process's cwd is its package directory, which on a developer box sits
+	// under the real home, so an inherited cwd reads ~/.beads/config.yaml
+	// whatever HOME says. A caller that needs a workspace sets Dir itself.
+	cmd.Dir = home
+	return cmd, ctx
 }
 
 // LinkBeadsTooling puts this run's bd and dolt in dir for gc to find on PATH and
-// returns the bd it wrote, which is also what to hand gc as BD_BIN.
+// returns the bd it wrote, which is also what to hand gc as BD_BIN on a
+// wrapped Env (Env.WithWrappedBD). A split-storage city's gc bd refuses a
+// wrapper script, so a default Env runs the real bd (Env.WithRealBD).
 //
 // dolt is a symlink. bd is toolhome's wrapper around bdPath, re-homed under the
-// Env's tool home, because gc forks bd with the Env's real HOME.
+// Env's tool home, because gc forks bd with the Env's real HOME. A failed
+// `bd init` also prints the scope's dolt logs to stderr (see
+// ParseBDInitDiagnostics), because gc rig add removes them on rollback.
 func LinkBeadsTooling(t *testing.T, env *Env, dir, bdPath, doltPath string) string {
 	t.Helper()
 	wrapper, err := InstallBeadsTooling(env, dir, bdPath, doltPath)
@@ -87,7 +111,7 @@ func InstallBeadsTooling(env *Env, dir, bdPath, doltPath string) (string, error)
 		}
 	}
 	wrapper := filepath.Join(dir, "bd")
-	if err := toolhome.WriteWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
+	if err := writeBDInitWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
 		return "", err
 	}
 	return wrapper, nil

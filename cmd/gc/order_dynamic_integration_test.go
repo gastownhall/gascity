@@ -66,7 +66,7 @@ func TestControllerDiscoversAddedCronOrderWithoutRestart(t *testing.T) {
 	var stdout bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {

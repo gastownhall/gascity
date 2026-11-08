@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -184,13 +185,14 @@ func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (strin
 // BundledSourcePinnedVersion returns the canonical pinned version for a
 // bundled builtin source: packs addressed through the public gascity-packs
 // repository keep their public registry pin; gascity.git sources use the
-// bundled gascity.git pin. The canonical pin is the only commit the
-// running binary pre-seeds from its embedded content — any other commit
-// on a bundled source is an ordinary remote import.
+// bundled gascity.git pin. A nested bundled subpack (gascity/roles) shares
+// its parent's pin. The canonical pin is the only commit the running binary
+// pre-seeds from its embedded content — any other commit on a bundled source
+// is an ordinary remote import.
 func BundledSourcePinnedVersion(source string) string {
 	name, repository, ok := builtinpacks.SourceLayout(source)
 	if ok && repository == builtinpacks.PublicRepository {
-		switch name {
+		switch builtinpacks.PinnedWith(name) {
 		case "gastown":
 			return PublicGastownPackVersion
 		case "gascity":
@@ -215,7 +217,10 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	var current string
 	switch repository {
 	case builtinpacks.PublicRepository:
-		switch name {
+		// A nested subpack (gascity/roles) was always written at its parent's
+		// pin, so it moves with its parent: re-pinning one without the other
+		// would split one release across two commits.
+		switch builtinpacks.PinnedWith(name) {
 		case "gastown":
 			superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
 		case "gascity":
@@ -233,13 +238,39 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	default:
 		return "", false
 	}
-	v := strings.TrimSpace(version)
-	for _, old := range superseded {
-		if v == old {
-			return current, true
-		}
+	if matchSupersededPin(version, superseded) {
+		return current, true
 	}
 	return "", false
+}
+
+// minSupersededPinPrefix is the shortest abbreviated sha accepted as naming a
+// superseded pin (git's default abbreviation length).
+const minSupersededPinPrefix = 7
+
+// matchSupersededPin reports whether version names one of the superseded
+// "sha:<hex>" pins. Hand-written pins vary in spelling, so the comparison
+// ignores case and accepts an abbreviation of at least
+// minSupersededPinPrefix hex digits that matches exactly one entry: a short
+// or uppercase spelling of a superseded pin must not slip past as a
+// deliberate pin and be fetched from git.
+func matchSupersededPin(version string, superseded []string) bool {
+	v := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(version), "sha:"))
+	v = strings.TrimPrefix(v, "sha:")
+	if len(v) < minSupersededPinPrefix {
+		return false
+	}
+	matches := 0
+	for _, old := range superseded {
+		full := strings.ToLower(strings.TrimPrefix(old, "sha:"))
+		if full == v {
+			return true
+		}
+		if strings.HasPrefix(full, v) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 // notCachedRemediation returns the remediation clause for an import whose
@@ -260,11 +291,12 @@ func notCachedRemediation(source, version string) string {
 	return fmt.Sprintf("pinned at superseded canonical %s; run \"gc doctor --fix\" to re-pin to the current canonical %s (offline), or \"gc import install\" to fetch this exact commit", version, current)
 }
 
-// IsBundledSourceAtCanonicalPin reports whether commit is the canonical
-// pinned commit the running binary pre-seeds for a bundled source. Only
-// the canonical pin is served from embedded content; pinning a bundled
-// source at any other commit makes it behave exactly like a regular
-// remote import — fetched for real by gc import install.
+// IsBundledSourceAtCanonicalPin reports whether commit is a pin the running
+// binary serves from its embedded content for a bundled source: the
+// canonical pin, or a superseded canonical pin of a gascity.git bundled pack
+// (core, bd, dolt; see isSupersededEmbeddedOnlyPin). Pinning a bundled
+// source at any other commit makes it behave exactly like a regular remote
+// import — fetched for real by gc import install.
 //
 // The comparison is deliberately exact (full lowercase sha): this
 // predicate determines cache-key derivation, which must be stable. An
@@ -275,14 +307,37 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 	if commit == "" || !builtinpacks.IsSource(source) {
 		return false
 	}
-	return strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:") == commit
+	if strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:") == commit {
+		return true
+	}
+	return isSupersededEmbeddedOnlyPin(source, commit)
+}
+
+// isSupersededEmbeddedOnlyPin reports whether commit is a superseded
+// canonical pin of a gascity.git bundled pack. Those pins only ever meant
+// "the pack bundled with this gc": every binary that wrote one served its
+// own embedded content under it, and the gascity.git commit it names holds
+// unrelated, older pack content. Fetching it from git after a pin bump would
+// silently swap a city's builtin packs for that stale tree, so the running
+// binary keeps serving its embedded content for these pins instead (offline,
+// no doctor step needed to keep an upgraded city loading). Superseded public
+// gascity-packs pins are real registry releases and are not aliased.
+func isSupersededEmbeddedOnlyPin(source, commit string) bool {
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok || repository != builtinpacks.Repository {
+		return false
+	}
+	_, superseded := SupersededBundledPinTarget(source, "sha:"+commit)
+	return superseded
 }
 
 // resolveBundledSourceWithoutLock resolves a bundled builtin source that has
 // no packs.lock entry to the binary's canonical pin, hydrating the synthetic
 // cache when needed. The lock stays the source of truth when an entry
 // exists, and a declared non-canonical pin never falls back here — it must
-// be installed for real, exactly like any other remote import. This
+// be installed for real, exactly like any other remote import (a superseded
+// gascity.git canonical pin is the one exception: it is still served from
+// embedded content, see isSupersededEmbeddedOnlyPin). This
 // fallback keeps cities composable before the first "gc import install"
 // writes the lock.
 func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking bool) (string, bool, error) {
@@ -290,9 +345,12 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking
 		return "", false, nil
 	}
 	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
-	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
-		strings.TrimPrefix(declared, "sha:") != commit {
-		return "", false, nil
+	if declared := strings.TrimPrefix(strings.TrimSpace(declaredVersion), "sha:"); declared != "" &&
+		declared != commit {
+		if !isSupersededEmbeddedOnlyPin(source, declared) {
+			return "", false, nil
+		}
+		commit = declared
 	}
 	cacheRoot, err := GlobalRepoCacheRoot()
 	if err != nil {
@@ -380,10 +438,10 @@ type remoteCacheValidationEntry struct{ fingerprint string }
 // rewrites the tree (changing root mtime); git checkout/reset update the
 // index. The .git directory itself is intentionally excluded: git status
 // --porcelain creates and removes a lock file inside .git/ as a side effect,
-// updating .git dir mtime on every run and defeating the memo. .git/index
-// mtime is stable across git status (the flags we pass, including
-// -c core.untrackedCache=false, prevent any index refresh writes).
-// A nested manual worktree edit touching neither root nor the index escapes
+// updating .git dir mtime on every run and defeating the memo. git status
+// may opportunistically write refreshed stat data back to .git/index, but
+// validation records the fingerprint only after status returns, so that
+// write-back does not invalidate the memo on the next load. A nested manual worktree edit touching neither root nor the index escapes
 // detection until the process restarts — acceptable for a pinned,
 // gc-managed cache.
 func remoteCacheFingerprint(cacheDir string) string {
@@ -527,10 +585,38 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
-	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+	if status != "" {
+		return fmt.Errorf("cached import %s has local worktree changes in %q: %s; run \"gc import install\"", source, cacheDir, dirtyStatusSummary(status))
 	}
 	return nil
+}
+
+// maxDirtyStatusEntries bounds how many porcelain records the dirty-cache
+// error quotes; further records are summarized as a count so a large diff
+// cannot flood the log line. It bounds the record count, not the length of
+// arbitrary pathnames.
+const maxDirtyStatusEntries = 3
+
+// dirtyStatusSummary quotes up to maxDirtyStatusEntries nonempty porcelain
+// records, preserving each record's leading status column, and ends with
+// an omitted-entry count when there are more.
+func dirtyStatusSummary(status string) string {
+	quoted := make([]string, 0, maxDirtyStatusEntries+1)
+	omitted := 0
+	for _, record := range strings.Split(status, "\n") {
+		if record == "" {
+			continue
+		}
+		if len(quoted) < maxDirtyStatusEntries {
+			quoted = append(quoted, fmt.Sprintf("%q", record))
+			continue
+		}
+		omitted++
+	}
+	if omitted > 0 {
+		quoted = append(quoted, fmt.Sprintf("and %d more", omitted))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
@@ -541,12 +627,42 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	}, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
-	cmd.Env = gitutil.HermeticEnv()
-	out, err := cmd.CombinedOutput()
+	cmd.Env = repoCacheGitEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	command := "git " + strings.Join(args, " ")
+	diagnostic := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		if diagnostic == "" {
+			return "", fmt.Errorf("%s: %w", command, err)
+		}
+		return "", fmt.Errorf("%s: %s: %w", command, diagnostic, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	// Callers parse stdout as a commit hash or porcelain records, so a
+	// successful command that still wrote diagnostics (such as a directory it
+	// could not read) fails closed instead of passing an incomplete answer.
+	if diagnostic != "" {
+		return "", fmt.Errorf("%s: unexpected diagnostics: %s", command, diagnostic)
+	}
+	// Trim only trailing newlines: leading spaces are porcelain status
+	// columns the dirty-cache diagnostics must preserve.
+	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+// repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace
+// output is diagnostic noise to the cache runner, whose callers parse git's
+// output as a commit hash or porcelain records.
+func repoCacheGitEnv() []string {
+	env := gitutil.HermeticEnv()
+	kept := env[:0]
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_TRACE") {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.

@@ -105,8 +105,10 @@ func TestStartupDeadSessionError_SignalOrMissingStatusIsNotCapacity(t *testing.T
 	}
 }
 
-// Provider.Start skips the token-fenced teardown only for ErrServerDegraded.
-// A capacity refusal leaves a dead pane behind and must still be torn down.
+// Provider.Start skips the token-fenced teardown only for ErrServerDegraded and
+// for runtime.ErrSessionExists, a name already held that this attempt did not
+// create. A capacity refusal leaves a dead pane behind and must still be torn
+// down.
 func TestCapacityErrorIsNotServerDegraded(t *testing.T) {
 	err := startupDeadSessionError(deadPaneOps("tunnel down", "75", ""), "worker")
 	if !runtime.IsProviderCapacity(err) {

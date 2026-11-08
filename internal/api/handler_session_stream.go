@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -84,19 +85,19 @@ func sessionStreamResumeToken(lastEventID, afterCursor string) string {
 }
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	catalog, err := s.workerSessionCatalog(store.Store)
+	catalog, err := s.workerSessionCatalog(store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -109,7 +110,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	includeThinking := queryBoolParam(r, "include_thinking")
 	resumeToken := sessionStreamResumeToken(r.Header.Get("Last-Event-ID"), r.URL.Query().Get("after_cursor"))
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -286,7 +287,7 @@ func (s *Server) emitStructuredFallbackSnapshot(w http.ResponseWriter, info sess
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		History:            structuredFallbackHistory(info, string(worker.TailActivityIdle)),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}
 	writeStructuredSSEUpdate(w, buildStructuredStreamUpdate(resumeToken, projection, includeThinking))
@@ -334,7 +335,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -493,7 +494,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {
@@ -633,7 +634,7 @@ func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityUnknown)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -907,7 +908,7 @@ func (s *Server) streamSessionPeekStructured(ctx context.Context, w http.Respons
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityUnknown)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -1044,13 +1045,21 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 	sentIDs := make(map[string]struct{})
 	currentActivity := historySnapshotActivity(initial)
 
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			seq++
+			_ = send(sse.Message{ID: seq, Data: frame})
+		}
+	}
+
 	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
 		emitted := false
 		if snapshot == nil {
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -1144,6 +1153,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 			log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
 		}
 		emitted = emitPending() || emitted
+		emitProgramStatus()
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
@@ -1167,6 +1177,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 	}
 
 	_ = emitSnapshot(initial)
+	emitProgramStatus()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1204,12 +1215,20 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
 
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			seq++
+			_ = send(sse.Message{ID: seq, Data: frame})
+		}
+	}
+
 	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
 		emitted := false
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {
@@ -1271,6 +1290,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		default:
 			log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
 		}
+		emitProgramStatus()
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
@@ -1290,6 +1310,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	}
 
 	_ = emitSnapshot(initial)
+	emitProgramStatus()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1332,6 +1353,13 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	lastPendingKey := pendingKey
 	lastProgress := time.Now()
 	currentActivity := historySnapshotActivity(initial)
+
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			_ = send(StringIDMessage{Data: frame})
+		}
+	}
 	currentResumeToken := resumeToken
 	var hasStructuredProjection bool
 
@@ -1353,7 +1381,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityUnknown)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -1442,6 +1470,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 			log.Printf("session stream structured: history reload failed for %s: %v", info.ID, err)
 		}
 		emitted = emitPending(false) || emitted
+		emitProgramStatus()
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
@@ -1469,6 +1498,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 	_ = emitSnapshot(initial)
 	emitStructuredFallback()
 	_ = emitPending(true)
+	emitProgramStatus()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1492,7 +1522,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
+	handle, err := s.workerHandleForSession(s.state.Stores().Sessions(), info.ID)
 	if err != nil {
 		return
 	}
@@ -1504,6 +1534,14 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 
 	var lastOutput string
 	var seq int
+
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			seq++
+			_ = send(sse.Message{ID: seq, Data: frame})
+		}
+	}
 	var lastPendingID string
 	var lastPendingKey string
 
@@ -1553,6 +1591,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	}
 
 	emitPeek()
+	emitProgramStatus()
 
 	for {
 		select {
@@ -1560,12 +1599,14 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 			return
 		case <-poll.C:
 			emitPeek()
+			emitProgramStatus()
 		case _, ok := <-workerOps:
 			if !ok {
 				workerOps = nil
 				continue
 			}
 			emitPeek()
+			emitProgramStatus()
 		case <-keepalive.C:
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
@@ -1591,6 +1632,13 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 	var lastPendingID string
 	var lastPendingKey string
 	currentResumeToken := resumeToken
+
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			_ = send(StringIDMessage{Data: frame})
+		}
+	}
 
 	emitPending := func() {
 		pending, err := handle.Pending(ctx)
@@ -1628,7 +1676,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityUnknown)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -1656,6 +1704,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 	if promoteToHistory() {
 		return
 	}
+	emitProgramStatus()
 
 	for {
 		select {
@@ -1666,6 +1715,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 				return
 			}
 			emitPeek()
+			emitProgramStatus()
 		case _, ok := <-workerOps:
 			if !ok {
 				workerOps = nil
@@ -1675,6 +1725,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 				return
 			}
 			emitPeek()
+			emitProgramStatus()
 		case <-keepalive.C:
 			_ = send(StringIDMessage{Data: HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)}})
 		}
@@ -1686,7 +1737,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
+	handle, err := s.workerHandleForSession(s.state.Stores().Sessions(), info.ID)
 	if err != nil {
 		return
 	}
@@ -1698,6 +1749,14 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 
 	var lastOutput string
 	var seq int
+
+	programFrames := s.newProgramStatusFrames(info)
+	emitProgramStatus := func() {
+		if frame, changed := programFrames.next(); changed {
+			seq++
+			_ = send(sse.Message{ID: seq, Data: frame})
+		}
+	}
 
 	emitPeek := func() {
 		output, err := handle.Peek(ctx, 100)
@@ -1724,6 +1783,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	}
 
 	emitPeek()
+	emitProgramStatus()
 
 	for {
 		select {
@@ -1731,12 +1791,14 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 			return
 		case <-poll.C:
 			emitPeek()
+			emitProgramStatus()
 		case _, ok := <-workerOps:
 			if !ok {
 				workerOps = nil
 				continue
 			}
 			emitPeek()
+			emitProgramStatus()
 		case <-keepalive.C:
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}

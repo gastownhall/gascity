@@ -1,0 +1,2 @@
+{"city":"maintainer-city","seq":"5001","ts":"2026-10-05 00:01:06.000000","type":"session.draining","actor":"controller","pool":"","subject":"gascity/polecat-1","run_id":"","step_id":"","session_id":"mc-p1","depends_on":[],"bead_status":"","message":"","payload":"{\"reason\":\"idle\"}"}
+{"city":"maintainer-city","seq":"5002","ts":"2026-10-05 00:02:01.500000","type":"session.stopped","actor":"controller","pool":"","subject":"mayor","run_id":"","step_id":"","session_id":"mc-m1","depends_on":[],"bead_status":"","message":"","payload":"{\"reason\":\"drain_timeout\"}"}

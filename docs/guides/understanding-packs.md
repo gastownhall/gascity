@@ -112,7 +112,7 @@ The same URL also opens the pack directory in a browser.
 
 The Gas City pack expects the binding `gc`: its skills surface as `gc.<skill>`
 (for example `gc.mayor`) and its commands as `gc gc <command>`. Cities created
-by gc v1.4.x bound it as `[imports.gascity]`; `gc doctor --fix` renames that
+by older releases bound it as `[imports.gascity]`; `gc doctor --fix` renames that
 key to `gc` (see the `gascity-pack-binding` check in
 [Troubleshooting](/getting-started/troubleshooting)).
 
@@ -145,6 +145,14 @@ path = "../checkout-service"
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
+
+`gc rig add ../checkout-service --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity`
+writes a `[rigs.imports.gc]` entry for this source. The `gc=` prefix sets the
+binding; without it, the binding is the source's last path segment
+(`gascity`). Because this pack ships with `gc`, `gc rig add` pins it to the
+bundled `sha:` version rather than the `^0.1` constraint shown above. Any
+other remote pack gets the constraint `gc import add` would write, plus a
+`packs.lock` entry.
 
 If that same pack defines a rig-scoped agent named `planner`, the runtime agent
 is stamped with the rig name as well as the binding:
@@ -388,7 +396,7 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 
 # exact SHA pin — this revision must be used
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:5bf643ca55bd20f080994cc31414ee4596015a0c"
 ```
 
 The authored import expresses the source and optional constraint; the lockfile

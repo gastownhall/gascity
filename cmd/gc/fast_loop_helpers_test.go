@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func skipSlowCmdGCTest(t *testing.T, reason string) {
@@ -31,17 +33,16 @@ func skipSlowCmdGCTest(t *testing.T, reason string) {
 // which silently overwrites user state on every run.
 // Regression for gastownhall/gascity#938.
 func sanitizedBaseEnv(extra ...string) []string {
-	filtered := make([]string, 0, len(os.Environ()))
-	for _, kv := range os.Environ() {
+	// Re-exec'd helper binaries must not inherit the bazel test-runner state
+	// the parent owns: with the shard filter the go test runner would assign
+	// the helper test to a different shard than the one requesting it and
+	// exit with "no tests to run", surfacing as a readiness-pipe EOF in the
+	// parent (#6638); with the coverage output path concurrent helpers would
+	// clobber the parent's profile.
+	base := bazeltest.HelperProcessEnv(os.Environ())
+	filtered := make([]string, 0, len(base))
+	for _, kv := range base {
 		if strings.HasPrefix(kv, "GC_") || strings.HasPrefix(kv, "BEADS_") {
-			continue
-		}
-		// Re-exec'd helper binaries must not inherit bazel's shard filter:
-		// the go test runner would assign the helper test to a different
-		// shard than the one requesting it and exit with "no tests to run",
-		// surfacing as a readiness-pipe EOF in the parent (#6638).
-		name, _, _ := strings.Cut(kv, "=")
-		if name == "TEST_SHARD_INDEX" || name == "TEST_TOTAL_SHARDS" {
 			continue
 		}
 		filtered = append(filtered, kv)

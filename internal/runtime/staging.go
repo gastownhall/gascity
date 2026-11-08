@@ -196,6 +196,26 @@ func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers [
 	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
 }
 
+// StageProviderOverlayDirSkippingInstalledMergeable is
+// StageProviderOverlayDirSkippingMergeable narrowed to the mergeable files the
+// caller's installer writes on the same pass: it skips a mergeable path only
+// when installed reports true for its slash-separated relative path (e.g.
+// ".codex/hooks.json") and stages every other overlay file, mergeable or not.
+//
+// A mergeable file no installer writes on the pass would otherwise be written
+// first by session-start staging, AFTER the reconcile tick fingerprinted the
+// work dir, so the next tick's CopyFiles probe would find a hook file GC itself
+// generated and read it as config drift. Staging it here keeps one writer on
+// the tick (the installer never touches it) and makes the file exist, with the
+// content session start re-merges idempotently, before every fingerprint.
+func StageProviderOverlayDirSkippingInstalledMergeable(srcDir, dstDir string, providers []string, installed func(relPath string) bool, warnings io.Writer, opts ...StageOption) error {
+	skip := func(relPath string, isDir bool) bool {
+		return !isDir && installed != nil && overlay.IsMergeablePath(relPath) &&
+			installed(filepath.ToSlash(filepath.Clean(relPath)))
+	}
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
+}
+
 // stageProviderOverlayDir stages srcDir into dstDir for the given provider
 // slots, omitting any entry for which skip returns true (nil skips nothing).
 //

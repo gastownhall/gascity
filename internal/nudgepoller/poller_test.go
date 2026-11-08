@@ -165,3 +165,51 @@ func TestCmdlineMatcherRequiresNudgePollCommand(t *testing.T) {
 		t.Fatalf("CmdlineMatcher matched non-contiguous nudge poll argv: %v", argv)
 	}
 }
+
+func TestFileStemMatcherRecognizesThePollerThatOwnsTheStem(t *testing.T) {
+	cityPath := "/tmp/gc-city"
+	stem := PollerFileStem("sess-worker", "agent")
+	cases := []struct {
+		name string
+		argv []string
+	}{
+		{name: "generated form", argv: append([]string{"gc"}, CommandArgs(cityPath, "sess-worker", "agent")...)},
+		{name: "equals form", argv: []string{"gc", "nudge", "poll", "--session=sess-worker", "--city=/tmp/gc-city", "agent"}},
+		{name: "interval flag", argv: []string{"/usr/local/bin/gc", "nudge", "poll", "--interval", "1s", "--city", "/tmp/gc-city", "--session", "sess-worker", "agent"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !FileStemMatcher(cityPath, stem)(tc.argv) {
+				t.Fatalf("FileStemMatcher(%q, %q) did not match %v", cityPath, stem, tc.argv)
+			}
+		})
+	}
+}
+
+func TestFileStemMatcherRejectsProcessesThatDoNotOwnTheStem(t *testing.T) {
+	cityPath := "/tmp/gc-city"
+	stem := PollerFileStem("sess-worker", "agent")
+	cases := []struct {
+		name     string
+		cityPath string
+		stem     string
+		argv     []string
+	}{
+		{name: "other city", cityPath: cityPath, stem: stem, argv: []string{"gc", "nudge", "poll", "--city", "/tmp/other-city", "--session", "sess-worker", "agent"}},
+		{name: "other session", cityPath: cityPath, stem: stem, argv: []string{"gc", "nudge", "poll", "--city", cityPath, "--session", "sess-other", "agent"}},
+		{name: "other target", cityPath: cityPath, stem: stem, argv: []string{"gc", "nudge", "poll", "--city", cityPath, "--session", "sess-worker", "other"}},
+		{name: "not a poller", cityPath: cityPath, stem: stem, argv: []string{"sleep", "60"}},
+		{name: "other gc command", cityPath: cityPath, stem: stem, argv: []string{"gc", "nudge", "status", "--city", cityPath, "--session", "sess-worker", "agent"}},
+		{name: "no session flag", cityPath: cityPath, stem: PollerFileStem("", "agent"), argv: []string{"gc", "nudge", "poll", "--city", cityPath, "agent"}},
+		{name: "no target", cityPath: cityPath, stem: stem, argv: []string{"gc", "nudge", "poll", "--city", cityPath, "--session", "sess-worker"}},
+		{name: "empty city", cityPath: "", stem: stem, argv: append([]string{"gc"}, CommandArgs(cityPath, "sess-worker", "agent")...)},
+		{name: "empty stem", cityPath: cityPath, stem: "", argv: append([]string{"gc"}, CommandArgs(cityPath, "sess-worker", "agent")...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if FileStemMatcher(tc.cityPath, tc.stem)(tc.argv) {
+				t.Fatalf("FileStemMatcher(%q, %q) matched %v", tc.cityPath, tc.stem, tc.argv)
+			}
+		})
+	}
+}

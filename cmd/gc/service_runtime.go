@@ -71,5 +71,5 @@ func (rt *serviceRuntime) BeadStore(rig string) beads.Store {
 // Poke implements workspacesvc.Runtime. Key-less: a workspace service has
 // no session or template in hand, so it enqueues the allocator.
 func (rt *serviceRuntime) Poke() {
-	legacyEnqueue(rt.cr.pokeCh, nil, reconcilekey.Allocator())
+	rt.cr.wakeOf().Enqueue(wakeReasonService, reconcilekey.Allocator())
 }

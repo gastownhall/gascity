@@ -4,14 +4,17 @@ go_library(
     name = "resourcecensus",
     srcs = [
         "census.go",
+        "counts.go",
         "hermetic.go",
         "medium.go",
+        "policy.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/resourcecensus",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/testpolicy/waiverclock",
         "@com_github_burntsushi_toml//:toml",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 
@@ -19,6 +22,7 @@ go_test(
     name = "resourcecensus_test",
     srcs = [
         "census_test.go",
+        "counts_test.go",
         "hermetic_test.go",
         "medium_test.go",
         "testenv_import_test.go",
@@ -28,14 +32,18 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "//:TESTING.md",
         "//:go.mod",
-        "//:repo_source_tree",
+        "//:repo_go_srcs",
+        "//:repo_go_test_srcs",
+        "//:repo_meta",
+        "//test:test-resource-counts.toml",
+        "//test:test-resources.toml",
     ],
     embed = [":resourcecensus"],
     deps = [
         "//internal/bazeltest",
         "//internal/testenv",
-        "//internal/testpolicy/waiverclock",
     ],
 )
 
@@ -47,6 +55,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

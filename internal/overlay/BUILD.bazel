@@ -3,9 +3,15 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "overlay",
     srcs = [
+        "kiro_released.go",
         "lint.go",
         "merge.go",
         "overlay.go",
+    ],
+    embedsrcs = [
+        "released/kiro-AGENTS-v1.2.0.txt",
+        "released/kiro-AGENTS-v1.3.0.txt",
+        "released/kiro-AGENTS-v1.4.0.txt",
     ],
     importpath = "github.com/gastownhall/gascity/internal/overlay",
     visibility = ["//:__subpackages__"],
@@ -14,6 +20,7 @@ go_library(
 go_test(
     name = "overlay_test",
     srcs = [
+        "kiro_released_test.go",
         "lint_test.go",
         "merge_test.go",
         "overlay_test.go",
@@ -33,6 +40,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )
