@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -139,5 +142,86 @@ func validateConfigShowJSONSchema(t *testing.T, data []byte) {
 	}
 	if err := schema.Validate(doc); err != nil {
 		t.Fatalf("payload does not match config show schema: %v\n%s", err, string(data))
+	}
+}
+
+// absentProviderCommand names a provider binary no host installs, so gc
+// start skips the provider's agents while validation still resolves them.
+const absentProviderCommand = "gc-test-absent-provider-binary"
+
+// writeAgentLocalMCPConflictCity writes a tmux city whose city-scoped
+// "worker" agent has its own mcp/ catalog, which the implicit agent of its
+// provider, sharing the city root's .mcp.json, never receives (#8267). It
+// makes the city the current one and returns its directory.
+func writeAgentLocalMCPConflictCity(t *testing.T, providerCommand string) string {
+	t.Helper()
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "claude"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+base = "builtin:claude"
+command = "`+providerCommand+`"
+prompt_mode = "none"
+`)
+	writeCatalogFile(t, cityDir, "agents/worker/agent.toml", `
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/worker/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+	return cityDir
+}
+
+// gc start refuses a city whose agent-local MCP catalog conflicts with the
+// implicit agent at the city root; gc config show --validate reports the
+// same conflict, its cause and remedy before start, from config alone: a
+// provider binary missing on this host does not hide it.
+func TestConfigShowValidateReportsImplicitAgentLocalMCPConflict(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{name: "provider installed", command: "echo"},
+		{name: "provider binary absent", command: absentProviderCommand},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := writeAgentLocalMCPConflictCity(t, tt.command)
+			if tt.command == absentProviderCommand {
+				if _, err := exec.LookPath(tt.command); err == nil {
+					t.Fatalf("%s resolves on this host; the case needs it absent", tt.command)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"config", "show", "--validate"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("gc config show --validate = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "Config valid.") {
+				t.Fatalf("stdout = %q, want no Config valid.", stdout.String())
+			}
+			for _, want := range []string{
+				"gc config show: MCP target conflict at " + filepath.Join(cityDir, ".mcp.json") + " (claude)",
+				`"worker" defines an agent-local MCP catalog at ` + filepath.Join(cityDir, "agents", "worker", "mcp"),
+				`"claude" (the implicit agent for provider "claude")`,
+				`give "worker" its own work_dir, or move its servers to an mcp/ directory both receive`,
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
 	}
 }

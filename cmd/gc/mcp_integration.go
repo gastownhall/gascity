@@ -264,6 +264,18 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 	return set.targets, err
 }
 
+// validateStage1MCPTargets reports the error gc start's stage-1 pass
+// returns for cfg, such as an MCP target conflict, from config alone:
+// provider families resolve without their binaries (resolveAnyProviderBinary),
+// work dirs are resolved without being created, and nothing is written. Its
+// skip warnings are left for the stage-1 pass to print. An agent whose
+// provider binary is missing here is still checked, though gc start on this
+// host would skip it.
+func validateStage1MCPTargets(cityPath string, cfg *config.City) error {
+	_, err := collectStage1MCPTargets(cityPath, cfg, resolveAnyProviderBinary, nil, true)
+	return err
+}
+
 // heldStage1MCPKey returns the managed key of the stage-1 target a skipped
 // agent would reconcile: set when its provider family has an MCP projection
 // and its work dir is its scope root. The family resolves from config alone,

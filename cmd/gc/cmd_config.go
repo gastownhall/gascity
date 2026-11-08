@@ -123,6 +123,10 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	var validationErrors []string
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		validationErrors = append(validationErrors, err.Error())
+	} else if err := validateStage1MCPTargets(cityPath, cfg); err != nil {
+		// What gc start's stage-1 MCP pass refuses, such as two agents
+		// projecting different servers into one provider-native file.
+		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
