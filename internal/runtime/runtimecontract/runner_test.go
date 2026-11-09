@@ -165,6 +165,37 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObservePeekNoScreen, edit("peek", `exit 66;`, `exit 1;`), "peek fails for no box instead of answering no screen"},
 		{ReqObservePeekNoScreen, set("peek", `exit 66`), "peek answers no screen for a running box"},
 		{ReqObservePeekNoScreen, set("peek", `exit 2`), "peek is not implemented"},
+		{ReqObserveAttachedUnattachedFalse, set("is-attached", `be || exit 1; if [ -d "$box" ]; then echo true; else echo false; fi`), "a running box with no client reads attached"},
+		{ReqObserveAttachedMissingFalse, edit("is-attached", `echo false`, `if [ ! -d "$box" ]; then echo "no such session" >&2; exit 1; fi; echo false`), "is-attached fails for a name no box holds"},
+		{ReqObserveAttachedMissingFalse, edit("is-attached", `echo false`, `if [ -d "$box" ]; then echo false; fi`), "is-attached answers nothing for a name no box holds"},
+
+		{ReqMetaRoundTrip, set("set-meta", `cat >/dev/null`), "set-meta drops the value"},
+		{ReqMetaUnsetKeyEmpty, edit("get-meta", `cat "$box/meta.$3"; fi`, `cat "$box/meta.$3"; else echo "no such key" >&2; exit 1; fi`), "get-meta of an unset key fails"},
+		{ReqMetaUnsetKeyEmpty, edit("get-meta", `cat "$box/meta.$3"; fi`, `cat "$box/meta.$3"; else echo unset; fi`), "get-meta of an unset key prints a placeholder"},
+		{ReqMetaRemoveThenEmpty, set("remove-meta", `:`), "remove-meta removes nothing"},
+		{ReqMetaEmptyValueOverwrites, edit("set-meta", `if [ -d "$box" ];`, `if [ -n "$v" ] && [ -d "$box" ];`), "set-meta skips an empty value"},
+		{ReqMetaOverwritesPrevious, edit("set-meta", `if [ -d "$box" ];`, `if [ -d "$box" ] && [ ! -f "$box/meta.$3" ];`), "set-meta keeps the first value"},
+		{ReqMetaMultipleKeysIndependent, edit("set-meta", `printf %s "$v" > "$box/meta.$3"`, `rm -f "$box"/meta.gc-rpp-*; printf %s "$v" > "$box/meta.$3"`), "set-meta of one key drops the others"},
+
+		{ReqDiscoveryFindsSessions, edit("list-running", `echo "$n" ;; esac; done`, `echo "$n" ;; esac; break; done`), "list-running stops after the first box"},
+		{ReqDiscoveryPrefixFiltering, edit("list-running", `case "$n" in "$name"*) echo "$n" ;; esac;`, `echo "$n";`), "list-running ignores the prefix"},
+		{ReqDiscoveryExcludesStopped, map[string]string{
+			"start":        g["start"] + `; echo "$name" >> "$S/started"`,
+			"list-running": `grep "^$name" "$S/started" 2>/dev/null; true`,
+		}, "list-running lists every name ever started"},
+		{ReqDiscoveryEmptyPrefix, edit("list-running", `be || exit 1; `, `be || exit 1; [ -n "$name" ] || exit 0; `), "list-running with an empty prefix lists nothing"},
+		{ReqDiscoveryFailureIsNotAbsence, edit("list-running", `be || exit 1;`, `be || exit 0;`), "a failed listing reads as an empty one"},
+		{ReqDiscoveryFailureIsNotAbsence, edit("list-running", `be || exit 1;`, `be || exit 2;`), "a failed listing answers exit 2 (unknown op)"},
+
+		{ReqProcessEmptyNamesAlive, edit("process-alive", `elif [ -z "$names" ]; then echo true;`, `elif [ -z "$names" ]; then echo false;`), "no process names reads dead"},
+		{ReqProcessFalseAfterStop, edit("process-alive", `if [ ! -d "$box" ]; then echo false;`, `if [ ! -d "$box" ]; then echo true;`), "a stopped session reads alive"},
+		{ReqProcessFalseAfterStop, edit("process-alive", `if [ ! -d "$box" ]; then echo false;`, `if [ ! -d "$box" ]; then :;`), "a stopped session answers empty, which gc reads as alive"},
+
+		{ReqConcurrencyStart, set("start", exclusive(g["start"])), "start refuses while another start runs"},
+		{ReqConcurrencyStop, set("stop", exclusive(g["stop"])), "stop refuses while another stop runs"},
+		{ReqConcurrencyIsRunning, set("is-running", exclusive(g["is-running"])), "is-running refuses while another runs"},
+		{ReqConcurrencyProcessAlive, set("process-alive", exclusive(g["process-alive"])), "process-alive refuses while another runs"},
+		{ReqConcurrencyListRunning, set("list-running", exclusive(g["list-running"])), "list-running refuses while another runs"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
@@ -230,6 +261,13 @@ func TestDeclaredProvisionExit2Fails(t *testing.T) {
 	}
 }
 
+// exclusive is body behind a script-wide lock it refuses to wait for,
+// held a second so concurrent calls overlap: an op that fails instead of
+// serving distinct names at once, the concurrency group's mutant.
+func exclusive(body string) string {
+	return `mkdir "$S/excl" 2>/dev/null || { echo "busy" >&2; exit 1; }; trap 'rmdir "$S/excl"' EXIT; sleep 1; ` + body
+}
+
 func resultFor(t *testing.T, report Report, code Code) Result {
 	t.Helper()
 	for _, res := range report.Results {
@@ -249,13 +287,23 @@ func TestRunErrorsOnMissingExecutable(t *testing.T) {
 
 // Kills an observe group that runs for a script not declaring observe.v1,
 // or a token-gated requirement that runs without its token: the golden's
-// ops are all there, so only the gates can make these skip.
+// ops are all there, so only the gates can make these skip. The
+// error-bearing attachment answer (RPP-OBSERVE-017..018) is gated by
+// report-attachment alone, so it runs without observe.v1.
 func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
+	attachOnly := map[Code]bool{ReqObserveAttachedUnattachedFalse: true, ReqObserveAttachedMissingFalse: true}
+	allButAttach := map[Code]bool{}
+	for _, req := range catalog {
+		if req.Group == GroupObserve && !attachOnly[req.Code] {
+			allButAttach[req.Code] = true
+		}
+	}
 	for protocol, wantSkip := range map[string]map[Code]bool{
-		`{"version":0,"capabilities":["report-attachment","report-activity","conformance-faults","city-scoped"]}`: nil,
+		`{"version":0,"capabilities":["report-attachment","report-activity","conformance-faults","city-scoped"]}`: allButAttach,
 		`{"version":0,"capabilities":["observe.v1"]}`: {
 			ReqObserveAttachedIsStrict: true, ReqObserveFaultsReadUnknown: true,
 			ReqObserveCityScoped: true, ReqObserveInventoryHasActivity: true,
+			ReqObserveAttachedUnattachedFalse: true, ReqObserveAttachedMissingFalse: true,
 		},
 	} {
 		bodies := reference.Bodies()
@@ -268,11 +316,100 @@ func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
 			if res.Group != GroupObserve {
 				continue
 			}
-			skip := wantSkip == nil || wantSkip[res.Code]
+			skip := wantSkip[res.Code]
 			if (res.Status == StatusSkip) != skip {
 				t.Errorf("handshake %s: %s = %s (%s), want skip %v", protocol, res.Code, res.Status, res.Detail, skip)
 			}
 		}
+	}
+}
+
+// Kills a ported group whose gate is wrong: without observe.v1 the
+// concurrency group skips while meta, discovery and process still run on
+// the golden's ops; an op that answers exit 2 skips its group, except a
+// metadata op under observe.v1, whose exit 2 is a missing store, even when
+// start itself is broken; and RPP-DISCOVERY-005 skips without
+// conformance-faults.
+func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
+	ported := func(g Group) bool {
+		return g == GroupMeta || g == GroupDiscovery || g == GroupProcess || g == GroupConcurrency
+	}
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		absent   []string
+		want     func(req Result) Status
+	}{
+		{
+			name:     "no observe.v1, every op present",
+			protocol: `{"version":0,"capabilities":["conformance-faults"]}`,
+			want: func(req Result) Status {
+				if req.Group == GroupConcurrency {
+					return StatusSkip
+				}
+				return StatusPass
+			},
+		},
+		{
+			name:     "no observe.v1, no conformance-faults",
+			protocol: `{"version":0,"capabilities":[]}`,
+			want: func(req Result) Status {
+				if req.Group == GroupConcurrency || req.Code == ReqDiscoveryFailureIsNotAbsence {
+					return StatusSkip
+				}
+				return StatusPass
+			},
+		},
+		{
+			name:     "no observe.v1, optional ops absent",
+			protocol: `{"version":0,"capabilities":["conformance-faults"]}`,
+			absent:   []string{"set-meta", "get-meta", "remove-meta", "list-running", "process-alive"},
+			want:     func(Result) Status { return StatusSkip },
+		},
+		{
+			// An absent op is told before any session starts, so a
+			// broken start fails the lifecycle group, not these.
+			name:     "no observe.v1, start and optional ops absent",
+			protocol: `{"version":0,"capabilities":["conformance-faults"]}`,
+			absent:   []string{"start", "set-meta", "get-meta", "remove-meta", "list-running", "process-alive"},
+			want:     func(Result) Status { return StatusSkip },
+		},
+		{
+			name:     "observe.v1, optional ops absent",
+			protocol: `{"version":0,"capabilities":["observe.v1","conformance-faults"]}`,
+			absent:   []string{"set-meta", "get-meta", "remove-meta", "list-running", "process-alive"},
+			want: func(req Result) Status {
+				switch req.Group {
+				case GroupMeta:
+					return StatusFail
+				case GroupConcurrency:
+					if req.Code == ReqConcurrencyStart || req.Code == ReqConcurrencyStop || req.Code == ReqConcurrencyIsRunning {
+						return StatusPass
+					}
+				}
+				return StatusSkip
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bodies := reference.Bodies()
+			bodies["protocol"] = `echo '` + tc.protocol + `'`
+			for _, op := range tc.absent {
+				delete(bodies, op)
+			}
+			report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, res := range report.Results {
+				if !ported(res.Group) {
+					continue
+				}
+				if want := tc.want(res); res.Status != want {
+					t.Errorf("%s = %s (%s), want %s", res.Code, res.Status, res.Detail, want)
+				}
+			}
+		})
 	}
 }
 

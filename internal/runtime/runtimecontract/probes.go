@@ -44,6 +44,31 @@ var probes = map[Code]probe{
 	ReqObserveCityScoped:           probeObserveCityScoped,
 	ReqObserveInventoryHasActivity: probeObserveInventoryActivity,
 	ReqObservePeekNoScreen:         probeObservePeekNoScreen,
+
+	ReqObserveAttachedUnattachedFalse: probeObserveAttachedUnattached,
+	ReqObserveAttachedMissingFalse:    probeObserveAttachedMissing,
+
+	ReqMetaRoundTrip:               probeMetaRoundTrip,
+	ReqMetaUnsetKeyEmpty:           probeMetaUnsetKeyEmpty,
+	ReqMetaRemoveThenEmpty:         probeMetaRemoveThenEmpty,
+	ReqMetaEmptyValueOverwrites:    probeMetaEmptyValueOverwrites,
+	ReqMetaOverwritesPrevious:      probeMetaOverwritesPrevious,
+	ReqMetaMultipleKeysIndependent: probeMetaMultipleKeys,
+
+	ReqDiscoveryFindsSessions:       probeDiscoveryFindsSessions,
+	ReqDiscoveryPrefixFiltering:     probeDiscoveryPrefixFiltering,
+	ReqDiscoveryExcludesStopped:     probeDiscoveryExcludesStopped,
+	ReqDiscoveryEmptyPrefix:         probeDiscoveryEmptyPrefix,
+	ReqDiscoveryFailureIsNotAbsence: probeDiscoveryFailureIsNotAbsence,
+
+	ReqProcessEmptyNamesAlive: probeProcessEmptyNamesAlive,
+	ReqProcessFalseAfterStop:  probeProcessFalseAfterStop,
+
+	ReqConcurrencyStart:        probeConcurrencyStart,
+	ReqConcurrencyStop:         probeConcurrencyStop,
+	ReqConcurrencyIsRunning:    probeConcurrencyIsRunning,
+	ReqConcurrencyProcessAlive: probeConcurrencyProcessAlive,
+	ReqConcurrencyListRunning:  probeConcurrencyListRunning,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
