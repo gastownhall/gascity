@@ -102,9 +102,12 @@ type Molecule struct {
 type OrderRuns struct {
 	Scope StoreRef
 
-	// PoursWork reports that the order's formula pours a v1 work-class
-	// molecule, whose root and run label land in the scope's work store.
-	PoursWork bool
+	// PoursWork reports whether the order's formula pours a v1 work-class
+	// molecule, whose root and run label land in the scope's work store. It
+	// is asked only on a split city, as gateStoresFor asks it, so a
+	// single-store city never compiles a formula to plan its gate; nil means
+	// no.
+	PoursWork func() bool
 
 	// LegacyCity reports that a rig order's tracking may still sit in the
 	// city work store (the dispatcher's legacy city target).
@@ -132,8 +135,22 @@ type Workflow struct {
 	// rig still holds.
 	IncludeRetiredRigs bool
 
-	// IncludeSuspendedRigs keeps the rigs the holder reports suspended
-	// (Leg.Suspended), for a reader that reads them today; by default a
-	// suspended rig, whose store may wake its retired proxy, is not read.
-	IncludeSuspendedRigs bool
+	// SuspendedRigs is the reader's choice about the rigs the holder reports
+	// suspended (Leg.Suspended). It has no default: the zero value is a plan
+	// error, because every reader converted so far reads them today and a
+	// silent skip would drop their roots, while a suspended rig's store is
+	// routinely dark and a read can wake its retired proxy.
+	SuspendedRigs WorkflowSuspendedRigs
 }
+
+// WorkflowSuspendedRigs is a Workflow reader's choice about suspended rigs.
+type WorkflowSuspendedRigs int
+
+const (
+	// WorkflowSuspendedRigsUnset is no choice; Stores.Plan refuses it.
+	WorkflowSuspendedRigsUnset WorkflowSuspendedRigs = iota
+	// WorkflowReadsSuspendedRigs reads a suspended rig as any other.
+	WorkflowReadsSuspendedRigs
+	// WorkflowSkipsSuspendedRigs leaves a suspended rig unread.
+	WorkflowSkipsSuspendedRigs
+)

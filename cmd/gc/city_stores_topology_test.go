@@ -66,9 +66,10 @@ func assertTopologiesPlanAlike(t *testing.T, label string, got, want storeref.To
 // (residencyTopology) and the registered spine (residencyTopologyForCity) do,
 // with the same work prefix, on a single-store city, a whole split before and
 // after its census cleared it, a refused city, a worker site whose plane
-// refuses each relocated class (the topology still names class:gmnos and is
-// not refused), and a whole split with a suspended rig (kept, marked, read by
-// no plan). Each rig's relic-free bit is the one the API reads
+// refuses every relocated class (the topology still names class:gmnos, and
+// fails closed: it agrees with the planes carrying that refusal), a worker
+// site that attaches only the graph class (refused per class, not city-wide),
+// and a whole split with a suspended rig (kept, marked, read by no plan). Each rig's relic-free bit is the one the API reads
 // (RigGraphRelicFree).
 //
 // The split-strict gate's projection is off here: the planes build from the
@@ -81,7 +82,7 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 	splitStrictSeam = nil
 	t.Cleanup(func() { splitStrictSeam = saved })
 
-	shapes := []string{"single store", "whole split", "whole split, censused clean", "refused", "worker site, whole split", "whole split, a rig suspended"}
+	shapes := []string{"single store", "whole split", "whole split, censused clean", "refused", "worker site, whole split", "worker site, graph attached", "whole split, a rig suspended"}
 	for _, shape := range shapes {
 		t.Run(shape, func(t *testing.T) {
 			resetControlPlaneForTest(t)
@@ -100,6 +101,11 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 				// A worker site whose descriptor attaches no binding: the plane
 				// refuses every relocated class per class (classRefusal).
 				writeControlPlaneFixture(t, cityPath, testDescriptor(cityPath, nil))
+			case "worker site, graph attached":
+				// The descriptor attaches the graph class to the binding: the
+				// plane refuses the other relocated classes only, and the
+				// topology is not refused.
+				writeControlPlaneFixture(t, cityPath, testDescriptor(cityPath, map[string][]string{splitEnvBinding: {"graph"}}))
 			}
 			cfg := &config.City{
 				Workspace: config.Workspace{Name: "test-city", Prefix: "tc"},
@@ -126,9 +132,18 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 			} else {
 				minted["standalone runtime"] = cr.cityStores()
 			}
+			if shape == "worker site, graph attached" {
+				_, graphRefused := beads.As[storeref.RefusingStore](cs.Stores().Graph())
+				_, sessionsRefused := beads.As[storeref.RefusingStore](cs.Stores().Sessions())
+				if graphRefused || !sessionsRefused {
+					t.Fatalf("fixture: graph refused %v, sessions refused %v; want only sessions", graphRefused, sessionsRefused)
+				}
+			}
 			if shape == "worker site, whole split" {
-				if _, refused := beads.As[storeref.RefusingStore](cs.Stores().Graph()); !refused {
-					t.Fatal("fixture: the worker site's graph handle does not refuse")
+				for name, handle := range map[string]beads.Store{"graph": cs.Stores().Graph(), "sessions": cs.Stores().Sessions(), "mail": cs.Stores().Mail(), "orders": cs.Stores().Orders(), "nudges": cs.Stores().Nudges()} {
+					if _, refused := beads.As[storeref.RefusingStore](handle); !refused {
+						t.Fatalf("fixture: the worker site's %s handle does not refuse", name)
+					}
 				}
 			}
 
@@ -140,14 +155,26 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 			}
 			for holder, stores := range minted {
 				topo := stores.Topology()
+				if shape == "worker site, whole split" {
+					// Every relocated class's handle refuses, so the topology
+					// fails closed, as the one-shot funnel's routes do on a
+					// worker site; its refs stay the routes' (class:gmnos).
+					if topo.Refused == nil || fmt.Sprint(topo.ClaimRefs()) != "[ class:gmnos]" {
+						t.Errorf("%s: refused %v, claim refs %v; want refused, [ class:gmnos]", holder, topo.Refused, topo.ClaimRefs())
+					}
+					for plane, want := range planes {
+						want.Refused = topo.Refused
+						planes[plane] = want
+					}
+				}
 				for plane, want := range planes {
 					assertTopologiesPlanAlike(t, holder+" vs "+plane, topo, want)
 					if topo.Work.Prefix != want.Work.Prefix {
 						t.Errorf("%s vs %s: work prefix %q, plane %q", holder, plane, topo.Work.Prefix, want.Work.Prefix)
 					}
 				}
-				if (topo.Refused != nil) != (shape == "refused") {
-					t.Errorf("%s: refused = %v; only the refused city's topology is refused", holder, topo.Refused)
+				if (topo.Refused != nil) != (shape == "refused" || shape == "worker site, whole split") {
+					t.Errorf("%s: refused = %v; only the refused city and the worker site are refused", holder, topo.Refused)
 				}
 				for _, leg := range topo.Rigs {
 					name, _ := storeref.ScopeRigContext(string(leg.Ref))
@@ -327,7 +354,7 @@ func TestStoresEpochFollowsAConfigOnlyReload(t *testing.T) {
 // workflowPlan is the epoch's Workflow plan, as a corpus row.
 func workflowPlan(t *testing.T, cs *controllerState) string {
 	t.Helper()
-	p, err := cs.Stores().Plan(storeref.Workflow{})
+	p, err := cs.Stores().Plan(storeref.Workflow{SuspendedRigs: storeref.WorkflowReadsSuspendedRigs})
 	if err != nil {
 		t.Fatalf("Plan(Workflow): %v", err)
 	}
@@ -414,5 +441,46 @@ func TestStoresEpochSurvivesAnUnchangedSuspensionSet(t *testing.T) {
 	cs.setSuspendedRigs(map[string]bool{"r": true})
 	if topo := cs.Stores().Topology(); cs.stores.current.Load() == epoch || len(topo.Rigs) != 1 || !topo.Rigs[0].Suspended {
 		t.Errorf("a changed suspension set: rigs %+v; want a re-minted epoch with r suspended", topo.Rigs)
+	}
+}
+
+// TestCityRuntimeStoresCarryTheStateSuspension: a runtime with a controller
+// state mints through the state's epoch (storesOver), suspension included:
+// cr.cityStores() marks the suspended rig, a Roots plan leaves it out, and
+// alternating cs.Stores() and cr.cityStores() share one epoch.
+func TestCityRuntimeStoresCarryTheStateSuspension(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = nil
+	t.Cleanup(func() { splitStrictSeam = saved })
+
+	routes := splitRoutes(beads.NewMemStore())
+	cityPath := t.TempDir()
+	cs := &controllerState{
+		cityName: "c", cityPath: cityPath, cityBeadStore: beads.NewMemStore(), storageRoutes: routes,
+		beadStores: map[string]beads.Store{"live": beads.NewMemStore(), "parked": beads.NewMemStore()},
+	}
+	cs.rigStoresGen++
+	cs.setSuspendedRigs(map[string]bool{"parked": true})
+	cr := &CityRuntime{cityName: "c", cityPath: cityPath, cs: cs, storageRoutes: routes}
+
+	topo := cr.cityStores().Topology()
+	if len(topo.Rigs) != 2 || topo.Rigs[0].Ref != storeref.RigRef("live") || topo.Rigs[0].Suspended || !topo.Rigs[1].Suspended {
+		t.Fatalf("runtime topology rigs = %+v; want live serving, parked suspended", topo.Rigs)
+	}
+	plan, err := cr.cityStores().Plan(storeref.Molecule{Kind: storeref.MoleculeRoots})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated] > rig:live[V1,PartialDegrade,federated]`
+	if got := plan.String(); got != want {
+		t.Errorf("Roots through the runtime:\n got  %s\n want %s", got, want)
+	}
+	epoch := cs.stores.current.Load()
+	for range 3 {
+		_ = cs.Stores()
+		_ = cr.cityStores()
+	}
+	if cs.stores.current.Load() != epoch {
+		t.Error("alternating cs.Stores() and cr.cityStores() re-minted the epoch")
 	}
 }

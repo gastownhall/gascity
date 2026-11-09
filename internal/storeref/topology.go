@@ -330,6 +330,13 @@ func (t Topology) orderedBindings() []ClassBinding {
 // ascending" order the ready federation and the API's list fan-out already
 // agree on. A suspended leg (Leg.Suspended) is not among them.
 func (t Topology) orderedRigs() []Leg {
+	suspended := false
+	for _, leg := range t.Rigs {
+		suspended = suspended || leg.Suspended
+	}
+	if !suspended {
+		return t.orderedAllRigs()
+	}
 	out := make([]Leg, 0, len(t.Rigs))
 	for _, leg := range t.orderedAllRigs() {
 		if !leg.Suspended {

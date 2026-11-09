@@ -135,7 +135,7 @@ func TestWorkflowConsumersErrorInjection(t *testing.T) {
 			f = buildTopology("T2u", map[string]string{"alpha": alphaPrefix, "bravo": bravoPrefix}, nil, nil)
 		}
 		failLeg(f, tc.fail)
-		plan, err := NewStores(f.topo, StoresOptions{}).Plan(Workflow{})
+		plan, err := NewStores(f.topo, StoresOptions{}).Plan(Workflow{SuspendedRigs: WorkflowReadsSuspendedRigs})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,12 +227,12 @@ func TestIntentKindsErrorInjection(t *testing.T) {
 			`visited [class:gmnos, the city work store] partial [] error: reading the city work store: leg down`,
 		},
 		{
-			"OrderRuns(pours), the graph fails first", func(topoFixture) Intent { return OrderRuns{PoursWork: true} },
+			"OrderRuns(pours), the graph fails first", func(topoFixture) Intent { return OrderRuns{PoursWork: func() bool { return true }} },
 			"class:gmnos", noSeed, union,
 			`visited [class:gmnos] partial [] error: reading class:gmnos: leg down`,
 		},
 		{
-			"OrderRuns(pours), the work leg fails", func(topoFixture) Intent { return OrderRuns{PoursWork: true} },
+			"OrderRuns(pours), the work leg fails", func(topoFixture) Intent { return OrderRuns{PoursWork: func() bool { return true }} },
 			WorkRef, noSeed, union,
 			`visited [class:gmnos, the city work store] partial [] error: reading the city work store: leg down`,
 		},

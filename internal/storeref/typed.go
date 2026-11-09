@@ -18,15 +18,28 @@ import (
 type TypedLeg struct {
 	// Reader reads the leg's store through a leg layer of the plan's gate
 	// role (PlanLeg.Gate): federated, relic, or strict.
-	Reader  beads.FederatedReader
+	Reader beads.FederatedReader
+
+	// Strict reads the same store through a strict leg (MintStrictLeg),
+	// whatever the plan's gate role: for a read the consumer makes unmarked
+	// today (the order dispatcher's HasOpenWork and cursor, dispatch's
+	// live-root scan and child listing), so converting it keeps the gate as
+	// sensitive as it was (plan §4.2).
+	Strict  beads.FederatedReader
 	Ref     StoreRef
 	Role    Role
 	OnError ErrPolicy
 }
 
-// typedLeg mints l's reader.
+// typedLeg mints l's readers.
 func typedLeg(l PlanLeg) TypedLeg {
-	return TypedLeg{Reader: legReader(l), Ref: l.Leg.Ref, Role: l.Role, OnError: l.OnError}
+	return TypedLeg{
+		Reader:  legReader(l),
+		Strict:  beads.MintStrictLeg(l.Leg.Store, string(l.Leg.Ref)),
+		Ref:     l.Leg.Ref,
+		Role:    l.Role,
+		OnError: l.OnError,
+	}
 }
 
 // legReader is l's read-only leg, for its gate role.

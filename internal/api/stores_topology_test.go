@@ -54,6 +54,21 @@ func assertAPITopologyAgrees(t *testing.T, label string, st State) {
 	if got, want := fmt.Sprint(minted.PrefixFaults()), fmt.Sprint(plane.PrefixFaults()); got != want {
 		t.Errorf("%s: prefix faults %s, the API plane %s", label, got, want)
 	}
+	if minted.Work.Prefix != plane.Work.Prefix {
+		t.Errorf("%s: work prefix %q, the API plane %q", label, minted.Work.Prefix, plane.Work.Prefix)
+	}
+	if (minted.Refused != nil) != (plane.Refused != nil) {
+		t.Errorf("%s: refused %v, the API plane %v", label, minted.Refused, plane.Refused)
+	}
+	planeRigs := map[storeref.StoreRef]string{}
+	for _, leg := range plane.Rigs {
+		planeRigs[leg.Ref] = leg.Prefix
+	}
+	for _, leg := range minted.Rigs {
+		if want, ok := planeRigs[leg.Ref]; ok && leg.Prefix != want {
+			t.Errorf("%s: rig %s prefix %q, the API plane %q", label, leg.Ref, leg.Prefix, want)
+		}
+	}
 }
 
 // fakeTopologyShapes are the fake States the agreement runs over: the default
@@ -187,8 +202,30 @@ func (refusingFakeStore) StorageRefusal() error {
 	return errors.New("refused: this worker site serves no binding")
 }
 
+// TestWorkerSiteTopologyFailsClosedOnBothSides: a worker site whose every
+// relocated class's handle refuses. The minted topology fails closed and keeps
+// the binding's ref, and the API plane, which reads the one refusing store
+// behind every class handle as the whole split's binding, is refused too: the
+// two agree, so T7c's switch to Stores().Topology() serves nothing new there.
+func TestWorkerSiteTopologyFailsClosedOnBothSides(t *testing.T) {
+	st := fakeTopologyShapes(t)["whole split"]
+	refusal := refusingFakeStore{Store: beads.NewMemStore()}
+	st.classRefusals = map[coordclass.Class]storeref.RefusingClassStore{}
+	for _, c := range coordclass.Classes() {
+		if c.IsInfrastructure() {
+			st.classRefusals[c] = refusal
+		}
+	}
+	minted := st.Stores().Topology()
+	if minted.Refused == nil || fmt.Sprint(minted.ClaimRefs()) != "[ class:gmnos]" {
+		t.Errorf("minted topology: refused %v, claim refs %v; want refused, [ class:gmnos]", minted.Refused, minted.ClaimRefs())
+	}
+	assertAPITopologyAgrees(t, "worker site", st)
+}
+
 // TestAPIPlaneTurnsAPerClassRefusalCityWide pins the one known divergence a
-// per-class refusal (cmd/gc's worker site) opens. The minted topology follows
+// refusal of SOME relocated classes opens (a refusal of every one fails closed
+// on both sides: TestWorkerSiteTopologyFailsClosedOnBothSides). The minted topology follows
 // the routes: the binding is class:gmnos, the topology is not refused, and
 // the refusal stays with the refused class's handle. The API plane derives its
 // bindings from the handles, so it reads the refusing graph handle as a

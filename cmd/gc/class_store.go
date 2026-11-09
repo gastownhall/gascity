@@ -31,11 +31,17 @@ import (
 // read under one cs.mu read lock, the lock update swaps the city and rig
 // stores and the config under, so the handles come from one reload. See
 // storesEpochCache for when it is re-minted.
+//
+// The suspension set is read in the same section, but the city runtime
+// publishes it outside cs.mu (setSuspendedRigs, at the top of each tick), so
+// an epoch can pair a reload's stores with the previous tick's set: a rig
+// suspended or resumed is marked from the next tick's epoch on, a window of
+// at most one tick, in which a just-suspended rig may still be planned.
 func (cs *controllerState) Stores() storeref.Stores {
 	cs.mu.RLock()
-	cityPath, routes, cfg, work, rigs := cs.cityPath, cs.storageRoutes, cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
+	cityPath, routes, cfg, work, rigs, suspended := cs.cityPath, cs.storageRoutes, cs.cfg, cs.cityBeadStore, cs.rigSetLocked(), cs.suspendedRigs.Load()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, cfg, work, rigs, cs.suspendedRigs.Load())
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, suspended)
 }
 
 // storesOver is Stores over the state's city work store and rig stores with
@@ -44,9 +50,9 @@ func (cs *controllerState) Stores() storeref.Stores {
 // them), so both share the one epoch.
 func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) storeref.Stores {
 	cs.mu.RLock()
-	cfg, work, rigs := cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
+	cfg, work, rigs, suspended := cs.cfg, cs.cityBeadStore, cs.rigSetLocked(), cs.suspendedRigs.Load()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, cfg, work, rigs, cs.suspendedRigs.Load())
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, suspended)
 }
 
 // rigSetLocked is the state's rig stores as a rig set. cs.mu must be held.

@@ -14,8 +14,10 @@ package storeref
 // A plane's per-class refusal (StoresOptions.ClassRefusals, cmd/gc's worker
 // site) is a property of that class's HANDLE, not of the topology: the handle
 // refuses every operation, and the topology names the binding the routes
-// serve, with the refusal the plane carried (Topology.Refused) and no other.
-// That keeps the minted refs the ones the route planes name (class:gmnos).
+// serve, so the minted refs are the ones the route planes name
+// (class:gmnos). The topology carries the plane's own refusal, and fails
+// closed when the per-class refusals cover every relocated class
+// (everyRelocatedClassRefused).
 
 import (
 	"fmt"
@@ -86,7 +88,33 @@ func mintedTopology(t Topology, opts StoresOptions, s Stores) Topology {
 	built, _ := BuildBindings(fresh, byStore, BindingOptions{})
 	out.Bindings = append(out.Bindings, built...)
 	out.Bindings = (Topology{Bindings: out.Bindings}).orderedBindings()
+	if out.Refused == nil {
+		out.Refused = everyRelocatedClassRefused(out.Bindings, opts)
+	}
 	return out
+}
+
+// everyRelocatedClassRefused is the plane's refusal when its per-class
+// refusals cover every class the topology relocates (a worker site whose
+// descriptor attaches none of the binding's classes), and nil otherwise. Such
+// a city serves no relocated class from anywhere, so the topology fails
+// closed, as the one-shot CLI funnel's routes do there: the refs stay the
+// binding's (class:gmnos), and a plan that touches the binding refuses. A
+// city that relocates nothing is never refused by this.
+func everyRelocatedClassRefused(bindings []ClassBinding, opts StoresOptions) error {
+	var first error
+	for _, b := range bindings {
+		for _, class := range b.Classes {
+			refusal, ok := opts.ClassRefusals[class]
+			if !ok || refusal == nil {
+				return nil
+			}
+			if first == nil {
+				first = refusal.StorageRefusal()
+			}
+		}
+	}
+	return first
 }
 
 // sameClassSet reports whether a and b name the same classes.
@@ -180,7 +208,7 @@ func (s Stores) Plan(i Intent) (ResolvedPlan, error) {
 	case OrderRuns:
 		plan, err = s.planOrderRuns(in)
 	case Workflow:
-		plan = s.planWorkflow(in)
+		plan, err = s.planWorkflow(in)
 	default:
 		return ResolvedPlan{}, fmt.Errorf("storeref: %T is the plane's topology question; plan it with Plan over the plane's topology, not Stores.Plan", i)
 	}
@@ -339,7 +367,7 @@ func (s Stores) planOrderRuns(in OrderRuns) (ResolvedPlan, error) {
 	if len(infra) == 0 {
 		return ResolvedPlan{Mode: ModeUnion, Legs: workLegs}, nil
 	}
-	if in.PoursWork && !legsHold(infra, work) {
+	if in.PoursWork != nil && !legsHold(infra, work) && in.PoursWork() {
 		infra = append(infra, s.leg(coordclass.ClassWork, work, in.Scope, RoleV1, PolicyFatal))
 	}
 	return ResolvedPlan{Mode: ModeUnion, Legs: infra}, nil
@@ -358,7 +386,10 @@ func legsHold(legs []PlanLeg, store beads.Store) bool {
 // planWorkflow is the workflow-root union: the relocated graph leg, the city,
 // then the rigs ascending, each scope leg a relic leg on a relocated city
 // unless it is a rig proven relic-free. Every leg is Fatal (intents.go).
-func (s Stores) planWorkflow(in Workflow) ResolvedPlan {
+func (s Stores) planWorkflow(in Workflow) (ResolvedPlan, error) {
+	if in.SuspendedRigs != WorkflowReadsSuspendedRigs && in.SuspendedRigs != WorkflowSkipsSuspendedRigs {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a Workflow plan needs the reader's choice about suspended rigs (WorkflowReadsSuspendedRigs or WorkflowSkipsSuspendedRigs), got %d", in.SuspendedRigs)
+	}
 	relocated := s.relocated()
 	plan := ResolvedPlan{Mode: ModeUnion}
 	if relocated {
@@ -377,11 +408,11 @@ func (s Stores) planWorkflow(in Workflow) ResolvedPlan {
 	// The city leg is never retired (OD-T7-11): Work.RelicFree is not read.
 	scope(s.topo.Work, false, false)
 	rigs := s.topo.orderedRigs()
-	if in.IncludeSuspendedRigs {
+	if in.SuspendedRigs == WorkflowReadsSuspendedRigs {
 		rigs = s.topo.orderedAllRigs()
 	}
 	for _, r := range rigs {
 		scope(r, r.RelicFree, in.IncludeRetiredRigs)
 	}
-	return plan
+	return plan, nil
 }

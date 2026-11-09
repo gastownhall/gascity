@@ -75,6 +75,19 @@ func TestTypedLegsReadThroughTheirGateRole(t *testing.T) {
 		if got := s.last(t); got != want[s] {
 			t.Errorf("%s %s: a live read carried %v, want %v", executor, leg.Ref, got, want[s])
 		}
+		// The strict reader reads the same store with no role, whatever
+		// the leg's gate role, as an unmarked read does today.
+		if leg.Strict.Role() != beads.NoLegRole || leg.Strict.Ref() != string(leg.Ref) || !beads.SameStore(leg.Strict, s) {
+			t.Errorf("%s %s: strict reader role %v, ref %q; want none, over the leg's store", executor, leg.Ref, leg.Strict.Role(), leg.Strict.Ref())
+		}
+		_, _ = leg.Strict.Get("x")
+		if got := s.last(t); got != beads.NoLegRole {
+			t.Errorf("%s %s: a strict read carried %v, want none", executor, leg.Ref, got)
+		}
+		_, _ = beads.LiveFor(leg.Strict).Get("x")
+		if got := s.last(t); got != beads.NoLegRole {
+			t.Errorf("%s %s: a strict live read carried %v, want none", executor, leg.Ref, got)
+		}
 	}
 	EachTypedLeg(plan, func(leg TypedLeg) { check("EachTypedLeg", leg) })
 	if _, err := TypedWalk(plan, func(leg TypedLeg) (bool, error) { check("TypedWalk", leg); return false, nil }); err != nil {

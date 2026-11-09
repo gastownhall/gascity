@@ -1,6 +1,7 @@
 package storeref
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -185,6 +186,55 @@ func TestStoresTopologyIgnoresAPlanesPerClassRefusal(t *testing.T) {
 			if got, want := planString(t, in.intent, minted), planString(t, in.intent, f.topo); got != want {
 				t.Errorf("%s x %s: minted %s, plane %s", in.name, f.name, got, want)
 			}
+		}
+	}
+}
+
+// TestStoresTopologyFailsClosedOnAWorkerSite: when the plane's per-class
+// refusals cover every class the topology relocates (a worker site whose
+// descriptor attaches none of the binding's classes), the minted topology is
+// refused, as the one-shot CLI funnel's routes are there, and still names the
+// binding class:gmnos; every existing intent then plans as over the plane's
+// topology carrying that refusal. A city that relocates nothing, and a
+// refusal of some classes only, leave the topology unrefused.
+func TestStoresTopologyFailsClosedOnAWorkerSite(t *testing.T) {
+	all := map[coordclass.Class]RefusingClassStore{}
+	for _, c := range infraClasses {
+		all[c] = refusingStore{}
+	}
+	f := newT2()
+	minted := NewStores(f.topo, StoresOptions{ClassRefusals: all}).Topology()
+	if minted.Refused == nil || fmt.Sprint(minted.ClaimRefs()) != "[ class:gmnos]" {
+		t.Fatalf("every relocated class refused: refused %v, claim refs %v; want refused, [ class:gmnos]", minted.Refused, minted.ClaimRefs())
+	}
+	refusedPlane := f.topo
+	refusedPlane.Refused = minted.Refused
+	for _, in := range corpusIntents() {
+		if got, want := planString(t, in.intent, minted), planString(t, in.intent, refusedPlane); got != want {
+			t.Errorf("%s: minted %s, the refused plane %s", in.name, got, want)
+		}
+	}
+	if got := NewStores(newT0().topo, StoresOptions{ClassRefusals: all}).Topology(); got.Refused != nil {
+		t.Errorf("a city that relocates nothing was refused: %v", got.Refused)
+	}
+	some := map[coordclass.Class]RefusingClassStore{coordclass.ClassGraph: refusingStore{}, coordclass.ClassSessions: refusingStore{}}
+	if got := NewStores(f.topo, StoresOptions{ClassRefusals: some}).Topology(); got.Refused != nil {
+		t.Errorf("refusing some relocated classes refused the topology: %v", got.Refused)
+	}
+}
+
+// TestOrderRunsAsksPoursWorkOnlyOnASplitCity: as gateStoresFor, a
+// single-store city's plan never asks whether the order pours work (which
+// compiles its formula); a split city's asks once.
+func TestOrderRunsAsksPoursWorkOnlyOnASplitCity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		f    topoFixture
+		want int
+	}{"single store": {newT0(), 0}, "whole split": {newT2(), 1}} {
+		asked := 0
+		_, err := NewStores(tc.f.topo, StoresOptions{}).Plan(OrderRuns{PoursWork: func() bool { asked++; return true }})
+		if err != nil || asked != tc.want {
+			t.Errorf("%s: asked %d times (err %v), want %d", name, asked, err, tc.want)
 		}
 	}
 }
