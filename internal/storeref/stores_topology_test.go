@@ -33,10 +33,11 @@ func TestStoresTopologyPlansAsTheTopologyItWasMintedFrom(t *testing.T) {
 func TestStoresTopologyCarriesTheHolderBits(t *testing.T) {
 	f := newT2RelicFree()
 	f.topo.Bindings[0].MintsReserved, f.topo.Bindings[0].HasLegacyResidents = true, false
+	f.topo.Work.RelicFree = true
 	s := NewStores(f.topo, StoresOptions{})
 	got := s.Topology()
-	if got.Work.Prefix != cityPrefix || !beads.SameStore(got.Work.Store, s.Work()) {
-		t.Errorf("work leg = %+v, want the work handle's store with prefix %q", got.Work, cityPrefix)
+	if got.Work.Prefix != cityPrefix || !got.Work.RelicFree || !beads.SameStore(got.Work.Store, s.Work()) {
+		t.Errorf("work leg = %+v, want the work handle's store with prefix %q, relic-free", got.Work, cityPrefix)
 	}
 	want := map[StoreRef]struct {
 		prefix    string
@@ -147,20 +148,43 @@ func TestPlanLegDedupeIsPhysicalIdentity(t *testing.T) {
 	}
 }
 
-// TestStoresPlanDelegatesTheExistingIntents: an intent the topology Plan
-// already answers is planned over Stores.Topology(), and a T7 intent is
-// refused by the topology Plan, which has no handles to plan it over.
-func TestStoresPlanDelegatesTheExistingIntents(t *testing.T) {
+// TestStoresPlanRefusesTheTopologyIntents: an intent the plane's topology
+// answers is not Stores.Plan's (OD-T7-5): it is refused here, and a T7 intent
+// is refused by the topology Plan, which has no handles to plan it over.
+func TestStoresPlanRefusesTheTopologyIntents(t *testing.T) {
 	f := newT2()
 	s := NewStores(f.topo, StoresOptions{})
 	for _, in := range corpusIntents() {
-		if got, want := storesPlanString(s, in.intent), planString(t, in.intent, s.Topology()); got != want {
-			t.Errorf("%s: Stores.Plan %s, Plan over Topology() %s", in.name, got, want)
+		if _, err := s.Plan(in.intent); err == nil {
+			t.Errorf("%s: Stores.Plan answered a topology intent", in.name)
 		}
 	}
 	for _, in := range storesIntents(f) {
 		if _, err := Plan(in.intent, f.topo); err == nil {
 			t.Errorf("%s: the topology Plan answered a T7 intent", in.name)
+		}
+	}
+}
+
+// TestStoresTopologyIgnoresAPlanesPerClassRefusal: a plane's per-class
+// refusal (StoresOptions.ClassRefusals, cmd/gc's worker site) refuses through
+// the class's handle only. The minted topology names the binding the routes
+// serve and carries no refusal of its own, so every existing intent plans as
+// over the plane's topology.
+func TestStoresTopologyIgnoresAPlanesPerClassRefusal(t *testing.T) {
+	for _, f := range []topoFixture{newT0(), newT2()} {
+		s := NewStores(f.topo, StoresOptions{ClassRefusals: map[coordclass.Class]RefusingClassStore{coordclass.ClassGraph: refusingStore{}}})
+		if _, refused := beads.As[RefusingStore](s.Graph()); !refused {
+			t.Fatalf("%s: fixture: the graph handle does not refuse", f.name)
+		}
+		minted := s.Topology()
+		if minted.Refused != nil {
+			t.Errorf("%s: the per-class refusal made the topology refused: %v", f.name, minted.Refused)
+		}
+		for _, in := range corpusIntents() {
+			if got, want := planString(t, in.intent, minted), planString(t, in.intent, f.topo); got != want {
+				t.Errorf("%s x %s: minted %s, plane %s", in.name, f.name, got, want)
+			}
 		}
 	}
 }

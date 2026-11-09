@@ -114,6 +114,10 @@ type rigStores struct {
 	ref   StoreRef
 	work  beads.WorkStore
 	graph beads.GraphStore
+	// orders is the orders placement over the rig's frame, by Place's rule:
+	// the order dispatcher reads a rig order's run evidence there
+	// (resolveOrderStore). It is not handed out; Stores.Plan reads it.
+	orders beads.OrdersStore
 }
 
 // RigWork is one rig's work store, as Stores.Rigs lists it.
@@ -144,12 +148,13 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 		}
 		frame := Topology{Work: leg, Bindings: t.Bindings, Refused: t.Refused}
 		h := beads.MintClassStores(beads.MintSpec{
-			Work:  Place(frame, opts, coordclass.ClassWork),
-			Graph: Place(frame, opts, coordclass.ClassGraph),
+			Work:   Place(frame, opts, coordclass.ClassWork),
+			Graph:  Place(frame, opts, coordclass.ClassGraph),
+			Orders: Place(frame, opts, coordclass.ClassOrders),
 		})
-		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph})
+		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph, orders: h.Orders})
 	}
-	s.topo = mintedTopology(t, s)
+	s.topo = mintedTopology(t, opts, s)
 	return s
 }
 

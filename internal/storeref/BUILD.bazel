@@ -30,6 +30,7 @@ go_test(
     srcs = [
         "bindings_test.go",
         "class_candidates_test.go",
+        "intent_errors_test.go",
         "mint_test.go",
         "placement_test.go",
         "relevance_test.go",

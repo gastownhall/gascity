@@ -741,6 +741,17 @@ func checkFirstOwnerPlan(p ResolvedPlan, id, executor string) (string, error) {
 	if len(p.Legs) == 0 {
 		return "", errors.New("storeref: plan has no legs")
 	}
+	unresolved, workAxis := false, false
+	for _, leg := range p.Legs {
+		unresolved = unresolved || leg.OnError == PolicyFatalUnlessResolved
+		workAxis = workAxis || leg.Role.ownedByCallersWorkAxis()
+	}
+	if unresolved && workAxis {
+		// The work axis's residual is handed back unprobed and its shadows
+		// prove absence; a remembered error behind them has nothing to win or
+		// lose against, so the combination is a plan no planner makes.
+		return "", fmt.Errorf("storeref: %s cannot run a plan that mixes %s legs with a by-id work axis", executor, PolicyFatalUnlessResolved)
+	}
 	return id, nil
 }
 

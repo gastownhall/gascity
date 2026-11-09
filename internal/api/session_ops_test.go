@@ -186,7 +186,7 @@ func (r *rebuiltOverState) Stores() storeref.Stores {
 	for rig := range r.stores {
 		rigs[rig] = r.BeadStore(rig)
 	}
-	return mintFakeStores(r.store, rigs, nil, nil, nil, nil)
+	return mintFakeStores(r.store, rigs, nil, storeref.StoresOptions{}, nil, nil)
 }
 
 func (r *rebuiltOverState) EventProvider() events.Provider {

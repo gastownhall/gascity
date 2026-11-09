@@ -35,7 +35,7 @@ func (cs *controllerState) Stores() storeref.Stores {
 	cs.mu.RLock()
 	cityPath, routes, cfg, work, rigs := cs.cityPath, cs.storageRoutes, cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, cfg, work, rigs)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, cs.suspendedRigs.Load())
 }
 
 // storesOver is Stores over the state's city work store and rig stores with
@@ -46,7 +46,7 @@ func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) st
 	cs.mu.RLock()
 	cfg, work, rigs := cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, cfg, work, rigs)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, cs.suspendedRigs.Load())
 }
 
 // rigSetLocked is the state's rig stores as a rig set. cs.mu must be held.
@@ -65,7 +65,8 @@ func (cs *controllerState) cityWorkStore() beads.WorkStore {
 // cityStores returns the runtime's class handles over its routes: with a
 // controllerState, the state's epoch over the state's city and rig stores;
 // else an epoch over its standalone city and rig stores, read under the lock
-// setStandaloneStores swaps them under.
+// setStandaloneStores swaps them under. A standalone runtime publishes no
+// suspension set, so its epoch marks no rig suspended.
 func (cr *CityRuntime) cityStores() storeref.Stores {
 	if cr.cs != nil {
 		return cr.cs.storesOver(cr.cityPath, cr.storageRoutes)
@@ -73,7 +74,7 @@ func (cr *CityRuntime) cityStores() storeref.Stores {
 	cr.serviceStateMu.RLock()
 	cfg, work, rigs := cr.cfg, cr.standaloneCityStore, rigSet{gen: cr.standaloneRigGen, stores: cr.standaloneRigStores}
 	cr.serviceStateMu.RUnlock()
-	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, cfg, work, rigs)
+	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, cfg, work, rigs, nil)
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the

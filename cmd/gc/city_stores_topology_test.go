@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -62,8 +64,11 @@ func assertTopologiesPlanAlike(t *testing.T, label string, got, want storeref.To
 // minted as (Stores.Topology, from the controller's state and the standalone
 // runtime) plans every residency question as the controller's own constructor
 // (residencyTopology) and the registered spine (residencyTopologyForCity) do,
-// on a single-store city, a whole split before and after its census cleared
-// it, and a refused city. Each rig's relic-free bit is the one the API reads
+// with the same work prefix, on a single-store city, a whole split before and
+// after its census cleared it, a refused city, a worker site whose plane
+// refuses each relocated class (the topology still names class:gmnos and is
+// not refused), and a whole split with a suspended rig (kept, marked, read by
+// no plan). Each rig's relic-free bit is the one the API reads
 // (RigGraphRelicFree).
 //
 // The split-strict gate's projection is off here: the planes build from the
@@ -76,8 +81,10 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 	splitStrictSeam = nil
 	t.Cleanup(func() { splitStrictSeam = saved })
 
-	for _, shape := range []string{"single store", "whole split", "whole split, censused clean", "refused"} {
+	shapes := []string{"single store", "whole split", "whole split, censused clean", "refused", "worker site, whole split", "whole split, a rig suspended"}
+	for _, shape := range shapes {
 		t.Run(shape, func(t *testing.T) {
+			resetControlPlaneForTest(t)
 			routes, cityPath, rigDirs := relicLegRoutes(t, shape != "single store" && shape != "refused")
 			switch shape {
 			case "single store":
@@ -89,6 +96,10 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 			case "whole split, censused clean":
 				binding, _ := routes.storeFor(coordclass.ClassGraph)
 				routes.relics = map[beads.Store]bool{binding: false}
+			case "worker site, whole split":
+				// A worker site whose descriptor attaches no binding: the plane
+				// refuses every relocated class per class (classRefusal).
+				writeControlPlaneFixture(t, cityPath, testDescriptor(cityPath, nil))
 			}
 			cfg := &config.City{
 				Workspace: config.Workspace{Name: "test-city", Prefix: "tc"},
@@ -103,18 +114,40 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 			cs.rigStoresGen++
 			cr := &CityRuntime{cityName: "test-city", cityPath: cityPath, cfg: cfg, storageRoutes: routes}
 			cr.setStandaloneStores(work, rigs)
+			serving := rigs
+			minted := map[string]storeref.Stores{"controllerState": cs.Stores()}
+			if shape == "whole split, a rig suspended" {
+				// The controller plane is told the serving rigs; the epoch keeps
+				// the suspended rig, marked, and no plan reads it. A standalone
+				// runtime publishes no suspension set.
+				cs.setSuspendedRigs(map[string]bool{"busy": true})
+				serving = map[string]beads.Store{"packs": rigs["packs"]}
+				minted["controllerState"] = cs.Stores()
+			} else {
+				minted["standalone runtime"] = cr.cityStores()
+			}
+			if shape == "worker site, whole split" {
+				if _, refused := beads.As[storeref.RefusingStore](cs.Stores().Graph()); !refused {
+					t.Fatal("fixture: the worker site's graph handle does not refuse")
+				}
+			}
 
 			registerResidencyRoutes(cityPath, routes, nil)
 			t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 			planes := map[string]storeref.Topology{
-				"controller":       cr.residencyTopology(rigs),
-				"registered spine": residencyTopologyForCity(cityPath, cfg, work, rigs),
+				"controller":       cr.residencyTopology(serving),
+				"registered spine": residencyTopologyForCity(cityPath, cfg, work, serving),
 			}
-			minted := map[string]storeref.Stores{"controllerState": cs.Stores(), "standalone runtime": cr.cityStores()}
 			for holder, stores := range minted {
 				topo := stores.Topology()
 				for plane, want := range planes {
 					assertTopologiesPlanAlike(t, holder+" vs "+plane, topo, want)
+					if topo.Work.Prefix != want.Work.Prefix {
+						t.Errorf("%s vs %s: work prefix %q, plane %q", holder, plane, topo.Work.Prefix, want.Work.Prefix)
+					}
+				}
+				if (topo.Refused != nil) != (shape == "refused") {
+					t.Errorf("%s: refused = %v; only the refused city's topology is refused", holder, topo.Refused)
 				}
 				for _, leg := range topo.Rigs {
 					name, _ := storeref.ScopeRigContext(string(leg.Ref))
@@ -123,9 +156,13 @@ func TestStoresTopologyAgreesWithTheControllerPlanes(t *testing.T) {
 					}
 				}
 			}
-			wantPacksFree := shape == "whole split" || shape == "whole split, censused clean"
-			if got := minted["controllerState"].Topology(); len(got.Rigs) != 2 || got.Rigs[1].Ref != storeref.RigRef("packs") || got.Rigs[1].RelicFree != wantPacksFree {
+			wantPacksFree := shape != "single store" && shape != "refused"
+			got := minted["controllerState"].Topology()
+			if len(got.Rigs) != 2 || got.Rigs[1].Ref != storeref.RigRef("packs") || got.Rigs[1].RelicFree != wantPacksFree {
 				t.Errorf("rig legs = %+v, want packs relic-free = %v", got.Rigs, wantPacksFree)
+			}
+			if busy := got.Rigs[0]; busy.Suspended != (shape == "whole split, a rig suspended") {
+				t.Errorf("rig busy suspended = %v in shape %q", busy.Suspended, shape)
 			}
 		})
 	}
@@ -284,5 +321,98 @@ func TestStoresEpochFollowsAConfigOnlyReload(t *testing.T) {
 	cs.mu.Unlock()
 	if got := cs.Stores().Topology(); got.Work.Prefix != "bb" || got.Rigs[0].Prefix != "bbr" {
 		t.Errorf("after a config-only reload the prefixes are %q, %q; want the new config's", got.Work.Prefix, got.Rigs[0].Prefix)
+	}
+}
+
+// workflowPlan is the epoch's Workflow plan, as a corpus row.
+func workflowPlan(t *testing.T, cs *controllerState) string {
+	t.Helper()
+	p, err := cs.Stores().Plan(storeref.Workflow{})
+	if err != nil {
+		t.Fatalf("Plan(Workflow): %v", err)
+	}
+	return p.String()
+}
+
+// TestStoresRelicLegsFollowTheCensusContract (R4, S5-G): the relic legs are
+// per epoch. A rig proven relic-free has none; once its record no longer
+// speaks for it (S5-G --to-rigs renames the records) the next epoch reads it
+// as a relic leg again; once the routes serve no binding (--to-work) no relic
+// role remains. A record that changes within an epoch is not seen until the
+// epoch re-mints, and a rig-generation bump (gc rig add, a reload) re-mints.
+func TestStoresRelicLegsFollowTheCensusContract(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = nil
+	t.Cleanup(func() { splitStrictSeam = saved })
+
+	routes, cityPath, rigDirs := relicLegRoutes(t, true)
+	cfg := &config.City{Workspace: config.Workspace{Name: "c"}, Rigs: []config.Rig{{Name: "packs", Path: rigDirs["packs"]}, {Name: "busy", Path: rigDirs["busy"]}}}
+	cs := &controllerState{
+		cityName: "c", cityPath: cityPath, cfg: cfg, cityBeadStore: beads.NewMemStore(), storageRoutes: routes,
+		beadStores: map[string]beads.Store{"packs": beads.NewMemStore(), "busy": beads.NewMemStore()},
+	}
+	cs.rigStoresGen++
+	bump := func() {
+		cs.mu.Lock()
+		cs.beadStores = map[string]beads.Store{"packs": cs.beadStores["packs"], "busy": cs.beadStores["busy"]}
+		cs.rigStoresGen++
+		cs.mu.Unlock()
+	}
+	clean := filepath.Join(routes.rigMarkers.bindingRoot, rigGraphCleanMarkerName("packs"))
+
+	const proven = `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:busy[Relic,Fatal,relic]`
+	const relic = `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:busy[Relic,Fatal,relic] > rig:packs[Relic,Fatal,relic]`
+	if got := workflowPlan(t, cs); got != proven {
+		t.Fatalf("packs proven relic-free:\n got  %s\n want %s", got, proven)
+	}
+
+	// --to-rigs: the records are renamed, so packs is no longer proven.
+	if err := os.Rename(clean, clean+".rolled-back"); err != nil {
+		t.Fatal(err)
+	}
+	if got := workflowPlan(t, cs); got != proven {
+		t.Errorf("within the epoch the census is not re-read:\n got  %s\n want %s", got, proven)
+	}
+	bump()
+	if got := workflowPlan(t, cs); got != relic {
+		t.Errorf("after the re-mint the relic leg is back:\n got  %s\n want %s", got, relic)
+	}
+
+	// A record written again is picked up by the next re-mint.
+	if err := os.Rename(clean+".rolled-back", clean); err != nil {
+		t.Fatal(err)
+	}
+	bump()
+	if got := workflowPlan(t, cs); got != proven {
+		t.Errorf("a rig-generation re-mint picks up the record again:\n got  %s\n want %s", got, proven)
+	}
+
+	// --to-work: the routes serve no binding, so no relic role remains.
+	unsplit := &storageRoutes{rigMarkers: routes.rigMarkers}
+	cs.mu.Lock()
+	cs.storageRoutes = unsplit
+	cs.mu.Unlock()
+	const none = `Union(first-leg-wins): ""[FederationTail,Fatal,federated] > rig:busy[FederationTail,Fatal,federated] > rig:packs[FederationTail,Fatal,federated]`
+	if got := workflowPlan(t, cs); got != none {
+		t.Errorf("after --to-work:\n got  %s\n want %s", got, none)
+	}
+}
+
+// TestStoresEpochSurvivesAnUnchangedSuspensionSet: the city runtime
+// republishes the suspension set every tick; an unchanged set keeps the
+// epoch, and a changed one re-mints it with the rig marked.
+func TestStoresEpochSurvivesAnUnchangedSuspensionSet(t *testing.T) {
+	cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: beads.NewMemStore(), beadStores: map[string]beads.Store{"r": beads.NewMemStore()}}
+	cs.rigStoresGen++
+	cs.setSuspendedRigs(map[string]bool{"r": false})
+	_ = cs.Stores()
+	epoch := cs.stores.current.Load()
+	cs.setSuspendedRigs(map[string]bool{})
+	if _ = cs.Stores(); cs.stores.current.Load() != epoch {
+		t.Error("republishing an unchanged suspension set re-minted the epoch")
+	}
+	cs.setSuspendedRigs(map[string]bool{"r": true})
+	if topo := cs.Stores().Topology(); cs.stores.current.Load() == epoch || len(topo.Rigs) != 1 || !topo.Rigs[0].Suspended {
+		t.Errorf("a changed suspension set: rigs %+v; want a re-minted epoch with r suspended", topo.Rigs)
 	}
 }

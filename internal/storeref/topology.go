@@ -92,6 +92,13 @@ type Leg struct {
 	// ClassBinding.HasLegacyResidents it is pessimistic: false unless a
 	// census proved it, and meaningful only on a scope (work or rig) leg.
 	RelicFree bool
+
+	// Suspended marks a rig leg the holder reports suspended: named, so the
+	// epoch keeps its handles, but never read by a plan (orderedRigs skips
+	// it), because a suspended rig's store is routinely dark and a read can
+	// wake its retired proxy. A plane constructor leaves such a rig out
+	// instead; Stores.Topology keeps it marked.
+	Suspended bool
 }
 
 // ClassBinding is one relocated class binding actually being served.
@@ -164,8 +171,10 @@ type Topology struct {
 	// Work is the city/HQ work-class leg. Always present.
 	Work Leg
 
-	// Rigs are the rig work-class legs. Suspended rigs are excluded by the
-	// constructor: it is TOLD which rigs are serving, it does not decide.
+	// Rigs are the rig work-class legs. A plane constructor excludes
+	// suspended rigs: it is TOLD which rigs are serving, it does not decide.
+	// Stores.Topology keeps every rig its holder opened and marks a suspended
+	// one (Leg.Suspended); no plan reads a suspended leg either way.
 	Rigs []Leg
 
 	// Bindings are the relocated class bindings actually being served. Empty
@@ -317,9 +326,21 @@ func (t Topology) orderedBindings() []ClassBinding {
 	return out
 }
 
-// orderedRigs returns the rig legs by ref ascending — the "rig-name ascending"
-// order the ready federation and the API's list fan-out already agree on.
+// orderedRigs returns the serving rig legs by ref ascending — the "rig-name
+// ascending" order the ready federation and the API's list fan-out already
+// agree on. A suspended leg (Leg.Suspended) is not among them.
 func (t Topology) orderedRigs() []Leg {
+	out := make([]Leg, 0, len(t.Rigs))
+	for _, leg := range t.orderedAllRigs() {
+		if !leg.Suspended {
+			out = append(out, leg)
+		}
+	}
+	return out
+}
+
+// orderedAllRigs is orderedRigs with the suspended legs too.
+func (t Topology) orderedAllRigs() []Leg {
 	if len(t.Rigs) < 2 {
 		return t.Rigs
 	}

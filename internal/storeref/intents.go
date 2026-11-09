@@ -16,30 +16,39 @@ import "github.com/gastownhall/gascity/internal/beads"
 type MoleculeKind int
 
 const (
-	// MoleculeRootNear finds a molecule root: the graph placement first
-	// (Authority), then the store the walk started from (RoleNear). First
-	// owner; only a not-found moves the walk on (B2's root lookup,
-	// cmd/gc/molecule_autoclose.go).
+	// MoleculeRootNear finds a molecule root: the graph placement at Scope
+	// first (Authority), then Near (RoleNear). First owner; only a not-found
+	// moves the walk on (B2's root lookup, cmd/gc/molecule_autoclose.go).
 	MoleculeRootNear MoleculeKind = iota
 
-	// MoleculeParentNear finds a legacy parent: the store the walk started
-	// from first (RoleNear), then the graph placement. First owner; only a
-	// not-found moves the walk on (B2's parent lookup).
+	// MoleculeParentNear finds a legacy parent: Near first (RoleNear), then
+	// the graph placement at Scope. First owner; only a not-found moves the
+	// walk on (B2's parent lookup).
 	MoleculeParentNear
 
 	// MoleculeAttachment finds a bead's attached molecule: the graph placement
-	// (Authority), then the scope's work store (RoleV1, a v1 poured molecule).
-	// First owner under PolicyFatalUnlessResolved, so a graph leg that refuses
-	// does not hide a v1 molecule the work leg holds (R2,
-	// internal/sling/sling_attachment.go).
+	// at Scope (Authority), then Near, the parent bead's own store (RoleV1, a
+	// v1 poured molecule lives beside its parent). First owner under
+	// PolicyFatalUnlessResolved, so a graph leg that refuses does not hide a
+	// v1 molecule Near holds (R2, internal/sling/sling_attachment.go). The
+	// attachment's children are attributed to the Near leg, as getFromStores'
+	// callers attribute them to the last store.
 	MoleculeAttachment
 
-	// MoleculeRoots enumerates molecule roots: the graph placement
-	// (Authority), then every work leg, the city's and each rig's ascending
-	// (RoleV1). A union; the visitor asks each role its own query (wisp GC,
-	// the step reminder). A failed work leg degrades the answer; a failed
-	// graph leg fails it.
+	// MoleculeRoots enumerates molecule roots for the wisp GC. On a city that
+	// relocates the graph class (by handle identity) it is the graph placement
+	// (Authority, Fatal), then every serving work leg, the city's and each
+	// rig's ascending (RoleV1, PartialDegrade), where v1 poured roots and the
+	// attachment holders live. On a city that relocates nothing it is the
+	// graph placement alone: the GC reads no work leg there
+	// (cmd/gc/city_runtime.go tickWispGC, wisp_gc_work_lane.go).
 	MoleculeRoots
+
+	// MoleculeActive is the step reminder's molecule readers for one agent:
+	// the graph placement at Scope (Authority), then Near, the agent's own
+	// work store (RoleV1), only when Near is not the graph placement's store.
+	// A union, Fatal on any leg (cmd/gc/wisp_step_inject.go activeMoleculeIn).
+	MoleculeActive
 )
 
 // String renders the kind.
@@ -53,6 +62,8 @@ func (k MoleculeKind) String() string {
 		return "Attachment"
 	case MoleculeRoots:
 		return "Roots"
+	case MoleculeActive:
+		return "Active"
 	default:
 		return "MoleculeKind(?)"
 	}
@@ -63,50 +74,66 @@ func (k MoleculeKind) String() string {
 type Molecule struct {
 	Kind MoleculeKind
 
-	// Scope is the scope whose graph placement the plan reads (WorkRef or a
-	// RigRef) and, for MoleculeAttachment, whose work store backs it.
+	// Scope is the scope whose graph placement the plan reads: WorkRef or a
+	// RigRef.
 	Scope StoreRef
 
-	// Near is the store the walk started from (the closed bead's own) and
-	// NearRef its name, for MoleculeRootNear and MoleculeParentNear. A Near
-	// that is the graph placement's store is one leg, not two.
+	// Near is the store the plan reads beside the graph placement, and NearRef
+	// its name: the closed bead's own store (RootNear, ParentNear), the parent
+	// bead's own store (Attachment), the agent's own work store (Active). A
+	// Near that is the graph placement's store is one leg, not two; a nil
+	// Near is no leg. Roots reads no Near.
 	Near    beads.Store
 	NearRef StoreRef
 }
 
-// OrderRuns is an order's run evidence: the orders placement, the graph
-// placement at Scope, then the scope's work store, where a v1 poured
-// formula's root lives (RoleV1). A union; the visitor keeps the rows it has
-// when a later leg fails (orders.Store.LastRun, cmd/gc's bd cursor).
+// OrderRuns is an order's run evidence, as the order dispatcher's open-work
+// gate, cooldown clock and event cursor read it (cmd/gc/order_dispatch.go
+// gateStoresFor), in its order, because HasOpenWork stops at the first leg
+// that holds open work or fails. Every leg is Fatal; LastRun keeps the rows
+// it has when a later leg fails, in its visitor.
+//
+//   - Where the graph or orders placement at Scope is not one of the work legs
+//     (a split city): the graph placement, then the orders placement, then
+//     the scope's work store only when PoursWork. The work ledger is
+//     otherwise not read.
+//   - Else (a single-store city): the scope's work store, then the city work
+//     store when LegacyCity.
 type OrderRuns struct {
 	Scope StoreRef
+
+	// PoursWork reports that the order's formula pours a v1 work-class
+	// molecule, whose root and run label land in the scope's work store.
+	PoursWork bool
+
+	// LegacyCity reports that a rig order's tracking may still sit in the
+	// city work store (the dispatcher's legacy city target).
+	LegacyCity bool
 }
 
-// WorkflowDoor is which reader a Workflow plan serves: it picks each leg's
-// error policy.
-type WorkflowDoor int
-
-const (
-	// WorkflowDoorRead is a workflow reader that keeps scanning past a leg it
-	// could not read and reports the leg (the API's workflow, run and convoy
-	// snapshots, cmd/gc's workflow scans): every leg degrades.
-	WorkflowDoorRead WorkflowDoor = iota
-
-	// WorkflowDoorSourceGuard is the source-bead singleton guard (sling, the
-	// CLI and dispatch's live-root scan): the relocated graph leg is Fatal,
-	// because a binding fault is an error and never "no conflict"; every scope
-	// leg degrades (the tolerated non-source-store warning).
-	WorkflowDoorSourceGuard
-)
-
 // Workflow is the workflow-root federation: the relocated graph binding
-// (Authority), then the city work store, then each rig ascending. On a
-// relocated city the scope legs are RoleRelic, read for roots written there
-// before the split, and a scope proven relic-free (Leg.RelicFree) is dropped;
-// on a single-store city they are Authority. IncludeRetiredRigs keeps a
-// relic-free rig, for a reader that may be looking for rig WORK (an event
-// subject), which such a rig still holds.
+// (Authority), then the city work store, then each serving rig ascending.
+// On a relocated city the scope legs are RoleRelic, read for roots written
+// there before the split; the city's is never retired (OD-T7-11), and a rig
+// proven relic-free (Leg.RelicFree) is dropped. On a single-store city every
+// leg is RoleFederationTail.
+//
+// RoleAuthority marks exactly one leg: the relocated graph binding, the store
+// that structurally holds every live root. A single-store city has none.
+//
+// Every leg is PolicyFatal: whether a leg's failure is tolerated is each
+// reader's own rule, kept in its visitor. The sling's source guard refuses on
+// the Authority leg and on the source store (by ref), and tolerates the rest
+// only with a warning sink; dispatch's live-root scan, the API's run cancel
+// and `gc workflow delete` fail on any.
 type Workflow struct {
+	// IncludeRetiredRigs keeps a relic-free rig, as a federated tail, for a
+	// reader that may be looking for rig WORK (an event subject), which such a
+	// rig still holds.
 	IncludeRetiredRigs bool
-	Door               WorkflowDoor
+
+	// IncludeSuspendedRigs keeps the rigs the holder reports suspended
+	// (Leg.Suspended), for a reader that reads them today; by default a
+	// suspended rig, whose store may wake its retired proxy, is not read.
+	IncludeSuspendedRigs bool
 }

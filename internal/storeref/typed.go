@@ -105,7 +105,14 @@ func WorkResidual(t Topology) beads.ResidentStore {
 // leg may hold it; with none preferred, the first row found wins; with none
 // found, beads.ErrNotFound. Every leg is read, the work residual included: the
 // question is which copy, not where to read next. A nil prefer accepts the
-// first row.
+// first row. A FatalUnlessResolved leg that failed outranks a rejected row
+// (TestResolveOwnerPreferringPrecedence).
+//
+// cmd/gc's committedCloseOwner (api_state.go) is not this executor and stays
+// its own code: it skips a failed read and still takes a later closed copy,
+// and with no closed copy falls back to its first store whatever was read.
+// That is a choice of which store to apply a committed close's effects in,
+// not a by-id resolution, and its R4 conversion (T7g) keeps it.
 func ResolveOwnerPreferring(p ResolvedPlan, id string, prefer func(beads.Bead) bool) (Owner, error) {
 	id, err := checkFirstOwnerPlan(p, id, "ResolveOwnerPreferring")
 	if err != nil {

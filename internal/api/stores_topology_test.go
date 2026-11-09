@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -175,5 +176,37 @@ func TestStoresHoldsIsTheAPIHoldsRule(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// refusingFakeStore stands in for cmd/gc's refusedClassStore: a store that
+// answers every operation with a standing refusal.
+type refusingFakeStore struct{ beads.Store }
+
+func (refusingFakeStore) StorageRefusal() error {
+	return errors.New("refused: this worker site serves no binding")
+}
+
+// TestAPIPlaneTurnsAPerClassRefusalCityWide pins the one known divergence a
+// per-class refusal (cmd/gc's worker site) opens. The minted topology follows
+// the routes: the binding is class:gmnos, the topology is not refused, and
+// the refusal stays with the refused class's handle. The API plane derives its
+// bindings from the handles, so it reads the refusing graph handle as a
+// binding of its own and the city as refused: every plan that touches a
+// binding fails there. T7c's switch of residencyTopology to
+// Stores().Topology() changes that: only reads through the graph handle
+// refuse.
+func TestAPIPlaneTurnsAPerClassRefusalCityWide(t *testing.T) {
+	st := fakeTopologyShapes(t)["whole split"]
+	st.classRefusals = map[coordclass.Class]storeref.RefusingClassStore{coordclass.ClassGraph: refusingFakeStore{Store: beads.NewMemStore()}}
+	if _, refused := beads.As[storeref.RefusingStore](st.Stores().Graph()); !refused {
+		t.Fatal("fixture: the graph handle does not refuse")
+	}
+	minted, plane := st.Stores().Topology(), New(st).residencyTopology()
+	if got := fmt.Sprint(minted.ClaimRefs()); got != "[ class:gmnos]" || minted.Refused != nil {
+		t.Errorf("minted topology: claim refs %s, refused %v; want [ class:gmnos], not refused", got, minted.Refused)
+	}
+	if got := fmt.Sprint(plane.ClaimRefs()); got != "[ class:g class:nos]" || plane.Refused == nil {
+		t.Errorf("API plane: claim refs %s, refused %v; want [ class:g class:nos], refused", got, plane.Refused)
 	}
 }

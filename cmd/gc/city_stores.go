@@ -130,7 +130,11 @@ func cityTopology(routes *storageRoutes, work beads.Store) storeref.Topology {
 // suspended ones included, as the API serves them; the residency topologies
 // the controller's census arms read exclude suspended rigs themselves
 // (residency_topology.go).
-func mintCityStores(cityPath string, routes *storageRoutes, cfg *config.City, work beads.Store, rigs []storeref.Leg) storeref.Stores {
+//
+// suspended names the rigs the holder last saw suspended (nil: none known).
+// Their legs are kept, marked Leg.Suspended, so the epoch still hands out
+// their handles while no plan reads them.
+func mintCityStores(cityPath string, routes *storageRoutes, cfg *config.City, work beads.Store, rigs []storeref.Leg, suspended map[string]bool) storeref.Stores {
 	opts := storeref.StoresOptions{Projection: splitStrictSeam}
 	for _, class := range mintClasses {
 		if refusal := classRefusal(cityPath, routes, class); refusal != nil {
@@ -148,6 +152,7 @@ func mintCityStores(cityPath string, routes *storageRoutes, cfg *config.City, wo
 		if name, ok := storeref.ScopeRigContext(string(leg.Ref)); ok && name != "" {
 			leg.Prefix = prefixes[name]
 			leg.RelicFree = splitRigGraphRelicFree(routes, name)
+			leg.Suspended = suspended[name]
 		}
 		t.Rigs = append(t.Rigs, leg)
 	}
@@ -181,7 +186,7 @@ func placeClass(cityPath string, routes *storageRoutes, work beads.Store, class 
 // needs a handle of another takes it from the city's Stores, or relabels it
 // with a counted literal at its own site.
 func scopeStores(cityPath string, routes *storageRoutes, scope beads.Store) storeref.Stores {
-	return mintCityStores(cityPath, routes, nil, scope, nil)
+	return mintCityStores(cityPath, routes, nil, scope, nil, nil)
 }
 
 // cliStores is scopeStores for a one-shot command, over the one-shot funnel's
@@ -207,9 +212,12 @@ type storesEpoch struct {
 	cityPath string
 	bindings *routesBindings
 	cfg      *config.City
-	work     beads.Store
-	rigGen   uint64
-	stores   storeref.Stores
+	// suspended is the holder's published suspension set, by pointer: the
+	// controller republishes it only when it changes (setSuspendedRigs).
+	suspended *map[string]bool
+	work      beads.Store
+	rigGen    uint64
+	stores    storeref.Stores
 }
 
 // storesEpochCache holds a holder's current epoch.
@@ -221,16 +229,21 @@ type storesEpochCache struct{ current atomic.Pointer[storesEpoch] }
 // lives on one routes value and is replaced whenever that value hands a class
 // a different store, so comparing it covers both the pointer and an in-place
 // rewrite. The config is compared by pointer, since a reload publishes a new
-// one: it carries the prefixes the topology is completed with. A cache hit
+// one: it carries the prefixes the topology is completed with; so is the
+// suspension set, which marks the rig legs no plan reads. A cache hit
 // reads the routes and allocates nothing. The caller reads every input under
 // the one lock it swaps them under (R10), so the topology, its census bits and
 // its rigs are one epoch's.
-func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, cfg *config.City, work beads.Store, rigs rigSet) storeref.Stores {
+func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, cfg *config.City, work beads.Store, rigs rigSet, suspended *map[string]bool) storeref.Stores {
 	bindings := routes.mintBindings()
-	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.bindings == bindings && e.cfg == cfg && sameBeadStore(e.work, work) && e.rigGen == rigs.gen {
+	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.bindings == bindings && e.cfg == cfg && e.suspended == suspended && sameBeadStore(e.work, work) && e.rigGen == rigs.gen {
 		return e.stores
 	}
-	e := &storesEpoch{cityPath: cityPath, bindings: bindings, cfg: cfg, work: work, rigGen: rigs.gen, stores: mintCityStores(cityPath, routes, cfg, work, storeref.RigLegs(rigs.stores))}
+	var names map[string]bool
+	if suspended != nil {
+		names = *suspended
+	}
+	e := &storesEpoch{cityPath: cityPath, bindings: bindings, cfg: cfg, suspended: suspended, work: work, rigGen: rigs.gen, stores: mintCityStores(cityPath, routes, cfg, work, storeref.RigLegs(rigs.stores), names)}
 	c.current.Store(e)
 	return e.stores
 }
