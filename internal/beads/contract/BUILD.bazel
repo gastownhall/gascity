@@ -66,8 +66,12 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_go_srcs",
+        "@com_github_steveyegge_beads//cmd/bd:migrate_dolt_mode_src",
     ],
     embed = [":contract"],
+    env = {
+        "GC_TEST_BEADS_MIGRATE_DOLT_MODE_SRC": "$(rootpath @com_github_steveyegge_beads//cmd/bd:migrate_dolt_mode_src)",
+    },
     deps = [
         "//internal/bazeltest",
         "//internal/fsys",

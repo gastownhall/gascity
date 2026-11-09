@@ -46,3 +46,15 @@ diff -ruN a/internal/types/BUILD.bazel b/internal/types/BUILD.bazel
 +    srcs = ["types.go"],
 +    visibility = ["//visibility:public"],
 +)
+diff -ruN a/cmd/bd/BUILD.bazel b/cmd/bd/BUILD.bazel
+--- a/cmd/bd/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
++++ b/cmd/bd/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
+@@ -0,0 +1,8 @@
++
++# Patched for gascity bazel farm: expose migrate_dolt_mode.go as runfiles data
++# for internal/beads/contract's TestMigrateJournalFileMatchesPinnedBeads.
++filegroup(
++    name = "migrate_dolt_mode_src",
++    srcs = ["migrate_dolt_mode.go"],
++    visibility = ["//visibility:public"],
++)
