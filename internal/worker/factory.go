@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -28,7 +29,13 @@ type FactoryConfig struct {
 	// CityPath is the city whose runtime leases the manager's starts and
 	// stops take. A factory whose handles create, start or stop sessions
 	// needs it: without one, those refuse with session.ErrRuntimeLeaseNoCity.
-	CityPath              string
+	CityPath string
+	// CityConfig lets the underlying session.Manager derive canonical
+	// named-session ownership (configured_named_session,
+	// configured_named_identity) from the city's own named-session spec
+	// table at creation time, instead of trusting caller-supplied
+	// ExtraMeta. Nil preserves the legacy ExtraMeta-trusting behavior.
+	CityConfig            *config.City
 	SearchPaths           []string
 	Recorder              events.Recorder
 	UsageSink             usage.Sink
@@ -96,9 +103,12 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 		// first call: every nil check below must see it as no store.
 		cfg.Store = nil
 	}
-	opts := make([]sessionpkg.ManagerOption, 0, 5)
+	opts := make([]sessionpkg.ManagerOption, 0, 6)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
+	}
+	if cfg.CityConfig != nil {
+		opts = append(opts, sessionpkg.WithCityConfig(cfg.CityConfig))
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))

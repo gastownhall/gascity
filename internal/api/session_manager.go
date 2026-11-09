@@ -24,6 +24,7 @@ func (s *Server) sessionManager(sessions beads.SessionStore) *session.Manager {
 		sessions,
 		s.state.SessionProvider(),
 		session.WithCityPath(s.state.CityPath()),
+		session.WithCityConfig(cfg),
 		session.WithDeferredSubmitQueue(s.state.NudgeQueue()),
 		session.WithRuntimeLeaseTTL(session.RuntimeLeaseTTLFor(cfg)),
 		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
