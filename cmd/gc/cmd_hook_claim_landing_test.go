@@ -640,3 +640,59 @@ func TestClassRoutedClaimRecordsLandingBeforeBindingReadback(t *testing.T) {
 		}
 	}
 }
+
+// TestHookClaimWithBdStoreConflictReadStaysMutationBound pins that a lost race
+// keeps its diagnostic read on the claim's own mutation context: no canonical
+// readback runner is constructed for a CAS this session did not commit. The
+// read surfaces the winner, and a failed read degrades to an empty non-claim.
+func TestHookClaimWithBdStoreConflictReadStaysMutationBound(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		showErr    error
+		wantWinner string
+	}{
+		{"diagnostic read surfaces the winner", nil, "other-seat"},
+		{"diagnostic read fails", errors.New("store unavailable"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			originalRunner := hookClaimCommandRunnerWithEnvContext
+			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+			var ctxs []context.Context
+			var ran [][]string
+			hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+				ctxs = append(ctxs, ctx)
+				return func(_ string, name string, args ...string) ([]byte, error) {
+					ran = append(ran, append([]string(nil), args...))
+					switch {
+					case name == "bd" && reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+						return []byte("Error: work-1 already claimed by other-seat"), errors.New("exit status 1")
+					case name == "bd" && reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+						if tc.showErr != nil {
+							return nil, tc.showErr
+						}
+						return []byte(`[{"id":"work-1","status":"in_progress","assignee":"other-seat"}]`), nil
+					default:
+						t.Fatalf("unexpected command: %s %q", name, args)
+						return nil, nil
+					}
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			current, ok, err := hookClaimWithBdStore(ctx, "/rig", nil, "work-1", "worker-1")
+			if err != nil || ok {
+				t.Fatalf("hookClaimWithBdStore = (%+v, ok=%v, err=%v), want a rejected non-claim", current, ok, err)
+			}
+			if current.Assignee != tc.wantWinner {
+				t.Fatalf("rejected bead assignee = %q, want %q", current.Assignee, tc.wantWinner)
+			}
+			if len(ctxs) != 1 || ctxs[0] != ctx {
+				t.Fatalf("runner constructions = %d, want only the mutation context's", len(ctxs))
+			}
+			if want := [][]string{{"update", "work-1", "--claim", "--json"}, {"show", "--json", "work-1"}}; !reflect.DeepEqual(ran, want) {
+				t.Fatalf("bd calls = %q, want %q", ran, want)
+			}
+		})
+	}
+}
