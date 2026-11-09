@@ -3792,6 +3792,20 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
+A row being ready does not mean a worker could be handed it. Synthetic input
+convoys (one minted per dispatch), molecule step beads, deliberately parked
+beads (deploy-handoff, hold:*, owner-action, human-decision, human), already
+routed and already-assigned beads are all ready by the store's definition and
+none of them is supply. --dispatchable keeps only the rows that are, and
+--census prints the count instead of the rows along with the per-class breakdown
+that complements it. Neither changes what a plain "gc ready" returns: the raw
+list stays complete for the callers that legitimately want convoy rows.
+
+Read the queue-health floor off --census's "dispatchable" number, not off the
+row count: a city's raw ready count grows with throughput because carriers are
+minted as work is dispatched, so the raw number reads healthy exactly when the
+pool is being consumed.
+
 Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
 suspended_on_start and not resumed. Their agents claim nothing and the
 controller counts no demand in them, so this reads the same rigs the controller
@@ -3817,6 +3831,8 @@ gc ready [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--assignee` | string |  | only work assigned to exactly this identity |
+| `--census` | bool |  | print the dispatchable census instead of the rows: the count the queue-health floor is measured against, with the per-class breakdown that complements it |
+| `--dispatchable` | bool |  | keep only rows a worker could be handed now: drop synthetic convoy carriers, molecule step beads, parked labels, already-routed and already-assigned beads |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |

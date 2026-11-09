@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/readywork"
@@ -58,6 +59,20 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
+A row being ready does not mean a worker could be handed it. Synthetic input
+convoys (one minted per dispatch), molecule step beads, deliberately parked
+beads (deploy-handoff, hold:*, owner-action, human-decision, human), already
+routed and already-assigned beads are all ready by the store's definition and
+none of them is supply. --dispatchable keeps only the rows that are, and
+--census prints the count instead of the rows along with the per-class breakdown
+that complements it. Neither changes what a plain "gc ready" returns: the raw
+list stays complete for the callers that legitimately want convoy rows.
+
+Read the queue-health floor off --census's "dispatchable" number, not off the
+row count: a city's raw ready count grows with throughput because carriers are
+minted as work is dispatched, so the raw number reads healthy exactly when the
+pool is being consumed.
+
 Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
 suspended_on_start and not resumed. Their agents claim nothing and the
 controller counts no demand in them, so this reads the same rigs the controller
@@ -93,25 +108,120 @@ read.`,
 // (readywork.ReadUntilUnblocked). The cut is not part of the query because the
 // endpoint does not take it: on that route the command cuts the controller's
 // whole answer itself.
+//
+// dispatchable and census are the DISPATCHABILITY surface (dispatchable.go in
+// internal/readywork): they are applied to the rows after the read, are not
+// part of the query, and therefore need no wire change. That is deliberate —
+// the classification is a pure function of a row, so the API and the CLI
+// cannot disagree about it.
+//
+// Neither flag name is bd's, and that is a constraint rather than an accident.
+// `bd ready` already spends --explain on "show dependency-aware reasoning" and
+// --claim on taking the first row; reusing either spelling here would answer a
+// bd-shaped work query with a census object instead of a row array, which every
+// consumer that decodes the array would report as an empty queue. The names are
+// new precisely so a copied bd invocation cannot mean something else here.
 type readyFlags struct {
 	query          readywork.Query
 	untilUnblocked bool
+	// dispatchable drops every row no worker could be handed now (synthetic
+	// convoy carriers, molecule step beads, parked labels, already-routed and
+	// already-assigned beads), leaving supply only.
+	dispatchable bool
+	// census replaces the row array with the census: the dispatchable count
+	// and the per-class breakdown that complements it.
+	census bool
 }
 
 // validate checks every flag without reading anything.
 func (f readyFlags) validate() error {
+	if f.census || f.dispatchable {
+		// The dispatchability surface measures READY work. --status lists beads
+		// in another status, and most of those (closed, blocked, already
+		// in_progress) are not claimable by definition, so classifying them as
+		// "dispatchable" would be a well-formed answer to a question nobody
+		// asked and a wrong one to the question they did.
+		if status := strings.TrimSpace(f.query.Status); status != "" && status != readywork.StatusOpen {
+			return fmt.Errorf("--dispatchable and --census measure ready work and do not take --status %s", f.query.Status)
+		}
+	}
+	if f.census {
+		// Both answers are about the same population, and they are different
+		// payloads: --dispatchable emits the rows, --census emits the count.
+		// Accepting both would mean silently choosing one, which is the
+		// accepted-looking-flag failure this package keeps naming (ga-8lyxc).
+		if f.dispatchable {
+			return fmt.Errorf("--census and --dispatchable are two answers to one question; pass one (--census counts, --dispatchable lists)")
+		}
+		// --limit bounds a ROW list, and --census returns no rows. Silently
+		// ignoring it would produce a document that looks limited and is not.
+		if f.query.Limit != 0 {
+			return fmt.Errorf("--census reports a count and takes no --limit (got %d); use --dispatchable --limit to list rows", f.query.Limit)
+		}
+	}
 	if f.untilUnblocked {
 		return readywork.ValidateUntilUnblocked(f.query)
 	}
 	return f.query.Validate()
 }
 
-// read answers the flags in-process over legs.
-func (f readyFlags) read(legs []readywork.Leg) ([]readywork.ReadyBead, error) {
+// read answers an explicit query over legs. The query can differ from the
+// flags' own when the dispatchability surface is in play: it reads unbounded and
+// cuts afterwards, while the flags keep the caller's limit for that cut.
+func (f readyFlags) read(legs []readywork.Leg, query readywork.Query) ([]readywork.ReadyBead, error) {
 	if f.untilUnblocked {
-		return readywork.ReadUntilUnblocked(context.Background(), legs, f.query)
+		return readywork.ReadUntilUnblocked(context.Background(), legs, query)
 	}
-	return readywork.Read(legs, f.query)
+	return readywork.Read(legs, query)
+}
+
+// postProcess applies the dispatchability surface to rows the reader returned.
+// It returns either the filtered rows (the --dispatchable arm) or, for
+// --census, no rows and the census document to print instead.
+//
+// The limit is the subtle part. The reader applies --limit LAST, but
+// --dispatchable drops rows AFTER the read, so a bounded read followed by a
+// filter can answer with fewer rows than the caller asked for even though more
+// dispatchable rows exist further down. cmdReady therefore reads UNBOUNDED when
+// --dispatchable or --census is set and cuts here, after the filter — the same
+// "the limit is the top N of the answer" rule, applied to the answer this
+// surface actually has. The cost is one whole-city read, which is what an
+// unbounded `gc ready` already costs and what an honest census needs anyway.
+func (f readyFlags) postProcess(rows []readywork.ReadyBead) (kept []readywork.ReadyBead, census *readyCensusDoc) {
+	if !f.dispatchable && !f.census {
+		return rows, nil
+	}
+	summary := readywork.Summarize(rows)
+	if f.census {
+		return nil, &readyCensusDoc{
+			Dispatchable: summary.Dispatchable,
+			Total:        summary.Total,
+			InFlight:     summary.InFlight(),
+			ByClass:      summary.ByClass,
+		}
+	}
+	kept = summary.Rows
+	if f.query.Limit > 0 && len(kept) > f.query.Limit {
+		kept = kept[:f.query.Limit]
+	}
+	return kept, nil
+}
+
+// readyCensusDoc is the --census payload: the dispatchable count, the total
+// it was drawn from, how many of the rest are work in flight, and the full
+// per-class breakdown — every class present, zero included, so a consumer
+// reading the JSON never has to tell "absent" from "zero".
+//
+// in_flight is in the document rather than left to the caller as (total -
+// dispatchable - synthetic - parked) because that subtraction would count
+// parked beads as in-flight, and the charter's scheduling order escalates on
+// exactly that distinction: busy (work in flight) is healthy, starved (nothing
+// in flight) is not.
+type readyCensusDoc struct {
+	Dispatchable int                             `json:"dispatchable"`
+	Total        int                             `json:"total"`
+	InFlight     int                             `json:"in_flight"`
+	ByClass      map[readywork.DispatchClass]int `json:"by_class"`
 }
 
 // registerReadyFlags binds the `gc ready` flag surface onto cmd.
@@ -141,6 +251,8 @@ func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral,
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
 	cmd.Flags().BoolVar(&flags.untilUnblocked, "until-unblocked", false, "with --status in_progress, end the answer at its first unblocked row, resolving no row past it")
+	cmd.Flags().BoolVar(&flags.dispatchable, "dispatchable", false, "keep only rows a worker could be handed now: drop synthetic convoy carriers, molecule step beads, parked labels, already-routed and already-assigned beads")
+	cmd.Flags().BoolVar(&flags.census, "census", false, "print the dispatchable census instead of the rows: the count the queue-health floor is measured against, with the per-class breakdown that complements it")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
@@ -154,6 +266,18 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 	if err := flags.validate(); err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// --dispatchable and --census filter AFTER the read, so a limit pushed into
+	// the read would cut the wrong population: the top N ready rows are not the
+	// top N dispatchable ones. Read unbounded and let postProcess cut with the
+	// caller's own limit, which is also what an honest census needs.
+	//
+	// The zeroing is on a COPY. Clearing flags.query.Limit instead would erase
+	// the number postProcess cuts with, and the answer would silently be
+	// unbounded — an over-delivery, not the requested top N.
+	query := flags.query
+	if flags.dispatchable || flags.census {
+		query.Limit = 0
 	}
 	// One composed city-config load for the whole invocation. Every store open
 	// below resolves its own inputs — the pinned bd, the storage binding env —
@@ -169,7 +293,7 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if rows, ok := readyThroughController(cityPath, flags.query, stderr); ok {
+	if rows, ok := readyThroughController(cityPath, query, stderr); ok {
 		if flags.untilUnblocked {
 			// The controller answers the whole window with every row resolved, and
 			// its cut is the in-process read's answer. A row past the cut that cannot
@@ -177,11 +301,7 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 			// read below answers.
 			rows = readywork.CutUntilUnblocked(rows)
 		}
-		if err := writeJSON(stdout, rows); err != nil {
-			fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+		return writeReadyAnswer(flags, rows, stdout, stderr)
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
@@ -206,12 +326,26 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	rows, err := flags.read(legs)
+	rows, err := flags.read(legs, query)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := writeJSON(stdout, rows); err != nil {
+	return writeReadyAnswer(flags, rows, stdout, stderr)
+}
+
+// writeReadyAnswer applies the dispatchability surface to rows and prints the
+// answer: the census document for --census, the (possibly filtered) row array
+// otherwise.
+func writeReadyAnswer(flags readyFlags, rows []readywork.ReadyBead, stdout, stderr io.Writer) int {
+	rows, census := flags.postProcess(rows)
+	var err error
+	if census != nil {
+		err = writeJSON(stdout, census)
+	} else {
+		err = writeJSON(stdout, rows)
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
