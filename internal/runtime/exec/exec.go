@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -109,25 +108,26 @@ func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Prov
 }
 
 // cityEnv returns the env an op of a provider built for a city runs with:
-// gc's environment, read through execenv.Environ, plus the city. It is nil
-// otherwise, so the op inherits gc's environment unchanged. Read it before
-// arming the op's deadline: execenv.Environ waits out an in-flight native
-// store open, and that wait is not the op's.
+// gc's environment, read through execenv.Environ without a session's
+// identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
+// it before arming the op's deadline: execenv.Environ waits out an
+// in-flight native store open, and that wait is not the op's.
 func (p *Provider) cityEnv() []string {
 	if !p.citySet {
 		return nil
 	}
-	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+	return append(sessionlessEnviron(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
 // opEnv returns the env a bounded op runs with: cityEnv for a provider built
-// for a city, else gc's environment read through execenv.Environ. Like
-// cityEnv, read it before arming the op's deadline.
+// for a city, else gc's environment read through execenv.Environ, without
+// a session's identity (sessionlessEnviron). Like cityEnv, read it before
+// arming the op's deadline.
 func (p *Provider) opEnv() []string {
 	if env := p.cityEnv(); env != nil {
 		return env
 	}
-	return execenv.Environ()
+	return sessionlessEnviron()
 }
 
 // withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
@@ -380,7 +380,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	cmd.Env = p.cityEnv()
+	cmd.Env = p.opEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
