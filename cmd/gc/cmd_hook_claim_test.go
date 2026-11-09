@@ -808,3 +808,63 @@ func TestHookClaimWithBdStoreReadbackHasItsOwnBudget(t *testing.T) {
 		}
 	})
 }
+
+// TestHookClaimWithBdStoreConflictReadStaysMutationBound pins #6984's boundary
+// from the conflict side: the readback budget exists ONLY for the canonical
+// readback of a committed CAS. A lost race committed nothing, so its diagnostic
+// read stays on the mutation-bound store — one store build, no fresh budget —
+// and a diagnostic read that finds the mutation context spent degrades to the
+// silent empty non-claim instead of borrowing the readback's live context.
+// Behavior-preserving by design: this row passes before and after the readback
+// budget, pinning that the conflict path was not widened.
+func TestHookClaimWithBdStoreConflictReadStaysMutationBound(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	var built int
+	hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+		built++
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			switch {
+			case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+				// The CAS spends the mutation context and then LOSES the race:
+				// bd refuses it as not claimable, which the store classifies
+				// as the conflict verdict (ok=false, nil error).
+				<-ctx.Done()
+				return []byte(`{"error":"1 of 1 issues failed to update","failed":[{"id":"work-1","error":"updating issue: issue not claimable: status in_progress"}],"schema_version":1}`),
+					errors.New("exit status 1: updating work-1: issue not claimable: status in_progress")
+			case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+				// The conflict diagnostic runs on the SAME mutation context.
+				// On the readback budget (WithoutCancel plus a fresh timeout)
+				// this read would succeed; finding it spent here is the proof
+				// the conflict path never borrows that budget.
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"other-worker"}]`), nil
+			default:
+				t.Fatalf("unexpected bd args: %#v", args)
+				return nil, nil
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	bead, ok, err := hookClaimWithBdStore(ctx, "/rig", nil, "work-1", "worker-1")
+	if err != nil {
+		t.Fatalf("hookClaimWithBdStore on a lost race with a failed diagnostic read: %v, want the silent empty non-claim", err)
+	}
+	if ok {
+		t.Fatalf("hookClaimWithBdStore = ok %v, want ok=false: the race was lost", ok)
+	}
+	if bead.ID != "" {
+		t.Fatalf("bead = %+v, want the empty bead: a failed diagnostic read degrades to a silent no-op", bead)
+	}
+	if built != 1 {
+		t.Fatalf("bd stores built = %d, want 1: the conflict path must not build a second store with the readback budget", built)
+	}
+}
