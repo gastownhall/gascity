@@ -764,7 +764,7 @@ file wins. A higher layer can therefore shadow a pack's prompt asset while the
 formula itself remains inherited from the lower-priority pack. Other relative
 `description_file` paths resolve against the directory of the formula file
 that declares them. See the
-[Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
+[Formula Specification](/reference/specs/formula-spec-v2#1-1-file-naming-and-layers) for
 formula file naming and layer resolution.
 
 ### 1.3.3. `overlay/`
@@ -1067,7 +1067,7 @@ When more than one layer contains a formula with the same name, the
 highest-priority layer wins (last wins); within a single layer, canonical
 `<name>.toml` beats deprecated `<name>.formula.toml`. Per-name winners are staged
 as symlinks into the scope's `.beads/formulas/` directory. See the
-[Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
+[Formula Specification](/reference/specs/formula-spec-v2#1-1-file-naming-and-layers) for
 the resolution and staging contract.
 
 Overlay directories follow the same city-base then rig-specific collection

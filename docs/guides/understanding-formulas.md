@@ -282,9 +282,9 @@ way: extend the matching base and override defaults or routes, rather than
 copying the step graph.
 </Accordion>
 
-See [steps](/reference/specs/formula-spec-v2#13-steps),
+See [steps](/reference/specs/formula-spec-v2#1-3-steps),
 [compilation](/reference/specs/formula-spec-v2#2-compilation), and
-[composition and inheritance](/reference/specs/formula-spec-v2#17-composition-and-inheritance)
+[composition and inheritance](/reference/specs/formula-spec-v2#1-7-composition-and-inheritance)
 in the v2 spec.
 
 ### Parameterized Templates
@@ -340,7 +340,7 @@ with required variables cannot be dispatched by an order. Give every
 variable a default if the formula must run on a schedule.
 </Note>
 
-See [variables](/reference/specs/formula-spec-v2#14-variables) in the v2 spec.
+See [variables](/reference/specs/formula-spec-v2#1-4-variables) in the v2 spec.
 
 ### Fan-Out Over a Runtime-Discovered Set
 
@@ -451,8 +451,8 @@ exists solely in a step's output. (Raw `gc.output_json_required` fan-out is
 deprecated; `gc lint` warns `gc.output_json is deprecated; use drain in v2
 formulas (see: engdocs/drain-fanout.md)`.)
 
-See [drain](/reference/specs/formula-spec-v2#33-drain) and
-[on-complete and tally](/reference/specs/formula-spec-v2#34-on-complete-and-tally) in
+See [drain](/reference/specs/formula-spec-v2#3-3-drain) and
+[on-complete and tally](/reference/specs/formula-spec-v2#3-4-on-complete-and-tally) in
 the v2 spec.
 
 ### Multi-Lane Review Loops
@@ -546,8 +546,8 @@ For quorum *voting* — verdicts reduced by `majority`, `unanimous`, or
 [Fan-Out](#fan-out-over-a-runtime-discovered-set)); the gascity pack does not,
 preferring the synthesize-and-recheck loop above.
 
-See [check](/reference/specs/formula-spec-v2#31-check) and
-[loops](/reference/specs/formula-spec-v2#16-loops) in the v2 spec.
+See [check](/reference/specs/formula-spec-v2#3-1-check) and
+[loops](/reference/specs/formula-spec-v2#1-6-loops) in the v2 spec.
 
 ### Self-Checking Work And Transient Hardening
 
@@ -648,8 +648,8 @@ bodies idempotent, or budget `max_attempts` knowing each attempt may repeat
 its side effects.
 </Warning>
 
-See [check](/reference/specs/formula-spec-v2#31-check) and
-[retry](/reference/specs/formula-spec-v2#32-retry) in the v2 spec.
+See [check](/reference/specs/formula-spec-v2#3-1-check) and
+[retry](/reference/specs/formula-spec-v2#3-2-retry) in the v2 spec.
 
 ### Planning Reviews And Decomposition
 
@@ -746,8 +746,8 @@ the pipeline. The convoy this step produces is the runtime-discovered set the
 drain fans out over — decomposition and fan-out are two ends of the same
 pipeline.
 
-See [check](/reference/specs/formula-spec-v2#31-check) and
-[variables](/reference/specs/formula-spec-v2#14-variables) in the v2 spec.
+See [check](/reference/specs/formula-spec-v2#3-1-check) and
+[variables](/reference/specs/formula-spec-v2#1-4-variables) in the v2 spec.
 
 ### Scheduled And Maintenance Work Via Orders
 

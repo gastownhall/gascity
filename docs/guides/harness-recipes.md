@@ -45,7 +45,7 @@ Two things hold for every recipe:
 | Antigravity | `antigravity` | login | yes |
 
 "—" under base URL means the harness has no standard base-URL env var: for a
-custom endpoint, supply it through the upstream's raw [`env`](/guides/configuring-an-agent#axis-3-upstream-who-serves-the-model)
+custom endpoint, supply it through the upstream's raw [`env`](/guides/configuring-an-agent#axis-3-—-upstream-who-serves-the-model)
 block. Model lists below are the built-in choices; override or extend a harness's
 `options_schema` to add your own.
 
@@ -235,7 +235,7 @@ api_key  = "$AMP_API_KEY"
 many model providers, where the credential env var is *provider-specific*. It has
 no single serving-env binding, so the **upstream names its own target** with the
 per-field `*_env` override (see the
-[gateway section](/guides/configuring-an-agent#gateway-harnesses-the-per-field-override)
+[gateway section](/guides/configuring-an-agent#gateway-harnesses-—-the-per-field-override)
 of the main guide). Gas City ships ready-made `groq` and `cerebras` presets on
 top of it.
 

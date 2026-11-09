@@ -138,7 +138,7 @@ The CLI:
 `token` is an **opaque bearer string** with a server-defined lifetime. The CLI
 never inspects it — no JWT parsing, no DPoP, no refresh protocol lives in the
 client. A server that wants short-lived credentials performs any exchange
-internally and re-issues on `401` (see [§7](#7-token-lifetime-and-401)).
+internally and re-issues on `401` (see [§7](#7-the-session-token-and-401-vs-403)).
 
 ### 3.2 Device-code login — `POST /gc/v0/auth/device/{code,token}`
 
@@ -288,7 +288,7 @@ Well-known codes a client keys on (all other non-2xx are handled by HTTP status)
   action (**do not re-login**; surface `message`).
 
 The device-token endpoint additionally uses the bare RFC-8628 `error` string
-values enumerated in [§3.2](#32-device-code-login--post-gcv0authdevicecodetoken).
+values enumerated in [§3.2](#3-2-device-code-login-—-post-/gc/v0/auth/device/codetoken).
 Servers MAY additionally emit `application/problem+json`; clients treat any
 non-2xx as failure and surface `message` when present.
 
@@ -334,7 +334,7 @@ GET {base}/.well-known/gascity-service
 ```
 
 A client MAY probe this to allow a server to relocate paths; absent or `404`, the
-client uses the fixed well-known paths in [§3](#3-endpoints-auth--identity). The
+client uses the fixed well-known paths in [§3](#3-endpoints-auth-+-identity). The
 v0 `gc` client uses the fixed paths and does not require discovery.
 
 ## 9. Reserved surface

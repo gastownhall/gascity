@@ -427,7 +427,7 @@ but nothing consumes it — neither the v1 cook path nor the v2 control
 dispatcher — so an `until` loop runs exactly one iteration (section 4).
 v1 has no runtime re-execution mechanism at all; orchestrator-driven
 re-execution requires the v2 `check` construct
-([v2 specification, section 3.1](/reference/specs/formula-spec-v2#31-check)).
+([v2 specification, section 3.1](/reference/specs/formula-spec-v2#3-1-check)).
 Second, `until` does not use the `{{var}} == value` step-condition syntax:
 `until = "{{ready}} == yes"` fails with `unrecognized condition format`.
 The grammar is the runtime condition evaluator's:
@@ -529,7 +529,7 @@ The v2-only constructs carry their own shape rules (`check` / `retry` /
 `drain` / `on_complete` field constraints); `tally` was removed and now
 fails fast if authored. The remaining construct constraints are specified
 with the constructs in the
-[v2 specification](/reference/specs/formula-spec-v2#19-validation).
+[v2 specification](/reference/specs/formula-spec-v2#1-9-validation).
 
 ## 2. Compilation
 
@@ -784,7 +784,7 @@ host capability mismatches.
 ### Convergence currently requires v1
 
 For iterate-until-verified semantics, prefer a v2 check loop
-([v2 spec section 3.1](/reference/specs/formula-spec-v2#31-check));
+([v2 spec section 3.1](/reference/specs/formula-spec-v2#3-1-check));
 `gc converge` is the pre-v2 command for this pattern and accepts only v1
 formulas.
 
