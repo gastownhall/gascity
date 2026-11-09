@@ -556,7 +556,7 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 // the work store so the two claim paths report a lost race, a stale projection
 // and a canonical-readback failure identically.
 func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
-	return hookClaimThroughStore(beadID, assignee,
+	return hookClaimThroughStore(context.Background(), beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
 		r.graph.Get, r.graph.Get)
 }

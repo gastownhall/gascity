@@ -27,8 +27,9 @@ package main
 //
 // # When the announcement runs
 //
-// Not inside the write. The claim tier stamps the instant the CAS returns and
-// decides from it whether the landed claim is kept (claimLandingWindowSpent),
+// Not inside the write. The claim op records the instant the CAS returns
+// (hookClaimLanding), before its canonical readback, and the claim tier decides
+// from it whether the landed claim is kept (claimLandingWindowSpent),
 // and a stale-lease reclaim runs before the claim's start fence
 // (claimWindowSpent). Store reads made inside those writes would spend the
 // window the fences measure, and on a slow store could turn a claim that
