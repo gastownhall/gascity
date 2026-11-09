@@ -44,6 +44,9 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
+		// The profile does not declare fs.host.
+		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
+		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true,
 	}
 	for _, res := range report.Results {
 		switch {

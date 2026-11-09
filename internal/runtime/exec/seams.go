@@ -147,11 +147,17 @@ var _ runtime.Transport = (*execTransport)(nil)
 // (or respawn-pane on a warm box) over the `exec` op — this is the controller-side
 // half of the un-weld (B3b), called after Provision by seamProvider.Start and by
 // the reconciler for a launch-only change. For a welded pack the agent is already
-// running (the `start` op launched it), so launchAgent is a no-op here.
+// running (the `start` op launched it), so launchAgent is a no-op here. After a
+// separable launch of a pack sharing the host filesystem, gc runs the
+// session_setup it left out of the provision config, as the welded Start does
+// after its `start` op.
 func (t *execTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
 	name := placeName(place)
 	if err := t.p.launchAgent(ctx, name, spec.Config); err != nil {
 		return nil, err
+	}
+	if t.p.supportsSeparableLaunch() && t.p.sharesHostFS() {
+		t.p.runHostSessionSetup(ctx, name, spec.Config)
 	}
 	return &execAttachment{p: t.p, name: name}, nil
 }

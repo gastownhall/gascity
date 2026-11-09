@@ -56,14 +56,14 @@ var (
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
 // through the seams.
-func NewSeamBacked(script string) runtime.Provider {
-	return seamBacked(NewProvider(script))
+func NewSeamBacked(script string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProvider(script, opts...))
 }
 
 // NewSeamBackedForCity is NewSeamBacked for a provider serving one city: every
 // op carries GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH (NewProviderForCity).
-func NewSeamBackedForCity(script, cityName, cityPath string) runtime.Provider {
-	return seamBacked(NewProviderForCity(script, cityName, cityPath))
+func NewSeamBackedForCity(script, cityName, cityPath string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProviderForCity(script, cityName, cityPath, opts...))
 }
 
 func seamBacked(raw *Provider) *seamBackedProvider {

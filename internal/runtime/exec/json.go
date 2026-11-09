@@ -52,6 +52,23 @@ type startConfig struct {
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
 func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
+	return json.Marshal(newStartConfig(cfg))
+}
+
+// marshalHostStagedStartConfig is marshalStartConfig for a pack sharing the
+// host filesystem whose host work gc did itself (Provider.startConfigFor):
+// the overlays, copied files and work-dir exclusions it staged, the
+// pre_start it ran, and the session_setup it runs after the launch are left
+// out, so the pack does exactly what the config carries.
+func marshalHostStagedStartConfig(cfg runtime.Config) ([]byte, error) {
+	sc := newStartConfig(cfg)
+	sc.PackOverlayDirs, sc.OverlayDir, sc.CopyFiles, sc.WorkDirExclude = nil, "", nil, nil
+	sc.PreStart, sc.SessionSetup, sc.SessionSetupScript = nil, nil, ""
+	return json.Marshal(sc)
+}
+
+// newStartConfig is cfg's full start config.
+func newStartConfig(cfg runtime.Config) startConfig {
 	var cfs []copyEntry
 	for _, ce := range cfg.CopyFiles {
 		cfs = append(cfs, copyEntry{Src: ce.Src, RelDst: ce.RelDst})
@@ -77,5 +94,5 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 	if cfg.WorkDir != "" {
 		sc.WorkDirExclude = citylayout.WorkDirExportExcludes()
 	}
-	return json.Marshal(sc)
+	return sc
 }

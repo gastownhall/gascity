@@ -67,6 +67,17 @@ const (
 	// exit 2 from a declared op read as a failure, never as the unknown-op
 	// no-op. With report-attachment it makes an exec runtime v2-ready.
 	ProtocolCapabilityObserveV1 = "observe.v1"
+	// ProtocolCapabilityFSHost declares that the executable's boxes share the
+	// controller's host filesystem: they run on the controller's host, as the
+	// controller's user, with the controller's view of the filesystem, so the
+	// work_dir, HOME and transcript paths gc holds name the same files inside
+	// the box. It narrows [ProtocolLocalityLocal], which says only that boxes
+	// run on the controller's host (a container on that host is local too, and
+	// must not declare fs.host unless it shares that view and user). It is
+	// read only through [ProtocolInfo.SharesHostFS], never on its own: with
+	// it, gc stages the work dir and runs pre_start and session_setup on the
+	// host itself and leaves that work out of the start config.
+	ProtocolCapabilityFSHost = "fs.host"
 )
 
 // ProtocolLocalityLocal is the handshake locality of an executable whose
@@ -89,6 +100,15 @@ type ProtocolInfo struct {
 // the controller's host. An absent or unknown locality is remote.
 func (pi ProtocolInfo) DeclaresLocal() bool {
 	return pi.Locality == ProtocolLocalityLocal
+}
+
+// SharesHostFS reports whether the handshake declared that its boxes share
+// the controller's host filesystem and user: locality=local narrowed by
+// [ProtocolCapabilityFSHost]. It is the one reader of that token, so
+// locality and the token are never checked apart; fs.host without
+// locality=local reads as undeclared.
+func (pi ProtocolInfo) SharesHostFS() bool {
+	return pi.DeclaresLocal() && pi.Has(ProtocolCapabilityFSHost)
 }
 
 // Has reports whether the handshake declared the given capability.

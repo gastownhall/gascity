@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -58,6 +59,14 @@ type Provider struct {
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
 	readyPrompts sync.Map
+
+	// setupTimeout and setupMaxTimeout budget each host pre_start and
+	// session_setup command gc runs for a pack sharing the host filesystem
+	// (hoststage.go; WithSetupTimeouts). setupWarnings receives the non-fatal
+	// diagnostics of that work; nil is os.Stderr.
+	setupTimeout    time.Duration
+	setupMaxTimeout time.Duration
+	setupWarnings   io.Writer
 }
 
 type startupWatchEvent struct {
@@ -71,20 +80,25 @@ const startupWatchCloseTimeout = 200 * time.Millisecond
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
-func NewProvider(script string) *Provider {
-	return &Provider{
+func NewProvider(script string, opts ...Option) *Provider {
+	p := &Provider{
 		script:       script,
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
+		setupTimeout: defaultSetupTimeout,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // NewProviderForCity returns an exec [Provider] for the given script that
 // runs every op with GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH set to the city
 // it serves, so a script shared by several cities on one backend can scope
 // its boxes and listings to this one.
-func NewProviderForCity(script, cityName, cityPath string) *Provider {
-	p := NewProvider(script)
+func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Provider {
+	p := NewProvider(script, opts...)
 	p.cityName, p.cityPath, p.citySet = cityName, cityPath, true
 	return p
 }
@@ -375,6 +389,13 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 //
+// For a pack sharing the host filesystem, Start first stages the work dir
+// and runs pre_start on the host (fatal: no box is created), leaves that
+// work out of the start config, and runs session_setup on the host once the
+// agent is up (hoststage.go). Into a name a box already holds it does no
+// host work, which would re-run pre_start in a live session's work dir, and
+// sends the full config instead.
+//
 // A [runtime.Config.FreshOnly] start is startFresh's.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if cfg.FreshOnly {
@@ -388,9 +409,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
 	foreignBox := occupancyKnown && occupiedBefore
 
-	data, err := marshalStartConfig(cfg)
+	hostWork := !foreignBox && p.sharesHostFS()
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
+		return err
 	}
 	var saved savedPaneFence
 	if !occupancyKnown || occupiedBefore {
@@ -410,6 +432,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
+	}
+	if hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
 	}
 	return nil
 }
@@ -486,15 +511,18 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // provisionBox creates the box for name. When the pack supports a separable
 // launch it runs the `provision` op (box + staging + pre_start, NO agent); the
 // agent is launched separately by launchAgent. Otherwise it falls back to the
-// welded Start (which both provisions and launches). (Un-weld B3b.)
+// welded Start (which both provisions and launches). (Un-weld B3b.) For a pack
+// sharing the host filesystem the host work precedes `provision` and is left
+// out of its config, as Start does; session_setup follows the launch
+// (execTransport.Launch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
-	data, err := marshalStartConfig(cfg)
+	data, err := p.startConfigFor(ctx, name, cfg, p.sharesHostFS())
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+		return err
 	}
 	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
 	return err

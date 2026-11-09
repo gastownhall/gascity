@@ -148,7 +148,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
-		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -170,6 +170,10 @@ type (
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
+	// execHostFSTrait is exec's local-transcript answer, which its pack's
+	// handshake decides (fs.host with locality local): the profiled pack
+	// declares neither, so its transcripts are not local.
+	execHostFSTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
@@ -183,6 +187,8 @@ func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
 func (localTranscriptTrait) LocalTranscripts() bool { return true }
+
+func (execHostFSTrait) LocalTranscripts() bool { return false }
 
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
@@ -312,6 +318,7 @@ type (
 		sleepTrait
 		probeBudgetTrait
 		execObserveTrait
+		execHostFSTrait
 	}
 	sshProfile struct {
 		Provider

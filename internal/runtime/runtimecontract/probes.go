@@ -69,6 +69,12 @@ var probes = map[Code]probe{
 	ReqConcurrencyIsRunning:    probeConcurrencyIsRunning,
 	ReqConcurrencyProcessAlive: probeConcurrencyProcessAlive,
 	ReqConcurrencyListRunning:  probeConcurrencyListRunning,
+
+	ReqFSHostSharedView:        probeFSHostSharedView,
+	ReqFSHostSameUser:          probeFSHostSameUser,
+	ReqFSHostLocal:             probeFSHostLocal,
+	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
+	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {

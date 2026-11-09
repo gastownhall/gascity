@@ -33,6 +33,10 @@
 //     `kill-object` wire shapes, the attach answer, the fault and city-scope
 //     tokens and the probe latency have no runtime.Provider method of their
 //     own to contract-test.
+//   - fshost (the fs.host token) — a promise about where a box runs (the
+//     controller's filesystem view and user) that no runtime.Provider method
+//     states; gc's side of it, host staging, is runtimetest's
+//     RunHostStagingContract.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -60,6 +64,7 @@ const (
 	GroupConnection Group = "connection"
 	GroupProvision  Group = "provision"
 	GroupObserve    Group = "observe"
+	GroupFSHost     Group = "fshost"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -186,6 +191,19 @@ const (
 	ReqConcurrencyIsRunning    Code = "RPP-CONCURRENCY-003"
 	ReqConcurrencyProcessAlive Code = "RPP-CONCURRENCY-004"
 	ReqConcurrencyListRunning  Code = "RPP-CONCURRENCY-005"
+
+	// The fshost group checks the fs.host token (RUNTIME-RPP-032): a script
+	// declaring it promises that its boxes share the controller's host
+	// filesystem and user, which narrows locality=local. It is a
+	// control-plane group, checked through start and observe, not the env
+	// plane (runtimecapability), whose probes run through the exec op that a
+	// pack without tmux in the box does not implement. Every requirement is
+	// Optional: SKIP when fs.host is not declared.
+	ReqFSHostSharedView        Code = "RPP-FSHOST-001"
+	ReqFSHostSameUser          Code = "RPP-FSHOST-002"
+	ReqFSHostLocal             Code = "RPP-FSHOST-003"
+	ReqFSHostRunsWhatItCarries Code = "RPP-FSHOST-004"
+	ReqFSHostAgentPIDOnHost    Code = "RPP-FSHOST-005"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -244,6 +262,12 @@ var catalog = []Requirement{
 	{ReqConcurrencyIsRunning, GroupConcurrency, "concurrent is-running of distinct running names all answer true", true},
 	{ReqConcurrencyProcessAlive, GroupConcurrency, "concurrent process-alive of distinct running names, asked about their agent, all answer true (absent = SKIP)", true},
 	{ReqConcurrencyListRunning, GroupConcurrency, "concurrent list-running, each with one running name as its prefix, each list that name (absent = SKIP)", true},
+
+	{ReqFSHostSharedView, GroupFSHost, "a box's command reads a file the caller wrote into work_dir and writes its copy where the caller reads it back, at the same paths (declared fs.host only)", true},
+	{ReqFSHostSameUser, GroupFSHost, "a box's command runs as the caller's user: its id -u equals the caller's uid (declared fs.host only)", true},
+	{ReqFSHostLocal, GroupFSHost, "a handshake declaring fs.host also declares locality local, which fs.host narrows (declared fs.host only)", true},
+	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, and a failing pre_start fails start and leaves no box (declared fs.host only)", true},
+	{ReqFSHostAgentPIDOnHost, GroupFSHost, "observe reports a running box's agent_pid as a live host process the caller's user may signal (declared fs.host with observe.v1 only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The
