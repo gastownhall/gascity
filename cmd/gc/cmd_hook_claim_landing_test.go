@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -399,4 +400,54 @@ func TestHookClaimLandingRecorder(t *testing.T) {
 			t.Fatalf("releases = %v, want %v: candidate two landed late and must unwind", rec.releases, want)
 		}
 	})
+}
+
+// TestHookClaimTiersUnwindALateCASAfterCanonicalReadback is the other side of
+// the landing fence: a CAS that itself returns after the claim window plus its
+// mutation reserve is a straddle in either claiming tier, even though its
+// canonical readback succeeds, and takes the existing unwind.
+func TestHookClaimTiersUnwindALateCASAfterCanonicalReadback(t *testing.T) {
+	const window = 40 * time.Second
+	for _, tier := range hookClaimLandingTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			rec := &turnBoundClaimRecorder{}
+			ops := rec.ops(t, tier.output)
+			invokedAt := time.Now()
+			clock := invokedAt
+			ops.Now = func() time.Time { return clock }
+			ops.InvokedAt = invokedAt
+			ops.ClaimWindow = window
+			ops.Claim = hookClaimWithBdStore
+			store := &hookClaimLandingStore{}
+			store.install(t, &clock, invokedAt, window+hookClaimMutationTimeout+time.Second, time.Second, nil)
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				JSON:         true,
+				DrainAck:     true,
+			}, ops, &stdout, &stderr)
+
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no work receipt for an unwound claim", stdout.String())
+			}
+			if want := []string{"work-1"}; !reflect.DeepEqual(rec.releases, want) {
+				t.Fatalf("releases = %v, want %v: a late CAS must self-release", rec.releases, want)
+			}
+			if len(rec.claimReleased) != 1 || rec.claimReleased[0].Reason != hookClaimReleaseReasonStraddled {
+				t.Fatalf("bead.claim_released events = %+v, want one %q", rec.claimReleased, hookClaimReleaseReasonStraddled)
+			}
+			if !strings.Contains(stderr.String(), "landed after the 40s claim window") ||
+				!strings.Contains(stderr.String(), "(invocation age 51s at landing)") {
+				t.Fatalf("stderr = %q, want the claim-window diagnostic at the CAS landing age", stderr.String())
+			}
+			if want := []string{"work-1"}; !reflect.DeepEqual(store.updates, want) {
+				t.Fatalf("updates = %v, want one CAS", store.updates)
+			}
+		})
+	}
 }
