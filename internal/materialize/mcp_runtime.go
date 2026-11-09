@@ -61,10 +61,18 @@ func MCPTemplateData(
 	workDir string,
 	topo config.QueryTopology,
 ) map[string]string {
+	// CityName is the {{.CityName}} that work_dir and session_setup templates
+	// see: the site-bound or declared workspace name, else the city dir's basename.
+	cityName := ""
+	if cityPath != "" {
+		cityName = filepath.Base(filepath.Clean(cityPath))
+	}
+	cityName = config.EffectiveCityName(cfg, cityName)
 	if agent == nil {
 		branch := defaultMCPBranch(workDir)
 		return map[string]string{
 			"CityRoot":      cityPath,
+			"CityName":      cityName,
 			"AgentName":     identity,
 			"TemplateName":  identity,
 			"WorkDir":       workDir,
@@ -83,12 +91,13 @@ func MCPTemplateData(
 	if templateName == "" {
 		templateName = identity
 	}
-	data := make(map[string]string, len(agent.Env)+14)
+	data := make(map[string]string, len(agent.Env)+15)
 	for key, value := range agent.Env {
 		data[key] = value
 	}
 	branch := defaultMCPBranch(workDir)
 	data["CityRoot"] = cityPath
+	data["CityName"] = cityName
 	data["AgentName"] = identity
 	data["TemplateName"] = templateName
 	data["RigName"] = rigName
