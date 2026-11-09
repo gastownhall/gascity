@@ -512,7 +512,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city; while it runs, any writer may change the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)

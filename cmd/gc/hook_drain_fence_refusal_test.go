@@ -83,8 +83,8 @@ func strandedSplitCity(t *testing.T) string {
 // kept dispatching (substrate 2026-11-09).
 func TestHookDrainFenceStaysOpenOnAStrandedCity(t *testing.T) {
 	strandedSplitCity(t)
-	if _, err := hookSessionDrainPending(drainPendingTestSessionID); err != nil {
-		t.Fatalf("the drain-pending probe refused on a stranded city: %v", err)
+	if _, err := hookSessionDrainPending(drainPendingTestSessionID); err != nil && (storeref.IsStandingRefusal(err) || hookDrainProbeFailsClosed(err)) {
+		t.Fatalf("the drain-pending probe carries a standing refusal on a stranded city: %v", err)
 	}
 	e := newDrainPendingClaimEnv()
 	ops := e.ops()
@@ -235,7 +235,7 @@ func TestStandingGateRefusalIsNotTransient(t *testing.T) {
 // startup-health episode and an own-session wait work, so its copy left them in
 // the work store, unlisted. They are not strands: a fence that failed closed
 // over them would stop every seat's claims on the first hook after the
-// upgrade. A real strand under the same earlier manifest still fails closed
+// upgrade. A real strand under the same earlier manifest now serves degraded too
 // (the control row).
 func TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen(t *testing.T) {
 	cases := []struct {
@@ -245,7 +245,10 @@ func TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen(t *testing.T) {
 	}{
 		{"startup-health episode", reclassifiedShapes()[0], false},
 		{"own-session wait without gc:wait", reclassifiedShapes()[1], false},
-		{"mail message stranded after the copy", beads.Bead{Title: "auto-handoff", Type: "message"}, true},
+		// A real strand under the same earlier manifest no longer fails the
+		// fence closed either: a stranded city serves degraded. The
+		// fail-closed control is refusedSplitCity's (identity mismatch).
+		{"mail message stranded after the copy serves degraded", beads.Bead{Title: "auto-handoff", Type: "message"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

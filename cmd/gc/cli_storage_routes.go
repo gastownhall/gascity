@@ -476,6 +476,9 @@ func closeCLIStorageRoutes() error {
 	cliStorageRefusalsMu.Lock()
 	cliStorageRefusalsPrinted = nil
 	cliStorageRefusalsMu.Unlock()
+	storageWarningsMu.Lock()
+	storageWarningsPrinted = nil
+	storageWarningsMu.Unlock()
 
 	var errs []error
 	for _, entry := range entries {
