@@ -212,6 +212,13 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 			// over the same golden reference.
 			continue
 		}
+		if req.Group == GroupFSHost {
+			// fs.host is a handshake token whose promise (a shared filesystem
+			// view and user) no runtime.Provider method states; gc's side of
+			// it, host staging, is the RUNTIME-CONTRACT-022 suite
+			// (runtimetest.RunHostStagingContract), not a RunProviderTests case.
+			continue
+		}
 		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire

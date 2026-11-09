@@ -74,6 +74,12 @@ var probes = map[Code]probe{
 	ReqServerStartAfterStop:        probeServerStartAfterStop,
 	ReqServerStopEndsSession:       probeServerStopEndsSession,
 	ReqServerStopSparesOtherCities: probeServerStopSparesOtherCities,
+
+	ReqFSHostSharedView:        probeFSHostSharedView,
+	ReqFSHostSameUser:          probeFSHostSameUser,
+	ReqFSHostLocal:             probeFSHostLocal,
+	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
+	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {

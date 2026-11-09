@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
@@ -30,16 +31,88 @@ func TestRPPHandleConformance(t *testing.T) {
 		"tier": "worker-core",
 	})
 	reporter.Require(t, vanishedNudgeNotDeliveredResult(t))
+	reporter.Require(t, hostFSTranscriptTurnsResult(t))
 }
 
-func TestRPPHandleCatalogRegistersVanishedNudgeRequirement(t *testing.T) {
+func TestRPPHandleCatalogRegistersItsRequirements(t *testing.T) {
 	catalog := RPPHandleCatalog()
-	if len(catalog) != 1 || catalog[0].Code != RequirementRPPVanishedNudgeNotDelivered {
-		t.Fatalf("RPPHandleCatalog() = %+v, want only %s", catalog, RequirementRPPVanishedNudgeNotDelivered)
+	want := []RequirementCode{RequirementRPPVanishedNudgeNotDelivered, RequirementRPPHostFSTranscriptTurns}
+	if len(catalog) != len(want) {
+		t.Fatalf("RPPHandleCatalog() = %+v, want %v", catalog, want)
 	}
-	if catalog[0].Group == "" || catalog[0].Description == "" {
-		t.Fatalf("requirement %s has empty group or description", catalog[0].Code)
+	for i, req := range catalog {
+		if req.Code != want[i] {
+			t.Fatalf("RPPHandleCatalog()[%d] = %s, want %s", i, req.Code, want[i])
+		}
+		if req.Group == "" || req.Description == "" {
+			t.Fatalf("requirement %s has empty group or description", req.Code)
+		}
 	}
+}
+
+// rppHostFSPack writes the host-filesystem golden reference (locality local
+// with fs.host, or the base golden when hostFS is false) with an `exec` that
+// runs nothing, so no check drives a host tmux.
+func rppHostFSPack(t *testing.T, hostFS bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bodies := reference.Bodies()
+	if hostFS {
+		bodies = reference.HostFSBodies()
+	}
+	bodies["exec"] = `cat >/dev/null`
+	script := filepath.Join(dir, "golden")
+	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// hostFSTranscriptTurnsResult evaluates WC-RPP-005: a Claude session on a
+// pack sharing the host filesystem, whose fixture transcript is written where
+// the session's key finds it, reads its turns from the transcript and keeps
+// the TurnHandle contract; on the same pack without fs.host it has no turn
+// source. The pack runs the session's command on this host, so the session
+// is launched with `true`, not an agent.
+func hostFSTranscriptTurnsResult(t *testing.T) Result {
+	t.Helper()
+	transcript := []string{
+		`{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`,
+		`{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-10-13T05:00:05.456Z"}`,
+		`{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:01:00.789Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-2222-4aaa-8000-000000000002","origin":"user","promptSource":"prompt"}`,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		hostFS bool
+		want   worker.TurnSource
+	}{{true, worker.TurnSourceTranscript}, {false, worker.TurnSourceNone}} {
+		sp := sessionexec.NewSeamBackedForCity(rppHostFSPack(t, tc.hostFS), "rpp-conformance", t.TempDir())
+		h, _ := turnConformanceSessionRunning(t, sp, "true", nil, transcript, 0)
+		t.Cleanup(func() { _ = h.StopForShutdown(context.Background()) })
+		caps, err := h.TurnCapabilities(ctx)
+		if err != nil || caps.Source != tc.want {
+			return Fail(rppHandleProfile, RequirementRPPHostFSTranscriptTurns,
+				fmt.Sprintf("fs.host %t: TurnCapabilities = %+v, %v; want source %q", tc.hostFS, caps, err, tc.want))
+		}
+		if err := CheckTurnHandle(ctx, h); err != nil {
+			return Fail(rppHandleProfile, RequirementRPPHostFSTranscriptTurns, fmt.Sprintf("fs.host %t: %v", tc.hostFS, err))
+		}
+		if !tc.hostFS {
+			continue
+		}
+		hist, err := h.CurrentTurn(ctx)
+		if err != nil || len(hist.Recent) != 1 {
+			return Fail(rppHandleProfile, RequirementRPPHostFSTranscriptTurns,
+				fmt.Sprintf("CurrentTurn = %+v, %v; want the transcript's one ended turn", hist, err))
+		}
+	}
+	return Pass(rppHandleProfile, RequirementRPPHostFSTranscriptTurns,
+		"an fs.host pack session reads its turns from its transcript; without fs.host it has no turn source")
 }
 
 // rppGoldenPack writes the golden reference with two changes: `exec` runs

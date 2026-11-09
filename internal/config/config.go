@@ -3719,7 +3719,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.

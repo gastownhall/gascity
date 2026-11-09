@@ -194,7 +194,9 @@ the script speaks and which optional capabilities it implements:
 ```
 
 `locality` is optional: `"local"` says the script's boxes run on gc's own
-host. Absent, or any other value, reads as remote.
+host. Absent, or any other value, reads as remote. A container on gc's host
+is local too; that its boxes also share gc's filesystem and user is what
+`fs.host` adds (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)).
 
 Scripts that do not implement `protocol` (exit 2) are treated as version 0
 with no optional capabilities — every pre-handshake script remains valid.
@@ -217,6 +219,7 @@ Capabilities:
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
 | `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
+| `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
 | `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
@@ -483,9 +486,11 @@ when `is-running` printed `true` before the attempt, or when `start` exited
 non-zero on its own with stderr saying the name is taken (it contains
 `already exists` or `already running`). The stderr check does not apply to a
 `start` that gc canceled at its deadline. A runtime that declares both
-`proc.provision` and `proc.exec` gets `provision` in place of that
-`is-running` and `start`: no `stop` follows a failed `provision`, and one
-always follows a failed agent launch after it.
+`proc.provision` and `proc.exec` gets `provision` in place of that `start`:
+no `stop` follows a failed `provision`, and one always follows a failed agent
+launch after it. It gets that `is-running` (`observe` on a v2-ready
+script) only when it also declares `fs.host`, because gc needs the answer
+before it does any [host work](#host-filesystem-fshost).
 
 Scripts may handle these hints or ignore them:
 
@@ -510,8 +515,10 @@ Scripts may handle these hints or ignore them:
   filesystem **before** the session is created. Used for directory
   preparation, worktree creation, or other setup that must exist before
   the agent starts. Scripts should execute each command in the target
-  environment before creating the tmux session. Non-fatal: warn on
-  stderr if a command fails, but don't abort start.
+  environment before creating the tmux session. Fatal: if a command
+  fails, fail `start` (exit 1) without creating the session. An agent
+  must never launch into an unprepared work dir, and gc delivers
+  skills and MCP for worktree agents as a `pre_start` command.
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
@@ -537,7 +544,60 @@ for the agent to show the prompt, or wait out the delay, before it counts
 the start done. A script that must reach a ready agent before it returns
 (to type `nudge`, say) waits itself; otherwise it may ignore them. Session setup
 commands are the *script's* responsibility — they run on the target
-filesystem, not the orchestrator.
+filesystem, not the orchestrator — unless the script declares `fs.host`, in
+which case gc runs them on the host and leaves them out of the start config
+of a start into a vacant name (see
+[Host filesystem (`fs.host`)](#host-filesystem-fshost)).
+
+### Host filesystem (`fs.host`)
+
+A script whose handshake declares `fs.host` together with
+`"locality": "local"` promises that its boxes run on gc's host, as gc's user,
+with gc's view of the filesystem. `locality` alone does not promise that: a
+container on gc's host is local but sees its own filesystem and may run as
+another user, and it must not declare `fs.host`. gc reads the two together;
+`fs.host` without `"locality": "local"` is ignored.
+
+For such a script gc does the session's host work itself, around `start` (or
+`provision`):
+
+1. It stages the work dir: `pack_overlay_dirs` (including the
+   `per-provider/<provider>/` subdirectories that match the session's
+   provider), `overlay_dir` and `copy_files`.
+2. It runs `pre_start` on the host, each command under the `[session]`
+   `setup_timeout` (and `setup_max_timeout`, when set). A failing command
+   fails the start before `start` runs; the error carries the command's
+   output tail with secrets redacted.
+3. It runs `start` (or `provision`) with a config that leaves out what it
+   did: `pack_overlay_dirs`, `overlay_dir`, `copy_files`, `pre_start`,
+   `session_setup` and `session_setup_script` are absent.
+4. Once the agent is up, it runs `session_setup` and then
+   `session_setup_script` on the host with `GC_SESSION` set. A failure is a
+   warning; the session keeps running.
+
+gc runs no `session_live` for an exec runtime; the field stays in the start
+config. gc does this host work only into a name the script reports vacant:
+`is-running` prints `false` or, on a v2-ready script, `observe` reads it
+absent. Into a name a box already holds, or one whose read fails, it does
+none of it and sends the full config.
+
+There is no flag in the start config that says gc did the work. A script
+does exactly what its start config carries: a gc that did the host work
+left those fields out, and an older gc (or one whose cached handshake
+predates the script declaring `fs.host`) sends them, and the script does
+them, as before.
+
+With `fs.host`, gc also reads the agent's transcript on its own host for
+turn tracking, and the runtime passes the skill and MCP materialization
+gates, so an agent with MCP configured resolves at its scope root and in a
+worktree.
+
+`gc runtime conformance` checks the promise in its `fshost` group: a box's
+command copies a file the runner wrote and records its `id -u`, which the
+runner reads back on its own host; a `start` config's `overlay_dir` and
+`pre_start` are carried out, and a failing `pre_start` fails `start` with no
+box; and, with `observe.v1`, `observe`'s `agent_pid` is a live host process
+of the caller's user.
 
 ### Work-dir export exclusions
 

@@ -47,6 +47,9 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		// No server of its own: server-lifecycle is not declared.
 		runtimecontract.ReqServerStopIdempotent: true, runtimecontract.ReqServerStartAfterStop: true,
 		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,
+		// The profile does not declare fs.host.
+		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
+		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true,
 	}
 	for _, res := range report.Results {
 		switch {

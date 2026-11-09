@@ -105,12 +105,12 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
-	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	must(r.RegisterPrefix("exec:", func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
 			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath), nil
+		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath, execSetupTimeouts(sc)), nil
 	}, registry.WithHostCapabilities(func(name, cityName, cityPath string) runtime.HostCapabilities {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
@@ -142,17 +142,30 @@ func buildRuntimeRegistry() *registry.Registry {
 	return r
 }
 
+// execSetupTimeouts hands an exec provider the [session] setup budget for
+// the host pre_start and session_setup it runs for a pack sharing the host
+// filesystem.
+func execSetupTimeouts(sc config.SessionConfig) sessionexec.Option {
+	return sessionexec.WithSetupTimeouts(sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration())
+}
+
 // execRuntimeHostCapabilities reports what an exec session runtime — an
 // exec:<script> selection or a pack's [runtimes.<name>] — guarantees about
-// the controller's host. The runtime protocol handshake has no token that
-// says so yet: locality=local (ProtocolInfo.DeclaresLocal) places boxes on
-// the controller's host but promises neither the host's filesystem view nor
-// that pre_start runs on the host — a container on the host is local too.
-// So every exec runtime reports the zero value until the handshake gains that
-// token (gastownhall/gascity#9006 item 3b). It is a variable so tests can
-// stand in a runtime that reports.
-var execRuntimeHostCapabilities = func(_, _, _ string) runtime.HostCapabilities {
-	return runtime.HostCapabilities{}
+// the controller's host: its handshake, read through the admission probe
+// (execReadiness, remembered per version of the script and city) and mapped
+// by sessionexec.HostCapabilities, which reads it only through
+// ProtocolInfo.SharesHostFS, the predicate the exec provider acts on. So a
+// pack declaring locality=local with fs.host reports both capabilities (gc
+// stages and runs pre_start on the host for it), and every other pack — a
+// container on the host included, or one whose handshake cannot be read —
+// reports none. It is a variable so tests can stand in a runtime that
+// reports.
+var execRuntimeHostCapabilities = func(script, cityName, cityPath string) runtime.HostCapabilities {
+	h := execReadiness(script, cityName, cityPath)
+	if h.err != nil {
+		return runtime.HostCapabilities{}
+	}
+	return sessionexec.HostCapabilities(h.info)
 }
 
 // validatePackRuntimeRegistrations fails city config loading when a
@@ -185,8 +198,8 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
-		if err := r.Register(name, func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath), nil
+		if err := r.Register(name, func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath, execSetupTimeouts(sc)), nil
 		}, registry.WithHostCapabilities(func(_, cityName, cityPath string) runtime.HostCapabilities {
 			return execRuntimeHostCapabilities(rt.Command, cityName, cityPath)
 		})); err != nil {
