@@ -1875,10 +1875,14 @@ func TestNudgeDrainInjectLaneLeaseOutlivesTheHookDeadline(t *testing.T) {
 
 // doneStallingStore holds the guarded batch of a pass's Done until its
 // context ends, as a ledger too slow to settle in the hook's time would, and
-// records the deadline each held batch ran under.
+// records the deadline each held batch ran under. With returnAfter set, the
+// held batch returns only once the wall clock is past it: a slow ledger's
+// answer comes some time after the Done's context ended, never at the very
+// instant its timer fires.
 type doneStallingStore struct {
 	laneTestStore
-	deadlines *[]time.Time
+	deadlines   *[]time.Time
+	returnAfter time.Time
 }
 
 func (s doneStallingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
@@ -1886,12 +1890,13 @@ func (s doneStallingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
 	if !ok {
 		return nil, false
 	}
-	return doneStallingBatcher{inner: inner, deadlines: s.deadlines}, true
+	return doneStallingBatcher{inner: inner, deadlines: s.deadlines, returnAfter: s.returnAfter}, true
 }
 
 type doneStallingBatcher struct {
-	inner     beads.GuardedBatcher
-	deadlines *[]time.Time
+	inner       beads.GuardedBatcher
+	deadlines   *[]time.Time
+	returnAfter time.Time
 }
 
 // ApplyGuarded holds the batch the lane labels as its Done and applies every
@@ -1906,6 +1911,16 @@ func (b doneStallingBatcher) ApplyGuarded(ctx context.Context, batch beads.Guard
 	}
 	*b.deadlines = append(*b.deadlines, deadline)
 	<-ctx.Done()
+	// returnAfter carries no monotonic reading, so time.Until reads the wall
+	// clock, as the hook's deadline checks do; the timer runs on the
+	// monotonic clock, so the loop asks the wall clock again until it agrees.
+	for !b.returnAfter.IsZero() {
+		wait := time.Until(b.returnAfter.Round(0))
+		if wait < 0 {
+			break
+		}
+		<-time.NewTimer(wait + time.Millisecond).C
+	}
 	return beads.GuardedResult{}, ctx.Err()
 }
 
@@ -1919,12 +1934,6 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	f := newHookLaneDrainFixture(t)
 	f.queueNudge(t)
 	op := f.propose(t, "mail arrived")
-	var deadlines []time.Time
-	prev := hookLaneSessionStore
-	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
-		return doneStallingStore{laneTestStore: f.sessions, deadlines: &deadlines}
-	}
-	t.Cleanup(func() { hookLaneSessionStore = prev })
 	prevStart := hookProcessStart
 	hookProcessStart = time.Now().Add(-100 * time.Hour)
 	t.Cleanup(func() { hookProcessStart = prevStart })
@@ -1932,6 +1941,19 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	// well inside the 2s, and its Done is held past them.
 	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(hookDeadlineArchiveMarginMax+2*time.Second)))
 	settleBy := hookLaneSettleBy()
+	// The Done's context ends at the settle-by time, and the drain's ack
+	// check allows an ack with exactly the margin left, so a Done answered
+	// at that very instant leaves the ack its time. A Done that outlasts
+	// the margin answers after it: the held batch returns once the wall
+	// clock is past the settle-by time. Returning on the context's own
+	// (monotonic) timer let a wall clock a millisecond behind it, as on a
+	// macOS runner, read the margin as still left (ga-oucanw).
+	var deadlines []time.Time
+	prev := hookLaneSessionStore
+	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
+		return doneStallingStore{laneTestStore: f.sessions, deadlines: &deadlines, returnAfter: settleBy.Add(50 * time.Millisecond)}
+	}
+	t.Cleanup(func() { hookLaneSessionStore = prev })
 	run := f.drain(t)
 	if !strings.Contains(run.stdout, "review queued work") || !strings.Contains(run.stdout, "mail arrived") {
 		t.Fatalf("combined output missing a part:\n%s\nstderr=%s", run.stdout, run.stderr)

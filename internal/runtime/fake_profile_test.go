@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -41,7 +42,10 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
 	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
 	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
+	"FreshActivityProvider":           reflect.TypeFor[runtime.FreshActivityProvider](),
+	"HeldFileProvider":                reflect.TypeFor[runtime.HeldFileProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
+	"IdentityObserver":                reflect.TypeFor[runtime.IdentityObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
 	"IdleSnapshotProvider":            reflect.TypeFor[runtime.IdleSnapshotProvider](),
@@ -50,7 +54,10 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InputClearProvider":              reflect.TypeFor[runtime.InputClearProvider](),
 	"InteractionProvider":             reflect.TypeFor[runtime.InteractionProvider](),
 	"InterruptBoundaryWaitProvider":   reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
+	"InterruptNoteProvider":           reflect.TypeFor[runtime.InterruptNoteProvider](),
 	"InterruptedTurnResetProvider":    reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
+	"InventoryGate":                   reflect.TypeFor[runtime.InventoryGate](),
+	"InventoryLister":                 reflect.TypeFor[runtime.InventoryLister](),
 	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
 	"KeyedNudgeProvider":              reflect.TypeFor[runtime.KeyedNudgeProvider](),
 	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
@@ -58,6 +65,10 @@ var optionalInterfaces = map[string]reflect.Type{
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
+	"ProgramCaptureHealer":            reflect.TypeFor[runtime.ProgramCaptureHealer](),
+	"ProgramStatusHoldProvider":       reflect.TypeFor[runtime.ProgramStatusHoldProvider](),
+	"ProgramStatusProvider":           reflect.TypeFor[runtime.ProgramStatusProvider](),
+	"ProgramStatusShadowProvider":     reflect.TypeFor[runtime.ProgramStatusShadowProvider](),
 	"RelaunchProvider":                reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                          reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),
@@ -66,7 +77,9 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SessionEventProvider":            reflect.TypeFor[runtime.SessionEventProvider](),
 	"SessionObjectKiller":             reflect.TypeFor[runtime.SessionObjectKiller](),
 	"SessionRosterProvider":           reflect.TypeFor[runtime.SessionRosterProvider](),
+	"SharedListing":                   reflect.TypeFor[runtime.SharedListing](),
 	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"StartupNudgeHandbackProvider":    reflect.TypeFor[runtime.StartupNudgeHandbackProvider](),
 	"SteerCapabilityProvider":         reflect.TypeFor[runtime.SteerCapabilityProvider](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
@@ -75,6 +88,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
 	"TurnRunningProvider":             reflect.TypeFor[runtime.TurnRunningProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
+	"V2ReadinessReporter":             reflect.TypeFor[runtime.V2ReadinessReporter](),
 }
 
 // notOptional are the package's exported interfaces that are not optional
@@ -163,6 +177,7 @@ current-context: c
 		runtime.ProfileHerdr:      herdr.New("city", t.TempDir(), t.TempDir(), 0, 0),
 		runtime.ProfileK8s:        kube,
 		runtime.ProfileExec:       exec.NewSeamBacked(execConnectionPack(t)),
+		runtime.ProfileExecV2:     exec.NewSeamBacked(execV2Pack(t)),
 		runtime.ProfileSSH:        ssh.NewSeamBacked(ep),
 		runtime.ProfileT3Bridge:   t3bridge.NewSeamBacked(),
 	}
@@ -181,15 +196,28 @@ func execConnectionPack(t *testing.T) string {
 	return script
 }
 
+// execV2Pack is execConnectionPack declaring observe.v1 and
+// report-attachment too: v2-ready.
+func execV2Pack(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pack")
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\",\"observe.v1\",\"report-attachment\"]}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
-// fencing, response fencing, local transcripts, a steer mode), or no
-// backend checked.
+// fencing, response fencing, local transcripts, a steer mode, observable
+// identity, v2 readiness, an available inventory, an attested listing), or
+// no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
-	for p := runtime.ProfileTmux; p <= runtime.ProfileT3Bridge; p++ {
+	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
 		backend, ok := backends[p]
 		if !ok {
 			t.Errorf("profile %d: no production backend to match", p)
@@ -211,7 +239,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -241,6 +269,19 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.FencedInteractionProvider); ok {
 		out[9] = string(f.ResponseFencing("s"))
+	}
+	if f, ok := p.(runtime.IdentityObserver); ok {
+		out[10] = strconv.FormatBool(f.IdentityObservable())
+	}
+	if f, ok := p.(runtime.V2ReadinessReporter); ok {
+		missing, err := f.V2Readiness()
+		out[11] = fmt.Sprintf("%v/%v", missing, err)
+	}
+	if f, ok := p.(runtime.InventoryGate); ok {
+		out[12] = strconv.FormatBool(f.InventoryAvailable())
+	}
+	if f, ok := p.(runtime.ListingAttestation); ok {
+		out[13] = strconv.FormatBool(f.ListRunningComplete())
 	}
 	return strings.Join(out, " ")
 }
@@ -283,6 +324,79 @@ func TestFullFakeAnswersFromItsState(t *testing.T) {
 	broken := runtime.FullFake{Fake: runtime.NewFailFake()}
 	if _, err := broken.ObserveLivenessWithError("s", nil); err == nil {
 		t.Fatal("a broken fake's error-bearing read succeeded")
+	}
+}
+
+// Kills a full fake whose screen readings ignore its busy-turn knobs: a
+// running session shows no turn and reads idle until ScreenTurnRunning names
+// it, then shows the turn and reads busy; ScreenReadErrors fails the turn
+// reading; an unstarted session cannot be looked at.
+func TestFullFakeScreenShowsTheTurnItsKnobsSet(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted TurnRunning error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (bool, bool) {
+		t.Helper()
+		running, err := b.TurnRunning("s")
+		if err != nil {
+			t.Fatalf("TurnRunning: %v", err)
+		}
+		idle, err := b.SnapshotIdle("s")
+		if err != nil {
+			t.Fatalf("SnapshotIdle: %v", err)
+		}
+		return running, idle
+	}
+	if running, idle := read(); running || !idle {
+		t.Fatalf("no knob: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenTurnRunning = map[string]bool{"s": true}
+	if running, idle := read(); !running || idle {
+		t.Fatalf("ScreenTurnRunning: running %v idle %v; want a turn, busy", running, idle)
+	}
+	f.ScreenTurnRunning["s"] = false
+	if running, idle := read(); running || !idle {
+		t.Fatalf("turn ended: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenReadErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ScreenReadErrors: TurnRunning error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
+// Kills a full fake whose fresh activity read ignores its knobs: it reads the
+// Activity GetLastActivity serves until PaneActivity moves the session's own
+// clock past it, while GetLastActivity keeps the older one; PaneActivityErrors
+// fails the read; an unstarted session cannot be read.
+func TestFullFakeFreshActivityReadsThePaneClock(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted FreshActivity error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cached, drawn := time.Unix(1000, 0), time.Unix(1060, 0)
+	f.SetActivity("s", cached)
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("no knob: FreshActivity = %v, %v; want the Activity %v", at, err, cached)
+	}
+	f.PaneActivity = map[string]time.Time{"s": drawn}
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(drawn) {
+		t.Fatalf("PaneActivity: FreshActivity = %v, %v; want %v", at, err, drawn)
+	}
+	if at, err := b.GetLastActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("PaneActivity: GetLastActivity = %v, %v; want the cached %v", at, err, cached)
+	}
+	f.PaneActivityErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("PaneActivityErrors: FreshActivity error = %v, want ErrRuntimeUnavailable", err)
 	}
 }
 
@@ -548,4 +662,79 @@ func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name 
 	b.ctx, b.name = ctx, name
 	b.calls++
 	return b.result
+}
+
+// corpseBackend is a full fake whose liveness read reports corpses.
+type corpseBackend struct {
+	runtime.FullFake
+	corpses map[string]bool
+	err     error
+}
+
+func (b corpseBackend) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	if b.err != nil {
+		return runtime.Liveness{}, b.err
+	}
+	if b.corpses[name] {
+		return runtime.Liveness{Corpse: true, ObjectID: "c", ObjectCreated: "t"}, nil
+	}
+	return b.FullFake.ObserveLivenessWithError(name, pn)
+}
+
+// Kills a v2 exec profile whose identity read disagrees with the exec
+// provider's: a dead box (a corpse its backend still lists) answers its
+// identity, an absent name ErrSessionNotFound, and a failed read
+// ErrRuntimeUnavailable; the profile that is not v2-ready reads none.
+func TestExecV2ProfileObservesACorpsesIdentity(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.SetMeta("dead", "GC_SESSION_ID", "gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	b := corpseBackend{FullFake: runtime.FullFake{Fake: f}, corpses: map[string]bool{"dead": true}}
+	obs := runtime.NewFakeProfile(runtime.ProfileExecV2, b).(runtime.IdentityObserver)
+	if id, err := obs.ObserveIdentity("dead"); err != nil || id["GC_SESSION_ID"] != "gc-1" {
+		t.Errorf("corpse: %v, %v; want its identity", id, err)
+	}
+	if _, err := obs.ObserveIdentity("gone"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("absent: %v, want ErrSessionNotFound", err)
+	}
+	failing := b
+	failing.err = errors.New("backend down")
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExecV2, failing).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("failed read: %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExec, b).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("exec profile, not v2-ready: %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
+// gatedInventory is a full fake whose inventory is gated as available.
+type gatedInventory struct {
+	runtime.FullFake
+	available bool
+}
+
+func (g gatedInventory) InventoryAvailable() bool { return g.available }
+
+// Kills an InventoryFor that offers an inventory its provider gated off
+// (a script that is not v2-ready), or withholds an ungated one (tmux).
+func TestInventoryFor(t *testing.T) {
+	full := runtime.FullFake{Fake: runtime.NewFake()}
+	for name, tc := range map[string]struct {
+		p    runtime.Provider
+		want bool
+	}{
+		"no inventory":    {runtime.NewFake(), false},
+		"ungated":         {full, true},
+		"gated off":       {gatedInventory{full, false}, false},
+		"gated on":        {gatedInventory{full, true}, true},
+		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, full), false},
+		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, full), true},
+		"tmux profile":    {runtime.NewFakeProfile(runtime.ProfileTmux, full), true},
+		"nil":             {nil, false},
+	} {
+		if inv, ok := runtime.InventoryFor(tc.p); ok != tc.want || ok != (inv != nil) {
+			t.Errorf("%s: InventoryFor = %v, %v; want %v", name, inv, ok, tc.want)
+		}
+	}
 }

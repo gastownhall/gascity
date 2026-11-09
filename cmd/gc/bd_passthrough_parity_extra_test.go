@@ -27,7 +27,7 @@ const bdParityAssigneeFakeBd = `#!/bin/sh
     eval "printf '%s=%s\n' $v \"\${$v}\""
   done
   printf -- '--\n'
-} >> "${BD_PARITY_LOG}"
+} >> "${BD_PARITY_LOG}.$$"
 case "$1" in
   show) echo '[{"id":"demo-abc","title":"t","status":"in_progress","issue_type":"task","assignee":"worker-x"}]' ;;
   list|ready) echo '[]' ;;

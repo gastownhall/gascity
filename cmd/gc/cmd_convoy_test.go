@@ -6,16 +6,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -332,7 +337,7 @@ func TestConvoyListAcrossStores(t *testing.T) {
 	_, _ = rigStore.Create(beads.Bead{Title: "rig task", ParentID: "gc-1"})
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, false, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, convoyListOptions{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -357,7 +362,7 @@ func TestConvoyListJSON(t *testing.T) {
 	_ = store.Close("gc-3")
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{jsonOut: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -395,7 +400,7 @@ func TestConvoyListJSONEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{jsonOut: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2086,7 +2091,7 @@ func TestConvoyAutocloseHappyPath(t *testing.T) {
 	_ = store.Close("gc-3")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-1 "batch"`) {
@@ -2114,7 +2119,7 @@ func TestConvoyAutocloseTracksDeps(t *testing.T) {
 	_ = store.Close("gc-4")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-3", &stdout, &bytes.Buffer{})
 
 	out := stdout.String()
 	if !strings.Contains(out, `Auto-closed convoy gc-2 "batch"`) {
@@ -2137,7 +2142,7 @@ func TestConvoyAutocloseOwnedSkip(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("owned convoy should NOT be auto-closed: %q", stdout.String())
@@ -2155,7 +2160,7 @@ func TestConvoyAutocloseNoParent(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-1", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("no-parent bead should produce no output, got %q", stdout.String())
@@ -2169,7 +2174,7 @@ func TestConvoyAutocloseNotConvoy(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if stdout.String() != "" {
 		t.Errorf("non-convoy parent should produce no output, got %q", stdout.String())
@@ -2189,7 +2194,7 @@ func TestConvoyAutoclosePartialSiblings(t *testing.T) {
 	_ = store.Close("gc-2")                                            // only one sibling closed
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	if strings.Contains(stdout.String(), "Auto-closed") {
 		t.Errorf("partial siblings should NOT auto-close: %q", stdout.String())
@@ -2214,7 +2219,7 @@ func TestConvoyAutocloseStampsCloseReason(t *testing.T) {
 	_ = store.Close("gc-2")
 
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(store, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, events.Discard, "gc-2", &stdout, &bytes.Buffer{})
 
 	b, err := store.Get("gc-1")
 	if err != nil {
@@ -2477,7 +2482,7 @@ func TestConvoyFieldsRoundTrip(t *testing.T) {
 		Target:   "integration/gc-1",
 	}
 
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2497,7 +2502,7 @@ func TestConvoyFieldsPartial(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	fields := ConvoyFields{Owner: "mayor"}
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2516,7 +2521,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	// Set empty fields — should be a no-op.
-	if err := setConvoyFields(store, "gc-1", ConvoyFields{}); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", ConvoyFields{}); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2529,7 +2534,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 
 func TestConvoyFieldsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	err := setConvoyFields(store, "gc-999", ConvoyFields{Owner: "mayor"})
+	err := setConvoyFields(beadstest.Work(store), "gc-999", ConvoyFields{Owner: "mayor"})
 	if err == nil {
 		t.Error("setConvoyFields on nonexistent bead should return error")
 	}
@@ -2663,6 +2668,7 @@ func okConvoyListHandler(_ *testing.T) http.Handler {
 				"total":     2,
 				"closed":    1,
 				"complete":  false,
+				"child_ids": []string{"gc-2", "gc-3"},
 			})
 		default:
 			http.NotFound(w, r)
@@ -2810,7 +2816,7 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeConvoyList(cityPath, c, tc.nilReason, false, &stdout, &stderr)
+			code := routeConvoyList(cityPath, c, tc.nilReason, convoyListOptions{}, &stdout, &stderr)
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
 			}
@@ -3100,39 +3106,53 @@ func assertRouteLog(t *testing.T, stderrStr, wantRoute, wantReason string) {
 	}
 }
 
-func TestRouteConvoyList_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeConvoyTestCity(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/convoys") {
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
+	for _, rows := range []int{0, 1} {
+		t.Run(fmt.Sprintf("rows=%d", rows), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				setBehindCacheHeaders(w)
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/convoys"):
+					items := []map[string]any{}
+					if rows > 0 {
+						items = append(items, map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"})
+					}
+					json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items)}) //nolint:errcheck
+				case strings.HasSuffix(r.URL.Path, "/convoy/gc-1/check"):
+					json.NewEncoder(w).Encode(map[string]any{"convoy_id": "gc-1", "total": 0, "closed": 0, "complete": false}) //nolint:errcheck
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	var stdout, stderr bytes.Buffer
-	if code := routeConvoyList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
-	}
-	// Zero-convoy list prints "No open convoys" and returns early without
-	// surfacing the cache-age banner. Assert the empty case path is correct
-	// and that the stale banner appears when there is at least one row.
-	if !strings.Contains(stdout.String(), "No open convoys") {
-		t.Errorf("empty list output missing marker:\n%s", stdout.String())
+			var stdout, stderr bytes.Buffer
+			if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			// The zero-convoy list prints "No open convoys" and no footer.
+			if rows == 0 {
+				if !strings.Contains(stdout.String(), "No open convoys") {
+					t.Errorf("empty list output missing marker:\n%s", stdout.String())
+				}
+				assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
+				return
+			}
+			assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+		})
 	}
 }
 
-func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"convoy":   map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
@@ -3148,9 +3168,7 @@ func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
 	if code := routeConvoyStatus(cityPath, "gc-1", c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
@@ -3291,7 +3309,7 @@ func TestConvoyListReadsTheBindingRow(t *testing.T) {
 	cityPath, _, _, _ := relocatedConvoyCity(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3320,7 +3338,7 @@ func TestConvoyListDropsTheFrozenCopyOfAConvoyTheBindingClosed(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3501,7 +3519,7 @@ func TestConvoyListKeepsARigConvoyThatCollidesWithABindingID(t *testing.T) {
 	rigHoldingID(t, cityPath, convoyID, "the rig's own convoy", "convoy")
 
 	var stdout, stderr bytes.Buffer
-	if code := doConvoyListFallback(cityPath, false, &stdout, &stderr); code != 0 {
+	if code := doConvoyListFallback(cityPath, convoyListOptions{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc convoy list exited %d: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -3772,5 +3790,325 @@ func TestConvoyBindingOwnedIDsKeepsOneQueryUnderTheCap(t *testing.T) {
 	}
 	if len(binding.batches) != 1 {
 		t.Errorf("the probe issued %d queries for %d candidates, want 1", len(binding.batches), len(ids))
+	}
+}
+
+// --- gc convoy list: synthetic convoys, pagination, store opens ---
+
+// syntheticConvoyMetadata is the stamp graph.v2's single-item input convoy and
+// the drain-unit convoy carry.
+func syntheticConvoyMetadata() map[string]string {
+	return map[string]string{beadmeta.SyntheticMetadataKey: "true"}
+}
+
+// TestConvoyListHidesSyntheticConvoysByDefault pins the default listing to
+// the convoys a person made: the synthetic convoys the system mints for
+// formula launches (thousands on a busy city) are left out, and the output
+// says how many were.
+func TestConvoyListHidesSyntheticConvoysByDefault(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})                                    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}) // gc-2
+	_, _ = store.Create(beads.Bead{Title: "unit for y", Type: "convoy", Metadata: syntheticConvoyMetadata()})  // gc-3
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "release train") {
+		t.Errorf("stdout missing the hand-made convoy:\n%s", out)
+	}
+	for _, hidden := range []string{"input for x", "unit for y"} {
+		if strings.Contains(out, hidden) {
+			t.Errorf("stdout lists synthetic convoy %q by default:\n%s", hidden, out)
+		}
+	}
+	if !strings.Contains(out, "2 synthetic convoy(s) hidden") || !strings.Contains(out, "--include-synthetic") {
+		t.Errorf("stdout does not say how many synthetic convoys were hidden or how to list them:\n%s", out)
+	}
+}
+
+// TestConvoyListIncludeSyntheticListsThem pins the opt-in: --include-synthetic
+// lists every open convoy and has nothing hidden to report.
+func TestConvoyListIncludeSyntheticListsThem(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()})
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{includeSynthetic: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"release train", "input for x"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q with --include-synthetic:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hidden") {
+		t.Errorf("stdout reports hidden convoys with --include-synthetic:\n%s", out)
+	}
+}
+
+// TestConvoyListOnlySyntheticSaysSo pins the empty table's wording when every
+// open convoy is synthetic: "No open convoys" alone would be a lie.
+func TestConvoyListOnlySyntheticSaysSo(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()})
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "No open convoys") || !strings.Contains(out, "1 synthetic convoy(s) hidden") {
+		t.Errorf("stdout = %q, want the empty marker and the hidden count", out)
+	}
+}
+
+// TestConvoyListJSONHidesSyntheticConvoys pins the --json projection: the
+// synthetic convoys are left out of convoys and counted in
+// summary.hidden_synthetic, and --include-synthetic puts them back.
+func TestConvoyListJSONHidesSyntheticConvoys(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})                                    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}) // gc-2
+
+	for _, tc := range []struct {
+		name       string
+		opts       convoyListOptions
+		wantIDs    []string
+		wantHidden int
+	}{
+		{name: "default", opts: convoyListOptions{jsonOut: true}, wantIDs: []string{"gc-1"}, wantHidden: 1},
+		{name: "include-synthetic", opts: convoyListOptions{jsonOut: true, includeSynthetic: true}, wantIDs: []string{"gc-1", "gc-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, tc.opts, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			var result convoyListResultJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			var ids []string
+			for _, c := range result.Convoys {
+				ids = append(ids, c.ID)
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("convoys = %v, want %v", ids, tc.wantIDs)
+			}
+			if result.Summary.Total != len(tc.wantIDs) || result.Summary.HiddenSynthetic != tc.wantHidden {
+				t.Errorf("summary = %+v, want total %d hidden_synthetic %d", result.Summary, len(tc.wantIDs), tc.wantHidden)
+			}
+		})
+	}
+}
+
+// TestConvoyListCommandIncludeSyntheticFlag drives the cobra command end to
+// end on a file-store city, so the flag is proven wired, not just honored by
+// the helper.
+func TestConvoyListCommandIncludeSyntheticFlag(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "release train", Type: "convoy"}); err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "input for x", Type: "convoy", Metadata: syntheticConvoyMetadata()}); err != nil {
+		t.Fatalf("create synthetic convoy: %v", err)
+	}
+
+	for _, tc := range []struct {
+		args      []string
+		wantTotal int
+	}{
+		{args: []string{"convoy", "list", "--json"}, wantTotal: 1},
+		{args: []string{"convoy", "list", "--json", "--include-synthetic"}, wantTotal: 2},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(tc.args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v = %d; stderr=%s stdout=%s", tc.args, code, stderr.String(), stdout.String())
+		}
+		var result convoyListResultJSON
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("run %v: stdout is not JSON: %v\n%s", tc.args, err, stdout.String())
+		}
+		if result.Summary.Total != tc.wantTotal || len(result.Convoys) != tc.wantTotal {
+			t.Errorf("run %v: %d convoys (summary %+v), want %d", tc.args, len(result.Convoys), result.Summary, tc.wantTotal)
+		}
+	}
+}
+
+// convoyListAPIFixture serves /convoys as two pages — a hand-made convoy then
+// a synthetic one — and /convoy/{id}/check for either, counting the checks per
+// convoy id.
+type convoyListAPIFixture struct {
+	mu     sync.Mutex
+	checks map[string]int
+}
+
+func (f *convoyListAPIFixture) handler(t *testing.T) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/convoys"):
+			if r.URL.Query().Get("cursor") == "" {
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"items":       []map[string]any{{"id": "gc-1", "title": "release train", "issue_type": "convoy", "status": "open"}},
+					"total":       2,
+					"next_cursor": "page-2",
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{{"id": "gc-2", "title": "input for x", "issue_type": "convoy", "status": "open", "metadata": syntheticConvoyMetadata()}},
+				"total": 2,
+			})
+		case strings.HasSuffix(r.URL.Path, "/check"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v0/city/test-city/convoy/"), "/check")
+			f.mu.Lock()
+			f.checks[id]++
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": 1, "closed": 0, "child_ids": []string{id + "-member"}}) //nolint:errcheck
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// TestRouteConvoyListAPIHidesSyntheticAndSkipsTheirChecks pins the API lane:
+// it reads every page of /convoys, leaves the synthetic convoys out, and asks
+// /convoy/{id}/check only about the convoys it lists — a check per synthetic
+// convoy is thousands of round trips on a busy city.
+func TestRouteConvoyListAPIHidesSyntheticAndSkipsTheirChecks(t *testing.T) {
+	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+
+	for _, tc := range []struct {
+		name       string
+		opts       convoyListOptions
+		wantIDs    []string
+		wantChecks map[string]int
+		wantHidden int
+	}{
+		{name: "default", opts: convoyListOptions{jsonOut: true}, wantIDs: []string{"gc-1"}, wantChecks: map[string]int{"gc-1": 1}, wantHidden: 1},
+		{name: "include-synthetic", opts: convoyListOptions{jsonOut: true, includeSynthetic: true}, wantIDs: []string{"gc-1", "gc-2"}, wantChecks: map[string]int{"gc-1": 1, "gc-2": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := &convoyListAPIFixture{checks: map[string]int{}}
+			srv := httptest.NewServer(fixture.handler(t))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
+
+			var stdout, stderr bytes.Buffer
+			if code := routeConvoyList(cityPath, c, "", tc.opts, &stdout, &stderr); code != 0 {
+				t.Fatalf("routeConvoyList = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			assertRouteLog(t, stderr.String(), "api", "")
+			var result convoyListResultJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			var ids []string
+			for _, c := range result.Convoys {
+				ids = append(ids, c.ID)
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("convoys = %v, want %v (second page dropped or synthetic filter wrong)", ids, tc.wantIDs)
+			}
+			if result.Summary.HiddenSynthetic != tc.wantHidden {
+				t.Errorf("summary.hidden_synthetic = %d, want %d", result.Summary.HiddenSynthetic, tc.wantHidden)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if !maps.Equal(fixture.checks, tc.wantChecks) {
+				t.Errorf("/check calls = %v, want %v", fixture.checks, tc.wantChecks)
+			}
+		})
+	}
+}
+
+// TestRouteConvoyListAPITextNotesHiddenSynthetic pins the API lane's human
+// output to the same hidden-count note the local lane prints.
+func TestRouteConvoyListAPITextNotesHiddenSynthetic(t *testing.T) {
+	cityPath := writeConvoyTestCity(t)
+	fixture := &convoyListAPIFixture{checks: map[string]int{}}
+	srv := httptest.NewServer(fixture.handler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("routeConvoyList = %d; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "release train") || strings.Contains(out, "input for x") {
+		t.Errorf("stdout should list only the hand-made convoy:\n%s", out)
+	}
+	if !strings.Contains(out, "1 synthetic convoy(s) hidden") {
+		t.Errorf("stdout missing the hidden-synthetic note:\n%s", out)
+	}
+}
+
+// TestAllConvoyStoreOpensReuseTheLoadedConfig pins openAllConvoyStoresAt, the
+// opener of gc beads list and show and gc convoy stranded on the local lane,
+// to the one config load it already makes: each convoy store it opens (the
+// city's and every rig's) used to reload city.toml and every pack include
+// inside the open, one full load per store per invocation.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestAllConvoyStoreOpensReuseTheLoadedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+
+	before := loadCityConfigCalls.Load()
+	stores, code := openAllConvoyStoresAt(cityDir, io.Discard, "gc convoy stranded")
+	if code != 0 {
+		t.Fatalf("openAllConvoyStoresAt = %d, want 0", code)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("opening %d convoy stores loaded the city config %d more times, want 0: the opens must reuse the config the command loaded", len(stores), grew)
+	}
+	if want := 1 + len(readyCountedRigNames); len(stores) != want {
+		t.Fatalf("opened %d convoy stores, want %d (city + each rig)", len(stores), want)
+	}
+}
+
+// TestConvoyStatusStoreOpensReuseTheLoadedConfig is the same pin for the
+// by-id resolution gc convoy status takes, which probes every convoy store
+// for the id.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestConvoyStatusStoreOpensReuseTheLoadedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cityStore, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	convoy, err := cityStore.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	var stderr bytes.Buffer
+	if _, code := openConvoyStoreByIDAt(convoy.ID, cityDir, &stderr, "gc convoy status"); code != 0 {
+		t.Fatalf("openConvoyStoreByIDAt = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("resolving %s across the convoy stores loaded the city config %d more times, want 0", convoy.ID, grew)
 	}
 }

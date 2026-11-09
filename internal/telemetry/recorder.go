@@ -739,7 +739,9 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 // unrecordedReason says why a request ran unrecorded or, in require mode, was
 // refused (store_unavailable, type_unregistered, no_namespace,
 // payload_too_large, invalid_key, invalid_request, unmaterialized_target,
-// no_generation, unreadable_target, propose_error), or, for a sweeper pass
+// no_generation, unreadable_target, propose_error, or not_recorded_by_default
+// for a gate auto only by its builtin default over a sessions store that is
+// not SQLite-backed), or, for a sweeper pass
 // that failed as a whole, the failure's degrade class (store_error,
 // contention, conditional_writes_unsupported, type_unregistered,
 // no_namespace); it is empty for every other result. Every value is a closed

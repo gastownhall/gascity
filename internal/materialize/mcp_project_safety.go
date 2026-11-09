@@ -22,6 +22,28 @@ import (
 // (.gemini/ or .codex/) is also checked because the preserve-unrelated path
 // reads from and writes into that directory.
 func ensureNotSymlink(fs fsys.FS, p MCPProjection) error {
+	path, err := symlinkedPath(fs, p)
+	if err != nil {
+		return err
+	}
+	if path != "" {
+		return symlinkError(path)
+	}
+	return nil
+}
+
+func symlinkError(path string) error {
+	return fmt.Errorf(
+		"refusing to project MCP through symlinked path %s: "+
+			"managed targets must be regular files or directories",
+		path,
+	)
+}
+
+// symlinkedPath returns the first path ensureNotSymlink would reject: the
+// target, or the provider directory holding it. It returns "" when neither
+// is a symlink.
+func symlinkedPath(fs fsys.FS, p MCPProjection) (string, error) {
 	toCheck := []string{p.Target}
 	if dir := filepath.Dir(p.Target); dir != "" && dir != p.Root && dir != "." {
 		toCheck = append(toCheck, dir)
@@ -32,45 +54,27 @@ func ensureNotSymlink(fs fsys.FS, p MCPProjection) error {
 			if os.IsNotExist(err) || errors.Is(err, iofs.ErrNotExist) {
 				continue
 			}
-			return fmt.Errorf("inspecting %s: %w", path, err)
+			return "", fmt.Errorf("inspecting %s: %w", path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf(
-				"refusing to project MCP through symlinked path %s: "+
-					"managed targets must be regular files or directories",
-				path,
-			)
+			return path, nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
-// snapshotExistingIfUnmanaged copies the existing provider-native MCP content
-// to an adoption backup before the first managed write. Gas City promises
+// snapshotAdoption copies data, the existing provider-native MCP content, to
+// an adoption backup before the first managed write. Gas City promises
 // non-destructive adoption: once we've taken ownership of a target we will
 // clobber it on every reconcile, but on the very first adoption the user's
 // pre-existing content is preserved under .gc/mcp-adopted/<provider>/ and a
 // one-time warning is emitted so operators can recover or diff.
 //
-// The snapshot is a no-op when the projection is already managed (marker
-// exists) or the target does not exist yet. Errors reading/writing the
-// backup are fatal: silent destructive adoption is exactly the failure
-// mode this function exists to prevent.
-func snapshotExistingIfUnmanaged(fs fsys.FS, p MCPProjection, now func() time.Time, stderr io.Writer) error {
-	if p.isManaged(fs) {
-		return nil
-	}
-	data, err := fs.ReadFile(p.Target)
-	if err != nil {
-		if errorsIsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("reading %s for adoption snapshot: %w", p.Target, err)
-	}
-	if now == nil {
-		now = time.Now
-	}
-	timestamp := now().UTC().Format("20060102T150405Z")
+// Apply calls it only for an existing target it does not manage yet, under
+// the target lock. Errors writing the backup are fatal: silent destructive
+// adoption is exactly the failure mode this function exists to prevent.
+func snapshotAdoption(fs fsys.FS, p MCPProjection, data []byte, stderr io.Writer) error {
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
 	backupDir := p.adoptionSnapshotDir()
 	ext := filepath.Ext(p.Target)
 	if ext == "" {

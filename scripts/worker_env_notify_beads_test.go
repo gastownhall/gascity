@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -134,7 +135,7 @@ const notifyBeadsGHStub = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_LOG"
 printf '%s\n' "${GH_TOKEN:-}" >>"$GH_TOKENS"
-n=$(wc -l <"$GH_LOG")
+n=$(($(wc -l <"$GH_LOG")))
 unexpected() { echo "$*" >>"$GH_DIR/unexpected"; echo "gh stub: $*" >&2; exit 2; }
 [ "${1:-}" = api ] || unexpected "not gh api: $*"
 shift
@@ -155,7 +156,7 @@ case "$method $endpoint" in
 "POST repos/"*/dispatches)
 	cp "$input" "$GH_DIR/dispatch.$n.json"
 	status=$(sed -n 1p "$GH_STATUSES")
-	sed -i 1d "$GH_STATUSES"
+	tail -n +2 "$GH_STATUSES" >"$GH_STATUSES.next" && mv -f "$GH_STATUSES.next" "$GH_STATUSES"
 	if [ "$status" = none ]; then
 		echo "error connecting to api.github.com" >&2
 		exit 1
@@ -348,45 +349,51 @@ func TestWorkerEnvNotifyBeadsTriggers(t *testing.T) {
 
 // TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould evaluates each job's `if`:
 // repin runs on gastownhall/gascity alone (not on a fork's main), dispatch
-// only after repin found a moved pin, comment on same-repo PRs of
-// gastownhall/gascity.
+// and grace (the rbe-west grace record, tools/rbe/worker-env-grace) only
+// after repin found a moved pin, grace also after repin could not fetch
+// main before the push (it compared with the parent, which can hide a
+// re-pin), comment on same-repo PRs of gastownhall/gascity.
 func TestWorkerEnvNotifyBeadsJobsRunWhenTheyShould(t *testing.T) {
 	push := loadNotifyBeads(t, notifyBeadsWorkflow)
 	pr := loadNotifyBeads(t, notifyBeadsPRWorkflow)
-	if got := rbeSortedKeys(push.Jobs); strings.Join(got, ",") != "dispatch,repin" {
-		t.Fatalf("%s jobs %v, want repin and dispatch", notifyBeadsWorkflow, got)
+	if got := rbeSortedKeys(push.Jobs); strings.Join(got, ",") != "dispatch,grace,repin" {
+		t.Fatalf("%s jobs %v, want repin, dispatch and grace", notifyBeadsWorkflow, got)
 	}
 	if got := rbeSortedKeys(pr.Jobs); strings.Join(got, ",") != "comment" {
 		t.Fatalf("%s jobs %v, want comment", notifyBeadsPRWorkflow, got)
 	}
-	repin, dispatch, comment := push.Jobs["repin"], push.Jobs["dispatch"], pr.Jobs["comment"]
-	if dispatch.Needs != "repin" || repin.Needs != nil || comment.Needs != nil {
-		t.Errorf("needs: dispatch %v, repin %v, comment %v; want dispatch on repin alone", dispatch.Needs, repin.Needs, comment.Needs)
+	repin, dispatch, grace, comment := push.Jobs["repin"], push.Jobs["dispatch"], push.Jobs["grace"], pr.Jobs["comment"]
+	if dispatch.Needs != "repin" || grace.Needs != "repin" || repin.Needs != nil || comment.Needs != nil {
+		t.Errorf("needs: dispatch %v, grace %v, repin %v, comment %v; want dispatch and grace on repin alone", dispatch.Needs, grace.Needs, repin.Needs, comment.Needs)
 	}
-	// A status function (always(), failure() ...) would let dispatch run
-	// after a skipped or failed repin; without one, GitHub skips it then.
-	if strings.Contains(dispatch.If, "(") {
-		t.Errorf("dispatch if %q calls a function; it must run only after repin succeeded", dispatch.If)
+	// A status function (always(), failure() ...) would let dispatch or
+	// grace run after a skipped or failed repin; without one, GitHub skips
+	// them then.
+	if strings.Contains(dispatch.If, "(") || strings.Contains(grace.If, "(") {
+		t.Errorf("dispatch if %q, grace if %q call a function; they must run only after repin succeeded", dispatch.If, grace.If)
 	}
 	const (
 		gascity = "gastownhall/gascity"
 		fork    = "someone/gascity"
 	)
 	for _, tc := range []struct {
-		name            string
-		ctx             map[string]string
-		repin, dispatch bool
+		name                   string
+		ctx                    map[string]string
+		repin, dispatch, grace bool
 	}{
-		{name: "push, pin moved", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true"}, repin: true, dispatch: true},
-		{name: "push, pin unchanged", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false"}, repin: true},
-		{name: "push to a fork's main", ctx: map[string]string{"github.repository": fork, "needs.repin.outputs.moved": "true"}},
+		{name: "push, pin moved", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "false"}, repin: true, dispatch: true, grace: true},
+		{name: "push, pin unchanged", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false", "needs.repin.outputs.unfetched": "false"}, repin: true},
+		{name: "push, pin moved from the parent's, before not fetched", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "true"}, repin: true, dispatch: true, grace: true},
+		{name: "push, pin unchanged from the parent's, before not fetched", ctx: map[string]string{"github.repository": gascity, "needs.repin.outputs.moved": "false", "needs.repin.outputs.unfetched": "true"}, repin: true, grace: true},
+		{name: "push to a fork's main", ctx: map[string]string{"github.repository": fork, "needs.repin.outputs.moved": "true", "needs.repin.outputs.unfetched": "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := evalGHIf(t, repin.If, tc.ctx)
-			// dispatch needs repin: a skipped repin skips it.
+			// dispatch and grace need repin: a skipped repin skips them.
 			d := r && evalGHIf(t, dispatch.If, tc.ctx)
-			if r != tc.repin || d != tc.dispatch {
-				t.Errorf("runs repin %v, dispatch %v; want %v, %v", r, d, tc.repin, tc.dispatch)
+			g := r && evalGHIf(t, grace.If, tc.ctx)
+			if r != tc.repin || d != tc.dispatch || g != tc.grace {
+				t.Errorf("runs repin %v, dispatch %v, grace %v; want %v, %v, %v", r, d, g, tc.repin, tc.dispatch, tc.grace)
 			}
 		})
 	}
@@ -501,7 +508,7 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 	usesLine := regexp.MustCompile(`^\s*(?:- )?uses: (\S+)(.*)$`)
 	pinned := regexp.MustCompile(`^[a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}$`)
 	version := regexp.MustCompile(`^ # v\d+(\.\d+)*$`)
-	for path, wantUses := range map[string]int{notifyBeadsWorkflow: 2, notifyBeadsPRWorkflow: 0} {
+	for path, wantUses := range map[string]int{notifyBeadsWorkflow: 3, notifyBeadsPRWorkflow: 0} {
 		wf := loadNotifyBeads(t, path)
 		if wf.Permissions == nil || len(wf.Permissions) != 0 {
 			t.Errorf("%s permissions %v, want {} (each job grants its own)", path, wf.Permissions)
@@ -532,6 +539,8 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 		}
 	}
 
+	// grace publishes one record at a time without canceling one in
+	// flight (TestWorkerEnvNotifyBeadsGraceJob).
 	if push.Concurrency != nil || push.Jobs["repin"].Concurrency != nil || push.Jobs["dispatch"].Concurrency != nil {
 		t.Errorf("concurrency on the push side (workflow %v, repin %v, dispatch %v): no push run may cancel another",
 			push.Concurrency, push.Jobs["repin"].Concurrency, push.Jobs["dispatch"].Concurrency)
@@ -540,13 +549,13 @@ func TestWorkerEnvNotifyBeadsGrantsAndCheckouts(t *testing.T) {
 	if want := map[string]string{"contents": "read"}; !reflect.DeepEqual(repin.Permissions, want) {
 		t.Errorf("repin permissions %v, want %v", repin.Permissions, want)
 	}
-	for _, k := range []string{"moved", "pin", "sha"} {
+	for _, k := range []string{"moved", "pin", "sha", "before", "unfetched"} {
 		if want := "${{ steps.pin.outputs." + k + " }}"; repin.Outputs[k] != want {
 			t.Errorf("repin output %s = %q, want %q", k, repin.Outputs[k], want)
 		}
 	}
-	if len(repin.Outputs) != 3 {
-		t.Errorf("repin outputs %v, want moved, pin, sha", repin.Outputs)
+	if len(repin.Outputs) != 5 {
+		t.Errorf("repin outputs %v, want moved, pin, sha, before, unfetched", repin.Outputs)
 	}
 	if len(repin.Steps) != 2 || !strings.HasPrefix(repin.Steps[0].Uses, "actions/checkout@") || repin.Steps[1].Uses != "" {
 		t.Fatalf("repin steps %+v, want a checkout and one inline script", repin.Steps)
@@ -637,7 +646,8 @@ func runNotifyBeadsFixture(t *testing.T, dir, script string, args ...string) {
 // push of several commits (a merge-queue group) counts, and one moved back
 // within the push does not. A push with no usable before (a new branch's
 // all-zero one, none at all, or one it cannot fetch) compares with the
-// commit's parent; a first commit compares with no pin.
+// commit's parent; a first commit compares with no pin. Its before output
+// is the push's own before, for the grace record, never that parent.
 func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 	root := repoRoot(t)
 	wf := loadNotifyBeads(t, notifyBeadsWorkflow)
@@ -674,21 +684,27 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 	const zero = "0000000000000000000000000000000000000000"
 	unknown := strings.Repeat("e", 40)
 
+	// mainBefore: repin's before output, main before the push for the grace
+	// record: the push's own before when it names a commit, fetched or not,
+	// else none; never the parent the pin is compared with in its stead.
+	// warn: repin could not fetch that before, so it compared with the
+	// parent, warned and says unfetched=true (moved is a guess then).
 	for _, tc := range []struct {
 		name, before, head string
 		moved              string
 		pin                string
+		mainBefore         string
 		fail, warn         bool
 	}{
-		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA},
-		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB},
-		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB},
-		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA},
+		{name: "comment only", before: sha["a"], head: sha["a-docs"], moved: "false", pin: pinA, mainBefore: sha["a"]},
+		{name: "re-pin", before: sha["a-docs"], head: sha["b"], moved: "true", pin: pinB, mainBefore: sha["a-docs"]},
+		{name: "re-pin before the last commit of the push", before: sha["a-docs"], head: sha["b-again"], moved: "true", pin: pinB, mainBefore: sha["a-docs"]},
+		{name: "moved and moved back within the push", before: sha["a-docs"], head: sha["a-back"], moved: "false", pin: pinA, mainBefore: sha["a-docs"]},
 		{name: "new branch, parent pins another host", before: zero, head: sha["b"], moved: "true", pin: pinB},
 		{name: "new branch, parent pins the same host", before: zero, head: sha["b-again"], moved: "false", pin: pinB},
 		{name: "no before", before: "", head: sha["b"], moved: "true", pin: pinB},
-		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, warn: true},
-		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, warn: true},
+		{name: "before not fetchable, parent pins the same host", before: unknown, head: sha["b-again"], moved: "false", pin: pinB, mainBefore: unknown, warn: true},
+		{name: "before not fetchable, parent pins another host", before: unknown, head: sha["b"], moved: "true", pin: pinB, mainBefore: unknown, warn: true},
 		{name: "first commit", before: zero, head: sha["a"], moved: "true", pin: pinA},
 		{name: "pin removed", before: sha["a-back"], head: sha["none"], fail: true},
 	} {
@@ -722,8 +738,12 @@ func TestWorkerEnvNotifyBeadsDetectsTheRepin(t *testing.T) {
 			}
 			pin, _ := readStepOutput(t, output, "pin")
 			head, _ := readStepOutput(t, output, "sha")
-			if moved != tc.moved || pin != tc.pin || head != tc.head {
-				t.Errorf("moved %q pin %q sha %q, want %q %q %q\n%s", moved, pin, head, tc.moved, tc.pin, tc.head, out)
+			mainBefore, found := readStepOutput(t, output, "before")
+			if moved != tc.moved || pin != tc.pin || head != tc.head || mainBefore != tc.mainBefore || !found {
+				t.Errorf("moved %q pin %q sha %q before %q (written %v), want %q %q %q %q\n%s", moved, pin, head, mainBefore, found, tc.moved, tc.pin, tc.head, tc.mainBefore, out)
+			}
+			if unfetched, _ := readStepOutput(t, output, "unfetched"); unfetched != strconv.FormatBool(tc.warn) {
+				t.Errorf("unfetched %q, want %v\n%s", unfetched, tc.warn, out)
 			}
 			if warned := strings.Contains(out, "::warning"); warned != tc.warn {
 				t.Errorf("::warning printed %v, want %v\n%s", warned, tc.warn, out)
@@ -804,6 +824,49 @@ func TestWorkerEnvNotifyBeadsDispatch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNotifyBeadsGHStubRunsUnderBSDTools: the gh stub runs on the macOS
+// runners too (make test-mac runs scripts/), where wc pads its count to eight
+// columns and sed -i takes its next argument as the backup suffix. Shims with
+// that BSD behavior run first on PATH here, so Linux pins the portability.
+func TestNotifyBeadsGHStubRunsUnderBSDTools(t *testing.T) {
+	realWC, err := exec.LookPath("wc")
+	if err != nil {
+		t.Skipf("no wc on PATH: %v", err)
+	}
+	realSed, err := exec.LookPath("sed")
+	if err != nil {
+		t.Skipf("no sed on PATH: %v", err)
+	}
+	bsd := t.TempDir()
+	for name, content := range map[string]string{
+		"wc":  "#!/bin/sh\n'" + realWC + `' "$@" | awk '{ printf "%8d", $1; for (i = 2; i <= NF; i++) printf " %s", $i; printf "\n" }'` + "\n",
+		"sed": "#!/bin/sh\nif [ \"$1\" = -i ]; then echo \"sed: 1: \\\"$3\\\": invalid command code\" >&2; exit 1; fi\nexec '" + realSed + "' \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bsd, name), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gh := newNotifyBeadsGH(t)
+	gh.write(gh.statuses, "204\n500\n")
+	input := filepath.Join(t.TempDir(), "payload.json")
+	gh.write(input, `{"event_type":"x"}`)
+	env := gh.env()
+	env["PATH"] = bsd + string(os.PathListSeparator) + env["PATH"]
+	for i, wantOK := range []bool{true, false} {
+		out, err := runWorkflowStepScript(t, t.TempDir(), "gh api --include --method POST repos/o/r/dispatches --input '"+input+"'\n", env)
+		if (err == nil) != wantOK {
+			t.Fatalf("call %d: exit %v, want success %v\n%s", i+1, err, wantOK, out)
+		}
+	}
+	gh.checkNoUnexpected()
+	if saved := gh.saved("dispatch"); len(saved) != 2 {
+		t.Errorf("stub saved %d dispatch payloads, want 2", len(saved))
+	}
+	if left := gh.lines(gh.statuses); len(left) != 0 {
+		t.Errorf("statuses left unconsumed: %q", left)
 	}
 }
 

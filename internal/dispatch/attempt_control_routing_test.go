@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -67,7 +68,7 @@ func TestRouteFanoutFragmentStepsRoutesDrainToControlDispatcher(t *testing.T) {
 	opts := testProcessOptionsWithControlDispatcher("gascity")
 	opts.routeCfg.cfg.Agents = append(opts.routeCfg.cfg.Agents, config.Agent{Name: "worker"})
 
-	if err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore()); err != nil {
+	if err := routeFanoutFragmentSteps(fragment, control, opts); err != nil {
 		t.Fatalf("routeFanoutFragmentSteps: %v", err)
 	}
 
@@ -107,7 +108,7 @@ func TestRouteFanoutFragmentStepsUsesCityStoreScopeOverRigExecution(t *testing.T
 	opts := testProcessOptionsWithControlDispatcher("")
 	opts.routeCfg.cfg.Agents = append(opts.routeCfg.cfg.Agents, config.Agent{Name: "worker", Dir: "fixture"})
 
-	if err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore()); err != nil {
+	if err := routeFanoutFragmentSteps(fragment, control, opts); err != nil {
 		t.Fatalf("routeFanoutFragmentSteps: %v", err)
 	}
 
@@ -145,7 +146,7 @@ func TestRouteFanoutFragmentStepsQualifiesBareTargetWithRigContext(t *testing.T)
 	opts.routeCfg.cfg.Agents = append(opts.routeCfg.cfg.Agents,
 		config.Agent{Name: "worker", Dir: "fable-nomad"})
 
-	if err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore()); err != nil {
+	if err := routeFanoutFragmentSteps(fragment, control, opts); err != nil {
 		t.Fatalf("routeFanoutFragmentSteps: %v", err)
 	}
 
@@ -214,9 +215,9 @@ func TestRouteFanoutFragmentStepsRouteConfigLoadFailureIsTransient(t *testing.T)
 	}}
 	// routeCfg unset so routeConfig() performs a fresh load from CityPath and
 	// surfaces the malformed-config error the dispatcher must tolerate.
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(beads.NewMemStore()), CityPath: cityPath}
 
-	err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore())
+	err := routeFanoutFragmentSteps(fragment, control, opts)
 	if err == nil {
 		t.Fatal("routeFanoutFragmentSteps: want error on malformed route config, got nil")
 	}
@@ -250,9 +251,9 @@ func TestRouteFanoutFragmentStepsMissingDispatcherStaysTerminal(t *testing.T) {
 	routeCfg.once.Do(func() {
 		routeCfg.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Dir: "gascity"}}}
 	})
-	opts := ProcessOptions{routeCfg: routeCfg}
+	opts := ProcessOptions{Work: beadstest.Work(beads.NewMemStore()), routeCfg: routeCfg}
 
-	err := routeFanoutFragmentSteps(fragment, control, opts, beads.NewMemStore())
+	err := routeFanoutFragmentSteps(fragment, control, opts)
 	if err == nil {
 		t.Fatal("routeFanoutFragmentSteps: want terminal error when store-scoped dispatcher is absent, got nil")
 	}

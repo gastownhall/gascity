@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
@@ -1984,8 +1985,8 @@ func TestBdCloseDualResidentWritesServingCopy(t *testing.T) {
 
 	storereftest.RunBindingWins(t,
 		storereftest.BindingWinsStores{
-			Binding:       classStore,
-			Work:          work,
+			Binding:       beadstest.Resident(classStore),
+			Work:          beadstest.Work(work),
 			DualID:        resident.ID,
 			BindingTitle:  "the class-binding copy",
 			WorkOnlyID:    control.ID,

@@ -9,6 +9,7 @@ package conversationlane_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,8 +26,10 @@ import (
 // checks that the repository gained no commit and kept its index as it
 // was, and that the arm's server runs with automatic GC and the stats
 // workers off (R3 measures its data dir per round); then a city on the arm,
-// in require, records a well-formed API submit and a CLI nudge, and both ops
-// close succeeded.
+// in require, records a well-formed API submit and a CLI nudge, both ops
+// close succeeded, and both rows sit in the no-history plane: bd's wisps
+// table, which the workspace's dolt_ignore keeps out of every Dolt commit,
+// before and after the garbage collection R3 runs at each round's end.
 func TestBdDoltArmProvisionsAndRecords(t *testing.T) {
 	outer := t.TempDir()
 	gitIn := func(args ...string) (string, error) {
@@ -80,6 +83,69 @@ func TestBdDoltArmProvisionsAndRecords(t *testing.T) {
 			t.Errorf("op %s closed %s{%s}, want succeeded", op.ID, arm, reason)
 		}
 	}
+	planes, err := readRowPlanes(c.doltServer.port, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if got := planes[id]; got != rowPlaneNoHistory {
+			t.Errorf("op %s is in %q, want %q: an op row is no-history, so recording it mints no Dolt commit", id, got, rowPlaneNoHistory)
+		}
+	}
+
+	// R3's collection at each round's end on this arm keeps the op rows.
+	if size := c.collectGarbage(); size <= 0 {
+		t.Errorf("the binding after a garbage collection is %d bytes, want its data", size)
+	}
+	if planes, err = readRowPlanes(c.doltServer.port, ids); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if got := planes[id]; got != rowPlaneNoHistory {
+			t.Errorf("after a garbage collection op %s is in %q, want %q", id, got, rowPlaneNoHistory)
+		}
+	}
+}
+
+// rowPlaneNoHistory is readRowPlanes' answer for a row in bd's wisps table
+// with its no_history flag set, the table being dolt_ignored.
+const rowPlaneNoHistory = "wisps (no_history, dolt_ignored)"
+
+// readRowPlanes reads which table of the bd-dolt arm's workspace each of ids
+// is in: rowPlaneNoHistory, "wisps" for a wisps row without the flag or with
+// the table not ignored, "issues" for the versioned table, absent for none.
+func readRowPlanes(port int, ids []string) (map[string]string, error) {
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s", port, laneIDPrefix))
+	if err != nil {
+		return nil, fmt.Errorf("opening the dolt sql-server on port %d: %w", port, err)
+	}
+	defer func() { _ = db.Close() }()
+	var ignored int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_ignore WHERE pattern = 'wisps' AND ignored").Scan(&ignored); err != nil {
+		return nil, fmt.Errorf("reading the workspace's dolt_ignore: %w", err)
+	}
+	planes := map[string]string{}
+	for _, id := range ids {
+		var noHistory int
+		switch err := db.QueryRow("SELECT no_history FROM wisps WHERE id = ?", id).Scan(&noHistory); {
+		case err == nil && noHistory == 1 && ignored > 0:
+			planes[id] = rowPlaneNoHistory
+			continue
+		case err == nil:
+			planes[id] = "wisps"
+			continue
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("reading %s from wisps: %w", id, err)
+		}
+		var one int
+		switch err := db.QueryRow("SELECT 1 FROM issues WHERE id = ?", id).Scan(&one); {
+		case err == nil:
+			planes[id] = "issues"
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("reading %s from issues: %w", id, err)
+		}
+	}
+	return planes, nil
 }
 
 // doltSwitches are a dolt sql-server's automatic-GC and stats switches as

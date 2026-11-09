@@ -65,7 +65,9 @@ type backstopPredicate interface {
 	// write exactly what it is given.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
-	// exhausted is invoked once attempts reach the shared max attempts.
+	// exhausted is invoked once attempts reach the shared max attempts and the
+	// last one's backoff has passed, or at once when a due nudge has no
+	// content to deliver.
 	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding, and reports
@@ -85,12 +87,39 @@ type backstopHoldObserver interface {
 
 // Engine-level hold reasons passed to backstopHoldObserver.observeHold.
 const (
-	backstopHoldRuntimeNotRunning = "runtime_not_running"
-	backstopHoldRevalidate        = "revalidate_hold"
+	backstopHoldRuntimeNotRunning  = "runtime_not_running"
+	backstopHoldRevalidate         = "revalidate_hold"
+	backstopHoldPendingInteraction = "pending_interaction"
 	// backstopHoldContentHeld is a conversation an operator holds
 	// (backstopContentHeld) when the engine would act on it.
 	backstopHoldContentHeld = "content_held"
 )
+
+// pendingInteractionBlocked reports whether the session shows a pending
+// interaction (a permission prompt or an AskUserQuestion dialog), which a
+// typed nudge would answer. A probe that errors or a runtime with no
+// interactions is not blocked: the nudge's own guard still refuses, so this
+// look only spares the attempt a refused delivery would otherwise spend.
+func pendingInteractionBlocked(sp runtime.Provider, sessName string) bool {
+	ip, ok := pendingInteractionProvider(sp).(runtime.InteractionProvider)
+	if !ok {
+		return false
+	}
+	pending, err := ip.Pending(sessName)
+	return err == nil && pending != nil
+}
+
+// nudgeRefusedBehindPendingInteraction reports whether err is the runtime's
+// refusal to type into a pending interaction: the tmux provider's
+// (runtime.ErrPendingInteraction) or the ACP provider's
+// (runtime.ErrNudgeRefusedPendingInteraction). Nothing was submitted, so a
+// bounded retry spends no attempt on it and holds until the interaction is
+// answered. tmux may refuse after its paste, before the submit key, leaving
+// the text unsent in the input box: the retry's clear before its paste
+// removes it, except while a client is attached.
+func nudgeRefusedBehindPendingInteraction(err error) bool {
+	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction)
+}
 
 func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
 	if ho, ok := pred.(backstopHoldObserver); ok {
@@ -178,10 +207,11 @@ const (
 )
 
 // decideBackstopAction is the observe(grace) → nudge → backoff → give-up
-// timing rule shared by every backstop predicate, extracted unchanged from
-// nudgeStalledPoolClaims. attempts is the number of delivery attempts already
-// reserved for the current assignment; last is the time of the last attempt,
-// or of first observation when attempts is 0. Pacing reuses the exact constants
+// timing rule shared by every backstop predicate. attempts is the number of
+// delivery attempts already reserved for the current assignment; last is the
+// time of the last attempt, or of first observation when attempts is 0. Every
+// attempt, the last included, gets a full backoff to be answered: the give-up
+// waits out the last attempt's backoff. Pacing reuses the exact constants
 // proven by the pool-claim backstop (idleClaimNudgeGrace/Backoff/MaxAttempts,
 // idle_nudge.go).
 func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
@@ -191,6 +221,9 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 			return backstopActionWait // still inside the observe-first grace
 		}
 	case attempts >= idleClaimNudgeMaxAttempts:
+		if now.Sub(last) < idleClaimNudgeBackoff {
+			return backstopActionWait // the last attempt gets its backoff too
+		}
 		return backstopActionExhausted // gave up; manual re-nudge is the escape hatch
 	default:
 		if now.Sub(last) < idleClaimNudgeBackoff {
@@ -305,6 +338,13 @@ func runNudgeBackstop(
 				clearBackstop(pred, store, s, label, stdout)
 				continue
 			case backstopResolutionOutstanding:
+				// Held before reserve so the open dialog costs no attempt. A
+				// dialog that opens after this look is refused at delivery,
+				// which refunds the attempt below.
+				if pendingInteractionBlocked(sp, sessName) {
+					observeBackstopHold(pred, store, s, backstopHoldPendingInteraction, stdout)
+					continue
+				}
 				clearBackstopHold(pred, store, s, stdout)
 				// Deliver below.
 			default:
@@ -351,6 +391,16 @@ func runNudgeBackstop(
 					// which is the write-ahead's ordinary failure mode.
 					pred.reserve(store, s, target, attempts, last, stdout)
 					fmt.Fprintf(stdout, "%s: %s is busy; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
+					continue
+				}
+				if nudgeRefusedBehindPendingInteraction(err) {
+					// A permission prompt or question opened after the
+					// look above, and the runtime submitted nothing rather
+					// than answer it. Refunded as a busy deferral is, and
+					// held as the look holds an open dialog.
+					pred.reserve(store, s, target, attempts, last, stdout)
+					observeBackstopHold(pred, store, s, backstopHoldPendingInteraction, stdout)
+					fmt.Fprintf(stdout, "%s: %s is waiting on a pending interaction; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
 					continue
 				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
@@ -438,15 +488,16 @@ func proposeBackstopNotice(
 
 // backstopLastNoticeStands reports whether an exhausted backstop's terminal
 // action must wait: the controller's lane host executes message ops for
-// store and label's last notice for target is still open and due, so the
-// last reminder has not yet had its chance at the session's boundary. Once
-// a backoff has passed since the last reservation (last) the last notice is
-// past its start_by, so only one the lane is still delivering (executing or
-// settling) holds the action, and for at most one lease more, the lease the
-// conversation lane takes it under (opjournal.DefaultLeaseTTL). Past that it
-// is no longer read: an exhausted backstop whose terminal action leaves it
-// exhausted pays no listing per tick. A failed read does not hold the
-// terminal action; it is logged at most once per laneErrorLogInterval.
+// store and label's last notice for target is still being delivered, so the
+// last reminder has not yet had its chance at the session's boundary. It is
+// reached only once a backoff has passed since the last reservation (last),
+// when the last notice is past its start_by, so only one the lane is still
+// delivering (executing or settling) holds the action, and for at most one
+// lease more, the lease the conversation lane takes it under
+// (opjournal.DefaultLeaseTTL). Past that it is no longer read: an exhausted
+// backstop whose terminal action leaves it exhausted pays no listing per
+// tick. A failed read does not hold the terminal action; it is logged at
+// most once per laneErrorLogInterval.
 func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, last, now time.Time, label string, stdout io.Writer) bool {
 	if !now.Before(last.Add(idleClaimNudgeBackoff + opjournal.DefaultLeaseTTL)) {
 		return false

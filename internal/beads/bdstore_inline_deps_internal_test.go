@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -59,10 +60,13 @@ type fakeBdLedger struct {
 	// that cannot testify about its own projection.
 	omitDependencyCount bool
 
+	mu    sync.Mutex // serializes run: a two-tier List runs its two bd reads at once
 	calls [][]string
 }
 
 func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
 	// bd's list and query hide closed rows unless asked for all of them.
@@ -734,8 +738,58 @@ func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T
 			// The cost: the reconcile spends the one closed read the backing's
 			// own Ready spends, a `bd list --all` and its wisp-tier `bd query`.
 			reads := closedInclusiveReads(ledger.calls[before:reconciled])
-			if len(reads) != 2 || reads[0][1] != "list" || reads[1][1] != "query" {
+			if !closedReadsAreOneListAndOneQuery(reads) {
 				t.Fatalf("the reconcile spent closed reads %v, want one `bd list --all` and one `bd query --all`", reads)
+			}
+		})
+	}
+}
+
+// closedReadsAreOneListAndOneQuery reports whether reads are the closed-row
+// budget of one two-tier read: a `bd list --all` and a wisp-tier `bd query
+// --all`, in either order: BdStore.listTierPair issues them concurrently.
+func closedReadsAreOneListAndOneQuery(reads [][]string) bool {
+	var lists, queries int
+	for _, read := range reads {
+		switch read[1] {
+		case "list":
+			lists++
+		case "query":
+			queries++
+		}
+	}
+	return len(reads) == 2 && lists == 1 && queries == 1
+}
+
+// TestClosedReadsAreOneListAndOneQueryInEitherOrder pins the cost invariant
+// the cached-ready reconcile test asserts. BdStore.listTierPair runs its two
+// tier reads concurrently and the fake ledger records them under a mutex, so
+// both recorded orders are valid and neither may be a failure. The calls are
+// scripted rather than scheduled, so no case depends on goroutine timing.
+func TestClosedReadsAreOneListAndOneQueryInEitherOrder(t *testing.T) {
+	list := []string{"bd", "list", "--json", "--status=closed", "--all", "--limit=0"}
+	query := []string{"bd", "query", "--json", "ephemeral=true AND status=closed", "--all", "--limit=0"}
+	cases := []struct {
+		name  string
+		reads [][]string
+		want  bool
+	}{
+		{"list then query", [][]string{list, query}, true},
+		{"query then list", [][]string{query, list}, true},
+		{"no reads", nil, false},
+		{"list only", [][]string{list}, false},
+		{"query only", [][]string{query}, false},
+		{"duplicate list", [][]string{list, list}, false},
+		{"duplicate query", [][]string{query, query}, false},
+		{"extra list", [][]string{list, query, list}, false},
+		{"extra query", [][]string{query, list, query}, false},
+		{"extra unrelated closed read", [][]string{list, query, {"bd", "show", "--all", "bd-1"}}, false},
+		{"unrelated read in place of query", [][]string{list, {"bd", "show", "--all", "bd-1"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := closedReadsAreOneListAndOneQuery(tc.reads); got != tc.want {
+				t.Errorf("closedReadsAreOneListAndOneQuery(%v) = %v, want %v", tc.reads, got, tc.want)
 			}
 		})
 	}

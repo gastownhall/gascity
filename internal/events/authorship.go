@@ -142,6 +142,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionDrainFenceUnavailable:   AuthorWorker,
 	WorkStartedUnrecorded:          AuthorWorker,
 	SessionDemandClaimDivergence:   AuthorWorker,
+	SessionProgramStatusShadow:     AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	BeadClaimFailed:                AuthorWorker,
@@ -158,6 +159,7 @@ var builtinAuthorship = map[string]Authorship{
 	ConvoyCreated:                  AuthorWorker,
 	ConvoyClosed:                   AuthorWorker,
 	ControlStalled:                 AuthorWorker,
+	ControlCheckUnlaunchable:       AuthorWorker,
 	ControlRootSettleFailed:        AuthorWorker,
 	OrderFailed:                    AuthorWorker,
 	WorkerOperation:                AuthorWorker,
@@ -193,6 +195,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionStranded:                       AuthorController,
 	SessionPoolSlotRetiredAtDrainDeadline: AuthorController,
 	SessionUnknownState:                   AuthorController,
+	SessionConfigDriftDeferred:            AuthorController,
 	SessionWakeRefused:                    AuthorController,
 	SessionResetStalled:                   AuthorController,
 	SessionColdStartTimeout:               AuthorController,
@@ -224,7 +227,10 @@ var builtinAuthorship = map[string]Authorship{
 	WorkReleased:          AuthorController,
 	WorkReleaseUnfinished: AuthorController,
 	WorkEscalated:         AuthorController,
+	WorkRateLimited:       AuthorController,
 	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
+	AgentClaimsStalled:    AuthorController, // the controller's claims-stall guard (cmd/gc/claim_stall_guard.go)
+	AgentClaimsResumed:    AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc
@@ -282,6 +288,8 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageRigImport:                AuthorController,
+	StorageRigResidue:               AuthorController,
 }
 
 func init() {

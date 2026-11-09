@@ -18,7 +18,10 @@
 // Scenarios:
 //
 //   - FreshMigration: a city without [storage] runs half the formula, stops,
-//     authors the split, migrates with this binary, starts and finishes.
+//     authors the split, migrates with this binary, starts and finishes. A
+//     work bead tracking the run first makes the migration refuse (D9: an
+//     open membership edge cannot cross stores); closed, as the refusal says,
+//     its edge is dropped and recorded, and the rollback puts it back.
 //   - MigratedByV150RC1: the same, but everything up to and including the
 //     migration is run by a v1.5.0-rc1 gc (GC_ACCEPTANCE_SPLIT_RC1_GC_BIN, or
 //     built here from the tag when the clone has it). Booting that city with
@@ -178,9 +181,11 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 		root := c.runFirstHalf()
 		edge := c.addWorkEdgeInto(root)
 		c.authorSplit()
-		c.assertEdgeAtRiskBeforeClear(c.migrate(), edge)
+		c.assertMigrationRefusesOpenEdge(edge)
+		c.closeWorkBead(edge.work)
+		c.assertEdgeDroppedBeforeClear(c.migrate(), edge)
 		c.finishAndAssert(root)
-		c.assertEdgeLost(edge)
+		c.assertEdgeDropped(edge)
 		c.rollbackAndRestoreFromBackup(root)
 		c.assertEdgeRestored(edge)
 	})
@@ -381,6 +386,9 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	// helpers.NewEnv only prepends the binary's directory to PATH, so a binary
 	// not named gc (gc-a2, say) left the worker's `gc hook`/`gc bd` calls and
 	// the sessions resolving whatever `gc` sat beside it — a different build.
+	// Every city here is split at some point, and gc bd on a split city
+	// forwards only to bd's own binary, never the topology's tool-home
+	// wrapper: TopologyEnv keeps NewEnv's real bd (see WithRealBD).
 	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath), gcBin, filepath.Join(root, "gc-bin"))
 	preEnv := env
 	if preBin != "" {
@@ -819,6 +827,9 @@ func (c *splitE2ECity) finishAndAssert(root string) {
 		c.dumpDiagnostics(root)
 		c.t.Fatalf("formula re-dispatch after the cutover:\n  %s", strings.Join(v, "\n  "))
 	}
+	if untrusted := c.events().bdUntrusted; len(untrusted) > 0 {
+		c.t.Fatalf("gc would not run this split city's bd, so it refused every forwarded gc bd (gate-sweep's included):\n  %s", strings.Join(untrusted, "\n  "))
+	}
 	wl := c.workerLog()
 	if len(wl.closed) != splitWorkerSteps {
 		c.dumpDiagnostics(root)
@@ -888,14 +899,21 @@ type splitEventSummary struct {
 	started           map[string]int
 	startedAfterClose map[string]int
 	stepDefined       []splitEvent
+	// bdUntrusted summarizes the events saying gc would not run the city's
+	// bd, one line per event type: the controller's start finding
+	// (gc_bd.uninventoried) and each gc bd refused for that reason.
+	bdUntrusted []string
 }
 
 type splitEvent struct {
 	Seq     int64  `json:"seq"`
 	Type    string `json:"type"`
 	Subject string `json:"subject"`
+	Message string `json:"message"`
 	RunID   string `json:"run_id"`
 	StepID  string `json:"step_id"`
+	// Payload is decoded only where a check needs it: its shape is per type.
+	Payload json.RawMessage `json:"payload"`
 }
 
 // events reads the city's event log in sequence order.
@@ -922,6 +940,7 @@ func (c *splitE2ECity) events() splitEventSummary {
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	closed := map[string]bool{}
+	var untrusted splitEventTally
 	for _, e := range all {
 		s.counts[e.Type]++
 		switch e.Type {
@@ -936,9 +955,45 @@ func (c *splitE2ECity) events() splitEventSummary {
 			if closed[e.Subject] {
 				s.startedAfterClose[e.Subject]++
 			}
+		case "gc_bd.uninventoried":
+			untrusted.note(e)
+		case "gc_bd.refused":
+			var refusal struct {
+				Kind string `json:"kind"`
+			}
+			if json.Unmarshal(e.Payload, &refusal) == nil && refusal.Kind == "bd-uninventoried" {
+				untrusted.note(e)
+			}
 		}
 	}
+	s.bdUntrusted = untrusted.lines()
 	return s
+}
+
+// splitEventTally counts events by type and keeps each type's first message.
+type splitEventTally struct {
+	order []string
+	count map[string]int
+	first map[string]string
+}
+
+func (t *splitEventTally) note(e splitEvent) {
+	if t.count == nil {
+		t.count, t.first = map[string]int{}, map[string]string{}
+	}
+	if t.count[e.Type] == 0 {
+		t.order = append(t.order, e.Type)
+		t.first[e.Type] = e.Message
+	}
+	t.count[e.Type]++
+}
+
+func (t *splitEventTally) lines() []string {
+	out := make([]string, 0, len(t.order))
+	for _, typ := range t.order {
+		out = append(out, fmt.Sprintf("%s x%d, first: %s", typ, t.count[typ], t.first[typ]))
+	}
+	return out
 }
 
 // stepsOf returns the step bead ids the controller defined for root.
@@ -1205,9 +1260,10 @@ type splitBackupBead struct {
 	Status   string            `json:"status"`
 	Parent   string            `json:"parent"`
 	Metadata map[string]string `json:"metadata"`
-	// Deps is the record's outbound edges, lifted from the entry beside the
-	// bead.
-	Deps []splitBackupEdge `json:"-"`
+	// Deps is the record's outbound edges, and Dependents the edges onto it,
+	// lifted from the entry beside the bead.
+	Deps       []splitBackupEdge `json:"-"`
+	Dependents []splitBackupEdge `json:"-"`
 }
 
 // splitBackupEdge is one edge as the backup records it.
@@ -1215,6 +1271,9 @@ type splitBackupEdge struct {
 	IssueID     string `json:"issue_id"`
 	DependsOnID string `json:"depends_on_id"`
 	Type        string `json:"type"`
+	// Disposition is what the migration did with the edge: copied, gated,
+	// copied-external or dropped.
+	Disposition string `json:"disposition"`
 }
 
 func readSplitBackup(t *testing.T, path string) map[string]splitBackupBead {
@@ -1226,11 +1285,13 @@ func readSplitBackup(t *testing.T, path string) map[string]splitBackupBead {
 	rows := map[string]splitBackupBead{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		var rec struct {
-			Bead *splitBackupBead  `json:"bead"`
-			Deps []splitBackupEdge `json:"deps"`
+			Bead       *splitBackupBead  `json:"bead"`
+			Deps       []splitBackupEdge `json:"deps"`
+			Dependents []splitBackupEdge `json:"dependents"`
 		}
 		if json.Unmarshal([]byte(line), &rec) == nil && rec.Bead != nil && rec.Bead.ID != "" {
 			rec.Bead.Deps = rec.Deps
+			rec.Bead.Dependents = rec.Dependents
 			rows[rec.Bead.ID] = *rec.Bead
 		}
 	}
@@ -1301,9 +1362,9 @@ func (b splitShownBead) hasDep(on, typ string) bool {
 // show reads one bead through gc bd and fails the test if it is unreadable.
 func (c *splitE2ECity) show(id string) splitShownBead {
 	c.t.Helper()
-	out, err := c.city.GCStdout("bd", "show", id, "--json")
+	out, errOut, err := helpers.RunGCStreams(c.city.Env, c.city.Dir, "bd", "show", id, "--json")
 	if err != nil {
-		c.t.Fatalf("gc bd show %s --json: %v\n%s", id, err, out)
+		c.t.Fatalf("gc bd show %s --json: %v\nstdout:\n%s\nstderr:\n%s", id, err, out, errOut)
 	}
 	payload := strings.TrimSpace(out)
 	if i := strings.IndexAny(payload, "[{"); i >= 0 {
@@ -1326,8 +1387,8 @@ type splitCrossEdge struct {
 	work, target, kind string
 }
 
-// String is the spelling the migration, `gc storage status` and the event all
-// use for an edge: "issue -[type]-> depends_on".
+// String is the spelling the migration's list of dropped cross-store edges uses
+// for an edge: "issue -[type]-> depends_on".
 func (e splitCrossEdge) String() string {
 	return fmt.Sprintf("%s -[%s]-> %s", e.work, e.kind, e.target)
 }
@@ -1361,50 +1422,116 @@ func (c *splitE2ECity) addWorkEdgeInto(target string) splitCrossEdge {
 	return edge
 }
 
-// assertEdgeAtRiskBeforeClear requires the migration to name the edge under
-// AT RISK before it reports removing any row.
-func (c *splitE2ECity) assertEdgeAtRiskBeforeClear(out string, edge splitCrossEdge) {
+// assertMigrationRefusesOpenEdge runs the cutover with the work bead still
+// open. An open tracks edge between a work bead and a bead the migration moves
+// is a membership edge that cannot cross stores (D9), so the migration must
+// refuse it by id, with its fix, before it copies anything.
+func (c *splitE2ECity) assertMigrationRefusesOpenEdge(edge splitCrossEdge) {
 	c.t.Helper()
-	risk := strings.Index(out, "cross-store edges AT RISK")
-	if risk < 0 {
-		c.t.Fatalf("gc storage migrate did not announce the cross-store edges AT RISK:\n%s", out)
+	out, err := c.city.GC("storage", "migrate", "--from-work", "--fleet-stopped")
+	if err == nil {
+		c.t.Fatalf("gc storage migrate carried the open edge %s instead of refusing it:\n%s", edge, out)
 	}
-	at := strings.Index(out[risk:], edge.String())
-	if at < 0 {
-		c.t.Fatalf("gc storage migrate's AT RISK list does not name %s:\n%s", edge, out)
+	for _, want := range []string{
+		"cannot cross from the work store into the binding",
+		"nothing was copied",
+		fmt.Sprintf("%s, %s:", edge.work, edge.target),
+		fmt.Sprintf("joined by a %s edge", edge.kind),
+		fmt.Sprintf("or close %s, then re-run", edge.work),
+	} {
+		if !strings.Contains(out, want) {
+			c.t.Errorf("gc storage migrate's refusal of %s does not say %q:\n%s", edge, want, out)
+		}
 	}
-	if cleared := strings.Index(out, "cop(ies) cleared"); cleared >= 0 && cleared < risk+at {
-		c.t.Errorf("gc storage migrate named %s AT RISK only after reporting the clear:\n%s", edge, out)
+	c.t.Logf("gc storage migrate refused the open edge %s as required:\n%s", edge, out)
+}
+
+// closeWorkBead applies the refusal's own fix: with the work bead closed, the
+// edge is no longer live membership, and the migration drops it.
+func (c *splitE2ECity) closeWorkBead(id string) {
+	c.t.Helper()
+	if out, err := c.city.GC("bd", "close", id); err != nil {
+		c.t.Fatalf("gc bd close %s, the refusal's fix: %v\n%s", id, err, out)
+	}
+	if got := c.show(id).Status; got != "closed" {
+		c.t.Fatalf("work bead %s is %q after gc bd close, want closed", id, got)
 	}
 }
 
-// assertEdgeLost pins what a bd/Dolt work store does with the edge once its
-// target is cleared: drops it, and says so in `gc storage status` and in the
-// storage.binding.converged event.
-func (c *splitE2ECity) assertEdgeLost(edge splitCrossEdge) {
+// assertEdgeDroppedBeforeClear requires the migration to name the edge among
+// the cross-store edges it drops before it reports removing any row, and its
+// clear summary to count the drop and its record on the work bead.
+func (c *splitE2ECity) assertEdgeDroppedBeforeClear(out string, edge splitCrossEdge) {
 	c.t.Helper()
-	if c.show(edge.work).hasDep(edge.target, edge.kind) {
-		c.t.Errorf("work bead %s still carries %s after its target was cleared; this test pins the bd/Dolt work store dropping it", edge.work, edge)
+	dropped := strings.Index(out, "cross-store edges dropped")
+	if dropped < 0 {
+		c.t.Fatalf("gc storage migrate did not announce the cross-store edges it drops:\n%s", out)
 	}
-	status, err := c.city.GC("storage", "status")
-	if err != nil {
-		c.t.Fatalf("gc storage status: %v\n%s", err, status)
+	at := strings.Index(out[dropped:], edge.String())
+	if at < 0 {
+		c.t.Fatalf("gc storage migrate's list of dropped cross-store edges does not name %s:\n%s", edge, out)
 	}
-	lost := strings.Index(status, "lost cross-store edges:")
-	if lost < 0 || !strings.Contains(status[lost:], edge.String()) {
-		c.t.Errorf("gc storage status does not list %s under lost cross-store edges:\n%s", edge, status)
+	cleared := strings.Index(out, "cop(ies) cleared")
+	if cleared < 0 {
+		c.t.Fatalf("gc storage migrate did not report its clear:\n%s", out)
 	}
-	found := false
-	for _, e := range c.convergedEvents() {
-		for _, l := range e.LostCrossEdges {
-			if strings.HasPrefix(l, edge.String()) {
-				found = true
-			}
+	if cleared < dropped+at {
+		c.t.Errorf("gc storage migrate named %s dropped only after reporting the clear:\n%s", edge, out)
+	}
+	for _, want := range []string{"cross-store edge(s) dropped, none re-added", "dropped cross-store edge(s) recorded on their work bead(s)"} {
+		if !strings.Contains(out[cleared:], want) {
+			c.t.Errorf("gc storage migrate's clear summary does not say %q:\n%s", want, out)
 		}
 	}
-	if !found {
-		c.t.Errorf("no storage.binding.converged event carries %s in lost_cross_edges: %+v", edge, c.convergedEvents())
+}
+
+// splitCrossEdgeRecord is one entry of a bead's gc.migrated_cross_edges
+// record.
+type splitCrossEdgeRecord struct {
+	Dir    string `json:"dir"`
+	Type   string `json:"type"`
+	Other  string `json:"other"`
+	Action string `json:"action"`
+}
+
+// assertEdgeDropped pins what D9 leaves once the copy has converged: the work
+// store keeps no edge onto a bead it no longer holds, the work bead records the
+// drop in gc.migrated_cross_edges, and the backup records the edge as a
+// dependent of the removed bead, which is what the rollback puts back.
+func (c *splitE2ECity) assertEdgeDropped(edge splitCrossEdge) {
+	c.t.Helper()
+	work := c.show(edge.work)
+	if work.hasDep(edge.target, edge.kind) {
+		c.t.Errorf("work bead %s still carries %s after the clear removed its target", edge.work, edge)
 	}
+	raw := work.Metadata["gc.migrated_cross_edges"]
+	var records []splitCrossEdgeRecord
+	if err := json.Unmarshal([]byte(raw), &records); err != nil {
+		c.t.Errorf("work bead %s gc.migrated_cross_edges = %q does not parse: %v", edge.work, raw, err)
+	}
+	recorded := false
+	for _, r := range records {
+		if r.Dir == "out" && r.Type == edge.kind && r.Other == edge.target && r.Action == "dropped" {
+			recorded = true
+		}
+	}
+	if !recorded {
+		c.t.Errorf("work bead %s does not record %s as dropped in gc.migrated_cross_edges: %q", edge.work, edge, raw)
+	}
+	backup := c.path(".gc", "store", "infra.retained-source.jsonl")
+	row, ok := readSplitBackup(c.t, backup)[edge.target]
+	if !ok {
+		c.t.Fatalf("backup %s does not hold %s, the bead the clear removed", backup, edge.target)
+	}
+	for _, d := range row.Dependents {
+		if d.IssueID == edge.work && d.DependsOnID == edge.target && d.Type == edge.kind {
+			if d.Disposition != "dropped" {
+				c.t.Errorf("backup records %s with disposition %q, want dropped", edge, d.Disposition)
+			}
+			return
+		}
+	}
+	c.t.Errorf("backup %s does not record %s among %s's dependents: %+v", backup, edge, edge.target, row.Dependents)
 }
 
 // assertEdgeRestored requires the runbook recipe's dep-add loop to have put
@@ -1415,32 +1542,4 @@ func (c *splitE2ECity) assertEdgeRestored(edge splitCrossEdge) {
 	if !got.hasDep(edge.target, edge.kind) {
 		c.t.Errorf("the runbook restore did not put back %s: gc bd show %s gives deps %+v", edge, edge.work, got.Dependencies)
 	}
-}
-
-// splitConvergedEvent is the part of a storage.binding.converged event the
-// cross-edge assertions read.
-type splitConvergedEvent struct {
-	Seq            int64    `json:"seq"`
-	LostCrossEdges []string `json:"lost_cross_edges"`
-}
-
-func (c *splitE2ECity) convergedEvents() []splitConvergedEvent {
-	data, err := os.ReadFile(c.path(".gc", "events.jsonl"))
-	if err != nil {
-		return nil
-	}
-	var out []splitConvergedEvent
-	for _, line := range strings.Split(string(data), "\n") {
-		var e struct {
-			Seq     int64               `json:"seq"`
-			Type    string              `json:"type"`
-			Payload splitConvergedEvent `json:"payload"`
-		}
-		if json.Unmarshal([]byte(line), &e) != nil || e.Type != "storage.binding.converged" {
-			continue
-		}
-		e.Payload.Seq = e.Seq
-		out = append(out, e.Payload)
-	}
-	return out
 }

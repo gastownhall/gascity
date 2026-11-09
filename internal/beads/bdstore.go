@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const (
@@ -28,6 +29,8 @@ const (
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
+// A runner must be safe for concurrent use: a two-tier List calls it from two
+// goroutines at once (see listTierPair).
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
 var (
@@ -280,17 +283,65 @@ func classifyBDExecResult(parent, ctx context.Context, name string, timeout time
 // every other shape — a single line, stderr that already leads with the error,
 // stderr with no bd error line, empty stderr, a non-bd command — composes
 // byte-for-byte what it composed before.
+//
+// bd's .beads/.env notices (isBdEnvFileNotice) go last, after whatever says
+// what failed, and do not count as stderr when choosing between the streams.
+// bd v1.3.3 and later print one on every command for each key outside their
+// .beads/.env allowlist. v1.3.3 also refused the GT_ROOT line every rig `gc rig
+// add` creates carries there (v1.3.4 admits GT_ROOT again), and any other key a
+// user puts in that file still draws the notice. If those lines counted, a --json failure bd reports only on stdout (bd close, dep
+// list, label add) would lose its envelope: the error text would hold just the
+// notices, and the text classifiers (isBdNotFound, isBdTransientWriteError)
+// would stop recognizing it.
 func bdFailureDetail(name string, out []byte, stderr string) string {
 	detail := strings.TrimSpace(stderr)
 	if name != "bd" {
 		return detail
 	}
+	detail, notices := splitBdEnvFileNotices(detail)
 	if detail == "" {
 		// bd writes structured errors to stdout under --json while stderr is
 		// often empty.
-		return bdStdoutErrorDetail(out)
+		detail = bdStdoutErrorDetail(out)
+	} else {
+		detail = hoistBdErrorLines(detail)
 	}
-	return hoistBdErrorLines(detail)
+	switch {
+	case notices == "":
+		return detail
+	case detail == "":
+		return notices
+	default:
+		return detail + "\n" + notices
+	}
+}
+
+// isBdEnvFileNotice reports whether line is the notice bd (v1.3.3 and later,
+// gastownhall/beads#7879) prints to stderr for a .beads/.env key outside its
+// allowlist: "beads: ignoring <KEY> from .beads/.env (<reason>)". bd prints it
+// before the command runs and ignores the key, so the line says nothing about
+// why a command failed.
+func isBdEnvFileNotice(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "beads: ignoring ") && strings.Contains(trimmed, " from .beads/.env (")
+}
+
+// splitBdEnvFileNotices separates bd's .beads/.env notices from the rest of
+// detail, each part keeping its lines in their original order. Detail without
+// a notice comes back unchanged.
+func splitBdEnvFileNotices(detail string) (rest, notices string) {
+	if !strings.Contains(detail, " from .beads/.env (") {
+		return detail, ""
+	}
+	var kept, moved []string
+	for _, line := range strings.Split(detail, "\n") {
+		if isBdEnvFileNotice(line) {
+			moved = append(moved, line)
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n")), strings.Join(moved, "\n")
 }
 
 // bdErrorLinePrefixes are the prefixes bd stamps on the lines that say what
@@ -1191,7 +1242,7 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status)
 	return Bead{
 		ID:                   b.ID,
 		Title:                b.Title,
@@ -1383,12 +1434,18 @@ func isExactIDQueryable(id string) bool {
 	return true
 }
 
+// isBdClaimConflictMessage reports whether bd refused a claim because of the
+// bead's own state: another actor holds it, or its status is not claimable
+// (closed, deferred or blocked since the caller read it). bd prints the
+// latter as beads' ErrNotClaimable sentinel followed by the status, on both its
+// direct and proxied-server update paths. Either refusal wrote nothing.
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
 		strings.Contains(msg, "already claimed") ||
 		strings.Contains(msg, "claimed by") ||
-		strings.Contains(msg, "claim conflict")
+		strings.Contains(msg, "claim conflict") ||
+		strings.Contains(msg, strings.ToLower(issueops.ErrNotClaimable.Error()))
 }
 
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
@@ -1405,11 +1462,14 @@ func mapBdStatus(s string) string {
 	}
 }
 
-// normalizedBdReadState preserves bd's status-based indefinite deferral after
-// richer bd statuses collapse to Gas City's three-state model. A time-bound
-// deferral remains governed by DeferUntil so it can become ready after expiry.
-func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
-	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+// normalizedBdReadState preserves bd's status-based deferral after richer bd
+// statuses collapse to Gas City's three-state model. bd's deferred status is a
+// deferral in its own right, dated or not: defer_until only says when bd's own
+// sweep may lift the deferral, and gc honors the lift once the store records
+// it. bd's ready query filters on the raw status, so a row the store still
+// records deferred is never served, whatever its date (#6207).
+func normalizedBdReadState(status string) (string, bool) {
+	return mapBdStatus(status), status == "deferred"
 }
 
 type optionalBool struct {
@@ -1867,9 +1927,11 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 
 // Claim atomically claims an open bead through bd update --claim.
 //
-// It returns ok=false when bd reports that another actor won the claim race.
-// The caller controls the claim actor through the store's CommandRunner
-// environment, typically BEADS_ACTOR.
+// It returns ok=false with a nil error when bd refuses the claim because of
+// the bead's own state: another actor holds it, or its status is not claimable.
+// That is the conflict verdict SQLiteStore.Claim and NativeDoltStore.Claim
+// return for the same refusals. The caller controls the claim actor through the
+// store's CommandRunner environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
@@ -3128,13 +3190,35 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list wisps tier", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+}
 
-	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+// tierPairResult is what listTierPair read from each tier.
+type tierPairResult struct {
+	list         []Bead
+	listErr      error
+	ephemeral    []Bead
+	ephemeralErr error
+}
+
+// listTierPair reads one two-tier List's two halves at once: listQ through
+// bd list and ephemeralQ through bd query. They are independent reads, each its
+// own bd subprocess, so read one after the other a two-tier List costs every
+// caller two bd round trips in series instead of one (ga-3js1ayv). Both halves
+// call the store's CommandRunner, so the two reads can run it concurrently.
+func (s *BdStore) listTierPair(listQ, ephemeralQ ListQuery) tierPairResult {
+	var r tierPairResult
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ephemeral, r.ephemeralErr = s.listEphemeral(ephemeralQ)
+	}()
+	r.list, r.listErr = s.listViaBDList(listQ)
+	<-done
+	return r
 }
 
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
@@ -3343,13 +3427,10 @@ func isBareBdQueryValue(value string) bool {
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierBoth
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
-
-	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list both tiers", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
 }
 
 func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
@@ -3721,10 +3802,20 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
 //
-// One id is read with DepList and returned as that anchor's entry: a one-id
-// `bd dep list <id> --json` prints the depended-on beads' rows, not the
-// dependency records a multi-id call prints, so parsing it as records would
-// key every edge under "" and report the anchor as edge-free.
+// The answer is bd's raw dependency records, for one anchor as for many, so an
+// edge whose target has no row in this database — a dangling edge, or one to
+// another store — is in it. bd picks its output shape by how many ids it is
+// handed: several print the records, but one prints the depended-on beads'
+// rows, a join that drops exactly those edges. A lone anchor is therefore
+// named twice, which bd answers with the records shape (bd itself suggests
+// `bd dep list <id> <id>` for the raw edges); a record that a repeated anchor
+// yields twice is kept once. An anchor's edges never depend on how many
+// anchors were asked about.
+//
+// Output that is not dependency records fails the read. bd before v1.3
+// answers a multi-id call with the rows instead when its batched read fails or
+// an anchor does not resolve; read as records those rows carry no anchor, and
+// filing their edges under "" would report every anchor as edge-free.
 //
 // A backend that does not implement the read at all — the bd/Postgres backend
 // answers `operation "IssueRelations" not supported by the postgres backend`
@@ -3738,14 +3829,11 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	anchors := ids
 	if len(ids) == 1 {
-		deps, err := s.DepList(ids[0], "down")
-		if err != nil {
-			return nil, err
-		}
-		return map[string][]Dep{ids[0]: deps}, nil
+		anchors = []string{ids[0], ids[0]}
 	}
-	args := append([]string{"dep", "list"}, ids...)
+	args := append([]string{"dep", "list"}, anchors...)
 	args = append(args, "--json")
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
@@ -3772,16 +3860,21 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
 	}
 	result := make(map[string][]Dep, len(ids))
+	seen := make(map[Dep]bool, len(records))
 	for _, r := range records {
+		if r.IssueID == "" || r.DependsOnID == "" {
+			return nil, errors.New("batch dep list: bd printed a row that is not a dependency record (no issue_id or depends_on_id)")
+		}
 		depType := r.Type
 		if depType == "" {
 			depType = "blocks"
 		}
-		result[r.IssueID] = append(result[r.IssueID], Dep{
-			IssueID:     r.IssueID,
-			DependsOnID: r.DependsOnID,
-			Type:        depType,
-		})
+		dep := Dep{IssueID: r.IssueID, DependsOnID: r.DependsOnID, Type: depType}
+		if seen[dep] {
+			continue
+		}
+		seen[dep] = true
+		result[r.IssueID] = append(result[r.IssueID], dep)
 	}
 	return result, nil
 }
