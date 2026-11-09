@@ -349,14 +349,19 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 }
 
 // anySuspendedRigStoreLocked reports whether any of stores is the store of a
-// rig the city runtime last saw suspended. cs.mu must be held.
+// rig the city runtime last saw suspended. Identity is physical
+// (beads.SameStore): a handle over a suspended rig's store is that rig, and
+// reading it would restart the rig's retired proxy. A suspended rig whose
+// store did not open is a nil entry, which the unconfigured fallback
+// (beadEventStoresLocked) lists as it is: it matches a nil store, as it
+// always has. cs.mu must be held.
 func (cs *controllerState) anySuspendedRigStoreLocked(stores []beads.Store) bool {
 	for name, rigStore := range cs.beadStores {
 		if !cs.rigSuspended(name) {
 			continue
 		}
 		for _, store := range stores {
-			if store == rigStore {
+			if beads.SameStore(store, rigStore) || (store == nil && rigStore == nil) {
 				return true
 			}
 		}

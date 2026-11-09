@@ -328,7 +328,6 @@ cmd/gc/claim_class_route.go	claimRouteTopology	raw-result	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	cap-assert	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	mint	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	raw-result	1
-cmd/gc/claim_class_route.go	classRoutedHookClaimOps	read-marker	5
 cmd/gc/claim_class_route.go	hookClaimClassRoute	raw-field	2
 cmd/gc/claim_class_route.go	hookClaimClassRoute.emitExecutionStepStarted	mint	1
 cmd/gc/claim_class_route.go	newClaimClassRouteOver	raw-param	1
@@ -1510,8 +1509,6 @@ cmd/gc/session_name_lookup.go	sessionAgentMetricIdentityByName	raw-param	1
 cmd/gc/session_ownership.go	liveBeadRead	raw-param	1
 cmd/gc/session_ownership.go	liveClaimVeto	raw-param	1
 cmd/gc/session_ownership.go	liveRead	raw-field	1
-cmd/gc/session_ownership.go	liveReads	cache-peel	2
-cmd/gc/session_ownership.go	liveReads	cap-assert	1
 cmd/gc/session_ownership.go	liveReads	raw-param	1
 cmd/gc/session_ownership.go	liveReads	unwrap	2
 cmd/gc/session_ownership.go	sessionOwnsLiveClaim	raw-param	1

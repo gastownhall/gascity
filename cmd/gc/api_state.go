@@ -1161,13 +1161,14 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 }
 
 // withRelicStore returns stores plus relic, the binding the residence probe
-// proved holds the id, unless stores already holds it.
+// proved holds the id, unless stores already holds it. Identity is physical
+// (beads.SameStore): a class handle over the binding is the binding.
 //
 // residency:allow — appends the one owner the by-id residency plan proved to
 // the watcher's prefix-route apply set; it resolves nothing itself.
 func withRelicStore(stores []beads.Store, relic beads.Store) []beads.Store {
 	for _, s := range stores {
-		if sameBeadStore(s, relic) {
+		if beads.SameStore(s, relic) {
 			return stores
 		}
 	}
@@ -1176,9 +1177,10 @@ func withRelicStore(stores []beads.Store, relic beads.Store) []beads.Store {
 
 // relicStoreRef is the autoclose store-ref for a close whose row lives in
 // owner: the ID-only mode ("") relocated ids use when owner is the relic's
-// binding, else the prefix route's own ref.
+// binding, else the prefix route's own ref. Identity is physical
+// (beads.SameStore), so a handle over the binding takes the ID-only mode too.
 func relicStoreRef(owner, relic beads.Store, prefixRef string) string {
-	if relic != nil && sameBeadStore(owner, relic) {
+	if relic != nil && beads.SameStore(owner, relic) {
 		return ""
 	}
 	return prefixRef
@@ -1190,7 +1192,7 @@ func relicStoreRef(owner, relic beads.Store, prefixRef string) string {
 // fails. stores must be non-empty.
 func committedCloseOwner(stores []beads.Store, id string) beads.Store {
 	for _, store := range stores {
-		if b, err := beads.HandlesFor(store).Live.Get(id); err == nil && b.Status == "closed" {
+		if b, err := beads.LiveFor(store).Get(id); err == nil && b.Status == "closed" {
 			return store
 		}
 	}
@@ -1267,7 +1269,7 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 	var err error
 	for _, store := range stores {
 		var b beads.Bead
-		if b, err = beads.HandlesFor(store).Live.Get(id); !errors.Is(err, beads.ErrNotFound) {
+		if b, err = beads.LiveFor(store).Get(id); !errors.Is(err, beads.ErrNotFound) {
 			return store, b, err
 		}
 	}
@@ -1294,7 +1296,7 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 		// residence probe proved holds the id: a relic's row lives in one.
 		var b beads.Bead
 		err := beads.FederatedRead(func() (err error) {
-			b, err = beads.HandlesFor(store).Live.Get(id)
+			b, err = beads.LiveFor(store).Get(id)
 			return err
 		})
 		switch {

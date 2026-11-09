@@ -208,7 +208,8 @@ func (l WorkLegs) workStore() beads.Store { return l.work }
 // (byIDOwnerRowForTopology over l's topology): a relocated class binding
 // before the work ledger, so a stale pre-migration copy co-resident in the
 // ledger never answers, then the serving rigs and the work store. It reads
-// through that store's Live handle, past any cache. No store ref is
+// through the owner's live reader (beads.LiveFor), past any cache and any
+// class layer above it. No store ref is
 // consulted: a slot's gc.trigger_bead_store_ref names the demand leg, which on
 // a split city is the work ledger even for a step that lives only in the
 // binding (ga-bmfmt, the warm-bind probe's trap). found is false on a clean
@@ -226,14 +227,12 @@ func (l WorkLegs) readLive(id string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, nil
 	case err != nil:
 		return beads.Bead{}, false, err
-	case owner.Store == nil:
+	case beads.IsNilStore(owner.Resident):
+		// A zero handle: no store owns the id (a reserved namespace no
+		// binding serves). Read, it would panic.
 		return beads.Bead{}, false, nil
 	}
-	live := beads.HandlesFor(owner.Store).Live
-	if live == nil {
-		return beads.Bead{}, false, nil
-	}
-	b, err := live.Get(id)
+	b, err := beads.LiveFor(owner.Resident).Get(id)
 	switch {
 	case errors.Is(err, beads.ErrNotFound):
 		return beads.Bead{}, false, nil

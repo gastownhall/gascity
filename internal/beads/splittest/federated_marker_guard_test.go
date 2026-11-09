@@ -43,10 +43,6 @@ type reviewedMarker struct {
 // change, where a reviewer sees it.
 var reviewedMarkers = map[string]reviewedMarker{
 	// Legitimate federation legs.
-	"cmd/gc/claim_class_route.go classRoutedHookClaimOps": {
-		"federated", 5,
-		"the hook-claim class route's work-first escalation (#8137): a not-found (or an empty continuation list) on the work leg is what sends the call to the binding",
-	},
 	"cmd/gc/wisp_autoclose.go collectInputConvoyWorkflowRoots": {
 		"federated", 1,
 		"tracking convoys are probed on the work store and the graph store; a convoy minted single-store-era can sit on the graph side",

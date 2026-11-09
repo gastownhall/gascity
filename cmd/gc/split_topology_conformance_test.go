@@ -2925,9 +2925,14 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 // beads.Store: resolve the bead in the store the claim is rooted in, take it,
 // and report the STORE's own error when it cannot — which is what makes the
 // relocated-id case a real not-found rather than a fixture assertion about one.
+//
+// The resolving read is the first leg of the class route's escalation, whose
+// miss the binding covers, so it reads through a federated leg: production's
+// leg is a bd subprocess, which declares nothing (OD-T7-6).
 func splitEnvStoreClaim(store beads.Store) hookClaimFunc {
+	leg := beadstest.FederatedLeg(store)
 	return func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-		if _, err := store.Get(beadID); err != nil {
+		if _, err := leg.Get(beadID); err != nil {
 			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, err)
 		}
 		inProgress := "in_progress"
