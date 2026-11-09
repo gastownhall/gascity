@@ -1610,7 +1610,10 @@ binding, with the stamp and its edges: before its first delete, the clear
 records in the journal every edge that touches a row it removes, in the
 binding and in the rig, so an edge from a row the clear already removed is
 restored too. A recorded edge whose other end neither store holds any longer
-is reported as not restored. A row gone from both refuses, nothing changed: put
+is reported as not restored, and one whose other end the binding keeps is
+recorded on the row as dropped (`gc.migrated_cross_edges`), as the reverse
+records any edge it cannot carry. A row an interrupted re-copy wrote that
+differs from the binding's is written again. A row gone from both refuses, nothing changed: put
 it back into its rig by hand carrying `gc.infra_reversed_from=<stamp>` (the
 refusal prints the stamp; the snapshot taken before the reverse holds the
 row as it was), then run the reverse again. A re-copy never deletes a

@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1222,13 +1223,13 @@ func (r *reverseRun) recopyAfterClear(missing []string) error {
 	if err != nil {
 		return err
 	}
-	inBinding := make(map[string]bool, len(all))
+	inBinding := make(map[string]string, len(all))
 	for _, b := range all {
-		inBinding[b.ID] = true
+		inBinding[b.ID] = b.Status
 	}
 	var gone []string
 	for _, id := range missing {
-		if !inBinding[id] {
+		if _, held := inBinding[id]; !held {
 			gone = append(gone, id)
 		}
 	}
@@ -1294,13 +1295,14 @@ func (r *reverseRun) recopyAfterClear(missing []string) error {
 	return nil
 }
 
-// recopyRows creates each of rows dest does not hold, adds each edge it does
-// not hold, and proves them, among the rows it already holds under the stamp.
-// It deletes nothing. Each recorded edge (ClearEdges) joining a lost row to a
-// row dest then holds is restored too; one whose other end only the binding
-// holds crosses stores (the plan recorded it on the row), and one whose other
-// end neither holds is dropped and reported.
-func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.DepWithPayload, recorded []reverseEdge, lost, inBinding map[string]bool) error {
+// recopyRows writes each of rows dest does not hold as planned, adds each
+// edge it does not hold, and proves them, among the rows it already holds
+// under the stamp. It deletes only a row an earlier re-copy wrote that
+// differs from the plan, to write it again. Each recorded edge (ClearEdges)
+// joining a lost row to a row dest then holds is restored too; one whose
+// other end only the binding holds crosses stores, and the row records it
+// dropped; one whose other end neither holds is dropped and reported.
+func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.DepWithPayload, recorded []reverseEdge, lost map[string]bool, inBinding map[string]string) error {
 	open := func() (*reverseTarget, error) {
 		return reverseTargetOpener(r.request.CityPath, r.request.Cfg, dest)
 	}
@@ -1330,18 +1332,24 @@ func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.De
 		planned[beads.DepPair{IssueID: e.IssueID, DependsOnID: e.DependsOnID}] = true
 	}
 	var dropped []string
+	crossing := map[string][]rigCrossEdgeRecord{}
 	for _, e := range recorded {
 		pair := beads.DepPair{IssueID: e.From, DependsOnID: e.To}
-		other := e.To
+		on, other, dir := e.From, e.To, "out"
 		if !lost[e.From] {
-			other = e.From
+			on, other, dir = e.To, e.From, "in"
 		}
+		status, otherInBinding := inBinding[other]
 		switch {
 		case planned[pair]:
 		case inDest[e.From] && (inDest[e.To] || strings.HasPrefix(e.To, "external:")):
 			planned[pair] = true
 			edges = append(edges, beads.DepWithPayload{Dep: beads.Dep{IssueID: e.From, DependsOnID: e.To, Type: e.Type}, Payload: e.Payload})
-		case inBinding[other]:
+		case otherInBinding:
+			// A cross-store edge: the row records it dropped, as the plan
+			// does while the binding still holds the edge (the clear's
+			// first pass removes it before the rows).
+			crossing[on] = append(crossing[on], rigCrossEdgeRecord{Dir: dir, Type: e.Type, Other: other, OtherStatus: status, Payload: e.Payload, Action: rigEdgeDropped})
 		default:
 			dropped = append(dropped, fmt.Sprintf("%s -[%s]-> %s", e.From, e.Type, e.To))
 		}
@@ -1355,15 +1363,40 @@ func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.De
 		sort.Strings(dropped)
 		fmt.Fprintf(r.stdout, "%s: %d recorded edge(s) of a row copied back into %s not restored, their other end in neither store: %s\n", r.logPrefix, len(dropped), reverseDestNoun(dest), strings.Join(dropped, ", ")) //nolint:errcheck // best-effort stdout
 	}
-	held := map[string]bool{}
+	for i := range rows {
+		if add := crossing[rows[i].ID]; len(add) > 0 {
+			merged, _, err := mergeCrossEdgeRecords(rows[i].Metadata[beadmeta.MigratedCrossEdgesMetadataKey], add)
+			if err != nil {
+				return fmt.Errorf("%s: %w", rows[i].ID, err)
+			}
+			metadata := maps.Clone(rows[i].Metadata)
+			metadata[beadmeta.MigratedCrossEdgesMetadataKey] = merged
+			rows[i].Metadata = metadata
+		}
+	}
+	// A row an earlier re-copy wrote that differs from the plan is deleted
+	// and written again: the binding holds it (recopyAfterClear proved
+	// that), so the rig's copy is not the only one.
+	held := map[string]beads.Bead{}
 	for _, b := range stamped {
-		held[b.ID] = b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
+		if b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp {
+			held[b.ID] = b
+		}
 	}
 	var create []beads.Bead
+	var redo []string
 	for _, b := range rows {
-		if !held[b.ID] {
+		got, ok := held[b.ID]
+		switch {
+		case !ok:
+			create = append(create, b)
+		case reverseRowDifference(t.form, b, got) != "":
+			redo = append(redo, b.ID)
 			create = append(create, b)
 		}
+	}
+	if err := reverseDeleteRows(t, redo); err != nil {
+		return err
 	}
 	if len(create) > 0 {
 		if err := t.create(create); err != nil {

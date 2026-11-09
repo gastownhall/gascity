@@ -365,6 +365,142 @@ func TestReverseToRigsNeverGoesBackBelowR3AfterItsClearBegan(t *testing.T) {
 			t.Fatal("the edge from gp-step2 was not restored onto gp-step1")
 		}
 	})
+	t.Run("a row a re-copy wrote wrong is written again by the next run", func(t *testing.T) {
+		r := lostAfterRecordedClear(t)
+		prev := reverseTargetOpener
+		reverseTargetOpener = func(cityPath string, cfg *config.City, dest string) (*reverseTarget, error) {
+			target, err := openReverseTarget(cityPath, cfg, dest)
+			if err == nil && target.create != nil {
+				create := target.create
+				target.create = func(rows []beads.Bead) error {
+					wrong := append([]beads.Bead(nil), rows...)
+					for i := range wrong {
+						wrong[i].Title += " (garbled)"
+					}
+					return create(wrong)
+				}
+			}
+			return target, err
+		}
+		code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		reverseTargetOpener = prev
+		if code == 0 || !strings.Contains(stderr, "verifying") || !strings.Contains(stderr, "gp-step1 differs") {
+			t.Fatalf("a re-copy that garbled its row = %d: %s", code, stderr)
+		}
+		if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+			t.Fatalf("the honest rerun = %d: %s%s", code, stdout, stderr)
+		}
+		finished(t, r)
+	})
+	t.Run("a re-copied row records a cross-store edge the clear's first pass removed", func(t *testing.T) {
+		r := newReverseRigFixture(t)
+		binding, err := openInfraDestination(r.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gcg, err := binding.Create(beads.Bead{Title: "city graph row", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.Close(gcg.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.DepAdd(gcg.ID, "gp-step1", "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(binding)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse R4 clear recorded" {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill did not stop the reverse")
+		}
+		// The clear's first pass: the edge joining a row it removes to one
+		// the binding keeps goes first.
+		if binding, err = openInfraDestination(r.target); err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.DepRemove(gcg.ID, "gp-step1"); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(binding)
+		rig := r.rig("packs")
+		for _, from := range []string{"gp-step2", "gp-w2"} {
+			if err := rig.DepRemove(from, "gp-step1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := rig.Delete("gp-step1"); err != nil {
+			t.Fatal(err)
+		}
+		if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+			t.Fatalf("the resume = %d: %s%s", code, stdout, stderr)
+		}
+		got, err := r.rig("packs").Get("gp-step1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if raw := got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; !strings.Contains(raw, `"other":"`+gcg.ID+`"`) || !strings.Contains(raw, `"action":"dropped"`) {
+			t.Fatalf("the re-copied gp-step1 records %s, want %s -[tracks]-> gp-step1 recorded dropped", raw, gcg.ID)
+		}
+		finished(t, r)
+	})
+	t.Run("an edge only the binding recorded is restored", func(t *testing.T) {
+		// gp-step2 -> gp-step1 leaves the rig before the clear, so only the
+		// binding's record holds it; gp-step1 then leaves the binding (the
+		// clear's first deletes) and gp-step2 the rig.
+		r := newReverseRigFixture(t)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse phase "+reversePhaseName(reverseR3) {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		if code == 0 {
+			t.Fatal("the kill at R3 did not stop the reverse")
+		}
+		rig := r.rig("packs")
+		if err := rig.DepRemove("gp-step2", "gp-step1"); err != nil {
+			t.Fatal(err)
+		}
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse R4 clear recorded" {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ = r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill at the clear did not stop the reverse")
+		}
+		binding, err := openInfraDestination(r.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.Delete("gp-step1"); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(binding)
+		if err := rig.Delete("gp-step2"); err != nil {
+			t.Fatal(err)
+		}
+		if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
+			t.Fatalf("the resume = %d: %s%s", code, stdout, stderr)
+		}
+		if !hasEdge(t, r.rig("packs"), "gp-step2", "gp-step1") {
+			t.Fatal("gp-step2 -> gp-step1, recorded only from the binding, was not restored")
+		}
+		finished(t, r)
+	})
 	t.Run("a rig that lost a row refuses, deleting nothing", func(t *testing.T) {
 		r := halfCleared(t)
 		if err := r.rig("packs").Delete("gp-step2"); err != nil {
