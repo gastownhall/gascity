@@ -1064,11 +1064,17 @@ func TestStorageRecoverStrandedOnlyWorkShapedIsNotNothingToRecover(t *testing.T)
 
 // TestStorageRecoverStrandedDryRunListsWorkShapedRowsApart: the dry run shows
 // the work-shaped row in its own list with the repair, leaves it out of the
-// copy count and the dump, and exits non-zero; with --move it would move.
+// copy count, and exits non-zero; with --move it would move. The dump carries
+// it, with its source dep edges, beside the row the run would move: it is a
+// row awaiting the operator's choice, and the dump is what they choose from.
 func TestStorageRecoverStrandedDryRunListsWorkShapedRowsApart(t *testing.T) {
 	cityPath, cfg, source, target := convergedRecoveryCity(t)
 	tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
 	work := workShapedStrandedBead(t, source)
+	followed := mustCreateInfraBead(t, source, beads.Bead{Title: "the work it follows", Type: "task"})
+	if err := source.DepAdd(work.ID, followed.ID, "blocks"); err != nil {
+		t.Fatalf("seeding the work-shaped row's edge: %v", err)
+	}
 	bindingBefore := infraStoreFingerprint(t, openMigratedDestination(t, target))
 	manifestBefore := manifestIDs(t, target)
 	dumpPath := filepath.Join(t.TempDir(), "stranded.json")
@@ -1091,8 +1097,24 @@ func TestStorageRecoverStrandedDryRunListsWorkShapedRowsApart(t *testing.T) {
 	if err := json.Unmarshal(contents, &dumped); err != nil {
 		t.Fatalf("decoding the dump: %v", err)
 	}
-	if len(dumped) != 1 || dumped[0].Bead.ID != tracker.ID {
-		t.Errorf("the dump carries more than the row the run would move: %+v", dumped)
+	byID := map[string]strandedBeadDump{}
+	for _, entry := range dumped {
+		byID[entry.Bead.ID] = entry
+	}
+	if len(dumped) != 2 || len(byID) != 2 {
+		t.Errorf("the dump carries %d row(s), want exactly the movable %s and the work-shaped %s: %+v", len(dumped), tracker.ID, work.ID, dumped)
+	}
+	if _, ok := byID[tracker.ID]; !ok {
+		t.Errorf("the dump does not carry %s, the row the run would move: %+v", tracker.ID, dumped)
+	}
+	deferred, ok := byID[work.ID]
+	if !ok {
+		t.Fatalf("the dump does not carry the work-shaped row %s awaiting a choice: %+v", work.ID, dumped)
+	}
+	if !slices.ContainsFunc(deferred.Deps, func(d beads.Dep) bool {
+		return d.DependsOnID == followed.ID && d.Type == "blocks"
+	}) {
+		t.Errorf("the dump of %s does not carry its source edge to %s: %+v", work.ID, followed.ID, deferred.Deps)
 	}
 	if after := infraStoreFingerprint(t, openMigratedDestination(t, target)); !slices.Equal(bindingBefore, after) {
 		t.Errorf("the dry run changed the binding")

@@ -229,7 +229,9 @@ city; if it really is a workflow step an unfenced writer created, run this
 again with --move <id> (repeatable) to copy it into the binding. A run that
 leaves one behind exits 1: the city is still stranded. --move naming a
 stranded row that is not work-shaped (it moves anyway) or an id that is not
-stranded is refused, and nothing is written.
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
 
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
@@ -1104,11 +1106,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			}
 			continue
 		}
+		listedByID := false
 		switch match {
 		case infraManifestCarried:
 			removedSinceCutover++
 			continue
 		case infraManifestLegacyUnbounded, infraManifestPresumedReused:
+			listedByID = true
 			switch {
 			case opts.Move[b.ID] && opts.RecordCarried[b.ID]:
 				fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedMoveFlag, strandedRecordCarriedFlag) //nolint:errcheck // best-effort stderr
@@ -1142,12 +1146,20 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		// the workflow they named, could take no comment, and vanished from
 		// every work reader. So it moves only when the operator names it with
 		// --move; otherwise it stays in the work store and the run names the
-		// in-place repair. A row an earlier per-id answer already resolved
-		// toward the binding (a legacy --move, a repeated
-		// --replace-binding-row) is the operator's decision and is not asked
-		// again.
+		// in-place repair. A row an earlier --replace-binding-row already
+		// resolved toward the binding is the operator's decision and is not
+		// asked again.
+		//
+		// Only a row the manifest does not list is judged this way: the set
+		// the gate offers the in-place repair for (Declassifiable). A row it
+		// lists by id alone keeps the per-id handling above, whatever its
+		// metadata. Nothing proves whether it is the bead a copy carried under
+		// that id, the gate counts an unbounded one retained rather than
+		// stranded, and the clear's refusal relies on this run to move a
+		// closed one, so withholding it here would leave the clear and this
+		// command each naming the other with no exit.
 		replacedBefore := opts.ReplaceBindingRow[b.ID] && choicesBefore[strandedReplaceBindingRowFlag][b.ID]
-		if chosen[b.ID] == "" && !replacedBefore {
+		if !listedByID && !replacedBefore {
 			if keys, metadataOnly := coordclass.ClassMetadataOnly(b); metadataOnly {
 				if !opts.Move[b.ID] {
 					workShaped = append(workShaped, b)
@@ -1387,10 +1399,11 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 
 	if opts.DumpPath != "" {
-		// The rows awaiting a per-id choice are dumped too: the dump is how an
-		// operator inspects them before choosing.
+		// The rows awaiting a per-id choice are dumped too, the work-shaped
+		// rows this run leaves for an in-place repair or --move among them:
+		// the dump is how an operator inspects them before choosing.
 		dumped := append(append([]beads.Bead(nil), stranded...), idOnlyOpen...)
-		dumped = append(append(append(dumped, replace...), drop...), awaitingHeld...)
+		dumped = append(append(append(append(dumped, replace...), drop...), awaitingHeld...), workShaped...)
 		if err := writeStrandedDump(opts.DumpPath, target, depReader, dumped); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1

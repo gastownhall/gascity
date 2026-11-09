@@ -590,12 +590,6 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		// repair is a separate, additive verb and not the migration again.
 		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding does not serve as the bead the work store holds: %s. They are intact in the retained work store. %s%s Re-check with `gc storage status`, which exits zero once none is left.",
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedAdviceFor(report.Stranded, report.HeldDifferent, report.PresumedReused, report.Declassifiable), infraStrandedRetainedAdvice(report))
-		if report.servesDegraded() {
-			// The city serves, so the advice ends on that, not on "start
-			// again". The revert is still withheld: the binding has served
-			// since cutover and holds what the revert would abandon.
-			return situation + fmt.Sprintf(" Do NOT revert [storage.classes] to %q: the binding has served this city's infrastructure state since cutover, and the revert would abandon it. The rest of the city serves degraded meanwhile.", config.StorageWorkBinding)
-		}
 	case infraMigrationRetained:
 		cause := ""
 		if report.Fault != nil {
@@ -660,15 +654,28 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 	default:
 		return ""
 	}
+	// A city served degraded (a stranded one: servesDegraded) is still
+	// serving whichever way the decision goes, so its advice ends on that
+	// rather than on "start again". The decision itself is the evidence's,
+	// as for every other outcome: a genesis city a raw bd write stranded
+	// before anything wrote to the binding holds nothing a revert would lose.
+	meanwhile := ""
+	if report.servesDegraded() {
+		meanwhile = " The rest of the city serves degraded meanwhile."
+	}
 	if report.BindingProvenEmpty {
-		return situation + " " + fmt.Sprintf(infraRevertInstruction, config.StorageWorkBinding)
+		return situation + " " + fmt.Sprintf(infraRevertInstruction, config.StorageWorkBinding) + meanwhile
 	}
 	because := ""
 	if report.BindingProbe != nil {
 		because = fmt.Sprintf(" (%v)", report.BindingProbe)
 	}
-	return situation + fmt.Sprintf(" Do NOT revert [storage.classes] to %q: the binding is not provably empty%s, so the revert would abandon every infrastructure bead that exists only there. Resolve the reason above and start again.",
-		config.StorageWorkBinding, because)
+	next := " Resolve the reason above and start again."
+	if meanwhile != "" {
+		next = meanwhile
+	}
+	return situation + fmt.Sprintf(" Do NOT revert [storage.classes] to %q: the binding is not provably empty%s, so the revert would abandon every infrastructure bead that exists only there.%s",
+		config.StorageWorkBinding, because, next)
 }
 
 // infraMigrationClassList names the classes this migration moves, in the order

@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a task or bug) is listed apart with its in-place repair, `gc bd update <id>
   --unset-metadata gc.root_bead_id`, and left in the work store; the command
   exits 1 while any is left. Name one with `--move <id>` to copy it into the
-  binding as before.
+  binding as before. A row an older build's copy manifest lists by id alone
+  keeps its earlier handling whatever its metadata: a closed one is moved.
 - **`gc bd comment`, `comments`, `comments add` and the other by-id verbs
   that fell through to bd now route through the binding check.** On a bead
   the infrastructure binding holds they are refused with a routing message

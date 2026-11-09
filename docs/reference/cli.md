@@ -5462,7 +5462,9 @@ city; if it really is a workflow step an unfenced writer created, run this
 again with --move &lt;id&gt; (repeatable) to copy it into the binding. A run that
 leaves one behind exits 1: the city is still stranded. --move naming a
 stranded row that is not work-shaped (it moves anyway) or an id that is not
-stranded is refused, and nothing is written.
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
 
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
