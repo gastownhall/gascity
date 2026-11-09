@@ -277,7 +277,7 @@ type preparedStart struct {
 	// consumed the prompt (gastownhall/gascity#5236). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
-	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
+	// resumeStartupPromptPlan and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
 	// no priming marker. promptHash is the sha256 of the rendered startup template
 	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
 	// appended to the delivered payload, so the stored hash still matches a later
@@ -1436,7 +1436,7 @@ func buildPreparedStartWithTranscript(
 	// S19 priming confirmation (write-only in Stage 2): a marker is stamped only
 	// when the pure delivery decision holds AND this incarnation is a fresh
 	// launch — the exact complement of the resume override below, which swaps in
-	// restartPromptNudge and delivers nothing. Reading the env marker instead
+	// resumeStartupPromptPlan and delivers nothing. Reading the env marker instead
 	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
 	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
 	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
@@ -1447,7 +1447,7 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
+		resumeStartupPromptPlan(tp.startupPromptSource()).applyTo(&agentCfg)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
