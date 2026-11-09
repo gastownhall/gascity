@@ -199,7 +199,14 @@ func nativeReadListPushableTypes(ctx context.Context, storage beadslib.Storage) 
 // type at all: a type the server classifies as infra would lose durable rows,
 // and only the server's own setting says which types those are.
 func (s *NativeDoltStore) loadListPushableTypes(ctx context.Context) {
-	pushable, err := nativeReadListPushableTypes(ctx, s.storage)
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		s.listLogger().Warn("native bead store: cannot read the scope's types.infra setting; listing without type pushdown for this store",
+			"prefix", s.idPrefix, "err", err)
+		return
+	}
+	defer release()
+	pushable, err := nativeReadListPushableTypes(ctx, storage)
 	if err != nil {
 		s.listLogger().Warn("native bead store: cannot read the scope's types.infra setting; listing without type pushdown for this store",
 			"prefix", s.idPrefix, "err", err)

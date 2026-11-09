@@ -119,8 +119,8 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 // nativeJournalActivationRecheck, so it stops answering "caught up" over
 // unrecorded writes within that interval — or, when a native open elsewhere in
 // the process holds the environment at the re-check, once that open ends: the
-// re-check keeps the last answer rather than wait for it under the store's
-// read lock. A scope that turns the journal on after open does not make the
+// re-check keeps the last answer rather than wait for it while holding a
+// lease on the handle. A scope that turns the journal on after open does not make the
 // handle tailable: its own writes are not journaled until it reopens.
 //
 // The library exposes the activation switch but no getter, so the open-time
@@ -195,10 +195,10 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage, beadsDir s
 // interval. A handle that closes, or is recorded anew, while its scope
 // resolves reports false.
 //
-// Its callers hold the store's read lock, so the re-resolution never waits
+// Its callers hold a lease on the handle, so the re-resolution never waits
 // for nativeDoltOpenEnvMu: an open elsewhere in the process holds that for its
-// whole window, and the store's close, and every reader queued behind that
-// close, would wait as long. While an open holds it, active keeps the last
+// whole window, and the lease, and with it the close of a handle a reconnect
+// retired, would wait as long. While an open holds it, active keeps the last
 // answer and leaves checkedAt alone, so the next question resolves again.
 func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	if !nativeStorageComparable(storage) {

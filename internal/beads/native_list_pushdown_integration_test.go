@@ -105,7 +105,7 @@ func assertPushdownAnswersTheUnpushedQuery(t *testing.T, store *NativeDoltStore)
 
 func TestNativeDoltStoreListPushdownAgainstRealStorage(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "pushdown-test")
-	if err := store.storage.SetConfig(context.Background(), "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
+	if err := store.lease.storage.SetConfig(context.Background(), "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
 		t.Fatalf("register gc types: %v", err)
 	}
 	store.loadListPushableTypes(context.Background())
@@ -140,11 +140,11 @@ func TestNativeDoltStoreListPushdownAgainstRealStorage(t *testing.T) {
 func TestNativeDoltStoreListPushdownFallsBackOnAScopeWithoutGCTypes(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "pushdown-test")
 	ctx := context.Background()
-	if err := store.storage.SetConfig(ctx, "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
+	if err := store.lease.storage.SetConfig(ctx, "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
 		t.Fatalf("register gc types: %v", err)
 	}
 	seedPushdownLedger(t, store)
-	if err := store.storage.SetConfig(ctx, "types.custom", "message"); err != nil {
+	if err := store.lease.storage.SetConfig(ctx, "types.custom", "message"); err != nil {
 		t.Fatalf("withdraw gc types: %v", err)
 	}
 	store.loadListPushableTypes(ctx)
@@ -169,7 +169,7 @@ func TestNativeDoltStoreListPushdownFallsBackOnAScopeWithoutGCTypes(t *testing.T
 func TestNativeDoltStoreListPushdownHonorsTheScopeInfraTypes(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "pushdown-test")
 	ctx := context.Background()
-	if err := store.storage.SetConfig(ctx, "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
+	if err := store.lease.storage.SetConfig(ctx, "types.custom", strings.Join(RequiredCustomTypes, ",")); err != nil {
 		t.Fatalf("register gc types: %v", err)
 	}
 	var pushable []string
@@ -205,7 +205,7 @@ func TestNativeDoltStoreListPushdownHonorsTheScopeInfraTypes(t *testing.T) {
 		}
 	}
 	infra := pushable[0]
-	if err := store.storage.SetConfig(ctx, nativeTypesInfraConfigKey, "agent,role,message,"+infra); err != nil {
+	if err := store.lease.storage.SetConfig(ctx, nativeTypesInfraConfigKey, "agent,role,message,"+infra); err != nil {
 		t.Fatalf("set types.infra: %v", err)
 	}
 	store.loadListPushableTypes(ctx)

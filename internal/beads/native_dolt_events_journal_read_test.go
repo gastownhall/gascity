@@ -130,7 +130,7 @@ func TestNativeDoltStoreReadEventsJournalPageRefusalOutlivesTheCallerCancel(t *t
 		store, native, _ := newSplitFixture(t)
 		store.journal = proxiedJournalActivation{resolved: true, active: true}
 		native.proxiedReadVerdicts = true
-		native.storage = &nativeDoltStorageSpy{}
+		native.lease = newStorageLease(&nativeDoltStorageSpy{})
 		_, err := store.ReadEventsJournalPage(canceled, 0, 0)
 		if !errors.Is(err, ErrEventsJournalUnsupported) {
 			t.Fatalf("error = %v, want ErrEventsJournalUnsupported", err)
@@ -441,9 +441,9 @@ func TestProxiedStoreEventsJournalReadsThroughTheNativeLeaf(t *testing.T) {
 	store.journal = proxiedJournalActivation{resolved: true, active: true}
 	want := journalops.Page{Rows: []journalops.Row{{Seq: 1, IssueID: "prx-1"}}, Head: 1}
 	// The leaf's own activation is not consulted: bd does the writes.
-	native.storage = &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+	native.lease = newStorageLease(&nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
 		return want, nil
-	}}
+	}})
 
 	page, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
 	if err != nil {
@@ -690,7 +690,7 @@ func proxiedJournalFixture(t *testing.T, spy *nativeJournalReaderSpy) (*ProxiedS
 	store, native, _ := newSplitFixture(t)
 	store.journal = proxiedJournalActivation{resolved: true, active: true}
 	native.proxiedReadVerdicts = true
-	native.storage = spy
+	native.lease = newStorageLease(spy)
 	return store, native
 }
 
@@ -1394,9 +1394,9 @@ func TestActiveEventsJournalRefusesWhatCannotBeTailed(t *testing.T) {
 // scope's, so discovery must not unwrap past the proxied answer.
 func TestActiveEventsJournalTakesTheProxiedAnswerOverItsLeaf(t *testing.T) {
 	store, native, _ := newSplitFixture(t)
-	native.storage = activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+	native.lease = newStorageLease(activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
 		return journalops.Page{}, nil
-	}})
+	}}))
 	cache := NewCachingStoreForTest(store, nil)
 
 	store.journal = proxiedJournalActivation{resolved: true, active: false}

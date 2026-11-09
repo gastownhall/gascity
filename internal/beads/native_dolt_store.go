@@ -360,8 +360,16 @@ func OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx context.Con
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
 type NativeDoltStore struct {
-	mu      sync.RWMutex
-	storage beadslib.Storage
+	// mu guards pointer and flag state only: lease, generation, closed, reopen,
+	// reconnectGate and the read-only latch. It is never held across I/O, a
+	// sleep, a context wait or any call that can take another lock, so no
+	// operation, however slow its storage handle, can park a writer of mu in
+	// front of a new reader. An operation pins the handle it uses with a lease
+	// (acquireStorage) instead of holding mu for its length.
+	mu sync.RWMutex
+	// lease is the serving storage handle together with the count of holders
+	// keeping it open. It is nil once CloseStore has detached it.
+	lease *storageLease
 	// generation increments on every successful reconnect. A read that fails
 	// with a transient connection error records the generation it observed and
 	// asks reconnect to swap the dead handle only if no other reader already did.
@@ -600,7 +608,54 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
+	return &NativeDoltStore{lease: newStorageLease(storage), actor: actor, localStrings: newLocalSidecar("")}
+}
+
+// storageLease is a storage handle plus the count of holders keeping it open.
+// The store owns one reference from construction (or install) until the handle
+// is retired by a reconnect or detached by CloseStore, and every in-flight
+// operation owns one more from acquireStorage until its release func runs. The
+// handle is closed, once, when the last reference is released, so a reconnect
+// or CloseStore can retire a handle without waiting for the operations still
+// using it and without closing it underneath them.
+type storageLease struct {
+	storage beadslib.Storage
+	refs    atomic.Int32
+}
+
+// newStorageLease wraps storage in a lease holding the store's own reference. A
+// nil storage yields a nil lease, the shape of a store with nothing to serve.
+func newStorageLease(storage beadslib.Storage) *storageLease {
+	if storage == nil {
+		return nil
+	}
+	l := &storageLease{storage: storage}
+	l.refs.Store(1)
+	return l
+}
+
+// retain takes one more reference. It is only called while the caller holds a
+// reference of its own or while the lease is still reachable from the store
+// under the store's mutex, so the count cannot already be zero.
+func (l *storageLease) retain() { l.refs.Add(1) }
+
+// release drops one reference and, at zero, closes the handle on a detached
+// goroutine (closeStorageQuietly), because a handle whose server was
+// hard-killed can wedge on Close.
+func (l *storageLease) release() {
+	if l.refs.Add(-1) == 0 {
+		closeStorageQuietly(l.storage)
+	}
+}
+
+// releaseAndClose drops one reference like release, but when it is the last one
+// it closes the handle synchronously and returns the close error. CloseStore
+// uses it so a store with nothing in flight reports its close error.
+func (l *storageLease) releaseAndClose() error {
+	if l.refs.Add(-1) == 0 {
+		return l.storage.Close()
+	}
+	return nil
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -762,16 +817,15 @@ func (s *NativeDoltStore) listIncludesCompleteDependencies() bool {
 	return true
 }
 
+// acquireStorage leases the serving storage handle for one operation. The
+// returned release func drops the lease and is safe to call more than once; the
+// handle stays open until every lease on it is released, even if a reconnect
+// replaces it or CloseStore detaches it meanwhile. s.mu is held only for the
+// pointer read and the reference count, never for the operation, so an
+// operation that parks on a slow handle blocks no other caller.
 func (s *NativeDoltStore) acquireStorage() (beadslib.Storage, func(), error) {
-	if s == nil {
-		return nil, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
-	}
-	s.mu.RLock()
-	if s.closed || s.storage == nil {
-		s.mu.RUnlock()
-		return nil, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
-	}
-	return s.storage, s.mu.RUnlock, nil
+	storage, _, release, err := s.acquireStorageGen()
+	return storage, release, err
 }
 
 // acquireStorageGen is acquireStorage plus the current reconnect generation, so
@@ -782,11 +836,18 @@ func (s *NativeDoltStore) acquireStorageGen() (beadslib.Storage, uint64, func(),
 		return nil, 0, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 	s.mu.RLock()
-	if s.closed || s.storage == nil {
+	lease := s.lease
+	if s.closed || lease == nil {
 		s.mu.RUnlock()
 		return nil, 0, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
-	return s.storage, s.generation, s.mu.RUnlock, nil
+	// The reference is taken inside the read section: a reconnect or CloseStore
+	// retires a lease only after swapping it out under the write lock, so a
+	// lease read here still carries the store's own reference.
+	lease.retain()
+	gen := s.generation
+	s.mu.RUnlock()
+	return lease.storage, gen, sync.OnceFunc(lease.release), nil
 }
 
 const (
@@ -1120,7 +1181,6 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 	s.mu.RLock()
 	curGen := s.generation
 	closed := s.closed
-	old := s.storage
 	reopen := s.reopen
 	s.mu.RUnlock()
 
@@ -1151,6 +1211,9 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 		return fmt.Errorf("native Dolt reopen returned nil storage")
 	}
 
+	// The install is a short pointer swap under the write lock: no operation
+	// holds mu across its I/O, so this never waits for a parked writer, and a
+	// writer still leasing the retired handle keeps it open until it releases.
 	s.mu.Lock()
 	// Void the install if the store was closed while we were reopening (terminal
 	// latch — never resurrect a closed store) or another reader reconnected first
@@ -1165,22 +1228,25 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 		closeStorageQuietly(fresh)
 		return nil
 	}
-	s.storage = fresh
+	old := s.lease
+	s.lease = newStorageLease(fresh)
 	s.generation++
 	// Advanced under the lock, with the install, so no reader can acquire the
 	// fresh storage and still see the marks this reopen covered as owed.
 	s.notePoolServiced(coversMarks)
 	s.mu.Unlock()
 
-	closeStorageQuietly(old)
+	if old != nil {
+		old.release() // the store's own reference; in-flight leases keep it open
+	}
 	return nil
 }
 
 // closeStorageQuietly closes a (possibly dead) storage handle without blocking
 // the caller: a handle whose server was hard-killed can wedge on Close, so it is
 // closed on a detached goroutine and any error is ignored. The handle is
-// unreferenced by the time this is called (the swap took the write lock, so no
-// reader still holds it), making the detached close safe.
+// unreferenced by the time this is called (the last lease release, or a fresh
+// handle that was never installed), making the detached close safe.
 func closeStorageQuietly(storage beadslib.Storage) {
 	if storage == nil {
 		return
@@ -1192,41 +1258,40 @@ func closeStorageQuietly(storage beadslib.Storage) {
 // It is a one-way terminal latch that must win any race with an in-flight
 // reconnect: after it returns no reconnect may install a fresh handle (which
 // would resurrect a closed store and leak a live Dolt connection).
+//
+// CloseStore does not wait for operations in flight. It detaches the handle and
+// drops the store's own reference: when no operation holds a lease it closes the
+// handle synchronously and returns the close error, and otherwise it returns nil
+// and the last in-flight operation's release closes the handle on a detached
+// goroutine. A caller therefore cannot assume every operation has finished when
+// CloseStore returns, only that none can start.
 func (s *NativeDoltStore) CloseStore() error {
 	if s == nil {
 		return nil
 	}
-	// Phase 1 — latch closed immediately under mu before waiting on the reconnect
-	// gate, so a reconnect currently blocked in its reopen observes the close on
-	// its post-reopen re-check, while new operations fail with ErrStoreClosed.
+	// One short critical section latches the store closed (new operations fail
+	// with ErrStoreClosed, and a reconnect blocked in its reopen observes the
+	// close on its post-reopen re-check and discards its fresh handle) and
+	// detaches the handle and the reopen hook. The generation advance voids any
+	// install that observed an earlier generation. It does not wait on the
+	// reconnect gate: the latch plus the install-time closed check already void a
+	// racing install, and the reference count prevents a double close.
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
-	s.mu.Unlock()
-
-	// Phase 2 — serialize the teardown with any in-flight reconnect,
-	// then advance generation + drop the storage handle + drop the reopen hook
-	// atomically under mu. Combined with the phase-1 latch, no fresh handle can be
-	// installed after this point.
-	gate, err := s.acquireReconnectGate(context.Background())
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	storage := s.storage
-	s.storage = nil
+	lease := s.lease
+	s.lease = nil
 	s.reopen = nil
 	s.generation++
 	s.mu.Unlock()
-	s.releaseReconnectGate(gate)
 
-	if storage == nil {
+	if lease == nil {
 		return nil
 	}
-	return storage.Close()
+	return lease.releaseAndClose()
 }
 
 // ApplyGraphPlan creates a bead graph atomically through the native beads
@@ -2116,22 +2181,15 @@ func nativeReleaseRefused(err error) bool {
 // refuses the update by name (*ErrUnsupported), reports ErrWispNotClaimable.
 //
 // THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
-// ALREADY HOLDS, NEVER THROUGH s.Get. Claim still holds s.mu.RLock here
-// (acquireStorage above, released only on return via the deferred release()).
-// s.Get funnels through withReadRetry, which re-takes s.mu via
-// acquireStorageGen and, on a transient read error, reconnects via
-// s.mu.Lock() — both of which are a second, nested lock request from the SAME
-// goroutine that already holds the outer RLock. Go's sync.RWMutex is not
-// reentrant and gives a blocked Lock() writer priority over new readers, so
-// either shape self-deadlocks the goroutine permanently: a pending writer (a
-// reconnect swap or CloseStore racing in from elsewhere) blocks the nested
-// RLock forever behind itself, and a transient failure on the disambiguating
-// read alone reaches reconnect's s.mu.Lock() while this same goroutine's outer
-// RLock is still held, which can never be granted. Reading directly off the
-// storage and ctx Claim already has avoids taking s.mu a second time at all,
-// so neither shape can occur; a transient error here keeps the claimer's
-// ErrNotFound (see the paragraph above) rather than opening a retry/reconnect
-// path.
+// ALREADY HOLDS, NOT THROUGH s.Get. Claim holds a lease on one handle
+// (acquireStorage above, released only on return via the deferred release()),
+// and the claim and the disambiguating read are one chain that must run on that
+// same handle: s.Get would lease whatever handle is serving at that moment,
+// which after a reconnect is a different one, and its transient-error path would
+// reconnect and retry on its own. Reading directly off the handle and ctx Claim
+// already has keeps the chain on one handle with no second acquisition; a
+// transient error here keeps the claimer's ErrNotFound (see the paragraph
+// above) rather than opening a retry/reconnect path.
 func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, false, err
@@ -2183,10 +2241,9 @@ func nativeClaimedBead(id string, issue *beadslib.Issue) (Bead, bool, error) {
 // wisp-plane marker: Ephemeral or NoHistory, the flags the beads library infers
 // a stored row's plane from. It deliberately does NOT go through
 // s.Get/s.withReadRetry: see the "THE DISAMBIGUATING READ" paragraph on
-// Claim's doc comment above for why a second, nested acquisition of s.mu from
-// the same goroutine self-deadlocks. Any failure here (including one that
-// would ordinarily reconnect and retry) reports false, so Claim keeps the
-// claimer's ErrNotFound rather than guessing.
+// Claim's doc comment above for why the chain stays on the leased handle. Any
+// failure here (including one that would ordinarily reconnect and retry)
+// reports false, so Claim keeps the claimer's ErrNotFound rather than guessing.
 func nativeClaimTargetIsWisp(ctx context.Context, storage beadslib.Storage, id string) bool {
 	reader, err := storage.IssueReader()
 	if err != nil {
@@ -2472,14 +2529,12 @@ func (s *NativeDoltStore) closeAllOneAtATime(ids []string, metadata map[string]s
 // a reason, and it is the reason this call was told to replace.
 //
 // THE FALLBACK RE-READS ON THE HELD HANDLE, and must, which is why it is spelled
-// out here instead of delegating to Close. acquireStorage hands back
-// s.mu.RUnlock as its release, so this whole body runs under a READ lock, and
-// Close acquires that same lock again. Go's RWMutex forbids recursive read
-// locking: a writer arriving between the two — the reconnect handle swap, or
-// CloseStore — parks in front of the inner RLock and all three deadlock. The
-// path is unreachable while both pinned legs hydrate, but it exists precisely
-// for the backend that does not, and hanging is a worse answer than the one it
-// was written to give. nativeBatchTx.Close reads on its held handle for the
+// out here instead of delegating to Close. acquireStorage leases one handle for
+// this whole body, and the stamp, the fallback read and the close are a chain
+// that must run on that same handle even if a reconnect installs a new one
+// meanwhile; Close would lease whatever handle is serving then. The path is
+// unreachable while both pinned legs hydrate, but it exists precisely for the
+// backend that does not. nativeBatchTx.Close reads on its held handle for the
 // same reason.
 func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) error {
 	patch, err := nativeIssuePatchFromUpdateOpts(UpdateOpts{Metadata: metadata})
@@ -2690,12 +2745,11 @@ const (
 // Every other error is returned on the first try. Retrying a genuine fault only
 // multiplies write load and hides the cause behind a slower failure.
 //
-// Callers hold the storage read lock across every attempt, so the backoff sleeps
-// inside this loop delay anything waiting to take s.mu for writing (store close
-// and the reconnect handle swap) by at most the total backoff. Holding it is
-// deliberate: releasing between attempts would let the handle be swapped
-// mid-retry, so a retry could run against a different storage than the one whose
-// transaction it is repeating.
+// Callers hold one storage lease across every attempt, so a reconnect that
+// installs a fresh handle mid-retry cannot move the retry onto a different
+// storage than the one whose transaction it is repeating, and the retired
+// handle stays open until the last attempt releases it. The lease holds no lock:
+// the backoff sleeps inside this loop delay no reconnect, read or CloseStore.
 func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
 }

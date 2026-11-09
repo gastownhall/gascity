@@ -261,7 +261,7 @@ func TestProxiedStoreGetFallsBackToBdLeafForWispIDs(t *testing.T) {
 	t.Run("a hit never reaches the bd leaf", func(t *testing.T) {
 		// Seed the ISSUES table the native leaf can see, through a write leaf
 		// pointed at the same storage.
-		seeded, err := newNativeDoltStoreForTest(native.storage.(*nativeDoltMemStorage)).Create(Bead{Title: "in the issues table", Type: "task"})
+		seeded, err := newNativeDoltStoreForTest(native.lease.storage.(*nativeDoltMemStorage)).Create(Bead{Title: "in the issues table", Type: "task"})
 		if err != nil {
 			t.Fatalf("seeding the native ledger: %v", err)
 		}

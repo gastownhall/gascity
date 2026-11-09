@@ -155,7 +155,7 @@ func TestNativeDoltStoreWritesJournalOnlyWhenWorkspaceEnablesIt(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 
-			ids := nativeJournalIssueIDs(ctx, t, store.storage)
+			ids := nativeJournalIssueIDs(ctx, t, store.lease.storage)
 			if journaled := slices.Contains(ids, bead.ID); journaled != tc.want {
 				t.Fatalf("journal recorded %s = %v, want %v; journal issue IDs: %v", bead.ID, journaled, tc.want, ids)
 			}
