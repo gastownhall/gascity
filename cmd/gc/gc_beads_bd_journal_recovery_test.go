@@ -840,7 +840,7 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 				errOut, _ := stderr.snapshot()
 				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s\nstderr so far: %d lines \"command reaped\", %d lines \"watchdog signaled\"; last lines:\n%s",
 					cmd.Process.Pid, idle.Round(time.Millisecond), len(gaps), processGroupMembers(t, cmd.Process.Pid),
-					strings.Count(errOut, "command reaped\n"), strings.Count(errOut, "watchdog signaled\n"), lastLines(errOut, 4))
+					strings.Count(errOut, "command reaped\n"), strings.Count(errOut, "watchdog signaled\n"), lastLines(errOut, 40))
 			}
 		}
 	}
@@ -935,18 +935,21 @@ const instantCommandsSlowCall = instantCommandsWatchdogTimeout / 3
 const instantCommandsBudget = 60 * time.Second
 
 // markRunWithTimeoutSteps makes run_with_timeout report on stderr when it
-// has reaped the command and when it has signaled the watchdog, so a stall
-// snapshot shows which wait a stalled call is blocked in.
+// has reaped the command and when it has signaled the watchdog, and traces
+// the watchdog (set -x) to the same stderr, so a stall snapshot shows where
+// the watchdog was when the caller signaled it.
 func markRunWithTimeoutSteps(t *testing.T, fn string) string {
 	t.Helper()
-	for _, step := range []struct{ after, mark string }{
-		{`wait "$cmd_pid" || status=$?`, "command reaped"},
-		{`kill "$watchdog_pid" 2>/dev/null || true`, "watchdog signaled"},
+	for _, step := range []struct{ old, new string }{
+		{`wait "$cmd_pid" || status=$?`, `wait "$cmd_pid" || status=$?` + "\n    printf 'command reaped\\n' >&2"},
+		{`kill "$watchdog_pid" 2>/dev/null || true`, `kill "$watchdog_pid" 2>/dev/null || true` + "\n    printf 'watchdog signaled\\n' >&2"},
+		{"    (\n        stopped=", "    (\n        PS4='+watchdog '\n        set -x\n        stopped="},
+		{") </dev/null >/dev/null 2>&1 &", ") </dev/null >/dev/null &"},
 	} {
-		if strings.Count(fn, step.after) != 1 {
-			t.Fatalf("run_with_timeout no longer has exactly one %q line", step.after)
+		if strings.Count(fn, step.old) != 1 {
+			t.Fatalf("run_with_timeout no longer has exactly one %q", step.old)
 		}
-		fn = strings.Replace(fn, step.after, step.after+"\n    printf '"+step.mark+"\\n' >&2", 1)
+		fn = strings.Replace(fn, step.old, step.new, 1)
 	}
 	return fn
 }
