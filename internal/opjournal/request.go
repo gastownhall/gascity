@@ -129,6 +129,11 @@ func validateRequestShape(op Op, spec Spec) error {
 	if err := validateScope(op.Scope, spec); err != nil {
 		return err
 	}
+	if spec.Kind == KindRespond {
+		if err := validateRespondShape(op); err != nil {
+			return err
+		}
+	}
 	if op.After != "" {
 		if !spec.AllowsAfter {
 			return invalidf("%s ops take no after", spec.Kind)
@@ -166,6 +171,20 @@ func validateProducer(p Producer) error {
 		return invalidf("owner epoch %d is negative", p.OwnerEpoch)
 	}
 	return nil
+}
+
+// ValidatePayload refuses a payload Propose would refuse for an op of kind,
+// whatever the op's conversation: over MaxInlinePayload
+// (ErrPayloadTooLarge), not valid UTF-8, empty for a kind that requires a
+// payload, or set for a kind that takes none (ErrInvalidRequest). An unknown
+// kind is ErrUnknownKind. Producers check a payload with it before they know
+// the conversation.
+func ValidatePayload(kind Kind, payload string) error {
+	spec, err := Lookup(kind)
+	if err != nil {
+		return err
+	}
+	return validatePayload(payload, spec)
 }
 
 func validatePayload(payload string, spec Spec) error {

@@ -79,7 +79,33 @@ type StorageBindingOutcomePayload struct {
 // variant.
 func (StorageBindingOutcomePayload) IsEventPayload() {}
 
+// StorageRigPayload is the shape of the storage.rig_import and
+// storage.rig_residue events: one rig's import outcome or residue verdict.
+type StorageRigPayload struct {
+	// Rig is the rig's name.
+	Rig string `json:"rig"`
+	// Binding is the city binding the rig's rows move into.
+	Binding string `json:"binding"`
+	// Outcome is what was concluded: for an import, imported, clean,
+	// "nothing to import", skipped, refused or failed; for residue,
+	// awaiting-import, retained or stranded.
+	Outcome string `json:"outcome"`
+	// Beads is the number of rows the import copied, or the residue counted.
+	Beads int `json:"beads"`
+	// Gates is the number of cross-store gates the import minted.
+	Gates int `json:"gates,omitempty"`
+	// Cleared is the number of rig copies the import removed.
+	Cleared int `json:"cleared,omitempty"`
+	// Detail is the operator-facing sentence: the refusal, failure or remedy.
+	Detail string `json:"detail,omitempty"`
+}
+
+// IsEventPayload marks StorageRigPayload as an events.Payload variant.
+func (StorageRigPayload) IsEventPayload() {}
+
 func init() {
+	events.RegisterPayload(events.StorageRigImport, StorageRigPayload{})
+	events.RegisterPayload(events.StorageRigResidue, StorageRigPayload{})
 	for _, eventType := range []string{
 		events.StorageBindingConverged,
 		events.StorageBindingGenesis,

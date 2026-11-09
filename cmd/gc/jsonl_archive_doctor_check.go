@@ -140,17 +140,59 @@ func (c *jsonlArchiveDoctorCheck) readState(path string) (jsonlArchiveState, boo
 }
 
 func (c *jsonlArchiveDoctorCheck) archiveHasOrigin(archiveRepo string) (bool, error) {
-	out, err := c.git(archiveRepo, "remote", "-v")
+	remote, err := c.archiveOriginURL(archiveRepo)
+	return remote != "", err
+}
+
+func (c *jsonlArchiveDoctorCheck) archiveOriginURL(archiveRepo string) (string, error) {
+	out, err := c.git(archiveRepo, "remote", "get-url", "origin")
 	if err != nil {
-		return false, err
+		// A missing origin is normal local-only mode. Distinguish it from a
+		// malformed repository by confirming the remote name is absent.
+		remotes, listErr := c.git(archiveRepo, "remote")
+		if listErr != nil {
+			return "", err
+		}
+		for _, name := range strings.Fields(string(remotes)) {
+			if name == "origin" {
+				return "", err
+			}
+		}
+		return "", nil
 	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// archivePushURLs returns every push URL configured for origin. Locality is
+// judged from these rather than the fetch URL because the export pushes.
+func (c *jsonlArchiveDoctorCheck) archivePushURLs(archiveRepo string) ([]string, error) {
+	out, err := c.git(archiveRepo, "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		return nil, err
+	}
+	var urls []string
 	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[0] == "origin" {
-			return true, nil
+		if line = strings.TrimSpace(line); line != "" {
+			urls = append(urls, line)
 		}
 	}
-	return false, nil
+	return urls, nil
+}
+
+func archiveRemoteIsOffBox(remote string) bool {
+	remote = strings.TrimSpace(remote)
+	if remote == "" || strings.HasPrefix(strings.ToLower(remote), "file://") || filepath.IsAbs(remote) {
+		return false
+	}
+	if strings.HasPrefix(remote, "./") || strings.HasPrefix(remote, "../") || strings.HasPrefix(remote, "~/") {
+		return false
+	}
+	// Drive-letter paths are local even when this check runs on a non-Windows
+	// host while inspecting a shared archive configuration.
+	if len(remote) >= 3 && ((remote[0] >= 'A' && remote[0] <= 'Z') || (remote[0] >= 'a' && remote[0] <= 'z')) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\') {
+		return false
+	}
+	return strings.Contains(remote, "://") || strings.Contains(remote, ":")
 }
 
 func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
@@ -195,7 +237,7 @@ func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		return r
 	}
 
-	hasOrigin, err := c.archiveHasOrigin(archiveRepo)
+	originURL, err := c.archiveOriginURL(archiveRepo)
 	if err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("querying archive remotes: %v", err)
@@ -203,7 +245,7 @@ func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		return r
 	}
 
-	if !hasOrigin {
+	if originURL == "" {
 		r.Status = doctor.StatusWarning
 		r.Message = "local-only mode — commits stay on this host, off-box backup disabled"
 		r.FixHint = fmt.Sprintf(`configure a remote with "git -C %s remote add origin <url>" to enable push mode`, archiveRepo)
@@ -214,6 +256,28 @@ func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Status = doctor.StatusError
 		r.Message = formatArchivePushFailureMessage(state.ConsecutivePushFailures, state.LastPushStderr)
 		r.FixHint = fmt.Sprintf(`check "git -C %s remote -v", verify credentials, then let the next jsonl-export run retry`, archiveRepo)
+		return r
+	}
+
+	pushURLs, err := c.archivePushURLs(archiveRepo)
+	if err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("querying archive push URLs: %v", err)
+		r.FixHint = fmt.Sprintf(`run "git -C %s remote -v" to diagnose`, archiveRepo)
+		return r
+	}
+
+	localPush := false
+	for _, pushURL := range pushURLs {
+		if !archiveRemoteIsOffBox(pushURL) {
+			localPush = true
+			break
+		}
+	}
+	if localPush {
+		r.Status = doctor.StatusWarning
+		r.Message = "local-path origin configured — commits stay on this host, off-box backup disabled"
+		r.FixHint = fmt.Sprintf(`replace origin with an off-box remote using "git -C %s remote set-url origin <url>"`, archiveRepo)
 		return r
 	}
 

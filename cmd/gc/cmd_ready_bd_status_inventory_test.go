@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/readywork"
 )
 
 // fakeBdStatusRow is one issue in fakeBdStatusCLI's ledger, carrying bd's RAW
@@ -89,13 +90,13 @@ func TestReadyStatusLegsAreExhaustiveOnBdStore(t *testing.T) {
 		{id: "gc-done", status: "closed"},
 	}
 	store := beads.NewBdStore("/city", fakeBdStatusCLI(t, rows))
-	legs := []readyLeg{readyTestLeg("city", store)}
+	legs := []readywork.Leg{readyTestLeg("city", store)}
 
 	seen := map[string][]string{}
-	for _, status := range readyKnownStatuses {
-		got, err := readyBeadsForOpts(legs, readyOpts{
-			status:         status,
-			metadataFields: []string{"gc.workflow_root_for=src-1"},
+	for _, status := range readywork.KnownStatuses() {
+		got, err := readywork.Read(legs, readywork.Query{
+			Status:         status,
+			MetadataFields: []string{"gc.workflow_root_for=src-1"},
 		})
 		if err != nil {
 			t.Fatalf("gc ready --status %s: %v", status, err)
@@ -106,7 +107,7 @@ func TestReadyStatusLegsAreExhaustiveOnBdStore(t *testing.T) {
 	}
 	for _, row := range rows {
 		if len(seen[row.id]) == 0 {
-			t.Errorf("bead %s (bd status %q) is invisible to every gc ready --status leg %v; the root inventory is not exhaustive", row.id, row.status, readyKnownStatuses)
+			t.Errorf("bead %s (bd status %q) is invisible to every gc ready --status leg %v; the root inventory is not exhaustive", row.id, row.status, readywork.KnownStatuses())
 		}
 	}
 	// Each bd status folded into Gas City's "open" must be served by the open

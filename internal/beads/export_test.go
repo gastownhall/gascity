@@ -114,3 +114,10 @@ func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
 	}
 	panic("WriteRowForTest: no row " + id)
 }
+
+// SetTxProjectionTimeoutForTest shortens how long a staged Tx waits for an
+// update to read back, so a test of the unconfirmed outcome need not wait the
+// production bound.
+func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
+	s.txProjectionTimeout = d
+}

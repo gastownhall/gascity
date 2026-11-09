@@ -69,8 +69,8 @@ type Spec struct {
 	Scopes []ScopeKind
 	// TurnScoped allows a turn on a session scope.
 	TurnScoped bool
-	// InteractionScoped requires an interaction (request id) on a session
-	// scope.
+	// InteractionScoped requires an interaction on a session scope: for a
+	// lane op the occurrence it answers, <request id>#<n> (RecordRaising).
 	InteractionScoped bool
 	// When lists the delivery modes a message may name; empty for every other
 	// kind.
@@ -129,7 +129,9 @@ var registry = []Spec{
 		DefaultScope: ScopeSession, Scopes: []ScopeKind{ScopeSession}, InteractionScoped: true,
 		PayloadRequired: true, PayloadAllowed: true,
 		StartWithin: time.Hour, FinishWithin: time.Hour + 5*time.Minute,
-		DefaultPolicy:       Policy{Guarantee: GuaranteeAtLeastOnce},
+		// A respond is at most once (validateRespondShape): a second attempt
+		// could answer a later, identical prompt.
+		DefaultPolicy:       Policy{Guarantee: GuaranteeAtMostOnce},
 		OnConversationClose: CloseRuleSkip,
 	},
 	{
@@ -153,12 +155,16 @@ var registry = []Spec{
 	func() Spec {
 		s := lifecycleSpec(KindClose, Policy{})
 		s.OnConversationClose = CloseRuleSucceed
+		// A close may carry its request's options (the API's
+		// {"delete":true}), so the digest tells a close that deletes its row
+		// from one that does not.
+		s.PayloadAllowed = true
 		return s
 	}(),
 }
 
-// lifecycleSpec is the shared shape of the payload-free conversation-scoped
-// lifecycle kinds.
+// lifecycleSpec is the shared shape of the conversation-scoped lifecycle
+// kinds, payload-free unless the kind's row says otherwise.
 func lifecycleSpec(k Kind, defaults Policy) Spec {
 	return Spec{
 		Kind: k, Class: ClassLifecycle, Lane: LaneLifecycle,

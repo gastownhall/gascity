@@ -96,6 +96,11 @@ func PromptHash(prompt string) string {
 // work bead. ComputeAwakeSet uses it to detect when an alive session has been
 // reassigned to a different bead — the trigger for a fresh-wake conversation
 // cycle under wake_mode=fresh.
+//
+// Usage attribution is a second consumer: the worker reads it to find the
+// formula a session's facts belong to. It is a single-valued pointer meaning
+// "the last bead the controller stamped", so it survives that bead's close and
+// a sleep.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
 var freshWakeConversationResetKeys = []string{
@@ -368,12 +373,15 @@ type CommitStartedPatchInput struct {
 	ConfirmState            bool
 	ClearSleepReason        bool
 	ClearPendingCreateClaim bool
-	// StartsAwakeInterval marks a commit that begins a new awake interval (a
-	// first start or a wake from a dormant state), as opposed to a recovery
-	// re-confirmation of an already-running runtime. When true the patch stamps
-	// a fresh awake_started_at epoch so each awake interval emits exactly one
-	// compute usage fact; the controller wake path does not otherwise refresh it
-	// (gastownhall/gascity#3513).
+	// StartsAwakeInterval marks a commit that begins a new awake interval: a
+	// first start, a wake from a dormant state, or a start (or its recovery)
+	// committed onto a bead already awake or active (heal can mark it awake
+	// while the start is in flight) that has no interval still open (no epoch,
+	// or one the compute lane has already accounted). A commit onto a bead
+	// whose interval is still open leaves it false, so that interval keeps its
+	// epoch. When true the patch stamps a fresh awake_started_at epoch so each
+	// awake interval emits exactly one compute usage fact; the controller wake
+	// path does not otherwise refresh it (gastownhall/gascity#3513).
 	StartsAwakeInterval bool
 	Now                 time.Time
 	// PrimedAt, when non-zero and PromptHash is non-empty, records that this
@@ -494,6 +502,23 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	return patch
+}
+
+// RevertDrainAckStopPendingPatch undoes DrainAckStopPendingPatch on a row
+// whose stop was never queued, restoring the lifecycle fields prior — the row
+// as read before the stop-pending mark — carried. The caller commits it
+// fenced on the stop-pending decision, so it lands only on the row that mark
+// produced and never over a later writer's state that its read sees; only a
+// store with conditional writes also refuses a writer that lands between that
+// read and the write (Store.Commit).
+func RevertDrainAckStopPendingPatch(prior Info) MetadataPatch {
+	return MetadataPatch{
+		"state":                     prior.MetadataState,
+		"state_reason":              prior.StateReason,
+		"drain_at":                  prior.DrainAt,
+		"pending_create_claim":      prior.PendingCreateClaimMetadata,
+		"pending_create_started_at": prior.PendingCreateStartedAt,
+	}
 }
 
 // SleepPatch records a non-terminal sleep/drain result. The holds are the
@@ -673,14 +698,108 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 // orphaned, drained, failed-create, ...) is silently rejected by the
 // validator, leaving close_reason/closed_at stamped on an OPEN bead and
 // triggering reconciler flap as the next tick clears them.
+//
+// Every close except a failed create also carries UsageClosePatch: the close
+// commits status=closed with it, so the row leaves the open set the usage lane
+// scans, and the marker is what keeps the interval it ended accounted. A failed
+// create never confirmed a start, so it has no interval and writes neither key.
 func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
-	return MetadataPatch{
+	patch := MetadataPatch{
 		"state":        stateCode,
 		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
 	}
+	if stateCode != string(StateFailedCreate) {
+		maps.Copy(patch, UsageClosePatch(now))
+	}
+	return patch
+}
+
+// UsageClosePatch marks a closing row as possibly holding an awake interval
+// the usage lane has not accounted. usage_close_pending is the equality the
+// lane lists closed rows by; usage_closed_at is the interval's end, kept apart
+// from closed_at because a named-session reopen clears closed_at before the
+// lane may have run. It drops the start and key an earlier close's reopen kept
+// (UsageReopenPatch): this close ended the row's current interval. The lane
+// clears every key once the interval is settled (UsageCloseClearPatch).
+func UsageClosePatch(now time.Time) MetadataPatch {
+	return MetadataPatch{
+		MetadataKeyUsageClosePending:         "true",
+		MetadataKeyUsageClosedAt:             now.UTC().Format(time.RFC3339Nano),
+		MetadataKeyUsageClosedAwakeStartedAt: "",
+		MetadataKeyUsageClosedSessionKey:     "",
+	}
+}
+
+// UsageReopenPatch keeps the interval a pending usage close ended identifiable
+// across the reopen of its closed row, from closedMeta, the row's metadata.
+// A closed row never starts and never changes its session_key, but the reopen
+// lets it: its next start stamps a new awake_started_at, a fresh wake clears
+// the key, and both can land before the usage lane settles the closed
+// interval. The patch copies both onto the close marker, once per close: a
+// reopen of a row whose kept values are already set (its start failed and it
+// closed again as a failed create, which leaves the marker) keeps the first.
+// It is empty when no usage close is pending or the row has no interval.
+func UsageReopenPatch(closedMeta map[string]string) MetadataPatch {
+	start := strings.TrimSpace(closedMeta["awake_started_at"])
+	if closedMeta[MetadataKeyUsageClosePending] != "true" || start == "" ||
+		strings.TrimSpace(closedMeta[MetadataKeyUsageClosedAwakeStartedAt]) != "" {
+		return nil
+	}
+	return MetadataPatch{
+		MetadataKeyUsageClosedAwakeStartedAt: start,
+		MetadataKeyUsageClosedSessionKey:     closedMeta["session_key"],
+	}
+}
+
+// UsageClosedIntervalMetadata returns meta as of the awake interval its
+// pending usage close ended: the awake_started_at and session_key a reopen
+// kept (UsageReopenPatch) stand in for the row's current ones, so that
+// interval is accounted the same whatever the row did after the reopen. It
+// returns meta itself when the reopen kept nothing.
+func UsageClosedIntervalMetadata(meta map[string]string) map[string]string {
+	start := strings.TrimSpace(meta[MetadataKeyUsageClosedAwakeStartedAt])
+	if start == "" {
+		return meta
+	}
+	interval := maps.Clone(meta)
+	interval["awake_started_at"] = start
+	interval["session_key"] = meta[MetadataKeyUsageClosedSessionKey]
+	return interval
+}
+
+// UsageCloseClearPatch clears a settled usage close: the marker and the
+// interval start and key a reopen kept.
+func UsageCloseClearPatch() MetadataPatch {
+	return MetadataPatch{
+		MetadataKeyUsageClosePending:         "",
+		MetadataKeyUsageClosedAt:             "",
+		MetadataKeyUsageClosedAwakeStartedAt: "",
+		MetadataKeyUsageClosedSessionKey:     "",
+	}
+}
+
+// UsageIntervalEnd returns where the awake interval that began at start ended,
+// for compute wall time and the model-usage sweep window. A usage close marker
+// later than start bounds the interval: slept_at wins when it falls inside
+// (start, usage_closed_at], since the session slept before the close. Without
+// one, slept_at ends the interval when it is after start (one carried over
+// from a prior interval is not), else now.
+func UsageIntervalEnd(meta map[string]string, start, now time.Time) time.Time {
+	slept, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["slept_at"]))
+	sleptInside := sleptErr == nil && slept.After(start)
+	if closedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(meta[MetadataKeyUsageClosedAt])); err == nil && closedAt.After(start) {
+		if sleptInside && !slept.After(closedAt) {
+			return slept
+		}
+		return closedAt
+	}
+	if sleptInside {
+		return slept
+	}
+	return now
 }
 
 // CanonicalCloseReason maps a short session stateCode to a human-readable

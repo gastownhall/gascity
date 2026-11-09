@@ -3,7 +3,6 @@ package beads
 import (
 	"context"
 	"math"
-	"time"
 )
 
 var _ GuardedBatcher = (*MemStore)(nil)
@@ -100,7 +99,7 @@ func (m *MemStore) insertPinnedLocked(b Bead) Bead {
 		b.Type = "task"
 	}
 	guardedCreateCloseReason(&b)
-	b.CreatedAt = time.Now().Round(0)
+	b.CreatedAt = m.nextCreatedAtLocked()
 	b.UpdatedAt = b.CreatedAt
 	b.Revision = 1
 	b.ClaimFence = 0

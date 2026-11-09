@@ -95,7 +95,7 @@ for that harness — you pick an abstract label, the harness renders the flag.
 
 ```toml
 # agents/reviewer/agent.toml
-provider        = "codex"
+provider        = "claude"
 option_defaults = { model = "sonnet", permission_mode = "plan" }
 ```
 
@@ -105,12 +105,27 @@ option_defaults = { model = "sonnet", permission_mode = "plan" }
 This is why you write `model = "sonnet"` and not a raw `--model` flag: the schema
 keeps the model selection portable and the flags server-side.
 
+`model` is not an agent field of its own: set it with `option_defaults` (a
+`--model` flag in `args` works too). A top-level `model = "sonnet"` in
+`agent.toml` is ignored without a warning. In a legacy city's `city.toml`
+`[[agent]]` block it is an unknown field: `gc config show` warns about it and
+`gc start --foreground` refuses to start.
+
 ### Reasoning effort (`option_defaults.effort`)
 
 `effort` is an options-schema key like `model`. Its tiers are
 `low · medium · high · xhigh · max`, and the harness renders the matching flag
 (for `claude`, `--effort <tier>`). The builtin `claude` harness defaults to
-`effort = "max"`, so set it explicitly when you want cheaper, faster turns.
+`permission_mode = "unrestricted"` (`--dangerously-skip-permissions`) and
+`effort = "max"` (`--effort max`), so set `effort` explicitly when you want
+cheaper, faster turns. Three places set it:
+
+```toml
+# city.toml — every agent on the claude harness
+[providers.claude]
+base            = "builtin:claude"
+option_defaults = { effort = "high", model = "sonnet" }
+```
 
 ```toml
 # agents/reviewer/agent.toml — one agent
@@ -119,16 +134,26 @@ option_defaults = { effort = "low" }
 ```
 
 ```toml
-# city.toml — every agent on the claude harness
-[providers.claude]
-option_defaults = { effort = "high" }
+# city.toml — one agent you don't own, such as one from an imported pack
+[[patches.agent]]
+name            = "mypack.planner"   # <import binding>.<agent>
+option_defaults = { effort = "medium" }
 ```
 
 Agent keys win over provider keys, so the reviewer above runs at `low` while
-other claude agents run at `high`. `gc config explain --provider claude` shows
-the provider-level resolved value and which layer set it; it does not include
-agent-level `option_defaults`, so an agent's own `effort` is read from its
-`agent.toml`.
+other claude agents run at `high`, and a patch's keys merge into the agent's
+own. A patch needs `name` and targets that one agent (`rig = "*"` reaches it
+in every rig); there is no wildcard for all agents, so use
+`[providers.claude]` for a city-wide default. Set `effort = ""` to launch
+without an `--effort` flag at all, leaving the choice to Claude Code.
+
+An agent's `args` can select an option too: `args = ["--effort", "high"]`
+launches at `high`, ahead of any `option_defaults`. An agent's `args` replace
+the provider's `args`.
+
+`gc config explain --provider claude` shows the provider-level resolved value
+and which layer set it; it does not include agent-level `option_defaults`, so
+an agent's own `effort` is read from its `agent.toml`.
 
 A single step can override these for the session launched to run it: `opt_effort`
 or `opt_model` metadata on the step's bead applies when that session launches (see

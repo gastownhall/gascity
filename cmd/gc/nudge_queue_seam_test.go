@@ -21,16 +21,22 @@ import (
 // than through openNudgeQueue: the state.json primitives, the lock wrapper,
 // the shadow front-door constructors, and building a queue value directly.
 var nudgeQueueRawAccess = map[string]bool{
-	"nudgequeue.WithState":          true,
-	"nudgequeue.LoadState":          true,
-	"nudgequeue.WithdrawWaitNudges": true,
-	"nudgequeue.StatePath":          true,
-	"nudgequeue.LockPath":           true,
-	"nudgequeue.NewStore":           true,
-	"withNudgeQueueState":           true,
-	"nudgeFrontDoor":                true,
-	"fileNudgeQueue{}":              true,
-	"nudgequeue.StateFileQueue{}":   true,
+	"nudgequeue.WithState":             true,
+	"nudgequeue.UpdateIfChanged":       true,
+	"nudgequeue.DryRun":                true,
+	"nudgequeue.WithStateFor":          true,
+	"nudgequeue.UpdateIfChangedFor":    true,
+	"nudgequeue.WithStateWithin":       true,
+	"nudgequeue.UpdateIfChangedWithin": true,
+	"nudgequeue.LoadState":             true,
+	"nudgequeue.WithdrawWaitNudges":    true,
+	"nudgequeue.StatePath":             true,
+	"nudgequeue.LockPath":              true,
+	"nudgequeue.NewStore":              true,
+	"withNudgeQueueState":              true,
+	"nudgeFrontDoor":                   true,
+	"fileNudgeQueue{}":                 true,
+	"nudgequeue.StateFileQueue{}":      true,
 }
 
 // nudgeQueueShadowWriters write a queue item's shadow outside the queue's
@@ -38,18 +44,20 @@ var nudgeQueueRawAccess = map[string]bool{
 // Rollback), never directly, so a queue selected at the seam owns its shadows.
 var nudgeQueueShadowWriters = []string{"ensureQueuedNudgeBead", "markQueuedNudgeTerminal"}
 
-// nudgeFileQueueFile declares the file queue's mechanics. Its top-level
-// functions are the queue's internals: outside it and the seam, a call to one
-// bypasses openNudgeQueue as surely as a raw state.json read does.
-const nudgeFileQueueFile = "nudge_file_queue.go"
+// nudgeFileQueueFiles declare the file queue's mechanics: the queue and its
+// shadow debts. Their top-level functions are the queue's internals: outside
+// them and the seam, a call to one bypasses openNudgeQueue as surely as a raw
+// state.json read does.
+var nudgeFileQueueFiles = []string{"nudge_file_queue.go", "nudge_shadow_debts.go"}
 
 // nudgeQueueRawAccessAllowed is where cmd/gc may reach the queue directly,
 // and how many times. A nil entry allows every access. Every count must match
 // exactly, so a retired exception is removed here and a second call beside an
 // excepted one fails rather than riding on the exception.
 var nudgeQueueRawAccessAllowed = map[string]map[string]int{
-	// The file queue itself.
-	nudgeFileQueueFile: nil,
+	// The file queue itself and its shadow debts.
+	"nudge_file_queue.go":   nil,
+	"nudge_shadow_debts.go": nil,
 	// openNudgeQueue and nudgeShadows.
 	"nudge_queue_seam.go": {"fileNudgeQueue{}": 1, "nudgeFrontDoor": 1},
 	// The shadow front door's definition and its two leaf helpers.
@@ -73,20 +81,22 @@ func nudgeQueueForbidden(t *testing.T, dir string) map[string]bool {
 	for _, name := range nudgeQueueShadowWriters {
 		forbidden[name] = true
 	}
-	path := filepath.Join(dir, nudgeFileQueueFile)
-	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
-	}
-	funcs := 0
-	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
-			forbidden[fn.Name.Name] = true
-			funcs++
+	for _, name := range nudgeFileQueueFiles {
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
 		}
-	}
-	if funcs == 0 {
-		t.Fatalf("%s declares no top-level functions; the ratchet would guard nothing", path)
+		funcs := 0
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				forbidden[fn.Name.Name] = true
+				funcs++
+			}
+		}
+		if funcs == 0 {
+			t.Fatalf("%s declares no top-level functions; the ratchet would guard nothing", path)
+		}
 	}
 	return forbidden
 }

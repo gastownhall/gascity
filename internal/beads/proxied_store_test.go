@@ -818,6 +818,11 @@ func TestProxiedStoreDepListBatchGuardsEveryIDBeforeTheNativeBatch(t *testing.T)
 	bd := NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		forks++
 		if len(args) > 1 && args[0] == "dep" && args[1] == "list" {
+			// Real bd: one id prints the depended-on beads' rows; several
+			// print the dependency records.
+			if len(args) == 4 {
+				return []byte(`[{"id":"prx-9","status":"open","dependency_type":"blocks"}]`), nil
+			}
 			return []byte(`[{"issue_id":"prx-1","depends_on_id":"prx-9","type":"blocks"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected bd %v", args)
@@ -1068,9 +1073,11 @@ func (l *bracketLeaf) CloseAll([]string, map[string]string) (int, error) {
 	l.onWrite()
 	return 0, nil
 }
+
 func (l *bracketLeaf) ReleaseIfCurrent(string, string) (bool, error) { l.onWrite(); return true, nil }
 func (l *bracketLeaf) DeleteBatch([]string) error                    { l.onWrite(); return nil }
 func (l *bracketLeaf) CreateWithForeignID(Bead) (Bead, error)        { l.onWrite(); return Bead{}, nil }
+
 func (l *bracketLeaf) CreateWithStorage(Bead, StorageClass) (Bead, error) {
 	l.onWrite()
 	return Bead{}, nil

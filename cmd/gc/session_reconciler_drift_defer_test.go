@@ -234,3 +234,82 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 		}
 	}
 }
+
+// TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralEscalatesOnce bounds
+// the held-work deferral (#8345, AC-2): an episode that reaches
+// [daemon] drift_deferral_escalate_after (1h by default) escalates exactly
+// once — the durable config_drift_escalated_at marker counts — and the
+// escalated session.config_drift_deferred event carries the episode's own
+// start and its pending age, while the deferral itself still holds until
+// the work closes.
+func TestReconcileSessionBeads_ConfigDriftHeldWorkDeferralEscalatesOnce(t *testing.T) {
+	reconcileHeldWorkDriftEpisodeBounded(t)
+}
+
+// reconcileHeldWorkDriftEpisodeBounded is legacy's full reconciliation
+// regression of the held-work deferral's bound (#8345): the episode stamps
+// on its first observation, escalates exactly once at the
+// drift_deferral_escalate_after horizon, never repeats, still defers the
+// drain while the work stays open, and proceeds to the config-drift drain
+// once the work closes.
+func reconcileHeldWorkDriftEpisodeBounded(t *testing.T) {
+	env, rec, sess, work := heldWorkReconcilerEnv(t)
+	horizon := env.cfg.Daemon.DriftDeferralEscalateAfterDuration()
+
+	firstStamp := env.reconcileFresh(t, sess).Metadata["config_drift_deferred_at"]
+	if firstStamp == "" {
+		t.Fatalf("the first pass must stamp the episode; stderr=%s", env.stderr.String())
+	}
+
+	// The horizon elapses with the work still open: the episode escalates
+	// once, its marker set and its age reported, the deferral still holding.
+	env.clk.Advance(horizon)
+	escalated := env.reconcileFresh(t, sess)
+	if escalated.Metadata["config_drift_deferred_at"] != firstStamp {
+		t.Fatalf("escalation re-stamped the episode to %q, want the first observation %q", escalated.Metadata["config_drift_deferred_at"], firstStamp)
+	}
+	marker := escalated.Metadata["config_drift_escalated_at"]
+	if at, err := time.Parse(time.RFC3339, marker); err != nil || !at.Equal(env.clk.Now()) {
+		t.Fatalf("marker %q, want the escalation pass's time %s", marker, env.clk.Now())
+	}
+	if ds := env.dt.get(sess.ID); ds != nil {
+		t.Fatalf("an escalated episode still defers the drain, got %+v", ds)
+	}
+	evs := driftDeferredEvents(rec)
+	if len(evs) != 2 {
+		t.Fatalf("held-work deferral events = %d, want the first observation and the one escalation; stderr=%s", len(evs), env.stderr.String())
+	}
+	p := driftDeferredPayload(t, &evs[1])
+	if p.DeferredSince != firstStamp {
+		t.Fatalf("payload deferred_since %q, want the episode's own start %q", p.DeferredSince, firstStamp)
+	}
+	if !p.Escalated || p.PendingSeconds != int64(horizon/time.Second) {
+		t.Fatalf("payload escalated %v pending %d, want the horizon reported once due", p.Escalated, p.PendingSeconds)
+	}
+	if p.WorkBeadID != work.ID {
+		t.Fatalf("payload work bead %q, want %s", p.WorkBeadID, work.ID)
+	}
+
+	// A later tick observes the escalated episode without repeating it: no
+	// third event, no marker rewrite, still no drain.
+	env.clk.Advance(time.Minute)
+	if again := env.reconcileFresh(t, sess); again.Metadata["config_drift_escalated_at"] != marker {
+		t.Fatalf("marker re-stamped to %q, want unchanged %q", again.Metadata["config_drift_escalated_at"], marker)
+	}
+	if n := len(driftDeferredEvents(rec)); n != 2 {
+		t.Fatalf("held-work deferral events = %d, want still 2", n)
+	}
+	if ds := env.dt.get(sess.ID); ds != nil {
+		t.Fatalf("the escalated episode must keep deferring the drain, got %+v", ds)
+	}
+
+	// The work closing still proceeds to the config-drift drain.
+	if err := env.store.Close(work.ID); err != nil {
+		t.Fatalf("Close(work): %v", err)
+	}
+	env.clk.Advance(time.Minute)
+	env.reconcileFresh(t, sess)
+	if ds := env.dt.get(sess.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("drain = %+v, want the config-drift drain once the work closes; stderr=%s", ds, env.stderr.String())
+	}
+}

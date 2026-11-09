@@ -231,7 +231,8 @@ func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing
 			}
 		}},
 		{"maintenance sweep", func(t *testing.T, cityPath string, _ queuedNudge) {
-			if err := runNudgeQueueMaintenanceSweep(cityPath, time.Now()); err != nil {
+			// A day on the item expires, so the sweep has a shadow debt to pay.
+			if err := runNudgeQueueMaintenanceSweep(cityPath, time.Now().Add(defaultQueuedNudgeTTL+time.Minute)); err != nil {
 				t.Fatalf("maintenance sweep: %v", err)
 			}
 		}},

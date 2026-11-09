@@ -77,9 +77,32 @@ type BuiltinProviderSpec struct {
 	UpstreamBaseURLEnv   string
 	UpstreamAPIKeyEnv    string
 	UpstreamAuthTokenEnv string
+	// Program-status declaration (OSC 7501), mirrored flat because this
+	// package cannot import config: ProgramStatusProtocol is "osc7501" to
+	// declare, ProgramStatusApp names the reporting program,
+	// ProgramStatusRelay wraps the agent in the probe-answering relay,
+	// ProgramStatusHoldMidTurn declares that input typed mid-turn aborts the
+	// program's turn (config.ProgramStatusBinding.HoldMidTurn says which
+	// deliveries that holds back), ProgramStatusDecideStartup and
+	// ProgramStatusDecideSettle opt the startup ladder and the interrupt
+	// settle into deciding with the record under the switch on
+	// (config.ProgramStatusBinding.DecideStartup, DecideSettle), and
+	// ProgramStatusEnv is forced into the session env when capture is armed.
+	ProgramStatusProtocol      string
+	ProgramStatusApp           string
+	ProgramStatusRelay         bool
+	ProgramStatusHoldMidTurn   bool
+	ProgramStatusDecideStartup bool
+	ProgramStatusDecideSettle  bool
+	ProgramStatusEnv           map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// programStatusOSC7501 mirrors config.ProgramStatusProtocolOSC7501. This
+// package sits below config and cannot import it; every builtin binding is
+// validated by config.TestBuiltinProgramStatusBindingsValidate.
+const programStatusOSC7501 = "osc7501"
 
 // optionValuePlaceholder mirrors config.OptionValuePlaceholder. This package
 // sits below config and cannot import it, so the token is duplicated here and
@@ -252,6 +275,17 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ForkFlag:      "--fork-session",
 		PrintArgs:     []string{"-p"},
 		TitleModel:    "haiku",
+		// Claude Code (2.1.295+, verified on 2.1.311) reports OSC 7501 only
+		// after the terminal answers its support probe, which tmux never
+		// does, so capture runs it under the probe-answering relay.
+		// The second OSC 7501 shadow measured its startup ladder and
+		// interrupt settle against the record, so both decide with it under
+		// the switch on.
+		ProgramStatusProtocol:      programStatusOSC7501,
+		ProgramStatusApp:           "claude-code",
+		ProgramStatusRelay:         true,
+		ProgramStatusDecideStartup: true,
+		ProgramStatusDecideSettle:  true,
 		// Config-facing names map to current CLI values: Claude Code rejects the
 		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
@@ -309,10 +343,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// API key). Codex auth is the API key; no separate auth-token var.
 		UpstreamBaseURLEnv: "OPENAI_BASE_URL",
 		UpstreamAPIKeyEnv:  "OPENAI_API_KEY",
+		// No model or effort default: unless the city, agent or session
+		// chooses one, codex runs on the user's own ~/.codex/config.toml.
+		// Which models an account may use depends on how it is logged in
+		// (a ChatGPT-account login rejects ids an API key accepts), so a
+		// catalog pin here broke every turn for those users while the
+		// session looked healthy.
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "gpt-5.5",
-			"effort":          "xhigh",
 		},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u203a ",
@@ -324,6 +362,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:       "subcommand",
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
+		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
+		// pane-output tap alone captures it. Input typed into a running
+		// Codex turn aborts it (the 2026-11-03 shadow: 18 of 20 mid-turn
+		// deliveries aborted their turn), so it declares the hold. The second
+		// shadow measured its startup ladder against the record, so the
+		// ladder decides with it under the switch on. Neither shadow recorded
+		// a Codex interrupt settle (ga-crzq6e), so the settle is not declared
+		// and decides from the screen, as under off.
+		ProgramStatusProtocol:      programStatusOSC7501,
+		ProgramStatusApp:           "codex",
+		ProgramStatusHoldMidTurn:   true,
+		ProgramStatusDecideStartup: true,
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
@@ -503,6 +553,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelChoice("grok-4.7", "Grok 4.7"),
 			),
 		},
+
+		// Grok Build 1.0.52+ reports OSC 7501 as app "grok-build". Its default
+		// auto mode sends no support probe inside tmux and falls back to Rex's
+		// REX_SESSION; with it set, grok writes its reports wrapped in tmux DCS
+		// passthrough, which tmux drops unless allow-passthrough is on and the
+		// capture reader unwraps. The config.toml switch
+		// [ui.notifications] program_status = "on" has no env equivalent
+		// (GROK_CONFIG overlays drop the ui table). Verified with grok 1.0.70
+		// (ga-f4ovjm.38). Its first idle report follows TUI init (model list
+		// loaded, or its fetch timed out), not the ready delay above.
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "grok-build",
+		ProgramStatusEnv:      map[string]string{"REX_SESSION": "1"},
 	},
 	"kimi": {
 		DisplayName: "Kimi Code CLI",
@@ -603,6 +666,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
 		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
 		Args:                 []string{"--yolo"},
+		OptionsSchema: []BuiltinProviderOption{
+			// Copilot's ask_user tool blocks the pane on an interactive
+			// question until someone answers it. Most sessions run
+			// unattended, so the default launches with --no-ask-user; an
+			// agent a human attaches to opts back in with
+			// option_defaults = { ask_user = "on" }.
+			{
+				Key:     "ask_user",
+				Label:   "Ask User Tool",
+				Type:    "select",
+				Default: "off",
+				Choices: []BuiltinOptionChoice{
+					{Value: "off", Label: "Disabled (work autonomously)", FlagArgs: []string{"--no-ask-user"}},
+					{Value: "on", Label: "Enabled (may ask questions)", FlagArgs: []string{}},
+				},
+			},
+		},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects
@@ -656,13 +736,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// multiple unsupported dialog classes with independent timeouts, so the
 		// first can exhaust the managed startup lease while OpenCode is working.
 		AcceptStartupDialogs: boolPtr(false),
-		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:          true,
-		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// OpenCode merges OPENCODE_PERMISSION over every config file, so this
+		// catch-all also overrides a project opencode.json's permission rules.
+		// An agent keeps those rules with env OPENCODE_PERMISSION = "" (see
+		// docs/guides/harness-recipes.md). The cerebras and groq presets share
+		// this default.
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
@@ -826,6 +911,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"},
 			}),
 		},
+
+		// pi 1.1.0+ reports OSC 7501 only after the terminal answers its
+		// support probe, which tmux never does; PI_PROGRAM_STATUS=1 forces
+		// reports on and skips the probe. Verified with pi 1.4.0
+		// (ga-f4ovjm.38).
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "pi",
+		ProgramStatusEnv:      map[string]string{"PI_PROGRAM_STATUS": "1"},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -837,6 +930,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile: "AGENTS.md",
 		ResumeFlag:       "--resume",
 		ResumeStyle:      "flag",
+
+		// omp 18.8.7+ reports OSC 7501 on any TTY without a probe while its
+		// terminal.programStatus setting is on (the default). Verified with
+		// omp 18.14.1 (ga-f4ovjm.38).
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "omp",
 	},
 	"antigravity": {
 		DisplayName: "Antigravity",
@@ -982,6 +1081,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
+	spec.ProgramStatusEnv = cloneStringMap(spec.ProgramStatusEnv)
 	return spec
 }
 

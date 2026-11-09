@@ -49,8 +49,14 @@ func stubStrandedRecoverySource(t *testing.T) beads.Store {
 // replaced the manifest instead of extending it would pass.
 func convergedRecoveryCity(t *testing.T) (cityPath string, cfg *config.City, source beads.Store, target infraBindingTarget) {
 	t.Helper()
+	return convergedRecoveryCityOn(t, stubStrandedRecoverySource(t))
+}
+
+// convergedRecoveryCityOn is convergedRecoveryCity over the given work store,
+// which the migration source is already stubbed to.
+func convergedRecoveryCityOn(t *testing.T, source beads.Store) (cityPath string, cfg *config.City, _ beads.Store, target infraBindingTarget) {
+	t.Helper()
 	cityPath = recoveryCityPath(t)
-	source = stubStrandedRecoverySource(t)
 	mustCreateInfraBead(t, source, beads.Bead{Title: "live session", Type: "session", Labels: []string{"gc:session"}})
 	mustCreateInfraBead(t, source, beads.Bead{Title: "delivered mail", Type: "message"})
 	mustCreateInfraBead(t, source, beads.Bead{Title: "ordinary backlog work", Type: "task"})
@@ -93,14 +99,14 @@ func runStrandedRecovery(t *testing.T, cityPath string, cfg *config.City, stdout
 // strandedIDs returns the ids the containment check currently calls stranded.
 func strandedIDs(t *testing.T, cityPath string, target infraBindingTarget) []string {
 	t.Helper()
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
-		t.Fatalf("readInfraCopyManifest: %v", err)
+		t.Fatalf("readInfraCopyManifestRecord: %v", err)
 	}
 	if !recorded {
 		t.Fatal("the city has no proven-copy manifest; the containment check is off and this assertion means nothing")
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
+	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
 		t.Fatalf("classifyInfraContainmentGap: %v", err)
 	}

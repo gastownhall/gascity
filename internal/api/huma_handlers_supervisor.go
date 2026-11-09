@@ -904,26 +904,31 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		// Prune departing cities before their watchers are detached, so no
 		// frame sent after a detach still names a city that left.
 		position.Retain(providers)
-		started, err := mw.Sync(providers, func(city string, p events.Provider) (uint64, error) {
+		_, err := mw.Sync(providers, func(city string, p events.Provider) (uint64, error) {
 			// A city the client already has a position for (from its resume
 			// cursor, from what this stream delivered, or from before it left
 			// the city set) resumes there without a gap. Otherwise it starts
 			// from "now", like a head-start connection, unless the client
 			// asked for replay from zero.
-			if seq, ok := position.Resume(city); ok {
-				return seq, nil
+			seq, ok := position.Resume(city)
+			if !ok && !replayNewCitiesFromZero {
+				var err error
+				if seq, err = p.LatestSeq(); err != nil {
+					return 0, err
+				}
 			}
-			if replayNewCitiesFromZero {
-				return 0, nil
-			}
-			return p.LatestSeq()
+			// Record the city's start seq before its watcher exists, so the
+			// composite SSE id carries it and a reconnect resumes the city from
+			// where this stream attached. Sync starts delivering a city's events
+			// as soon as its watcher attaches, before Sync returns: recording
+			// the start seq afterwards would let the city's first frames go out
+			// with an id that omits the city.
+			position.Attach(map[string]uint64{city: seq})
+			return seq, nil
 		})
 		if err != nil && streamCtx.Err() == nil {
 			log.Printf("api: supervisor events-stream: syncing city watchers: %v", err)
 		}
-		// Record each new city's start seq so the composite SSE id carries it
-		// and a reconnect resumes the city from where this stream attached.
-		position.Attach(started)
 	}
 	requestSync := func() {
 		if syncing {

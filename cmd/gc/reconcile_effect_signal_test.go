@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -408,7 +409,7 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 			}
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 			t.Fatalf("running %t: attach: %v", running, err)
 		}
 		got, err := store.Get(b.ID)
@@ -449,7 +450,7 @@ func (h *attachRaceSP) Start(ctx context.Context, name string, cfg runtime.Confi
 	return err
 }
 
-// attachRaceStore runs beforeClear once, before the first metadata batch
+// attachRaceStore runs beforeClear once, before the first metadata write
 // that clears the stop request's controller half (the operator's confirm).
 type attachRaceStore struct {
 	*beads.MemStore
@@ -457,12 +458,23 @@ type attachRaceStore struct {
 }
 
 func (s *attachRaceStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.race(kvs)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// UpdateIfMatch is the start's confirm fenced on its incarnation
+// (session.Store.ConfirmIncarnation).
+func (s *attachRaceStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.race(opts.Metadata)
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *attachRaceStore) race(kvs map[string]string) {
 	if _, ok := kvs[session.DrainIntentReasonKey]; ok && s.beforeClear != nil {
 		f := s.beforeClear
 		s.beforeClear = nil
 		f()
 	}
-	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 // TestSignalNeverStrandsAnOperatorStart (#7638, mc-ted51; review probes
@@ -500,7 +512,7 @@ func TestSignalNeverStrandsAnOperatorStart(t *testing.T) {
 				mstore = &attachRaceStore{MemStore: store.(*beads.MemStore), beforeClear: signal}
 			}
 			city := p.World.CityPath
-			err := session.NewManagerWithOptions(mstore, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+			err := session.NewManagerWithOptions(beadstest.Sessions(mstore), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
 			got, gerr := store.Get(it.Key.ID)
 			if gerr != nil {
 				t.Fatal(gerr)
@@ -540,7 +552,7 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: begin}
 	city := t.TempDir()
-	if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	got, err := store.Get(b.ID)

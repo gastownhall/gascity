@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/storeref/storereftest"
@@ -427,8 +428,8 @@ func TestBeadDualResidentAnswersFromTheBinding(t *testing.T) {
 	s := New(st)
 	storereftest.RunBindingWins(t,
 		storereftest.BindingWinsStores{
-			Binding:       graph,
-			Work:          city,
+			Binding:       beadstest.Resident(graph),
+			Work:          beadstest.Work(city),
 			DualID:        id,
 			BindingTitle:  "class-resident under a work prefix",
 			WorkOnlyID:    "mc-workonly1",
