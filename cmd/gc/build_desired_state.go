@@ -3527,9 +3527,11 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 			continue
 		}
 		// A root hidden by a deferral (future defer_until, or an indefinite
-		// defer) is not an actionable turn: the hook refuses it
-		// (isFutureDeferredHookCandidate), so counting it here as ready
-		// wake demand wakes the session for work it cannot claim (#7080).
+		// defer) is not an actionable turn. The hook already refuses a
+		// future defer_until (isFutureDeferredHookCandidate), and an
+		// indefinite defer is not claimable either, so counting it here as
+		// ready wake demand wakes the session for work it cannot claim
+		// (#7080).
 		if beads.IsDeferred(b, now) {
 			continue
 		}
