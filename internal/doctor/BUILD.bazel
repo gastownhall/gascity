@@ -115,6 +115,7 @@ go_test(
         "checks_order_dispatch_floor_test.go",
         "checks_order_firing_archive_test.go",
         "checks_order_firing_bounded_test.go",
+        "checks_order_firing_floor_test.go",
         "checks_order_firing_test.go",
         "checks_order_outcome_scale_test.go",
         "checks_order_outcome_test.go",
