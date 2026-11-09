@@ -128,6 +128,11 @@ type sessionLogContext struct {
 	sessionKey string
 	provider   string
 	createdAt  time.Time
+	// pinnedPath is the transcript pinned on the session bead at retirement
+	// (session.PinnedTranscriptMetadataKey), empty when none is pinned or the
+	// pinned file is gone. It is the only source that survives a closed
+	// session's workdir being recycled by a successor.
+	pinnedPath string
 }
 
 func sessionLogPathFreshEnough(path string, sessionCreatedAt time.Time) bool {
