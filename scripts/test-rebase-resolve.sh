@@ -757,6 +757,344 @@ GOEOF
     rm -rf "$remote" "$work" "$seed"
 }
 
+# bounded_go_scenario <label> <expect: refused|resolved> <path> <base> <feature> <main>
+#
+# Builds a bare remote with <path> = <base> on main, a pushed `feature` branch
+# that sets it to <feature>, and main advanced to <main>; clones, checks out
+# feature and runs attempt_bounded_self_rebase feature main. "refused" demands
+# rc=12 with local HEAD, the remote feature sha, the work tree and the markers
+# all exactly as before (no push). "resolved" demands rc=0, the remote equal
+# to local HEAD, no markers, and a result gofmt accepts.
+bounded_go_scenario() {
+    local label="$1" expect="$2" path="$3" base="$4" ours="$5" theirs="$6"
+    local remote work seed
+    remote="$(new_bare_remote)"
+    seed="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-seed.XXXXXX")"
+    git clone -q "$remote" "$seed" 2>/dev/null
+    (
+        cd "$seed" || exit 1
+        git config commit.gpgsign false
+        mkdir -p "$(dirname "$path")"
+        printf '%s' "$base" > "$path"
+        git add -A && git commit -qm base
+        git push -q origin main
+        git checkout -q -b feature
+        printf '%s' "$ours" > "$path"
+        git add -A && git commit -qm "feature change"
+        git push -q origin feature
+        git checkout -q main
+        printf '%s' "$theirs" > "$path"
+        git add -A && git commit -qm "main change"
+        git push -q origin main
+    )
+    work="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-work.XXXXXX")"
+    git clone -q "$remote" "$work"
+    ( cd "$work" && git config commit.gpgsign false && git checkout -q feature )
+
+    local before_local remote_before
+    before_local="$(git -C "$work" rev-parse HEAD)"
+    remote_before="$(remote_sha "$remote" refs/heads/feature)"
+
+    local output rc
+    output="$(cd "$work" && attempt_bounded_self_rebase feature main 2>&1)"; rc=$?
+
+    local after_local remote_after
+    after_local="$(git -C "$work" rev-parse HEAD)"
+    remote_after="$(remote_sha "$remote" refs/heads/feature)"
+
+    if [[ "$expect" == "refused" ]]; then
+        if [[ $rc -eq 12 \
+              && "$after_local" == "$before_local" \
+              && "$remote_after" == "$remote_before" \
+              && -z "$(git -C "$work" status --porcelain 2>/dev/null)" ]] \
+           && ! has_markers "$work"; then
+            record_pass "$label (rc=12, HEAD and remote unchanged, no markers)"
+        else
+            record_fail "$label" \
+                "expected rc=12 untouched; rc=$rc before_local=$before_local after_local=$after_local remote_before=$remote_before remote_after=$remote_after output=$output content: $(tr '\n' '|' < "$work/$path")"
+        fi
+    else
+        if [[ $rc -eq 0 \
+              && "$remote_after" == "$after_local" ]] \
+           && ! has_markers "$work" \
+           && gofmt -e "$work/$path" >/dev/null 2>&1; then
+            record_pass "$label (rc=0, union pushed, valid Go)"
+        else
+            record_fail "$label" \
+                "expected rc=0 pushed valid Go; rc=$rc after_local=$after_local remote_after=$remote_after output=$output content: $(tr '\n' '|' < "$work/$path")"
+        fi
+    fi
+    rm -rf "$remote" "$work" "$seed"
+}
+
+# Round-1 review of ga-nlvpzq (ga-x7rsyi9) probe P2: the SAME line is rewritten
+# on both sides (base `want := 1`, feature `want := 2`, main `want := 3`). The
+# conflict hunk is both-non-empty-and-differ in an allowlisted _test.go, the
+# ours-then-theirs union parses, yet it redeclares `want` and `go vet` rejects
+# it ("no new variables on left side of :="). The three-way base is non-empty,
+# so this is a real conflict, never an additive-both union.
+test_bounded_rebase_same_line_rewritten_both_sides_refused() {
+    bounded_go_scenario "bounded/same-line-rewritten-both-sides-refused" refused \
+        pkg/widget_test.go \
+'package widget
+
+import "testing"
+
+func TestWidget(t *testing.T) {
+	want := 1
+	_ = want
+}
+' \
+'package widget
+
+import "testing"
+
+func TestWidget(t *testing.T) {
+	want := 2
+	_ = want
+}
+' \
+'package widget
+
+import "testing"
+
+func TestWidget(t *testing.T) {
+	want := 3
+	_ = want
+}
+'
+}
+
+# Probe P3: both sides append a top-level `func TestNew` with DIFFERENT bodies
+# at the end of the file (one-line bodies, so git keeps the hunk to the
+# differing line and the union is balanced rather than cut mid-block). The base
+# side of the hunk is empty (two pure insertions), so a base-aware check
+# cannot see it; the union parses but
+# `go vet` reports "TestNew redeclared in this block". Must be refused.
+test_bounded_rebase_same_named_top_level_func_both_sides_refused() {
+    bounded_go_scenario "bounded/same-named-top-level-func-both-sides-refused" refused \
+        pkg/widget_test.go \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestNew(t *testing.T) { t.Log("feature body") }
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestNew(t *testing.T) { t.Log("main body") }
+'
+}
+
+# Probe P4 (non-regression, passes before and after the fix): feature adds
+# TestFeatureOnly and main adds TestMainOnly after a shared existing test. The
+# legitimate additive union has distinct names and must still resolve (rc=0).
+test_bounded_rebase_distinct_additive_go_tests_still_resolve() {
+    bounded_go_scenario "bounded/distinct-additive-go-tests-still-resolve" resolved \
+        pkg/widget_test.go \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestFeatureOnly(t *testing.T) {}
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestMainOnly(t *testing.T) {}
+'
+}
+
+# write_go_conflict <path> <ours_block> <theirs_block>: a Go file whose one
+# conflict hunk has no diff3 base section (two pure insertions).
+write_go_conflict() {
+    local path="$1" ours="$2" theirs="$3"
+    {
+        printf 'package widget\n\n'
+        echo "<<<<<<< HEAD"
+        printf '%s\n' "$ours"
+        echo "======="
+        printf '%s\n' "$theirs"
+        echo ">>>>>>> branch"
+    } > "$path"
+}
+
+# Direct classifier cases for the top-level duplicate-declaration check on an
+# allowed keep-both *.go union: a repeated func, type, var or const name, or a
+# repeated method on the same receiver, is refused (rc=1, file untouched);
+# the same method name on different receivers, any number of init funcs and
+# blank-identifier declarations, and a declaration-looking line inside a raw
+# string are not duplicates (rc=0).
+test_resolve_go_duplicate_top_level_declaration() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-dup.XXXXXX")"
+    local name ours theirs want rc before
+    # name|ours|theirs|want
+    local cases=(
+        'dup-func|func TestNew() { a() }|func TestNew() { b() }|1'
+        'dup-type|type Widget struct{ A int }|type Widget struct{ B int }|1'
+        'dup-var|var cache = 1|var cache = 2|1'
+        'dup-const|const limit = 1|const limit = 2|1'
+        'dup-method-same-receiver|func (w *Widget) Run() { a() }|func (w *Widget) Run() { b() }|1'
+        'dup-method-value-vs-pointer-receiver|func (w Widget) Run() { a() }|func (w *Widget) Run() { b() }|1'
+        'dup-generic-method|func (w *Box[T]) Get() { a() }|func (w *Box[K]) Get() { b() }|1'
+        'same-method-different-receivers|func (w *Widget) Run() { a() }|func (g *Gadget) Run() { b() }|0'
+        'distinct-funcs|func TestA() { a() }|func TestB() { b() }|0'
+        'repeated-init|func init() { a() }|func init() { b() }|0'
+        'repeated-blank|var _ = a|var _ = b|0'
+    )
+    local c
+    for c in "${cases[@]}"; do
+        IFS='|' read -r name ours theirs want <<< "$c"
+        write_go_conflict "$d/f.go" "$ours" "$theirs"
+        before="$(cat "$d/f.go")"
+        resolve_conflict_markers_in_file "$d/f.go" 1 >/dev/null 2>&1; rc=$?
+        if [[ $rc -eq $want ]] \
+           && { [[ $want -eq 0 ]] || [[ "$(cat "$d/f.go")" == "$before" ]]; }; then
+            record_pass "resolve/go-duplicate-top-level/$name (rc=$want)"
+        else
+            record_fail "resolve/go-duplicate-top-level/$name" \
+                "expected rc=$want, got rc=$rc, file: $(tr '\n' '|' < "$d/f.go")"
+        fi
+    done
+
+    # A duplicate-looking line inside a raw string is not a declaration.
+    cat > "$d/raw.go" <<'GOEOF'
+package widget
+
+<<<<<<< HEAD
+const doc = `
+func TestNew() {}
+`
+=======
+const other = `
+func TestNew() {}
+`
+>>>>>>> branch
+GOEOF
+    resolve_conflict_markers_in_file "$d/raw.go" 1 >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "resolve/go-duplicate-top-level/raw-string-not-a-declaration (rc=0)"
+    else
+        record_fail "resolve/go-duplicate-top-level/raw-string-not-a-declaration" \
+            "expected rc=0, got rc=$rc, file: $(tr '\n' '|' < "$d/raw.go")"
+    fi
+    rm -rf "$d"
+}
+
+# A diff3 base section is a three-way signal: a *.go hunk whose base side is
+# non-empty and whose two sides both differ is a real conflict even when
+# keep-both is allowed. (The bounded rebase turns diff3 on; this pins the
+# classifier half directly.)
+test_resolve_go_diff3_nonempty_base_is_real_conflict() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-diff3.XXXXXX")"
+    cat > "$d/f.go" <<'GOEOF'
+package widget
+
+func f() {
+<<<<<<< HEAD
+	want := 2
+||||||| base
+	want := 1
+=======
+	want := 3
+>>>>>>> branch
+}
+GOEOF
+    local before rc
+    before="$(cat "$d/f.go")"
+    resolve_conflict_markers_in_file "$d/f.go" 1 >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 1 && "$(cat "$d/f.go")" == "$before" ]]; then
+        record_pass "resolve/go-diff3-nonempty-base-is-real-conflict (rc=1, file untouched)"
+    else
+        record_fail "resolve/go-diff3-nonempty-base-is-real-conflict" \
+            "expected rc=1 untouched, got rc=$rc, file: $(tr '\n' '|' < "$d/f.go")"
+    fi
+
+    # Two pure insertions (empty base section) are still an additive union.
+    cat > "$d/g.go" <<'GOEOF'
+package widget
+
+<<<<<<< HEAD
+func TestA() {}
+||||||| base
+=======
+func TestB() {}
+>>>>>>> branch
+GOEOF
+    resolve_conflict_markers_in_file "$d/g.go" 1 >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q TestA "$d/g.go" && grep -q TestB "$d/g.go"; then
+        record_pass "resolve/go-diff3-empty-base-still-unions (rc=0)"
+    else
+        record_fail "resolve/go-diff3-empty-base-still-unions" \
+            "expected rc=0 union, got rc=$rc, file: $(tr '\n' '|' < "$d/g.go")"
+    fi
+    rm -rf "$d"
+}
+
+# gofmt's diagnostic must reach the caller: an unparseable *.go union is
+# refused (rc=1) AND its first diagnostic line is printed to stderr rather
+# than discarded, so the deployer's log says why the file was refused.
+test_resolve_go_unparseable_prints_gofmt_diagnostic() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-diag.XXXXXX")"
+    write_go_conflict "$d/f.go" 'func a() {' 'func b() {'
+    local errout rc
+    errout="$(resolve_conflict_markers_in_file "$d/f.go" 1 2>&1 >/dev/null)"
+    resolve_conflict_markers_in_file "$d/f.go" 1 >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 1 && "$errout" == *"not valid Go"* && "$errout" == *"f.go"* ]]; then
+        record_pass "resolve/go-unparseable-prints-gofmt-diagnostic (rc=1, stderr names the parse error)"
+    else
+        record_fail "resolve/go-unparseable-prints-gofmt-diagnostic" \
+            "expected rc=1 and stderr containing 'not valid Go' and the path; rc=$rc stderr=[$errout]"
+    fi
+    rm -rf "$d"
+}
+
+# A missing gofmt is its own error, not a parse failure: the *.go check cannot
+# run, so the resolution is refused with rc=2 and a message that names gofmt.
+# The PATH here holds only the tools the classifier needs, minus gofmt.
+test_resolve_go_missing_gofmt_is_its_own_error() {
+    local d bin t p; d="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-nogofmt.XXXXXX")"
+    bin="$d/bin"; mkdir -p "$bin"
+    for t in awk mktemp rm mv head cat tr dirname; do
+        p="$(command -v "$t" 2>/dev/null)" && [[ -n "$p" && "$p" == /* ]] && ln -s "$p" "$bin/$t"
+    done
+    write_go_conflict "$d/f.go" 'func TestA() {}' 'func TestB() {}'
+    local before errout rc
+    before="$(cat "$d/f.go")"
+    errout="$( ( PATH="$bin"; hash -r; resolve_conflict_markers_in_file "$d/f.go" 1 ) 2>&1 >/dev/null )"
+    ( PATH="$bin"; hash -r; resolve_conflict_markers_in_file "$d/f.go" 1 ) >/dev/null 2>&1; rc=$?
+    if [[ $rc -eq 2 && "$errout" == *"gofmt not found"* && "$(cat "$d/f.go")" == "$before" ]]; then
+        record_pass "resolve/go-missing-gofmt-is-its-own-error (rc=2, 'gofmt not found', file untouched)"
+    else
+        record_fail "resolve/go-missing-gofmt-is-its-own-error" \
+            "expected rc=2 with 'gofmt not found' and the file untouched; rc=$rc stderr=[$errout]"
+    fi
+    rm -rf "$d"
+}
+
 # Bead-required case 4 (dynamic half): confirm --force-with-lease (not
 # --force) is what's actually invoked, by proving the lease's staleness
 # protection is live — a concurrent push to the remote after our clone must
@@ -899,6 +1237,13 @@ run_all() {
     test_bounded_rebase_trivial_conflict_resolves_and_succeeds
     test_bounded_rebase_real_conflict_refused_untouched
     test_bounded_rebase_additive_both_invalid_go_never_certified
+    test_bounded_rebase_same_line_rewritten_both_sides_refused
+    test_bounded_rebase_same_named_top_level_func_both_sides_refused
+    test_bounded_rebase_distinct_additive_go_tests_still_resolve
+    test_resolve_go_duplicate_top_level_declaration
+    test_resolve_go_diff3_nonempty_base_is_real_conflict
+    test_resolve_go_unparseable_prints_gofmt_diagnostic
+    test_resolve_go_missing_gofmt_is_its_own_error
     test_bounded_rebase_stale_lease_returns_13
     test_bounded_rebase_restricted_fetch_refspec_still_pushes
 
