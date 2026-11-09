@@ -217,10 +217,11 @@ jobs:
       - name: Audit dated waivers in strict mode
         run: scripts/waiver-clock-audit
 
-  # ga-hd99jq D5: consumers must read this job's conclusion, never the
-  # workflow-level conclusion -- GitHub still reports Nightly as successful
-  # even when a scheduled job silently fails, so this always-run aggregate
-  # is the only signal the red-streak monitor can trust.
+  # ga-hd99jq D5: consumers must read this job's conclusion, not the
+  # workflow-level conclusion. A skipped or cancelled job does not reliably
+  # turn the run red, so this always-run aggregate -- which fails on any
+  # result other than success -- is the one signal the red-streak monitor
+  # can trust.
   nightly-summary:
     name: Nightly summary
     needs:

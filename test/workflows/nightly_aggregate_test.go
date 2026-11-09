@@ -93,8 +93,12 @@ func TestNightlyAggregateFailsForEveryNonSuccessDependency(t *testing.T) {
 	}
 
 	for _, dependency := range append([]string(nil), summary.Needs...) {
-		for _, conclusion := range []string{"failure", "canceled", "skipped"} {
-			t.Run(dependency+"/"+conclusion, func(t *testing.T) {
+		for _, conclusion := range []string{"failure", "cancelled", "skipped", ""} { //nolint:misspell // GitHub needs.<job>.result wire spelling
+			name := conclusion
+			if name == "" {
+				name = "empty"
+			}
+			t.Run(dependency+"/"+name, func(t *testing.T) {
 				env := make(map[string]string, len(allSuccess))
 				for key, value := range allSuccess {
 					env[key] = value
