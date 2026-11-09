@@ -453,6 +453,11 @@ jobs:
         with:
           base-sha: ${{ needs.rbe.outputs.base-sha }}
 
+      # dist_in_sync_test is content-only; this reads the git index modes.
+      - name: dashboard dist file modes
+        if: matrix.lane == 'unit'
+        run: scripts/check-dashboard-dist-modes.sh
+
       # worker-env (tools/rbe/worker-env-drift): rbe-west's schedulers match
       # the worker-env pin exactly, and pool workers serve the default
       # branch's pin only. A change that moves the pin can't run remotely
