@@ -4570,8 +4570,16 @@ gc session
 Attach to a running session or resume a suspended one.
 
 If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
-using the provider's resume mechanism (if supported) or restarts.
+If the session is not running while the city's controller runs,
+asks the controller to start it (as "gc session wake" does), waits
+up to --wait-timeout for it to run, then attaches; the runtime is
+never started from this process. With no controller running, a
+suspended session or one whose tmux session died is resumed here
+using the provider's resume mechanism (if supported) or restarted.
+
+With --no-start, attach only to a running session: a session that
+is not running is neither woken nor started, and attach exits
+non-zero.
 
 A session still waiting for the reconciler to start it, in a city
 registered with the supervisor while neither the supervisor nor the
@@ -4581,8 +4589,13 @@ then attach once the session runs.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session attach <session-id-or-alias>
+gc session attach <session-id-or-alias> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-start` | bool |  | attach only if the session is running; never start or wake it |
+| `--wait-timeout` | duration | `2m0s` | max time to wait for the controller to start a stopped session before attaching |
 
 ## gc session close
 

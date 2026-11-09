@@ -1769,14 +1769,23 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 
 // newSessionAttachCmd creates the "gc session attach <id-or-alias>" command.
 func newSessionAttachCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	opts := sessionAttachOpts{waitTimeout: defaultSessionNewWaitTimeout}
+	cmd := &cobra.Command{
 		Use:   "attach <session-id-or-alias>",
 		Short: "Attach to (or resume) a chat session",
 		Long: `Attach to a running session or resume a suspended one.
 
 If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
-using the provider's resume mechanism (if supported) or restarts.
+If the session is not running while the city's controller runs,
+asks the controller to start it (as "gc session wake" does), waits
+up to --wait-timeout for it to run, then attaches; the runtime is
+never started from this process. With no controller running, a
+suspended session or one whose tmux session died is resumed here
+using the provider's resume mechanism (if supported) or restarted.
+
+With --no-start, attach only to a running session: a session that
+is not running is neither woken nor started, and attach exits
+non-zero.
 
 A session still waiting for the reconciler to start it, in a city
 registered with the supervisor while neither the supervisor nor the
@@ -1786,17 +1795,33 @@ then attach once the session runs.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionAttach(args, stdout, stderr) != 0 {
+			if cmdSessionAttachWith(args, opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&opts.noStart, "no-start", false, "attach only if the session is running; never start or wake it")
+	cmd.Flags().DurationVar(&opts.waitTimeout, "wait-timeout", defaultSessionNewWaitTimeout, "max time to wait for the controller to start a stopped session before attaching")
+	return cmd
 }
 
-// cmdSessionAttach is the CLI entry point for "gc session attach".
+// sessionAttachOpts are the flags of "gc session attach".
+type sessionAttachOpts struct {
+	// noStart refuses a session that is not running instead of starting it.
+	noStart bool
+	// waitTimeout bounds the wait for a controller to start the session.
+	waitTimeout time.Duration
+}
+
+// cmdSessionAttach is "gc session attach" with its default flags.
 func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
+	return cmdSessionAttachWith(args, sessionAttachOpts{waitTimeout: defaultSessionNewWaitTimeout}, stdout, stderr)
+}
+
+// cmdSessionAttachWith is the CLI entry point for "gc session attach".
+func cmdSessionAttachWith(args []string, opts sessionAttachOpts, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1848,6 +1873,46 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	} else if awaits {
 		noteNotAttachingUntilSupervisor(stderr, info)
 		return 1
+	}
+	// attachRunning attaches through a runtime-only worker handle, which
+	// attaches only while the runtime runs and never starts it.
+	attachRunning := func() int {
+		runtimeHandle, err := runtimeWorkerHandleWithConfig(cityPath, sessStore, sp, cfg, info.SessionName, info.Provider, info.Transport, nil)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
+		if err := runtimeHandle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
+			fmt.Fprintf(stderr, "gc session attach: attaching to session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+	// A viewer never owns a runtime's lifetime: while the city's controller
+	// runs, a session that is not running is woken as gc session wake and
+	// the API's wake do, and started by the controller, never from this
+	// process. --no-start starts nothing at all.
+	if !sp.IsRunning(info.SessionName) {
+		switch {
+		case opts.noStart:
+			fmt.Fprintf(stderr, "gc session attach: session %s is not running (state %q); not starting it (--no-start)\n", sessionID, info.MetadataState) //nolint:errcheck // best-effort stderr
+			return 1
+		case controllerAlive(cityPath) != 0:
+			fmt.Fprintf(stdout, "Session %s is not running; asking the controller to start it...\n", sessionID) //nolint:errcheck // best-effort stdout
+			if cmdSessionWake([]string{sessionID}, "", stdout, stderr, false) != 0 {
+				fmt.Fprintf(stderr, "gc session attach: session %s was not woken; not attaching\n", sessionID) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
+			if err := waitForSession(sp, info.SessionName, opts.waitTimeout, sessionFrontDoor(sessStore), sessionID, stderr); err != nil {
+				fmt.Fprintf(stderr, "gc session attach: waiting for the controller to start session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			return attachRunning()
+		}
+	} else if opts.noStart {
+		return attachRunning()
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
