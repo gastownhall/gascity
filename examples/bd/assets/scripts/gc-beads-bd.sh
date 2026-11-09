@@ -346,10 +346,12 @@ tcp_check() {
 # can KILL it the moment the command exits: it inherits every caller
 # descriptor above 2 (op_start's fd 9 lock) and must not outlive the call.
 # The stopper in front of it in the pipeline blocks writing into the pipe
-# until the sleep exits, then TERMs the command if it is still running. No
-# step depends on a process acting on a signal it traps: on macOS a watchdog
-# subshell that trapped the caller's TERM sometimes stayed blocked on its
-# sleep for the whole timeout.
+# until the sleep exits, then TERMs the command if it is still running. The
+# stopper holds those descriptors too: `wait` on the pipeline's pid waits for
+# both of its processes (bash and dash alike), so neither outlives the call.
+# No step depends on a process acting on a signal it traps: on macOS a
+# watchdog subshell that trapped the caller's TERM sometimes stayed blocked on
+# its sleep for the whole timeout.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift

@@ -806,8 +806,8 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 	defer timer.Stop()
 	// The first time the harness goes runWithTimeoutStallSnapshotAfter
 	// without printing a line, record its process group: which of the
-	// caller, the command, the watchdog and its sleep are still there shows
-	// where a stalled call is stuck.
+	// caller, the command, the stopper and the timer's sleep are still there
+	// shows where a stalled call is stuck.
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	var stallSnapshot string
@@ -864,9 +864,9 @@ const runWithTimeoutStallSnapshotAfter = 5 * time.Second
 // group pgid to empty after the harness exits. The kernel can still count a
 // member that has exited but is not fully torn down (seen on macOS runners,
 // #8984), so a single kill(-pgid, 0) right after the harness exits races the
-// last child's exit. The grace stays well under the shortest sleep a
-// run_with_timeout watchdog arms in these tests (1s), so a leaked watchdog or
-// sleep still outlives it and fails the check.
+// last child's exit. The grace stays well under the shortest timeout a
+// run_with_timeout call arms in these tests (1s), so a leaked timer sleep, or
+// a stopper still blocked on one, outlives it and fails the check.
 const processGroupGoneGrace = 750 * time.Millisecond
 
 // expectProcessGroupGone fails when any process of group pgid still runs:
@@ -924,16 +924,15 @@ func processGroupMembers(t *testing.T, pgid int) string {
 // after the caller's TERM.
 const instantCommandsWatchdogTimeout = 30 * time.Second
 
-// instantCommandsSlowCall is the longest one call may take. Runner slowness
-// does not come near it (the slowest passing macOS runs averaged about 70ms
-// a call), while a call that waited out its watchdog takes the full
-// instantCommandsWatchdogTimeout.
+// instantCommandsSlowCall is the longest one call may take. A call that
+// returns when its command exits takes milliseconds even on a loaded macOS
+// runner (1-5ms in the cmd/gc process shards), while a call that waits out
+// its timer takes the full instantCommandsWatchdogTimeout.
 const instantCommandsSlowCall = instantCommandsWatchdogTimeout / 3
 
-// instantCommandsBudget bounds the whole 200-call harness. macOS runners
-// running a full cmd/gc process shard have taken over 16s for the 200 calls
-// (about 0.3s on Linux) with no single call near its watchdog timeout, so the
-// budget only bounds a hang; the per-call check is what catches a stall.
+// instantCommandsBudget bounds the whole 200-call harness, which takes about
+// a second or less when no call stalls. It only bounds a hang; the per-call
+// check is what catches a stall.
 const instantCommandsBudget = 60 * time.Second
 
 // markRunWithTimeoutSteps makes run_with_timeout report on stderr when it
@@ -970,7 +969,7 @@ done
 		}
 		for i, gap := range run.lineGaps {
 			if gap >= instantCommandsSlowCall {
-				t.Errorf("call %d took %s, at least %s with a %s watchdog timeout: run_with_timeout waited on its watchdog after the command exited (slowest: %s)",
+				t.Errorf("call %d took %s, at least %s with a %s timeout: run_with_timeout waited out its timer after the command exited (slowest: %s)",
 					i+1, gap.Round(time.Millisecond), instantCommandsSlowCall, instantCommandsWatchdogTimeout, slowestLineGaps(run.lineGaps, 5))
 			}
 		}
