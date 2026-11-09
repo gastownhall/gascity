@@ -46,6 +46,7 @@ go_test(
         "process_env_projection_test.go",
         "readiness_test.go",
         "readiness_unix_test.go",
+        "seam_presence_test.go",
         "seams_test.go",
         "testenv_import_test.go",
         "v2_conformance_test.go",

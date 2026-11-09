@@ -133,6 +133,56 @@ func checkStopDeadServer(sp runtime.Provider) error {
 	return nil
 }
 
+// missingInputSessionName is the session the RUNTIME-CONTRACT-019 cases
+// drive. No fixture ever starts it, so on a responsive provider it is a
+// session the runtime can tell is absent.
+const missingInputSessionName = "never-started-input-contract-session"
+
+// missingSessionInput is one driving call RUNTIME-CONTRACT-019 covers.
+type missingSessionInput struct {
+	name string
+	send func(runtime.Provider, string) error
+}
+
+// missingSessionInputs are the driving calls whose nil answer a caller
+// reads as delivered.
+var missingSessionInputs = []missingSessionInput{
+	{"Nudge", func(sp runtime.Provider, name string) error { return sp.Nudge(name, runtime.TextContent("hello")) }},
+	{"SendKeys", func(sp runtime.Provider, name string) error { return sp.SendKeys(name, "Enter") }},
+	{"Interrupt", func(sp runtime.Provider, name string) error { return sp.Interrupt(name) }},
+}
+
+// RunMissingSessionInputContract runs the RUNTIME-CONTRACT-019 cases against
+// providers from newProvider, each responsive and holding no session named
+// missingInputSessionName: Nudge, SendKeys and Interrupt to that session
+// return an error wrapping [runtime.ErrSessionNotFound], never the nil a
+// caller reads as delivered. The contract is scoped to the exec (RPP)
+// provider: the generic seam adapter still answers nil for the other
+// providers, which RunSessionTests allows.
+func RunMissingSessionInputContract(t *testing.T, newProvider func(t *testing.T) runtime.Provider) {
+	t.Helper()
+	for _, in := range missingSessionInputs {
+		t.Run("MissingSessionInput_"+in.name+"IsNotDelivered", func(t *testing.T) {
+			if err := checkMissingSessionInput(newProvider(t), in); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// checkMissingSessionInput reports how sp breaks RUNTIME-CONTRACT-019 for
+// in, or nil when it keeps the contract.
+func checkMissingSessionInput(sp runtime.Provider, in missingSessionInput) error {
+	err := in.send(sp, missingInputSessionName)
+	if err == nil {
+		return fmt.Errorf("runtime contract 019: %s to a missing session of a responsive provider = nil, want runtime.ErrSessionNotFound: nil reads as delivered", in.name)
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		return fmt.Errorf("runtime contract 019: %s to a missing session of a responsive provider = %w, want an error wrapping runtime.ErrSessionNotFound", in.name, err)
+	}
+	return nil
+}
+
 // RunIdleWaitContractTests runs the RUNTIME-CONTRACT-016 cases: a wait is
 // bounded by its timeout, a timeout after a busy reading is the timeout alone,
 // and a timeout with no busy reading wraps [runtime.ErrWaitUnobserved].
