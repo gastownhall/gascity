@@ -24,6 +24,12 @@ import (
 // never mask a real reap failure, and short enough to self-clear.
 const fixtureLifetimeSeconds = 300
 
+// pidFileWait is how long waitForPIDFile waits for a scripted run body to
+// record its pid. It is a constant, not a parameter, because every caller
+// wants the same generous bound (nogo's unparam rejects a parameter that never
+// varies).
+const pidFileWait = 30 * time.Second
+
 // reapFixture builds a repo-shaped environment for driving
 // scripts/test-go-test-shard with a fake `go` whose run phase is scripted by
 // the caller. It mirrors newGoTestShardFixture's shape (fake bin dir ahead of
@@ -171,9 +177,9 @@ func waitWithin(t *testing.T, cmd *exec.Cmd, within time.Duration) error {
 
 // waitForPIDFile blocks until the scripted run body has recorded the PID of
 // the descendant it spawned, so the test signals only after the tree exists.
-func waitForPIDFile(t *testing.T, path string, within time.Duration) int {
+func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	deadline := time.Now().Add(pidFileWait)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
@@ -184,7 +190,7 @@ func waitForPIDFile(t *testing.T, path string, within time.Duration) int {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("descendant never recorded its pid at %s within %s", path, within)
+	t.Fatalf("descendant never recorded its pid at %s within %s", path, pidFileWait)
 	return 0
 }
 
@@ -226,7 +232,7 @@ exec sleep %d
 `, pidFile, fixtureLifetimeSeconds))
 
 	cmd := fixture.start(t)
-	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
+	descendant := waitForPIDFile(t, pidFile)
 
 	// Kill only the runner, the way a dead driver, a closed session, or a
 	// killed parent chain does. Its descendants must not survive it.
@@ -264,7 +270,7 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 		"GO_TEST_TIMEOUT=2s",
 		"GO_TEST_WATCHDOG_GRACE=2s",
 	)
-	wedged := waitForPIDFile(t, pidFile, 30*time.Second)
+	wedged := waitForPIDFile(t, pidFile)
 
 	err := waitWithin(t, cmd, 90*time.Second)
 	elapsed := time.Since(start)
@@ -303,6 +309,41 @@ func processGroupOf(t *testing.T, pid int) int {
 	return pgid
 }
 
+// sigQuitCaught reports whether the process pid has a handler installed for
+// SIGQUIT, read from the SigCgt mask in /proc/<pid>/status (SIGQUIT is signal
+// 3, so bit 0x4). known is false where /proc does not exist (macOS), in which
+// case the caller falls back to the behavioral assertions alone.
+//
+// This is the direct, discriminating check on the job leader: a signaled
+// process that merely happens to exit is not evidence it had a disposition,
+// but a missing SigCgt bit is evidence it would core dump. SigIgn is checked
+// too: a SIGQUIT inherited as ignored from the launching environment makes any
+// signal-based repro pass for the wrong reason, because nothing ever dies.
+func sigQuitCaught(t *testing.T, pid int) (caught, ignored, known bool) {
+	t.Helper()
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return false, false, false
+	}
+	const quitBit = 0x4
+	mask := func(field string) uint64 {
+		for _, line := range strings.Split(string(data), "\n") {
+			rest, ok := strings.CutPrefix(line, field+":")
+			if !ok {
+				continue
+			}
+			v, convErr := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+			if convErr != nil {
+				t.Fatalf("parse %s from /proc/%d/status: %v", field, pid, convErr)
+			}
+			return v
+		}
+		t.Fatalf("/proc/%d/status has no %s line:\n%s", pid, field, data)
+		return 0
+	}
+	return mask("SigCgt")&quitBit != 0, mask("SigIgn")&quitBit != 0, true
+}
+
 // TestGoTestShardTrapsQuitInsteadOfCoreDumping is the ga-5kse5n regression:
 // gc_harness_watchdog (harness-reap.sh:96) signals the *job's* process group
 // with SIGQUIT when a shard blows its deadline — gc_harness_signal_group
@@ -316,27 +357,28 @@ func processGroupOf(t *testing.T, pid int) int {
 // runtime's own goroutine dump, the only artifact that answers "which test
 // wedged." Only bash's own disposition on the way past may change.
 //
-// The runner's own exit status can't tell buggy from fixed apart: bash
-// collapses "$?" to the same 128+SIGQUIT=131 whether the job died from the
-// uncaught signal or from a trap that itself calls `exit 131`, and the
-// runner is never the job's parent for the deeper descendants either, so it
-// has no wait4()-level status for them. What does distinguish the two is
-// bash's own job-control death report — printed against the job's pid,
-// specifically, only for a job job control still under monitor mode learns
-// died from an uncaught signal, never for a clean exit — which is why this
-// asserts on that message rather than on any wait status.
+// There are two production changes and each has its own case, so reverting
+// either one turns exactly the matching case red:
+//
+//   - job-group: the job leader's `trap 'exit 131' QUIT` (harness-reap.sh).
+//     The watchdog's group-wide QUIT lands on the job leader, which must
+//     have a QUIT handler (SigCgt bit 0x4, read from /proc before signaling)
+//     and must not be reported by bash as dying from an uncaught signal.
+//   - runner: the runner's own `trap gc_shard_on_quit QUIT` (test-go-test-
+//     shard). QUIT sent to the runner alone must run the handler, which
+//     reaps the supervised job group and exits 131. Without the trap the
+//     runner never reaches that handler: it dies from the signal
+//     (ExitCode -1) or hangs mid core dump, and the job is orphaned.
+//
+// The runner's exit status alone can't tell buggy from fixed apart in the
+// job-group case: bash collapses "$?" to the same 128+SIGQUIT=131 whether the
+// job died from the uncaught signal or from a trap that itself calls
+// `exit 131`. What does distinguish the two there is bash's own job-control
+// death report — printed against the job's pid, specifically, only for a job
+// that job control learns died from an uncaught signal, never for a clean
+// exit — which is why the case asserts on that message as well as on SigCgt.
 func TestGoTestShardTrapsQuitInsteadOfCoreDumping(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
-
-	// A plain sleeping descendant is enough to resolve the job's process
-	// group (it inherits job_pgid; nothing in this chain calls setpgid) and
-	// to show whether the supervised job is reaped or orphaned afterward.
-	fixture := newReapFixture(t, fmt.Sprintf(`
-    echo $$ > %q
-    sleep %d
-`, pidFile, fixtureLifetimeSeconds))
-
-	// Force RLIMIT_CORE=0 for the fixture process this test spawns so a
+	// Force RLIMIT_CORE=0 for the fixture processes this test spawns so a
 	// pre-fix run cannot leave a real core file or a coredumpctl entry
 	// behind — the very artifact this bug exists to drive to zero. Bash's
 	// job-control death report (asserted below) reflects signal disposition
@@ -351,32 +393,83 @@ func TestGoTestShardTrapsQuitInsteadOfCoreDumping(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_CORE, &oldRlimit) })
 
-	cmd := fixture.start(t)
-	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
-	jobPgid := processGroupOf(t, descendant)
-
-	// Signal the job's process group exactly as gc_harness_watchdog does —
-	// group-wide, never the runner's own pid alone.
-	if err := syscall.Kill(-jobPgid, syscall.SIGQUIT); err != nil {
-		t.Fatalf("signal job group -%d: %v", jobPgid, err)
+	cases := []struct {
+		name string
+		// signal delivers SIGQUIT the way that case's production path does.
+		signal func(runnerPid, jobPgid int) error
+		// wantExit, when nonzero, is the exact exit status the runner must
+		// report (131 = 128+SIGQUIT from its own trap). Zero means only
+		// "failed, did not exit 0".
+		wantExit int
+	}{
+		{
+			name: "job-group",
+			// Exactly as gc_harness_watchdog does: group-wide, never the
+			// runner's own pid alone.
+			signal: func(_, jobPgid int) error { return syscall.Kill(-jobPgid, syscall.SIGQUIT) },
+		},
+		{
+			name:     "runner",
+			signal:   func(runnerPid, _ int) error { return syscall.Kill(runnerPid, syscall.SIGQUIT) },
+			wantExit: 131,
+		},
 	}
 
-	err := waitWithin(t, cmd, 20*time.Second)
-	if err == nil {
-		t.Fatalf("runner exited 0 after SIGQUIT; expected a QUIT-driven termination.\n%s", fixture.output())
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("wait runner: %v\n%s", err, fixture.output())
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "descendant.pid")
 
-	wantDeath := fmt.Sprintf("%d Quit", jobPgid)
-	if out := fixture.output(); strings.Contains(out, wantDeath) {
-		t.Fatalf("job group %d died from an uncaught QUIT instead of trapping it and exiting cleanly — this is the ga-5kse5n bash core dump.\n%s", jobPgid, out)
-	}
+			// A plain sleeping descendant is enough to resolve the job's
+			// process group (it inherits jobPgid; nothing in this chain calls
+			// setpgid) and to show whether the supervised job is reaped or
+			// orphaned afterward.
+			fixture := newReapFixture(t, fmt.Sprintf(`
+    echo $$ > %q
+    sleep %d
+`, pidFile, fixtureLifetimeSeconds))
 
-	if !processGone(descendant, 20*time.Second) {
-		t.Fatalf("descendant pid %d survived the runner's QUIT: the QUIT trap must reap the supervised job before exiting, like the other signal traps do", descendant)
+			cmd := fixture.start(t)
+			descendant := waitForPIDFile(t, pidFile)
+			jobPgid := processGroupOf(t, descendant)
+
+			// The job leader is the process whose pid is the group id. Check
+			// its disposition BEFORE signaling, so a missing handler fails
+			// here with a precise message rather than as a downstream symptom.
+			caught, ignored, known := sigQuitCaught(t, jobPgid)
+			switch {
+			case !known:
+				t.Logf("no /proc: SIGQUIT disposition not inspected on this platform")
+			case ignored:
+				t.Fatalf("job leader %d inherited SIGQUIT as ignored (SigIgn): a signal-based repro would pass for the wrong reason; fix the launching environment", jobPgid)
+			case !caught && tc.name == "job-group":
+				t.Fatalf("job leader %d has no SIGQUIT handler (SigCgt bit 0x4 clear): the watchdog's group QUIT will core-dump it — this is the ga-5kse5n bash core dump", jobPgid)
+			}
+
+			if err := tc.signal(cmd.Process.Pid, jobPgid); err != nil {
+				t.Fatalf("signal SIGQUIT (%s): %v", tc.name, err)
+			}
+
+			err := waitWithin(t, cmd, 20*time.Second)
+			if err == nil {
+				t.Fatalf("runner exited 0 after SIGQUIT; expected a QUIT-driven termination.\n%s", fixture.output())
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("wait runner: %v\n%s", err, fixture.output())
+			}
+			if tc.wantExit != 0 && exitErr.ExitCode() != tc.wantExit {
+				t.Fatalf("runner exit status = %d, want %d (a QUIT trap that reaps the job then `exit %d`; -1 means the runner died from the uncaught signal).\n%s", exitErr.ExitCode(), tc.wantExit, tc.wantExit, fixture.output())
+			}
+
+			wantDeath := fmt.Sprintf("%d Quit", jobPgid)
+			if out := fixture.output(); strings.Contains(out, wantDeath) {
+				t.Fatalf("job group %d died from an uncaught QUIT instead of trapping it and exiting cleanly — this is the ga-5kse5n bash core dump.\n%s", jobPgid, out)
+			}
+
+			if !processGone(descendant, 20*time.Second) {
+				t.Fatalf("descendant pid %d survived the runner's QUIT: the QUIT trap must reap the supervised job before exiting, like the other signal traps do", descendant)
+			}
+		})
 	}
 }
 
@@ -605,7 +698,7 @@ func TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe(t *testing.T) 
 	)
 	// From here on the runner's tree holds the only write ends.
 	_ = stdoutWriter.Close()
-	waitForPIDFile(t, pidFile, 30*time.Second)
+	waitForPIDFile(t, pidFile)
 
 	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal runner: %v", err)
