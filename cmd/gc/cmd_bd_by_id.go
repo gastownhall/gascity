@@ -959,9 +959,11 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 type bdByIDSubjectPositions int
 
 const (
-	// bdByIDSubjectFirst: the first positional only (`comment <id> [text...]`).
+	// bdByIDSubjectFirst: the first positional only (`comment <id> [text...]`,
+	// `dep remove <id> <depends-on-id>`, whose target bd resolves read-only).
 	bdByIDSubjectFirst bdByIDSubjectPositions = iota
-	// bdByIDSubjectFirstTwo: the first two (`dep remove <id> <depends-on-id>`).
+	// bdByIDSubjectFirstTwo: the first two (`dep unrelate <id1> <id2>`, which
+	// writes both sides).
 	bdByIDSubjectFirstTwo
 	// bdByIDSubjectEvery: every positional (`defer [id...]`).
 	bdByIDSubjectEvery
@@ -1006,26 +1008,40 @@ func (p bdByIDSubjectPositions) pick(positionals []string) []string {
 // The comment verbs take the FIRST positional only, so comment text is never
 // probed as an id. Do not move them into bdMutationWriteIDs: it returns every
 // positional, and it drives doBd's single-store write guard.
+//
+// `dep remove` (alias `rm`) is routed by its FIRST id only: bd 1.3.4 resolves
+// that one for writing (resolveIDForMutation) and the depends-on target
+// read-only, so the target may lawfully be a binding resident and an edge
+// from a work bead to it is the work store's to remove. `dep unrelate`
+// resolves both ids in the work store and removes the relates_to edge in both
+// directions, so both are subjects.
+//
+// `tag <id> <label>`, `label propagate <parent-id> <label>` and
+// `state list <issue-id>` address their first positional (bd's usage lines;
+// the pinned inventories give each no flag beyond help).
 var bdByIDSubjectTable = map[string]bdByIDSubjectPositions{
-	"comment":      bdByIDSubjectFirst,
-	"comments":     bdByIDSubjectFirst,
-	"comments add": bdByIDSubjectFirst,
-	"note":         bdByIDSubjectFirst,
-	"assign":       bdByIDSubjectFirst,
-	"priority":     bdByIDSubjectFirst,
-	"promote":      bdByIDSubjectFirst,
-	"gate resolve": bdByIDSubjectFirst,
-	"state":        bdByIDSubjectFirst,
-	"label list":   bdByIDSubjectFirst,
-	"history":      bdByIDSubjectFirst,
-	"children":     bdByIDSubjectFirst,
-	"unclaim":      bdByIDSubjectEvery,
-	"defer":        bdByIDSubjectEvery,
-	"undefer":      bdByIDSubjectEvery,
-	"dep remove":   bdByIDSubjectFirstTwo,
-	"dep unrelate": bdByIDSubjectFirstTwo,
-	"label add":    bdByIDSubjectAllButLast,
-	"label remove": bdByIDSubjectAllButLast,
+	"comment":         bdByIDSubjectFirst,
+	"comments":        bdByIDSubjectFirst,
+	"comments add":    bdByIDSubjectFirst,
+	"note":            bdByIDSubjectFirst,
+	"assign":          bdByIDSubjectFirst,
+	"priority":        bdByIDSubjectFirst,
+	"promote":         bdByIDSubjectFirst,
+	"gate resolve":    bdByIDSubjectFirst,
+	"state":           bdByIDSubjectFirst,
+	"state list":      bdByIDSubjectFirst,
+	"tag":             bdByIDSubjectFirst,
+	"label list":      bdByIDSubjectFirst,
+	"label propagate": bdByIDSubjectFirst,
+	"history":         bdByIDSubjectFirst,
+	"children":        bdByIDSubjectFirst,
+	"dep remove":      bdByIDSubjectFirst,
+	"unclaim":         bdByIDSubjectEvery,
+	"defer":           bdByIDSubjectEvery,
+	"undefer":         bdByIDSubjectEvery,
+	"dep unrelate":    bdByIDSubjectFirstTwo,
+	"label add":       bdByIDSubjectAllButLast,
+	"label remove":    bdByIDSubjectAllButLast,
 }
 
 // bdByIDCommentPaths are the subject-table verbs about comments. The binding
@@ -1124,13 +1140,26 @@ func bdByIDResolveTableArgv(inv *bdflags.Inventory, bdArgs []string) (string, []
 }
 
 // refuseClassOwnedTableTarget refuses a subject-table verb on a bead the class
-// binding holds. The comment verbs say why no spelling of them can be served
-// and name the one that records a note.
+// binding holds. The comment verbs say why no spelling of them can be served.
+// The writing ones name the one spelling that records a note without
+// overwriting anything — a NEW metadata key — and warn off --description,
+// which in the binding replaces the description rather than appending to it
+// (an agent told to "record the note" there would erase the bead's
+// description). The listing one says there is nothing to list.
+//
+// The work store is described as not holding the LIVE bead: a migrated relic
+// keeps a frozen pre-migration copy there, so "does not hold the bead" would
+// be false.
 func refuseClassOwnedTableTarget(door bdByIDClassDoor, path, id string, stderr io.Writer) (int, bool) {
 	if !bdByIDCommentPaths[path] {
 		return refuseClassOwnedTarget(door, path, id, "", stderr)
 	}
-	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, which %s, so `gc bd %s` is not served; refusing rather than running it against the work store, which does not hold the bead — record the note with `gc bd update %s --description ...` or `--set-metadata`\n", id, door.bindingName(), bdByIDNoCommentStorage, path, id) //nolint:errcheck // best-effort stderr
+	const workStore = "the work store, which does not hold the live bead (any copy there is a frozen pre-migration copy)"
+	if path == "comments" {
+		fmt.Fprintf(stderr, "gc bd: %s is owned by %s, which %s, so there are no comments to list; refusing rather than running `gc bd %s` against %s\n", id, door.bindingName(), bdByIDNoCommentStorage, path, workStore) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, which %s, so `gc bd %s` is not served; refusing rather than running it against %s — record the note under a new metadata key, which overwrites nothing: `gc bd update %s --set-metadata <new-key>=<text>`. Do not use --description to record a note: it replaces the bead's description\n", id, door.bindingName(), bdByIDNoCommentStorage, path, workStore, id) //nolint:errcheck // best-effort stderr
 	return 1, true
 }
 
@@ -1385,7 +1414,7 @@ func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
 // (bdArgsAddressedClassIDs) plus whatever the mutation or by-ID read scanner
 // (bdByIDMutationSubjects, bdByIDReadSubjects) could reduce to subjects.
 // Probing every addressed id, not just the first, is what makes a
-// multi-subject `dep add`/`dep remove` — or `show <id> <id>` — order-independent:
+// multi-subject `dep add` — or `show <id> <id>` — order-independent:
 // an argv whose first id is a clean miss and whose LATER id is class-resident is
 // refused on the later id rather than falling through on the first miss.
 //
@@ -1393,6 +1422,10 @@ func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
 // the failure being prevented: `show <work-id> <class-id>` answered by bd prints
 // the class leg from the copy the migration left in the work store. Each id read
 // on its own, in a served spelling, is answered from its owner.
+//
+// A subject-table verb (bdByIDSubjectTable) is the exception: its candidates
+// are its subject positions only, so a `dep remove` target or an id in
+// comment text is not a candidate, whatever its prefix.
 //
 // What stays outside this net (ga-zvetw) is an all-work-prefix argv the
 // scanners cannot reduce to subjects — a verb that is neither a write mutation

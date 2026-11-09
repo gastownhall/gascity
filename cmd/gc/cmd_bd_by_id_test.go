@@ -2403,14 +2403,20 @@ func TestBdByIDFallThroughVerbsOnResidentAreRefused(t *testing.T) {
 		{[]string{"defer", relic.ID, "--until", "tomorrow"}, "defer"},
 		{[]string{"undefer", relic.ID}, "undefer"},
 		{[]string{"promote", relic.ID}, "promote"},
-		{[]string{"dep", "remove", normal.ID, relic.ID}, "dep remove"},
+		{[]string{"dep", "remove", relic.ID, normal.ID}, "dep remove"},
 		{[]string{"dep", "rm", relic.ID, normal.ID}, "dep remove"},
+		// unrelate resolves and writes BOTH sides (bd removes the relates_to
+		// edge in each direction), so either position decides.
 		{[]string{"dep", "unrelate", relic.ID, normal.ID}, "dep unrelate"},
+		{[]string{"dep", "unrelate", normal.ID, relic.ID}, "dep unrelate"},
 		{[]string{"gate", "resolve", relic.ID}, "gate resolve"},
 		{[]string{"label", "add", normal.ID, relic.ID, "urgent"}, "label add"},
 		{[]string{"label", "remove", relic.ID, "urgent"}, "label remove"},
 		{[]string{"label", "list", relic.ID}, "label list"},
+		{[]string{"label", "propagate", relic.ID, "branch:x"}, "label propagate"},
+		{[]string{"tag", relic.ID, "urgent"}, "tag"},
 		{[]string{"state", relic.ID, "health"}, "state"},
+		{[]string{"state", "list", relic.ID}, "state list"},
 		{[]string{"history", relic.ID}, "history"},
 		{[]string{"children", relic.ID}, "children"},
 		{[]string{"--json", "comments", relic.ID}, "comments"},
@@ -2441,6 +2447,88 @@ func TestBdByIDFallThroughVerbsOnResidentAreRefused(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code, handled := maybeRouteBdByID(cityPath, "", control, &stdout, &stderr); handled {
 				t.Errorf("%v on a work bead was taken here (exit %d): %s%s", control, code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDDepRemoveRoutesOnItsSourceOnly: bd 1.3.4 resolves only the FIRST
+// id of `dep remove` for writing (resolveIDForMutation); the second is the
+// dependency target, resolved read-only, and it may lawfully live in the
+// binding. So an edge FROM a work bead TO a binding resident is the work
+// store's to remove, and the door must pass it through — the remedy several
+// gc refusals print (`gc bd dep remove <waiting> <running>`) is that shape.
+func TestBdByIDDepRemoveRoutesOnItsSourceOnly(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	resident := mustCreateClassBead(t, classStore, beads.Bead{Title: "a reserved class resident", Type: "task"})
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+	normal, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	for _, args := range [][]string{
+		{"dep", "remove", normal.ID, relic.ID},
+		{"dep", "rm", normal.ID, relic.ID},
+		{"dep", "remove", normal.ID, resident.ID},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if got, ok := bdByIDTableSubjects(args); !ok || !slices.Equal(got.subjects, []string{normal.ID}) {
+				t.Errorf("bdByIDTableSubjects(%v) = %+v, %t; want the one subject %s", args, got, ok, normal.ID)
+			}
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Errorf("%v was taken by the door for its dependency TARGET (exit %d): %s", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDCommentRefusalNamesOnlyANonDestructiveNote: the binding stores no
+// comments, and its update replaces a description rather than appending to
+// it. The refusal must not send an agent (mol-polecat-base drives agents to
+// comment) to `--description`, which would overwrite the bead's description;
+// it names a NEW metadata key, says --description replaces, and does not
+// claim the work store holds no copy at all (a migrated relic keeps a frozen
+// pre-migration copy there). The list verb records nothing, so its refusal
+// says there are no comments to list.
+func TestBdByIDCommentRefusalNamesOnlyANonDestructiveNote(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+	for _, tc := range []struct {
+		args       []string
+		want, deny []string
+	}{
+		{
+			args: []string{"comments", "add", relic.ID, "a note"},
+			want: []string{"`gc bd update " + relic.ID + " --set-metadata <new-key>=<text>`", "replaces", "not hold the live bead"},
+			deny: []string{"--description ...", "which does not hold the bead"},
+		},
+		{
+			args: []string{"comment", relic.ID, "a note"},
+			want: []string{"`gc bd update " + relic.ID + " --set-metadata <new-key>=<text>`", "replaces", "not hold the live bead"},
+			deny: []string{"--description ...", "which does not hold the bead"},
+		},
+		{
+			args: []string{"comments", relic.ID},
+			want: []string{"no comments to list", "not hold the live bead"},
+			deny: []string{"record the note", "--description", "which does not hold the bead"},
+		},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
+			if !handled || code == 0 {
+				t.Fatalf("%v was not refused (handled=%t, exit %d)", tc.args, handled, code)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("the refusal does not say %q: %q", want, stderr.String())
+				}
+			}
+			for _, deny := range tc.deny {
+				if strings.Contains(stderr.String(), deny) {
+					t.Errorf("the refusal says %q: %q", deny, stderr.String())
+				}
 			}
 		})
 	}
