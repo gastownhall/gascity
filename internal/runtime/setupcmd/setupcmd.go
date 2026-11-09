@@ -49,6 +49,10 @@ type Options struct {
 	// not exist yet — a pre_start often creates it. Empty leaves the command
 	// in the caller's working directory.
 	FallbackDir string
+	// Clock is the activity-aware budget's time source; nil means the real
+	// clock. Tests inject one to drive the idle window deterministically. The
+	// fixed deadline always runs on real time.
+	Clock execgrace.Clock
 }
 
 // Run executes command with `sh -c` under opts' budget. The command's
@@ -78,7 +82,7 @@ func Run(ctx context.Context, command string, env map[string]string, opts Option
 	if opts.MaxTimeout > 0 {
 		idle, grace = opts.Timeout, cancelGrace
 	}
-	mon := execgrace.NewMonitor(ctx, idle, opts.MaxTimeout)
+	mon := execgrace.NewMonitorWithClock(ctx, idle, opts.MaxTimeout, opts.Clock)
 	defer mon.Stop()
 	runCtx := mon.Context()
 	if !mon.Enabled() {
@@ -130,11 +134,14 @@ func workDir(env map[string]string, fallback string) string {
 
 // outputTail is a bounded io.Writer over a command's output. It retains
 // [runtime.OutputTailRetention] bytes rather than limit so redaction runs on
-// whole values before the reported window is cut out of them.
+// whole values before the reported window is cut out of them. Once it has
+// discarded output, what it retains can begin inside a credential, so render
+// strips that first ([runtime.TrimDecapitatedSecret]).
 type outputTail struct {
-	limit  int
-	retain int
-	buf    []byte
+	limit   int
+	retain  int
+	written int
+	buf     []byte
 }
 
 func newOutputTail(limit int) *outputTail {
@@ -142,6 +149,7 @@ func newOutputTail(limit int) *outputTail {
 }
 
 func (b *outputTail) Write(p []byte) (int, error) {
+	b.written += len(p)
 	if len(p) >= b.retain {
 		b.buf = append(b.buf[:0], p[len(p)-b.retain:]...)
 		return len(p), nil
@@ -156,6 +164,10 @@ func (b *outputTail) Write(p []byte) (int, error) {
 
 // render returns the last limit bytes with secrets scrubbed, trimmed.
 func (b *outputTail) render(secrets []string) string {
-	text, _ := runtime.RedactSecretsTail(string(b.buf), b.limit, secrets)
+	text := string(b.buf)
+	if b.written > len(b.buf) {
+		text = runtime.TrimDecapitatedSecret(text, secrets)
+	}
+	text, _ = runtime.RedactSecretsTail(text, b.limit, secrets)
 	return strings.TrimSpace(text)
 }

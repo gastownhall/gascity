@@ -184,6 +184,86 @@ func TestRedactSecretsTailRedactsBeforeTruncating(t *testing.T) {
 	}
 }
 
+// TestTrimDecapitatedSecretCutsTheSurvivingTail pins what a bounded writer owes
+// once it has discarded output: what it kept can begin with the tail of a
+// credential whose head is gone, that tail matches nothing, and redaction alone
+// prints it as soon as shrinking the rest pulls the reported window back to it.
+func TestTrimDecapitatedSecretCutsTheSurvivingTail(t *testing.T) {
+	const after = "\ncurl: (22) 401"
+	text := sentinel[10:] + after
+
+	// The counterfactual, asserted rather than described.
+	if got := RedactSecrets(text, []string{sentinel}); !strings.Contains(got, "CREDENTIAL") {
+		t.Fatal("redaction already removes the fixture's fragment, so the trim is untested here")
+	}
+
+	if got := TrimDecapitatedSecret(text, []string{sentinel}); got != after {
+		t.Errorf("TrimDecapitatedSecret = %q, want %q", got, after)
+	}
+	// The controls: the cut is only ever a secret's suffix. Text that begins
+	// with none is left whole, and so is the suffix of a value below the
+	// substitution floor, which redaction leaves legible anyway; at the floor
+	// the same shape is cut, so the second case is about length.
+	for _, tc := range []struct {
+		text, secret, want string
+	}{
+		{text: "curl: (22) 401", secret: sentinel, want: "curl: (22) 401"},
+		{text: "efg: id", secret: "abcdefg", want: "efg: id"},
+		{text: "fgh: id", secret: "abcdefgh", want: ": id"},
+	} {
+		if got := TrimDecapitatedSecret(tc.text, []string{tc.secret}); got != tc.want {
+			t.Errorf("TrimDecapitatedSecret(%q, %q) = %q, want %q", tc.text, tc.secret, got, tc.want)
+		}
+	}
+}
+
+// TestTrimDecapitatedSecretCutsTheLongestTail pins the choice between secrets:
+// which value lost its head is unknowable, so the longest suffix any of them
+// offers goes, whichever order the secrets arrive in (they come off a map
+// range).
+func TestTrimDecapitatedSecretCutsTheLongestTail(t *testing.T) {
+	const base = "inst-8f3a21c0"
+	const derived = base + "-worker-3"
+	// Both a two-byte suffix of base and an eleven-byte suffix of derived
+	// begin the text.
+	const text = "c0-worker-3 rejected"
+
+	for _, order := range [][]string{{base, derived}, {derived, base}} {
+		if got, want := TrimDecapitatedSecret(text, order), " rejected"; got != want {
+			t.Errorf("TrimDecapitatedSecret(%q order) = %q, want %q", order, got, want)
+		}
+	}
+}
+
+// TestTrimDecapitatedSecretKeepsWholeValuesWhole pins the cut's second half. A
+// value whose last bytes repeat its first offers a suffix that each of its
+// whole occurrences begins with, so kept bytes that happen to begin on a whole
+// occurrence look decapitated too. Cutting that suffix alone would take the
+// value's head itself, and redaction would then miss the rest. PEM blocks open
+// and close with dashes.
+func TestTrimDecapitatedSecretKeepsWholeValuesWhole(t *testing.T) {
+	const body = "Tk9ULUEtUkVBTC1LRVktTUFURVJJQUw="
+	const pem = "-----BEGIN TEST KEY-----\n" + body + "\n-----END TEST KEY-----"
+	const after = "\ncurl: (22) 401"
+	text := pem + after
+
+	// The counterfactual: the dashes alone are a matching suffix, and cutting
+	// just them leaves the body for redaction to miss.
+	if got := RedactSecrets(text[len("-----"):], []string{pem}); !strings.Contains(got, body) {
+		t.Fatal("the fixture does not repeat its first bytes at its end, so the extension is untested here")
+	}
+
+	got := RedactSecrets(TrimDecapitatedSecret(text, []string{pem}), []string{pem})
+	if strings.Contains(got, body) || strings.Contains(got, "BEGIN") {
+		t.Errorf("the trim decapitated a whole value, which then survived redaction: %q", got)
+	}
+	// The control: the text after the value survives, so the assertion above
+	// is not passing on a trim that swallowed everything.
+	if got != after {
+		t.Errorf("TrimDecapitatedSecret then RedactSecrets = %q, want %q", got, after)
+	}
+}
+
 // TestSetupCommandSecretsCoversBothEnvironments pins that the set spans the
 // session env the caller assembled AND this process's own. Every setup-command
 // runner builds its child env as os.Environ() plus the overlay, so a command

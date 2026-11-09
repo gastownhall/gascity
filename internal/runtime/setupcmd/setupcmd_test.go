@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,12 @@ import (
 // sentinel stands in for a credential. It is synthetic; no real value belongs in
 // a test.
 const sentinel = "sk-test-NOT-A-REAL-CREDENTIAL-8f3a21"
+
+// jwtSignature ends jwt: the part that leaks when the head is dropped.
+const jwtSignature = ".SIGNATURE-NOT-A-REAL-CREDENTIAL"
+
+// jwt has a service-account JWT's shape and order of magnitude (~1.5KB).
+var jwt = "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph", 40) + jwtSignature
 
 // fixed is the historical single-deadline budget: no ceiling, so Timeout is a
 // wall-clock deadline.
@@ -223,17 +230,6 @@ func TestRunFixedTimeoutCauseIsDeadlineExceeded(t *testing.T) {
 	}
 }
 
-// TestRunIdleBudgetToleratesSteadyOutput pins the activity-aware budget: with
-// a ceiling set, Timeout bounds output silence, so a command that keeps
-// producing output may run past it.
-func TestRunIdleBudgetToleratesSteadyOutput(t *testing.T) {
-	err := Run(context.Background(), "for i in 1 2 3 4 5 6 7 8; do echo tick; sleep 0.1; done",
-		nil, Options{Timeout: 500 * time.Millisecond, MaxTimeout: 30 * time.Second})
-	if err != nil {
-		t.Fatalf("a command producing steady output past Timeout failed under the idle budget: %v", err)
-	}
-}
-
 // TestRunIdleBudgetCauseIsErrIdle pins that a silent command under the
 // activity-aware budget fails with a cause naming the idle budget.
 func TestRunIdleBudgetCauseIsErrIdle(t *testing.T) {
@@ -369,10 +365,6 @@ func TestOutputTailRetainsEnoughToRedact(t *testing.T) {
 // only the comfortable half of that range.
 func TestOutputTailRetainsAJWTLengthCredential(t *testing.T) {
 	const limit = 256
-	// A service-account JWT's shape and order of magnitude (~1.5KB): the part
-	// that leaks when the head is dropped is the signature at the end.
-	const signature = ".SIGNATURE-NOT-A-REAL-CREDENTIAL"
-	jwt := "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph", 40) + signature
 	if len(jwt) <= 1024 {
 		t.Fatalf("fixture is %d bytes, which the previous slack already covered", len(jwt))
 	}
@@ -385,7 +377,7 @@ func TestOutputTailRetainsAJWTLengthCredential(t *testing.T) {
 	}
 
 	got := tail.render([]string{jwt})
-	if strings.Contains(got, signature) {
+	if strings.Contains(got, jwtSignature) {
 		t.Errorf("the tail of a JWT-length credential survived the reported window: %q", got)
 	}
 	if !strings.Contains(got, runtime.RedactedValue) {
@@ -395,6 +387,106 @@ func TestOutputTailRetainsAJWTLengthCredential(t *testing.T) {
 	// assertions above.
 	if !strings.Contains(got, "curl: (22) 401") {
 		t.Errorf("the surrounding diagnostic did not survive: %q", got)
+	}
+}
+
+// echoedCredentials are outputs whose redaction shrinks them far enough to pull
+// the writer's first retained byte into the reported window: one credential
+// echoed over and over, as a `set -x` retry loop or `curl -v --retry` prints
+// it, for long enough that the writer discards output and cuts into an
+// occurrence.
+var echoedCredentials = []struct {
+	name    string
+	secret  string
+	prefix  string // printed before the credential on each line
+	repeats int
+	last    string // the command's final, credential-free output
+}{
+	{name: "short token", secret: sentinel, repeats: 500, last: "abcde"},
+	{name: "JWT-length credential", secret: jwt, prefix: "> Authorization: Bearer ", repeats: 40, last: "curl: (22) 401"},
+}
+
+// TestOutputTailNeverRendersADecapitatedCredential is the regression for a
+// bounded writer that redacts only what it kept. Each whole occurrence of an
+// echoed credential shrinks to <redacted>, the reported window reaches back to
+// the first retained byte, and that byte sits inside an occurrence whose head
+// the writer discarded: the surviving suffix matches nothing, so redaction
+// alone reports it verbatim.
+func TestOutputTailNeverRendersADecapitatedCredential(t *testing.T) {
+	for _, tc := range echoedCredentials {
+		line := tc.prefix + tc.secret + "\n"
+		output := strings.Repeat(line, tc.repeats) + tc.last
+		// Both of Write's discarding paths: one oversized write, and the
+		// rollover of many small ones.
+		for _, writes := range []struct {
+			name   string
+			chunks []string
+		}{
+			{name: "one write", chunks: []string{output}},
+			{name: "line by line", chunks: append(slices.Repeat([]string{line}, tc.repeats), tc.last)},
+		} {
+			t.Run(tc.name+"/"+writes.name, func(t *testing.T) {
+				tail := newOutputTail(outputLimit)
+				for _, chunk := range writes.chunks {
+					if _, err := tail.Write([]byte(chunk)); err != nil {
+						t.Fatalf("Write: %v", err)
+					}
+				}
+				secrets := []string{tc.secret}
+
+				// The counterfactual, asserted rather than described: redacting
+				// the retained bytes alone reports the decapitated suffix.
+				if leaked, _ := runtime.RedactSecretsTail(string(tail.buf), outputLimit, secrets); !strings.Contains(leaked, "CREDENTIAL") {
+					t.Fatal("the retained bytes do not begin inside an occurrence, so nothing is tested here")
+				}
+
+				got := tail.render(secrets)
+				if strings.Contains(got, "CREDENTIAL") {
+					t.Errorf("a decapitated credential reached the rendered tail: %.120q", got)
+				}
+				// The controls: the rest was redacted rather than dropped, the
+				// diagnostic after it survives, and both bounds still hold.
+				if !strings.Contains(got, runtime.RedactedValue) {
+					t.Errorf("nothing was redacted, so the assertion above proves nothing: %.120q", got)
+				}
+				if !strings.HasSuffix(got, tc.last) {
+					t.Errorf("the command's last output did not survive: %.120q", got)
+				}
+				if len(tail.buf) > runtime.OutputTailRetention(outputLimit) {
+					t.Errorf("writer retained %d bytes, want at most %d", len(tail.buf), runtime.OutputTailRetention(outputLimit))
+				}
+				if len(got) > outputLimit {
+					t.Errorf("render returned %d bytes, so the limit is not being applied", len(got))
+				}
+			})
+		}
+	}
+}
+
+// TestRunFailureNeverReportsADecapitatedCredential is the same regression end to
+// end: a failing setup command that echoes its credential over and over must
+// not carry any part of it into the durable error.
+func TestRunFailureNeverReportsADecapitatedCredential(t *testing.T) {
+	for _, tc := range echoedCredentials {
+		t.Run(tc.name, func(t *testing.T) {
+			command := `i=0; while [ "$i" -lt ` + strconv.Itoa(tc.repeats) + ` ]; do printf '%s%s\n' '` + tc.prefix +
+				`' "$SOME_NEW_TOKEN"; i=$((i+1)); done; printf '%s' '` + tc.last + `'; exit 1`
+			err := Run(context.Background(), command, map[string]string{"SOME_NEW_TOKEN": tc.secret}, fixed(10*time.Second))
+			if err == nil {
+				t.Fatal("a setup command exiting 1 must fail")
+			}
+			if strings.Contains(err.Error(), "CREDENTIAL") {
+				t.Errorf("a decapitated credential reached the failure: %.120q", err.Error())
+			}
+			// The controls: the command ran as scripted and its output was
+			// redacted, not lost.
+			if !strings.HasPrefix(err.Error(), "exit status 1: ") || !strings.HasSuffix(err.Error(), tc.last) {
+				t.Fatalf("the failure does not carry the command's output: %.120q", err.Error())
+			}
+			if !strings.Contains(err.Error(), runtime.RedactedValue) {
+				t.Errorf("nothing was redacted, so the assertion above proves nothing: %.120q", err.Error())
+			}
+		})
 	}
 }
 

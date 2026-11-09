@@ -15,6 +15,7 @@ go_library(
 go_test(
     name = "setupcmd_test",
     srcs = [
+        "activity_unix_test.go",
         "setupcmd_test.go",
         "testenv_import_test.go",
     ],
