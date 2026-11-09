@@ -50,6 +50,28 @@ func providerOwnedIdentityFixture(t *testing.T, prefixJSON string, prefixExit in
 	return city, marker
 }
 
+// installIdentityBootstrappedBd puts a fake `bd` first on PATH that reports an
+// issue_prefix, the way a store whose identity bootstrap ran does. Fixtures that
+// drive a fake provider script through provider-owned init use it because the
+// provider script never creates a bd store: without a bd answering
+// `config get --json issue_prefix`, the post-init identity check (ga-a7f4frg)
+// rightly refuses to journal their scope ready.
+func installIdentityBootstrappedBd(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  'config get --json issue_prefix') printf '{\"key\":\"issue_prefix\",\"value\":\"af\"}\\n' ;;\n" +
+		"  'config get --json types.custom') printf '{\"value\":\"\"}\\n' ;;\n" +
+		"  'types --json') printf '{\"core_types\":[]}\\n' ;;\n" +
+		"esac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", "")
+}
+
 // TestInitAndHookDirProviderOwnedJournalsReadyOnlyWhenBdBootstrapped pins the
 // post-init identity check (ga-a7f4frg): a provider-owned scope is journaled
 // ready only once bd reports an issue_prefix. An interrupted proxied init

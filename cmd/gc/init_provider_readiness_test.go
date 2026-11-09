@@ -2357,6 +2357,7 @@ func TestCmdInitResumePreservesPreparedExternalSelector(t *testing.T) {
 			t.Fatalf("doInit = %d: %s", code, stderr.String())
 		}
 		t.Setenv("GC_BEADS", "") // use the configured test provider for the resumed lifecycle
+		installIdentityBootstrappedBd(t)
 		logPath := filepath.Join(city, "provider.log")
 		script := filepath.Join(city, "gc-beads-bd.sh")
 		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"$1\" \"${GC_BEADS_TRANSPORT:-}\" \"${GC_BEADS_TARGET:-}\" \"${GC_DOLT_HOST:-}\" \"${GC_DOLT_PORT:-}\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {

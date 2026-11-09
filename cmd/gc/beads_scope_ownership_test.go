@@ -337,6 +337,7 @@ func TestProviderScopeOwnershipMissingIsLegacy(t *testing.T) {
 
 func TestInitDirIfReadySkipRecordsFreshRigIntentForProviderOwnedCity(t *testing.T) {
 	city := t.TempDir()
+	installIdentityBootstrappedBd(t)
 	rig := filepath.Join(city, "rigs", "fresh")
 	if err := os.MkdirAll(rig, 0o755); err != nil {
 		t.Fatal(err)
@@ -739,6 +740,7 @@ func TestProviderOwnedLifecycleRejectsProviderExitTwo(t *testing.T) {
 
 func TestProviderOwnedStartInitializesAndMarksReady(t *testing.T) {
 	city := t.TempDir()
+	installIdentityBootstrappedBd(t)
 	logPath := filepath.Join(city, "provider-ops")
 	script := filepath.Join(city, "provider.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {
@@ -773,6 +775,7 @@ func TestProviderOwnedStartInitializesAndMarksReady(t *testing.T) {
 
 func TestProviderOwnedExternalInitPassesOneShotDatabaseToBD(t *testing.T) {
 	city := t.TempDir()
+	installIdentityBootstrappedBd(t)
 	logPath := filepath.Join(city, "provider-ops")
 	script := filepath.Join(city, "gc-beads-bd.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {
@@ -814,6 +817,7 @@ func TestProviderOwnedExternalInitPassesOneShotDatabaseToBD(t *testing.T) {
 
 func TestProviderOwnedPendingExternalScopeResumesOnlyWithExplicitEnvironment(t *testing.T) {
 	city := t.TempDir()
+	installIdentityBootstrappedBd(t)
 	logPath := filepath.Join(city, "provider-ops")
 	script := filepath.Join(city, "gc-beads-bd.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {

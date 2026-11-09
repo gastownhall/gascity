@@ -26,6 +26,7 @@ func TestPendingExternalProviderScopeRecoversItsEndpointFromTheJournal(t *testin
 				t.Fatal(err)
 			}
 			t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+			installIdentityBootstrappedBd(t)
 			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}

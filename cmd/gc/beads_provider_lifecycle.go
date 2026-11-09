@@ -728,6 +728,36 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 	return env, nil
 }
 
+// verifyProviderOwnedScopeIdentity fails unless bd reports an issue_prefix for
+// the provider-owned scope at dir. The provider's init and health ops can
+// both exit 0 over a bare proxied root that an interrupted init left behind
+// (bd's --init-if-missing reports it as already initialized), so neither
+// proves bd's identity bootstrap ran; without a prefix every `bd create`
+// fails with "issue_prefix config is missing". Returning an error here keeps
+// the ownership journal at provider_initializing so the next `gc init`
+// retries the init instead of trusting the scope. A blank value counts as
+// unset, and a bd that cannot answer is an error rather than a pass.
+func verifyProviderOwnedScopeIdentity(cityPath, dir string) error {
+	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
+	if err != nil {
+		return fmt.Errorf("verifying provider-owned scope %s: %w", dir, err)
+	}
+	out, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", "config", "get", "--json", "issue_prefix")
+	if err != nil {
+		return fmt.Errorf("verifying provider-owned scope %s: read issue_prefix: %w", dir, err)
+	}
+	var cfg struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return fmt.Errorf("verifying provider-owned scope %s: parse issue_prefix: %w", dir, err)
+	}
+	if strings.TrimSpace(cfg.Value) == "" {
+		return fmt.Errorf("verifying provider-owned scope %s: bd reports no issue_prefix, so its identity bootstrap never ran; re-run `gc init` to retry", dir)
+	}
+	return nil
+}
+
 // embeddedScopeCustomTypesEnv builds registerScopeCustomTypes' env for a scope
 // whose metadata.json records embedded Dolt: doctor's custom-types store
 // projection, the one `gc doctor --fix` registers under, which aims bd at the
@@ -1003,6 +1033,9 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 			return fmt.Errorf("provider-owned scope readiness: %w", err)
 		}
 		if pending {
+			if err := verifyProviderOwnedScopeIdentity(cityPath, dir); err != nil {
+				return err
+			}
 			return markProviderScopeOwnershipReady(cityPath, dir)
 		}
 		return nil

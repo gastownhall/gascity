@@ -808,6 +808,7 @@ printf '%s\n' "$op" >> "$GC_TEST_PROVIDER_LOG"
 			t.Setenv("GC_BEADS", "exec:"+script)
 			t.Setenv("GC_TEST_PROVIDER_LOG", providerLog)
 			t.Setenv("GC_DOLT", "")
+			installIdentityBootstrappedBd(t)
 
 			args := []string{"--template", "gascity", "--default-provider", "claude", "--skip-provider-readiness", "--no-start", "--beads-transport", tc.transport, "--beads-target", tc.target}
 			if tc.target == "external" {
