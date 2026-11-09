@@ -83,11 +83,17 @@ func toFakeBdIssue(b beads.Bead) fakeBdIssue {
 	if typ == "" {
 		typ = "task"
 	}
+	// bd stores its default reason for a close given none, so a closed row
+	// never shows an empty close_reason on the wire.
+	closeReason := b.CloseReason
+	if b.Status == "closed" && closeReason == "" {
+		closeReason = "Closed"
+	}
 	return fakeBdIssue{
 		ID: b.ID, Title: b.Title, Status: b.Status, IssueType: typ,
 		CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt, Assignee: b.Assignee,
 		Description: b.Description, Labels: b.Labels, Metadata: b.Metadata,
-		CloseReason: b.CloseReason, Revision: b.Revision,
+		CloseReason: closeReason, Revision: b.Revision,
 		Parent: b.ParentID, Ephemeral: b.Ephemeral,
 	}
 }

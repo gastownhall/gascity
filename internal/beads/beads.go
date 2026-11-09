@@ -225,9 +225,10 @@ type Bead struct {
 	IsBlocked *bool `json:"is_blocked,omitempty"`
 	// CloseReason says why the bead was closed. It is empty while the bead is
 	// not closed, and when the closer gave no reason. bd-backed stores read
-	// bd's close_reason column (written by `bd close --reason`); stores that
-	// hold the whole row record the trimmed metadata.close_reason a closer
-	// stamped before closing, the same value BdStore and NativeDoltStore
+	// bd's close_reason column (written by `bd close --reason`) and read the
+	// default bd writes for a close without one ("Closed") as no reason;
+	// stores that hold the whole row record the trimmed metadata.close_reason a
+	// closer stamped before closing, the same value BdStore and NativeDoltStore
 	// forward to their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
 	// IndefinitelyDeferred preserves bd's status-based deferral after richer

@@ -1271,11 +1271,17 @@ func (b *bdIssue) toBead() Bead {
 	}
 }
 
+// bdDefaultCloseReason is the close_reason bd writes when a close is given no
+// --reason (cmd/bd/close.go resolveCloseReasons).
+const bdDefaultCloseReason = "Closed"
+
 // bdCloseReason reads bd's close_reason for a bead in its normalized status. bd
 // clears the column on reopen, but a row that is not closed has no close
-// reason whatever the column still holds.
+// reason whatever the column still holds. bd's own default reason is what a
+// close without a reason reads back as, so it reads as no reason, the value
+// the whole-row stores report for the same close.
 func bdCloseReason(status, reason string) string {
-	if status != "closed" {
+	if status != "closed" || reason == bdDefaultCloseReason {
 		return ""
 	}
 	return reason
