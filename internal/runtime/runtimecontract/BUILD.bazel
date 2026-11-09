@@ -4,13 +4,22 @@ go_library(
     name = "runtimecontract",
     srcs = [
         "catalog.go",
+        "fshost.go",
+        "observe.go",
+        "ported.go",
         "probes.go",
         "report.go",
         "runner.go",
+        "server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecontract",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/execenv",
+        "//internal/runtime",
+        "//internal/runtime/exec",
+        "//internal/shellquote",
+    ],
 )
 
 go_test(
@@ -18,6 +27,8 @@ go_test(
     srcs = [
         "lockstep_test.go",
         "runner_test.go",
+        "screen_reference_test.go",
+        "screen_script_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -25,10 +36,16 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//contrib:all_files",
         "//internal/runtime/runtimetest:conformance.go",
     ],
     embed = [":runtimecontract"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/runtime/runtimecontract/reference",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

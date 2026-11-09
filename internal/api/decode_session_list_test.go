@@ -270,8 +270,11 @@ func TestClientListSessionsReportsPartialAcrossPages(t *testing.T) {
 				page := tc.pages[0]
 				if r.URL.Query().Get("cursor") == "page2" {
 					page = tc.pages[1]
+					w.Header().Set("X-GC-Cache-Refresh", "failing")
 				} else {
 					page["next_cursor"] = "page2"
+					w.Header().Set("X-GC-Cache-Refresh-Interval-S", "60")
+					w.Header().Set("X-GC-Cache-Refresh", "scheduled")
 				}
 				json.NewEncoder(w).Encode(page) //nolint:errcheck
 			}))
@@ -288,6 +291,9 @@ func TestClientListSessionsReportsPartialAcrossPages(t *testing.T) {
 			}
 			if strings.Join(cr.Body.PartialErrors, "|") != strings.Join(tc.wantErrs, "|") {
 				t.Errorf("PartialErrors = %q, want %q", cr.Body.PartialErrors, tc.wantErrs)
+			}
+			if want := (CacheRefresh{IntervalS: 60, State: CacheRefreshScheduled}); cr.Refresh != want {
+				t.Errorf("Refresh = %+v, want page 1's %+v", cr.Refresh, want)
 			}
 		})
 	}

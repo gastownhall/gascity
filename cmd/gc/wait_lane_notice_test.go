@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -74,7 +75,7 @@ func waitNow(t *testing.T, f *laneFixture, wait sessionpkg.WaitInfo) sessionpkg.
 
 func TestWaitNudgeUnderLaneProposesANotice(t *testing.T) {
 	f := newLaneFixture(t)
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	h := newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
 	wait := readyWait(t, f, "Continue after review closes.")
@@ -310,7 +311,7 @@ func (s *waitNudgeIDRefusingStore) SetMetadata(id, key, value string) error {
 func TestWaitNudgeNoticeIsRecordedBeforeItIsProposed(t *testing.T) {
 	store := &waitNudgeIDRefusingStore{laneTestStore: newLaneTestStore()}
 	f := newLaneFixtureOver(t, store)
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
 	ordinary := readyWait(t, f, "ordinary")
@@ -331,7 +332,7 @@ func TestWaitNudgeNoticeIsRecordedBeforeItIsProposed(t *testing.T) {
 	}
 
 	store.refuse = ""
-	f.cfg.Ops.Authoritative = nil
+	f.cfg.Ops.Authoritative = config.OpsKinds()
 	newNoticeLaneHost(t, f)
 	dispatchWaits(t, f)
 	noticeOpAbsent(t, st, id)
@@ -362,13 +363,14 @@ func TestWaitNudgeNoticeIsRecordedBeforeItIsProposed(t *testing.T) {
 	}
 }
 
-// A protocol-mode runtime (t3bridge) that no other host serves is one no
+// A protocol-mode runtime whose turn starts are not recorded and that no
+// other host serves is one no
 // lane can type into, so its ready wait keeps the queue item even while the
 // controller's host executes message.
-func TestWaitNudgeProtocolModeSessionKeepsTheQueue(t *testing.T) {
+func TestWaitNudgeUnservedProtocolSessionKeepsTheQueue(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	newNoticeLaneHost(t, f, "message")
 	wait := readyWait(t, f, "protocol")
 	dispatchWaits(t, f)
@@ -465,7 +467,7 @@ func TestWaitNudgeFlipKeepsTheQueuedAttempt(t *testing.T) {
 	if _, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(queuedID); err != nil || !open {
 		t.Fatalf("before the flip: queue item %s open %v, %v; want it open", queuedID, open, err)
 	}
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	newNoticeLaneHost(t, f, "message")
 	dispatchWaits(t, f)
 	if got := waitNow(t, f, wait).NudgeID; got != queuedID {
@@ -481,13 +483,13 @@ func TestWaitNudgeFlipKeepsTheQueuedAttempt(t *testing.T) {
 // (the open notice still drains), and keeps the op as its nudge_id.
 func TestWaitNudgeRollbackKeepsTheOpenNotice(t *testing.T) {
 	f := newLaneFixture(t)
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
 	wait := readyWait(t, f, "rollback")
 	dispatchWaits(t, f)
 	op := waitNotice(t, f, st, wait)
-	f.cfg.Ops.Authoritative = nil
+	f.cfg.Ops.Authoritative = config.OpsKinds()
 	newNoticeLaneHost(t, f)
 	dispatchWaits(t, f)
 	if got := waitNow(t, f, wait).NudgeID; got != op.ID {
@@ -512,7 +514,7 @@ func neverProposedNoticeWait(t *testing.T, f *laneFixture) (sessionpkg.WaitInfo,
 	if err := sessionFrontDoor(f.store).SetWaitNudgeID(wait.ID, opID); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Ops.Authoritative = nil
+	f.cfg.Ops.Authoritative = config.OpsKinds()
 	newNoticeLaneHost(t, f)
 	return waitNow(t, f, wait), opID
 }

@@ -122,6 +122,9 @@ type demandView struct {
 	// probes (demandProbeStores): K1's lane reads them, and gather's
 	// lane-fed check reuses them rather than build the targets again.
 	ProbeStores []beads.Store
+	// ClaimedDemand is the default-probe demand gather dropped as work this
+	// pass already reads as claimed (withoutClaimedDemand), by template.
+	ClaimedDemand map[string]claimedDemandCut
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.

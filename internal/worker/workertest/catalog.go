@@ -16,6 +16,8 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementDeliveryQueuesBehindPending         RequirementCode = "WC-DELIVERY-001"
 	RequirementAcceptedMessageQueuesBehindPending  RequirementCode = "WC-DELIVERY-002"
 	RequirementWaitIdleOutOfReachQueuesAtOnce      RequirementCode = "WC-NUDGE-001"
+	RequirementRPPVanishedNudgeNotDelivered        RequirementCode = "WC-RPP-001"
+	RequirementRPPHostFSTranscriptTurns            RequirementCode = "WC-RPP-005"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -47,6 +49,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementProgramStatusReadiness              RequirementCode = "WC-PSTAT-006"
 	RequirementProgramStatusShadowIdentical        RequirementCode = "WC-PSTAT-007"
 	RequirementProgramStatusTranscriptTurn         RequirementCode = "WC-PSTAT-008"
+	RequirementProgramStatusHoldMidTurn            RequirementCode = "WC-PSTAT-009"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceTemplateStartup            RequirementCode = "WI-START-002"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
@@ -185,6 +188,11 @@ func ProgramStatusCatalog() []Requirement {
 			Group:       "program_status",
 			Description: "A record never ends a transcript turn whose start is newer than the record's edge.",
 		},
+		{
+			Code:        RequirementProgramStatusHoldMidTurn,
+			Group:       "program_status",
+			Description: "A profile declaring the mid-turn hold takes every wait-idle, default and immediate nudge exactly as the switch off does, whatever its record says, under shadow and on alike; under on, a fresh read of its record reports a live working record as a typing hold (the one a starved queue's bypass and the conversation lane's quiescence boundary are vetoed on), and a blocked or boundary record as none.",
+		},
 	}
 }
 
@@ -196,7 +204,26 @@ func NudgeHandleCatalog() []Requirement {
 		{
 			Code:        RequirementWaitIdleOutOfReachQueuesAtOnce,
 			Group:       "nudge",
-			Description: "A wait-idle nudge to a non-ACP session whose non-blocking idle pre-read (runtime.IdleBoundaryNow) reads busy, or reads indeterminate while the runtime reports a pending interaction, is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary, or indeterminate with nothing pending, waits for idle and delivers.",
+			Description: "A wait-idle nudge to a non-ACP session whose non-blocking idle pre-read (runtime.IdleBoundaryNow) reads busy, reads a pending choice (runtime.ErrIdlePendingChoice), or reads indeterminate while the runtime reports a pending interaction, is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary, or indeterminate with nothing pending, waits for idle and delivers.",
+		},
+	}
+}
+
+// RPPHandleCatalog returns the worker-handle requirements of a pack runtime
+// (RPP), driven through the real exec provider over the conformance golden
+// reference rather than runtime.Fake. Like NudgeHandleCatalog, these are
+// handle-behavior rules enforced through the exported worker API.
+func RPPHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementRPPVanishedNudgeNotDelivered,
+			Group:       "rpp",
+			Description: "A nudge to a pack-runtime session that vanished after the handle's liveness read is never reported delivered: it fails with runtime.ErrSessionNotFound, the refusal the nudge queue releases without spending an attempt.",
+		},
+		{
+			Code:        RequirementRPPHostFSTranscriptTurns,
+			Group:       "rpp",
+			Description: "A session on a pack runtime whose handshake shares the controller's host filesystem (locality local with fs.host) reads its turns from its transcript (TurnSourceTranscript) and keeps the TurnHandle contract; the same pack without fs.host has no turn source.",
 		},
 	}
 }

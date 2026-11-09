@@ -418,6 +418,69 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCorePackClaimTextTreatsFailedClaimAsHeld pins the agent-facing claim
+// wording. `bd update <id> --claim` is idempotent only for the holder: it wins
+// an open bead that is unassigned or already the actor's and refuses a bead
+// another actor holds. Pack text must not promise a takeover, must tell the
+// agent a failed claim means "held by someone else; do not work it", and the
+// routed-pickup texts must name `gc hook --claim` as the one-step pickup.
+func TestCorePackClaimTextTreatsFailedClaimAsHeld(t *testing.T) {
+	const doWorkName = "formulas/mol-do-work.toml do-work step"
+	doWork := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	texts := map[string]string{doWorkName: doWork}
+	for _, path := range []string{
+		"skills/gc-work/SKILL.md",
+		"overlay/per-provider/copilot/.github/copilot-instructions.md",
+		"overlay/per-provider/kiro/AGENTS.md",
+	} {
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		texts[path] = string(data)
+	}
+	// flatten joins wrapped lines and folds case, so a phrase is found
+	// wherever the prose breaks it or a sentence starts with it.
+	flatten := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+	for name, text := range texts {
+		flat := flatten(text)
+		for _, banned := range []string{"self-assigns", "regardless of current state", "already claimed some other way"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s still says --claim %q; a claim never takes over another holder's bead", name, banned)
+			}
+		}
+		if !strings.Contains(flat, "gc bd update") || !strings.Contains(flat, "--claim") {
+			t.Errorf("%s no longer teaches gc bd update --claim; update this test if the verb moved", name)
+		}
+		if !strings.Contains(flat, "another agent holds") && !strings.Contains(flat, "another agent already holds") {
+			t.Errorf("%s must say a claim fails when another agent holds the bead", name)
+		}
+		if !strings.Contains(flat, "do not work") {
+			t.Errorf("%s must tell the agent not to work a bead whose claim failed", name)
+		}
+		// mol-do-work claims the specific convoy child it derived, so only
+		// the routed-pickup texts must point at the one-step claim.
+		if name != doWorkName && !strings.Contains(flat, "gc hook --claim") {
+			t.Errorf("%s must name gc hook --claim (find and claim one routed item in a single step)", name)
+		}
+		// Plain gc hook only lists routed work. Saying it claims sends the
+		// agent to work a bead it never claimed, with no assignee or lease.
+		for _, banned := range []string{"run `gc hook` to check for and claim", "`gc hook` — check for and claim"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s says plain gc hook claims work (%q); only gc hook --claim claims", name, banned)
+			}
+		}
+	}
+	// Step 3 of mol-do-work records gc.work_outcome on the work bead and closes
+	// it, including for blocked or abandoned work. A failed claim leaves the
+	// bead with its holder, so the failure path must rule both writes out
+	// instead of sending the agent down the blocked close onto someone else's
+	// bead.
+	if !strings.Contains(flatten(doWork), "do not record an outcome on it or close it") {
+		t.Errorf("%s must tell the agent not to record an outcome on, or close, a bead whose claim failed", doWorkName)
+	}
+}
+
 // molDoWorkCloseStepBlock returns the bash block under the do-work step's
 // "Close this formula step" heading, with the convoy variable rendered as cv-1.
 func molDoWorkCloseStepBlock(t *testing.T) string {

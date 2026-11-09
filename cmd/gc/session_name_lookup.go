@@ -113,6 +113,47 @@ func isPoolManagedSessionInfo(i sessionpkg.Info) bool {
 	return strings.TrimSpace(i.PoolSlot) != ""
 }
 
+// isCollapsedCanonicalSingletonPoolBead reports whether bead is a
+// canonical-singleton pool seat that a configured named session of the same
+// template took over. buildDesiredState collapses the seat's phantom pool
+// identity onto the named identity, and the metadata sync then clears
+// pool_managed and stamps session_origin "named", but the row keeps the
+// runtime name the pool path minted for it. Every pace-keeper that gates on
+// the raw pool_managed value (the work ladder, the idle-claim backstop, the
+// warm-bind nudge) then drops the seat, leaving it with no claim retry: it
+// can sit awake while routed work goes unclaimed in front of it.
+//
+// It matches on that pool-minted name, not on session_origin, so it cannot
+// widen to ordinary named sessions: those are created under the name config
+// reserves for them, which never embeds the row's bead ID. Two names count:
+// PoolSessionName(template, bead.ID), what every unaliased pool row gets
+// today, and poolRuntimeSessionName's "<name>-pool" step-aside, which rows
+// minted before v1.5.0 still carry. An agent that is not a canonical
+// singleton pool is never matched.
+func isCollapsedCanonicalSingletonPoolBead(cfg *config.City, bead beads.Bead) bool {
+	if cfg == nil {
+		return false
+	}
+	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	if sessionName == "" {
+		return false
+	}
+	template := normalizedSessionTemplate(bead, cfg)
+	if template == "" {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	if id := strings.TrimSpace(bead.ID); id != "" && sessionName == PoolSessionName(template, id) {
+		return true
+	}
+	identity := cfgAgent.QualifiedName()
+	steppedAside := poolRuntimeSessionName(cfg, identity, template, false)
+	return steppedAside != poolIdentitySessionName(identity, template) && sessionName == steppedAside
+}
+
 // isCanonicalPoolManagedSessionBeadForTemplate is the bead-shape companion to
 // config.Agent.UsesCanonicalSingletonPoolIdentity: pool-managed, no pool slot,
 // and canonical identity according to beadIdentifiesAsCanonical.
@@ -475,7 +516,7 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	if store == nil {
 		return nil
 	}
-	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false,
 		map[string]string{"agent_name": agentName},
 		map[string]string{"agent_name": want})
 	if err != nil {
@@ -623,7 +664,7 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
 }
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
@@ -975,7 +1016,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
+	items, err := sessionpkg.ExactMetadataSessionCandidates(beads.SessionStore{Store: store}, false, map[string]string{key: value})
 	if err != nil {
 		return ""
 	}
@@ -989,7 +1030,7 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
 		}
-		sessionpkg.RepairEmptyType(store, &b)
+		sessionpkg.RepairEmptyType(beads.SessionStore{Store: store}, &b)
 		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
 			continue
 		}

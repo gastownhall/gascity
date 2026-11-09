@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -66,7 +67,7 @@ func newInboxFixture(t *testing.T) (*readCountingStore, *Provider, session.Info)
 	if err := p.MarkRead(read.ID); err != nil {
 		t.Fatalf("MarkRead: %v", err)
 	}
-	info, _, err := session.ResolveSessionRecordByExactID(store, sessionBead.ID)
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), sessionBead.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
@@ -457,7 +458,7 @@ func newSuccessionFixture(t *testing.T) (*readCountingStore, *Provider, func() s
 	}
 	return store, p, func() session.Info {
 		t.Helper()
-		info, _, err := session.ResolveSessionRecordByExactID(store.MemStore, s.ID)
+		info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store.MemStore), s.ID)
 		if err != nil {
 			t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 		}

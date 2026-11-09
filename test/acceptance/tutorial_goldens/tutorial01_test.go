@@ -18,7 +18,6 @@ func TestTutorial01Cities(t *testing.T) {
 
 		myCity := expandHome(ws.home(), "~/my-city")
 		myProject := expandHome(ws.home(), "~/my-project")
-		mustMkdirAll(t, myProject)
 
 		var helloTaskID string
 
@@ -40,11 +39,29 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 		})
 
-		t.Run("gc init ~/my-city", func(t *testing.T) {
-			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --default-provider claude --skip-provider-readiness` path because the wizard requires a real TTY and CI does not carry interactive Claude auth")
-			out, err := ws.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
+		// The harness seeds a Dolt identity, so these run as documented and
+		// leave it in place; the check is that Dolt ends up with one.
+		for _, step := range []struct{ key, command string }{
+			{"user.name", `[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"`},
+			{"user.email", `[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"`},
+		} {
+			t.Run(step.command, func(t *testing.T) {
+				out, err := ws.runShell(step.command, "")
+				if err != nil {
+					t.Fatalf("copy git %s into Dolt: %v\n%s", step.key, err, out)
+				}
+				value, err := ws.runShell("dolt config --global --get "+step.key, "")
+				if err != nil || strings.TrimSpace(value) == "" {
+					t.Fatalf("Dolt %s is still empty after the identity step: %v\n%s", step.key, err, value)
+				}
+			})
+		}
+
+		t.Run("gc init ~/my-city --template gascity --default-provider claude", func(t *testing.T) {
+			ws.noteWarning("tutorial 01 init: the acceptance harness adds `--skip-provider-readiness` to the documented `gc init ~/my-city --template gascity --default-provider claude` because CI does not carry interactive Claude auth")
+			out, err := ws.runShell("gc init ~/my-city --template gascity --default-provider claude --skip-provider-readiness", "")
 			if err != nil {
-				t.Fatalf("gc init wizard: %v\n%s", err, out)
+				t.Fatalf("gc init --template gascity: %v\n%s", err, out)
 			}
 			for _, want := range []string{
 				"Welcome to Gas City!",
@@ -67,22 +84,6 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 			if !strings.Contains(out, "my-city") {
 				t.Fatalf("gc cities should list my-city:\n%s", out)
-			}
-		})
-
-		t.Run("gc init ~/my-city --default-provider claude", func(t *testing.T) {
-			wsProvider := newTutorialWorkspace(t)
-			wsProvider.attachDiagnostics(t, "tutorial-01-provider-branch")
-
-			out, err := wsProvider.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
-			if err != nil {
-				t.Fatalf("gc init --default-provider claude: %v\n%s", err, out)
-			}
-			if _, err := os.Stat(filepath.Join(expandHome(wsProvider.home(), "~/my-city"), "city.toml")); err != nil {
-				t.Fatalf("city.toml missing after explicit provider init: %v", err)
-			}
-			if !strings.Contains(strings.ToLower(out), "created") && !strings.Contains(strings.ToLower(out), "registered") {
-				t.Fatalf("gc init --default-provider output missing creation marker:\n%s", out)
 			}
 		})
 
@@ -159,6 +160,29 @@ func TestTutorial01Cities(t *testing.T) {
 					t.Fatalf("gc status missing %q:\n%s", want, out)
 				}
 			}
+		})
+
+		t.Run("mkdir -p ~/my-project && cd ~/my-project", func(t *testing.T) {
+			out, err := ws.runShell("mkdir -p ~/my-project && cd ~/my-project", "")
+			if err != nil {
+				t.Fatalf("create my-project: %v\n%s", err, out)
+			}
+			ws.setCWD(myProject)
+		})
+
+		t.Run(`git init && git commit --allow-empty -m "initial commit"`, func(t *testing.T) {
+			out, err := ws.runShell(`git init && git commit --allow-empty -m "initial commit"`, "")
+			if err != nil {
+				t.Fatalf("initialize my-project as a git repository: %v\n%s", err, out)
+			}
+			log, err := ws.runShell("git log --oneline -1", "")
+			if err != nil || !strings.Contains(log, "initial commit") {
+				t.Fatalf("my-project has no initial commit: %v\n%s", err, log)
+			}
+		})
+
+		t.Run("cd ~/my-city (before rig add)", func(t *testing.T) {
+			ws.setCWD(myCity)
 		})
 
 		t.Run("gc rig add ~/my-project", func(t *testing.T) {

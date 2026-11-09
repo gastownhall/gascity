@@ -34,6 +34,7 @@ func legacyCollectedDemandView(env demandGatherEnv) demandView {
 		UnassignedRoutedPartial: routedPartial,
 		ColdWakeTemplates:       targets.coldWakeTemplates,
 		NamedOnDemandTemplates:  targets.namedOnDemandTemplates,
+		NameOnlyTemplates:       targets.nameOnlyTemplates,
 	}
 	for _, pool := range targets.pendingPools {
 		v.CustomCheckTemplates = append(v.CustomCheckTemplates, cfg.Agents[pool.agentIdx].QualifiedName())

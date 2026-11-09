@@ -49,7 +49,7 @@ func TestLoadDownDepsForScopeSkipReadsEachAnchorWhenBdRefusesTheBatch(t *testing
 	}
 	store := beads.NewCachingStoreForTest(beads.NewBdStore("/fake-bd", runner), nil)
 
-	deps, err := loadDownDepsForScopeSkip(store, []string{first.ID, second.ID})
+	deps, err := loadDownDepsForScopeSkip(beadstest.Graph(store), []string{first.ID, second.ID})
 	if err != nil {
 		t.Fatalf("loadDownDepsForScopeSkip: %v", err)
 	}

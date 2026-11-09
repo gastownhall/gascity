@@ -1,7 +1,6 @@
 package herdr
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,10 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
-	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/runtime/setupcmd"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -541,19 +539,6 @@ func startupPrimeText(cfg runtime.Config) string {
 // concurrent boots during a town-wide restart.
 const startupNudgeIdleTimeout = 60 * time.Second
 
-const (
-	// preStartOutputLimit bounds the captured output tail attached to a failed
-	// pre_start error (mirrors tmux's setupCommandOutputLimit).
-	preStartOutputLimit = 4096
-	// preStartWaitDelay force-closes the capture pipes shortly after the command
-	// exits, so a pre_start that daemonizes a child holding inherited stdio
-	// cannot hang the start (mirrors tmux's setupCommandWaitDelay).
-	preStartWaitDelay = 2 * time.Second
-	// preStartCancelGrace is the rollback-trap budget when the activity-aware
-	// setup budget is enabled (mirrors tmux's setupCancelGrace).
-	preStartCancelGrace = 10 * time.Second
-)
-
 // runPreStart runs cfg.PreStart shell commands on the host before the agent is
 // created, mirroring the tmux provider (tmux/adapter.go runPreStart).
 //
@@ -579,94 +564,28 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 	return nil
 }
 
-// runSetupCommand executes one setup command under the provider's setupTimeout,
-// mirroring tmux's tmuxStartOps.runSetupCommand: `sh -c <cmd>`, cwd from GC_DIR
-// (the workDir a pre_start may itself be creating — so it is intentionally read
-// from env rather than cfg.WorkDir), process env plus cfg.Env.
+// runSetupCommand executes one setup command under the provider's setup
+// budget through [setupcmd.Run], which owns the `sh -c` execution, the
+// TERM-then-KILL cancellation, the cause-bearing failure and the redacted output
+// tail. What stays here is the provider's policy: the defaulted setupTimeout,
+// the optional activity-aware ceiling, and the city root as the cwd fallback
+// when GC_DIR (the workDir a pre_start may itself be creating — so it is
+// intentionally read from env rather than cfg.WorkDir) does not exist yet, the
+// same fallback effectiveWorkDir applies to the agent itself.
 func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string) error {
-	// Read the base env before arming the deadline: execenv.Environ waits out
-	// an in-flight native store open, and that wait is not the command's.
-	baseEnv := execenv.Environ()
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
 	}
-	// Deadline shape (mirrors tmux's runSetupCommand): with setupMaxTimeout
-	// unset the historical fixed wall-clock deadline applies; with it set the
-	// budget is activity-aware — timeout bounds output silence,
-	// setupMaxTimeout bounds total runtime.
-	idle, grace := time.Duration(0), preStartWaitDelay
-	if p.setupMaxTimeout > 0 {
-		idle, grace = timeout, preStartCancelGrace
+	var cityRoot string
+	if p.c != nil {
+		cityRoot = p.c.cityRoot
 	}
-	mon := execgrace.NewMonitor(ctx, idle, p.setupMaxTimeout)
-	defer mon.Stop()
-	runCtx := mon.Context()
-	if !mon.Enabled() {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
-	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
-	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
-	// agent itself. A pool session's worktree is often created concurrently with
-	// (or by) pre_start, so chdir'ing into it unconditionally fails fast with
-	// "chdir ... no such file" on resume-path starts that run before the
-	// worktree lands. The injected pre_start commands carry their target as an
-	// explicit --workdir flag and do not depend on cwd.
-	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
-		if _, err := os.Stat(workDir); err == nil {
-			c.Dir = workDir
-		} else if p.c.cityRoot != "" {
-			c.Dir = p.c.cityRoot
-		}
-	}
-	c.Env = baseEnv
-	for k, v := range env {
-		c.Env = append(c.Env, k+"="+v)
-	}
-	var out bytes.Buffer
-	w := mon.Writer(&out)
-	c.Stdout, c.Stderr = w, w
-	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
-	// the command's process group first so shell rollback traps run before
-	// the forced kill; the grace doubles as the pipe-closing WaitDelay
-	// (mirrors tmux's runSetupCommand).
-	execgrace.Apply(c, grace)
-	if err := c.Run(); err != nil {
-		// ErrWaitDelay means the command itself exited successfully and only the
-		// force-closed pipes ended the wait: a setup command that daemonizes a
-		// child holding inherited stdio succeeded (mirrors tmux).
-		if errors.Is(err, exec.ErrWaitDelay) {
-			return nil
-		}
-		// context.Cause surfaces which budget fired (execgrace.ErrIdle,
-		// execgrace.ErrCeiling, or the fixed deadline's DeadlineExceeded).
-		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
-			err = fmt.Errorf("%w: %w", ctxErr, err)
-		}
-		// The command's own output can echo a credential back at us — `set -x`
-		// traces every expansion, and a failing curl prints the header it sent.
-		// This error is durable (logs, event bus, bead notes) for the same reason
-		// the client's are.
-		//
-		// Both environments it was given, not just the session env: c.Env starts
-		// from os.Environ() above, so the controller's own credentials are in
-		// scope for that echo as much as the session's.
-		//
-		// [runtime.RedactSecretsTail] scrubs before it truncates, which is the
-		// order that matters: redacting a cut tail would leave a straddling
-		// credential decapitated and no longer matching itself. Unlike tmux's
-		// bounded writer this holds the whole output already, so nothing has to
-		// be retained to make that work.
-		tail, _ := runtime.RedactSecretsTail(out.String(), preStartOutputLimit, runtime.SetupCommandSecrets(env))
-		if tail = strings.TrimSpace(tail); tail != "" {
-			return fmt.Errorf("%w: %s", err, tail)
-		}
-		return err
-	}
-	return nil
+	return setupcmd.Run(ctx, cmd, env, setupcmd.Options{
+		Timeout:     timeout,
+		MaxTimeout:  p.setupMaxTimeout,
+		FallbackDir: cityRoot,
+	})
 }
 
 // Stop closes the agent's pane and clears its metadata sidecar. Idempotent.

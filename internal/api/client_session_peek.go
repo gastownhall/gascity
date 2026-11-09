@@ -61,10 +61,7 @@ func (c *Client) PeekSession(target string, lines int) (CachedRead[SessionView],
 	if resp.JSON200 == nil {
 		return CachedRead[SessionView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return CachedRead[SessionView]{
-		Body:       sessionViewFromGen(*resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return cachedReadOf(sessionViewFromGen(*resp.JSON200), resp.HTTPResponse), nil
 }
 
 // sessionPeekProblem maps a strict peek's registered session refusals to

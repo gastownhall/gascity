@@ -67,6 +67,7 @@ go_test(
         "ralph_test.go",
         "retry_artifact_iteration_test.go",
         "retry_attempt_key_test.go",
+        "retry_clone_worktree_evidence_test.go",
         "retry_test.go",
         "root_view_test.go",
         "runtime_test.go",
