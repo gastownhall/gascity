@@ -131,6 +131,19 @@ that parks with a label of its own should also set a bd status (`blocked` or
 `deferred`) or a canonical hold, or the controller will treat the bead as
 detached and restore its route.
 
+The detached-orphan sweep recognises a detached bead by claim residue:
+`gc.work_branch`, `gc.session_id` and `gc.session_name`. That residue is
+provenance, not evidence. The claim path stamps it and so does the controller,
+and `gc.work_branch` is where the claimer was, not proof that anything was
+pushed, so the residue never argues for restoring a route. The park vocabulary
+the sweep honors is exactly this: a bd status other than `open`, or a
+canonical hold (`hold:mayor`, `hold:external`). A park recorded only in a bead
+note, or only in a label of a pack's own, is not honored, and the sweep will
+restore the route. Every restore, in either lane, is logged with the bead, the
+route, the stamped session it came from and the lane (`lane=delta` or
+`lane=backstop`), so a route restored on a bead someone meant to park can be
+traced to the residue that caused it.
+
 ## See also
 
 - `bd show ga-tug8ry.1` — the architecture decision: full live census,

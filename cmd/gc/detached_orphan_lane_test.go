@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -623,5 +624,46 @@ func TestDetachedOrphanDeltaLogsEveryRestoreWithItsProvenance(t *testing.T) {
 	cr.sweepDetachedHandoffOrphansDelta()
 	if out.Len() != 0 {
 		t.Fatalf("the tick after the restore logged %q, want no output", out.String())
+	}
+}
+
+// TestDetachedOrphanBackstopLogsEveryRestoreWithItsProvenance is the backstop
+// half of the same contract: its per-bead line carries the route, the stamped
+// session and the lane, in the fields the delta lane uses, so one grep finds a
+// restore whichever lane made it.
+func TestDetachedOrphanBackstopLogsEveryRestoreWithItsProvenance(t *testing.T) {
+	work := detachedOrphanWorkBead("D-1")
+	work.Metadata[beadmeta.SessionIDMetadataKey] = "S-1"
+	cr, _ := detachedOrphanRuntime(t, detachedOrphanSessionBead(), work)
+
+	var logBuf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	report := cr.runDetachedOrphanBackstop(backstopReasonCadence)
+	if report.restored != 1 {
+		t.Fatalf("backstop restored %d (err=%v), want 1", report.restored, report.err)
+	}
+
+	var restoreLines []string
+	for _, line := range strings.Split(logBuf.String(), "\n") {
+		if strings.Contains(line, "restored gc.routed_to") {
+			restoreLines = append(restoreLines, line)
+		}
+	}
+	if len(restoreLines) != 1 {
+		t.Fatalf("backstop logged %d restore line(s), want exactly 1; output:\n%s", len(restoreLines), logBuf.String())
+	}
+	for _, want := range []string{
+		"D-1",
+		detachedOrphanTestPool,
+		"S-1",
+		detachedOrphanTestSession,
+		"lane=backstop",
+	} {
+		if !strings.Contains(restoreLines[0], want) {
+			t.Errorf("backstop restore line %q does not contain %q", restoreLines[0], want)
+		}
 	}
 }

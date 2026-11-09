@@ -21,6 +21,14 @@ import (
 // session bead → template and re-stamps gc.routed_to, returning each bead to
 // pool demand. Returns the count of restored beads.
 //
+// The signature it matches is claim residue — gc.work_branch, gc.session_id and
+// gc.session_name — which is provenance, not evidence: the claim path
+// (hookClaimIdentityPatch) and the controller (stampRunSessionIdentity) stamp it,
+// so it shows where a claimer was and never that the work was done or pushed. The
+// sweep honors a park only as a bd status other than open, or a dispatch hold
+// label (hold:mayor, hold:external); a note-only park is not honored. Each
+// restore is logged with the bead, route, stamped session and lane.
+//
 // Recovery is judgment-free (ZFC): it reads the original pool route from the
 // session bead's own template metadata and re-stamps gc.routed_to. The bead
 // re-enters pool demand; the formula re-evaluates it from there. No role names
@@ -144,7 +152,7 @@ func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", c.id, route, setErr))
 			continue
 		}
-		log.Printf("sweepDetachedHandoffOrphans: restored gc.routed_to=%q on detached handoff orphan %s", route, c.id)
+		log.Printf("sweepDetachedHandoffOrphans: restored gc.routed_to=%q on detached handoff orphan %s session_id=%q session_name=%q lane=backstop", route, c.id, c.sessionID, c.sessionName)
 		result.restored++
 	}
 	return result, errors.Join(errs...)
@@ -198,14 +206,25 @@ func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool)
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
 // fully-detached handoff orphan: open, unassigned, not on a dispatch hold, no
 // pool route (neither gc.routed_to nor a legacy gc.run_target), no gc.kind, not
-// taken over by a graph workflow, branch set (indicating work was done and
-// pushed), and a session back-reference — gc.session_id or gc.session_name —
-// from which the pool route can be recovered. This sweep's
-// novel domain is exactly work that carries *no* self-declared route: a bead
-// that still has gc.run_target is recovered earlier in the same tick by
-// restoreCarriedWorkRoutes from its own declared route, and any non-empty
-// gc.kind is a workflow-root/control/topology bead that carriedPoolRoute
-// deliberately keeps out of pool demand.
+// taken over by a graph workflow, gc.work_branch set, and a session
+// back-reference — gc.session_id or gc.session_name — from which the pool route
+// can be recovered.
+//
+// The branch and the session stamps are claim residue: provenance, not evidence.
+// A claim stamps them (hookClaimIdentityPatch) and so does the controller
+// (stampRunSessionIdentity), and gc.work_branch is where the claimer was, not
+// proof that anything was pushed. The predicate cannot tell finished work from a
+// claim that went nowhere, so it must not treat the residue as a reason to
+// re-route. What it does honor is a park: a bd status other than open, and a
+// dispatch hold label (hold:mayor, hold:external; beadmeta.HasDispatchHold). A
+// park recorded only in a note is not honored. The predicate is a pure function
+// of one bead's fields.
+//
+// This sweep's novel domain is exactly work that carries *no* self-declared
+// route: a bead that still has gc.run_target is recovered earlier in the same
+// tick by restoreCarriedWorkRoutes from its own declared route, and any
+// non-empty gc.kind is a workflow-root/control/topology bead that
+// carriedPoolRoute deliberately keeps out of pool demand.
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if b.Status != "open" {
 		return false

@@ -42,6 +42,24 @@ package main
 // cost. The startup pass runs on the background lane instead, within one poll
 // interval of the feed being armed.
 //
+// # Claim residue is provenance, not evidence
+//
+// Both passes decide a bead is a detached orphan from fields a claim left
+// behind: gc.work_branch, gc.session_id and gc.session_name. Those say where a
+// claimer was and which session it ran in; they do not say the work was done.
+// The claim path stamps them (hookClaimIdentityPatch), and so does the
+// controller (stampRunSessionIdentity), so a bead can carry all three having
+// never been worked. gc.work_branch in particular is the branch the claimer was
+// on, not proof that anything was pushed to it.
+//
+// The sweep therefore re-routes only a bead nobody parked. The park vocabulary
+// it honors is a bd status other than open (blocked, deferred, review,
+// testing) and a dispatch hold label (hold:mayor, hold:external;
+// beadmeta.HasDispatchHold). A park recorded only in a note or a label of a
+// pack's own is not honored: the sweep cannot read it, and the bead looks
+// detached. Every restore is logged per bead with the route, the stamped
+// session it came from and the lane, so a wrong one can be traced to its residue.
+//
 // # Two things the pre-lane sweep could not reach, and now does
 //
 // The old sweep took the city store plus the rig store map. On a converged split
@@ -110,6 +128,20 @@ type detachedOrphanReport struct {
 	duration   time.Duration
 	partial    bool
 	err        error
+	// restores lists each bead this pass restored, with the stamped session its
+	// route was recovered from. The delta lane's operator log reads it; the
+	// backstop logs the same fields itself, per bead, as it writes.
+	restores []detachedOrphanRestore
+}
+
+// detachedOrphanRestore is one restored bead and where its route came from: the
+// route written and the gc.session_id / gc.session_name stamps on the bead that
+// named the session bead the route was read from.
+type detachedOrphanRestore struct {
+	beadID      string
+	route       string
+	sessionID   string
+	sessionName string
 }
 
 // fields renders the report for the reconciler trace. restored_count keeps its
@@ -385,6 +417,7 @@ func (l *detachedOrphanLane) deltaPass(plan storeref.ResolvedPlan, sessions bead
 			if outcome.restored {
 				repaired[row.ID] = struct{}{}
 				report.restored++
+				report.restores = append(report.restores, outcome.restore)
 			}
 		}
 		return nil
@@ -431,6 +464,7 @@ func (l *detachedOrphanLane) backstopPassOnPlane(plan storeref.ResolvedPlan, ses
 // detachedOrphanRestoreOutcome is what one candidate's repair decided.
 type detachedOrphanRestoreOutcome struct {
 	restored bool
+	restore  detachedOrphanRestore
 	writes   int
 	err      error
 }
@@ -453,7 +487,11 @@ func restoreDetachedOrphanRoute(store beads.Store, live beads.Bead, resolver *de
 	if setErr := store.SetMetadata(live.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 		return detachedOrphanRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, setErr)}
 	}
-	return detachedOrphanRestoreOutcome{restored: true, writes: 1}
+	return detachedOrphanRestoreOutcome{
+		restored: true,
+		writes:   1,
+		restore:  detachedOrphanRestore{beadID: live.ID, route: route, sessionID: sessionID, sessionName: sessionName},
+	}
 }
 
 // detachedOrphanPlan resolves the work legs an orphan-repair pass reads.
@@ -574,5 +612,14 @@ func (cr *CityRuntime) logDetachedOrphanSweep(report detachedOrphanReport) {
 	}
 	if report.restored > 0 {
 		fmt.Fprintf(cr.stderr, "%s: detached handoff orphan sweep (%s): restored gc.routed_to on %d bead(s)\n", cr.logPrefix, report.lane, report.restored) //nolint:errcheck // best-effort stderr
+	}
+	// One line per restored bead, the same fields the backstop logs as it
+	// writes: a restore is a route the controller invented from claim residue, so
+	// the operator must be able to see which bead, which route and which stamp.
+	// The backstop's lines come from the leg that wrote them, so its report
+	// carries no restores and nothing is printed twice.
+	for _, r := range report.restores {
+		fmt.Fprintf(cr.stderr, "%s: detached handoff orphan sweep: restored gc.routed_to=%q on bead %s session_id=%q session_name=%q lane=%s\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, r.route, r.beadID, r.sessionID, r.sessionName, report.lane)
 	}
 }
