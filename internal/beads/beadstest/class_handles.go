@@ -46,6 +46,10 @@ func FederatedLeg(s beads.Store) beads.FederatedReader { return beads.MintFedera
 // filters and counts as relic debt.
 func RelicLeg(s beads.Store) beads.FederatedReader { return beads.MintRelicLeg(s, "") }
 
+// StrictLeg is a test's leg over s that declares no role
+// (beads.MintStrictLeg), named "".
+func StrictLeg(s beads.Store) beads.FederatedReader { return beads.MintStrictLeg(s, "") }
+
 // Resident is a resident handle over s, for a test.
 func Resident(s beads.Store) beads.ResidentStore { return beads.MintResident(s, "") }
 
@@ -145,10 +149,11 @@ var capabilityProbes = []capabilityProbe{
 // store does: the same answer, the same dynamic type, and the same value where
 // the type is comparable. A handle that hid a capability, or found a
 // different one, would change behavior with no compile error (design §7.4);
-// run it for every engine kind. It covers the resident handle and both
-// federation leg layers too, and checks that each leg reader reaches the
-// class-neutral capabilities, and reads, exactly as the store does, and
-// nothing else.
+// run it for every engine kind. It covers the resident handle and the three
+// leg layers too, and checks that each leg reader reaches the class-neutral
+// capabilities, and reads, exactly as the store does, and nothing else. A
+// leg's role-carrying adapter (beads.LegAdapterBase) counts as the store's
+// own capability.
 func RunClassHandleCapabilityConformance(t *testing.T, newStore func(t *testing.T) beads.Store) {
 	t.Helper()
 	raw := newStore(t)
@@ -159,8 +164,9 @@ func RunClassHandleCapabilityConformance(t *testing.T, newStore func(t *testing.
 	handles["resident"] = Resident(raw)
 	handles["federated leg"] = ResidentLeg(FederatedLeg(raw))
 	handles["relic leg"] = ResidentLeg(RelicLeg(raw))
+	handles["strict leg"] = ResidentLeg(StrictLeg(raw))
 	checkHandleCapabilities(t, raw, handles)
-	readers := map[string]beads.FederatedReader{"federated leg": FederatedLeg(raw), "relic leg": RelicLeg(raw)}
+	readers := map[string]beads.FederatedReader{"federated leg": FederatedLeg(raw), "relic leg": RelicLeg(raw), "strict leg": StrictLeg(raw)}
 	checkReaderCapabilities(t, raw, readers)
 	checkLegReads(t, raw, readers)
 }
@@ -183,6 +189,7 @@ func checkHandleCapabilities(t errorReporter, raw beads.Store, handles map[strin
 		for _, p := range capabilityProbes {
 			want, wantOK := p.look(raw)
 			got, gotOK := p.look(h)
+			got = beads.LegAdapterBase(got) // a leg's role adapter over the store's own
 			if gotOK != wantOK {
 				t.Errorf("%s handle, %s: found = %v, the store's = %v", class, p.name, gotOK, wantOK)
 				continue
@@ -248,6 +255,7 @@ func checkHelperAnswers(t errorReporter, raw beads.Store, class string, h beads.
 	for _, p := range helperProbes {
 		want, wantOK := p.look(raw)
 		got, gotOK := p.look(h)
+		got = beads.LegAdapterBase(got)
 		switch {
 		case gotOK != wantOK:
 			t.Errorf("%s handle, %s: found = %v, the store's = %v", class, p.name, gotOK, wantOK)
@@ -274,6 +282,7 @@ func checkReaderCapabilities(t errorReporter, raw beads.Store, readers map[strin
 		}
 		for _, p := range capabilityProbes {
 			got, gotOK := p.reader(r)
+			got = beads.LegAdapterBase(got)
 			if !p.readable {
 				if gotOK {
 					t.Errorf("%s reader, %s: a read-only leg handed out %T", leg, p.name, got)

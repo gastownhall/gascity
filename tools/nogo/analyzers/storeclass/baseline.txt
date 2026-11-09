@@ -1902,11 +1902,6 @@ internal/sling/sling_core.go	sourceWorkflowRootCollector.scanStore	mint	1
 internal/sling/sling_core.go	sourceWorkflowRootCollector.scanStore	read-marker	1
 internal/sling/sling_core.go	withSourceWorkflowLaunchLock	mint	1
 internal/sling/sling_core.go	workflowRestoreState	raw-field	1
-internal/storeref/bindings.go	BuildBindings	cap-assert	1
-internal/storeref/storeref.go	MintsInsideNamespace	cap-assert	1
-internal/storeref/storeref.go	PrefixOwner	cap-assert	1
-internal/storeref/storereftest/binding_wins.go	BindingWinsStores	raw-field	2
-internal/storeref/topology.go	Topology.PrefixFaults	cap-assert	1
 internal/supervisor/maintenance.go	StoreMaintenanceLoop	raw-field	1
 internal/supervisor/maintenance.go	StoreMaintenanceLoopDeps	raw-field	1
 internal/worker/factory.go	Factory	raw-field	1

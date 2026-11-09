@@ -43,7 +43,6 @@ type reviewedMarker struct {
 // change, where a reviewer sees it.
 var reviewedMarkers = map[string]reviewedMarker{
 	// Legitimate federation legs.
-	"internal/storeref/resolve.go resolveByID": {"federated", 1, "the ModeFirstOwner leg walk: each leg is a planned residence probe"},
 	"cmd/gc/claim_class_route.go classRoutedHookClaimOps": {
 		"federated", 5,
 		"the hook-claim class route's work-first escalation (#8137): a not-found (or an empty continuation list) on the work leg is what sends the call to the binding",

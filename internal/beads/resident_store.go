@@ -11,8 +11,10 @@ package beads
 //
 // The split-strict gate polices its reads (OD-T7-3) unless it was minted over
 // a leg layer (MintResidentLeg). Then its Store-method bead reads carry the
-// leg's role; a read below the leg (a capability through As, HandlesFor,
-// LiveFor or GetMany) carries none, and is policed.
+// leg's role, and so do the reads below the leg that go through a
+// role-carrying adapter (leg_reads.go): HandlesFor's and LiveFor's readers,
+// GetMany, and As's CachedLister and Counter. Any other capability's reads
+// carry none, and are policed.
 type ResidentStore struct {
 	Store
 	ref string

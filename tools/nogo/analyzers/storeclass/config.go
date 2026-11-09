@@ -74,7 +74,7 @@ var Default = Config{
 	// mint a plan's legs and owners, beadstest a test's.
 	MintFuncs: []string{
 		beads + ".MintClassStores", storeref + ".NewStores", storeref + ".Place",
-		beads + ".MintFederatedLeg", beads + ".MintRelicLeg", beads + ".MintResident", beads + ".MintResidentLeg",
+		beads + ".MintFederatedLeg", beads + ".MintRelicLeg", beads + ".MintStrictLeg", beads + ".MintResident", beads + ".MintResidentLeg",
 	},
 	// The storeref types that carry raw stores: the mint's inputs (a Leg or a
 	// Topology would otherwise launder any store into NewStores uncounted) and

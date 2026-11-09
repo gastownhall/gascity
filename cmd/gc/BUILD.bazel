@@ -1189,6 +1189,7 @@ go_test(
         "city_status_unknown_not_absent_test.go",
         "city_stores_rigs_test.go",
         "city_stores_test.go",
+        "city_stores_topology_test.go",
         "city_toml_beads_peek_test.go",
         "cityinit_exact_output_test.go",
         "cityinit_impl_test.go",

@@ -186,6 +186,7 @@ go_test(
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
         "helpers_through_handles_test.go",
+        "leg_reads_test.go",
         "leg_test.go",
         "list_revision_fidelity_test.go",
         "live_ready_test.go",

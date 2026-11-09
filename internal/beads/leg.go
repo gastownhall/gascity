@@ -21,8 +21,9 @@ import "runtime"
 type LegRole int
 
 const (
-	// NoLegRole is a read through no leg layer: a store, a class handle, or a
-	// ResidentStore minted over the store itself. The gate polices it.
+	// NoLegRole is a read through no leg layer: a store, a class handle, a
+	// ResidentStore minted over the store itself, or a strict leg
+	// (MintStrictLeg). The gate polices it.
 	NoLegRole LegRole = iota
 	// FederatedLegRole is a read through a federated leg: one leg of a
 	// planned multi-store read, or a by-id residence probe. It may miss; the
@@ -96,8 +97,11 @@ func (l *federatedLeg) GuardedBatcherHandle() (GuardedBatcher, bool) {
 }
 
 // Handles forwards HandlesFor to the store beneath, with the leg as the
-// writer; see WorkStore.Handles.
-func (l *federatedLeg) Handles() StoreHandles { return forwardHandles(l, l.Store) }
+// writer (see WorkStore.Handles) and the readers carrying the leg's role
+// (leg_reads.go).
+func (l *federatedLeg) Handles() StoreHandles {
+	return legHandles(FederatedLegRole, forwardHandles(l, l.Store))
+}
 
 // Get reads through the federated leg.
 //
@@ -170,8 +174,10 @@ func (l *relicLeg) GuardedBatcherHandle() (GuardedBatcher, bool) {
 }
 
 // Handles forwards HandlesFor to the store beneath, with the leg as the
-// writer; see WorkStore.Handles.
-func (l *relicLeg) Handles() StoreHandles { return forwardHandles(l, l.Store) }
+// writer and the readers carrying the leg's role; see federatedLeg's.
+func (l *relicLeg) Handles() StoreHandles {
+	return legHandles(RelicLegRole, forwardHandles(l, l.Store))
+}
 
 // Get reads through the relic leg.
 //
@@ -228,13 +234,45 @@ func (l *relicLeg) DepList(id, direction string) ([]Dep, error) {
 	return l.Store.DepList(id, direction)
 }
 
+// strictLeg is a leg layer that declares no role: one leg of a planned read
+// whose reads the gate polices as it does an unmarked read (the union legs no
+// marker covered before T7, OD-T7-1). Its reads are the store's own.
+type strictLeg struct {
+	Store
+	ref string
+}
+
+var (
+	_ legLayer                         = (*strictLeg)(nil)
+	_ ConditionalWritesResolveTargeter = (*strictLeg)(nil)
+	_ GuardedBatcherHandleProvider     = (*strictLeg)(nil)
+)
+
+func (l *strictLeg) legRef() string          { return l.ref }
+func (l *strictLeg) legRole() LegRole        { return NoLegRole }
+func (l *strictLeg) unwrapClassLayer() Store { return l.Store }
+
+// ConditionalWritesResolveTarget declares the store beneath the leg as the
+// conditional-writes resolution target; see federatedLeg's.
+func (l *strictLeg) ConditionalWritesResolveTarget() Store { return l.Store }
+
+// GuardedBatcherHandle forwards guarded-batch discovery to the store beneath.
+func (l *strictLeg) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	return GuardedBatcherFor(l.Store)
+}
+
+// Handles forwards HandlesFor to the store beneath, with the leg as the
+// writer; see WorkStore.Handles.
+func (l *strictLeg) Handles() StoreHandles { return forwardHandles(l, l.Store) }
+
 // FederatedReader is one read-only leg of a federation: the reads a planned
 // multi-store read or residence probe makes of one store, through a leg layer
-// that declares the leg's role. It is not a Store, so a leg cannot be written
-// or handed to a write path; ResidentStore is the writable handle. Reach a
-// read capability with ReaderAs. Only the residency layer mints one
-// (MintFederatedLeg, MintRelicLeg; beadstest in tests). Like a zero class
-// handle, a zero reader's reads panic: IsNilStore reports it.
+// that declares the leg's role (or, for a strict leg, none). It is not a
+// Store, so a leg cannot be written or handed to a write path; ResidentStore
+// is the writable handle. Reach a read capability with ReaderAs. Only the
+// residency layer mints one (MintFederatedLeg, MintRelicLeg, MintStrictLeg;
+// beadstest in tests). Like a zero class handle, a zero reader's reads panic:
+// IsNilStore reports it.
 type FederatedReader struct {
 	leg legLayer
 }
@@ -249,6 +287,13 @@ func MintFederatedLeg(s Store, ref string) FederatedReader {
 // MintRelicLeg is a relic leg over s, named ref; a mint, as MintFederatedLeg.
 func MintRelicLeg(s Store, ref string) FederatedReader {
 	return FederatedReader{leg: &relicLeg{Store: s, ref: ref}}
+}
+
+// MintStrictLeg is a leg over s, named ref, that declares no role: the gate
+// polices its reads as it does a read through the store (OD-T7-1: a union leg
+// no marker covered stays strict). A mint, as MintFederatedLeg.
+func MintStrictLeg(s Store, ref string) FederatedReader {
+	return FederatedReader{leg: &strictLeg{Store: s, ref: ref}}
 }
 
 // Ref names the store the leg reads, or "" for a zero reader.
@@ -310,8 +355,9 @@ func (r FederatedReader) DepList(id, direction string) ([]Dep, error) {
 
 // ReaderAs is As for a leg: r's capability T, for a read capability only
 // (passesReaderGate), so a read-only leg never hands out a writer or its
-// store. A capability read runs below the leg layer, so it carries no role on
-// the stack: the gate polices it.
+// store. A capability read runs below the leg layer, so it carries the leg's
+// role only through an adapter (leg_reads.go: CachedLister and Counter); any
+// other capability's reads the gate polices.
 func ReaderAs[T any](r FederatedReader) (T, bool) {
 	var zero T
 	if r.leg == nil || !passesReaderGate[T]() {
@@ -363,6 +409,7 @@ var legReadFrames = func() map[string]LegRole {
 		frames[pkg+"(*federatedLeg)."+read] = FederatedLegRole
 		frames[pkg+"(*relicLeg)."+read] = RelicLegRole
 	}
+	legAdapterFrames(pkg, frames)
 	return frames
 }()
 
@@ -378,7 +425,9 @@ var legReadFrames = func() map[string]LegRole {
 //
 // A role is visible only on the goroutine that made the read: a leg read must
 // run on the calling goroutine, and a read a store hands to another goroutine
-// carries no role.
+// carries no role. GetMany's fan-out keeps it because each of its goroutines
+// reads through the leg's live reader adapter (leg_reads.go), whose frame is
+// on that goroutine's stack.
 func LegRoleOnStack(pcs []uintptr) LegRole {
 	if len(pcs) == 0 {
 		return NoLegRole

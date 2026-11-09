@@ -97,6 +97,11 @@ const classLayerMaxDepth = 8
 // a handle over one), or a walk deeper than classLayerMaxDepth answers
 // false, before any layer is asked, so As[Store] never hands out an absent
 // handle.
+//
+// A CachedLister or Counter found below a federated or relic leg layer comes
+// back in an adapter whose reads carry the innermost such leg's role
+// (leg_reads.go), so the gate charges a cache-first list or a count through a
+// leg as it does the leg's own reads.
 func As[T any](s Store) (T, bool) {
 	var zero T
 	if physicalStore(s) == nil {
@@ -109,13 +114,21 @@ func As[T any](s Store) (T, bool) {
 		}
 		return zero, false
 	}
+	role := NoLegRole
 	for range classLayerMaxDepth {
 		layer, isLayer := s.(classLayer)
 		if !isLayer {
-			return resolveCapability[T](s)
+			v, ok := resolveCapability[T](s)
+			if ok {
+				v = legCapability(role, v)
+			}
+			return v, ok
 		}
 		if v, ok := s.(T); ok {
 			return v, true
+		}
+		if leg, ok := s.(legLayer); ok && leg.legRole() != NoLegRole {
+			role = leg.legRole()
 		}
 		s = layer.unwrapClassLayer()
 	}
@@ -217,11 +230,13 @@ func SameStore(a, b StoreReader) (same bool) {
 // live reader, which a class handle would otherwise hide behind the logical
 // wrapper, and any other store is read through the logical wrapper over raw
 // itself, so the wrapper's optional reads (GetExactBatch) find raw's
-// capabilities rather than the handle's. s may be a FederatedReader, whose
-// live reader is its store's (and carries no leg role). s must be a store: a
-// zero handle answers a reader whose reads panic, as HandlesFor(nil) does.
+// capabilities rather than the handle's. When s reads through a federated or
+// relic leg (a FederatedReader, or a ResidentStore over one), the live reader
+// is raw's in an adapter whose reads, GetExactBatch included, carry the
+// innermost such leg's role (leg_reads.go). s must be a store: a zero handle
+// answers a reader whose reads panic, as HandlesFor(nil) does.
 func LiveFor(s StoreReader) LiveReader {
-	return HandlesFor(physicalStore(s)).Live
+	return roleReads(legRoleOf(s), HandlesFor(physicalStore(s)).Live)
 }
 
 // PhysicalStoreKey is a string identity for the store below s's class layers,

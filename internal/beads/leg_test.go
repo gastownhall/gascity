@@ -236,8 +236,10 @@ func TestLegHandlesNameTheirRefAndRole(t *testing.T) {
 		if !SameStore(r, mem) || !SameStore(r, WorkStore{mem}) || PhysicalStoreKey(r) != PhysicalStoreKey(mem) {
 			t.Errorf("%s reader: not its store's identity", name)
 		}
-		if LiveFor(r) != LiveFor(mem) {
-			t.Errorf("%s reader: LiveFor is not the store's", name)
+		// The reader's live reader is the store's, in an adapter carrying the
+		// leg's role (leg_reads.go), so it is not the store's own value.
+		if live := LiveFor(r); live == LiveFor(mem) || LegAdapterBase(live) != LiveFor(mem) {
+			t.Errorf("%s reader: LiveFor is %#v, want the store's in a role adapter", name, live)
 		}
 	}
 }
@@ -248,8 +250,8 @@ func TestLegHandlesNameTheirRefAndRole(t *testing.T) {
 func TestReaderAsAnswersOnlyReadCapabilities(t *testing.T) {
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	r := MintRelicLeg(WorkStore{cache}, "")
-	if c, ok := ReaderAs[Counter](r); !ok || c != Counter(cache) {
-		t.Errorf("ReaderAs[Counter] = %v, %v; want the cache", c, ok)
+	if c, ok := ReaderAs[Counter](r); !ok || LegAdapterBase(c) != Counter(cache) {
+		t.Errorf("ReaderAs[Counter] = %v, %v; want the cache, in a role adapter", c, ok)
 	}
 	if _, ok := ReaderAs[CachedLister](r); !ok {
 		t.Error("ReaderAs[CachedLister] = false")
@@ -318,7 +320,7 @@ func TestHandlesAndLiveForThroughAResidentReadPastTheCache(t *testing.T) {
 				t.Errorf("%s, %s Live.List = %v, %v; want %s", name, reader, capBeadIDs(rows), err, late.ID)
 			}
 		}
-		if got := HandlesFor(h).Cached; got != (cachedStoreReader{store: cache}) {
+		if got := LegAdapterBase(HandlesFor(h).Cached); got != (cachedStoreReader{store: cache}) {
 			t.Errorf("%s: HandlesFor.Cached = %#v, want the cache's own reader", name, got)
 		}
 		if w := HandlesFor(h).Writer; w != Writer(h) {
