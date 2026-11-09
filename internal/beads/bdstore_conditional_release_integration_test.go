@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -222,6 +223,99 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		}
 		if got.Status != "in_progress" || got.Assignee != "worker-1" {
 			t.Fatalf("a bead the caller never named was released: state = (%s, %q), want (in_progress, \"worker-1\")", got.Status, got.Assignee)
+		}
+	})
+}
+
+// TestBdStoreLiveScopedListAndConditionalReleaseSkipDeferredRows drives, against
+// a REAL bd, the three facts the release sweep's cost fix (ga-y0ft4d) rests on
+// and the unit tests can only assume:
+//
+//  1. a live list scoped to one assignee and `open` returns that assignee's
+//     open bead;
+//  2. once the bead is deferred, the same list OMITS it (bd drops parked rows
+//     from --status=open server side) although Get still reports Status
+//     "open" — which is why the verification is a scoped list and not a Get;
+//  3. a fenced release (UpdateIfAssignment on open + assignee) of the deferred
+//     bead is refused by bd with nothing written, so a deferred claim that
+//     slipped past the sweep's skip is still never released.
+//
+// If leg 3 fails on the installed bd, the sweep skip is no longer a pure
+// optimisation over a safe write: stop and take it to the architect.
+func TestBdStoreLiveScopedListAndConditionalReleaseSkipDeferredRows(t *testing.T) {
+	store, scope := newConditionalIntegrationBdStore(t)
+	if !bdParsesConditionalReleaseFlags(t, scope) {
+		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status")
+	}
+	const owner = "worker-1"
+
+	created, err := store.Create(beads.Bead{Title: "deferred claim row", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(created.ID, beads.UpdateOpts{Assignee: strPtr(owner)}); err != nil {
+		t.Fatalf("Update assignee: %v", err)
+	}
+
+	scoped := beads.ListQuery{Status: "open", Assignee: owner, Live: true, TierMode: beads.TierBoth}
+	listed := func(t *testing.T) bool {
+		t.Helper()
+		rows, err := store.List(scoped)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", scoped, err)
+		}
+		for _, r := range rows {
+			if r.ID == created.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("an open claim is listed under its assignee", func(t *testing.T) {
+		if !listed(t) {
+			t.Fatalf("scoped live List omitted open bead %s held by %s", created.ID, owner)
+		}
+	})
+
+	deferUntil := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+	if out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", created.ID, "--defer", deferUntil); err != nil {
+		t.Fatalf("bd update --defer %s: %v\n%s", deferUntil, err, out)
+	}
+
+	t.Run("a deferred claim drops out of the scoped list while Get still says open", func(t *testing.T) {
+		if listed(t) {
+			t.Fatalf("scoped live List still returned deferred bead %s; bd no longer parks it out of --status=open", created.ID)
+		}
+		got, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("Get status = %q, want open (the read-side collapse the scoped list guards against)", got.Status)
+		}
+	})
+
+	t.Run("the fenced release of a deferred claim writes nothing", func(t *testing.T) {
+		released, err := store.UpdateIfAssignment(created.ID, "open", owner, beads.UpdateOpts{
+			Status:   strPtr("open"),
+			Assignee: strPtr(""),
+		})
+		if err != nil {
+			t.Fatalf("UpdateIfAssignment(deferred): %v", err)
+		}
+		if released {
+			t.Fatal("released a deferred claim; the sweep's deferred-open skip would no longer be redundant with the write guard")
+		}
+		got, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get after refused release: %v", err)
+		}
+		if got.Assignee != owner {
+			t.Fatalf("assignee = %q after a refused release, want %q", got.Assignee, owner)
+		}
+		if listed(t) {
+			t.Fatal("bead is listed as open again: the refused release un-deferred it")
 		}
 	})
 }
