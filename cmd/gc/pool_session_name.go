@@ -292,6 +292,15 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
+		// Deferred open work is parked, not abandoned. The live verification
+		// below lists only rows bd serves as open, so it would drop this bead
+		// anyway; skipping it here spends no read on the way to that answer,
+		// where verifying it costs a live list per candidate per tick. Only this
+		// sweep skips: releaseConfirmedOrphanSessionWork still puts a deferred
+		// claim through the live check (see its comment).
+		if isDeferredOpenWork(wb, sweepStart) {
+			continue
+		}
 		// A bead carrying bd's human label waits on a person. Route-scoped
 		// dispatch serves it to no worker (config.PoolDemandServeRulesForQuery),
 		// so no pool lane takes it back, and its holder may be a person, whom
@@ -425,6 +434,15 @@ func releaseOrphanedPoolAssignments(
 	return released
 }
 
+// isDeferredOpenWork reports whether wb is open work the store hides as
+// deferred at now: a status-based deferral with no date, or a defer_until still
+// in the future. Callers pass a real instant: beads.IsDeferred treats every
+// non-nil DeferUntil as future against the zero time. In_progress work is never
+// deferred work, whatever stale defer_until it still carries.
+func isDeferredOpenWork(wb beads.Bead, now time.Time) bool {
+	return wb.Status == "open" && beads.IsDeferred(wb, now)
+}
+
 // deadAssigneeKeepLog is the last logged keep reason by bead, so a claim the
 // sweep keeps every tick (one its detached probe holds, an unserved route)
 // logs once per reason, not per tick. Its owner (the controller, the v2 lane)
@@ -476,8 +494,12 @@ func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
 //
 // Every per-bead gate from releaseOrphanedPoolAssignments applies unchanged,
 // including the live re-read in liveWorkAssignmentStillReleasable — the tick
-// snapshot names candidates but never by itself justifies a release. The one
-// exception is the foreign-claim gate, which this site does not consult: every
+// snapshot names candidates but never by itself justifies a release — with two
+// exceptions. The first is the deferred-open skip (isDeferredOpenWork), which
+// this site does not share: the seat-close guard counts deferred work as seat
+// work on NativeDoltStore, so skipping a deferred claim here would leave the
+// close guard refusing forever, the deadlock above. The second is the
+// foreign-claim gate, which this site does not consult: every
 // identifier it releases under is read off this city's own orphaned session
 // bead or derived from its roster for that bead, so it already carries the
 // provenance that gate looks for (see the package comment in

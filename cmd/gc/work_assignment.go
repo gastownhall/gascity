@@ -475,12 +475,23 @@ func releaseWorkAssignmentIfCurrent(store beads.Store, item beads.Bead) (release
 // pool_session_name.go uses it as its pre-write staleness check; the work path
 // here fences its writes instead (releaseAssignmentFenced).
 //
-// It uses a LIVE list query, not Get, and that choice is load-bearing:
-// CachingStore.Get serves a clone straight from the in-memory cache for a bead
-// that is tracked and not dirty (internal/beads/caching_store_reads.go). A
-// cached read here would re-verify the caller's stale snapshot against an
-// equally stale cache and confirm it, which reproduces the exact clobber this
-// guard exists to prevent.
+// It uses a LIVE list query, not Get, and that choice is load-bearing: the
+// candidate came from a snapshot, and CachingStore.Get serves a clone straight
+// from the in-memory cache for a bead that is tracked and not dirty
+// (internal/beads/caching_store_reads.go). A cached read here would re-verify
+// the caller's stale snapshot against an equally stale cache and confirm it,
+// which reproduces the exact clobber this guard exists to prevent.
+//
+// It is a list, not a Get, for a second reason: bd omits parked rows (blocked,
+// deferred) from --status=open server side, while the reaper's candidate read
+// stays on the collapsed-status cache tier (gc-ft31x) that labels them "open".
+// A Get would see "open" for such a row and confirm it; the list drops it, so a
+// parked claim is never reported current.
+//
+// The list is scoped to the expected assignee. A whole-status list reads every
+// row of the status (~1.5 s for 9k rows) for each candidate on each tick, and
+// the answer only ever concerns this assignee's rows. An empty expected
+// assignee means no filter.
 //
 // expectedStatus must be the status the caller observed: if the bead has since
 // transitioned (a concurrent claim moved open→in_progress, or another release
@@ -499,6 +510,7 @@ func liveWorkAssignmentAssigneeMatches(store beads.Store, id, expectedStatus, ex
 		return false, nil
 	}
 	work, err := store.List(beads.ListQuery{
+		Assignee: strings.TrimSpace(expectedAssignee),
 		Status:   expectedStatus,
 		Live:     true,
 		TierMode: beads.TierBoth,

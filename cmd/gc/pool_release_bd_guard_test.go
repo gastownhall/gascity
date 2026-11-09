@@ -387,9 +387,11 @@ func TestReleaseOrphanedPoolAssignments_BdStoreKeepsStoreDeferredRow(t *testing.
 	if len(ledger.updates) != 0 {
 		t.Fatalf("bd updates = %v, want no write to a row bd records deferred", ledger.updates)
 	}
-	// The keep must come from the live raw-status re-read, not a failed one.
-	if strings.Contains(logs.String(), "validation failed") || !strings.Contains(logs.String(), "moved") {
-		t.Fatalf("log output = %q, want the row kept as moved by a successful live re-read", logs.String())
+	// The keep comes from the sweep's deferred-open skip (isDeferredOpenWork),
+	// which fires before any read and logs nothing; it must not be a failed
+	// live verification.
+	if strings.Contains(logs.String(), "validation failed") {
+		t.Fatalf("log output = %q, want the row skipped as deferred, not kept by a failed live re-read", logs.String())
 	}
 	got := ledger.row()
 	if got.Status != "deferred" || got.Assignee != "worker-dead" || got.DeferUntil == nil || !got.DeferUntil.Equal(elapsed) {
@@ -541,10 +543,11 @@ func (a nativeGuardApplier) ApplyBatch(_ context.Context, req issueops.ApplyBatc
 // TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow is
 // issue #6207's release contract on the native door, the sibling of the bd
 // tests above. The census snapshots the folded "open", which keeps a row the
-// store records deferred, and the release loop re-reads it with a Live "open"
-// before it writes, which NativeDoltStore pushes to the reader role as bd's
-// raw open (#7809). The row is absent from that re-read, so its dead assignee
-// is kept and nothing is written; once the store wakes the row, the next sweep
+// store records deferred, and the release loop skips that marked open row
+// (isDeferredOpenWork) before any read. Were it not skipped, the Live "open"
+// re-read NativeDoltStore pushes to the reader role as bd's raw open (#7809)
+// would drop it too. Either way its dead assignee is kept and nothing is
+// written; once the store wakes the row, the next sweep
 // releases it.
 func TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow(t *testing.T) {
 	elapsed := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Second)
@@ -582,9 +585,11 @@ func TestReleaseOrphanedPoolAssignments_NativeStoreKeepsStoreDeferredRow(t *test
 	if row, writes := storage.state(); writes != 0 || row.Status != beadslib.StatusDeferred || row.Assignee != "worker-dead" {
 		t.Fatalf("native writes = %d, row = status %q assignee %q; want no write to a row the store records deferred", writes, row.Status, row.Assignee)
 	}
-	// The keep must come from the live raw-status re-read, not a failed one.
-	if strings.Contains(logs.String(), "validation failed") || !strings.Contains(logs.String(), `kept "gc-7" of dead assignee "worker-dead": moved`) {
-		t.Fatalf("log output = %q, want the row kept as moved by a successful live re-read", logs.String())
+	// The keep comes from the sweep's deferred-open skip (isDeferredOpenWork),
+	// which fires before any read and logs nothing; it must not be a failed
+	// live verification.
+	if strings.Contains(logs.String(), "validation failed") {
+		t.Fatalf("log output = %q, want the row skipped as deferred, not kept by a failed live re-read", logs.String())
 	}
 
 	storage.wake()
