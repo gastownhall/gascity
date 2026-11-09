@@ -145,6 +145,17 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--var": true,
 	},
 	"mol burn": {},
+	// The comment verbs, transcribed from the pinned inventories (identical
+	// in bd 1.3.4, 1.3.2 and 1.3.0 Enterprise;
+	// TestCommentFlagSetsMatchThePinnedInventories). The by-id door reads
+	// them to tell a subject from a flag value.
+	"comment": {
+		"--file": true,
+	},
+	"comments": {},
+	"comments add": {
+		"-a": true, "--author": true, "-f": true, "--file": true,
+	},
 	"gate check": {
 		"-l": true, "--limit": true, "-t": true, "--type": true,
 	},
@@ -215,6 +226,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"mol burn": {
 		"--dry-run": true, "--force": true,
 	},
+	"comment": {
+		"--stdin": true,
+	},
+	"comments": {
+		"--local-time": true,
+	},
+	"comments add": {},
 	"gate check": {
 		"--dry-run": true, "-e": true, "--escalate": true,
 	},

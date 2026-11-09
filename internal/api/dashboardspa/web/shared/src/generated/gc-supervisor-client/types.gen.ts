@@ -6358,10 +6358,20 @@ export type StatusWorkCounts = {
 export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
+    held_different?: Array<string> | null;
+    held_different_count?: number;
     invariant: string;
     lost_cross_edges?: Array<string> | null;
     outcome: string;
+    presumed_reused?: Array<string> | null;
+    presumed_reused_count?: number;
     proven_beads: number;
+    recheck?: boolean;
+    retained?: Array<string> | null;
+    retained_count?: number;
+    serving?: boolean;
+    stranded?: Array<string> | null;
+    stranded_count?: number;
 };
 
 export type StorageRigPayload = {
@@ -6839,6 +6849,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
     type: 'storage.binding.not_configured';
 } & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
+    type: 'storage.binding.stranded';
+} & TypedEventStreamEnvelopeStorageBindingStranded) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -8861,6 +8873,24 @@ export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.binding.stranded
+ */
+export type TypedEventStreamEnvelopeStorageBindingStranded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.stranded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope storage.binding.uncheckable
  */
 export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
@@ -9426,6 +9456,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
     type: 'storage.binding.not_configured';
 } & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
+    type: 'storage.binding.stranded';
+} & TypedTaggedEventStreamEnvelopeStorageBindingStranded) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -11554,6 +11586,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
     subject?: string;
     ts: string;
     type: 'storage.binding.not_configured';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.stranded
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingStranded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.stranded';
     workflow?: WorkflowEventProjection;
 };
 

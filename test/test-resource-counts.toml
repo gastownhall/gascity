@@ -3197,7 +3197,7 @@ tagged = true
 [[count]]
 path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
 resource = "subprocess"
-calls = 6
+calls = 7
 tagged = true
 
 [[count]]

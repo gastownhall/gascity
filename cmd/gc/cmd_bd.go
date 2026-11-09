@@ -587,11 +587,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// `update --add-label wisp`, `label add <id> gc:session`, `update --type
 	// message`, or an `import` of an archive taken before the split each turn
 	// work-store rows into infrastructure-class rows in place, and one such row
-	// makes every later routed gc command refuse until the fleet is stopped. It
-	// runs after the by-id door, which has already served or refused every
-	// binding resident, so what reaches it is the work scope's. A single-store
-	// city holds every class in its one store and the guard passes everything
-	// through unchanged.
+	// is invisible to its class readers until it is repaired. It
+	// runs after the by-id door (maybeRouteBdByID), which serves or refuses
+	// the binding residents it probes: the subjects of a served verb, a write
+	// mutation, a by-id read or a subject-table verb (bdByIDSubjectTable),
+	// and every reserved-prefix id an argv OUTSIDE that table addresses. It
+	// does not probe a non-subject position of a table verb (comment text, a
+	// `dep remove` target, a label), nor a work-prefixed id in an argv no
+	// scanner reduces to subjects (a verb in no table, a flag outside the
+	// manifest), so such an argv can reach this guard naming a binding
+	// resident; the guard does not decide residence (bdClassFlipGuard). A
+	// single-store city holds every class in its one store and the guard
+	// passes everything through unchanged.
 	var classGuardStore beads.Store
 	classGuard := bdClassFlipGuard(cfg, target.ScopeRoot, bdArgs, bdClassGuardDeps{
 		stdin: os.Stdin,

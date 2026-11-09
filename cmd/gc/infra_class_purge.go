@@ -357,7 +357,7 @@ func openInfraPurgeSession(ctx context.Context, request storageOperatorRequest, 
 	session := &infraPurgeSession{target: target}
 	if write {
 		if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-			fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing the work store. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: controller PID %d is live on this city; while it runs, any writer may change the work store, and a purge judged against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
 			return nil, false
 		}
 		if !request.FleetStopped {
