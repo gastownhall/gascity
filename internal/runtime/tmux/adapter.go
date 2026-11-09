@@ -862,7 +862,9 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 
 // Nudge sends a message to the named session to wake or redirect the agent.
 // By default, waits for the agent to be idle before sending (wait-idle mode)
-// to avoid interrupting active tool calls. If the agent doesn't become idle
+// to avoid interrupting active tool calls. A blocking mid-session dialog the
+// nudge dismisses anyway (such as the session-limit chooser, which never
+// reads idle) is dismissed before that wait. If the agent doesn't become idle
 // within NudgeIdleTimeout, sends immediately as a fallback — unless the
 // provider's submit keys would interrupt the turn still running there (Codex's
 // Escape-led submit): then nothing is typed and the error wraps
@@ -886,6 +888,9 @@ func (p *Provider) nudge(ctx context.Context, name string, content []runtime.Con
 		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
 			return err
 		}
+		// Nor does a blocking mid-session dialog, which the nudge clears
+		// before its text anyway: clear it now, not after the whole wait.
+		p.tm.dismissMidSessionDialogBeforeIdleWait(ctx, name)
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
@@ -1706,15 +1711,15 @@ func (o *tmuxStartOps) shadowStartupLadder(name string, send func() error, busy 
 // back to the start's caller; ops that do not implement it decide with the
 // scan alone.
 type startupLadderDecider interface {
-	programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
+	programStartupLadder(name string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
 	handBackStartupNudge(name, nudge string)
 }
 
 // programStartupLadder wraps send and busy to decide with the program's
-// record under the switch on (Tmux.programStartupLadder). Off on, both are
-// returned as they are.
-func (o *tmuxStartOps) programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
-	return o.tm.programStartupLadder(name, send, busy)
+// record under the switch on, for a start whose arm opts into it
+// (Tmux.programStartupLadder). Otherwise both are returned as they are.
+func (o *tmuxStartOps) programStartupLadder(name string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.programStartupLadder(name, arm, send, busy)
 }
 
 // handBackStartupNudge keeps nudge for the start's caller to take
@@ -2341,7 +2346,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		}
 		decider, decides := ops.(startupLadderDecider)
 		if decides {
-			send, busy = decider.programStartupLadder(name, send, busy)
+			send, busy = decider.programStartupLadder(name, cfg.ProgramStatus, send, busy)
 		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			send,

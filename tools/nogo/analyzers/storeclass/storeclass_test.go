@@ -25,6 +25,12 @@ type Counter interface{ Count() int }
 
 type CachingStore struct{ Store }
 
+func (*CachingStore) IsLive() bool { return true }
+
+func (*CachingStore) Lookup(string) (Bead, error) { return Bead{}, nil }
+
+type StoreReader interface{ Lookup(id string) (Bead, error) }
+
 type WorkStore struct{ Store }
 
 type GraphStore struct{ Store }
@@ -153,7 +159,23 @@ func assert(w beads.WorkStore) { _, _ = w.Store.(beads.Counter) } // unwrap cap-
 
 func assertAnon(g beads.GraphStore) { s := g.Raw(); _, _ = s.(interface{ Count() int }) } // unwrap cap-assert
 
-func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert
+func assertCaching(w beads.WorkStore) { var s beads.Store = w; _, _ = s.(*beads.CachingStore) } // cap-assert cache-peel
+
+func peelSwitch(s beads.Store) { switch v := s.(type) { case beads.WorkStore, *beads.CachingStore: _ = v; case beads.Counter: } } // raw-param cap-assert cache-peel cache-peel
+
+func peelHandle(s beads.Store) { _, _ = s.(beads.GraphStore) } // raw-param cap-assert cache-peel
+
+func peelBoxed(g beads.GraphStore) { _, _ = any(g).(*beads.CachingStore) } // cap-assert cache-peel
+
+func peelSwitchNoAssign(s beads.Store) { switch s.(type) { case *beads.CachingStore: } } // raw-param cap-assert cache-peel
+
+func peelOther(x any) { _, _ = x.(*beads.CachingStore); switch x.(type) { case beads.WorkStore: } }
+
+func peelProbe(s beads.Store) { _, _ = s.(interface{ IsLive() bool }) } // raw-param cap-assert cache-peel
+
+func peelProbeOther(s beads.Store) { _, _ = s.(interface{ Count() int }) } // raw-param cap-assert
+
+func readerAssert(r beads.StoreReader) { _, _ = r.(beads.Counter); _, _ = r.(*beads.CachingStore) } // cap-assert cap-assert cache-peel
 
 func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { case beads.Counter: } } // cap-assert
 
@@ -245,15 +267,18 @@ func fixture(s beads.Store) beads.GraphStore { return beads.GraphStore{Store: s}
 
 func config() storeclass.Config {
 	return storeclass.Config{
-		Module:           module,
-		Store:            module + "internal/beads.Store",
-		Handles:          []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
-		HandleField:      "Store",
-		UnwrapMethods:    []string{"Raw", "ConditionalWritesResolveTarget"},
-		MintFuncs:        []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
-		RawCarriers:      []string{module + "internal/storeref.Leg"},
-		TestMintPackages: []string{module + "internal/beads/beadstest"},
-		Markers:          []string{module + "internal/beads.FederatedRead"},
+		Module:            module,
+		Store:             module + "internal/beads.Store",
+		Handles:           []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
+		HandleField:       "Store",
+		UnwrapMethods:     []string{"Raw", "ConditionalWritesResolveTarget"},
+		MintFuncs:         []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
+		RawCarriers:       []string{module + "internal/storeref.Leg"},
+		TestMintPackages:  []string{module + "internal/beads/beadstest"},
+		CacheTypes:        []string{module + "internal/beads.CachingStore"},
+		CacheProbeMethods: []string{"IsLive"},
+		StoreReaders:      []string{module + "internal/beads.StoreReader"},
+		Markers:           []string{module + "internal/beads.FederatedRead"},
 		Allow: []storeclass.Allow{
 			{Package: "internal/beads", Reason: "the engines and handles"},
 			{Package: "internal/storeref", Rules: storeclass.AllRulesBut(storeclass.CapAssert), Reason: "the mint and executors"},
@@ -607,6 +632,32 @@ func TestParseBaseline(t *testing.T) {
 	again, err := storeclass.ParseBaseline(text)
 	if err != nil || len(again) != 2 {
 		t.Fatalf("round trip: %v %v", again, err)
+	}
+}
+
+// TestReservedRulesParseAndReportNothing: a baseline or ceiling row may name
+// a reserved rule (so the change that enables it can carry its rows past the
+// merge-base's generator), the analyzer reports nothing under it, and a
+// reserved rule is not also an enforced one.
+func TestReservedRulesParseAndReportNothing(t *testing.T) {
+	for _, r := range storeclass.ReservedRules {
+		if slices.Contains(storeclass.Rules, r) {
+			t.Errorf("rule %s is both reserved and enforced", r)
+		}
+		if _, err := storeclass.ParseBaseline("cmd/gc/a.go\tf\t" + string(r) + "\t3\n"); err != nil {
+			t.Errorf("ParseBaseline refuses a %s row: %v", r, err)
+		}
+		if _, err := storeclass.ParseCeiling("cmd/gc\t" + string(r) + "\t3\n"); err != nil {
+			t.Errorf("ParseCeiling refuses a %s row: %v", r, err)
+		}
+		for _, d := range analyzertest.RunGraph(t, storeclass.New(config()), graph(callers)) {
+			if strings.HasPrefix(d.Message, "storeclass["+string(r)+"]") {
+				t.Errorf("reserved rule %s reported: %s:%d %s", r, d.File, d.Line, d.Message)
+			}
+		}
+	}
+	if !slices.Contains(storeclass.Rules, storeclass.CachePeel) {
+		t.Error("cache-peel is not enforced")
 	}
 }
 

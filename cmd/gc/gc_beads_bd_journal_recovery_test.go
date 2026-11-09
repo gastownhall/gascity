@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -740,13 +742,59 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 	}
 }
 
+// processGroupGoneGrace bounds how long expectProcessGroupGone waits for
+// group pgid to empty after the harness exits. The kernel can still count a
+// member that has exited but is not fully torn down (seen on macOS runners,
+// #8984), so a single kill(-pgid, 0) right after the harness exits races the
+// last child's exit. The grace stays well under the shortest sleep a
+// run_with_timeout watchdog arms in these tests (1s), so a leaked watchdog or
+// sleep still outlives it and fails the check.
+const processGroupGoneGrace = 750 * time.Millisecond
+
 // expectProcessGroupGone fails when any process of group pgid still runs:
 // after the harness exits, a member can only be something a call left behind.
+// It polls kill(-pgid, 0) until ESRCH for up to processGroupGoneGrace, then
+// reports the surviving members so a real leak can be told apart from
+// teardown lag.
 func expectProcessGroupGone(t *testing.T, pgid int) {
 	t.Helper()
-	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("process group %d still has members after the harness exited (kill -0 = %v), want ESRCH", pgid, err)
+	deadline := time.Now().Add(processGroupGoneGrace)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		err := syscall.Kill(-pgid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process group %d still has members %s after the harness exited (kill -0 = %v), want ESRCH\nmembers:\n%s",
+				pgid, processGroupGoneGrace, err, processGroupMembers(t, pgid))
+		}
+		<-tick.C
 	}
+}
+
+// processGroupMembers returns the ps rows of every process in group pgid.
+// It lists all processes and filters on the pgid column because ps -g means
+// different things on Linux and macOS.
+func processGroupMembers(t *testing.T, pgid int) string {
+	t.Helper()
+	env := journalRecoveryEnv{binDir: t.TempDir(), shell: "sh"}
+	out, err := env.command("ps -A -o pid=,ppid=,pgid=,stat=,command=").CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("(ps failed: %v: %s)", err, bytes.TrimSpace(out))
+	}
+	want := strconv.Itoa(pgid)
+	var rows []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if fields := strings.Fields(line); len(fields) >= 3 && fields[2] == want {
+			rows = append(rows, strings.TrimSpace(line))
+		}
+	}
+	if len(rows) == 0 {
+		return "(none listed by ps; likely exited but not yet torn down)"
+	}
+	return "PID PPID PGID STAT COMMAND\n" + strings.Join(rows, "\n")
 }
 
 func TestRunWithTimeoutLeavesNothingAfterInstantCommands(t *testing.T) {
