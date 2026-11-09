@@ -17,5 +17,5 @@ func (s *DoltliteReadStore) UpdateReporting(id string, opts UpdateOpts) (Updated
 // in-process Children, so the batched read promoted from BdStore cannot route
 // around it.
 func (s *DoltliteReadStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
-	return childrenOfAnyPerParent(s, parentIDs, opts...)
+	return ChildrenOfAnyPerParent(s, parentIDs, opts...)
 }

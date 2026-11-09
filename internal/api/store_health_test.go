@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -758,4 +759,213 @@ func TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted(t *testing
 	if !strings.Contains(got, "after already returning rows") {
 		t.Errorf("partial error = %q, want it to say what disproved the zero", got)
 	}
+}
+
+// retainedCountStore models a remote ledger: it cannot count, and its
+// closed-inclusive list outlasts the status read budget.
+type retainedCountStore struct {
+	beads.Store
+	delay         time.Duration
+	retainedLists atomic.Int32
+}
+
+func (s *retainedCountStore) Count(context.Context, beads.ListQuery, ...string) (int, error) {
+	return 0, fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported)
+}
+
+func (s *retainedCountStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if reflect.DeepEqual(query, beads.ListQuery{AllowScan: true, IncludeClosed: true}) {
+		s.retainedLists.Add(1)
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(query)
+}
+
+// A store-health measurement that cannot complete is retried once per
+// storeHealthCacheTTL, not on every full build, and every build in between
+// reports the same partial error.
+func TestStatusFullBuildsReuseAFailedStoreHealthMeasurement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState(t)
+		store := &retainedCountStore{Store: beads.NewMemStore(), delay: 10 * time.Second}
+		state.cityBeadStore = store
+		s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
+
+		first := s.buildStatusBody(context.Background(), false)
+		second := s.buildStatusBody(context.Background(), false)
+		if got := store.retainedLists.Load(); got != 1 {
+			t.Errorf("retained-row lists across two builds inside the TTL = %d, want 1", got)
+		}
+		if !reflect.DeepEqual(first.PartialErrors, second.PartialErrors) || len(first.PartialErrors) == 0 {
+			t.Errorf("partial errors differ: %q vs %q", first.PartialErrors, second.PartialErrors)
+		}
+		time.Sleep(storeHealthCacheTTL)
+		s.buildStatusBody(context.Background(), false)
+		if got := store.retainedLists.Load(); got != 2 {
+			t.Errorf("retained-row lists after the TTL = %d, want 2 (retried)", got)
+		}
+		// The timed-out lists were abandoned, not canceled: let them finish.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+	})
+}
+
+// recoveringCounterStore fails its first `failures` counts with a cheap,
+// transient error and then answers.
+type recoveringCounterStore struct {
+	beads.Store
+	failures int32
+	count    int
+	calls    atomic.Int32
+}
+
+// Count fails store health's retained-row count (IncludeClosed) the first
+// failures times. The /status work buckets count the city store too, since
+// BeadStores carries it; they are answered and not counted as calls.
+func (s *recoveringCounterStore) Count(_ context.Context, q beads.ListQuery, _ ...string) (int, error) {
+	if !q.IncludeClosed {
+		return s.count, nil
+	}
+	if s.calls.Add(1) <= s.failures {
+		return 0, errors.New("dolt: connection refused (transient)")
+	}
+	return s.count, nil
+}
+
+func storeHealthPartialErrors(body StatusBody) []string {
+	var out []string
+	for _, e := range body.PartialErrors {
+		if strings.HasPrefix(e, "store health:") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// A cheap store-health failure (here a transient counter-path error) is not
+// memoized: the next full build retries it, and a store that has recovered
+// reports store_health and drops the partial error instead of carrying it for
+// the whole storeHealthCacheTTL.
+func TestStatusFullBuildRetriesACheapStoreHealthFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState(t)
+		store := &recoveringCounterStore{Store: beads.NewMemStore(), failures: 1, count: 7}
+		state.cityBeadStore = store
+		s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
+
+		first := s.buildStatusBody(context.Background(), false)
+		if got := storeHealthPartialErrors(first); len(got) != 1 || first.StoreHealth != nil {
+			t.Fatalf("first build: store-health partial errors = %q, StoreHealth = %+v; want one error and no block", got, first.StoreHealth)
+		}
+		second := s.buildStatusBody(context.Background(), false)
+		if second.StoreHealth == nil {
+			t.Fatal("StoreHealth = nil after the store recovered, want the block")
+		}
+		if got := storeHealthPartialErrors(second); len(got) != 0 {
+			t.Errorf("store-health partial errors after recovery = %q, want none", got)
+		}
+		if got := store.calls.Load(); got != 2 {
+			t.Errorf("Count calls = %d, want 2 (the failure retried on the next build)", got)
+		}
+	})
+}
+
+// A list fallback that fails without outlasting its read budget is cheap too,
+// so it is retried rather than memoized.
+func TestCachedStoreHealthRetriesAListFallbackErrorThatDidNotTimeOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState(t)
+		inner := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: errors.New("bd: exit status 1")}
+		state.cityBeadStore = inner
+		s := &Server{state: state}
+
+		if _, err := s.cachedStoreHealth(context.Background(), time.Now()); err == nil {
+			t.Fatal("first refresh succeeded, want the list error")
+		}
+		state.cityBeadStore = beads.NewMemStore()
+		health, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil || health == nil {
+			t.Fatalf("refresh after recovery = %+v, %v; want a block and no error", health, err)
+		}
+	})
+}
+
+// Only a hydrating list fallback that outlasted its read budget is memoized:
+// that is the failure that costs the full budget and abandons a ledger walk.
+func TestCachedStoreHealthMemoizesOnlyAListFallbackOverrun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		overrun := fmt.Errorf("counting retained bead rows: %s: %w", countBranchList,
+			retainedListOverrun{fmt.Errorf("list timed out: %w", context.DeadlineExceeded)})
+		for _, tc := range []struct {
+			name      string
+			err       error
+			wantCalls int32
+		}{
+			{"counter error", fmt.Errorf("counting retained bead rows: %s: %w", countBranchCounter, errors.New("boom")), 2},
+			{"counter timeout", fmt.Errorf("counting retained bead rows: %s: %w", countBranchCounter, context.DeadlineExceeded), 2},
+			{"store unavailable", errors.New("counting retained bead rows: store unavailable"), 2},
+			{"contradicted zero", fmt.Errorf("counting retained bead rows: %s: %w", countBranchList, errRowCountContradicted), 2},
+			{"list fallback overrun", overrun, 1},
+		} {
+			var calls atomic.Int32
+			s := &Server{state: newFakeState(t)}
+			s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+				calls.Add(1)
+				return nil, tc.err
+			}
+			start := time.Now()
+			for i := range 2 {
+				now := start.Add(time.Duration(i) * time.Second)
+				if _, err := s.cachedStoreHealth(context.Background(), now); !errors.Is(err, tc.err) {
+					t.Errorf("%s: error = %v, want %v", tc.name, err, tc.err)
+				}
+			}
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Errorf("%s: computes across two calls = %d, want %d", tc.name, got, tc.wantCalls)
+			}
+		}
+	})
+}
+
+// heldListStore cannot count, and its list blocks until release is closed.
+type heldListStore struct {
+	beads.Store
+	release chan struct{}
+}
+
+func (s *heldListStore) Count(context.Context, beads.ListQuery, ...string) (int, error) {
+	return 0, fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported)
+}
+
+func (s *heldListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	<-s.release
+	return s.Store.List(query)
+}
+
+// countBeadStoreRows tags a list-fallback timeout, and only that, as an
+// overrun.
+func TestCountBeadStoreRowsTagsOnlyAListFallbackTimeoutAsOverrun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState(t)
+		slow := &heldListStore{Store: beads.NewMemStore(), release: make(chan struct{})}
+		_, err := countBeadStoreRows(context.Background(), state, slow)
+		if !isRetainedListOverrun(err) {
+			t.Errorf("slow list fallback error %v not tagged as an overrun", err)
+		}
+		if !strings.Contains(fmt.Sprint(err), "counting retained bead rows: hydrating list fallback: list timed out") {
+			t.Errorf("overrun message = %q, want the unchanged list-timeout text", err)
+		}
+
+		failing := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: errors.New("bd: exit status 1")}
+		if _, err := countBeadStoreRows(context.Background(), state, failing); err == nil || isRetainedListOverrun(err) {
+			t.Errorf("immediate list error %v tagged as an overrun", err)
+		}
+		counter := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: context.DeadlineExceeded}
+		if _, err := countBeadStoreRows(context.Background(), state, counter); err == nil || isRetainedListOverrun(err) {
+			t.Errorf("counter timeout %v tagged as an overrun", err)
+		}
+		// The timed-out list was abandoned, not canceled: let it finish.
+		close(slow.release)
+		synctest.Wait()
+	})
 }

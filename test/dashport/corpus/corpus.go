@@ -352,7 +352,7 @@ func seedSession(store beads.Store) error {
 //     the mail thread-detail render (both bodies) and the agent-detail chat pane
 //     (messages between the operator alias and the seeded agent).
 func seedMail(store beads.Store) (*beadmail.Provider, error) {
-	mp := beadmail.New(store)
+	mp := beadmail.NewWithStores(beads.MailStore{Store: store}, beads.SessionStore{Store: store})
 	if _, err := mp.Send(MailFrom, MailTo, MailSubject, "please adopt the seeded PR"); err != nil {
 		return nil, fmt.Errorf("seed mail: %w", err)
 	}

@@ -40,6 +40,15 @@ const (
 	// on this value, so the factory owns it and they read it.
 	BeadsGateProxiedProvider = "proxied_provider"
 
+	// BeadsGateForceFallback is the gate of the BdStore fallback
+	// GC_BEADS_FORCE_FALLBACK=1 forces. It and BeadsGateBdHooks are exported
+	// for a caller that must not take that lane (the storage migration) and
+	// names the gate in its refusal.
+	BeadsGateForceFallback = nativeForceFallbackGate
+	// BeadsGateBdHooks is the gate of the BdStore fallback executable bd hooks
+	// force: only the bd CLI runs them.
+	BeadsGateBdHooks = nativeHooksGate
+
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
@@ -286,7 +295,8 @@ type StoreOpenOptions struct {
 	// OpenProxiedStore opens the split store for a proxied-server scope:
 	// reads on a native handle over bd's proxy data port, mutations on the bd
 	// leaf. It is consulted ONLY when the persisted topology is
-	// proxied-server, GC_BEADS_PROXIED_NATIVE is on, and it is non-nil — so a
+	// proxied-server, GC_BEADS_PROXIED_NATIVE is on (or ForceProxiedNative),
+	// and it is non-nil — so a
 	// composition root that has not been taught about the lane, and every
 	// binary with the flag off, take exactly the path they take today.
 	//
@@ -299,6 +309,12 @@ type StoreOpenOptions struct {
 	// that names the generation it was looking at is a diagnostic and one that
 	// names only a verdict is a mystery.
 	OpenProxiedStore func(ctx context.Context, longLived bool) (Store, ProxiedOpenReport, error)
+
+	// ForceProxiedNative turns the proxied-native lane on for this open alone,
+	// as GC_BEADS_PROXIED_NATIVE does for the whole process. The storage
+	// migration's maintenance window sets it: it needs the lane that reads
+	// edge payloads, and nothing else in the process should change lanes.
+	ForceProxiedNative bool
 
 	// LongLived says whether the store this open produces will be held for the
 	// process lifetime (a controller or rig store) rather than used once and
@@ -322,6 +338,12 @@ type StoreOpenOptions struct {
 	// (unset) maps to Off with a defaulted marker, so an unthreaded open path
 	// behaves exactly like today's default and can never raise enforcement.
 	ConditionalWrites gate.Mode
+
+	// ConditionalWritesDefaulted reports that ConditionalWrites is the
+	// builtin default rather than an operator's choice. A defaulted auto on a
+	// store that cannot carry the mode is treated as off: the open notes it
+	// at debug and fires no degrade. The stamp records it as defaulted.
+	ConditionalWritesDefaulted bool
 
 	// OnConditionalWritesDegraded receives the first (and only the first)
 	// capability degrade of each store this open produces — the composition
@@ -624,7 +646,7 @@ func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, prov
 // topology (the caller's condition). Nothing else in this function can turn
 // the lane on.
 func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsDiagnostic) (bool, StoreOpenResult, error) {
-	if !proxiedNativeEnabled() || opts.OpenProxiedStore == nil {
+	if (!proxiedNativeEnabled() && !opts.ForceProxiedNative) || opts.OpenProxiedStore == nil {
 		return false, StoreOpenResult{}, nil
 	}
 	store, report, err := opts.OpenProxiedStore(ctx, opts.LongLived)
@@ -703,9 +725,9 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if err != nil || result.Store == nil {
 		return result, err
 	}
-	mode, defaulted := opts.ConditionalWrites, false
+	mode, defaulted, unthreaded := opts.ConditionalWrites, opts.ConditionalWritesDefaulted, false
 	if mode == gate.ModeUnset {
-		mode, defaulted = gate.Off, true
+		mode, defaulted, unthreaded = gate.Off, true, true
 	}
 	carrier, ok := result.Store.(conditionalWritesModeCarrier)
 	if !ok {
@@ -715,7 +737,7 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if !carrier.stampConditionalWritesMode(mode, defaulted) {
 		return opts.unstampableResult(result, mode, "store forwards the stamp into a backing that cannot carry it")
 	}
-	if defaulted && opts.Logger != nil {
+	if unthreaded && opts.Logger != nil {
 		opts.Logger.Debug("conditional_writes mode not threaded; defaulted to off",
 			slog.String("store", result.Diagnostic.Store),
 			slog.String("scope", opts.ScopeRoot))
@@ -726,19 +748,20 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 // StampOpenedStore stamps the conditional-writes mode onto a store the factory
 // did not open, such as a relocated class binding's engine, by the factory's
 // own rules: ModeUnset defaults to off, and a store that cannot carry the mode
-// is refused under require and degraded loudly under auto. kind names the
+// is refused under require and degraded loudly under auto, or quietly when
+// defaulted (StoreOpenOptions.ConditionalWritesDefaulted). kind names the
 // store in the diagnostic and log vocabulary.
 //
 // A store that already carries a mode is refused, whatever the new mode: the
 // stamp is latched for the store's lifetime (§6.3), and a second stamp is the
 // one way a caller could lower a require it did not set.
-func StampOpenedStore(store Store, kind string, mode gate.Mode, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
+func StampOpenedStore(store Store, kind string, mode gate.Mode, defaulted bool, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
 	if carrier, ok := store.(conditionalWritesModeCarrier); ok {
 		if stamped, _ := carrier.conditionalWritesMode(); stamped != gate.ModeUnset {
 			return fmt.Errorf("stamping %s: conditional_writes mode is already %q and stays latched for the store's lifetime", kind, stamped)
 		}
 	}
-	opts := StoreOpenOptions{ConditionalWrites: mode, OnConditionalWritesDegraded: onDegrade, Logger: logger}
+	opts := StoreOpenOptions{ConditionalWrites: mode, ConditionalWritesDefaulted: defaulted, OnConditionalWritesDegraded: onDegrade, Logger: logger}
 	_, err := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: kind}}, nil)
 	return err
 }
@@ -749,17 +772,17 @@ func StampOpenedStore(store Store, kind string, mode gate.Mode, onDegrade func(C
 // OPEN refuses — a store that cannot enforce the fence must never be handed
 // to a caller whose config promises fencing; under auto the open succeeds but
 // degrades LOUDLY (warn log plus the degrade notification, fired directly —
-// there is no stamp to latch on, and an open happens once per store); off and
-// unset stay a debug note.
+// there is no stamp to latch on, and an open happens once per store); off,
+// unset and a defaulted auto (ConditionalWritesDefaulted) stay a debug note.
 func (opts StoreOpenOptions) unstampableResult(result StoreOpenResult, mode gate.Mode, reason string) (StoreOpenResult, error) {
-	switch mode {
-	case gate.Require:
+	switch {
+	case mode == gate.Require:
 		refusal := &ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason}
 		if opts.ScopeRoot == "" {
 			return StoreOpenResult{}, fmt.Errorf("opening %s: %w", result.Diagnostic.Store, refusal)
 		}
 		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w", result.Diagnostic.Store, opts.ScopeRoot, refusal)
-	case gate.Auto:
+	case mode == gate.Auto && !opts.ConditionalWritesDefaulted:
 		if opts.Logger != nil {
 			opts.Logger.Warn("conditional_writes degraded at open",
 				slog.String("store", result.Diagnostic.Store),

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -25,7 +26,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotMaterializeMissingMultiSessio
 	}
 	srv := New(fs)
 
-	_, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "gascity/claude")
+	_, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "gascity/claude")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude) error = %v, want ErrSessionNotFound", err)
 	}
@@ -63,17 +64,17 @@ func TestResolveSessionIDWithConfig_RejectsOrphanedNamedSessionBead(t *testing.T
 
 	fs.cfg.NamedSessions = nil
 
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id != b.ID {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err != nil || id != b.ID {
 		t.Fatalf("session.ResolveSessionID = %q, %v, want %q and nil", id, err, b.ID)
 	}
-	_, err = srv.resolveSessionIDWithConfig(fs.cityBeadStore, "myrig/worker")
+	_, err = srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(myrig/worker) = %v, want ErrSessionNotFound", err)
 	}
 	if !errors.Is(err, errSessionTargetRejectedByConfig) {
 		t.Fatalf("resolveSessionIDWithConfig(myrig/worker) = %v, want config rejection marker at the resolver surface", err)
 	}
-	handle, err := srv.workerHandleForSessionTarget(fs.cityBeadStore, "myrig/worker")
+	handle, err := srv.workerHandleForSessionTarget(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("workerHandleForSessionTarget(myrig/worker) error = %v, want ErrSessionNotFound", err)
 	}

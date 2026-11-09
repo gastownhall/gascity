@@ -2,9 +2,11 @@ package main
 
 import (
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -20,6 +22,19 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
+	// Probe answers what a claim would claim, from a lock-free snapshot (the
+	// poll loop's due-work gate, nudgePollGate, and the starvation check,
+	// queuedNudgeStarvedForTarget).
+	Probe nudgeClaimProber
+}
+
+// nudgeClaimProber reports, without the queue lock and without claiming, what
+// ClaimBatch for ct at now would claim.
+type nudgeClaimProber interface {
+	// WouldClaimBatch reports whether ClaimBatch would claim anything.
+	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
+	// NextBatch returns the items ClaimBatch would claim, in queue order.
+	NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error)
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
@@ -35,10 +50,14 @@ type nudgeClaimRepinner interface {
 
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
 // store is the nudges-class store the caller already holds. With the zero
-// value, Enqueue, RecordFailure and the verbs that run a maintenance pass open
-// their own, as the facades always did; Rollback and WithdrawQueuedWaitNudges
-// do not, and reach shadows only through a caller-passed store, so with the
-// zero value they retire the queue item and leave its shadow open.
+// value, Enqueue opens its own to save the shadow, and the verbs whose commit
+// owes shadow debts open their own after the queue lock to pay them
+// (settleNudgeShadowDebts). WithdrawQueuedWaitNudges does not, and reaches
+// shadows only through a caller-passed store: with the zero value it retires
+// the queue item and leaves its shadow open, as does Rollback of an item no
+// longer queued.
+//
+// It builds the file queue only.
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
@@ -46,6 +65,7 @@ func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 		Location: q.location(),
 		Skips:    q,
 		Repin:    q,
+		Probe:    q,
 	}
 }
 
@@ -57,8 +77,18 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 
 // claimTarget is the contract's view of t: its queue keys, its fence, and a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
-// superseded session's nudges.
+// superseded session's nudges. A target that carries a census of its own
+// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
+// instead.
 func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+	if t.fenceCensus != nil {
+		return storebinding.ClaimTarget{
+			QueueKeys:         t.queueKeys(),
+			SessionID:         t.sessionID,
+			ContinuationEpoch: t.continuationEpoch,
+			LiveFenceSessions: t.fenceCensus,
+		}
+	}
 	var once sync.Once
 	var ids map[string]struct{}
 	return storebinding.ClaimTarget{

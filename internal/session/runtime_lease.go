@@ -578,7 +578,7 @@ func (l *RuntimeLease) holdsRow(bead beads.Bead) bool {
 // row's reopen, mc-dkblm) flips it open, as
 // SetStatusOpen's own clear does: a reopened row holds no lease. A bead that is
 // not a session, or holds no record, is left alone.
-func ClearRuntimeLeaseForReopen(store beads.Store, id string) error {
+func ClearRuntimeLeaseForReopen(store beads.SessionStore, id string) error {
 	b, err := store.Get(id)
 	if err != nil || !IsSessionBeadOrRepairable(b) || strings.TrimSpace(b.Metadata[RuntimeLeaseHolderKey]) == "" {
 		return nil
@@ -604,10 +604,10 @@ func withRuntimeLeaseCleared(patch MetadataPatch) MetadataPatch {
 
 // freshBead reads the session row past any cache.
 func (s *Store) freshBead(id string) (beads.Bead, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
-	b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+	b, err := beads.LiveFor(s.store).Get(id)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)
 	}

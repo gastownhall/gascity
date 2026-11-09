@@ -18,7 +18,8 @@ configuration, not Gas City concepts. The underlying primitive is the session.
 
 This tutorial continues from the city the last two left off with: `pack.toml`
 and `city.toml` at the root, plus the reviewer Tutorial 02 added under
-`agents/reviewer/`.
+`agents/reviewer/`. The listings below are abbreviated to the parts this
+tutorial uses; your files have more in them.
 
 ```shell
 ~/my-city
@@ -26,6 +27,8 @@ $ cat pack.toml
 [pack]
 name = "my-city"
 schema = 2
+
+# ... yours also has an [imports] table for the packs gc init pulled in
 
 [[named_session]]
 template = "mayor"
@@ -36,26 +39,31 @@ $ cat city.toml
 [workspace]
 provider = "claude"
 
-... # content elided
+# ... yours also has [providers] and [defaults.rig.imports] tables
 
 [[rigs]]
-name = "my-project"
+name = "hello-world"   # from the Quickstart
+# ...
+
+[[rigs]]
+name = "my-project"    # from Tutorial 01
+# ...
 
 ~/my-city
 $ cat agents/reviewer/agent.toml
 dir = "my-project"
-provider = "codex"
+provider = "codex"     # or whichever provider you chose in Tutorial 02
 ```
 
-The city's machine-local identity and the rig's path binding now live in
-`.gc/site.toml` instead:
+The city's machine-local identity and each rig's path binding live in
+`.gc/site.toml` instead, with paths under your own home directory:
 
 ```toml
 workspace_name = "my-city"
 
 [[rig]]
 name = "my-project"
-path = "/Users/csells/my-project"
+path = "/home/you/my-project"   # your absolute path to ~/my-project
 ```
 
 The reviewer's prompt lives at `agents/reviewer/prompt.template.md`. This is the
@@ -71,17 +79,17 @@ terminal, state, and conversation history.
 Slinging a bead to an agent that isn't running creates a session. To inspect a
 live one, look up its ID with `gc session list`, then pass that to `gc session
 peek`. (If the reviewer already finished Tutorial 02's review and its session
-was cleaned up, sling the same review work again for a fresh live session to
-watch.)
+was cleaned up, the list comes back empty; sling the same review work again for
+a fresh live session to watch.)
 
 ```shell
 ~/my-project
 $ gc session list --template my-project/reviewer
-ID       TEMPLATE              STATE     REASON  TARGET        TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
+ID       TEMPLATE             STATE     REASON  TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer  creating  create  reviewer-a1b  reviewer  /Users/you/my-project  1s   -
 
 ~/my-project
-$ gc session peek mc-8sfd
+$ gc session peek mc-8sfd   # use the ID your list printed
 › [my-city] my-project/reviewer • 2026-04-07T11:56:59
 
   # Code Reviewer Agent
@@ -128,9 +136,12 @@ $ gc session peek mc-8sfd
 • Working (43s • esc to interrupt)
 ```
 
-The peek shows the reviewer's prompt — the output of `gc prime` — landing as
-the first input to the `codex` CLI. That's how GC tells Codex how to act. Codex
-then claims a ready bead, executes it, and produces `review.md`.
+This sample comes from a reviewer running Codex; with Claude or another
+provider you see that provider's interface instead, and the exact text always
+varies. Either way, the peek shows the reviewer's prompt — the output of `gc
+prime` — landing as the first input to the provider's CLI. That's how Gas City
+tells the provider how to act. The agent then claims a ready bead, executes it,
+and produces `review.md`.
 
 When the work runs out, the agent goes idle and the GC supervisor shuts its
 session down. That's the on-demand default: an agent with no always-on
@@ -142,15 +153,15 @@ declared by the local pack.
 
 ## Chatting over an always-on session
 
-`gc session list` shows both flavors side by side — the reviewer mid-work, and
-the mayor up for ten hours:
+`gc session list` shows both flavors side by side — here, the reviewer mid-work
+and the mayor up for ten hours (your IDs, ages, and states will differ):
 
 ```shell
 ~/my-project
 $ gc session list
-ID       TEMPLATE              STATE     REASON          TARGET        TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer  1s   -
-mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
+ID       TEMPLATE             STATE     REASON          TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer  creating  create          reviewer-a1b  reviewer  /Users/you/my-project  1s   -
+mc-5o1   mayor                active    session,config  mayor         mayor     /Users/you/my-city     10h  14m ago
 ```
 
 The reviewer will go idle and be shut down once its work is done. The mayor has
@@ -160,10 +171,17 @@ tokens? Peek says no:
 ```shell
 ~/my-project
 $ gc session peek mayor --lines 3
-
+...
 City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
+...
 ```
+
+Peek captures the session's terminal, not its conversation. `--lines N` reaches
+N lines back into the terminal's scrollback and always includes the whole
+visible screen, so even `--lines 3` prints a screenful — the tail of the
+mayor's last reply plus the provider's input box and footer. Your mayor's words
+will differ; what matters is that it's waiting for input, not working.
 
 Idle but not shut down. The mayor survives because the local pack — your
 `pack.toml`, the root pack that imports the others — declares an always-on
@@ -179,7 +197,9 @@ That `mode="always"` keeps the session running so the mayor is always around to
 chat, plan, or receive work. Any agent the local pack (or a pack it imports)
 declares this way gets the same treatment; everything else runs on demand.
 
-To talk to the mayor — or any agent in a running session — attach to it:
+To talk to the mayor — or any agent in a running session — attach to it from
+an interactive terminal (attach fails with `not a terminal` when run from a
+script or another non-interactive shell):
 
 ```shell
 ~/my-project
@@ -204,7 +224,7 @@ can **nudge** it — type a new message into its terminal:
 ```shell
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
-Nudged mayor   # or "Queued nudge for mayor" if the session isn't ready yet
+Nudged mayor   # or a "Queued nudge for mayor ..." line if the session isn't ready yet
 ```
 
 ![mayor nudge screenshot](mayor-nudge.png)
@@ -214,25 +234,38 @@ Confirm the session remains available after the nudge:
 ```shell
 ~/my-city
 $ gc session list
-ID      TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
-mc-5o1  mayor     active  session,config  mayor   mayor  10h  5s ago
+ID      TEMPLATE  STATE   REASON          TARGET  TITLE  WORKDIR             AGE  LAST ACTIVE
+mc-5o1  mayor     active  session,config  mayor   mayor  /Users/you/my-city  10h  5s ago
 ```
 
 ## Session logs
 
-Peek shows the last few lines of terminal output. Logs show the full
-conversation history:
+Peek shows the terminal screen. Logs show the conversation history:
 
 ```shell
 ~/my-city
-$ gc session logs mayor --tail 2
-22:07:29 [USER] What's the current city status?
+$ gc session logs mayor --tail 5
+22:07:29 [USER] <system-reminder> ... [session] What's the current city status?
+22:07:32 [ASSISTANT] tool_use: Bash
+22:07:34 [USER] tool_result: ok
+22:07:35 [ASSISTANT] (no displayable content)
 22:07:38 [ASSISTANT] City is up and idle. No pending work, no agents running besides me.
 ```
 
-`--tail N` prints the last N transcript entries (same convention as `tail -n`),
-so `--tail 2` shows the most recent prompt and reply. Use `--tail 0` for the
-whole conversation. Follow live output with `-f`:
+This sample is illustrative; your entries, timestamps, and wording will differ.
+A few things to recognize:
+
+- A nudge arrives as a `[USER]` entry wrapped in the context Gas City injects
+  on each turn, with your text at the end after `[session]`.
+- Tool calls (`tool_use`) and their results (`tool_result`) are transcript
+  entries too, as are entries with nothing printable, shown as `(no
+  displayable content)`.
+
+`--tail N` prints the last N transcript entries (same convention as `tail -n`;
+the default is 10), and those tool and empty entries count toward N. If the
+agent ran tools while answering, the prompt can fall outside a small window, so
+raise N until you see it. Use `--tail 0` for the whole conversation. Follow
+live output with `-f`:
 
 ```shell
 ~/my-city
@@ -246,14 +279,15 @@ Now nudge the mayor from another terminal:
 $ gc session nudge mayor "What's the current city status?"
 ```
 
-The follow stream prints the exchange as it arrives — handy for watching a
-background agent without attaching and risking an interruption.
+The follow stream first prints the most recent entries (the same window
+`--tail` would show), then prints the new exchange as it arrives — handy for
+watching a background agent without attaching and risking an interruption.
+Press `Ctrl-C` to stop following.
 
 <Accordion title="Edge: how --tail counts entries">
 A compact-boundary divider counts as an entry if one lands inside the final
-window. As of 1.0, `--tail` counts displayed transcript entries; before 1.0 it
-counted compaction segments. The HTTP API's `tail` query parameter still counts
-compaction segments.
+window. `--tail` counts displayed transcript entries; the HTTP API's `tail`
+query parameter counts compaction segments.
 </Accordion>
 
 ## What's next

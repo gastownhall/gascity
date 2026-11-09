@@ -1,8 +1,15 @@
 # Security floor: FastMCP 2.13.0.2 and Authlib 1.5.2 are flagged by the
 # image vulnerability gate. Keep these overrides until mcp-agent-mail's
-# transitive constraints move past the fixed versions.
-fastmcp>=3.2.0
-authlib>=1.6.9
+# transitive constraints move past the fixed versions. FastMCP < 3.4.10 has
+# GHSA-7xgj-8392-5q4r; fastmcp exact-pins fastmcp-slim to its own version, so
+# this floor moves both.
+fastmcp>=3.4.10
+# Authlib < 1.9.0 has CVE-2026-96760 (CRITICAL, empty-signature JWS JSON
+# validation), CVE-2026-114615 and CVE-2026-114617..114620; < 1.9.1 adds
+# CVE-2026-114616 (HIGH, empty HMAC key forgery). mcp-agent-mail v0.3.2 caps
+# authlib <1.6, hence an override rather than a floor. It only uses
+# authlib.jose JsonWebKey/JsonWebToken for optional JWT auth, which 1.9.1 keeps.
+authlib>=1.9.1
 
 # Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0, and
 # CVE-2026-102268 (CRITICAL) plus CVE-2026-102266/-102267/-102271/-102272/

@@ -1,3 +1,5 @@
+//go:build unix
+
 package dolt_test
 
 // Fast-forward-only sync classification (gc-6ommo). `gc dolt sync` must not

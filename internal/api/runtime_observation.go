@@ -19,14 +19,15 @@ func observeProviderSession(sp runtime.Provider, sessionName string, processName
 	liveness := runtime.ObserveLiveness(sp, sessionName, processNames)
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
-	if suspended, err := sp.GetMeta(sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
-		obs.Suspended = true
-	}
-	if sessionID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
-		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
-	}
+	// Like GET /agents, only a running session's metadata is read: on tmux a
+	// stopped session has no environment, and each read forks
+	// `tmux show-environment`, while the rig list observes every configured
+	// agent row, most of them stopped.
 	if !obs.Running {
 		return obs
+	}
+	if suspended, err := sp.GetMeta(sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
+		obs.Suspended = true
 	}
 	obs.Attached = sp.IsAttached(sessionName)
 	if lastActive, err := sp.GetLastActivity(sessionName); err == nil && !lastActive.IsZero() {
@@ -59,12 +60,26 @@ func (h providerSessionResponseHandle) State(context.Context) (worker.State, err
 		SessionName: h.sessionName,
 		Provider:    h.providerName,
 	}
-	if h.provider == nil || !h.provider.IsRunning(h.sessionName) {
+	if !sessionRuntimeRunning(h.provider, h.sessionName) {
 		state.Phase = worker.PhaseStopped
 		return state, nil
 	}
+	state.Program = worker.ProgramStatusOf(h.provider, h.sessionName)
 	state.Phase = worker.PhaseReady
+	if phase, decided := worker.ProgramPhase(state.Program); decided {
+		state.Phase = phase
+	}
 	return state, nil
+}
+
+// sessionRuntimeRunning is the runtime probe behind a session response's
+// running field: whether the provider holds a live runtime for sessionName.
+// Every session response reads running through it, so GET /session/{id} and
+// GET /sessions cannot disagree by construction; on tmux it is served from the
+// provider's shared fleet snapshot, not a per-session fork.
+func sessionRuntimeRunning(sp runtime.Provider, sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	return sp != nil && sessionName != "" && sp.IsRunning(sessionName)
 }
 
 func (h providerSessionResponseHandle) Peek(_ context.Context, lines int) (string, error) {

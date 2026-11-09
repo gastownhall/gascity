@@ -772,7 +772,7 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Tim
 }
 
 // deleteRetired deletes one retired record the sweep listed, fenced on its
-// revision. A store whose List leaves revisions unstamped (the native store),
+// revision. A store whose List leaves revisions unstamped (BdStore, mc-3c8h5),
 // or a cache that served such a row, hands over no usable token, so a refused
 // delete is presented again at the revision of a fresh read — but only while
 // that read still shows a closed, terminal record last written before cutoff.
@@ -1412,6 +1412,19 @@ func encodeNudgeItem(item nudgequeue.Item, state string, extra map[string]string
 func nudgeQueueUnclaim(update map[string]string) beads.UpdateOpts {
 	unassigned, open := "", "open"
 	return beads.UpdateOpts{Assignee: &unassigned, Status: &open, Metadata: update}
+}
+
+// IsNudgeQueueRecord reports whether b is a beads nudge queue record.
+func IsNudgeQueueRecord(b beads.Bead) bool {
+	if b.Type != nudgeQueueBeadType {
+		return false
+	}
+	for _, label := range b.Labels {
+		if label == nudgeQueueLabel {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeQueueBeadID derives the queue bead id for a nudge id. It is a hash so

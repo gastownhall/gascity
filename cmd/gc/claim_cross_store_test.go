@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -69,11 +72,11 @@ func TestRunBDForBeadRedirectsCrossStoreWrite(t *testing.T) {
 			inStoreArgs = append([]string{name}, args...)
 			return nil
 		},
-		resolveBeadStore: func(beadID string) (string, []string, bool) {
+		resolveBeadStore: func(beadID string) (string, []string, bool, error) {
 			if beadID == "vw-1" {
-				return "/rigs/voxist-web", []string{"BEADS_DIR=/rigs/voxist-web/.beads"}, true
+				return "/rigs/voxist-web", []string{"BEADS_DIR=/rigs/voxist-web/.beads"}, true, nil
 			}
-			return "", nil, false
+			return "", nil, false, nil
 		},
 	}
 
@@ -108,5 +111,52 @@ func TestCrossStoreClaimDirNilCfgOrAgent(t *testing.T) {
 	cfg := &config.City{Rigs: []config.Rig{{Name: "voxist-web", Path: "/x", Prefix: "vw"}}}
 	if _, ok := crossStoreClaimDir(cfg, nil, "vw-1"); ok {
 		t.Fatal("nil agent must not redirect")
+	}
+}
+
+// A store that cannot be decided refuses the write: no bd process runs, in
+// the bead's store or in the default one.
+func TestRunBDForBeadRefusesWhenStoreUnresolved(t *testing.T) {
+	ran := false
+	exec := agentScriptExecutor{
+		runCommand: func(_ string, _ ...string) error {
+			ran = true
+			return nil
+		},
+		runCommandInStore: func(_ string, _ []string, _ string, _ ...string) error {
+			ran = true
+			return nil
+		},
+		resolveBeadStore: func(string) (string, []string, bool, error) {
+			return "", nil, false, errors.New("loading city config to route bead vw-1: boom")
+		},
+	}
+	err := exec.runBDForBead("vw-1", "update", "vw-1", "--claim")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("runBDForBead err = %v, want the resolver's error", err)
+	}
+	if ran {
+		t.Fatal("a write whose store cannot be decided must not run bd")
+	}
+}
+
+// bd_claim and bd_update fail when the city config cannot be loaded, instead
+// of running the write in the agent's default store.
+func TestAgentScriptCrossStoreBeadEnvFailsOnUnloadableCityConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_ALIAS", "platform-architect")
+	_, _, ok, err := agentScriptCrossStoreBeadEnv("vw-1")
+	if err == nil {
+		t.Fatal("agentScriptCrossStoreBeadEnv must fail when city.toml cannot be loaded")
+	}
+	if ok {
+		t.Fatal("a failed resolution must not report a store")
+	}
+	if !strings.Contains(err.Error(), "vw-1") {
+		t.Fatalf("error %q should name the bead", err)
 	}
 }
