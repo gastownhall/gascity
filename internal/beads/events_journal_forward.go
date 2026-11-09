@@ -7,9 +7,9 @@ import (
 	"github.com/steveyegge/beads/journalops"
 )
 
-// maxJournalUnwrap bounds ActiveEventsJournal's walk down Backing chains. Real
-// chains are two or three deep; the bound only keeps a store whose Backing
-// cycles from looping forever.
+// maxJournalUnwrap bounds EventsJournalCarrier's walk down Backing chains.
+// Real chains are two or three deep; the bound only keeps a store whose
+// Backing cycles from looping forever.
 const maxJournalUnwrap = 16
 
 // ActiveEventsJournal finds the journal read a consumer can tail through
@@ -37,23 +37,35 @@ const maxJournalUnwrap = 16
 // within nativeJournalActivationRecheck or once a native open in flight
 // ends), and handles that the same way.
 func ActiveEventsJournal(store Store) (journalops.Journal, bool) {
+	carrier := EventsJournalCarrier(store)
+	journal, ok := carrier.(journalops.Journal)
+	if !ok || !EventsJournalActiveThrough(carrier) {
+		return nil, false
+	}
+	return journal, true
+}
+
+// EventsJournalCarrier returns the store ActiveEventsJournal's discovery
+// stops at — the outermost store in store's Backing chain that carries
+// journalops.Journal — or nil when the walk ends without one. It leaves
+// activation to the caller: a consumer that tails a journal the scope may
+// turn on later takes the carrier whatever its EventsJournalActive reports,
+// and learns from its reads (ErrEventsJournalInactive) whether it is on.
+func EventsJournalCarrier(store Store) Store {
 	for range maxJournalUnwrap {
 		if store == nil {
-			return nil, false
+			return nil
 		}
-		if journal, ok := store.(journalops.Journal); ok {
-			if !EventsJournalActiveThrough(store) {
-				return nil, false
-			}
-			return journal, true
+		if _, ok := store.(journalops.Journal); ok {
+			return store
 		}
 		wrapper, ok := store.(interface{ Backing() Store })
 		if !ok {
-			return nil, false
+			return nil
 		}
 		store = wrapper.Backing()
 	}
-	return nil, false
+	return nil
 }
 
 // ReadEventsJournalPageThrough pages inner's journal, refusing with

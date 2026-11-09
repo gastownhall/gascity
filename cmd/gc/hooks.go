@@ -11,8 +11,10 @@ import (
 // removed by installBeadHooks. These hooks previously spawned a gc subprocess
 // per bead write. The controller's CachingStore emits events for gc's own
 // writes in-process, but a write that emits no gc event (an agent's `bd
-// close`, a human, raw SQL) now reaches it only through a cache reconcile
-// scan, late and collapsed to the latest state.
+// close`, a human, raw SQL) reaches it through the journal feed when
+// [beads] ledger_feed = "auto" and the scope journals (ledger_feed.go), and
+// otherwise only through a cache reconcile scan, late and collapsed to the
+// latest state.
 var beadEventHookNames = []string{"on_create", "on_update", "on_close"}
 
 // hookStampLine returns the version-stamp comment embedded in gc-managed hook

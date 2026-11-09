@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -266,5 +267,33 @@ func TestHookClaimNamedHolderAndDeferredPoolSessionOnlyAliasHolderClaims(t *test
 	t.Setenv("GC_INSTANCE_TOKEN", "named-token")
 	if result := runCollapsedIdentityClaim(t); result.Action != "work" || result.BeadID != "mc-olivia-1" {
 		t.Fatalf("named holder result = %+v, want action=work bead=mc-olivia-1", result)
+	}
+}
+
+// TestHookClaimAsksTheControllerNothing pins that gc hook --claim makes no
+// identify call on a claim: the mode it could ask for only picks the
+// drain-pending hint, so asking on every hook would charge every agent turn
+// a controller round-trip (seconds against a frozen controller).
+func TestHookClaimAsksTheControllerNothing(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeCollapsedIdentityCity(t)
+	sessionID := newCollapsedPoolSessionBead(t, cityDir, "olivia", "olivia", "live-token")
+	setCollapsedPoolClaimEnv(t, cityDir, sessionID, "live-token")
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	asked := 0
+	controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) {
+		asked++
+		return reconcilerLegacy, false
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if asked != 0 {
+		t.Fatalf("gc hook --claim asked the controller its mode %d times, want none", asked)
 	}
 }

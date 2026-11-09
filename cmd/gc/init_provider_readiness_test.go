@@ -746,13 +746,15 @@ func TestCheckHardDependenciesRequiresBd13ForPendingProviderScope(t *testing.T) 
 	}
 }
 
+// A ready city and a pending provider-owned rig share the 1.3.0 floor, so
+// bd 1.2.2 is refused either way, and the refusal names 1.3.0.
 func TestCheckHardDependenciesRequiresBd13ForPendingProviderRig(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		pendingRig     bool
 		wantFreshFloor bool
 	}{
-		{name: "ready city retains compatibility floor", wantFreshFloor: false},
+		{name: "ready city is refused at the 1.3.0 init floor", wantFreshFloor: true},
 		{name: "ready city with pending rig requires provider floor", pendingRig: true, wantFreshFloor: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1482,38 +1484,65 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 }
 
-func TestCheckHardDependenciesRejectsBdBelowExplicitIDSupport(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-
-	oldLookPath := initLookPath
-	initLookPath = func(name string) (string, error) {
-		return "/usr/bin/" + name, nil
+// TestCheckHardDependenciesEnforcesTheBd130Floor pins the minimum supported bd.
+// bd 1.3.0 is the first tested release with the conditional-release flags
+// (--if-assignee/--if-status, beads#5008) that ReleaseIfCurrent now requires;
+// bd 1.2.2 re-released the 1.1.2 code, so a 1.2.x version number does not
+// imply the flags. Every older line is refused with the found and needed
+// versions; 1.3.0 itself passes.
+func TestCheckHardDependenciesEnforcesTheBd130Floor(t *testing.T) {
+	if bdMinVersion != "1.3.0" {
+		t.Fatalf("bdMinVersion = %q, want 1.3.0", bdMinVersion)
 	}
-	t.Cleanup(func() { initLookPath = oldLookPath })
+	for _, tc := range []struct {
+		bd     string
+		refuse bool
+	}{
+		{bd: "1.0.3", refuse: true},
+		{bd: "1.0.4", refuse: true},
+		{bd: "1.1.2", refuse: true},
+		{bd: "1.2.2", refuse: true},
+		{bd: "1.3.0", refuse: false},
+		{bd: "1.3.1", refuse: false},
+	} {
+		t.Run(tc.bd, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
 
-	oldRunVersion := initRunVersion
-	initRunVersion = func(binary string) (string, error) {
-		switch binary {
-		case "bd":
-			return "bd version 1.0.3", nil
-		case "dolt":
-			return "dolt version " + doltMinVersion, nil
-		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
-			return binary + " version", nil
-		default:
-			return binary + " version " + doltMinVersion, nil
-		}
-	}
-	t.Cleanup(func() { initRunVersion = oldRunVersion })
+			oldLookPath := initLookPath
+			initLookPath = func(name string) (string, error) {
+				return "/usr/bin/" + name, nil
+			}
+			t.Cleanup(func() { initLookPath = oldLookPath })
 
-	missing := checkHardDependencies(t.TempDir())
-	if len(missing) != 1 {
-		t.Fatalf("missing deps = %#v, want only bd version rejection", missing)
-	}
-	for _, want := range []string{"bd", "1.0.3", "1.0.4"} {
-		if !strings.Contains(missing[0].name, want) {
-			t.Fatalf("missing dep = %#v, want %q", missing[0], want)
-		}
+			oldRunVersion := initRunVersion
+			initRunVersion = func(binary string) (string, error) {
+				switch binary {
+				case "bd":
+					return "bd version " + tc.bd, nil
+				case "dolt":
+					return "dolt version " + doltMinVersion, nil
+				case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+					return binary + " version", nil
+				default:
+					return binary + " version " + doltMinVersion, nil
+				}
+			}
+			t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+			missing := checkHardDependencies(t.TempDir())
+			if !tc.refuse {
+				if len(missing) != 0 {
+					t.Fatalf("missing deps = %#v, want bd %s accepted", missing, tc.bd)
+				}
+				return
+			}
+			if len(missing) != 1 {
+				t.Fatalf("missing deps = %#v, want only the bd version rejection", missing)
+			}
+			if want := "bd (found v" + tc.bd + ", need v1.3.0+)"; missing[0].name != want {
+				t.Fatalf("missing dep = %q, want %q", missing[0].name, want)
+			}
+		})
 	}
 }
 

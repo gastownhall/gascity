@@ -15,8 +15,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -157,6 +159,47 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 		if obs.Running || obs.Alive {
 			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
+		}
+	})
+
+	// v2's start (CONTRACT v5 S1): a provider v2 starts on, one that reads
+	// fresh, refuses a FreshOnly start over a name it holds with
+	// ErrSessionExists, and leaves the session it holds running.
+	t.Run("Start_FreshOnlyRefusesAHeldName", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.FreshReadable(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		fresh := cfg
+		fresh.FreshOnly = true
+		if err := sp.Start(context.Background(), name, fresh); !errors.Is(err, runtime.ErrSessionExists) {
+			t.Errorf("FreshOnly Start over a held name = %v, want ErrSessionExists", err)
+		}
+		if !sp.IsRunning(name) {
+			t.Error("the refused FreshOnly Start stopped the session it found")
+		}
+	})
+
+	// An attested listing (runtime.ListRunningWithAttestation) is proof of
+	// absence: it lists a started session, and does not list it once
+	// stopped.
+	t.Run("ListRunning_AttestedAfterStartAndStop", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.ListRunningAttested(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		names, attested, err := runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || !contains(names, name) {
+			t.Fatalf("attested listing after Start = %v (attested %v), %v; want %q listed", names, attested, err, name)
+		}
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		names, attested, err = runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || contains(names, name) {
+			t.Errorf("attested listing after Stop = %v (attested %v), %v; want %q absent", names, attested, err, name)
 		}
 	})
 
@@ -460,6 +503,40 @@ func fencedStart(t *testing.T, opts Options, sp runtime.Provider, name string, c
 	return fence
 }
 
+// peekBarrierWait bounds how long peekBarrier waits for its marker.
+const peekBarrierWait = 2 * time.Second
+
+// peekBarrier nudges a marker unfenced (NudgeNow when sp has it) and waits
+// for Peek to show it, returning that output. Input sent before the barrier
+// has reached the session by then, so a case can confirm delivery or
+// non-delivery from it. False when sp's Peek never shows nudged text (a
+// runtime with no visible input), so the case cannot confirm by peeking; the
+// log then names the input fencing the case relied on instead.
+func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) {
+	t.Helper()
+	marker := "barrier-" + name
+	send := sp.Nudge
+	if now, ok := sp.(runtime.ImmediateNudgeProvider); ok {
+		send = now.NudgeNow
+	}
+	if err := send(name, runtime.TextContent(marker)); err != nil {
+		t.Logf("barrier nudge: %v; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", err, runtime.InputFencingFor(sp, name))
+		return "", false
+	}
+	deadline := time.Now().Add(peekBarrierWait)
+	for {
+		out, err := sp.Peek(name, 0)
+		if err == nil && strings.Contains(out, marker) {
+			return out, true
+		}
+		if time.Now().After(deadline) {
+			t.Logf("Peek never showed the barrier nudge; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", runtime.InputFencingFor(sp, name))
+			return "", false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // runFencedInputTests is the fenced-input group: a provider that can fence a
 // session's input (runtime.FencedInputProvider) delivers under the fence of
 // the incarnation it started, and refuses every input under another fence or
@@ -472,11 +549,15 @@ func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
 		fence := fencedStart(t, opts, sp, name, cfg)
 		fp := sp.(runtime.FencedInputProvider)
 		ctx := context.Background()
-		if err := fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
+		text := "fenced-in-" + name
+		if err := fp.NudgeFenced(ctx, name, runtime.TextContent(text), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
 			t.Errorf("NudgeFenced under the session's fence: %v", err)
 		}
 		if err := fp.SendKeysFenced(ctx, name, fence, "Enter"); err != nil {
 			t.Errorf("SendKeysFenced under the session's fence: %v", err)
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && !strings.Contains(out, text) {
+			t.Errorf("Peek after the fenced nudge and a later unfenced one = %q, want the fenced text %q delivered", out, text)
 		}
 	})
 
@@ -487,14 +568,18 @@ func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
 		ctx := context.Background()
 		other := fence
 		other.Token += "-other"
+		stale := "fenced-stale-" + name
 		for op, err := range map[string]error{
-			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: other, Immediate: true}),
+			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent(stale), runtime.FencedNudge{Fence: other, Immediate: true}),
 			"SendKeysFenced":  fp.SendKeysFenced(ctx, name, other, "Enter"),
 			"InterruptFenced": fp.InterruptFenced(ctx, name, other),
 		} {
 			if !errors.Is(err, runtime.ErrFenceMismatch) || runtime.IsSessionGone(err) {
 				t.Errorf("%s under another fence = %v, want ErrFenceMismatch, not gone", op, err)
 			}
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && strings.Contains(out, stale) {
+			t.Errorf("Peek after a refused nudge and a later unfenced one = %q, want nothing of the refused text %q", out, stale)
 		}
 	})
 
@@ -735,8 +820,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("SendKeys_MissingSession", func(t *testing.T) {
-		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil {
-			t.Errorf("SendKeys on missing session should not error: %v", err)
+		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("SendKeys on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 

@@ -1,8 +1,10 @@
 package fsys
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,6 +92,22 @@ func (s *TreeSnapshot) capture(fs FS, path string) error {
 		}
 	}
 	return nil
+}
+
+// Equal reports whether s and other captured the same tree: the same root,
+// present in both or in neither, with the same directories, files and
+// symlinks, modes and contents included. A nil snapshot equals only nil.
+func (s *TreeSnapshot) Equal(other *TreeSnapshot) bool {
+	if s == nil || other == nil {
+		return s == other
+	}
+	return s.root == other.root &&
+		s.exists == other.exists &&
+		maps.Equal(s.dirs, other.dirs) &&
+		maps.Equal(s.links, other.links) &&
+		maps.EqualFunc(s.files, other.files, func(a, b treeSnapshotFile) bool {
+			return a.mode == b.mode && bytes.Equal(a.data, b.data)
+		})
 }
 
 // Restore removes the current root and recreates the captured tree.

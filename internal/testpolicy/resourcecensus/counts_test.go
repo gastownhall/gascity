@@ -18,8 +18,8 @@ import (
 const (
 	wantCountsHeader = "# GENERATED FILE - DO NOT EDIT BY HAND.\n" +
 		"# Per-file counts for the P0.4 source resource census (owner: ga-cp3hwi).\n" +
-		"# Regenerate: go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update\n"
-	wantRegenerateCommand = "go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update"
+		"# Regenerate: " + wantRegenerateCommand + "\n"
+	wantRegenerateCommand = `GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update`
 	wantRegenerateLine    = "regenerate with: " + wantRegenerateCommand + " (then review the diff of test/test-resource-counts.toml: each changed line is a ceiling change)"
 	wantCountsPath        = "test/test-resource-counts.toml"
 	wantDocSection        = "Checked source-level resource ratchets"
@@ -1105,7 +1105,7 @@ func TestUpdateGeneratedSaysWhenTheSourceTreeIsReadOnly(t *testing.T) {
 
 	err := updateGenerated(policy, root, cloneLedger(policy), updateCensus())
 	requireErrorContains(t, err, "read-only")
-	requireErrorContains(t, err, "go test")
+	requireErrorContains(t, err, wantRegenerateCommand)
 }
 
 // ---- documentation and the real repository --------------------------------

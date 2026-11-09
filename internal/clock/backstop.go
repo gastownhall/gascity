@@ -38,6 +38,7 @@ import (
 //   - the reconcile planner's patrol pass, observation max age, boot-gate
 //     alert and pass-record dedupe window
 //   - the external-reads lane's pace and its sources' freshness
+//   - the order-dispatch-floor doctor check's patrol-pass length
 //   - the host-resume threshold, twice the patrol interval
 //     (CityRuntime.observeResume), so a resume is detected N times sooner
 //
@@ -75,7 +76,9 @@ var testHooks string
 
 const testHooksEnabled = "enabled"
 
-// TestHooksEnabled reports whether this binary was linked with test hooks.
+// TestHooksEnabled reports whether this binary was linked with test hooks:
+// the only binary that honors GC_TEST_BACKSTOP_SPEEDUP and cmd/gc's
+// GC_LANE_FAILPOINT and GC_OPS_FAILPOINT.
 func TestHooksEnabled() bool { return testHooks == testHooksEnabled }
 
 var announceOnce sync.Once

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -140,7 +141,7 @@ func TestCommitAsyncStartResult_DriftedPendingCreateRollsBack(t *testing.T) {
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
 	}
-	if err := session.EnsureAliasAvailable(store, driftAlias, ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(store), driftAlias, ""); err != nil {
 		t.Fatalf("alias %q still held after the rollback: %v", driftAlias, err)
 	}
 	if !strings.Contains(stderr, "async_start_drift_rolled_back") {
@@ -495,7 +496,7 @@ func TestRescuePendingCreateForReset(t *testing.T) {
 		if got := mustGetBead(t, store, b.ID); got.Status != "closed" {
 			t.Fatalf("status = %q, want closed", got.Status)
 		}
-		if err := session.EnsureAliasAvailable(store, driftAlias, ""); err != nil {
+		if err := session.EnsureAliasAvailable(beadstest.Sessions(store), driftAlias, ""); err != nil {
 			t.Fatalf("alias still held after reset rescue: %v", err)
 		}
 	})

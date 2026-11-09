@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -44,6 +45,9 @@ type Provider struct {
 	procs    map[string]*sessionConn // in-process tracking
 	workDirs map[string]string       // session name → workDir (for CopyTo)
 	ops      providerOps
+	// fenceChecked is a test seam run between a fenced operation's check and
+	// its signal.
+	fenceChecked func(name string)
 }
 
 type providerOps struct {
@@ -65,6 +69,7 @@ type sessionConn struct {
 	done     chan struct{} // closed when process exits
 	reaped   chan struct{} // closed once reap has finished, after done
 	token    string        // the GC_INSTANCE_TOKEN this incarnation seeded
+	fence    string        // the input-fence digest of this incarnation ("" when its env names none)
 	listener net.Listener  // unix socket listener
 }
 
@@ -123,6 +128,29 @@ func newProvider(dir string) *Provider {
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	// Build environment: inherit parent env + apply overrides. An empty override
+	// spells withholding, matching the tmux adapter: remove the inherited entry
+	// instead of passing KEY=, so namespace isolation remains real to children.
+	// The parent env is read through execenv.Environ so a native beads store
+	// open projecting its scope's BEADS_* variables cannot leak into the session.
+	// It is read before p.mu: execenv.Environ waits out an in-flight open, and
+	// the provider's other calls must not wait with it.
+	env := execenv.Environ()
+	if len(cfg.Env) > 0 {
+		keys := make([]string, 0, len(cfg.Env))
+		for k := range cfg.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
+			env = append(env, k+"="+cfg.Env[k])
+		}
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()
@@ -176,24 +204,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
 
-	// Build environment: inherit parent env + apply overrides. An empty override
-	// spells withholding, matching the tmux adapter: remove the inherited entry
-	// instead of passing KEY=, so namespace isolation remains real to children.
-	env := os.Environ()
-	if len(cfg.Env) > 0 {
-		keys := make([]string, 0, len(cfg.Env))
-		for k := range cfg.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = envWithoutKey(env, k)
-			if cfg.Env[k] == "" {
-				continue
-			}
-			env = append(env, k+"="+cfg.Env[k])
-		}
-	}
 	cmd.Env = env
 
 	// Validate immediately before process creation so hostile pre-creation
@@ -222,6 +232,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	// Create control socket for cross-process discovery.
 	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
+	if f, ok := runtime.InputFenceFromEnv(cfg.Env); ok {
+		sc.fence = f.Digest()
+	}
 	lis, err := p.startControlSocket(name, sc, socketDir, euid)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.
@@ -962,11 +975,15 @@ func isUnavailableSocketError(err error) bool {
 
 // --- In-memory process helpers ---
 
+// sessionStopGrace is how long a stopped session's process group gets between
+// SIGTERM and SIGKILL. A variable so tests can shorten it.
+var sessionStopGrace = runtime.ManagedProcessStopGrace
+
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked
 // process and returns once reap has finished, so a stopped session's sidecar
 // is gone when Stop (or a socket "stop") returns.
 func terminateSessionConn(sc *sessionConn) error {
-	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, sessionStopGrace)
 	<-sc.reaped
 	return err
 }

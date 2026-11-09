@@ -1,7 +1,7 @@
 """The nogo analyzer set: golangci-lint's configured linters as go/analysis passes.
 
 This is the single list of analyzers `//tools/nogo` runs on every Go compile.
-It mirrors the linters .golangci.yml enabled (golangci-lint v2.12 defaults plus
+It mirrors the linters .golangci.yml enabled (golangci-lint v2.14 defaults plus
 the configured extras); analyzers_test.go checks the staticcheck lists against
 honnef.co/go/tools so an upgrade cannot silently drop or add checks.
 """
@@ -131,7 +131,6 @@ STATICCHECK = [
     "sa5008",
     "sa5009",
     "sa5010",
-    "sa5011",
     "sa5012",
     "sa6000",
     "sa6001",
@@ -148,6 +147,7 @@ STATICCHECK = [
     "sa9007",
     "sa9008",
     "sa9009",
+    "sa9010",
 ]
 
 SIMPLE = [
@@ -226,6 +226,7 @@ WRAPPED = [
     "//tools/nogo/analyzers/misspell",
     "//tools/nogo/analyzers/revive",
     "//tools/nogo/analyzers/runtimelease",
+    "//tools/nogo/analyzers/storeclass",
     "//tools/nogo/analyzers/testrelax",
     "//tools/nogo/analyzers/unconvert",
     "//tools/nogo/analyzers/unparam",

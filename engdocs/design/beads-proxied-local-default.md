@@ -32,10 +32,10 @@ as a selector-driven one, because both journal a pending ownership record and
 `checkHardDependencies` raises the floor whenever one exists
 (`bdFreshProviderMinVersion`). On an older bd, `gc init` refuses typed before
 touching the store: `missing required dependencies: bd (found vX, need
-v1.3.0+)`. There is no silent fallback to the legacy path. The only fresh init
-that stays on the 1.0.4 floor is the legacy `--dolt-host` alias used without
-`--beads-transport`/`--beads-target`, which is a client-only external
-binding. `beads.bd_compatibility` in `city.toml` is a different knob: it
+v1.3.0+)`. There is no silent fallback to the legacy path. The legacy
+`--dolt-host` alias used without `--beads-transport`/`--beads-target` journals
+no ownership record, and the general init floor (`bdMinVersion`, also 1.3.0)
+applies to it. `beads.bd_compatibility` in `city.toml` is a different knob: it
 selects which bd CLI *semantics* gc relies on at runtime and does not lower or
 raise this init floor.
 
@@ -199,9 +199,13 @@ periodic read would keep a suspended scope warm for good.
   - A config change made while it is quiescent is applied on the first tick
     after resume.
 - **Retire on suspend, converging on live state.** Once a suspended scope's
-  sessions have been drained for a whole tick, the controller stops its pair
-  with the lifecycle `stop` op (`bd dolt stop`), the same op gc stop runs
-  last.
+  sessions have been drained, and none of the controller's off-tick store work
+  (autoclose runs, completion facts, the async session starts and drain-ack
+  stops it dispatched) has been in flight for a whole tick, the controller
+  stops its pair with the lifecycle `stop` op (`bd dolt stop`), the same op gc
+  stop runs last. A drain-ack stop empties the provider's session list before
+  it releases its runtime lease in the session store, so the empty list alone
+  does not mean the last write has landed.
   - A rig is stopped when its own sessions are gone; the city and every rig
     when nothing runs at all.
   - The check reads the proxy record and the process table, never a store.

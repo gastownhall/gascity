@@ -43,7 +43,7 @@ const (
 // bazelRRCVar gates it.
 const (
 	bazelForkRRCReadStep   = "Fork cache remote repo contents cache (read)"
-	bazelForkRRCReadStepIf = bazelCacheZstdStepIf
+	bazelForkRRCReadStepIf = "needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'"
 	bazelCacheRRCProbe     = "tools/rbe/cache-rrc-probe.sh"
 	bazelCacheRRCProbeGate = "if why=$(bash " + bazelCacheRRCProbe + " 2>&1); then"
 	bazelCacheRRCKillLine  = "fork_rrc_read=on"
@@ -136,7 +136,7 @@ func TestBazelRRCReadStep(t *testing.T) {
 			}
 		}
 	}
-	lines, _ := runBazelRCLocalStep(t, step.Run, nil)
+	lines := runBazelRCLocalStep(t, step.Run, nil)
 	if !slices.Equal(lines, bazelRRCReadLines) {
 		t.Errorf("%q writes %q, want %q", step.Name, lines, bazelRRCReadLines)
 	}
@@ -208,26 +208,49 @@ func TestBazelForkRRCReadStep(t *testing.T) {
 	if strings.Count(step.Run, bazelCacheRRCProbeGate) != 1 {
 		t.Errorf("%q does not gate the reader's lines on %q once", step.Name, bazelCacheRRCProbeGate)
 	}
-	for probe, want := range map[string][]string{"": nil, "ok": bazelRRCReadLines} {
-		run := runBazelRCLocalStepProbes(t, step.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
-		if run.rrcProbes != 1 || run.zstdProbes != 0 {
-			t.Errorf("probe %q: the step ran the rrc probe %d and the zstd probe %d times, want once and never", probe, run.rrcProbes, run.zstdProbes)
+	// The zstd probe runs first, as a diagnostic: .bazelrc's fork-cache
+	// asks for zstd, so without it Bazel refuses rbe-cache. Then the lane
+	// gets a warning and no reader lines, and the rrc probe never runs.
+	for _, c := range []struct {
+		zstd, rrc string
+		want      []string
+	}{
+		{"zstd", "", nil},
+		{"zstd", "ok", bazelRRCReadLines},
+		{"", "ok", nil},
+		{"", "", nil},
+	} {
+		name := "zstd probe " + strconv.Quote(c.zstd) + ", rrc probe " + strconv.Quote(c.rrc)
+		run := runBazelRCLocalStepProbes(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": c.zstd, "BAZEL_TEST_RRC_PROBE": c.rrc})
+		zstdOK := c.zstd == "zstd"
+		if wantRRC := map[bool]int{true: 1}[zstdOK]; run.zstdProbes != 1 || run.rrcProbes != wantRRC {
+			t.Errorf("%s: the step ran the zstd probe %d and the rrc probe %d times, want once and %d", name, run.zstdProbes, run.rrcProbes, wantRRC)
 		}
-		if !slices.Equal(run.lines, want) {
-			t.Errorf("probe %q: .bazelrc.local %q, want %q", probe, run.lines, want)
+		if !slices.Equal(run.lines, c.want) {
+			t.Errorf("%s: .bazelrc.local %q, want %q", name, run.lines, c.want)
 		}
 		notice := "::notice title=No remote repo contents cache::rbe-cache rrc probe: stub refused"
-		if hasNotice := strings.Contains(run.out, notice); hasNotice != (want == nil) {
-			t.Errorf("probe %q: notice %v, want %v (the probe's reason, only when it fails):\n%s", probe, hasNotice, want == nil, run.out)
+		if hasNotice := strings.Contains(run.out, notice); hasNotice != (zstdOK && c.want == nil) {
+			t.Errorf("%s: notice %v, want %v (the rrc probe's reason, only when it fails):\n%s", name, hasNotice, zstdOK && c.want == nil, run.out)
+		}
+		warning := "::warning title=rbe-cache without zstd::rbe-cache zstd probe: stub not advertised"
+		if hasWarning := strings.Contains(run.out, warning); hasWarning != !zstdOK {
+			t.Errorf("%s: zstd warning %v, want %v:\n%s", name, hasWarning, !zstdOK, run.out)
+		}
+		if !strings.Contains(run.out, "rbe-cache zstd probe: ") {
+			t.Errorf("%s: log lacks the zstd probe's verdict:\n%s", name, run.out)
 		}
 		// The verdict, with the probe's reason (rbe-cache's connect time
 		// when it has one), in the lane's step summary either way.
 		summary := "Fork cache remote repo contents cache read: **off** (stub refused)\n"
-		if want != nil {
+		switch {
+		case !zstdOK:
+			summary = "Fork cache remote repo contents cache read: **off** (rbe-cache zstd probe: stub not advertised; fork-cache builds run locally)\n"
+		case c.want != nil:
 			summary = "Fork cache remote repo contents cache read: **on** (stub answers)\n"
 		}
 		if run.summary != summary {
-			t.Errorf("probe %q: step summary %q, want %q", probe, run.summary, summary)
+			t.Errorf("%s: step summary %q, want %q", name, run.summary, summary)
 		}
 	}
 	wf := readMultiLaneWorkflow(t)

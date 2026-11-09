@@ -4,11 +4,18 @@ import "sync"
 
 // Inflight is the API's per-process registry of requests being admitted or
 // executed, keyed by op id. An entry is removed only by its own request
-// (Release by pointer identity: from Finish, from the handler's panic
-// recovery, or by Admit or Finish themselves when they panic): never by age
-// or by size, so the set is bounded by concurrent requests, and no same-key
-// request in this process can see "open, not in flight" while the executor
-// still runs.
+// (Release by pointer identity): by Admit when the request does not execute,
+// by Finish once the op closes, is left open (as the handler's panic recovery
+// leaves it) or gets an invalid outcome, by Admit or Finish themselves when
+// they panic, and, after a close that kept failing, by the background close
+// retry once its close lands or its op's finish_by passes, or by a timer just
+// past finish_by when the recorder's Done ends that retry first. So the set
+// is bounded by concurrent requests plus the requests whose close has not
+// landed, each held until about its op's finish_by, and no same-key request
+// in this process can see "open, not in flight" while the executor still
+// runs, nor before the finish_by of an op whose close did not land: its
+// effect may already have landed. Past finish_by a same-key Admit closes such
+// an op as expired instead of adopting it.
 //
 // The registry is the only in-flight signal adoption reads, so adoption
 // assumes one API process per city (DES-O0API D9, I3): another API process,

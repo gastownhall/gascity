@@ -232,7 +232,7 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		// the delivery layer can cold-wake a session for. Persist the
 		// configured identity so the binding stays unambiguous even when
 		// a later config change makes the bare name ambiguous.
-		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.SessionsBeadStore().Store, agentName)
+		spec, ok, err := s.findNamedSessionSpecForTarget(agentName)
 		if err != nil {
 			return nil, apierr.InvalidRequest.Msg(fmt.Sprintf("resolving agent %q: %s", agentName, err))
 		}

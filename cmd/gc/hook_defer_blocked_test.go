@@ -29,6 +29,38 @@ func TestDoHookFiltersDeferredBeads(t *testing.T) {
 	}
 }
 
+// TestDoHookFiltersStoreDeferredBeads pins issue #6207 on the hook's defensive
+// filter: a row bd records deferred is not work while the store still records
+// it so, with or without a date and whether the date has passed. A raw-open row
+// with an elapsed date stays (TestDoHookKeepsPastDeferredAndClosedBlockers).
+func TestDoHookFiltersStoreDeferredBeads(t *testing.T) {
+	past := "2000-01-01T00:00:00Z"
+	future := "2099-01-01T00:00:00Z"
+	runner := func(_, _ string) (string, error) {
+		return `[
+			{"id":"deferred-elapsed","status":"deferred","defer_until":"` + past + `"},
+			{"id":"deferred-future","status":"deferred","defer_until":"` + future + `"},
+			{"id":"deferred-dateless","status":"deferred"},
+			{"id":"ready-3","status":"open"}
+		]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, id := range []string{"deferred-elapsed", "deferred-future", "deferred-dateless"} {
+		if strings.Contains(out, id) {
+			t.Errorf("store-deferred bead %q surfaced in hook output: %s", id, out)
+		}
+	}
+	if !strings.Contains(out, "ready-3") {
+		t.Errorf("ready bead missing from hook output: %s", out)
+	}
+}
+
 func TestDoHookFiltersDepBlockedBeads(t *testing.T) {
 	runner := func(_, _ string) (string, error) {
 		return `[

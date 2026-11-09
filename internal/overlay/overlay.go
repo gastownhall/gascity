@@ -2,6 +2,7 @@
 package overlay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -48,7 +49,10 @@ func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 	return copyDir(srcDir, dstDir, stderr, nil, nil)
 }
 
-type preserveExistingFunc func(relPath string) bool
+// preserveExistingFunc reports whether the destination file dst, staged from
+// the overlay path relPath, must be kept if it already exists. It may read dst
+// to decide; a dst that does not exist is staged whatever it returns.
+type preserveExistingFunc func(relPath, dst string) bool
 
 // skipRuntimeMirror reports whether relPath is the runtime `.gc` mirror (the
 // entry itself or anything beneath it) at the root of a copy operation, so it is
@@ -124,8 +128,16 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		// Copy file (merge if applicable).
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
-		if preserveExisting != nil && preserveExisting(entryRel) {
+		if preserveExisting != nil && preserveExisting(entryRel, dst) {
 			if _, err := os.Stat(dst); err == nil {
+				// A dst byte-identical to src already holds exactly what this
+				// overlay would stage, whichever writer put it there (typically
+				// gc's own Kiro AGENTS.md fallback from an earlier stage).
+				// Keeping it preserves nothing over the overlay, so skip it
+				// without a warning.
+				if sameFileBytes(src, dst) {
+					continue
+				}
 				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
 				continue
 			} else if !os.IsNotExist(err) {
@@ -138,6 +150,20 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		}
 	}
 	return nil
+}
+
+// sameFileBytes reports whether src and dst are both readable and hold
+// identical bytes. Any read error reports false.
+func sameFileBytes(src, dst string) bool {
+	srcData, err := os.ReadFile(src)
+	if err != nil {
+		return false
+	}
+	dstData, err := os.ReadFile(dst)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(srcData, dstData)
 }
 
 // SkipFunc reports whether a file or directory should be skipped during copy.
@@ -348,19 +374,27 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 	if providerName != "kiro" {
 		return nil
 	}
-	return func(relPath string) bool {
+	return func(relPath, dst string) bool {
 		// Kiro's AGENTS.md is a workspace-root instruction fallback. Once any
 		// workspace, pack, or earlier overlay has provided it, later Kiro
 		// overlays preserve that file instead of replacing instructions.
-		return filepath.Clean(relPath) == "AGENTS.md"
+		if filepath.Clean(relPath) != KiroAgentsMDPath {
+			return false
+		}
+		// The one exception is a body a gc release itself wrote that tells the
+		// agent plain `gc hook` claims work (IsReleasedKiroAgentsMD). It is
+		// replaced by the current fallback. The released body is reproducible
+		// byte for byte, so nothing is backed up. An unreadable file is kept.
+		existing, err := os.ReadFile(dst)
+		return err != nil || !IsReleasedKiroAgentsMD(existing)
 	}
 }
 
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. When wrapBareHooks is true (Claude settings), bare
 // hook entries in the result are normalized into wrapped form, both when
-// merging and when creating the file fresh. Falls back to plain copy on any
-// merge error.
+// merging and when creating the file fresh. A merge result identical to dst
+// leaves the file untouched. Falls back to plain copy on any merge error.
 func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if !merge {
 		return copyFile(src, dst)
@@ -389,6 +423,11 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if err != nil {
 		// Merge failed — fall back to overwrite.
 		return copyFile(src, dst)
+	}
+	// A steady-state re-projection merges to the bytes already on disk; skip
+	// the write so a running session never sees a truncated file mid-rewrite.
+	if bytes.Equal(merged, dstData) {
+		return nil
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {

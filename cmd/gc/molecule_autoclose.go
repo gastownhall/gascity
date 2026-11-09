@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -155,21 +156,49 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		if bead.Type != "step" || bead.ParentID == "" {
 			return run
 		}
-		parent, err := graphStore.Get(bead.ParentID)
+		// A parent shares its child's ledger, so the closed bead's own store
+		// answers first. That is where a v1 POURED molecule lives: its beads
+		// are work class and stay on the work ledger even on a split city.
+		parent, parentStore, err := autocloseLocate(bead.ParentID, store, graphStore)
 		if err != nil {
 			run.note(err)
 			return run
 		}
-		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout, &run)
+		autocloseMoleculeIfComplete(parentStore, rec, parent, stdout, &run)
 		return run
 	}
-	root, err := graphStore.Get(rootID)
+	// gc.root_bead_id names a graph-class root, so the graph store answers
+	// first; the closed bead's own store is the fallback for a root that
+	// shares its ledger (a single-store city, or a rig-scope graph root).
+	root, rootStore, err := autocloseLocate(rootID, graphStore, store)
 	if err != nil {
 		run.note(err)
 		return run
 	}
-	autocloseMoleculeIfComplete(graphStore, rec, root, stdout, &run)
+	autocloseMoleculeIfComplete(rootStore, rec, root, stdout, &run)
 	return run
+}
+
+// autocloseLocate reads id from the first of two stores that holds it and
+// returns that store, so the subtree walk and the close run where the root
+// lives. Only a not-found passes the lookup on; any other read error is the
+// answer (a store that failed to answer is not proof the bead is elsewhere).
+// When first and second are the same store it is read once.
+func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
+	// A two-store residence probe: a miss on the first store is covered by
+	// the second.
+	b, err := beads.FederatedGet(first, id)
+	if err == nil {
+		return b, first, nil
+	}
+	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
+		return beads.Bead{}, first, err
+	}
+	b, err = beads.FederatedGet(second, id)
+	if err != nil {
+		return beads.Bead{}, second, err
+	}
+	return b, second, nil
 }
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer, run *autocloseRun) {
@@ -212,7 +241,9 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 // bead elsewhere (a different gc.source_store_ref) must not be closed here. An
 // empty storeRef falls back to matching on bead ID alone (single-store path).
 func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer, run *autocloseRun) {
-	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, storeRef, storeRef)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
+	roots, err := sourceworkflow.ListLiveRoots(storeMolecule, sourceBeadID, storeRef, storeRef)
 	if err != nil {
 		run.note(err)
 		return
@@ -222,7 +253,7 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 		run.note(err)
 		if terminal {
 			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout, run) {
-				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
+				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
 			}
 		}
 	}
@@ -243,7 +274,8 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // subtreeTerminalOrErr is subtreeTerminalExcludingRoot that also returns the
 // walk error, for an autoclose run that reports what it could not read.
 func subtreeTerminalOrErr(store beads.Store, rootID string) (terminal bool, descendants int, err error) {
-	subtree, err := molecule.ListSubtree(store, rootID)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	subtree, err := molecule.ListSubtree(beads.GraphMolecule(beads.GraphStore{Store: store}), rootID)
 	if err != nil {
 		return false, 0, err
 	}
