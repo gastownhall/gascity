@@ -411,6 +411,11 @@ type infraMigrationReport struct {
 	// infrastructure class to the keys an in-place repair unsets
 	// (infraContainmentGap.Declassifiable).
 	Declassifiable map[string][]string
+	// ClearUnfinished marks a stranded city whose last clear of the retained
+	// copies did not finish (the cleared note is present and incomplete).
+	// With Retained, it is what keeps a stranded city refused: the stranded
+	// verdict carries the retained-copies state so a strand cannot hide it.
+	ClearUnfinished bool
 	// ServedBinding, ServedProvider and ServedNotePath carry the genesis-blocked
 	// evidence: which binding this city previously served its infrastructure
 	// classes from, under which provider, and the note file whose removal is
@@ -496,17 +501,47 @@ func (r infraMigrationReport) serving() bool {
 // the work store answers with the only copy. A presumed-reused id is the same,
 // since the binding does not hold it either. A held-different id is not — it
 // names two beads — so the city still refuses for it.
+//
+// Retained copies are not part of the degraded case. A work store that still
+// holds a frozen copy of a bead the binding owns re-dispatches finished
+// workflow steps (#5987), which is a city-wide hazard, so a stranded city that
+// also holds retained copies, or whose last clear did not finish, refuses
+// exactly as the retained-copies verdict does.
 func (r infraMigrationReport) servesDegraded() bool {
-	return r.Outcome == infraMigrationStranded && len(r.Stranded) > 0 && len(r.HeldDifferent) == 0
+	return r.Outcome == infraMigrationStranded && len(r.Stranded) > 0 && len(r.HeldDifferent) == 0 &&
+		len(r.Retained) == 0 && !r.ClearUnfinished
 }
 
 // infraStrandedServingLine is the serving verdict `gc storage status` prints
 // for a stranded city, in the gate's terms (servesDegraded).
-func infraStrandedServingLine(stranded, heldDifferent int) string {
-	if heldDifferent > 0 {
-		return fmt.Sprintf("refused — %d stranded id(s) are held in the binding by a different bead, so an id would name two beads; no routed gc command serves this city until they are resolved", heldDifferent)
+func infraStrandedServingLine(r infraMigrationReport) string {
+	switch {
+	case r.servesDegraded():
+		return fmt.Sprintf("degraded — %d stranded row(s) are invisible to their class readers; the rest of the city serves", len(r.Stranded))
+	case len(r.HeldDifferent) > 0:
+		return fmt.Sprintf("refused — %d stranded id(s) are held in the binding by a different bead, so an id would name two beads; no routed gc command serves this city until they are resolved", len(r.HeldDifferent))
+	case len(r.Retained) > 0 || r.ClearUnfinished:
+		return fmt.Sprintf("refused — the work store also holds %d retained cop(ies) of beads the binding owns (or an unfinished clear), which re-dispatch finished work (#5987); no routed gc command serves this city until they are cleared", len(r.Retained))
+	default:
+		return "refused"
 	}
-	return fmt.Sprintf("degraded — %d stranded row(s) are invisible to their class readers; the rest of the city serves", stranded)
+}
+
+// infraStrandedRetainedAdvice names the clear for a stranded city that also
+// holds retained copies or an unfinished clear, or "" when it holds neither.
+func infraStrandedRetainedAdvice(r infraMigrationReport) string {
+	if len(r.Retained) == 0 && !r.ClearUnfinished {
+		return ""
+	}
+	held := fmt.Sprintf("%d retained pre-migration cop(ies) of beads the binding owns (%s)", len(r.Retained), infraStrandedIDList(r.Retained))
+	if len(r.Retained) == 0 {
+		held = "the residue of a clear that did not finish"
+	}
+	record := ""
+	if len(r.Unrecorded) > 0 {
+		record = fmt.Sprintf(" (%s records the %d the copy manifest does not, %s, first)", storageRecoveryInstruction(), len(r.Unrecorded), infraStrandedIDList(r.Unrecorded))
+	}
+	return fmt.Sprintf(" The work store also still holds %s, which readers that reach it first are served, so finished workflow steps are dispatched again (#5987): the city is refused until they are cleared. Once the stranded rows are handled, clear them with:  %s%s.", held, storageClearInstruction(), record)
 }
 
 // infraRevertInstruction is the one sentence that tells an operator to point
@@ -553,8 +588,14 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		// documented way out, because the migration refuses to re-run and
 		// nothing else moved a bead. See infra_class_recover.go for why the
 		// repair is a separate, additive verb and not the migration again.
-		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding does not serve as the bead the work store holds: %s. They are intact in the retained work store. %s Re-check with `gc storage status`, which exits zero once none is left.",
-			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedAdviceFor(report.Stranded, report.HeldDifferent, report.PresumedReused, report.Declassifiable))
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding does not serve as the bead the work store holds: %s. They are intact in the retained work store. %s%s Re-check with `gc storage status`, which exits zero once none is left.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedAdviceFor(report.Stranded, report.HeldDifferent, report.PresumedReused, report.Declassifiable), infraStrandedRetainedAdvice(report))
+		if report.servesDegraded() {
+			// The city serves, so the advice ends on that, not on "start
+			// again". The revert is still withheld: the binding has served
+			// since cutover and holds what the revert would abandon.
+			return situation + fmt.Sprintf(" Do NOT revert [storage.classes] to %q: the binding has served this city's infrastructure state since cutover, and the revert would abandon it. The rest of the city serves degraded meanwhile.", config.StorageWorkBinding)
+		}
 	case infraMigrationRetained:
 		cause := ""
 		if report.Fault != nil {
@@ -1886,7 +1927,12 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 	// binding) is what follows it.
 	fmt.Fprintf(stderr, "%s: %d infrastructure bead(s) in the retained work store are not recorded as carried by the proven copy, and the converged binding %s does not serve them as the beads the work store holds: %s%s. They are intact in the work store. %s\n", //nolint:errcheck // best-effort stderr
 		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable))
-	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable}
+	note, notePresent, err := readInfraClearedNote(cityPath)
+	if err != nil {
+		return reportUncheckableConvergence(target, logPrefix, stderr, err)
+	}
+	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable,
+		Retained: gap.Retained, Unrecorded: gap.Unrecorded, ClearUnfinished: notePresent && !note.Complete, LostCrossEdges: note.LostCrossEdges}
 }
 
 // reportUncheckableConvergence reports a converged city whose convergence could

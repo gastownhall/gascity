@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -162,23 +163,29 @@ func MintCommand(c Class) string {
 	}
 }
 
-// ClassMetadataOnly reports the classifier metadata keys whose removal returns
-// b to the work class, when metadata ALONE takes it out of work: no classifier
-// label and no class-deciding type is involved. ok is false for a work bead,
-// and for any bead whose type or labels decide its class (a gc:session bead,
-// a convergence root, a message, a wisp label), because unsetting a key there
-// would not make it work, or would make it the wrong thing.
+// ClassMetadataOnly reports whether b is a WORK-SHAPED bead that a stray
+// gc.root_bead_id alone takes out of the work class, and if so the keys an
+// in-place repair unsets (always exactly gc.root_bead_id).
 //
 // It exists for the stranded-row repair. An agent that copies its workflow
 // root onto ordinary work as provenance (`gc.root_bead_id` on a task, the
 // substrate 2026-11-09 incident) makes that work graph class, and a split
 // city then counts it as stranded. Such a row is repaired in place, on the
-// running city, by unsetting exactly these keys: CheckFlip allows a write that
-// returns a bead to a class its store holds. Copying it into the binding
-// instead would hand ordinary work to a workflow's ownership.
+// running city, by unsetting the key: CheckFlip allows a write that returns a
+// bead to a class its store holds. Copying it into the binding instead would
+// hand ordinary work to a workflow's ownership.
 //
-// The keys are minimal and sorted: a classifier key present on the bead that
-// does not take part in its class (gc.synthetic on a non-convoy) is not named.
+// It is deliberately narrow, because a false yes tells an operator to strip
+// a REAL graph bead of its workflow membership. ok is false for:
+//
+//   - a work bead (nothing to remove);
+//   - any bead whose type or labels decide its class (a gc:session bead, a
+//     convergence root, a message, a wisp label);
+//   - any bead carrying a classifier key other than gc.root_bead_id:
+//     gc.kind (a workflow root, a wisp) and gc.formula_contract are
+//     definitive graph markers no agent copies by accident;
+//   - a bead carrying gc.step_id: that is what a formula step looks like, so
+//     it is most likely a real step written by an unfenced writer.
 func ClassMetadataOnly(b beads.Bead) (keys []string, ok bool) {
 	if Classify(b) == ClassWork {
 		return nil, false
@@ -188,22 +195,18 @@ func ClassMetadataOnly(b beads.Bead) (keys []string, ok bool) {
 			return nil, false
 		}
 	}
-	present := make([]string, 0, len(classifierMetadataKeys))
 	for _, k := range ClassifierMetadataKeys() {
-		if strings.TrimSpace(b.Metadata[k]) != "" {
-			present = append(present, k)
+		if k != beadmeta.RootBeadIDMetadataKey && strings.TrimSpace(b.Metadata[k]) != "" {
+			return nil, false
 		}
 	}
-	if len(present) == 0 || Classify(Mutation{UnsetMetadata: present}.Apply(b)) != ClassWork {
+	if strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]) == "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.StepIDMetadataKey]) != "" {
 		return nil, false
 	}
-	// Drop every key the work verdict does not need.
-	keys = slices.Clone(present)
-	for _, k := range present {
-		trial := slices.DeleteFunc(slices.Clone(keys), func(x string) bool { return x == k })
-		if Classify(Mutation{UnsetMetadata: trial}.Apply(b)) == ClassWork {
-			keys = trial
-		}
+	keys = []string{beadmeta.RootBeadIDMetadataKey}
+	if Classify(Mutation{UnsetMetadata: keys}.Apply(b)) != ClassWork {
+		return nil, false
 	}
 	return keys, true
 }

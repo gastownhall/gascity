@@ -338,10 +338,10 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if cfg == nil || cfg.Storage == nil {
 		if blocked, held := revertHoldingNote(storageSplitNone, cityPath); held {
 			advice := infraMigrationOperatorAdvice(blocked, logPrefix)
-			recordStorageBindingOutcome(rec, blocked, advice)
+			recordStorageGateOutcome(rec, blocked, advice, false)
 			return nil, errors.New(advice)
 		}
-		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
+		recordStorageGateOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "", true)
 		return nil, nil
 	}
 
@@ -381,14 +381,14 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// that never served a split has no note and passes untouched.
 		if blocked, held := revertHoldingNote(shape, cityPath); held {
 			advice := infraMigrationOperatorAdvice(blocked, logPrefix)
-			recordStorageBindingOutcome(rec, blocked, advice)
+			recordStorageGateOutcome(rec, blocked, advice, false)
 			return nil, errors.New(advice)
 		}
 		// Same verdict as the absent section above, and deliberately the same
 		// event: an operator who reverted by re-pointing every class and one who
 		// deleted the section have arrived at the same place, and a subscriber
 		// should not have to know which edit they made to read it.
-		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
+		recordStorageGateOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "", true)
 		return nil, nil
 	}
 
@@ -443,17 +443,19 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// (infraMigrationReport.servesDegraded): the stranded rows stay invisible
 	// to their class readers, and this process says so once, here, rather than
 	// refusing every class for them.
+	// The one-line warning is the caller's to print (warnDegradedServing), so
+	// a caller that buffers this gate's diagnostics — the one-shot CLI, which
+	// prints them only on a refusal — still warns.
 	degraded, degradedAdvice := !report.serving() && report.servesDegraded(), ""
 	if degraded {
 		degradedAdvice = infraMigrationOperatorAdvice(report, logPrefix)
-		printStorageWarningOnce(stderr, strandedDegradedWarning(report, logPrefix))
 	}
 	if !report.serving() && !degraded {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice == "" {
 			advice = fmt.Sprintf("%s: binding %q cannot be served and the reason was not reported (%s)", logPrefix, target.Binding, report.Outcome)
 		}
-		recordStorageBindingOutcome(rec, report, advice)
+		recordStorageGateOutcome(rec, report, advice, false)
 		if report.Transient {
 			return nil, storageGateTransientFault{err: errors.New(advice)}
 		}
@@ -474,7 +476,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// stream reports the verdict this gate reached, and the open's own failure
 	// is what the caller prints. A degraded verdict is recorded once, as the
 	// stranded event carrying its advice.
-	recordStorageBindingOutcome(rec, report, degradedAdvice)
+	recordStorageGateOutcome(rec, report, degradedAdvice, true)
 	routes, err := openStorageRoutes(plan, target, cfg, cityPath, rec)
 	if err != nil {
 		return nil, err
@@ -827,12 +829,32 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
-// recordStorageBindingOutcome publishes what one gate or one migration
-// concluded about a binding.
+// recordStorageBindingOutcome publishes what one operator command concluded
+// about a binding. It carries no serving field: a command run is not a
+// statement about whether any process serves the city (a migrate whose clear
+// stopped exits 1 whatever the verdict would let a boot do).
 //
 // invariant is the operator-facing sentence a refusal printed, so a subscriber
 // reads the same reason the terminal did rather than a paraphrase of it.
 func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationReport, invariant string) {
+	publishStorageBindingOutcome(rec, report, invariant, nil, false)
+}
+
+// recordStorageGateOutcome publishes the boot gate's verdict, and is the one
+// publisher that says whether the city is served: serving is what this gate
+// did, not what the outcome would suggest.
+func recordStorageGateOutcome(rec events.Recorder, report infraMigrationReport, invariant string, serving bool) {
+	publishStorageBindingOutcome(rec, report, invariant, &serving, false)
+}
+
+// recordStrandRecheckOutcome publishes the controller's periodic recheck. It
+// is marked as a recheck and claims nothing about serving: the running
+// controller keeps serving whatever the recheck finds.
+func recordStrandRecheckOutcome(rec events.Recorder, report infraMigrationReport, invariant string) {
+	publishStorageBindingOutcome(rec, report, invariant, nil, true)
+}
+
+func publishStorageBindingOutcome(rec events.Recorder, report infraMigrationReport, invariant string, serving *bool, recheck bool) {
 	if rec == nil {
 		return
 	}
@@ -847,13 +869,18 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		Invariant:      invariant,
 		ProvenBeads:    report.ProvenBeads,
 		LostCrossEdges: report.LostCrossEdges,
-		Serving:        report.serving() || report.servesDegraded() || report.Outcome == infraMigrationNotConfigured,
+		Serving:        serving,
+		Recheck:        recheck,
 	}
 	if report.Outcome == infraMigrationStranded {
-		payload.Stranded = report.Stranded[:min(len(report.Stranded), storebinding.StrandedCap)]
+		payload.Stranded = capStrandedIDs(report.Stranded)
 		payload.StrandedCount = len(report.Stranded)
-		payload.HeldDifferent = report.HeldDifferent
-		payload.PresumedReused = report.PresumedReused
+		payload.HeldDifferent = capStrandedIDs(report.HeldDifferent)
+		payload.HeldDifferentCount = len(report.HeldDifferent)
+		payload.PresumedReused = capStrandedIDs(report.PresumedReused)
+		payload.PresumedReusedCount = len(report.PresumedReused)
+		payload.Retained = capStrandedIDs(report.Retained)
+		payload.RetainedCount = len(report.Retained)
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -865,6 +892,11 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		Subject: report.Target.Binding,
 		Payload: raw,
 	})
+}
+
+// capStrandedIDs bounds an id list a payload carries (storebinding.StrandedCap).
+func capStrandedIDs(ids []string) []string {
+	return ids[:min(len(ids), storebinding.StrandedCap)]
 }
 
 // storageWarningsPrinted holds every (writer, message) a gate warning has
@@ -909,23 +941,28 @@ var strandRecheckInterval = 10 * time.Minute
 // gate's containment check (confirmInfraContainment). The controller runs the
 // gate once, at boot, so before this a write that stranded rows after boot —
 // an agent's plain `bd create` carrying gc.root_bead_id — was visible only to
-// the one-shot processes that refused for it. Now it is an event.
+// the one-shot processes that read it. Now it is an event.
 //
-// It REPORTS only. It never re-gates the running controller: the gate serves
-// a stranded city degraded anyway, and taking a running city down over a
-// verdict its writer never sees is what the degraded verdict replaced.
+// It REPORTS only. It never re-gates the running controller, and its events
+// are marked as rechecks and claim nothing about serving.
 //
-// It publishes when the verdict changes: storage.binding.stranded when the
-// stranded set changes (by its ids), storage.binding.converged once it is
-// empty again, and storage.binding.uncheckable when the check could not run —
-// which stops nothing.
+// It publishes a change of DEFINITIVE verdict: storage.binding.stranded when
+// the stranded set changes (by its ids), storage.binding.converged once it is
+// empty again. A check that could not run is not a verdict: a transient read
+// fault publishes nothing (it is logged), and a standing one publishes
+// uncheckable once; the next definitive verdict after an uncheckable is
+// published even if it equals the last one, so a subscriber sees the fault
+// clear. The fault text is never part of the change key.
 type strandRecheck struct {
 	cityPath  string
 	target    infraBindingTarget
 	rec       events.Recorder
 	stderr    io.Writer
 	logPrefix string
-	last      string
+	// last is the key of the last definitive verdict published (or served on
+	// at boot); faulted is set while the last published verdict is uncheckable.
+	last    string
+	faulted bool
 }
 
 // newStrandRecheck seeds the recheck with the verdict the gate served on, so
@@ -947,39 +984,54 @@ func newStrandRecheck(routes *storageRoutes, cityPath string, rec events.Recorde
 }
 
 // strandRecheckKey is what a change is measured against: the outcome, and
-// for a stranded verdict its ids.
+// for a stranded verdict its ids and the facts that decide its serving
+// verdict. It never includes fault text.
 func strandRecheckKey(report infraMigrationReport) string {
 	switch report.Outcome {
 	case infraMigrationGenesis:
 		return infraMigrationConverged.String()
 	case infraMigrationStranded:
-		return report.Outcome.String() + ":" + strings.Join(report.Stranded, ",") + "|" + strings.Join(report.HeldDifferent, ",")
-	case infraMigrationUncheckable:
-		if report.Fault != nil {
-			return report.Outcome.String() + ":" + report.Fault.Error()
-		}
+		return fmt.Sprintf("%s:%s|%s|%d|%v", report.Outcome, strings.Join(report.Stranded, ","), strings.Join(report.HeldDifferent, ","), len(report.Retained), report.ClearUnfinished)
 	}
 	return report.Outcome.String()
 }
 
-// tick runs one recheck and publishes the verdict if it changed.
+// tick runs one recheck and publishes the verdict if it changed. A panic is
+// contained here: the recheck runs inside the supervisor that hosts every
+// city, and a report-only probe must never take it down.
 func (s *strandRecheck) tick() {
+	defer func() {
+		if r := recover(); r != nil && s.stderr != nil {
+			fmt.Fprintf(s.stderr, "%s: the strand recheck panicked and was skipped: %v\n", s.logPrefix, r) //nolint:errcheck // best-effort stderr
+		}
+	}()
 	report := confirmInfraContainment(s.cityPath, s.target, s.logPrefix, io.Discard)
 	report.Target = s.target
-	key := strandRecheckKey(report)
-	if key == s.last {
+	if report.Outcome == infraMigrationUncheckable {
+		if report.Transient || s.faulted {
+			if report.Transient && s.stderr != nil {
+				fmt.Fprintf(s.stderr, "%s: the strand recheck could not run this time: %v\n", s.logPrefix, report.Fault) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+		s.faulted = true
+		recordStrandRecheckOutcome(s.rec, report, infraMigrationOperatorAdvice(report, s.logPrefix))
 		return
 	}
-	s.last = key
+	key := strandRecheckKey(report)
+	if key == s.last && !s.faulted {
+		return
+	}
+	s.last, s.faulted = key, false
 	advice := ""
 	if !report.serving() {
 		advice = infraMigrationOperatorAdvice(report, s.logPrefix)
 	}
 	if report.Outcome == infraMigrationStranded && s.stderr != nil {
-		fmt.Fprintf(s.stderr, "%s: the strand recheck found %d stranded infrastructure bead(s) (%s); %s\n", //nolint:errcheck // best-effort stderr
-			s.logPrefix, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedServingLine(len(report.Stranded), len(report.HeldDifferent)))
+		fmt.Fprintf(s.stderr, "%s: the strand recheck found %d stranded infrastructure bead(s) (%s); a boot now would be %s\n", //nolint:errcheck // best-effort stderr
+			s.logPrefix, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedServingLine(report))
 	}
-	recordStorageBindingOutcome(s.rec, report, advice)
+	recordStrandRecheckOutcome(s.rec, report, advice)
 }
 
 // run ticks every interval until ctx ends.
@@ -997,14 +1049,34 @@ func (s *strandRecheck) run(ctx context.Context, interval time.Duration) {
 }
 
 // startStrandRecheck starts the controller's strand recheck, when the city has
-// a converged binding to recheck and the interval is positive.
-func (cr *CityRuntime) startStrandRecheck(ctx context.Context) {
-	if strandRecheckInterval <= 0 {
+// a converged binding to recheck and the interval is positive, and returns the
+// stop that cancels it and waits for it to exit. run() defers the stop, so the
+// recheck never outlives the runtime: not on an early return, not past
+// shutdown. The stop is a no-op when nothing started.
+func (cr *CityRuntime) startStrandRecheck(ctx context.Context) (stop func()) {
+	s := newStrandRecheck(cr.storageRoutes, cr.cityPath, cr.rec, cr.stderr, cr.logPrefix)
+	if strandRecheckInterval <= 0 || s == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.run(ctx, strandRecheckInterval)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// warnDegradedServing prints, once per process and writer, the one-line
+// warning for routes the gate served degraded. Nothing for any other routes.
+func warnDegradedServing(routes *storageRoutes, w io.Writer, logPrefix string) {
+	if routes == nil || !routes.bootVerdict.servesDegraded() {
 		return
 	}
-	if s := newStrandRecheck(cr.storageRoutes, cr.cityPath, cr.rec, cr.stderr, cr.logPrefix); s != nil {
-		go s.run(ctx, strandRecheckInterval)
-	}
+	printStorageWarningOnce(w, strandedDegradedWarning(routes.bootVerdict, logPrefix))
 }
 
 // strandedDegradedWarning is the one line a process serving a stranded city

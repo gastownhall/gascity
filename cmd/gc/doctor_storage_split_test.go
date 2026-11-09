@@ -108,6 +108,12 @@ func TestStorageSplitDoctorAgreesWithStatus(t *testing.T) {
 					t.Fatal(err)
 				}
 				mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-1"}})
+				// Tied to the gate: doctor's "degraded" is the gate's verdict.
+				routes, err := storageBootGate(request.CityPath, request.Cfg, "gc start", nil, io.Discard)
+				if err != nil || !routes.bootVerdict.servesDegraded() {
+					t.Fatalf("the gate does not serve this city degraded (err %v)", err)
+				}
+				_ = routes.close()
 				return request
 			},
 			status: doctor.StatusError, want: "the city serves degraded",

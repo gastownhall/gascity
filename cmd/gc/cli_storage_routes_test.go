@@ -277,6 +277,12 @@ func TestCLIStorageRoutesServeAStrandedCityDegraded(t *testing.T) {
 	if !strings.Contains(stderr.String(), stranded.ID) {
 		t.Errorf("the warning does not name %s: %q", stranded.ID, stderr.String())
 	}
+	// Exactly the one warning line: the gate's containment paragraph (over a
+	// kilobyte, naming every id and the remedy) is printed only with a
+	// refusal, not by every gc process on a degraded city.
+	if got := strings.TrimRight(stderr.String(), "\n"); strings.Contains(got, "\n") || strings.Contains(got, "are not recorded as carried by the proven copy") {
+		t.Errorf("a degraded city's gc process printed more than the one warning line:\n%s", stderr.String())
+	}
 }
 
 // TestStorageStatusStaysOffTheOneShotFunnel pins the exemption the refusal

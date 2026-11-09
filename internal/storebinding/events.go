@@ -75,23 +75,34 @@ type StorageBindingOutcomePayload struct {
 	// on every verdict that reads the cleared note, so the record outlives the
 	// migrate run that dropped them.
 	LostCrossEdges []string `json:"lost_cross_edges,omitempty"`
-	// Serving reports whether the process that reached this verdict serves the
-	// city: true for converged, genesis and not-configured, and for a stranded
-	// city that serves degraded; false for every refusal. It is what a
-	// subscriber branches on for a storage.binding.stranded event, which
-	// arrives both ways.
-	Serving bool `json:"serving"`
+	// Serving is set only by the boot gate (a controller boot or a gc
+	// process resolving its routes) and says what that gate did: true when it
+	// serves the city — converged, genesis, not-configured, or a stranded city
+	// served degraded — false when it refuses. It is absent (null) on an
+	// operator command's event and on a recheck's, which serve nothing, and
+	// on every event an older build recorded; absent means "not stated", never
+	// false.
+	Serving *bool `json:"serving,omitempty"`
+	// Recheck marks an event the controller's periodic, read-only containment
+	// recheck published, rather than a boot or an operator command. The
+	// running controller keeps serving whatever a recheck finds.
+	Recheck bool `json:"recheck,omitempty"`
 	// Stranded names the stranded ids a storage.binding.stranded event is
 	// about, capped at the first StrandedCap in id order; StrandedCount is the
-	// whole count. Both are empty on every other type.
-	Stranded      []string `json:"stranded,omitempty"`
-	StrandedCount int      `json:"stranded_count,omitempty"`
-	// HeldDifferent names the stranded ids the binding holds for a different
-	// bead. Any one of them makes the city refuse rather than serve degraded.
-	HeldDifferent []string `json:"held_different,omitempty"`
-	// PresumedReused names the stranded ids a legacy manifest lists by a bare
-	// id they are younger than; they do not stop the city serving.
-	PresumedReused []string `json:"presumed_reused,omitempty"`
+	// whole count. HeldDifferent (the ids the binding holds for a different
+	// bead, any one of which makes the city refuse), PresumedReused (ids a
+	// legacy manifest lists by a bare id they are younger than) and Retained
+	// (retained copies of binding-owned beads beside the strand, which also
+	// make it refuse) are capped the same way, each with its whole count. All
+	// are empty on every other type.
+	Stranded            []string `json:"stranded,omitempty"`
+	StrandedCount       int      `json:"stranded_count,omitempty"`
+	HeldDifferent       []string `json:"held_different,omitempty"`
+	HeldDifferentCount  int      `json:"held_different_count,omitempty"`
+	PresumedReused      []string `json:"presumed_reused,omitempty"`
+	PresumedReusedCount int      `json:"presumed_reused_count,omitempty"`
+	Retained            []string `json:"retained,omitempty"`
+	RetainedCount       int      `json:"retained_count,omitempty"`
 }
 
 // StrandedCap bounds the ids a storage.binding.stranded payload lists.

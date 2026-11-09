@@ -1773,18 +1773,20 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if len(workShaped) > 0 {
 		fmt.Fprintf(stdout, "still stranded by default: %d work-shaped row(s) were left in the work store; repair each in place or name it with --%s (listed above)\n", len(workShaped), strandedMoveFlag) //nolint:errcheck // best-effort stdout
 	}
-	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 || len(workShaped) > 0 {
-		return 1
-	}
 	// The recovered rows are now proven into the binding and still in the work
 	// store: second rows under ids the binding owns, which boot refuses until
 	// they are cleared. This command only ever adds, so it names the one that
-	// clears rather than doing it.
+	// clears rather than doing it — before any exit-1 return below, because a
+	// run that leaves work-shaped or ambiguous rows still left these copies,
+	// and a stranded city that holds them is refused, not served degraded.
 	if len(residual.Retained) > 0 {
 		// Retained counts every carried row, including the ones whose binding
 		// copy the binding's own GC has since collected; name the two apart.
 		held := len(residual.Retained) - residual.RemovedSinceCutover
 		fmt.Fprintf(stdout, "next: the work store still holds %d retained cop(ies) (%d of beads the binding holds, %d the binding has since collected); clear them with `%s`\n", len(residual.Retained), held, residual.RemovedSinceCutover, storageClearInstruction()) //nolint:errcheck // best-effort stdout
+	}
+	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 || len(workShaped) > 0 {
+		return 1
 	}
 	return 0
 }

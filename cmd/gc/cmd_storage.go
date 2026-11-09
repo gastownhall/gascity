@@ -862,7 +862,11 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		// What the gate does with this verdict (infraMigrationReport.servesDegraded):
 		// the exit stays 1 either way, because a stranded row is a defect
 		// whether or not the rest of the city serves around it.
-		fmt.Fprintf(stdout, "  serving:     %s\n", infraStrandedServingLine(len(gap.Stranded), len(gap.HeldDifferent))) //nolint:errcheck // best-effort stdout
+		verdict := infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, Retained: gap.Retained, Unrecorded: gap.Unrecorded}
+		if note, present, err := readInfraClearedNote(request.CityPath); err != nil || (present && !note.Complete) {
+			verdict.ClearUnfinished = true
+		}
+		fmt.Fprintf(stdout, "  serving:     %s\n", infraStrandedServingLine(verdict)) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
 		// about it. This report used to carry only the ids, so the one command
 		// an operator would reach for after a non-zero `gc storage status` said
@@ -879,7 +883,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		// unsettled, its own remedy above is the only one: recover-stranded
 		// refuses until then (infraPurgeUnsettledRefusal).
 		if purgeSettled {
-			fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable)) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "blocking invariant: %s%s\n", infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable), infraStrandedRetainedAdvice(verdict)) //nolint:errcheck // best-effort stdout
 		}
 		return 1
 	}

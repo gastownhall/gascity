@@ -307,8 +307,13 @@ func TestClassMetadataOnly(t *testing.T) {
 		// stamped its workflow root as provenance on ordinary work.
 		{"task with root bead id", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605", "gc.step_ref": "x"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
 		{"bug with root bead id", beads.Bead{Type: "bug", Labels: []string{"triage/needs-decision"}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-622605"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
-		{"workflow kind and contract", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: "graph.v2"}}, []string{beadmeta.FormulaContractMetadataKey, beadmeta.KindMetadataKey}, true},
-		{"irrelevant synthetic key is not named", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.SyntheticMetadataKey: "true"}}, []string{beadmeta.RootBeadIDMetadataKey}, true},
+		// Genuine graph beads are never work-shaped: an operator told to unset
+		// their keys would strip a real workflow of its members.
+		{"workflow root (kind and contract)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"contract alone", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.FormulaContractMetadataKey: "graph.v2"}}, nil, false},
+		{"wisp by gc.kind alone", beads.Bead{Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, nil, false},
+		{"real step (root and step id)", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.StepIDMetadataKey: "s1", "gc.step_ref": "f.s1"}}, nil, false},
+		{"root id beside another class key", beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1", beadmeta.SyntheticMetadataKey: "true"}}, nil, false},
 		{"work bead has nothing to remove", beads.Bead{Type: "task"}, nil, false},
 		{"session label decides", beads.Bead{Type: "task", Labels: []string{labelSession}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-1"}}, nil, false},
 		{"session type decides", beads.Bead{Type: typeSession}, nil, false},

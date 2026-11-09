@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -510,6 +512,7 @@ func TestStorageGateServesAStrandedCityDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a city with only absent stranded rows refused to start: %v", err)
 	}
+	warnDegradedServing(routes, &stderr, "gc start")
 	t.Cleanup(func() { _ = routes.close() })
 	for _, class := range coordclass.Classes() {
 		if !class.IsInfrastructure() {
@@ -528,7 +531,7 @@ func TestStorageGateServesAStrandedCityDegraded(t *testing.T) {
 	if event.Type != events.StorageBindingStranded {
 		t.Fatalf("recorded %s, want %s", event.Type, events.StorageBindingStranded)
 	}
-	if !payload.Serving || payload.Outcome != "stranded" || payload.StrandedCount != 3 || len(payload.HeldDifferent) != 0 {
+	if payload.Serving == nil || !*payload.Serving || payload.Recheck || payload.Outcome != "stranded" || payload.StrandedCount != 3 || len(payload.HeldDifferent) != 0 {
 		t.Errorf("payload = %+v, want serving stranded with 3 ids and none held different", payload)
 	}
 	for _, id := range []string{task.ID, bug.ID, session.ID} {
@@ -561,6 +564,7 @@ func TestStorageGateServesAStrandedCityDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second gate refused: %v", err)
 	}
+	warnDegradedServing(again, &stderr, "gc start")
 	_ = again.close()
 	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
 		t.Errorf("the gate warned %d time(s) across two resolutions, want once", got)
@@ -592,7 +596,7 @@ func TestStorageGateRefusesAStrandedIDHeldByADifferentBead(t *testing.T) {
 		t.Errorf("the refusal names no recovery re-check: %v", err)
 	}
 	event, payload := decodeStorageBindingOutcome(t, rec)
-	if event.Type != events.StorageBindingStranded || payload.Serving || !slices.Contains(payload.HeldDifferent, reused.ID) {
+	if event.Type != events.StorageBindingStranded || payload.Serving == nil || *payload.Serving || !slices.Contains(payload.HeldDifferent, reused.ID) || payload.HeldDifferentCount != 1 {
 		t.Errorf("recorded %s %+v, want a non-serving stranded event naming %s held different", event.Type, payload, reused.ID)
 	}
 	if strings.Contains(stderr.String(), "serving degraded") {
@@ -2499,8 +2503,8 @@ func TestStrandRecheckPublishesOnlyChanges(t *testing.T) {
 	s.tick()
 	s.tick()
 	_, payload := decodeStorageBindingOutcome(t, rec)
-	if rec.Events[0].Type != events.StorageBindingStranded || !payload.Serving || !slices.Equal(payload.Stranded, []string{stranded.ID}) {
-		t.Fatalf("recorded %s %+v, want one serving stranded event naming %s", rec.Events[0].Type, payload, stranded.ID)
+	if rec.Events[0].Type != events.StorageBindingStranded || payload.Serving != nil || !payload.Recheck || !slices.Equal(payload.Stranded, []string{stranded.ID}) {
+		t.Fatalf("recorded %s %+v, want one recheck stranded event naming %s and claiming nothing about serving", rec.Events[0].Type, payload, stranded.ID)
 	}
 	if !strings.Contains(payload.Invariant, "--unset-metadata gc.root_bead_id") {
 		t.Errorf("the recheck's event carries no repair: %s", payload.Invariant)
@@ -2546,5 +2550,155 @@ func TestStrandRecheckSeedsFromADegradedBoot(t *testing.T) {
 	s.tick()
 	if len(rec.Events) != 0 {
 		t.Fatalf("the first recheck republished the boot strand: %+v", rec.Events)
+	}
+}
+
+// TestStorageGateRefusesAStrandBesideRetainedCopies (review probe): a city
+// whose work store still holds retained copies of binding-owned beads
+// refuses (#5987); one stranded row beside them must not turn that into a
+// degraded serve, and the refusal names the clear.
+func TestStorageGateRefusesAStrandBesideRetainedCopies(t *testing.T) {
+	cityPath, cfg, source, _ := convergedRecoveryCity(t)
+	before := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	if before.Outcome != infraMigrationRetained {
+		t.Fatalf("fixture: outcome %s, want retained", before.Outcome)
+	}
+	work := workShapedStrandedBead(t, source)
+	after := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	if after.Outcome != infraMigrationStranded || after.servesDegraded() || len(after.Retained) == 0 {
+		t.Fatalf("after one strand: outcome=%s retained=%v servesDegraded=%v, want a stranded verdict that carries the retained copies and does not serve", after.Outcome, after.Retained, after.servesDegraded())
+	}
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatalf("one stranded row (%s) made a city with retained copies %v serve degraded (#5987)", work.ID, before.Retained)
+	}
+	if !strings.Contains(err.Error(), storageClearInstruction()) {
+		t.Errorf("the refusal does not name the clear %q: %v", storageClearInstruction(), err)
+	}
+	if strings.Contains(stderr.String(), "serving degraded") {
+		t.Errorf("a refusing gate warned it serves degraded: %s", stderr.String())
+	}
+	if _, payload := decodeStorageBindingOutcome(t, rec); payload.Serving == nil || *payload.Serving {
+		t.Errorf("the refusal's event does not say serving=false: %+v", payload)
+	}
+	var stdout bytes.Buffer
+	doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, io.Discard)
+	if !strings.Contains(stdout.String(), "serving:     refused") || !strings.Contains(stdout.String(), storageClearInstruction()) {
+		t.Errorf("status does not report the refusal and the clear:\n%s", stdout.String())
+	}
+}
+
+// TestRecoverStrandedNamesTheClearAndLeavesTheCityRefused (review probe):
+// recover-stranded carries a session strand (its work-store copy stays until
+// the clear) and leaves a work-shaped row. It must name the clear even though
+// it exits 1, and the gate must not serve the retained copy.
+func TestRecoverStrandedNamesTheClearAndLeavesTheCityRefused(t *testing.T) {
+	cityPath, cfg, source, _ := convergedRecoveryCity(t)
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("fixture: clear outcome %s: %s", got.Outcome, log.String())
+	}
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "late session", Type: "session", Labels: []string{"gc:session"}})
+	work := workShapedStrandedBead(t, source)
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code != 1 {
+		t.Errorf("recover exited %d with %s left, want 1; stdout:\n%s\nstderr:\n%s", code, work.ID, stdout, stderr)
+	}
+	if !strings.Contains(stdout, storageClearInstruction()) {
+		t.Errorf("recover-stranded left %s's carried copy in the work store but never named the clear %q:\n%s", session.ID, storageClearInstruction(), stdout)
+	}
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err == nil {
+		_ = routes.close()
+		t.Fatalf("after recover-stranded carried %s (copy retained until the clear) and left %s, the city serves degraded with a retained copy (#5987)", session.ID, work.ID)
+	}
+}
+
+// TestStrandRecheckIgnoresATransientFaultAndContainsAPanic: a read that
+// fails transiently publishes nothing and, once it clears to the same
+// verdict, nothing either (no uncheckable→converged flap); a panic inside the
+// check is contained; the stop cancels the loop and waits for it.
+func TestStrandRecheckIgnoresATransientFaultAndContainsAPanic(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, rec, &stderr, "gc start")
+
+	prev := openInfraMigrationSource
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		return nil, errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`)
+	}
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("a transient fault published %+v", rec.Events)
+	}
+	if !strings.Contains(stderr.String(), "could not run") {
+		t.Errorf("the transient fault was not logged: %q", stderr.String())
+	}
+	openInfraMigrationSource = prev
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("the fault clearing to the same verdict published %+v", rec.Events)
+	}
+
+	openInfraMigrationSource = func(string) (beads.Store, error) { panic("boom") }
+	s.tick() // must not panic
+	if !strings.Contains(stderr.String(), "panicked") {
+		t.Errorf("the contained panic was not logged: %q", stderr.String())
+	}
+	openInfraMigrationSource = prev
+
+	prevInterval := strandRecheckInterval
+	strandRecheckInterval = time.Millisecond
+	t.Cleanup(func() { strandRecheckInterval = prevInterval })
+	cr := &CityRuntime{storageRoutes: routes, cityPath: cityPath, rec: rec, stderr: io.Discard, logPrefix: "gc start"}
+	stop := cr.startStrandRecheck(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recheck's stop did not return")
+	}
+}
+
+// TestStrandedEventCapsEveryIDList: the stranded payload caps each id list at
+// StrandedCap and carries each whole count.
+func TestStrandedEventCapsEveryIDList(t *testing.T) {
+	ids := make([]string, storebinding.StrandedCap+7)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%03d", i)
+	}
+	rec := events.NewFake()
+	recordStorageGateOutcome(rec, infraMigrationReport{Outcome: infraMigrationStranded, Stranded: ids, HeldDifferent: ids, PresumedReused: ids, Retained: ids}, "x", false)
+	_, payload := decodeStorageBindingOutcome(t, rec)
+	for name, got := range map[string][]string{"stranded": payload.Stranded, "held_different": payload.HeldDifferent, "presumed_reused": payload.PresumedReused, "retained": payload.Retained} {
+		if len(got) != storebinding.StrandedCap {
+			t.Errorf("%s carries %d ids, want the cap %d", name, len(got), storebinding.StrandedCap)
+		}
+	}
+	if payload.StrandedCount != len(ids) || payload.HeldDifferentCount != len(ids) || payload.PresumedReusedCount != len(ids) || payload.RetainedCount != len(ids) {
+		t.Errorf("counts = %+v, want %d each", payload, len(ids))
+	}
+	// An operator command's event states nothing about serving, and an event
+	// an older build recorded (no serving key) decodes as "not stated".
+	rec = events.NewFake()
+	recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationStranded, Stranded: ids[:1]}, "x")
+	if _, payload := decodeStorageBindingOutcome(t, rec); payload.Serving != nil {
+		t.Errorf("an operator command's event claims serving=%v", *payload.Serving)
+	}
+	var old storebinding.StorageBindingOutcomePayload
+	if err := json.Unmarshal([]byte(`{"binding":"infra","outcome":"converged"}`), &old); err != nil || old.Serving != nil {
+		t.Errorf("an older event decodes serving=%v (err %v), want absent", old.Serving, err)
 	}
 }

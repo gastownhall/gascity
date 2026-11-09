@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -2602,6 +2603,16 @@ func TestStorageStatusNamesTheDeclassifyRepairAndDegradedServing(t *testing.T) {
 	if strings.Contains(out, "gc bd update "+session.ID) {
 		t.Errorf("status tells the gc:session row to drop its metadata:\n%s", out)
 	}
+	// Status and the gate agree: the city status calls degraded is the one
+	// the gate serves.
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("status says degraded and the gate refuses: %v", err)
+	}
+	if !routes.bootVerdict.servesDegraded() {
+		t.Errorf("status says degraded and the gate served verdict %s", routes.bootVerdict.Outcome)
+	}
+	_ = routes.close()
 
 	// The repair in place, as gc bd judges it: unsetting the key returns the
 	// row to work, which the work store holds, and status is clean again.
