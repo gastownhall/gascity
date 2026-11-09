@@ -71,7 +71,11 @@ started, not a description of a running system. Its states:
   and, for an external target, the `endpoint` (host/port/database) the scope
   must initialize against. That endpoint is journaled because it used to live
   only in the initializing process: a `gc init` that died after writing the
-  record left every retry unable to reach its upstream.
+  record left every retry unable to reach its upstream. A scope leaves this
+  state only after the provider's init and health ops succeed **and** bd
+  reports an `issue_prefix`: a provider can exit 0 over a bare root an
+  interrupted init left behind, so only bd's own answer proves its identity
+  bootstrap ran.
 - `ready` — intent and endpoint are cleared. bd's own binding is authoritative
   from that point; a retained copy would outrank it on a later repair.
 
