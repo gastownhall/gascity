@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -47,6 +48,12 @@ type Provider struct {
 	handshakeAt       time.Time
 	handshakeInfo     runtime.ProtocolInfo
 	handshakeErr      error
+
+	// execUnsupported remembers an `exec` exit 2 from a pack whose
+	// successful handshake does not declare proc.exec, so the driving
+	// methods stop spawning `exec` before every dedicated op. An exit 2
+	// while the handshake is failing is not remembered (see Exec).
+	execUnsupported atomic.Bool
 
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
@@ -917,6 +924,32 @@ func (p *Provider) isRunningOp(name string) (running, definite bool) {
 	}
 }
 
+// requirePresent reports a session the pack can tell is gone as an error
+// wrapping [runtime.ErrSessionNotFound], so a driving call to it is never
+// reported delivered. On a v2-ready pack it reads `observe`: an absent or
+// dead box is gone, and a failed read wraps [runtime.ErrRuntimeUnavailable].
+// Otherwise it asks `is-running`, and only a definite "false" is gone; a pack
+// that cannot tell is let through, as before.
+//
+// The seam-backed driving verbs call it; the raw driving methods do not,
+// because the startup dialog loops drive a box through them.
+func (p *Provider) requirePresent(name string) error {
+	if p.v2Ready() {
+		o, err := p.observe(context.Background(), name, nil)
+		if err != nil {
+			return fmt.Errorf("session %q: %w", name, err)
+		}
+		if o.state != stateRunning {
+			return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+		}
+		return nil
+	}
+	if running, definite := p.isRunningOp(name); definite && !running {
+		return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+	}
+	return nil
+}
+
 // IsAttached reports terminal attachment via `script is-attached <name>`
 // when the executable declared the report-attachment capability in its
 // protocol handshake; otherwise it is always false. Op errors read as
@@ -1130,6 +1163,9 @@ var (
 // own stdin is not separately available; the driving ops reproduced over Exec
 // (tmux send-keys / capture-pane / …) do not need it.
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	if p.execUnsupported.Load() {
+		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+	}
 	command := shellQuote(argv)
 	env := p.cityEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -1160,9 +1196,16 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 				// exit code). A runtime that DECLARES the exec connection in its
 				// handshake implements the op, so exit 2 is the command's own exit
 				// code; only an UNDECLARED runtime means "op unimplemented" — fall
-				// back to the dedicated driving ops.
-				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+				// back to the dedicated driving ops. Only a successful
+				// handshake's answer is remembered: a failed one reads as
+				// undeclared until its retry, and remembering that would pin
+				// a proc.exec pack to the dedicated ops for the provider's life.
+				info, herr := p.Protocol()
+				if herr == nil && info.Has(runtime.ProtocolCapabilityConnectionExec) {
 					return stdout.Bytes(), 2, nil
+				}
+				if herr == nil {
+					p.execUnsupported.Store(true)
 				}
 				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 			}
