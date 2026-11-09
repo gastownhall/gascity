@@ -556,9 +556,12 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 // the work store so the two claim paths report a lost race, a stale projection
 // and a canonical-readback failure identically.
 func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
+	// The binding's reads are context-free by contract, so its canonical
+	// readback needs no separate budget: it is the same Get as the conflict
+	// diagnostic, never a mutation-context read that a CAS could spend.
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
-		r.graph.Get)
+		r.graph.Get, r.graph.Get)
 }
 
 // listContinuation reads a continuation group out of the binding and records

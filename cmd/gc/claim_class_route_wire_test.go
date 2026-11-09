@@ -77,7 +77,7 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverAWireWorkStore(t *testing.T)
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			return hookClaimThroughStore(beadID, assignee,
 				func() (beads.Bead, bool, error) { return work.Claim(beadID, assignee) },
-				work.Get)
+				work.Get, work.Get)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return work.Get(beadID)

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -648,4 +650,161 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHookClaimWithBdStoreCanonicalReadbackSurvivesCASDeadline reproduces
+// #6984: a successful claim CAS that spends the claim mutation deadline must not
+// leave the canonical readback with an already-expired context. The fake bd
+// claim blocks until its context's deadline passes and then reports success
+// (the CAS committed at the boundary); the canonical show must still run on a
+// live context and return the claimed bead.
+func TestHookClaimWithBdStoreCanonicalReadbackSurvivesCASDeadline(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	var calls [][]string
+	hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+				<-ctx.Done()
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
+			case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
+			default:
+				t.Fatalf("unexpected bd args: %#v", args)
+				return nil, nil
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	claimed, ok, err := hookClaimWithBdStore(ctx, "/rig", nil, "work-1", "worker-1")
+	if err != nil {
+		t.Fatalf("hookClaimWithBdStore after a CAS that spent the mutation deadline: %v (canonical readback shared the exhausted claim context)", err)
+	}
+	if !ok || claimed.Assignee != "worker-1" {
+		t.Fatalf("hookClaimWithBdStore = (%+v, %v), want claimed by worker-1", claimed, ok)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want one claim update followed by one canonical show", calls)
+	}
+}
+
+// claimBudgetProbeKey tags the caller context so the readback store's factory
+// can prove the context VALUES survived into the fresh readback budget.
+type claimBudgetProbeKey struct{}
+
+// TestHookClaimWithBdStoreReadbackHasItsOwnBudget pins the readback budget of
+// #6984 from the store side: a claim CAS that cancels (or spends) its mutation
+// context the instant it commits must leave the canonical readback a LIVE
+// context of its own — same directory, same projected environment and actor,
+// same context values — and that context is canceled once the readback
+// returns rather than living past the claim.
+func TestHookClaimWithBdStoreReadbackHasItsOwnBudget(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	t.Run("readback survives a CAS that spent the mutation context", func(t *testing.T) {
+		parent, cancelParent := context.WithCancel(context.WithValue(context.Background(), claimBudgetProbeKey{}, "sentinel"))
+		defer cancelParent()
+		var built []context.Context
+		var builtEnv []map[string]string
+		var readDeadline time.Time
+		hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, env map[string]string) beads.CommandRunner {
+			built = append(built, ctx)
+			builtEnv = append(builtEnv, maps.Clone(env))
+			return func(_ string, name string, args ...string) ([]byte, error) {
+				if name != "bd" {
+					t.Fatalf("command name = %q, want bd", name)
+				}
+				switch {
+				case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+					// The CAS commits as its mutation budget dies.
+					cancelParent()
+					return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1"}]`), nil
+				case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if deadline, ok := ctx.Deadline(); ok {
+						readDeadline = deadline
+					}
+					return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.root_bead_id":"root-1"}}]`), nil
+				default:
+					t.Fatalf("unexpected bd args: %#v", args)
+					return nil, nil
+				}
+			}
+		}
+
+		claimed, ok, err := hookClaimWithBdStore(parent, "/rig", []string{"GC_SESSION_ID=sess-9"}, "work-1", "worker-1")
+		if err != nil {
+			t.Fatalf("hookClaimWithBdStore after a CAS that canceled the mutation context: %v", err)
+		}
+		if !ok || claimed.Assignee != "worker-1" || claimed.Metadata["gc.root_bead_id"] != "root-1" {
+			t.Fatalf("hookClaimWithBdStore = (%+v, %v), want the canonical bead claimed by worker-1", claimed, ok)
+		}
+		if len(built) != 2 {
+			t.Fatalf("bd stores built = %d, want 2 (mutation-bound claim, then a readback store with its own budget)", len(built))
+		}
+		if err := built[0].Err(); err == nil {
+			t.Fatalf("the mutation store's context = %v, want it spent by the CAS", err)
+		}
+		if err := built[1].Err(); err != context.Canceled {
+			t.Fatalf("the readback store's context after hookClaimWithBdStore returned = %v, want Canceled (the budget is canceled, not leaked)", err)
+		}
+		if got, _ := built[1].Value(claimBudgetProbeKey{}).(string); got != "sentinel" {
+			t.Fatalf("the readback context's probe value = %q, want the caller's value preserved", got)
+		}
+		if readDeadline.IsZero() {
+			t.Fatal("the readback context carried no deadline, want a fresh hookClaimReadbackTimeout budget")
+		}
+		if slack := time.Until(readDeadline); slack > hookClaimReadbackTimeout || slack <= 0 {
+			t.Fatalf("readback deadline = %s away, want a fresh budget within hookClaimReadbackTimeout (%s)", slack, hookClaimReadbackTimeout)
+		}
+		if !maps.Equal(builtEnv[0], builtEnv[1]) {
+			t.Fatalf("readback env %v differs from the claim's %v, want the exact projected environment", builtEnv[1], builtEnv[0])
+		}
+		if got := builtEnv[1]["BEADS_ACTOR"]; got != "worker-1" {
+			t.Fatalf("readback BEADS_ACTOR = %q, want the claiming actor worker-1", got)
+		}
+	})
+
+	t.Run("a readback that outruns its own budget fails with the claim kept", func(t *testing.T) {
+		originalTimeout := hookClaimReadbackTimeout
+		hookClaimReadbackTimeout = 30 * time.Millisecond
+		t.Cleanup(func() { hookClaimReadbackTimeout = originalTimeout })
+
+		hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+			return func(_ string, _ string, args ...string) ([]byte, error) {
+				switch {
+				case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+					return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1"}]`), nil
+				case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+					<-ctx.Done()
+					return nil, ctx.Err()
+				default:
+					t.Fatalf("unexpected bd args: %#v", args)
+					return nil, nil
+				}
+			}
+		}
+
+		claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1")
+		if err == nil {
+			t.Fatal("hookClaimWithBdStore with a readback that outruns its budget: no error, want the reload failure surfaced")
+		}
+		if !ok || claimed.ID != "work-1" {
+			t.Fatalf("hookClaimWithBdStore = (%+v, %v), want the committed CAS reported as kept (claimed, true)", claimed, ok)
+		}
+	})
 }

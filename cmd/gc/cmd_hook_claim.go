@@ -81,6 +81,17 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
+// hookClaimReadbackTimeout bounds the canonical readback that follows a
+// successful claim CAS: a budget of its own, deliberately NOT the claim's
+// mutation context. A CAS that committed after consuming most of
+// hookClaimMutationTimeout used to leave its canonical read an already-expired
+// context, so the committed claim surfaced as (claimed, true, error) — a
+// stranded assignment the tier must stop on — when one more bounded read
+// would have delivered it (#6984). The readback context is derived from the
+// claim's with context.WithoutCancel, so it keeps the caller's values and
+// drops only the spent deadline/cancellation.
+var hookClaimReadbackTimeout = 10 * time.Second
+
 // hookClaimWindowDefault bounds how long after a `gc hook --claim` invocation
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
@@ -2493,9 +2504,22 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
+	// The canonical readback runs on its own bounded context (#6984): the claim
+	// CAS may have spent the mutation budget that store is bound to, and the
+	// read must not share that spent deadline. WithoutCancel keeps the
+	// caller's context values while detaching the exhausted deadline, and the
+	// same directory, projected environment and actor rebuild the store, so the
+	// read answers from exactly the ledger the CAS wrote to. The conflict-path
+	// diagnostic read below stays on the mutation-bound store: a lost race
+	// committed nothing here, so it owes no fresh budget.
+	reload := func(id string) (beads.Bead, error) {
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookClaimReadbackTimeout)
+		defer cancel()
+		return hookClaimBdStoreContext(readCtx, dir, env, assignee).Get(id)
+	}
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
-		store.Get)
+		store.Get, reload)
 }
 
 // hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
@@ -2519,11 +2543,15 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // of draining. Two copies of that would be two chances to disagree, and the
 // paths that disagree about ownership are this program's recurring bug class.
 //
-// claim and get are the store's own operations: the bd context's Claim takes the
+// claim, get and reload are the store's own operations: the bd context's Claim takes the
 // assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
 // binding's takes it explicitly, so the caller binds them and this function
-// never has to know which shape it is holding.
-func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+// never has to know which shape it is holding. get is the conflict-path
+// diagnostic read, run on the claim's mutation-bound store; reload is the
+// canonical readback of a claim the CAS committed, which the bd context runs
+// on its own bounded readback budget (hookClaimReadbackTimeout) rather than
+// the mutation context the CAS may have spent (#6984).
+func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error), reload func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -2545,7 +2573,7 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 		// as ours.
 		return claimed, false, nil
 	}
-	canonical, err := get(beadID)
+	canonical, err := reload(beadID)
 	if err != nil {
 		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
 	}

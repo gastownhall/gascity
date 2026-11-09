@@ -140,6 +140,9 @@ func TestHookClaimThroughStoreRefusesForeignOwnershipOnEitherRead(t *testing.T) 
 				},
 				func(string) (beads.Bead, error) {
 					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: tc.canonical}, nil
+				},
+				func(string) (beads.Bead, error) {
+					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: tc.canonical}, nil
 				})
 			if err != nil {
 				t.Fatalf("hookClaimThroughStore: %v", err)
