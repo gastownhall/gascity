@@ -1177,6 +1177,24 @@ its `cmd/product-check`, which is stdlib-only and quick. It measures only
 when the change touches the worker host. product-check is skipped if H5 or
 the fetch failed, and still runs if the measurement failed.
 
+### Setup download mirror (RBE_DIST_MIRROR)
+
+Each pool VM downloads three pinned artifacts in setup: NativeLink, Go and
+dolt. rbe-worker's `worker/rbe-fetch` retries each download. If the
+repository variable `RBE_DIST_MIRROR` (the fork pool: `RBE_FORK_DIST_MIRROR`)
+is `https://rbe-warm.ops.gascity.com/dist`, it tries the copy on rbe-west's
+warm bucket first (infra `nativelink-cas/west` README, "Pinned setup
+downloads on R2"). The copy is transport only: every file is checked against
+the sha256 pinned in the rbe-worker tree, and a miss or mismatch falls back
+to upstream. The pool workflows pass the variable to their measure and
+worker steps, `rbe-worker-legacy.yml` does the same, and
+`rbe-worker-env-canary.yml` passes it to its measure step. Unset, every
+download comes from upstream, still retried. Before a pin bump that moves
+NativeLink, Go (`go.mod`) or dolt, the core's `rbe-dist-publish.sh` puts the
+new artifact on the mirror; until it does, workers fall back to upstream.
+Each VM prints one `rbe-fetch:` line per artifact (`source=mirror|upstream`,
+`mirror=hit|off|miss|bad-sha256`). To roll back, unset the variable.
+
 ### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
 
 Before the fork pool reads big blobs from rbe-west's R2 hot tier
