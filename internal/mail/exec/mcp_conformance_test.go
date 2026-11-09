@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/mailtest"
 )
@@ -23,7 +24,7 @@ func TestMCPMailConformance(t *testing.T) {
 	// Locate the real MCP mail script relative to the module root.
 	scriptPath, err := findMCPScript()
 	if err != nil {
-		t.Skipf("MCP mail script not found: %v", err)
+		skipOrFailMissingMCPScript(t, err)
 	}
 
 	mailtest.RunProviderTests(t, func(t *testing.T) mail.Provider {
@@ -77,7 +78,7 @@ func TestMCPMailReplyMissingOriginalIsNotFound(t *testing.T) {
 	}
 	scriptPath, err := findMCPScript()
 	if err != nil {
-		t.Skipf("MCP mail script not found: %v", err)
+		skipOrFailMissingMCPScript(t, err)
 	}
 
 	dir := t.TempDir()
@@ -156,7 +157,7 @@ func TestMCPMailBridgeSourceable(t *testing.T) {
 	}
 	scriptPath, err := findMCPScript()
 	if err != nil {
-		t.Skipf("MCP mail script not found: %v", err)
+		skipOrFailMissingMCPScript(t, err)
 	}
 	// Source the script with no positional parameters, then assert the
 	// expected functions exist. A sourced bridge must NOT execute any
@@ -192,7 +193,7 @@ func TestMCPMailCrossPodNameResolution(t *testing.T) {
 	}
 	scriptPath, err := findMCPScript()
 	if err != nil {
-		t.Skipf("MCP mail script not found: %v", err)
+		skipOrFailMissingMCPScript(t, err)
 	}
 
 	dir := t.TempDir()
@@ -283,7 +284,7 @@ func TestMCPMailProjectKeyIsolation(t *testing.T) {
 	}
 	scriptPath, err := findMCPScript()
 	if err != nil {
-		t.Skipf("MCP mail script not found: %v", err)
+		skipOrFailMissingMCPScript(t, err)
 	}
 
 	dir := t.TempDir()
@@ -373,6 +374,19 @@ func findMCPScript() (string, error) {
 		}
 		dir = parent
 	}
+}
+
+// skipOrFailMissingMCPScript reports a contrib script that findMCPScript could
+// not locate. Under bazel test the script reaches the test only as declared
+// data, so a miss is a BUILD defect and fails: a skip there turns the whole
+// MCP conformance suite into a silent no-op in the lane that gates merges.
+// Elsewhere (a checkout without contrib/) it skips.
+func skipOrFailMissingMCPScript(t *testing.T, err error) {
+	t.Helper()
+	if bazeltest.IsBazel() {
+		t.Fatalf("MCP mail script not found under bazel test: declare //contrib:mail-scripts/gc-mail-mcp-agent-mail as data of the test target: %v", err)
+	}
+	t.Skipf("MCP mail script not found: %v", err)
 }
 
 // mcpWrapper returns a shell script that sets up the mock environment and

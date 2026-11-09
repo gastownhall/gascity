@@ -9,6 +9,10 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
+// migrateDoltModeSrcEnv names the environment variable through which the
+// go_test target hands this test the pinned beads cmd/bd/migrate_dolt_mode.go.
+const migrateDoltModeSrcEnv = "GC_TEST_BEADS_MIGRATE_DOLT_MODE_SRC"
+
 // TestMigrateJournalFileMatchesPinnedBeads reads the name out of the pinned
 // beads module rather than restating it.
 //
@@ -30,10 +34,18 @@ import (
 // resource census (verified — the untagged subprocess baseline rejects it) and
 // that ratchet is shrink-only, so the resolution is inlined instead.
 func TestMigrateJournalFileMatchesPinnedBeads(t *testing.T) {
-	modCache := goModuleCache(t)
 	version := pinnedBeadsVersion(t)
-	source, err := os.ReadFile(filepath.Join(modCache, "github.com/steveyegge/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go"))
+	// Under bazel the pinned source arrives as declared data, named by the
+	// target's env: a pure-Bazel machine has no module cache to read it from.
+	path := bazeltest.DataPath(t, migrateDoltModeSrcEnv)
+	if path == "" {
+		path = filepath.Join(goModuleCache(t), "github.com/steveyegge/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go")
+	}
+	source, err := os.ReadFile(path)
 	if err != nil {
+		if bazeltest.IsBazel() {
+			t.Fatalf("pinned beads %s migrate_dolt_mode.go is not available under bazel test: declare it as data of the test target and name it in %s: %v", version, migrateDoltModeSrcEnv, err)
+		}
 		t.Skipf("pinned beads %s is not unpacked in the local module cache: %v", version, err)
 	}
 
