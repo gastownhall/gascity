@@ -408,6 +408,54 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *test
 	}
 }
 
+// TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead
+// pins issue #6207: bd records the routed bead deferred with a defer_until that
+// has passed, and its assignee resolves to no session. bd ready (the pool claim
+// query) keeps hiding the row until the store itself wakes it, so pool demand
+// must not request a worker for it. The row is decoded from the store's wire
+// shape, as every production read builds it.
+func TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	decode := func(t *testing.T, payload string) beads.Bead {
+		t.Helper()
+		b, ok := beads.DecodeBeadEventPayload([]byte(payload))
+		if !ok {
+			t.Fatalf("DecodeBeadEventPayload(%s) returned ok=false", payload)
+		}
+		return b
+	}
+	demandRequests := func(work []beads.Bead) []SessionRequest {
+		filtered := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, make([]string, len(work)))
+		var requests []SessionRequest
+		for _, ds := range ComputePoolDesiredStates(cfg, filtered, nil, nil) {
+			requests = append(requests, ds.Requests...)
+		}
+		return requests
+	}
+
+	// Control: the same routed row once the store has woken it (open, date
+	// cleared) is demand the template-identity wake serves.
+	woken := decode(t, `{"id":"routed-work","status":"open","issue_type":"task","assignee":"worker","metadata":{"gc.routed_to":"worker"}}`)
+	if got := demandRequests([]beads.Bead{woken}); len(got) != 1 || got[0].Tier != "wake-known-identity" {
+		t.Fatalf("woken row requests = %#v, want one wake-known-identity (control)", got)
+	}
+
+	parked := decode(t, `{"id":"routed-work","status":"deferred","defer_until":"2020-01-01T00:00:00Z","issue_type":"task","assignee":"worker","metadata":{"gc.routed_to":"worker"}}`)
+	if got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, []beads.Bead{parked}, []string{""}); len(got) != 0 {
+		t.Fatalf("filtered work = %#v, want the store-deferred row with an elapsed date dropped from pool demand", got)
+	}
+	if got := demandRequests([]beads.Bead{parked}); len(got) != 0 {
+		t.Fatalf("parked row requests = %#v, want none: no worker can claim a row bd ready hides", got)
+	}
+	if got := classifyDemandRowClaimability(parked, time.Now()); got != demandRowDeferred {
+		t.Fatalf("classifyDemandRowClaimability = %q, want %q", got, demandRowDeferred)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

@@ -142,7 +142,8 @@ func (s *NativeDoltStore) closeAllAsBatch(ids []string, metadata map[string]stri
 	reason := strings.TrimSpace(metadata["close_reason"])
 	closed := 0
 	for _, chunk := range nativeCloseAllChunks(ids, stamps) {
-		items := make([]issueops.ApplyItem, 0, len(chunk)*nativeCloseAllItemsPerBead(stamps))
+		// A chunk never exceeds the cap, so the cap is an exact upper bound.
+		items := make([]issueops.ApplyItem, 0, issueops.MaxApplyBatchItems)
 		for _, id := range chunk {
 			if stamps {
 				items = append(items, issueops.ApplyItem{
@@ -221,7 +222,7 @@ func nativeCloseAllItemsPerBead(stamps bool) int {
 // stamp and the close it feeds always land together.
 func nativeCloseAllChunks(ids []string, stamps bool) [][]string {
 	perChunk := issueops.MaxApplyBatchItems / nativeCloseAllItemsPerBead(stamps)
-	chunks := make([][]string, 0, (len(ids)+perChunk-1)/perChunk)
+	var chunks [][]string
 	for start := 0; start < len(ids); start += perChunk {
 		end := start + perChunk
 		if end > len(ids) {

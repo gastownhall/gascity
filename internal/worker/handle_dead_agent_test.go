@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -27,6 +28,27 @@ type freshErrFake struct{ *runtime.Fake }
 
 func (freshErrFake) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
 	return runtime.Liveness{}, errors.New("tmux state refresh failed")
+}
+
+// freshErrAfterStartFake is freshErrFake once its runtime started: a start
+// reads the runtime fresh under its lease before it mints (I-MINT), so a
+// fixture that starts its session first needs that read to succeed.
+type freshErrAfterStartFake struct {
+	*runtime.Fake
+	started bool
+}
+
+func (p *freshErrAfterStartFake) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	err := p.Fake.Start(ctx, name, cfg)
+	p.started = p.started || err == nil
+	return err
+}
+
+func (p *freshErrAfterStartFake) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	if p.started {
+		return runtime.Liveness{}, errors.New("tmux state refresh failed")
+	}
+	return runtime.ObserveLivenessWithError(p.Fake, name, processNames)
 }
 
 // TestRuntimeHandleNudgeHoldsOffACrashedAgent (mc-48az4, mc-wdjni): the
@@ -98,7 +120,7 @@ func TestSessionHandleNudgeOverACrashedAgent(t *testing.T) {
 	setup := func(t *testing.T, provider, transport string) (*SessionHandle, *runtime.Fake) {
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
-		manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+		manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 		b, err := store.Create(beads.Bead{Title: "w", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
 			"session_name": "s-dead", "template": "worker", "provider": provider, "work_dir": "/tmp", "command": provider, "state": string(sessionpkg.StateActive), "transport": transport,
 		}})

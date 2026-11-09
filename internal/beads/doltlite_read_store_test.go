@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -156,6 +157,35 @@ func TestDoltliteReadStoreGetReadsCloseReason(t *testing.T) {
 	}
 	if open.CloseReason != "" {
 		t.Fatalf("open bead CloseReason = %q, want empty", open.CloseReason)
+	}
+}
+
+// A read folds bd's richer statuses into Gas City's three and keeps the one it
+// read as SourceStatus, as BdStore and NativeDoltStore do: this store pushes a
+// named status as bd's raw one, so a cache above needs it to tell a parked row
+// from a stale one.
+func TestDoltliteReadStoreRecordsSourceStatus(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	if _, err := writer.Exec(`UPDATE issues SET status = 'blocked' WHERE id = 'gc-ready'`); err != nil {
+		t.Fatalf("parking gc-ready: %v", err)
+	}
+
+	for _, tt := range []struct{ id, status, source string }{
+		{"gc-ready", "open", "blocked"},
+		{"gc-parent", "open", "open"},
+		{"gc-assigned-progress", "in_progress", "in_progress"},
+	} {
+		got, err := store.Get(tt.id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", tt.id, err)
+		}
+		if got.Status != tt.status || got.SourceStatus != tt.source {
+			t.Errorf("Get(%s) = status %q from %q, want %q from %q", tt.id, got.Status, got.SourceStatus, tt.status, tt.source)
+		}
 	}
 }
 
@@ -2299,5 +2329,26 @@ func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
 	}
 	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
 		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
+}
+
+// TestDoltliteParseMetadataIsTheBdCLIReading: the DoltLite read store reads a
+// stored metadata object exactly as the bd CLI does, reading 0 of
+// MetadataReadings, so a caller judging a row under every reading gc's stores
+// give it covers this store too.
+func TestDoltliteParseMetadataIsTheBdCLIReading(t *testing.T) {
+	for _, raw := range []string{
+		`{}`,
+		` {"gc.root_bead_id":"gc-1","note":"x"} `,
+		`{"gc.root_bead_id":null,"session_id":null,"gc.synthetic":null}`,
+		`{"n":1.50,"e":1e3,"b":true,"o":{"b":1, "a":2},"a":[1, 2],"s":" padded "}`,
+	} {
+		readings, err := MetadataReadings([]byte(raw))
+		if err != nil {
+			t.Fatalf("MetadataReadings(%s): %v", raw, err)
+		}
+		if got := parseMetadata(raw); !maps.Equal(got, readings[0]) {
+			t.Errorf("%s: DoltLite reads %q, want the bd CLI's reading %q", raw, got, readings[0])
+		}
 	}
 }

@@ -46,7 +46,17 @@ func bdSubjectPrefixTarget(cfg *config.City, cityTarget execStoreTarget, cityPat
 // bdAddressedSubjects returns the bead ids a by-id read or write addresses,
 // scanned exactly against the verb's flag manifest, or nil when argv is no
 // such invocation or cannot be scanned without guessing.
+//
+// gc's own `release-if-current <issue-id> <assignee>` addresses the issue
+// alone. Its assignee is an identity, often a pool session's bead id carrying
+// the city's prefix, and must never pick the store the release runs in.
 func bdAddressedSubjects(args []string) []string {
+	if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok {
+		if err != nil {
+			return nil
+		}
+		return []string{id}
+	}
 	if ids := bdByIDReadSubjects(args); len(ids) > 0 {
 		return ids
 	}

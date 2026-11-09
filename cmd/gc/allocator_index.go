@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 
@@ -38,8 +39,9 @@ type passIndex struct {
 	// (indexOccupancy, A3).
 	byStored, byName map[string][]int
 	// views counts the realization views handed out, and served the legacy
-	// lookups their memos answered: proof the index is in use.
-	views, served int
+	// lookups their memos answered: proof the index is in use. probes
+	// counts the slots the fresh-slot claims looked at (claimFreshSlot).
+	views, served, probes int
 }
 
 // poolRealizeMemo is one pool agent's realization view's memo, carried as
@@ -69,6 +71,29 @@ type poolRealizeMemo struct {
 	// (realizePools). Callers share it, so it is replaced, never edited (A3).
 	reusable      []session.Info
 	reusableBuilt bool
+	// cursor resumes the fresh-slot scan (claimFreshSlot).
+	cursor freshCursor
+}
+
+// freshCursor is where claimFreshSlot resumes in used, the used slots it
+// last claimed from: slot is the slot it claimed. Every slot below slot was
+// held or used at that claim, and held never changes. used is one pool's map
+// for one pass (realizePools), and while its claims run only
+// selectOrPlanPoolSessionBead edits it, which adds used slots and frees only
+// the slot it just claimed. So while the claim scans the same used slots and
+// they still hold slot, no slot below it is free. A lower slot freed between
+// two claims on one map would be skipped: legacy frees a failed create's
+// slot only after its claims, on a map no cursor scans (legacy has no memo).
+// Without the cursor an unlimited pool's N fresh plans rescan from slot 1
+// each: O(N²) per pass.
+type freshCursor struct {
+	used map[int]bool
+	slot int
+}
+
+// resumes reports whether the cursor holds for usedSlots.
+func (c freshCursor) resumes(usedSlots map[int]bool) bool {
+	return c.slot > 0 && usedSlots[c.slot] && reflect.ValueOf(c.used).UnsafePointer() == reflect.ValueOf(usedSlots).UnsafePointer()
 }
 
 func newPassIndex() *passIndex {
@@ -290,6 +315,30 @@ func (m *poolRealizeMemo) freshSlots(cfgAgent *config.Agent) map[int]bool {
 	}
 	m.buildOccupancy()
 	return m.held
+}
+
+// claimFreshSlot is claimFreshPoolSlotInfo's scan over held, the slots
+// freshSlots counts, and usedSlots: the lowest slot in neither, within
+// upper unless unlimited, which it marks used. It resumes from the cursor
+// when the cursor still holds, else from slot 1 as legacy's scan does, so
+// it claims the slot legacy's would (TestClaimFreshSlotCursorMatchesScan).
+func (m *poolRealizeMemo) claimFreshSlot(held, usedSlots map[int]bool, upper int, unlimited bool) (int, bool) {
+	start := 1
+	if m.cursor.resumes(usedSlots) {
+		start = m.cursor.slot + 1
+	}
+	for slot := start; unlimited || slot <= upper; slot++ {
+		if m.index != nil {
+			m.index.probes++
+		}
+		if usedSlots[slot] || held[slot] {
+			continue
+		}
+		usedSlots[slot] = true
+		m.cursor = freshCursor{used: usedSlots, slot: slot}
+		return slot, true
+	}
+	return 0, false
 }
 
 // reusablePoolSessionInfos is legacy's over the template's rows instead of

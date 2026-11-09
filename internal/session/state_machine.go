@@ -114,6 +114,10 @@ var transitions = map[TransitionCommand]map[State]State{
 		StateActive:      StateSuspended,
 		StateAsleep:      StateSuspended,
 		StateQuarantined: StateSuspended,
+		// Only an operator's suspend (see Manager.Suspend): a drained row is
+		// dormant like an asleep one, but a compatible wake reason can still
+		// wake it, so the operator's hold has something to hold.
+		StateDrained: StateSuspended,
 	},
 	CmdWake: {
 		StateAsleep:      StateActive,

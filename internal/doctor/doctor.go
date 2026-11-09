@@ -165,14 +165,17 @@ func (r *Report) tally(result *CheckResult) {
 // buffer: on completion the buffer is flushed to the real writer (keeping a
 // check's incidental output grouped before its result line); on timeout the
 // goroutine is abandoned with its private buffer, so a still-running check
-// can never interleave writes with — or race against — the rest of the run.
+// can never interleave writes with — or race against — the rest of the run,
+// and the check's CheckContext.Done is closed so it can stop issuing I/O.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
 		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
+	abandoned := make(chan struct{})
 	checkCtx := *ctx
 	checkCtx.Output = &buf
+	checkCtx.Done = abandoned
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {
@@ -186,6 +189,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 		}
 		return result
 	case <-time.After(d.CheckTimeout):
+		close(abandoned)
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusError,
@@ -238,6 +242,10 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		return res, true
 	case err != nil:
 		res.FixError = err.Error()
+		var hinted *FixHintError
+		if errors.As(err, &hinted) && hinted.Hint != "" {
+			res.FixHint = hinted.Hint
+		}
 		res.FixAttempted = true
 		return res, false
 	}

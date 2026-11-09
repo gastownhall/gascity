@@ -48,10 +48,30 @@ func TestRuntimeHandleSweepStartsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.StartResolved(context.Background(), session.Actor{Kind: session.ActorSweep}, "x", runtime.Config{}); !errors.Is(err, session.ErrSweepStarts) {
+	if err := h.StartResolved(context.Background(), session.Actor{Kind: session.ActorSweep}, session.Incarnation{}, "x", runtime.Config{}); !errors.Is(err, session.ErrSweepStarts) {
 		t.Fatalf("StartResolved by a sweep = %v, want ErrSweepStarts", err)
 	}
 	if sp.IsRunning("legacy-2") {
 		t.Fatal("a sweep started the runtime")
+	}
+}
+
+// TestRuntimeHandleStartTakesTheStartupHandback: a runtime-only handle has
+// no session queue, so a startup nudge its runtime handed back (held behind a
+// program-reported dialog) is taken, and so never left for a later start's
+// caller, and the start still succeeds.
+func TestRuntimeHandleStartTakesTheStartupHandback(t *testing.T) {
+	fake := runtime.NewFake()
+	fake.SetStartupNudgeHandback("legacy-3", "start working")
+	sp := runtime.FullFake{Fake: fake}
+	h, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := startResolved(t, h, "x", runtime.Config{}); err != nil {
+		t.Fatalf("StartResolved: %v", err)
+	}
+	if nudge, ok := sp.TakeStartupNudgeHandback("legacy-3"); ok {
+		t.Fatalf("handback %q left after the start", nudge)
 	}
 }

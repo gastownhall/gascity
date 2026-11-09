@@ -221,8 +221,13 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
 		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
 	}
-	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
-		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(string(suite), "run_suite make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel, through run_suite")
+	}
+	for _, bare := range []string{"exec make", "exec bazel"} {
+		if strings.Contains(string(suite), bare) {
+			t.Fatalf("push-suite.sh must not %q: run_suite has to see a 141 (SIGPIPE) to fail it closed", bare)
+		}
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))

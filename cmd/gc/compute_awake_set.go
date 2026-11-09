@@ -71,6 +71,8 @@ func (x awakeWorkIndex) candidates(work []AwakeWorkBead, named []AwakeNamedSessi
 	add(bead.ID)
 	add(bead.SessionName)
 	add(bead.Alias)
+	add(bead.RequalifiedFrom)
+	add(bead.RequalifiedRuntimeName)
 	add(bead.NamedIdentity)
 	if bead.ConfiguredNamedSession {
 		for _, ns := range named {
@@ -103,6 +105,13 @@ type AwakeNamedSession struct {
 	Template    string // agent template name
 	Mode        string // "always" or "on_demand"
 	RuntimeName string // computed runtime session_name (e.g. "hello-world--refinery")
+	// BareIdentity is the entry's prior top-level form when requalification
+	// (gc rig add --adopt) is the only thing that made the identity qualified
+	// and the bare leaf still maps to this entry alone (gastownhall/gascity#5957);
+	// a live bead still stamped with it is the session's runtime awaiting its
+	// in-place rename. Empty for a born-qualified identity and when the leaf
+	// is ambiguous (two bindings or a top-level entry claim it).
+	BareIdentity string
 }
 
 // AwakeSessionBead represents an open session bead from the store.
@@ -118,6 +127,8 @@ type AwakeSessionBead struct {
 	DependencyOnly            bool      // only wakeable via dependency gate
 	NamedIdentity             string    // non-empty for named session beads
 	Alias                     string    // stable alias the session claims work under; "" for a rebinding pool slot
+	RequalifiedFrom           string    // bare identity a requalified named session was renamed in place from; it still owns work claimed under it (#5957)
+	RequalifiedRuntimeName    string    // its named session's runtime name while the renamed row keeps the bare form's; work claimed under it is the session's (#5957)
 	ConfiguredNamedSession    bool      // configured_named_session metadata is true
 	Pinned                    bool      // pin_awake durable wake reason
 	Drained                   bool      // state=="drained" or sleep_reason=="drained"
@@ -749,15 +760,17 @@ func findNamedSessionBead(beads []AwakeSessionBead, identity string) *AwakeSessi
 // a configured_named_session bead by its session_name when that matches the
 // identity's deterministic runtime name AND its template matches.
 //
-// The fallback recovers a configured named session whose NamedIdentity is
-// MISSING on its bead — for example, a bead minted before
-// configured_named_identity was added. Beads with a non-empty NamedIdentity
-// that doesn't match any [[named_session]] identity are NOT recovered by
-// this fallback (those return "" at the bead.NamedIdentity != ns.Identity
-// check below); a config-change migration that leaves a stale NamedIdentity
-// must be handled separately. Without this fallback, ComputeAwakeSet
+// The runtime-name fallback recovers a configured named session whose
+// NamedIdentity is MISSING on its bead — for example, a bead minted before
+// configured_named_identity was added (#1493). Beads with a non-empty
+// NamedIdentity that doesn't match any [[named_session]] identity fall to the
+// BareIdentity pass, the requalification migration (#5957): a bead still
+// stamped with a qualified entry's prior top-level form — the leaf the entry
+// alone still maps back to, as config.NamedSessionBareIdentity reports — is
+// that session's runtime awaiting its in-place rename, when exactly one bead
+// claims it and it has a session name. Without these passes ComputeAwakeSet
 // silently drops the bead from `desired` and the session stays asleep
-// forever even though the config says mode=always. See #1493.
+// forever even though the config says mode=always.
 func resolveNamedSessionBeadName(beads []AwakeSessionBead, ns AwakeNamedSession) string {
 	if bead := resolveNamedSessionBead(beads, ns); bead != nil {
 		return bead.SessionName
@@ -771,20 +784,34 @@ func resolveNamedSessionBead(beads []AwakeSessionBead, ns AwakeNamedSession) *Aw
 	if bead := findNamedSessionBead(beads, ns.Identity); bead != nil && bead.SessionName != "" {
 		return bead
 	}
-	if ns.RuntimeName == "" {
-		return nil
+	if ns.RuntimeName != "" {
+		if bead := findBeadBySessionName(beads, ns.RuntimeName); bead != nil && bead.ConfiguredNamedSession &&
+			(ns.Template == "" || bead.Template == ns.Template) &&
+			(bead.NamedIdentity == "" || bead.NamedIdentity == ns.Identity) {
+			return bead
+		}
 	}
-	bead := findBeadBySessionName(beads, ns.RuntimeName)
-	if bead == nil || !bead.ConfiguredNamedSession {
-		return nil
+	// The requalification pass (#5957): a live bead still stamped with the
+	// identity's prior bare form is this session's runtime. The stored
+	// template is no gate — the template is exactly what requalification
+	// changes — and two beads claiming the bare form resolve none.
+	if bare := ns.BareIdentity; bare != "" && bare != ns.Identity {
+		var match *AwakeSessionBead
+		for i := range beads {
+			b := &beads[i]
+			if b.NamedIdentity != bare || !b.ConfiguredNamedSession || b.SessionName == "" {
+				continue
+			}
+			if match != nil {
+				return nil
+			}
+			match = b
+		}
+		if match != nil {
+			return match
+		}
 	}
-	if ns.Template != "" && bead.Template != ns.Template {
-		return nil
-	}
-	if bead.NamedIdentity != "" && bead.NamedIdentity != ns.Identity {
-		return nil
-	}
-	return bead
+	return nil
 }
 
 func findBeadBySessionName(beads []AwakeSessionBead, name string) *AwakeSessionBead {
@@ -950,6 +977,18 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 	if bead.Alias != "" && assignee == bead.Alias {
 		return true
 	}
+	// A named session requalified in place still owns the work claimed under
+	// its bare pre-adopt identity (#5957), and, while the row keeps the bare
+	// form's runtime name, the work claimed under its named session's runtime
+	// name. The bridge fills RequalifiedFrom and RequalifiedRuntimeName only for
+	// the row renamed in place (requalifiedPriorIdentityInfo,
+	// requalifiedSpecRuntimeNameInfo).
+	if bead.RequalifiedFrom != "" && assignee == bead.RequalifiedFrom {
+		return true
+	}
+	if bead.RequalifiedRuntimeName != "" && assignee == bead.RequalifiedRuntimeName {
+		return true
+	}
 	if bead.NamedIdentity != "" {
 		return assignee == bead.NamedIdentity
 	}
@@ -981,11 +1020,12 @@ func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool
 }
 
 // namedSessionMatches reports whether bead represents a configured named
-// session of the given mode. The fallback path (bead.ConfiguredNamedSession
-// + matching runtime name + template) mirrors resolveNamedSessionBeadName
+// session of the given mode. The fallback paths mirror resolveNamedSessionBead
 // so a bead with missing/stale NamedIdentity is still recognized as named —
 // otherwise idle-sleep suppression and on-demand keep-awake silently lose
-// their exemption for affected beads. See #1493.
+// their exemption for affected beads. See #1493 for the runtime-name fallback
+// (a bead whose NamedIdentity metadata is gone) and #5957 for the bare pass
+// (a bead still stamped with a requalified entry's prior top-level form).
 func namedSessionMatches(named []AwakeNamedSession, bead AwakeSessionBead, mode string) bool {
 	for _, ns := range named {
 		if ns.Mode != mode {
@@ -997,6 +1037,13 @@ func namedSessionMatches(named []AwakeNamedSession, bead AwakeSessionBead, mode 
 		if bead.NamedIdentity == "" && bead.ConfiguredNamedSession &&
 			ns.RuntimeName != "" && ns.RuntimeName == bead.SessionName &&
 			(ns.Template == "" || ns.Template == bead.Template) {
+			return true
+		}
+		// The #5957 requalification pass: a bead still stamped with the
+		// entry's prior bare form is this session's runtime awaiting its
+		// in-place rename.
+		if ns.BareIdentity != "" && ns.BareIdentity != ns.Identity &&
+			bead.NamedIdentity == ns.BareIdentity && bead.ConfiguredNamedSession && bead.SessionName != "" {
 			return true
 		}
 	}

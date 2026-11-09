@@ -222,6 +222,33 @@ func TestCopyDirForProviders_KiroWarnsWhenPreservingExistingInstructions(t *test
 	}
 }
 
+// Re-staging gc's own Kiro fallback into a work dir that already holds it
+// byte for byte preserves nothing, so it must not log a preservation warning.
+func TestCopyDirForProviders_KiroRestageOfIdenticalFallbackIsQuiet(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "kiro"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "kiro", "AGENTS.md"), []byte("fallback instructions"), 0o644)
+
+	for i := 1; i <= 2; i++ {
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"kiro"}, &stderr); err != nil {
+			t.Fatalf("stage %d: CopyDirForProviders: %v", i, err)
+		}
+		if got := stderr.String(); got != "" {
+			t.Fatalf("stage %d: stderr = %q, want no warning", i, got)
+		}
+		data, err := os.ReadFile(filepath.Join(dst, "AGENTS.md"))
+		if err != nil {
+			t.Fatalf("stage %d: read AGENTS.md: %v", i, err)
+		}
+		if string(data) != "fallback instructions" {
+			t.Fatalf("stage %d: AGENTS.md = %q, want fallback instructions", i, string(data))
+		}
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

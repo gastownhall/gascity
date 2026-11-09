@@ -462,8 +462,9 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	// A terminal run root forces its steps' presentation statuses terminal: once
 	// the root folds terminal, a step still reading non-terminal lost its close
 	// event, so it can no longer be "Running". Inactive for every non-terminal or
-	// root-less run.
-	clamp := rootClampFor(input.root)
+	// root-less run. A member that executes after the root settles (the
+	// workflow finalizer, the teardown tail) keeps its own status.
+	clamp := rootClampFor(input.root).withPostTerminal(input.beads)
 
 	rawNodes := make([]RunDisplayNode, 0, len(groups))
 	for _, group := range groups {

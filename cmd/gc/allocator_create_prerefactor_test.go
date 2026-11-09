@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -83,7 +84,7 @@ func createPoolSessionBeadWithGuardedAliasUsingLockPreRefactor(
 			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
 		}
 		if alias != "" {
-			aliasErr := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, "")
+			aliasErr := session.EnsureAliasAvailableWithConfig(beadstest.Sessions(bp.beadStore), bp.city, alias, "")
 			if aliasErr == nil {
 				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
 			}

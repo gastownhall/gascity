@@ -58,8 +58,13 @@ type allocInputs struct {
 	// ScaleCheck is the external-reads lane's scale_check result at Now
 	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
 	ScaleCheck *scaleCheckResult
-	Obs        *ObservationSnapshot
-	ObsMaxAge  time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment (the pairing
+	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
@@ -117,6 +122,9 @@ type demandView struct {
 	// probes (demandProbeStores): K1's lane reads them, and gather's
 	// lane-fed check reuses them rather than build the targets again.
 	ProbeStores []beads.Store
+	// ClaimedDemand is the default-probe demand gather dropped as work this
+	// pass already reads as claimed (withoutClaimedDemand), by template.
+	ClaimedDemand map[string]claimedDemandCut
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -179,6 +187,8 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
+	// parked is the pass's park verdicts (parkSeats), by session bead ID.
+	parked parkedSeats
 	// inFlight are the planning reservations of the in-flight creates the
 	// census does not show yet (inFlightCreates), and standIns the templates
 	// of the pending-create rows the pool ones stand in for, by stand-in ID.
@@ -634,6 +644,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Config = &ref
 			e.Normalize = sel.normalize
 		}
+		e.Park = p.parked[info.ID]
 		d := decisions[info.ID]
 		if d.HasAssignedWork || d.AssignedWorkBeadID != "" {
 			e.AssignedWork = &assignedWorkView{BeadID: d.AssignedWorkBeadID, Claimed: d.AssignedWorkClaimed, RequiresFreshCycle: d.RequiresFreshCycle}

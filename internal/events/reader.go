@@ -95,6 +95,34 @@ func ApplyFilter(evts []Event, filter Filter) []Event {
 	return result
 }
 
+// lineMayMatchType is a cheap pre-decode screen for a raw JSONL line. A line
+// whose Type satisfies the filter must contain that type's text verbatim, so a
+// line containing none of the wanted types cannot match and is skipped without
+// paying for json.Unmarshal. It is deliberately a substring test on the type
+// value alone, not on `"type":"..."`, so it never depends on how the producer
+// spaces its JSON. A line containing a \u escape is always passed through,
+// since the escape can spell a type without its literal text. False positives
+// (a payload mentioning the type) are fine: matchesFilter still runs on the
+// decoded event.
+func lineMayMatchType(line []byte, f Filter) bool {
+	// A \u escape can spell a type without its literal text; decode such lines.
+	if bytes.Contains(line, []byte(`\u`)) {
+		return true
+	}
+	if f.Type != "" && !bytes.Contains(line, []byte(f.Type)) {
+		return false
+	}
+	if len(f.Types) == 0 {
+		return true
+	}
+	for _, t := range f.Types {
+		if bytes.Contains(line, []byte(t)) {
+			return true
+		}
+	}
+	return false
+}
+
 func limitReached(count int, filter Filter) bool {
 	return filter.Limit > 0 && count >= filter.Limit
 }
@@ -297,6 +325,9 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
 	for scanner.Scan() {
+		if !lineMayMatchType(scanner.Bytes(), filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
@@ -529,6 +560,9 @@ func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 				continue
 			}
 		}
+		if !lineMayMatchType(line, filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(line, &e); err != nil {
 			continue
@@ -638,23 +672,22 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 	return ascending(reversed, 0), nil
 }
 
-// ReadLatestSeq returns the highest complete event Seq visible in the
-// active events file or any canonical sibling archive. Event logs are
-// append-only and sequence numbers are monotonic, so the active file
-// is read backward from the tail and archives contribute their
-// filename-encoded LastSeq without being gunzipped.
+// ReadLatestSeq returns the highest complete event Seq the log holds: in
+// the active events file, any canonical sibling archive, or an in-flight
+// rotating-* file. Event logs are append-only and sequence numbers are
+// monotonic, so the active file is read backward from the tail, and
+// archives and rotating files contribute the LastSeq their filenames
+// encode without being read. A rotating file holds the log's newest events
+// from the moment a rotation renames the active log until the fresh one gets
+// an event: the rotation's anchor or, when it could not write that, the next
+// append.
 func ReadLatestSeq(path string) (uint64, error) {
 	seq, err := readLatestActiveSeq(path)
 	if err != nil {
 		return 0, err
 	}
-	archives, err := archiveFilesIn(filepath.Dir(path))
-	if err == nil {
-		for _, info := range archives {
-			if info.LastSeq > seq {
-				seq = info.LastSeq
-			}
-		}
+	if rotated, err := latestRotatedSeq(filepath.Dir(path)); err == nil && rotated > seq {
+		seq = rotated
 	}
 	return seq, nil
 }
@@ -670,11 +703,22 @@ func latestLiveSeq(path string) (uint64, error) {
 	if err != nil || seq > 0 {
 		return seq, err
 	}
-	entries, err := os.ReadDir(filepath.Dir(path))
+	return latestRotatedSeq(filepath.Dir(path))
+}
+
+// latestRotatedSeq returns the highest seq that the archives and in-flight
+// rotating files in dir cover, as their filenames encode it, or 0 when there
+// are none.
+func latestRotatedSeq(dir string) (uint64, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, fmt.Errorf("reading event log directory: %w", err)
 	}
+	var seq uint64
 	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
 		if info, err := parseArchiveBasename(entry.Name()); err == nil && info.LastSeq > seq {
 			seq = info.LastSeq
 		}

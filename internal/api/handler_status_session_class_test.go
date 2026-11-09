@@ -9,7 +9,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // workLedgerStore stands in for a cross-region hosted work ledger: it counts
@@ -43,11 +45,15 @@ func stallWorkLedger(t *testing.T, work *workLedgerStore) {
 
 // sessionClassUnavailableState reports a work store but no session-class store,
 // the shape a city gets when [beads.classes.sessions] is relocated to a binding
-// that failed to open.
+// that failed to open: its sessions handle, and the messaging handle that
+// follows it, are zero.
 type sessionClassUnavailableState struct{ *fakeState }
 
-func (sessionClassUnavailableState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{}
+func (s sessionClassUnavailableState) Stores() storeref.Stores {
+	relocated := s.relocatedClasses()
+	relocated[coordclass.ClassSessions] = nil
+	relocated[coordclass.ClassMessaging] = nil
+	return mintFakeStores(s.cityBeadStore, s.stores, relocated, storeref.StoresOptions{Projection: gateProjection{}}, s.cfg, s.ClassBindingHasLegacyResidents)
 }
 
 // splitClassState builds a city with sessions relocated off the work ledger:
@@ -147,8 +153,8 @@ func TestStatusSessionSnapshotStoreIdentity(t *testing.T) {
 		if observed != st.CityBeadStore() {
 			t.Errorf("read store = %p, want CityBeadStore %p — a city that relocates nothing must stay byte-identical", observed, st.CityBeadStore())
 		}
-		if observed != st.SessionsBeadStore().Store {
-			t.Errorf("read store = %p, want SessionsBeadStore %p", observed, st.SessionsBeadStore().Store)
+		if observed != st.Stores().Sessions().Store {
+			t.Errorf("read store = %p, want Stores().Sessions() %p", observed, st.Stores().Sessions().Store)
 		}
 	})
 

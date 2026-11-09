@@ -1104,7 +1104,10 @@ func TestAllocator_PlanNeverEditsItsInputs(t *testing.T) {
 
 // Kills: a scale_check partial read for a template with no custom check
 // (P3-3 obligation): every other template reads partial on the lane's
-// result, so only the custom-check templates are asked.
+// result, so only the custom-check templates are asked. Also kills an unread
+// source traced as the template's own check failing: with no lane result
+// the cause is scale-check-source-unread, and with a result whose check
+// failed it is pool-scale-check-partial.
 func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3), allocPoolAgent("custom", 3)}}
 	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "asleep"))
@@ -1113,8 +1116,12 @@ func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	if _, partial := d.Snapshot.Partial.Templates["worker"]; partial {
 		t.Fatalf("worker read partial with no custom check: %+v", d.Snapshot.Partial)
 	}
-	if !d.Snapshot.Partial.Templates["custom"].Retain {
-		t.Fatalf("custom with no lane result must read partial: %+v", d.Snapshot.Partial)
+	if tp := d.Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckUnread) || slices.Contains(tp.Causes, causeScaleCheckPartial) {
+		t.Fatalf("custom with no lane result = %+v, want retained for %s, not %s", tp, causeScaleCheckUnread, causeScaleCheckPartial)
+	}
+	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"custom": 0}, Partial: map[string]bool{"custom": true}}
+	if tp := f.decide().Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckPartial) || slices.Contains(tp.Causes, causeScaleCheckUnread) {
+		t.Fatalf("custom whose check failed = %+v, want retained for %s, not %s", tp, causeScaleCheckPartial, causeScaleCheckUnread)
 	}
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
 		t.Fatalf("idle worker row = %s, want drain (not retained by another template's partial)", e.Desired)
@@ -1325,4 +1332,424 @@ func TestAllocator_RealizeNeverSelectsANamedRowForAPoolRequest(t *testing.T) {
 	if len(p.selected) != 0 || len(p.plans) != 0 {
 		t.Fatalf("a named row realized for a pool request: selected %v plans %+v", maps.Keys(p.selected), p.plans)
 	}
+}
+
+// claimGuardCity decides a city with worker (custom check, count) and plain
+// (no check): gc-1 (worker, slot 1) busy on old work w-0, gc-3 (worker, slot
+// 2, alias worker-2 when alias) and gc-2 (plain) awake. w is the claim under
+// test, first seen at seen relative to the run's start (noSeen: never), and
+// noRun publishes no run.
+func claimGuardCity(t *testing.T, w beads.Bead, count int, seen time.Duration, noSeen, noRun, alias bool, counts map[string]int) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4), allocPoolAgent("plain", 4)}}
+	gc3 := poolRow("gc-3", "worker", 2, "active")
+	if alias {
+		gc3 = poolRow("gc-3", "worker", 2, "active", "alias", "worker-2")
+	}
+	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active"), gc3, poolRow("gc-2", "plain", 1, "active")).
+		alive("s-gc-1", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{})
+	started := allocNow.Add(-time.Minute)
+	w0 := beads.Bead{ID: "w-0", Title: "w-0", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = []beads.Bead{w0, w}, []string{"", ""}
+	if !noRun {
+		if counts == nil {
+			counts = map[string]int{"worker": count}
+		}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: counts}, started
+	}
+	c0, _ := workClaimOf(f.in.Demand, 0)
+	f.in.ClaimsSeen = map[workClaim]time.Time{c0: started.Add(-time.Hour)}
+	if c1, ok := workClaimOf(f.in.Demand, 1); ok && !noSeen {
+		f.in.ClaimsSeen[c1] = started.Add(seen)
+	}
+	return f.decide()
+}
+
+// workerAllocation is worker's accepted count and planned slots.
+func workerAllocation(d allocDecision) string {
+	var slots []int
+	for _, plan := range d.Plans {
+		if plan.Template == "worker" {
+			slots = append(slots, plan.Plan.poolSlot)
+		}
+	}
+	return fmt.Sprintf("desired %d, creates %v", d.Snapshot.PoolDesired["worker"], slots)
+}
+
+// Kills the pairing guard cutting the wrong template's count, or none, or
+// cutting by the wrong amount (PAR-SC re-review). A run's count may still
+// include a bead claimed after the run started; the decide subtracts each
+// such claim from the count of the template that owns it: the template its
+// work routes to, normalized as pool demand attributes it (a slot-suffixed
+// route, a legacy workflow run target), or for unrouted work the claimant
+// row's template. Over the review's ownership matrix the subtracted
+// decision (stale count, claim newer than the run) equals the decision a
+// run that saw the claim gives (fresh count), and a cut is traced
+// scale-check-stale-vs-claim. An older claim, a claim the planner never
+// saw, or no run cuts nothing; a template the run lacks reads
+// scale-check-source-unread.
+func TestAllocator_ScaleCheckClaimHold(t *testing.T) {
+	work := func(assignee, routed string, extra map[string]string) beads.Bead {
+		b := beads.Bead{ID: "w-1", Title: "w-1", Type: "task", Status: "in_progress", Assignee: assignee, Metadata: map[string]string{}}
+		if routed != "" {
+			b.Metadata[beadmeta.RoutedToMetadataKey] = routed
+		}
+		maps.Copy(b.Metadata, extra)
+		return b
+	}
+	workflow := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.RunTargetMetadataKey: "worker"}
+	matrix := []struct {
+		name, assignee, routed string
+		extra                  map[string]string
+		alias                  bool
+		stale, fresh           int // the run's count for worker, before and after the claim
+		cut                    bool
+	}{
+		{name: "worker-routed, by worker row id", assignee: "gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row session name", assignee: "s-gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row agent name", assignee: "worker-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row alias", assignee: "worker-2", routed: "worker", alias: true, stale: 1, fresh: 0, cut: true},
+		{name: "unrouted, by worker row id", assignee: "gc-3", stale: 0, fresh: 0},
+		{name: "unrouted, by worker row id, check counts it", assignee: "gc-3", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by plain row", assignee: "gc-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by a human", assignee: "alice", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "plain-routed, by worker row", assignee: "gc-3", routed: "plain", stale: 2, fresh: 2},
+		{name: "plain-routed, by plain row", assignee: "gc-2", routed: "plain", stale: 2, fresh: 2},
+		{name: "slot-suffixed worker-3 route, check counts canonical only", assignee: "gc-2", routed: "worker-3", stale: 0, fresh: 0},
+		{name: "slot-suffixed worker-3 route, check counts it", assignee: "gc-2", routed: "worker-3", stale: 1, fresh: 0, cut: true},
+		{name: "legacy workflow run target, check counts it", assignee: "gc-2", extra: workflow, stale: 1, fresh: 0, cut: true},
+	}
+	for _, c := range matrix {
+		t.Run(c.name, func(t *testing.T) {
+			w := work(c.assignee, c.routed, c.extra)
+			guarded := claimGuardCity(t, w, c.stale, time.Second, false, false, c.alias, nil)
+			fresh := claimGuardCity(t, w, c.fresh, -time.Hour, false, false, c.alias, nil)
+			if got, want := workerAllocation(guarded), workerAllocation(fresh); got != want {
+				t.Errorf("stale count with a newer claim: %s; a run that saw the claim: %s", got, want)
+			}
+			if cut := slices.Contains(guarded.Snapshot.Partial.Templates["worker"].Causes, causeScaleCheckStaleClaim); cut != c.cut {
+				t.Errorf("traced %s = %t, want %t", causeScaleCheckStaleClaim, cut, c.cut)
+			}
+		})
+	}
+	claim := work("gc-3", "worker", nil)
+	for _, c := range []struct {
+		name          string
+		seen          time.Duration
+		noSeen, noRun bool
+		counts        map[string]int
+		wantDesired   int
+		cut, unread   bool
+	}{
+		{name: "claim seen as the run started", seen: 0, wantDesired: 3, cut: true},
+		{name: "claim older than the run", seen: -time.Second, wantDesired: 4},
+		{name: "claim the planner never saw", noSeen: true, wantDesired: 4},
+		{name: "no run", seen: time.Second, noRun: true, wantDesired: 2, unread: true},
+		{name: "run lacks the template", seen: time.Second, counts: map[string]int{"other": 1}, wantDesired: 2, unread: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := claimGuardCity(t, claim, 2, c.seen, c.noSeen, c.noRun, false, c.counts)
+			tp := d.Snapshot.Partial.Templates["worker"]
+			if got := d.Snapshot.PoolDesired["worker"]; got != c.wantDesired {
+				t.Errorf("worker desired %d, want %d (%s)", got, c.wantDesired, workerAllocation(d))
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckStaleClaim); got != c.cut {
+				t.Errorf("cut = %t (causes %v), want %t", got, tp.Causes, c.cut)
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckUnread); got != c.unread {
+				t.Errorf("unread = %t (causes %v), want %t", got, tp.Causes, c.unread)
+			}
+			if c.unread && (!tp.Retain || slices.Contains(tp.Causes, causeScaleCheckPartial)) {
+				t.Errorf("causes %v retain %t; want retained, not %s", tp.Causes, tp.Retain, causeScaleCheckPartial)
+			}
+		})
+	}
+}
+
+// Kills the all-or-nothing hold the subtraction replaced (PAR-SC re-review),
+// and a cut by anything but the number of newer claims: with one or two
+// claims first seen during every run, a backlog of 5 still scales up, by
+// the count less those claims, on every cycle.
+func TestScaleCheckClaimStreamStillScalesUp(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 8)}}
+	rows := []beads.Bead{poolRow("gc-1", "worker", 1, "active")}
+	for cycle := range 10 {
+		f := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-1", InventoryAttrs{})
+		runStart := allocNow.Add(time.Duration(cycle) * 4 * time.Second)
+		claims := 1 + cycle%2
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 5}}, runStart
+		f.in.ClaimsSeen = map[workClaim]time.Time{}
+		for i := range claims {
+			f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+				ID: fmt.Sprintf("w-%d-%d", cycle, i), Title: "w", Type: "task", Status: "in_progress", Assignee: "gc-1",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+			})
+			f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+			c, _ := workClaimOf(f.in.Demand, i)
+			f.in.ClaimsSeen[c] = runStart.Add(time.Second) // seen while the run was in flight
+		}
+		// gc-1 takes its claims; the count less the newer claims is new demand.
+		if got, want := len(f.decide().Plans), 5-claims; got != want {
+			t.Fatalf("cycle %d: %d creates for a count of 5 less %d newer claim(s), want %d", cycle, got, claims, want)
+		}
+	}
+}
+
+// claimCutPool decides worker (custom check, count 2) with gc-1 working w-0
+// and gc-2, gc-3 awake and idle, kept by the count; extra are more claims
+// by gc-1, each first seen at its value relative to the run's start, and
+// w-0 is first seen at w0Seen.
+func claimCutPool(t *testing.T, w0Seen time.Duration, extra map[string]time.Duration) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
+	f := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"), poolRow("gc-3", "worker", 3, "active"),
+	).alive("s-gc-1", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{})
+	started := allocNow.Add(-time.Minute)
+	seen := map[string]time.Duration{"w-0": w0Seen}
+	maps.Copy(seen, extra)
+	ids := slices.Sorted(maps.Keys(seen))
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	for _, id := range ids {
+		f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+			ID: id, Title: id, Type: "task", Status: "in_progress", Assignee: "gc-1",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		})
+		f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+	}
+	f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 2}}, started
+	f.in.ClaimsSeen = map[workClaim]time.Time{}
+	for i, id := range ids {
+		c, _ := workClaimOf(f.in.Demand, i)
+		f.in.ClaimsSeen[c] = started.Add(seen[id])
+	}
+	return f.decide()
+}
+
+// Kills a claim cut that puts rows to sleep (PAR-SC review must-fix): a
+// claim the check never counted (work assigned at creation) is cut like any
+// newer claim, and the first pass after a controller restart sees every
+// assignment as new. Either way the cut count is below the true one, so the
+// template retains its rows while the cut lasts: no row the true count
+// keeps sleeps or drains, and creates still follow the cut count.
+func TestScaleCheckClaimCutKeepsRows(t *testing.T) {
+	quiet := func(t *testing.T, cut, truth allocDecision) {
+		t.Helper()
+		if tp := cut.Snapshot.Partial.Templates["worker"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckStaleClaim) {
+			t.Fatalf("cut template = %+v, want retained for %s", tp, causeScaleCheckStaleClaim)
+		}
+		for k, e := range cut.Snapshot.Entries {
+			if (e.Desired == desireDrain || e.Desired == desireSleep) && truth.Snapshot.Entries[k].Desired != e.Desired {
+				t.Errorf("row %s: %s/%s under the cut, %s without it", k.ID, e.Desired, e.Reason, truth.Snapshot.Entries[k].Desired)
+			}
+		}
+		if len(cut.Plans) > len(truth.Plans) {
+			t.Errorf("the cut planned %d creates, more than the true count's %d", len(cut.Plans), len(truth.Plans))
+		}
+	}
+	t.Run("a claim the check never counted", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": -time.Second})
+		cut := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": time.Second})
+		quiet(t, cut, truth)
+	})
+	t.Run("first pass after a restart", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-1": -time.Hour})
+		boot := claimCutPool(t, time.Second, map[string]time.Duration{"w-1": time.Second})
+		quiet(t, boot, truth)
+		for k, e := range boot.Snapshot.Entries {
+			if e.Desired == desireDrain || e.Desired == desireSleep {
+				t.Errorf("first pass after a restart: row %s %s/%s", k.ID, e.Desired, e.Reason)
+			}
+		}
+	})
+}
+
+// TestAllocator_UnusableWorktreeEvidenceNamesItsWorkItem pins the refusal
+// record of a request whose worktree evidence the pass finds unusable: it
+// names the work item and why, on the fresh-plan path and on a reused start
+// candidate. A request refused while a failed verification's backoff is live
+// names neither: the create effect logged that verdict on its attempt.
+//
+// Kills: either plan-time site tracing a bare refusal (the planner's alert
+// then never fires); a backoff refusal naming its work item (an alert every
+// backoff cycle); a reused candidate's record without its row.
+func TestAllocator_UnusableWorktreeEvidenceNamesItsWorkItem(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	worktreeRefusals := func(d allocDecision) []allocTraceRecord {
+		var out []allocTraceRecord
+		for _, r := range d.Trace {
+			if r.Reason == "ineligible:"+gateWorktreeRefused {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	withDemand := func(f *allocFixture, edit func(*scaleCheckDemand)) *allocFixture {
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		edit(&d)
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		return f
+	}
+
+	t.Run("fresh plan", func(t *testing.T) {
+		const missing = `work bead w-1 has gc.work_dir="/wt/w-1" but is missing gc.worktree_root`
+		f := withDemand(newAllocFixture(t, cfg).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeErrors = map[string]string{"w-1": missing}
+		})
+		d := f.decide()
+		got := worktreeRefusals(d)
+		if len(d.Plans) != 0 || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, "missing gc.worktree_root") {
+			t.Fatalf("plans %v refusals %+v, want none planned and w-1 refused with its missing key", planSlots(d, "worker"), got)
+		}
+	})
+	t.Run("reused start candidate", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "rig:alpha", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		got := worktreeRefusals(f.decide())
+		if len(got) != 1 || got[0].WorkBeadID != "w-1" || got[0].Key.ID != "gc-1" || !strings.Contains(got[0].Detail, `store "rig:alpha" does not match request store "city"`) {
+			t.Fatalf("refusals %+v, want gc-1's w-1 refused for its store", got)
+		}
+	})
+	t.Run("live verification backoff", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "city", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		f.in.Backoff = workRefusal(spec)
+		d := f.decide()
+		if got := worktreeRefusals(d); len(d.Plans) != 0 || len(got) != 1 || got[0].WorkBeadID != "" || got[0].Detail != "" {
+			t.Fatalf("plans %v refusals %+v, want one refusal naming no work item", planSlots(d, "worker"), got)
+		}
+	})
+	t.Run("reused start candidate under live verification backoff", func(t *testing.T) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "city", Path: "/wt/w-1"}
+		f := withDemand(newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).demand("worker", "w-1"), func(d *scaleCheckDemand) {
+			d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		})
+		f.in.Backoff = workRefusal(spec)
+		got := worktreeRefusals(f.decide())
+		if len(got) != 1 || got[0].Key.ID != "gc-1" || got[0].WorkBeadID != "" || got[0].Detail != "" {
+			t.Fatalf("refusals %+v, want gc-1's refusal naming no work item", got)
+		}
+	})
+}
+
+// TestAllocator_NameOnlyRequestWithRefusedEvidenceStartsUnnamed pins v2's
+// twin of legacy's name-only fallback (nameOnlyFallback): a warm custom
+// pool's seat whose name the pass refuses still plans, unnamed, with the
+// refusal traced as a named request's is. A row the merge names no seat for
+// (unusable evidence) is traced naming its work item, so the planner's
+// worktree alert still fires for it.
+//
+// Kills: a refused name refusing its seat (the pool a seat short of its
+// count); the fallback planning the named request anyway; a merge refusal
+// left untraced (no alert).
+func TestAllocator_NameOnlyRequestWithRefusedEvidenceStartsUnnamed(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	nameOnly := func(t *testing.T, edit func(*scaleCheckDemand)) *allocFixture {
+		f := newAllocFixture(t, cfg).demand("worker", "w-1")
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
+		f.in.Demand.Collected.NameOnlyTemplates = map[string]bool{"worker": true}
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		edit(&d)
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		return f
+	}
+	refusals := func(d allocDecision) []allocTraceRecord {
+		var out []allocTraceRecord
+		for _, r := range d.Trace {
+			if r.Reason == "ineligible:"+gateWorktreeRefused {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	withSpec := func(storeRef string) func(*scaleCheckDemand) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: storeRef, Path: "/wt/w-1"}
+		return func(d *scaleCheckDemand) { d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec} }
+	}
+
+	t.Run("usable evidence (control)", func(t *testing.T) {
+		d := nameOnly(t, withSpec("city")).decide()
+		if got := planWork(d); !slices.Equal(got, []string{"w-1"}) || len(refusals(d)) != 0 {
+			t.Fatalf("planned work %q, refusals %+v; want the seat named for w-1", got, refusals(d))
+		}
+	})
+	t.Run("evidence naming another store", func(t *testing.T) {
+		d := nameOnly(t, withSpec("rig:alpha")).decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, `store "rig:alpha" does not match request store "city"`) {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and w-1 refused for its store", planWork(d), got)
+		}
+	})
+	t.Run("live verification backoff", func(t *testing.T) {
+		f := nameOnly(t, withSpec("city"))
+		f.in.Backoff = workRefusal(*f.in.Demand.Collected.DefaultDemand["worker"].WorktreeSpecs["w-1"])
+		d := f.decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "" {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and one refusal naming no work item", planWork(d), got)
+		}
+	})
+	t.Run("unusable evidence the merge names no seat for", func(t *testing.T) {
+		const missing = `work bead w-1 has gc.work_dir="/wt/w-1" but is missing gc.worktree_root`
+		d := nameOnly(t, func(d *scaleCheckDemand) { d.WorktreeErrors = map[string]string{"w-1": missing} }).decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, "missing gc.worktree_root") {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and w-1 refused with its missing key", planWork(d), got)
+		}
+	})
+}
+
+// TestAllocator_RefusedNameMovesAReusedStartCandidateToThePoolDir pins v2's
+// twin of legacy's move for a refused name
+// (TestLegacyRefusedNameMovesASeatThatIsNotAliveToThePoolDir): a start
+// candidate the unnamed request reuses is bound to the pool's own directory,
+// not left in the one its last binding recorded (here a worktree), where its
+// start would launch it. A start candidate that records no directory gets
+// none, as a fresh unnamed seat records none.
+//
+// Kills: the unnamed binding clearing only the trigger, so the start launches
+// the seat in its previous work's worktree.
+func TestAllocator_RefusedNameMovesAReusedStartCandidateToThePoolDir(t *testing.T) {
+	agent := allocPoolAgent("worker", 3)
+	agent.WorkDir = "/pool"
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	binding := func(t *testing.T, meta ...string) *bindingTarget {
+		t.Helper()
+		row := poolRow("gc-1", "worker", 1, "active", append([]string{beadmeta.TriggerBeadIDMetadataKey, "w-old"}, meta...)...)
+		f := newAllocFixture(t, cfg).sessions(row).demand("worker", "w-1")
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
+		f.in.Demand.Collected.NameOnlyTemplates = map[string]bool{"worker": true}
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "rig:alpha", Path: "/wt/w-1"}
+		d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		dec := f.decide()
+		e := entryOf(t, dec, "gc-1")
+		if len(dec.Plans) != 0 || !e.InDesired || e.Binding == nil || e.Binding.WorkBeadID != "" {
+			t.Fatalf("plans %v, gc-1 indesired=%v binding %+v; want gc-1 reused, bound unnamed", planWork(dec), e.InDesired, e.Binding)
+		}
+		return e.Binding
+	}
+
+	t.Run("records a worktree", func(t *testing.T) {
+		b := binding(t, beadmeta.WorkDirMetadataKey, "/wt/old", beadmeta.LegacyWorkDirMetadataKey, "/wt/old")
+		want := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: "", beadmeta.WorkDirMetadataKey: "/pool", beadmeta.LegacyWorkDirMetadataKey: "/pool"}
+		if !maps.Equal(b.Patch, want) {
+			t.Fatalf("binding patch %v, want %v: the trigger cleared and the seat moved to the pool's own directory", b.Patch, want)
+		}
+	})
+	t.Run("records no directory", func(t *testing.T) {
+		b := binding(t)
+		if want := (session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}); !maps.Equal(b.Patch, want) {
+			t.Fatalf("binding patch %v, want %v: only the trigger cleared", b.Patch, want)
+		}
+	})
 }

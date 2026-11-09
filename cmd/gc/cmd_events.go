@@ -685,6 +685,9 @@ func eachLocalCityEvent(scope eventsAPIScope, apiErr error, typeFilter, sinceFla
 	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
 		return false, nil
 	}
+	if err := refuseLocalEventsOnWorkerSite(scope); err != nil {
+		return true, err
+	}
 	filter := events.Filter{Type: strings.TrimSpace(typeFilter)}
 	if cutoff, err := eventsSinceCutoff(sinceFlag); err != nil {
 		return true, err
@@ -775,11 +778,24 @@ func readLocalCityHeadIndex(scope eventsAPIScope, apiErr error) (string, bool, e
 	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
 		return "", false, nil
 	}
+	if err := refuseLocalEventsOnWorkerSite(scope); err != nil {
+		return "", true, err
+	}
 	seq, err := events.ReadLatestSeq(filepath.Join(scope.cityPath, ".gc", "events.jsonl"))
 	if err != nil {
 		return "", true, fmt.Errorf("reading local city event head: %w", err)
 	}
 	return strconv.FormatUint(seq, 10), true, nil
+}
+
+// refuseLocalEventsOnWorkerSite refuses the local fallback in a box: its
+// events.jsonl holds only what this box wrote, not the city's events, so
+// reading it as the city's log would answer with the wrong history.
+func refuseLocalEventsOnWorkerSite(scope eventsAPIScope) error {
+	if onWorkerSite(scope.cityPath) {
+		return errWorkerSiteLocalState{what: "events"}
+	}
+	return nil
 }
 
 func shouldUseLocalCityEventsFallback(scope eventsAPIScope, apiErr error) bool {

@@ -59,7 +59,7 @@ func TestOrderStoreInfosReachTheOrdersBinding(t *testing.T) {
 }
 
 // TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity is the compatibility
-// half: with OrdersBeadStore() == CityBeadStore() — every city that relocates
+// half: with Stores().Orders() == CityBeadStore() — every city that relocates
 // nothing — the list is exactly the one it always was, so the read does not scan
 // one database twice.
 func TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity(t *testing.T) {

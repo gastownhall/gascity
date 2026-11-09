@@ -430,36 +430,79 @@ func packExists(dir string) bool {
 // peekBeadsProvider reads just the beads.provider field from a city.toml
 // without doing full config parsing. Returns "" if not set or on error.
 func peekBeadsProvider(tomlPath string) string {
-	data, err := os.ReadFile(tomlPath)
-	if err != nil {
-		return ""
-	}
-	var peek struct {
-		Beads struct {
-			Provider string `toml:"provider"`
-			Backend  string `toml:"backend"`
-		} `toml:"beads"`
-	}
-	if _, err := toml.Decode(string(data), &peek); err != nil {
-		return ""
-	}
-	return peek.Beads.Provider
+	return peekCityTOMLBeads(tomlPath).Provider
 }
 
+// peekBeadsBackend reads just the beads.backend field from a city.toml, the
+// same way peekBeadsProvider reads the provider.
 func peekBeadsBackend(tomlPath string) string {
+	return peekCityTOMLBeads(tomlPath).Backend
+}
+
+// cityTOMLBeadsPeek is what one city.toml's [beads] table says about the
+// provider and backend, read without composing the city config.
+type cityTOMLBeadsPeek struct {
+	Provider string
+	Backend  string
+}
+
+// cityTOMLBeadsPeekDecodes counts the city.toml decodes the [beads] peek
+// performed (memo answers excluded), for tests that pin a command's cost.
+var cityTOMLBeadsPeekDecodes atomic.Int64
+
+// peekCityTOMLBeads answers the [beads] peek for tomlPath. Decoding TOML means
+// decoding the whole file, about 15 ms for a production-sized city.toml, and a
+// one-shot command asks many times (10 per `gc bd show` on maintainer-city), so
+// inside an invocation memo scope the file is decoded once. Outside a scope
+// every peek reads the file, so a long-lived process sees edits.
+func peekCityTOMLBeads(tomlPath string) cityTOMLBeadsPeek {
+	if memo := currentInvocationConfigMemo(); memo != nil {
+		return memo.cityTOMLBeadsPeek(tomlPath)
+	}
+	peek, _ := decodeCityTOMLBeadsPeek(tomlPath)
+	return peek
+}
+
+// decodeCityTOMLBeadsPeek reads tomlPath and decodes the provider and backend
+// of its [beads] table, each on its own: a field holding a non-string value is
+// answered as unset without blanking the other. ok is false when the file could
+// not be read or parsed, or when either field could not be decoded, so a
+// partial answer is never remembered.
+func decodeCityTOMLBeadsPeek(tomlPath string) (cityTOMLBeadsPeek, bool) {
+	cityTOMLBeadsPeekDecodes.Add(1)
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		return ""
+		return cityTOMLBeadsPeek{}, false
 	}
+	// The fields are untyped so a value of the wrong type fails only its own
+	// field, not the whole decode; the struct keeps the decoder's key matching,
+	// which is the config loader's.
 	var peek struct {
 		Beads struct {
-			Backend string `toml:"backend"`
+			Provider any `toml:"provider"`
+			Backend  any `toml:"backend"`
 		} `toml:"beads"`
 	}
 	if _, err := toml.Decode(string(data), &peek); err != nil {
-		return ""
+		return cityTOMLBeadsPeek{}, false
 	}
-	return peek.Beads.Backend
+	provider, providerOK := peekedTOMLString(peek.Beads.Provider)
+	backend, backendOK := peekedTOMLString(peek.Beads.Backend)
+	return cityTOMLBeadsPeek{Provider: provider, Backend: backend}, providerOK && backendOK
+}
+
+// peekedTOMLString decodes a peeked TOML value as a string field. An absent
+// value decodes as unset (""), a string as itself; any other type does not
+// decode (ok false) and is answered as unset.
+func peekedTOMLString(v any) (s string, ok bool) {
+	switch v := v.(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	default:
+		return "", false
+	}
 }
 
 // peekEventsProvider reads just the events.provider field from a city.toml
@@ -470,6 +513,10 @@ func peekBeadsBackend(tomlPath string) string {
 // `git status --porcelain --ignored` against every cached pack-source repo
 // — slow on hosts where a pack source is a large monorepo, and fan-out
 // concurrent across a bd-write burst (see gastownhall/gascity#2099).
+//
+// Unlike peekCityTOMLBeads it is not answered from an invocation memo scope:
+// each of its callers, gc event emit and gc status's store-health block, peeks
+// at most once per process.
 //
 // Trade-off: include/import/pack-provided overrides of [events].provider are
 // not honored on this hook fast path. Operators that need this path to bypass

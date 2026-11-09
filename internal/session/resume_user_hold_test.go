@@ -99,11 +99,16 @@ func TestOperatorResumeConsumesUserHold(t *testing.T) {
 			meta := heldKeys(t, store, b.ID)
 			for k, want := range map[string]string{
 				"state": string(StateActive), "state_reason": "creation_complete", "held_until": "", "sleep_intent": "",
-				"suspended_at": "", "wake_request": "", "wake_requested_at": "", "generation": "3", "instance_token": "tok-3",
+				"suspended_at": "", "wake_request": "", "wake_requested_at": "", "generation": "4",
 			} {
 				if meta[k] != want {
 					t.Errorf("%s = %q, want %q", k, meta[k], want)
 				}
+			}
+			// The resume started a new incarnation (I-MINT), and the consume
+			// landed on it.
+			if tok := meta["instance_token"]; tok == "tok-3" || tok == "" {
+				t.Errorf("instance_token = %q, want the resume's minted token", tok)
 			}
 		})
 	}
@@ -216,7 +221,7 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 			_, err := NewStore(beads.SessionStore{Store: store}).OperatorSuspend(id, time.Now().Add(time.Second))
 			return err
 		}, wantErr: true, wantHeld: true},
-		"kill":               {race: set(MetadataPatch{"generation": "4"}), wantErr: true, wantHeld: true},
+		"kill":               {race: set(MetadataPatch{"generation": "5"}), wantErr: true, wantHeld: true}, // past the resume's own mint (4)
 		"quarantine":         {race: set(MetadataPatch{"quarantined_until": later}), wantErr: true, wantHeld: true},
 		"held_until moved":   {race: set(MetadataPatch{"held_until": later}), wantErr: true, wantHeld: true},
 		"intent moved":       {race: set(MetadataPatch{"sleep_intent": ""}), wantErr: true},
