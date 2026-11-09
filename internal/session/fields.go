@@ -421,7 +421,7 @@ var registry = slices.Concat([]Field{
 	{Key: "started_config_hash", Class: ClassBaseline, Premise: true, Writers: sites(legacyCommit)},
 
 	// Assignment identity (sessionAssignmentIdentifiersForConfig's reads).
-	{Key: NamedSessionIdentityMetadata, Class: ClassAssignmentIdentity, Premise: true, Writers: sites(op("cmd/gc/cmd_session.go", "cmdSessionNew"))},
+	{Key: NamedSessionIdentityMetadata, Class: ClassAssignmentIdentity, Premise: true, Writers: sites(op("cmd/gc/cmd_session.go", "cmdSessionNew"), op(srcManager, "Manager.stampConfiguredNamedSession"))},
 
 	// Launch configuration.
 	{Key: "session_key", Class: ClassLaunchConfig, Premise: true, Writers: sites(op(srcManager, "Manager.PersistSessionKey"))},
@@ -455,7 +455,7 @@ var registry = slices.Concat([]Field{
 	same(ClassBaseline, false, sites(legacyCommit), "started_provision_hash", "started_launch_hash", "started_live_hash", "live_hash", "core_hash_breakdown"),
 	same(ClassAssignmentIdentity, false, sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers"), opCreate), "template", "session_name"),
 	same(ClassLaunchConfig, false, sites(legacyCreate), NamedSessionModeMetadata),
-	same(ClassAssignmentIdentity, false, sites(op("cmd/gc/cmd_session.go", "cmdSessionNew")), NamedSessionMetadataKey),
+	same(ClassAssignmentIdentity, false, sites(op("cmd/gc/cmd_session.go", "cmdSessionNew"), op(srcManager, "Manager.stampConfiguredNamedSession")), NamedSessionMetadataKey),
 	same(ClassAssignmentIdentity, false, sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers")), "agent_name"),
 	same(ClassLaunchConfig, false, sites(opCreate), "session_name_explicit"),
 	same(ClassLaunchConfig, false, sites(legacyCreate, opCreate), "command"),
