@@ -16,8 +16,10 @@ import (
 // (runtime.ProtocolInfo.SharesHostFS). gc then stages the work dir, runs
 // pre_start before the box is created and session_setup after the agent is
 // up, all on the host, and leaves that work out of the start config, so the
-// pack does exactly what the config carries. Every reader of the token goes
-// through sharesHostFS, so locality and the token are read together.
+// pack does exactly what the config carries. It does that only into a name
+// the pack reports vacant (Start, provisionBox, startFresh). Every reader of
+// the token goes through sharesHostFS, so locality and the token are read
+// together.
 
 // defaultSetupTimeout is the per-command budget for host pre_start and
 // session_setup when the provider was built without one: the [session]

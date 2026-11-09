@@ -69,8 +69,10 @@ var (
 // this agent. Stage 1 happens in the gc controller process on the host
 // filesystem, so it requires only that the agent's runtime read that host
 // filesystem — not that it execute PreStart. By registration today, tmux
-// (the default), subprocess and herdr guarantee it; acp, k8s, ssh:, hybrid
-// (whose sessions may route to k8s at spawn time) and exec runtimes do not.
+// (the default), subprocess, herdr and an exec runtime whose handshake
+// declares fs.host with locality=local guarantee it; acp, k8s, ssh:, hybrid
+// (whose sessions may route to k8s at spawn time) and every other exec
+// runtime do not.
 //
 // Separate from isStage2EligibleSession, which also requires the runtime to
 // execute PreStart on the host.
@@ -94,7 +96,8 @@ func canStage1Materialize(rt materializationRuntime, agent *config.Agent) bool {
 // host and read the host filesystem that entry writes into: a runtime that
 // skips PreStart silently drops materialization, and one whose agents read
 // another filesystem (a pod, a container) gets it in the wrong place. By
-// registration today, tmux (the default) and herdr qualify; subprocess reads
+// registration today, tmux (the default), herdr and an exec runtime whose
+// handshake declares fs.host with locality=local qualify; subprocess reads
 // the host filesystem but does not execute PreStart; hybrid does not
 // qualify because a configured RemoteMatch routes some sessions to k8s.
 //

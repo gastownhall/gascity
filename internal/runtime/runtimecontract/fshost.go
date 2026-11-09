@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // This file is the fshost group: what a script declaring fs.host promises,
@@ -61,11 +62,6 @@ func fsHostDeclared(hs runtime.ProtocolInfo) (Status, string, bool) {
 // fsHostDir makes a fresh directory under the run's work dir for one probe.
 func (r *runner) fsHostDir() (string, error) {
 	return os.MkdirTemp(r.opts.WorkDir, "gc-rpp-fshost-")
-}
-
-// shellQuote single-quotes s for a POSIX shell.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // awaitFile returns path's content once it is non-empty, within
@@ -119,7 +115,7 @@ func probeFSHostSharedView(ctx context.Context, r *runner, hs runtime.ProtocolIn
 		return StatusFail, "writing the probe file: " + err.Error()
 	}
 	name := r.nextName()
-	cmd := "cp " + shellQuote(in) + " " + shellQuote(out) + "; exec " + r.opts.Command
+	cmd := "cp " + shellquote.Quote(in) + " " + shellquote.Quote(out) + "; exec " + r.opts.Command
 	if status, detail := startFSHostOrFail(ctx, r, name, fsHostConfig{WorkDir: dir, Command: cmd}); status != StatusPass {
 		return status, detail
 	}
@@ -145,7 +141,7 @@ func probeFSHostSameUser(ctx context.Context, r *runner, hs runtime.ProtocolInfo
 	defer func() { _ = os.RemoveAll(dir) }()
 	out := filepath.Join(dir, "gc-rpp-fshost-uid")
 	name := r.nextName()
-	cmd := "id -u | tee " + shellQuote(out) + "; exec " + r.opts.Command
+	cmd := "id -u | tee " + shellquote.Quote(out) + "; exec " + r.opts.Command
 	if status, detail := startFSHostOrFail(ctx, r, name, fsHostConfig{WorkDir: dir, Command: cmd}); status != StatusPass {
 		return status, detail
 	}
@@ -192,7 +188,7 @@ func probeFSHostRunsWhatItCarries(ctx context.Context, r *runner, hs runtime.Pro
 	marker := filepath.Join(work, "gc-rpp-fshost-prestart")
 
 	name := r.nextName()
-	cfg := fsHostConfig{WorkDir: work, Command: r.opts.Command, OverlayDir: overlay, PreStart: []string{"touch " + shellQuote(marker)}}
+	cfg := fsHostConfig{WorkDir: work, Command: r.opts.Command, OverlayDir: overlay, PreStart: []string{"touch " + shellquote.Quote(marker)}}
 	if status, detail := startFSHostOrFail(ctx, r, name, cfg); status != StatusPass {
 		return status, detail
 	}

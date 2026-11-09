@@ -17,6 +17,7 @@ go_library(
         "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
+        "//internal/shellquote",
     ],
 )
 

@@ -26,7 +26,7 @@ type HostStagingFixture struct {
 // HostHandledStartFields are the start-request fields a provider that did
 // their work on the host leaves out, so the backend does exactly what the
 // request carries and never repeats it.
-var HostHandledStartFields = []string{"copy_files", "overlay_dir", "pack_overlay_dirs", "pre_start", "session_setup", "session_setup_script", "work_dir_exclude"}
+var HostHandledStartFields = []string{"copy_files", "overlay_dir", "pack_overlay_dirs", "pre_start", "session_setup", "session_setup_script"}
 
 // hostStagingProvider is the provider (overlay) slot the cases stage for.
 const hostStagingProvider = "claude"

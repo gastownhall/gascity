@@ -32,9 +32,10 @@ const (
 // hostStageFixture is a pack that records the start config each `start` or
 // `provision` op received ($S/<op>.<name>.json) and whether, when it ran,
 // the work dir already held the pre_start marker and the session_setup
-// marker. A session is running while $S/<name>.running exists. Its `exec`
-// answers `tmux has-session` with 1 (no agent session yet) and every other
-// command with 0, so a separable launch succeeds without a tmux.
+// marker. A session is running while $S/<name>.running exists, and
+// `is-running` fails while $S/is-running.fails exists. Its `exec` answers
+// `tmux has-session` with 1 (no agent session yet) and every other command
+// with 0, so a separable launch succeeds without a tmux.
 type hostStageFixture struct {
 	script  string
 	state   string
@@ -63,7 +64,9 @@ case "$op" in
     if [ -f "$W/gc-setup-ran" ]; then : > "$S/$op.$name.saw-setup"; fi
     : > "$S/$name.running" ;;
   stop) rm -f "$S/$name.running"; echo "$name" >> "$S/stops" ;;
-  is-running) if [ -f "$S/$name.running" ]; then echo true; else echo false; fi ;;
+  is-running)
+    if [ -f "$S/is-running.fails" ]; then exit 1; fi
+    if [ -f "$S/$name.running" ]; then echo true; else echo false; fi ;;
   exec) cmd=$(cat); case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
   *) exit 2 ;;
 esac
@@ -152,7 +155,7 @@ func fileIn(t *testing.T, dir, rel string) (string, bool) {
 
 // handledStartFields are the start-config fields gc leaves out when it did
 // their work on the host.
-var handledStartFields = []string{"copy_files", "overlay_dir", "pack_overlay_dirs", "pre_start", "session_setup", "session_setup_script", "work_dir_exclude"}
+var handledStartFields = []string{"copy_files", "overlay_dir", "pack_overlay_dirs", "pre_start", "session_setup", "session_setup_script"}
 
 // TestHostStagedStartOmitsHandledFields pins fs.host on the welded start:
 // gc stages the provider-aware overlays and copied files, runs pre_start on
@@ -172,7 +175,7 @@ func TestHostStagedStartOmitsHandledFields(t *testing.T) {
 			t.Errorf("start config carries %q, which gc already handled on the host; fields = %v", field, got)
 		}
 	}
-	for _, field := range []string{"work_dir", "command", "env", "session_live"} {
+	for _, field := range []string{"work_dir", "command", "env", "session_live", "work_dir_exclude"} {
 		if !slices.Contains(got, field) {
 			t.Errorf("start config lacks %q, which gc did not handle; fields = %v", field, got)
 		}
@@ -327,28 +330,47 @@ func TestHostSessionSetupFailureIsNonFatal(t *testing.T) {
 	}
 }
 
-// TestHostStagedOccupiedNameSendsTheFullConfig pins the start into a name a
-// box already holds: gc does no host work there (it would re-run pre_start
-// in a live session's work dir), so it omits nothing and the pack does what
-// the config carries.
-func TestHostStagedOccupiedNameSendsTheFullConfig(t *testing.T) {
-	f := newHostStageFixture(t, hostFSHandshake)
-	if err := os.WriteFile(filepath.Join(f.state, "s1.running"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	p := NewProviderForCity(f.script, "city", t.TempDir())
-	cfg := f.hostWorkConfig(t)
-	if err := p.Start(context.Background(), hostStageSession, cfg); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	got := f.received(t, "start")
-	for _, field := range handledStartFields {
-		if !slices.Contains(got, field) {
-			t.Errorf("start config into an occupied name lacks %q; fields = %v", field, got)
-		}
-	}
-	if _, ok := fileIn(t, f.workDir, hostStageWorkDirMarker); ok {
-		t.Error("gc ran pre_start into a name a box already holds")
+// TestHostStagingNeedsAReportedVacancy pins the start into a name the pack
+// does not report vacant, on both create paths of the production
+// seam-backed provider (the welded start, and the separable provision then
+// launch): a name a box already holds, and one whose `is-running` read
+// fails. gc does no host work there, which would re-run pre_start in a live
+// session's work dir: it stages nothing, runs no pre_start or session_setup
+// on the host, and sends the full config, so the pack does what it carries.
+func TestHostStagingNeedsAReportedVacancy(t *testing.T) {
+	for _, tc := range []struct {
+		name, handshake, op string
+		occupancy           string // the state file that makes the read occupied or failed
+	}{
+		{"welded, occupied", hostFSHandshake, "start", hostStageSession + ".running"},
+		{"welded, unknown", hostFSHandshake, "start", "is-running.fails"},
+		{"separable, occupied", hostFSSeparableLaunch, "provision", hostStageSession + ".running"},
+		{"separable, unknown", hostFSSeparableLaunch, "provision", "is-running.fails"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHostStageFixture(t, tc.handshake)
+			if err := os.WriteFile(filepath.Join(f.state, tc.occupancy), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sp := NewSeamBackedForCity(f.script, "city", t.TempDir())
+			if err := sp.Start(context.Background(), hostStageSession, f.hostWorkConfig(t)); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			got := f.received(t, tc.op)
+			if got == nil {
+				t.Fatalf("the %s op never ran", tc.op)
+			}
+			for _, field := range handledStartFields {
+				if !slices.Contains(got, field) {
+					t.Errorf("%s config lacks %q, but gc may do no host work into this name; fields = %v", tc.op, field, got)
+				}
+			}
+			for _, rel := range []string{hostStageWorkDirMarker, "claude-only", "shared", "agent-file", "staged/copied", "gc-setup-ran", "gc-setup-script-ran"} {
+				if _, ok := fileIn(t, f.workDir, rel); ok {
+					t.Errorf("gc did host work (%s) into a name the pack did not report vacant", rel)
+				}
+			}
+		})
 	}
 }
 

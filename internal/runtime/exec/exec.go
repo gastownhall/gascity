@@ -67,6 +67,11 @@ type Provider struct {
 	setupTimeout    time.Duration
 	setupMaxTimeout time.Duration
 	setupWarnings   io.Writer
+
+	// hostSetupDue holds the names whose `provision` config gc stripped of
+	// its host work (provisionBox), so the launch that follows runs their
+	// session_setup on the host (execTransport.Launch).
+	hostSetupDue sync.Map
 }
 
 type startupWatchEvent struct {
@@ -392,9 +397,10 @@ func (p *Provider) runWithTTY(args ...string) error {
 // For a pack sharing the host filesystem, Start first stages the work dir
 // and runs pre_start on the host (fatal: no box is created), leaves that
 // work out of the start config, and runs session_setup on the host once the
-// agent is up (hoststage.go). Into a name a box already holds it does no
-// host work, which would re-run pre_start in a live session's work dir, and
-// sends the full config instead.
+// agent is up (hoststage.go). It does that host work only into a name the
+// pack reports vacant: into a name a box already holds it would re-run
+// pre_start in a live session's work dir, and a name whose occupancy read
+// fails may be one, so there it sends the full config instead.
 //
 // A [runtime.Config.FreshOnly] start is startFresh's.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -409,7 +415,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
 	foreignBox := occupancyKnown && occupiedBefore
 
-	hostWork := !foreignBox && p.sharesHostFS()
+	hostWork := occupancyKnown && !occupiedBefore && p.sharesHostFS()
 	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
 		return err
@@ -512,20 +518,27 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // launch it runs the `provision` op (box + staging + pre_start, NO agent); the
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.) For a pack
-// sharing the host filesystem the host work precedes `provision` and is left
-// out of its config, as Start does; session_setup follows the launch
-// (execTransport.Launch).
+// sharing the host filesystem, and as in Start only into a name the pack
+// reports vacant, the host work precedes `provision` and is left out of its
+// config; session_setup then follows the launch (execTransport.Launch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
-	data, err := p.startConfigFor(ctx, name, cfg, p.sharesHostFS())
+	p.hostSetupDue.Delete(name)
+	hostWork := p.sharesHostFS() && p.reportsVacant(name)
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
 		return err
 	}
-	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
-	return err
+	if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+		return err
+	}
+	if hostWork {
+		p.hostSetupDue.Store(name, struct{}{})
+	}
+	return nil
 }
 
 // launchAgent starts the agent in the in-box tmux session over the `exec` op, for
@@ -954,6 +967,13 @@ func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 		return o.present(), true
 	}
 	return p.isRunningOp(name)
+}
+
+// reportsVacant reports whether the pack definitely reports no box holding
+// name (boxOccupancy). A failed read reports nothing: the name may be held.
+func (p *Provider) reportsVacant(name string) bool {
+	occupied, definite := p.boxOccupancy(name)
+	return definite && !occupied
 }
 
 // isRunningOp asks `is-running <name>` and reports both the answer and

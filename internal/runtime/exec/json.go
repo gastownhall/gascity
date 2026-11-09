@@ -57,12 +57,13 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 
 // marshalHostStagedStartConfig is marshalStartConfig for a pack sharing the
 // host filesystem whose host work gc did itself (Provider.startConfigFor):
-// the overlays, copied files and work-dir exclusions it staged, the
-// pre_start it ran, and the session_setup it runs after the launch are left
-// out, so the pack does exactly what the config carries.
+// the overlays and copied files it staged, the pre_start it ran, and the
+// session_setup it runs after the launch are left out, so the pack does
+// exactly what the config carries. work_dir_exclude stays: it is the floor
+// of what an export of the work dir skips, not work gc did.
 func marshalHostStagedStartConfig(cfg runtime.Config) ([]byte, error) {
 	sc := newStartConfig(cfg)
-	sc.PackOverlayDirs, sc.OverlayDir, sc.CopyFiles, sc.WorkDirExclude = nil, "", nil, nil
+	sc.PackOverlayDirs, sc.OverlayDir, sc.CopyFiles = nil, "", nil
 	sc.PreStart, sc.SessionSetup, sc.SessionSetupScript = nil, nil, ""
 	return json.Marshal(sc)
 }

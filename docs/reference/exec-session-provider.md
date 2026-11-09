@@ -442,9 +442,11 @@ when `is-running` printed `true` before the attempt, or when `start` exited
 non-zero on its own with stderr saying the name is taken (it contains
 `already exists` or `already running`). The stderr check does not apply to a
 `start` that gc canceled at its deadline. A runtime that declares both
-`proc.provision` and `proc.exec` gets `provision` in place of that
-`is-running` and `start`: no `stop` follows a failed `provision`, and one
-always follows a failed agent launch after it.
+`proc.provision` and `proc.exec` gets `provision` in place of that `start`:
+no `stop` follows a failed `provision`, and one always follows a failed agent
+launch after it. It gets that `is-running` (`observe` on a v2-ready
+script) only when it also declares `fs.host`, because gc needs the answer
+before it does any [host work](#host-filesystem-fshost).
 
 Scripts may handle these hints or ignore them:
 
@@ -499,7 +501,9 @@ the start done. A script that must reach a ready agent before it returns
 (to type `nudge`, say) waits itself; otherwise it may ignore them. Session setup
 commands are the *script's* responsibility — they run on the target
 filesystem, not the orchestrator — unless the script declares `fs.host`, in
-which case gc runs them on the host and leaves them out of the start config.
+which case gc runs them on the host and leaves them out of the start config
+of a start into a vacant name (see
+[Host filesystem (`fs.host`)](#host-filesystem-fshost)).
 
 ### Host filesystem (`fs.host`)
 
@@ -521,16 +525,17 @@ For such a script gc does the session's host work itself, around `start` (or
    fails the start before `start` runs; the error carries the command's
    output tail with secrets redacted.
 3. It runs `start` (or `provision`) with a config that leaves out what it
-   did: `pack_overlay_dirs`, `overlay_dir`, `copy_files`,
-   `work_dir_exclude`, `pre_start`, `session_setup` and
-   `session_setup_script` are absent.
+   did: `pack_overlay_dirs`, `overlay_dir`, `copy_files`, `pre_start`,
+   `session_setup` and `session_setup_script` are absent.
 4. Once the agent is up, it runs `session_setup` and then
    `session_setup_script` on the host with `GC_SESSION` set. A failure is a
    warning; the session keeps running.
 
 gc runs no `session_live` for an exec runtime; the field stays in the start
-config. Into a name a box already holds, gc does none of this host work and
-sends the full config.
+config. gc does this host work only into a name the script reports vacant:
+`is-running` prints `false` or, on a v2-ready script, `observe` reads it
+absent. Into a name a box already holds, or one whose read fails, it does
+none of it and sends the full config.
 
 There is no flag in the start config that says gc did the work. A script
 does exactly what its start config carries: a gc that did the host work
