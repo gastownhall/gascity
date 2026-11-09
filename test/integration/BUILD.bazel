@@ -86,6 +86,7 @@ go_test(
         "integration_test.go",
         "mail_test.go",
         "prompt_query_federation_test.go",
+        "provider_credential_isolation_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
         "run_drift_command_test.go",
@@ -127,6 +128,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/testenv",
+        "//internal/worker/builtin",
         "@com_github_stretchr_testify//require",
     ] + select({
         "@rules_go//go/platform:aix": [
