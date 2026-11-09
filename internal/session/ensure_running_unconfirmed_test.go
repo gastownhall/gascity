@@ -507,3 +507,94 @@ func TestEnsureRunning_StaleKeyCheckOnUnconfirmedLivenessDoesNotRetainACommitted
 		})
 	}
 }
+
+// staleProbingProvider has no FreshLivenessObserver and a stale IsRunning, and
+// reads liveness per call through ObserveLivenessWithError, as acp and
+// subprocess do by probing their control socket: live and err are what that
+// probe finds.
+type staleProbingProvider struct {
+	*runtime.Fake
+	live runtime.Liveness
+	err  error
+}
+
+func (p *staleProbingProvider) IsRunning(string) bool { return false }
+
+func (p *staleProbingProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return p.live, p.err
+}
+
+// A runtime can be read fresh when the leaf serving the name, or failing that
+// the top provider, has the capability (SESSION-RUNTIME-017). auto has it in
+// front of a leaf that does not, as it is in front of acp: the runtime-only
+// start's gate must still confirm the leaf's stale "not running" with the
+// composite's read, so it starts neither over a runtime that is up nor over one
+// it could not read. Only the bridge discriminates: Start reads fresh under its
+// lease before it gets as far as its gate.
+func TestEnsureRunning_FreshCompositeOverALeafWithoutFreshReadConfirmsTheGate(t *testing.T) {
+	for name, answer := range map[string]freshAnswer{"running": freshRunning, "unknown": freshUnknown} {
+		t.Run(name, func(t *testing.T) {
+			leaf := &staleProbingProvider{Fake: runtime.NewFake(), live: answer.live, err: answer.err}
+			mgr, id, _ := seedAsleepSession(t, auto.New(leaf, runtime.NewFake()))
+
+			err := startEntry["StartRuntimeOnly"](t, mgr, id)()
+
+			if answer.err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Errorf("StartRuntimeOnly error = %v, want runtime unavailable", err)
+			}
+			if answer.err == nil && err != nil {
+				t.Errorf("StartRuntimeOnly: %v, want convergence on the runtime that is up", err)
+			}
+			if got := callCount(leaf.Fake, "Start"); got != 0 {
+				t.Errorf("Start called %d times, want 0", got)
+			}
+		})
+	}
+}
+
+// An auto route the session beads never seeded cannot vouch for where the name
+// lives. When the leaf it picks reads not running there, the composite is asked
+// too, which covers the other backend: a session that backend runs is found,
+// and nothing is started over it (SESSION-RUNTIME-017). The other backend's own
+// IsRunning is stale here, so only the fresh read finds it.
+func TestEnsureRunning_UnseededAutoRouteAsksTheOtherBackendBeforeStarting(t *testing.T) {
+	for entry, newStart := range startEntry {
+		t.Run(entry, func(t *testing.T) {
+			other := &staleProbingProvider{Fake: runtime.NewFake(), live: freshRunning.live}
+			wrap := func(p *cachingFreshProvider) runtime.Provider { return auto.New(p, other) }
+			mgr, sp, _, id, _ := seedUnconfirmedSessionVia(t, wrap, StateAsleep, false, false, freshAbsent)
+
+			if err := newStart(t, mgr, id)(); !converged(entry, err) {
+				t.Fatalf("%s: %v, want convergence on the session the other backend runs", entry, err)
+			}
+			if got := callCount(sp.Fake, "Start"); got != 0 {
+				t.Errorf("Start called %d times, want 0 over a session the other backend runs", got)
+			}
+		})
+	}
+}
+
+// Start says the session exists and the fresh read finds nothing running, or
+// only a corpse. That refusal is not a convergence: only a fresh Running
+// converges, and a runtime that could be read is not an unavailable one. The
+// bridge returns the session-exists error either way (its caller tells a dead
+// runtime apart itself), so only the operator's Start discriminates.
+func TestEnsureRunning_SessionExistsOnAFreshNotRunningReadIsNotConvergence(t *testing.T) {
+	for name, answer := range map[string]freshAnswer{"absent": freshAbsent, "corpse": freshCorpse} {
+		t.Run(name, func(t *testing.T) {
+			mgr, sp, _, id, sessName := seedUnconfirmedSession(t, StateAsleep, false, false, freshAbsent, answer)
+			if err := sp.Fake.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+				t.Fatalf("seed runtime: %v", err)
+			}
+
+			err := startEntry["Start"](t, mgr, id)()
+
+			if !errors.Is(err, runtime.ErrSessionExists) {
+				t.Fatalf("Start error = %v, want the refused Start's session-exists error, not a convergence", err)
+			}
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Errorf("Start error = %v, want session-exists alone: the runtime could be read", err)
+			}
+		})
+	}
+}
