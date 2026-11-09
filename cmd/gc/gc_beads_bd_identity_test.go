@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,10 @@ import (
 // the field that is actually missing — user.email.
 func TestEnsureDoltIdentityErrorMessages(t *testing.T) {
 	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
 
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
@@ -148,22 +151,6 @@ func TestEnsureDoltIdentityErrorMessages(t *testing.T) {
 			}
 		})
 	}
-}
-
-// runGCBeadsBdCommand runs one program under the given environment and returns
-// its stdout, stderr and run error separately. The gc-beads-bd shell tests all
-// route through this one command construction rather than building their own,
-// so the untagged subprocess census carries a single call site for the family
-// instead of one per test file.
-func runGCBeadsBdCommand(t *testing.T, env []string, name string, args ...string) (string, string, error) {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Env = env
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
 }
 
 func writeFakeDolt(t *testing.T, dir, name, email string) {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"regexp"
 	"testing"
 )
@@ -32,4 +34,20 @@ func extractShellFunction(t *testing.T, script, name string) string {
 		t.Fatalf("could not find shell function %q in script", name)
 	}
 	return script[loc[0]:loc[1]]
+}
+
+// runGCBeadsBdCommand runs one program under the given environment and returns
+// its stdout, stderr and run error separately. The gc-beads-bd shell tests all
+// route through this one command construction rather than building their own,
+// so the untagged subprocess census carries a single call site for the family
+// instead of one per test file.
+func runGCBeadsBdCommand(t *testing.T, env []string, name string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }

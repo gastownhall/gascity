@@ -63,21 +63,28 @@ calls = 8
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
 resource = "fixed_sleep"
 calls = 2
-tagged = true
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
+resource = "slow_process_gate"
+calls = 1
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
 resource = "subprocess"
 calls = 3
-tagged = true
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
@@ -599,7 +606,6 @@ calls = 1
 path = "cmd/gc/cmd_supervisor_processgroup_unix_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
@@ -812,13 +818,11 @@ calls = 5
 path = "cmd/gc/dolt_standalone_conflict_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_standalone_conflict_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_start_address_in_use_retry_window_test.go"
@@ -839,13 +843,11 @@ calls = 2
 path = "cmd/gc/dolt_start_managed_processgroup_unix_test.go"
 resource = "fixed_sleep"
 calls = 4
-tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_start_managed_processgroup_unix_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_start_managed_test.go"
@@ -906,12 +908,6 @@ calls = 2
 path = "cmd/gc/gc_beads_bd_force_reinit_guard_test.go"
 resource = "subprocess"
 calls = 1
-
-[[count]]
-path = "cmd/gc/gc_beads_bd_identity_test.go"
-resource = "subprocess"
-calls = 1
-tagged = true
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_journal_recovery_test.go"
@@ -1455,6 +1451,11 @@ resource = "slow_process_gate"
 calls = 2
 
 [[count]]
+path = "cmd/gc/writeexecutable_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "examples/bd/dolt/backup_order_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1509,9 +1510,18 @@ calls = 2
 
 [[count]]
 path = "examples/bd/dolt/health_test.go"
+resource = "net_listen"
+calls = 10
+
+[[count]]
+path = "examples/bd/dolt/health_test.go"
+resource = "net_listen_config"
+calls = 1
+
+[[count]]
+path = "examples/bd/dolt/health_test.go"
 resource = "subprocess"
 calls = 20
-tagged = true
 
 [[count]]
 path = "examples/bd/dolt/journal_recovery_runbook_test.go"
