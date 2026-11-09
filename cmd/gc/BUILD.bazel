@@ -2318,6 +2318,7 @@ go_test(
         "start_deferral_memo_test.go",
         "start_gate_classification_test.go",
         "start_output_test.go",
+        "startup_health_death_test.go",
         "startup_health_escalation_test.go",
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
