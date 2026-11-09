@@ -300,6 +300,71 @@ func TestReverseToRigsNeverGoesBackBelowR3AfterItsClearBegan(t *testing.T) {
 		}
 		finished(t, r)
 	})
+	// partlyCleared stops --to-rigs right after it records its clear, then
+	// removes gp-step2 from the binding as the clear's first deletes would,
+	// and deletes gp-step1 from the rig as bd does, with the edges onto it
+	// (gp-step2 -> gp-step1 among them); gone, when set, is deleted from the
+	// rig too.
+	partlyCleared := func(t *testing.T, gone ...string) *reverseRigFixture {
+		t.Helper()
+		r := newReverseRigFixture(t)
+		prev := infraEngineCrashPoint
+		infraEngineCrashPoint = func(p string) error {
+			if p == "reverse R4 clear recorded" {
+				return errors.New("killed")
+			}
+			return nil
+		}
+		code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		infraEngineCrashPoint = prev
+		if code == 0 {
+			t.Fatal("the kill did not stop the reverse")
+		}
+		if journal, _, _ := readStorageReverseJournal(r.request.CityPath); !journal.ClearStarted || len(journal.ClearEdges) == 0 {
+			t.Fatalf("precondition: the clear began with its edges recorded: %+v", journal)
+		}
+		binding, err := openInfraDestination(r.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.Delete("gp-step2"); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeBeadStoreHandle(binding)
+		rig := r.rig("packs")
+		for _, from := range []string{"gp-step2", "gp-w2"} {
+			if err := rig.DepRemove(from, "gp-step1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, id := range append([]string{"gp-step1"}, gone...) {
+			if err := rig.Delete(id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return r
+	}
+	t.Run("a re-copy restores the edge from a row the clear already removed", func(t *testing.T) {
+		r := partlyCleared(t)
+		code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		if code != 0 {
+			t.Fatalf("the resume = %d: %s%s", code, stdout, stderr)
+		}
+		if !hasEdge(t, r.rig("packs"), "gp-step2", "gp-step1") {
+			t.Fatal("the edge from gp-step2, which the clear had removed from the binding, was not restored onto gp-step1")
+		}
+		finished(t, r)
+	})
+	t.Run("a recorded edge whose other end neither store holds is reported dropped", func(t *testing.T) {
+		r := partlyCleared(t, "gp-w2")
+		code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+		if code != 0 || !strings.Contains(stdout, "not restored, their other end in neither store: gp-w2 -[tracks]-> gp-step1") {
+			t.Fatalf("the resume with gp-w2 gone = %d: %s%s", code, stdout, stderr)
+		}
+		if !hasEdge(t, r.rig("packs"), "gp-step2", "gp-step1") {
+			t.Fatal("the edge from gp-step2 was not restored onto gp-step1")
+		}
+	})
 	t.Run("a rig that lost a row refuses, deleting nothing", func(t *testing.T) {
 		r := halfCleared(t)
 		if err := r.rig("packs").Delete("gp-step2"); err != nil {

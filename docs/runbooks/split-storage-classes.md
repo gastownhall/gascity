@@ -1606,9 +1606,11 @@ copies again. Before R4 and before the archive, each store it wrote is listed
 again under its stamp against its manifest: a row gone puts it back to R0 the
 same way. Once a `--to-rigs` has begun clearing the binding, it never goes
 back: a row a rig lost that the binding still holds is copied back from the
-binding, with the stamp and every edge the binding still records for it (an
-edge onto it from a row the clear already removed is not recorded there, so
-it comes back only if the rig kept it). A row gone from both refuses, nothing changed: put
+binding, with the stamp and its edges: before its first delete, the clear
+records in the journal every edge that touches a row it removes, in the
+binding and in the rig, so an edge from a row the clear already removed is
+restored too. A recorded edge whose other end neither store holds any longer
+is reported as not restored. A row gone from both refuses, nothing changed: put
 it back into its rig by hand carrying `gc.infra_reversed_from=<stamp>` (the
 refusal prints the stamp; the snapshot taken before the reverse holds the
 row as it was), then run the reverse again. A re-copy never deletes a

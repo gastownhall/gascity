@@ -483,6 +483,44 @@ func reverseEdgesOnto(t *reverseTarget, ids map[string]bool) ([]reverseEdge, err
 	return out, nil
 }
 
+// reverseEdgesTouching reads every edge t holds that joins one of ids, in
+// either direction, with its payload.
+func reverseEdgesTouching(t *reverseTarget, ids map[string]bool) ([]reverseEdge, error) {
+	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", reverseDestNoun(t.dest), err)
+	}
+	every := make([]string, 0, len(all))
+	for _, b := range all {
+		every = append(every, b.ID)
+	}
+	down, err := t.down(every)
+	if err != nil {
+		return nil, err
+	}
+	touching := map[string][]beads.Dep{}
+	for id, deps := range down {
+		for _, d := range deps {
+			if ids[id] || ids[d.DependsOnID] {
+				touching[id] = append(touching[id], d)
+			}
+		}
+	}
+	payloads := map[beads.DepPair]string{}
+	if t.payloads != nil && len(touching) > 0 {
+		if payloads, err = t.payloads(touching); err != nil {
+			return nil, err
+		}
+	}
+	var out []reverseEdge
+	for _, id := range sortedMapKeys(touching) {
+		for _, d := range touching[id] {
+			out = append(out, reverseEdge{From: id, To: d.DependsOnID, Type: d.Type, Payload: payloads[beads.DepPair{IssueID: id, DependsOnID: d.DependsOnID}]})
+		}
+	}
+	return out, nil
+}
+
 // reverseEdge is one edge as the journal records it.
 type reverseEdge struct {
 	From    string `json:"from"`
