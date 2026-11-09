@@ -642,9 +642,15 @@ func (in bdClassGuardInput) pass() bdClassGuard { return bdClassGuard{args: in.b
 
 // bdClassFlipGuard is gc bd's split-city gate: the bd build check, the
 // allowlist, then the allowlisted command's judge. It runs after the by-id
-// door, which has already served or refused every binding resident. A
-// single-store city passes everything through unchanged (gc's own
-// --skip-infra on import is dropped).
+// door (maybeRouteBdByID), which has served or refused every binding resident
+// it could find: any reserved-prefix id the argv addresses, and the subjects
+// of a served verb, of a write mutation, of a by-id read, or of a
+// subject-table verb (bdByIDSubjectTable). It has NOT probed a work-prefixed
+// id in an argv none of those reduce to subjects — a verb in no table, or a
+// scan made ambiguous by a flag outside the manifest — so such an argv can
+// reach this gate naming a binding resident, and this gate does not decide
+// residence. A single-store city passes everything through unchanged (gc's
+// own --skip-infra on import is dropped).
 func bdClassFlipGuard(cfg *config.City, scopeRoot string, bdArgs []string, deps bdClassGuardDeps) bdClassGuard {
 	holds := workStoreClassHolds(cfg)
 	args, gcFlag := stripGCOwnFlags(bdArgs)

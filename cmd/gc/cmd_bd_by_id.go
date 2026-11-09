@@ -198,6 +198,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -953,6 +954,186 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 	return ids
 }
 
+// bdByIDSubjectPositions says which positionals of a by-id verb name the beads
+// it addresses.
+type bdByIDSubjectPositions int
+
+const (
+	// bdByIDSubjectFirst: the first positional only (`comment <id> [text...]`).
+	bdByIDSubjectFirst bdByIDSubjectPositions = iota
+	// bdByIDSubjectFirstTwo: the first two (`dep remove <id> <depends-on-id>`).
+	bdByIDSubjectFirstTwo
+	// bdByIDSubjectEvery: every positional (`defer [id...]`).
+	bdByIDSubjectEvery
+	// bdByIDSubjectAllButLast: every positional but the last, which is a
+	// value (`label add [id...] <label>`).
+	bdByIDSubjectAllButLast
+)
+
+// pick returns the subject positionals of positionals.
+func (p bdByIDSubjectPositions) pick(positionals []string) []string {
+	n := 0
+	switch p {
+	case bdByIDSubjectFirst:
+		n = min(1, len(positionals))
+	case bdByIDSubjectFirstTwo:
+		n = min(2, len(positionals))
+	case bdByIDSubjectEvery:
+		n = len(positionals)
+	case bdByIDSubjectAllButLast:
+		n = max(0, len(positionals)-1)
+	}
+	var out []string
+	for _, id := range positionals[:n] {
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// bdByIDSubjectTable maps a by-id bd command path that neither scanner
+// (bdByIDMutationSubjects, bdByIDReadSubjects) reduces to subjects to the
+// positionals that name its subjects, from bd's own usage lines (`comment <id>
+// [text...]`, `assign <id> <name>`, `label add [issue-id...] [label]`, ...).
+//
+// None of these is served in process (the comment verbs cannot be: the
+// binding's store contract has no comment storage). So for a bead the binding
+// holds, the answer is a routing refusal, which says where the bead is; without
+// this table the argv reached bd, which answered from the work store with "no
+// issue found" for a bead that is not missing. A work bead keeps bd's path.
+//
+// The comment verbs take the FIRST positional only, so comment text is never
+// probed as an id. Do not move them into bdMutationWriteIDs: it returns every
+// positional, and it drives doBd's single-store write guard.
+var bdByIDSubjectTable = map[string]bdByIDSubjectPositions{
+	"comment":      bdByIDSubjectFirst,
+	"comments":     bdByIDSubjectFirst,
+	"comments add": bdByIDSubjectFirst,
+	"note":         bdByIDSubjectFirst,
+	"assign":       bdByIDSubjectFirst,
+	"priority":     bdByIDSubjectFirst,
+	"promote":      bdByIDSubjectFirst,
+	"gate resolve": bdByIDSubjectFirst,
+	"state":        bdByIDSubjectFirst,
+	"label list":   bdByIDSubjectFirst,
+	"history":      bdByIDSubjectFirst,
+	"children":     bdByIDSubjectFirst,
+	"unclaim":      bdByIDSubjectEvery,
+	"defer":        bdByIDSubjectEvery,
+	"undefer":      bdByIDSubjectEvery,
+	"dep remove":   bdByIDSubjectFirstTwo,
+	"dep unrelate": bdByIDSubjectFirstTwo,
+	"label add":    bdByIDSubjectAllButLast,
+	"label remove": bdByIDSubjectAllButLast,
+}
+
+// bdByIDCommentPaths are the subject-table verbs about comments. The binding
+// stores none, so their refusal says so and names the spelling that does
+// record a note on a binding bead.
+var bdByIDCommentPaths = map[string]bool{"comment": true, "comments": true, "comments add": true}
+
+// bdByIDNoCommentStorage is the comment refusal's reason.
+const bdByIDNoCommentStorage = "stores no comments"
+
+// bdByIDTableCommand is a subject-table argv: its bd command path and the
+// bead ids it addresses.
+type bdByIDTableCommand struct {
+	path     string
+	subjects []string
+}
+
+// bdByIDTableSubjects resolves bdArgs against every pinned inventory, as bd
+// itself resolves and parses it (bdflags Resolve, then ParseArgs over the
+// command's flags), and returns the subject-table command it is with its
+// subjects. ok=false keeps today's path: the argv is not a table verb, asks
+// for help, or the scan is ambiguous — an inventory rejects it, two
+// inventories read it differently, or cobra's lookup and pflag disagree about
+// which tokens name the command. A guess there could probe a value as a
+// subject.
+func bdByIDTableSubjects(bdArgs []string) (bdByIDTableCommand, bool) {
+	if !bdByIDMayNameATableVerb(bdArgs) {
+		return bdByIDTableCommand{}, false
+	}
+	var path string
+	var positionals []string
+	for i, inv := range bdflags.Inventories() {
+		p, pos, ok := bdByIDResolveTableArgv(inv, bdArgs)
+		if !ok {
+			return bdByIDTableCommand{}, false
+		}
+		if i == 0 {
+			path, positionals = p, pos
+			continue
+		}
+		if p != path || !slices.Equal(pos, positionals) {
+			return bdByIDTableCommand{}, false
+		}
+	}
+	rule, ok := bdByIDSubjectTable[path]
+	if !ok {
+		return bdByIDTableCommand{}, false
+	}
+	return bdByIDTableCommand{path: path, subjects: rule.pick(positionals)}, true
+}
+
+// bdByIDMayNameATableVerb is the cheap pre-check that keeps every other argv
+// from paying for an inventory resolve: some bare token must be the first word
+// of a subject-table path.
+func bdByIDMayNameATableVerb(bdArgs []string) bool {
+	for _, arg := range bdArgs {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		for path := range bdByIDSubjectTable {
+			if first, _, _ := strings.Cut(path, " "); first == arg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bdByIDResolveTableArgv resolves bdArgs against one inventory and returns the
+// command path and its positionals; ok=false when the inventory rejects the
+// argv, it asks for help, or pflag reads the command words differently from
+// cobra's lookup (see resolveBdSplitCommand).
+func bdByIDResolveTableArgv(inv *bdflags.Inventory, bdArgs []string) (string, []string, bool) {
+	res, err := inv.Resolve(bdArgs)
+	if err != nil || res.Help || res.DisableFlagParsing {
+		return "", nil, false
+	}
+	specs := inv.FlagSpecs(res.Path)
+	for _, tok := range bdArgs {
+		if tok == "--" {
+			break
+		}
+		if bdflags.ClusterTakesNextToken(specs, tok) {
+			return "", nil, false
+		}
+	}
+	parsed, err := bdflags.ParseArgs(specs, bdArgs)
+	if err != nil {
+		return "", nil, false
+	}
+	words := len(strings.Fields(res.Path))
+	if len(parsed.Positionals) != words+len(res.Positionals) || !slices.Equal(parsed.Positionals[words:], res.Positionals) {
+		return "", nil, false
+	}
+	return res.Path, res.Positionals, true
+}
+
+// refuseClassOwnedTableTarget refuses a subject-table verb on a bead the class
+// binding holds. The comment verbs say why no spelling of them can be served
+// and name the one that records a note.
+func refuseClassOwnedTableTarget(door bdByIDClassDoor, path, id string, stderr io.Writer) (int, bool) {
+	if !bdByIDCommentPaths[path] {
+		return refuseClassOwnedTarget(door, path, id, "", stderr)
+	}
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, which %s, so `gc bd %s` is not served; refusing rather than running it against the work store, which does not hold the bead — record the note with `gc bd update %s --description ...` or `--set-metadata`\n", id, door.bindingName(), bdByIDNoCommentStorage, path, id) //nolint:errcheck // best-effort stderr
+	return 1, true
+}
+
 // bdByIDDepTreeValueFlags and bdByIDDepTreeBoolFlags are `dep tree`'s flag
 // manifest for the read scanner. bdflags carries none for it, so this is the
 // set the served parser (parseBdByIDDepTreeArgs) implements; any other flag
@@ -1127,6 +1308,16 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	if len(subjectIDs) == 0 {
 		subjectIDs = bdByIDReadSubjects(bdArgs)
 	}
+	if table, tabled := bdByIDTableSubjects(bdArgs); tabled && !served && len(subjectIDs) == 0 {
+		// A subject-table verb addresses only its subject positions, so a
+		// reserved id elsewhere (in comment text, a label) is quoted, not
+		// addressed, and is not probed.
+		subjectIDs = table.subjects
+		classIDs = nil
+		for _, id := range table.subjects {
+			classIDs = append(classIDs, bdReservedClassIDs(id)...)
+		}
+	}
 	if !served && len(classIDs) == 0 && len(subjectIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
@@ -1232,6 +1423,9 @@ func refuseUnservedClassTarget(door bdByIDClassDoor, bdArgs, classIDs, subjectID
 	// the one ledger that cannot hold the bead.
 	if manifest, read := bdByIDReadManifestFor(bdArgs); read {
 		return refuseUnservedClassRead(door, bdArgs, manifest, resident, stderr)
+	}
+	if table, tabled := bdByIDTableSubjects(bdArgs); tabled {
+		return refuseClassOwnedTableTarget(door, table.path, resident, stderr)
 	}
 	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), resident, bdByIDUnservedFlag(bdArgs), stderr)
 }

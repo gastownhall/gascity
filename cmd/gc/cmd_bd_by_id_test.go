@@ -1265,6 +1265,17 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 		"served reopen on a work id": {[]string{"reopen", "gc-123"}, true},
 		"unserved work delete":       {[]string{"delete", "gc-123"}, true},
 		"unserved update spelling":   {[]string{"update", "gc-123", "--notes", "x"}, true},
+		// The comment verbs and the other fall-through verbs address their
+		// subject positionally, so a work id there is a residence question.
+		"comments add on a work id":         {[]string{"comments", "add", "gc-123", "a note"}, true},
+		"comment on a work id":              {[]string{"comment", "gc-123", "a note"}, true},
+		"comments read on a work id":        {[]string{"comments", "gc-123"}, true},
+		"assign on a work id":               {[]string{"assign", "gc-123", "someone"}, true},
+		"label add on a work id":            {[]string{"label", "add", "gc-123", "urgent"}, true},
+		"history on a work id":              {[]string{"history", "gc-123"}, true},
+		"comments with no subject":          {[]string{"comments"}, false},
+		"comment with an unknown flag":      {[]string{"comment", "--bogus", "gc-123", "a note"}, false},
+		"comments add with an unknown flag": {[]string{"comments", "add", "--bogus", "gc-123", "a note"}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resetCLIStorageRoutes(t)
@@ -1359,6 +1370,11 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"reopen", "gcg-1", "-r", "wrong call"},
 		{"delete", "gcg-1"},
 		{"list"},
+		// The comment verbs are never served: the class binding has no
+		// comment storage. They meet the ownership refusal instead.
+		{"comment", "gcg-1", "a note"},
+		{"comments", "gcg-1"},
+		{"comments", "add", "gcg-1", "a note"},
 	} {
 		if op, ok := parseBdByIDOp(args); ok {
 			t.Errorf("%v was recognized as %q, want the caller's existing path", args, op.Verb)
@@ -2308,6 +2324,11 @@ func TestBdUpdateUnservedSpellingOnResidentRefusesNamingFlag(t *testing.T) {
 	}{
 		{[]string{"update", relic.ID, "--notes", "x"}, bdByIDUpdateUnrepresentable},
 		{[]string{"delete", relic.ID}, ""},
+		// The comment verbs: the binding stores no comments, so the refusal
+		// says so and names the update spelling that records a note instead.
+		{[]string{"comments", "add", relic.ID, "a note"}, bdByIDNoCommentStorage},
+		{[]string{"comment", relic.ID, "a note"}, bdByIDNoCommentStorage},
+		{[]string{"comments", relic.ID}, bdByIDNoCommentStorage},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -2351,6 +2372,126 @@ func TestBdUpdateUnservedSpellingOnResidentRefusesNamingFlag(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code, handled := maybeRouteBdByID(cityPath, "", control, &stdout, &stderr); handled {
 				t.Errorf("an unserved mutation of a work-resident bead was refused here (exit %d): %s%s", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDFallThroughVerbsOnResidentAreRefused covers the by-id verbs that
+// neither scanner (bdByIDMutationSubjects, bdByIDReadSubjects) reduces to
+// subjects. Each one addresses its subject positionally, so on a work-prefixed
+// bead the binding holds it used to fall through to bd and die with bd's
+// "no issue found" from the work store. The subject table makes residence
+// decide, the same as for update and delete; the control keeps a work bead on
+// bd.
+func TestBdByIDFallThroughVerbsOnResidentAreRefused(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+	normal, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+
+	for _, tc := range []struct {
+		args []string
+		verb string
+	}{
+		{[]string{"note", relic.ID, "a note"}, "note"},
+		{[]string{"assign", relic.ID, "someone"}, "assign"},
+		{[]string{"priority", relic.ID, "1"}, "priority"},
+		{[]string{"unclaim", relic.ID}, "unclaim"},
+		{[]string{"defer", relic.ID, "--until", "tomorrow"}, "defer"},
+		{[]string{"undefer", relic.ID}, "undefer"},
+		{[]string{"promote", relic.ID}, "promote"},
+		{[]string{"dep", "remove", normal.ID, relic.ID}, "dep remove"},
+		{[]string{"dep", "rm", relic.ID, normal.ID}, "dep remove"},
+		{[]string{"dep", "unrelate", relic.ID, normal.ID}, "dep unrelate"},
+		{[]string{"gate", "resolve", relic.ID}, "gate resolve"},
+		{[]string{"label", "add", normal.ID, relic.ID, "urgent"}, "label add"},
+		{[]string{"label", "remove", relic.ID, "urgent"}, "label remove"},
+		{[]string{"label", "list", relic.ID}, "label list"},
+		{[]string{"state", relic.ID, "health"}, "state"},
+		{[]string{"history", relic.ID}, "history"},
+		{[]string{"children", relic.ID}, "children"},
+		{[]string{"--json", "comments", relic.ID}, "comments"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v on a class resident fell through to the bd subprocess", tc.args)
+			}
+			if code == 0 {
+				t.Errorf("the refusal exited 0: %q", stdout.String())
+			}
+			for _, want := range []string{relic.ID, "class binding", "`gc bd " + tc.verb + "`"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("the refusal does not name %q: %q", want, stderr.String())
+				}
+			}
+		})
+
+		control := append([]string{}, tc.args...)
+		for i, arg := range control {
+			if arg == relic.ID {
+				control[i] = normal.ID
+			}
+		}
+		t.Run("control "+strings.Join(control, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", control, &stdout, &stderr); handled {
+				t.Errorf("%v on a work bead was taken here (exit %d): %s%s", control, code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDCommentsAddOnAWorkBeadKeepsThePassthrough: a work bead's comment
+// is bd's to record, so the door must not take it, whatever the text says.
+func TestBdByIDCommentsAddOnAWorkBeadKeepsThePassthrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	normal, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	for _, args := range [][]string{
+		{"comments", "add", normal.ID, "done; see the log"},
+		{"comments", "add", "--author", "me", normal.ID, "done"},
+		{"comment", normal.ID, "done"},
+		{"comments", normal.ID},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+			t.Errorf("%v on a work bead was taken by the by-ID surface (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// TestBdByIDCommentTextIsNeverASubject: only a comment verb's first positional
+// names a bead. The text after it is prose, and an unquoted reserved id inside
+// it (an agent writing "blocked on gcg-12") is quoted, not addressed — probing
+// it would refuse a work bead's comment because the prose mentions a class
+// bead.
+func TestBdByIDCommentTextIsNeverASubject(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	mentioned := mustCreateClassBead(t, classStore, beads.Bead{Title: "mentioned in prose", Type: "task"})
+	normal, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "an ordinary work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	for _, args := range [][]string{
+		{"comments", "add", normal.ID, "blocked", "on", mentioned.ID},
+		{"comment", normal.ID, "see", mentioned.ID},
+		{"note", normal.ID, mentioned.ID, "is the parent"},
+		{"comments", "add", "-a", "me", normal.ID, mentioned.ID},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if got, ok := bdByIDTableSubjects(args); !ok || len(got.subjects) != 1 || got.subjects[0] != normal.ID {
+				t.Errorf("bdByIDTableSubjects(%v) = %+v, %t; want the one subject %s", args, got, ok, normal.ID)
+			}
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Errorf("%v was refused for an id in its text (exit %d): %s", args, code, stderr.String())
 			}
 		})
 	}
