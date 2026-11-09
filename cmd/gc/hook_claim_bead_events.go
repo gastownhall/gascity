@@ -27,10 +27,11 @@ package main
 //
 // # When the announcement runs
 //
-// Not inside the write. The claim tier stamps the instant the CAS returns and
-// decides from it whether the landed claim is kept (claimLandingWindowSpent),
-// and a stale-lease reclaim runs before the claim's start fence
-// (claimWindowSpent). Store reads made inside those writes would spend the
+// Not inside the write. The claim path records the instant the CAS returns —
+// inside the classifier, before its canonical readback (hookClaimLandingRecorder,
+// #6984) — and the tier decides from it whether the landed claim is kept
+// (claimLandingWindowSpent), and a stale-lease reclaim runs before the claim's
+// start fence (claimWindowSpent). Store reads made inside those writes would spend the
 // window the fences measure, and on a slow store could turn a claim that
 // landed in time into a straddle unwind. So each write only NOTES what it
 // changed, and the notes are announced together: by

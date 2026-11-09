@@ -244,7 +244,7 @@ func (h *handoffFixture) ops() hookClaimOps {
 		},
 		ReadSessionTrigger: func(string) (string, error) { return h.triggerID, nil },
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return hookClaimThroughStore(beadID, assignee,
+			return hookClaimThroughStore(context.Background(), beadID, assignee,
 				func() (beads.Bead, bool, error) {
 					current, err := h.store.Get(beadID)
 					if err != nil {

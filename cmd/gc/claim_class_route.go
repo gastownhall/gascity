@@ -558,8 +558,11 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
 	// The binding's reads are context-free by contract, so its canonical
 	// readback needs no separate budget: it is the same Get as the conflict
-	// diagnostic, never a mutation-context read that a CAS could spend.
-	return hookClaimThroughStore(beadID, assignee,
+	// diagnostic, never a mutation-context read that a CAS could spend. The
+	// context is interim: the binding's claim carries no recorder until AC-5
+	// forwards the tier's one, so its CAS landing falls back to the tier's
+	// post-return clock sample (#6984).
+	return hookClaimThroughStore(context.Background(), beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
 		r.graph.Get, r.graph.Get)
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -784,4 +785,297 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	if len(sessSpy.beadIDs) != 0 {
 		t.Fatalf("session-claim seam writes = %v, want none: the straddle path stamps nothing, so it must clear nothing", sessSpy.beadIDs)
 	}
+}
+
+// landingClaimRecorder is the turnbound recorder plus the seams a tier-level
+// landing row needs: the claim runs through the REAL bd adapter
+// (hookClaimWithBdStore) over a fake bd runner, so what lands in the fences is
+// the adapter's own CAS/readback sequence, not a stubbed verdict.
+type landingClaimRecorder struct {
+	releases      []string
+	drainAcked    bool
+	windowExpired []hookClaimWindowExpiry
+	claimReleased []hookClaimReleaseRecord
+}
+
+func (r *landingClaimRecorder) ops(t *testing.T, output string, clock *time.Time) hookClaimOps {
+	t.Helper()
+	return hookClaimOps{
+		Runner: func(string, string) (string, error) { return output, nil },
+		// The production adapter: a fake bd runner serves its subprocesses.
+		Claim: hookClaimWithBdStore,
+		Release: func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
+			r.releases = append(r.releases, beadID)
+			return true, nil
+		},
+		DrainAck: func(io.Writer) error {
+			r.drainAcked = true
+			return nil
+		},
+		EmitClaimWindowExpired: func(expiry hookClaimWindowExpiry) {
+			r.windowExpired = append(r.windowExpired, expiry)
+		},
+		EmitClaimReleased: func(rec hookClaimReleaseRecord) {
+			r.claimReleased = append(r.claimReleased, rec)
+		},
+		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		PublishRunMap:     func(string, string, ...string) error { return nil },
+		ListContinuation:  func(context.Context, string, []string, string, string) ([]beads.Bead, error) { return nil, nil },
+		StoreRef:          func(string) string { return "rig:landing" },
+		ReadWorkStarted:   noStartedClaims,
+		Now:               func() time.Time { return *clock },
+		InvokedAt:         *clock,
+		ClaimWindow:       30 * time.Second,
+	}
+}
+
+// landingBdTimeline is the fake clock's budget for each bd leg of a claim:
+// casLanding is how much fake time the claim CAS consumes before it commits,
+// and readback is how much the canonical show consumes after it.
+type landingBdTimeline struct {
+	casLanding    time.Duration
+	readback      time.Duration
+	readbackFails bool
+}
+
+// installLandingBdRunner replaces the bd runner seam for the duration of one
+// tier row and returns the bd argv log, so a row can count the CAS legs it
+// caused.
+func installLandingBdRunner(t *testing.T, clock *time.Time, tl landingBdTimeline) *[][]string {
+	t.Helper()
+	var calls [][]string
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case len(args) >= 4 && args[0] == "update" && args[2] == "--claim":
+				*clock = clock.Add(tl.casLanding)
+				return []byte(fmt.Sprintf(`[{"id":%q,"status":"in_progress","assignee":"worker-1"}]`, args[1])), nil
+			case len(args) >= 3 && args[0] == "show" && args[1] == "--json":
+				*clock = clock.Add(tl.readback)
+				if tl.readbackFails {
+					return nil, errors.New("canonical read failed")
+				}
+				return []byte(fmt.Sprintf(`[{"id":%q,"status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, args[2])), nil
+			default:
+				t.Fatalf("unexpected bd args: %#v", args)
+				return nil, nil
+			}
+		}
+	}
+	return &calls
+}
+
+// TestHookClaimTiersKeepTheCASLandingAcrossCanonicalReadback pins #6984's
+// timing half in both claim tiers: the straddle fence measures the instant the
+// claim CAS returned, not the canonical readback that follows it. A CAS that
+// lands inside the window plus its reserved mutation budget is a healthy claim
+// even when the canonical readback afterwards crosses that boundary; fencing
+// on the post-readback clock released it, and the readback's cost grew further
+// once it got its own budget. Both tiers are driven through the production bd
+// adapter over a fake bd runner and a controlled clock.
+func TestHookClaimTiersKeepTheCASLandingAcrossCanonicalReadback(t *testing.T) {
+	const window = 30 * time.Second
+	reserve := hookClaimMutationTimeout
+	for _, tier := range []struct {
+		name    string
+		row     string
+		wantWhy string
+	}{
+		{
+			name:    "ready assignment",
+			row:     `[{"id":"work-1","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`,
+			wantWhy: "ready_assignment",
+		},
+		{
+			name:    "fresh candidate",
+			row:     `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+			wantWhy: "claimed",
+		},
+	} {
+		t.Run(tier.name, func(t *testing.T) {
+			clock := time.Now()
+			rec := &landingClaimRecorder{}
+			ops := rec.ops(t, tier.row, &clock)
+			// The CAS lands one second inside window + reserve; the canonical
+			// readback then spends five more seconds, crossing the boundary.
+			bdCalls := installLandingBdRunner(t, &clock, landingBdTimeline{
+				casLanding: window + reserve - time.Second,
+				readback:   5 * time.Second,
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				DrainAck:     true,
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("code = %d, want 0; a CAS that landed inside window+reserve is a healthy claim, not a straddle; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if len(rec.releases) != 0 {
+				t.Fatalf("releases = %v, want none: the claim landed in time and must be delivered", rec.releases)
+			}
+			if rec.drainAcked {
+				t.Fatal("the drain was acknowledged on a delivered claim")
+			}
+			result := decodeTurnBoundResult(t, stdout.String())
+			if result.Action != "work" || result.Reason != tier.wantWhy || result.BeadID != "work-1" {
+				t.Fatalf("result = %+v, want the work receipt (reason %s)", result, tier.wantWhy)
+			}
+			// The CAS ran once, its canonical readback once, and nothing else
+			// was claimed or probed afterwards.
+			if len(*bdCalls) != 2 {
+				t.Fatalf("bd calls = %#v, want one claim CAS and one canonical readback", *bdCalls)
+			}
+		})
+	}
+}
+
+// TestHookClaimLandingRecorder pins the CAS-landing recorder's own contract
+// (#6984), unit-level: the classifier records the instant the CAS committed —
+// before the projection identity check and the canonical readback, so a claim
+// rejected as foreign still records — errors and conflicts never record, a
+// context without a recorder is safe, a non-recording op falls back to the
+// tier's immediate post-return clock sample, and two candidates in one tier
+// never share a recorder: a rejected early candidate must not lend its landing
+// to a genuinely late one.
+func TestHookClaimLandingRecorder(t *testing.T) {
+	t.Run("recording precedes the identity check and the reload", func(t *testing.T) {
+		start := time.Now()
+		clock := &start
+		ctx, landing := withHookClaimLanding(context.Background(), func() time.Time { return *clock })
+		// The CAS commits at t0 and its projection names another seat, so the
+		// classifier returns a rejected claim — but the landing is already
+		// recorded by then, before the identity check that rejects it: that
+		// ordering is what keeps the fence's clock from being spent by anything
+		// after the CAS.
+		_, ok, err := hookClaimThroughStore(ctx, "work-1", "worker-1",
+			func() (beads.Bead, bool, error) {
+				return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "someone-else"}, true, nil
+			},
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil },
+			func(string) (beads.Bead, error) {
+				t.Fatal("the reload must not run: the identity check rejects the claim first")
+				return beads.Bead{}, nil
+			})
+		if err != nil || ok {
+			t.Fatalf("fixture: a foreign projection is a rejected claim (ok=false, nil error), got (ok=%v err=%v)", ok, err)
+		}
+		if got := landing.landingTime(); !got.Equal(start) {
+			t.Fatalf("landing = %v, want the CAS instant %v: the landing must be recorded before the reload spends the clock", got, start)
+		}
+	})
+
+	t.Run("errors and conflicts never record", func(t *testing.T) {
+		start := time.Now()
+		clock := &start
+		for _, tc := range []struct {
+			name  string
+			claim func() (beads.Bead, bool, error)
+		}{
+			{name: "claim error", claim: func() (beads.Bead, bool, error) {
+				return beads.Bead{}, false, errors.New("store down")
+			}},
+			{name: "lost race", claim: func() (beads.Bead, bool, error) {
+				return beads.Bead{ID: "work-1", Assignee: "other"}, false, nil
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, landing := withHookClaimLanding(context.Background(), func() time.Time { return *clock })
+				_, _, _ = hookClaimThroughStore(ctx, "work-1", "worker-1", tc.claim,
+					func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil },
+					func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil })
+				if !landing.landed.IsZero() {
+					t.Fatalf("landing = %v, want none: a failed CAS is not a landing", landing.landed)
+				}
+			})
+		}
+	})
+
+	t.Run("a context without a recorder is safe", func(_ *testing.T) {
+		// A plain classifier caller (the class binding until AC-5) must not
+		// record, and must not panic.
+		recordHookClaimLanding(context.Background())
+		_, _, _ = hookClaimThroughStore(context.Background(), "work-1", "worker-1",
+			func() (beads.Bead, bool, error) {
+				return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "worker-1"}, true, nil
+			},
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil },
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil })
+	})
+
+	t.Run("a non-recording op falls back to the post-return clock", func(t *testing.T) {
+		start := time.Now()
+		clock := start
+		// A tier whose op never derived the recorder context still gets a
+		// landing: the immediate post-return sample, the pre-recorder behavior.
+		rec := &hookClaimLandingRecorder{clock: func() time.Time { return clock }}
+		clock = clock.Add(2 * time.Second)
+		if got := rec.landingTime(); !got.Equal(start.Add(2 * time.Second)) {
+			t.Fatalf("fallback landing = %v, want the clock at call time %v", got, start.Add(2*time.Second))
+		}
+	})
+
+	t.Run("each candidate records on its own", func(t *testing.T) {
+		// One tier, two candidates, one clock, exactly the derivation the tier
+		// performs per candidate. The first CAS commits an EARLY landing but its
+		// projection names another seat, so the tier skips it and continues; the
+		// second CAS commits late. The recorders must be fresh per candidate: a
+		// shared one would still hold the first stamp and wrongly stand the
+		// second, genuinely late claim.
+		start := time.Now()
+		clock := start
+		window := 30 * time.Second
+		parent := context.Background()
+
+		// Candidate one: the classifier records its landing (recording precedes
+		// the identity check), then the projection names another seat, so the
+		// tier sees a lost race and moves on.
+		ctxOne, landingOne := withHookClaimLanding(parent, func() time.Time { return clock })
+		_, ok, err := hookClaimThroughStore(ctxOne, "work-1", "worker-1",
+			func() (beads.Bead, bool, error) {
+				clock = clock.Add(window + hookClaimMutationTimeout - 5*time.Second)
+				return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: "other"}, true, nil
+			},
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil },
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-1"}, nil })
+		if err != nil || ok {
+			t.Fatalf("candidate one = (ok=%v err=%v), want a lost race it skipped", ok, err)
+		}
+		if landingOne.landingTime().Equal(start) {
+			t.Fatal("fixture: candidate one's landing must be recorded for this row to mean anything")
+		}
+
+		// Candidate two, exactly as the tier derives it: a FRESH recorder. Its
+		// CAS commits past the fence; its own landing must show that, not the
+		// early stamp candidate one left behind.
+		ctxTwo, landingTwo := withHookClaimLanding(parent, func() time.Time { return clock })
+		_, ok, err = hookClaimThroughStore(ctxTwo, "work-2", "worker-1",
+			func() (beads.Bead, bool, error) {
+				// Lands a second past the fence: candidate one's stamp was 5s
+				// inside it, so only its own recorder can answer correctly.
+				clock = clock.Add(6 * time.Second)
+				return beads.Bead{ID: "work-2", Status: "in_progress", Assignee: "worker-1"}, true, nil
+			},
+			func(string) (beads.Bead, error) { return beads.Bead{ID: "work-2"}, nil },
+			func(string) (beads.Bead, error) {
+				return beads.Bead{ID: "work-2", Status: "in_progress", Assignee: "worker-1"}, nil
+			})
+		if err != nil || !ok {
+			t.Fatalf("candidate two = (ok=%v err=%v), want it claimed", ok, err)
+		}
+		ops := hookClaimOps{InvokedAt: start, ClaimWindow: window}
+		if !ops.claimLandingWindowSpent(landingTwo.landingTime()) {
+			t.Fatalf("candidate two landed at %v, want it past the fence: a fresh recorder must record its own CAS instant, not reuse candidate one's", landingTwo.landingTime())
+		}
+		if ops.claimLandingWindowSpent(landingOne.landingTime()) {
+			t.Fatal("fixture: candidate one's landing is inside the fence, so only a shared recorder could stand candidate two")
+		}
+	})
 }

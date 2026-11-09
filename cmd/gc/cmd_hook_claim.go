@@ -862,12 +862,16 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 // inside it owns a separate, full mutation budget (claimMutationContext), so
 // only a CAS that overran that reserved budget is a straddle.
 //
-// landedAt is the instant the claim CAS returned, stamped by the tier that ran
-// it, and the landing age is taken there rather than now. The question is
-// whether the CAS landed after the invoking turn could have received it; the
-// store reads a tier makes after the CAS (the post-CAS workflow stop gate, the
-// adoption re-stamp) are not the claim landing, and on a slow store they would
-// otherwise turn a claim that landed in time into a straddle unwind.
+// landedAt is the instant the claim CAS returned, recorded by the classifier
+// (hookClaimThroughStore) inside ops.Claim — before the canonical readback and
+// every later store read — with the tier's landingTime falling back to its own
+// post-return clock sample for an op that never recorded one. The landing age
+// is taken there rather than now. The question is whether the CAS landed after
+// the invoking turn could have received it; the store reads the claim path
+// makes after the CAS (the canonical readback, the post-CAS workflow stop
+// gate, the adoption re-stamp) are not the claim landing, and on a slow store
+// they would otherwise turn a claim that landed in time into a straddle
+// unwind (#6984).
 func (ops *hookClaimOps) claimLandingWindowSpent(landedAt time.Time) bool {
 	return ops.claimLandingAge(landedAt) > ops.claimWindowOrDefault()+hookClaimMutationTimeout
 }
@@ -977,10 +981,14 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
-		// The straddle fence asks when the CAS landed; stamp it before the
-		// re-stamp and the workflow re-check below spend any more store time.
-		landedAt := ops.nowOrWallClock()
+		// Each candidate's CAS landing is recorded on its own recorder (#6984):
+		// the classifier stamps the instant ops.Claim's CAS commits — before the
+		// canonical readback below it can spend the fence's clock — and
+		// landingTime falls back to this post-return sample only for an op that
+		// never recorded one.
+		claimCtx, landing := withHookClaimLanding(ctx, ops.nowOrWallClock)
+		claimed, ok, err := ops.Claim(claimCtx, dir, opts.Env, candidate.ID, claimActor)
+		landedAt := landing.landingTime()
 		if err != nil {
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
@@ -1171,10 +1179,14 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
-		// The straddle fence asks when the CAS landed; stamp it before the
-		// workflow re-check below spends any more store time.
-		landedAt := ops.nowOrWallClock()
+		// Each candidate's CAS landing is recorded on its own recorder (#6984):
+		// the classifier stamps the instant ops.Claim's CAS commits — before the
+		// canonical readback below it can spend the fence's clock — and
+		// landingTime falls back to this post-return sample only for an op that
+		// never recorded one.
+		claimCtx, landing := withHookClaimLanding(ctx, ops.nowOrWallClock)
+		claimed, ok, err := ops.Claim(claimCtx, dir, opts.Env, candidate.ID, opts.Assignee)
+		landedAt := landing.landingTime()
 		if err != nil {
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
@@ -1584,8 +1596,9 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // existing-assignment tier instead. The verdict also decides whether the
 // claim's work_started key is a proven residence (hookStartedKeyFor).
 //
-// landedAt is the instant a minted claim's CAS returned (see
-// claimLandingWindowSpent); adoption passes the zero time.
+// landedAt is the instant a minted claim's CAS returned, recorded inside the
+// claim path before its canonical readback (see claimLandingWindowSpent and
+// hookClaimLandingRecorder); adoption passes the zero time.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, verdict hookAdoptionVerdict, landedAt time.Time, stdout, stderr io.Writer) int {
 	minted := verdict == hookClaimMinted
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
@@ -2517,7 +2530,7 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 		defer cancel()
 		return hookClaimBdStoreContext(readCtx, dir, env, assignee).Get(id)
 	}
-	return hookClaimThroughStore(beadID, assignee,
+	return hookClaimThroughStore(ctx, beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
 		store.Get, reload)
 }
@@ -2543,6 +2556,61 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // of draining. Two copies of that would be two chances to disagree, and the
 // paths that disagree about ownership are this program's recurring bug class.
 //
+// hookClaimLandingRecorder captures the instant a claim CAS returned, so the
+// straddle fence can measure the CAS's own landing rather than the clock after
+// the reads that follow it (#6984). It is carried through the context the tier
+// hands ops.Claim, so it reaches hookClaimThroughStore without changing any op
+// signature; it is strictly per-candidate (each tier iteration derives a fresh
+// one, never shared on the tier context or copied ops) and synchronous, so a
+// lost race or an error on one candidate can never leak a landing instant into
+// the next.
+type hookClaimLandingRecorder struct {
+	clock  func() time.Time
+	landed time.Time
+}
+
+// hookClaimLandingContextKey is the private, typed key for the per-candidate
+// CAS-landing recorder. Private to this package so no other context value can
+// collide with it.
+type hookClaimLandingContextKey struct{}
+
+// withHookClaimLanding derives the context a tier hands ops.Claim for one
+// candidate, carrying a fresh recorder bound to the tier's clock. The derived
+// context keeps the parent's values and deadline; it adds only the recorder.
+func withHookClaimLanding(ctx context.Context, clock func() time.Time) (context.Context, *hookClaimLandingRecorder) {
+	rec := &hookClaimLandingRecorder{clock: clock}
+	return context.WithValue(ctx, hookClaimLandingContextKey{}, rec), rec
+}
+
+// recordHookClaimLanding stamps the CAS-landing instant on the recorder the
+// context carries. A context without one — an op that never derived it, or a
+// caller of the classifier with a plain context — records nothing, and the
+// tier's landingTime falls back to its own post-return sample.
+func recordHookClaimLanding(ctx context.Context) {
+	if rec, ok := ctx.Value(hookClaimLandingContextKey{}).(*hookClaimLandingRecorder); ok && rec != nil {
+		rec.stamp()
+	}
+}
+
+// stamp records the CAS landing once; the clock is the tier's own, so a fake
+// clock in a test fence row and wall time in production answer identically.
+func (r *hookClaimLandingRecorder) stamp() {
+	if r.landed.IsZero() {
+		r.landed = r.clock()
+	}
+}
+
+// landingTime is the recorded CAS-landing instant, or — for an op that never
+// recorded one — a sample of the clock taken immediately after ops.Claim
+// returned, which is the pre-recorder behavior and stays the conservative
+// fallback for a non-recording op.
+func (r *hookClaimLandingRecorder) landingTime() time.Time {
+	if r.landed.IsZero() {
+		return r.clock()
+	}
+	return r.landed
+}
+
 // claim, get and reload are the store's own operations: the bd context's Claim takes the
 // assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
 // binding's takes it explicitly, so the caller binds them and this function
@@ -2551,7 +2619,13 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // canonical readback of a claim the CAS committed, which the bd context runs
 // on its own bounded readback budget (hookClaimReadbackTimeout) rather than
 // the mutation context the CAS may have spent (#6984).
-func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error), reload func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+//
+// ctx is the context the calling tier handed its op; it carries the
+// per-candidate CAS-landing recorder, and the landing is recorded the moment
+// the committed CAS returns — before the projection identity check, the
+// canonical reload and every other post-CAS read can spend the fence's clock.
+// Errors and conflicts never record: a failed CAS is not a landing.
+func hookClaimThroughStore(ctx context.Context, beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error), reload func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -2566,6 +2640,8 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 		}
 		return current, false, nil
 	}
+	// The CAS committed: this is the landing the straddle fence measures.
+	recordHookClaimLanding(ctx)
 	if !hookClaimHasIdentity(claimed.Assignee, []string{assignee}) {
 		// The store reported a successful mutation but the bead is owned by
 		// another claimant (stale projection / lost race). Return it as a

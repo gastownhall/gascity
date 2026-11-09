@@ -75,7 +75,7 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverAWireWorkStore(t *testing.T)
 	work := beads.NewNativeDoltStoreOverStorageForTest(storage)
 	ops := classRoutedHookClaimOps(hookClaimOps{
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return hookClaimThroughStore(beadID, assignee,
+			return hookClaimThroughStore(context.Background(), beadID, assignee,
 				func() (beads.Bead, bool, error) { return work.Claim(beadID, assignee) },
 				work.Get, work.Get)
 		},
