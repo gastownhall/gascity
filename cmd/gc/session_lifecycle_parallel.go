@@ -277,7 +277,7 @@ type preparedStart struct {
 	// consumed the prompt (gastownhall/gascity#5236). It is the pure
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
-	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
+	// resumeStartupPromptPlan and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
 	// no priming marker. promptHash is the sha256 of the rendered startup template
 	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
 	// appended to the delivered payload, so the stored hash still matches a later
@@ -1436,7 +1436,7 @@ func buildPreparedStartWithTranscript(
 	// S19 priming confirmation (write-only in Stage 2): a marker is stamped only
 	// when the pure delivery decision holds AND this incarnation is a fresh
 	// launch — the exact complement of the resume override below, which swaps in
-	// restartPromptNudge and delivers nothing. Reading the env marker instead
+	// resumeStartupPromptPlan and delivers nothing. Reading the env marker instead
 	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
 	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
 	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
@@ -1447,14 +1447,17 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
+		resumeStartupPromptPlan(tp.startupPromptSource()).applyTo(&agentCfg)
 	}
-	// Initial message: append to prompt on first start only, reusing the
-	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
+	// Initial message: append to the activation carrier for a fresh conversation,
+	// including hook-primed missing-key recovery. Reuse the overrides parsed by
+	// parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+	if tp.startupPromptSource().roleSuppliedByHook() && (firstStart || forceFresh || !hasResumeKey) {
+		agentCfg.Nudge = hookFreshActivation(tp, candidate.info, sessionOverrides["initial_message"])
+	} else if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
@@ -2245,6 +2248,38 @@ func restartPromptNudge(prompt, nudge string) string {
 		return nudge
 	}
 	return prependStartupPromptToNudge(prompt, nudge)
+}
+
+const (
+	manualRoleKickoff    = "Confirm your role: reply with your role name and a one-sentence purpose, then wait for instructions."
+	automaticRoleKickoff = "Begin your startup routine as your instructions describe. If it finds no work for you, end your turn without a status report."
+)
+
+// hookFreshActivation starts a fresh conversation without resubmitting its role.
+// Explicit activation always wins; otherwise a manual session acknowledges its
+// role while automated sessions begin work instead of waiting for a backstop.
+// A template that rendered no role gets no kickoff: a role-less session, pool
+// workers included, starts with the beacon alone and acts on the builtin or
+// default worker prompt the hook supplies.
+func hookFreshActivation(tp TemplateParams, info sessionpkg.Info, message string) string {
+	nudge := tp.startupPromptSource().hookNudge()
+	if message != "" {
+		return appendInitialMessageToStartupNudge(nudge, message)
+	}
+	if nudge != "" {
+		return nudge
+	}
+	if !tp.RoleRendered {
+		return tp.Beacon
+	}
+	kickoff := automaticRoleKickoff
+	switch {
+	case sessionOriginInfo(info) == "manual" || templateParamsSessionOrigin(tp) == "manual":
+		kickoff = manualRoleKickoff
+	case info.PoolManaged:
+		kickoff = defaultPoolClaimNudge
+	}
+	return restartPromptNudge(tp.Beacon, kickoff)
 }
 
 // startupRateLimitScreenDetected reports whether the session's pane shows a

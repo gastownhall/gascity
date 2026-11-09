@@ -28,15 +28,136 @@ const (
 // deliver. TemplateParams projects onto it for the reconciler; the worker
 // resolvers build it from the session and its agent.
 type startupPromptSource struct {
-	TemplateName     string
-	SessionName      string
-	InstanceName     string
-	Prompt           string
-	IsACP            bool
-	ResolvedProvider *config.ResolvedProvider
-	HintNudge        string
-	RuntimeName      string
-	CityRuntimes     map[string]config.DiscoveredRuntime
+	TemplateName string
+	SessionName  string
+	InstanceName string
+	Prompt       string
+	// Beacon is the bare identity line (`[city] agent • ts`, no prime
+	// instruction) that opens a resume turn when the provider hook supplies
+	// the role (roleSuppliedByHook). The worker resolvers leave it empty: they
+	// carry no configured nudge, so that resume sends no turn at all. Were
+	// they to carry one, it would go out without a beacon.
+	Beacon string
+	IsACP  bool
+	// HookEnabled is config.AgentHasHooks for the launching agent: its
+	// provider hooks are installed.
+	HookEnabled bool
+	// ClientProviderChat marks a client's provider chat (isClientProviderChat),
+	// whose hook emits no persona.
+	ClientProviderChat bool
+	ResolvedProvider   *config.ResolvedProvider
+	HintNudge          string
+	RuntimeName        string
+	// SessionRuntime is the runtime a non-ACP session runs on: the city's
+	// session provider, whatever the agent's session override says.
+	SessionRuntime string
+	CityRuntimes   map[string]config.DiscoveredRuntime
+}
+
+// roleSuppliedByHook reports whether the provider hook supplies the rendered
+// role prompt to every model generation of this launch, on fresh starts as
+// well as resumes, so no launch submits it as a user turn. The hook decorates
+// generations but never starts one; activation is delivered separately
+// (hookNudge, resumeNudge and the reconciler's fresh-start kickoff).
+//
+// Every condition must hold. The resolved provider's builtin family stages a
+// per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn);
+// providers whose hooks prime once at SessionStart (pi, codex, antigravity,
+// claude via settings) are excluded by that family fact, not by
+// SupportsHooks, which is true for them as well. The hook is installed for
+// this agent (HookEnabled: true by default for opencode/mimocode, whose
+// overlay is staged for every launch; an explicit hooks_installed = false
+// means no plugin, so the nudge stays the only carrier). The session is not
+// ACP, whose transport never loads the CLI plugin. And the session is not a
+// client's provider chat: its hook writes no persona (primeHookClientChat),
+// so it keeps its beacon-only turns. Last, the session runs on a local
+// terminal runtime, checked below.
+func (s startupPromptSource) roleSuppliedByHook() bool {
+	if !s.HookEnabled || s.IsACP || s.ClientProviderChat || !s.ResolvedProvider.HookSuppliesRolePerTurn() {
+		return false
+	}
+	// Only the local terminal runtimes are known to stage the provider overlay
+	// in the same filesystem where the CLI loads its plugin. That is the
+	// city's runtime: session = "tmux" picks the terminal transport, not the
+	// runtime. Remote and custom runtimes keep the explicit role carrier
+	// rather than assuming hook presence.
+	switch strings.TrimSpace(s.SessionRuntime) {
+	case "", "tmux", "herdr":
+		return true
+	default:
+		return false
+	}
+}
+
+// hookNudge supplies activation without persisting the hook-supplied role as
+// a user message: the beacon and the configured nudge. A beacon alone does
+// not justify starting a turn, so with no configured nudge it is "".
+func (s startupPromptSource) hookNudge() string {
+	if strings.TrimSpace(s.HintNudge) == "" {
+		return ""
+	}
+	return restartPromptNudge(s.Beacon, s.HintNudge)
+}
+
+// delivery selects the per-generation hook as the role carrier where it
+// supplies the role, reported as effective mode "hook". Other launches keep
+// promptDelivery's launch-time routing. Role bytes carried by the hook never
+// enter argv and need no argv-size fallback. A fresh launch, gc prime --strict
+// and gc doctor all route through it, so none of them can disagree about the
+// carrier.
+func (s startupPromptSource) delivery() (promptDeliveryResult, error) {
+	if s.roleSuppliedByHook() {
+		res := promptDeliveryResult{
+			Nudge:         s.hookNudge(),
+			Delivered:     strings.TrimSpace(s.Prompt) != "",
+			EffectiveMode: "hook",
+		}
+		if s.ResolvedProvider != nil {
+			res.ConfiguredMode = s.ResolvedProvider.PromptMode
+		}
+		return res, nil
+	}
+	return promptDelivery(s.Prompt, s.IsACP, s.ResolvedProvider, s.HintNudge, s.RuntimeName, s.CityRuntimes)
+}
+
+// agentStartupPromptSource is the source a fresh launch of agent a would plan
+// the rendered prompt with, built from config alone: gc prime --strict and gc
+// doctor measure the delivery budget through it. resolved may be nil.
+func agentStartupPromptSource(cfg *config.City, a *config.Agent, resolved *config.ResolvedProvider, prompt string) startupPromptSource {
+	providerName := ""
+	if resolved != nil {
+		providerName = resolved.Name
+	}
+	return startupPromptSource{
+		TemplateName:     a.QualifiedName(),
+		Prompt:           prompt,
+		IsACP:            config.ResolveSessionCreateTransport(a.Session, resolved) == config.SessionTransportACP,
+		HookEnabled:      config.AgentHasHooks(a, &cfg.Workspace, providerName, cfg.Providers),
+		ResolvedProvider: resolved,
+		RuntimeName:      effectiveSessionProvider(a.Session, cfg.Session.Provider),
+		SessionRuntime:   cfg.Session.Provider,
+		CityRuntimes:     cfg.Runtimes,
+	}
+}
+
+// resumeNudge is the restart turn delivered to a resumed provider
+// conversation. The rendered prompt rides along so a restarted session does
+// not land idle, unless the provider hook re-supplies it to every generation:
+// replaying it there would persist another copy of the role as a user message
+// on every wake.
+//
+// On that hook-primed branch the turn is the beacon followed by the configured
+// nudge: the nudge is the reason for the turn, and the beacon identifies the
+// wake. With no configured nudge there is no restart turn. The role is already
+// in the system prompt through the plugin, so a content-free wake turn only
+// buys a generation that acknowledges and waits; the next human message, queued
+// nudge or claim backstop (nudgeStalledPoolClaims) starts a real turn. tmux and
+// herdr skip an empty nudge, so "" delivers nothing.
+func (s startupPromptSource) resumeNudge() string {
+	if s.roleSuppliedByHook() {
+		return s.hookNudge()
+	}
+	return restartPromptNudge(s.Prompt, s.HintNudge)
 }
 
 // configuredMode names the prompt-delivery mode the source's provider is
@@ -77,7 +198,7 @@ type startupPromptPlan struct {
 // (fallback to the nudge, or a hard failure on a runtime with no fallback,
 // ga-q8wgom.1.1) is identical for every launch builder.
 func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (startupPromptPlan, error) {
-	delivery, err := promptDelivery(src.Prompt, src.IsACP, src.ResolvedProvider, src.HintNudge, src.RuntimeName, src.CityRuntimes)
+	delivery, err := src.delivery()
 	if err != nil {
 		logOversizedPromptDelivery(slog.Default().Error,
 			"startup prompt exceeds argv-safety threshold; no fallback delivery available",
@@ -90,7 +211,7 @@ func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (sta
 			src, "nudge-fallback")
 	}
 	if launch == startupPromptResumeLaunch {
-		plan := resumeStartupPromptPlan(src.Prompt, src.HintNudge)
+		plan := resumeStartupPromptPlan(src)
 		plan.Delivery = delivery
 		return plan, nil
 	}
@@ -105,11 +226,14 @@ func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (sta
 }
 
 // resumeStartupPromptPlan is the plan for a launch that continues a conversation:
-// the prompt rides the nudge and the marker is set whenever there is a prompt.
-func resumeStartupPromptPlan(prompt, hintNudge string) startupPromptPlan {
+// the restart turn (src.resumeNudge) rides the nudge and the marker is set
+// whenever there is a prompt. A session whose hook supplies the role is still
+// primed, through the hook rather than the nudge, so the marker is set for it
+// too.
+func resumeStartupPromptPlan(src startupPromptSource) startupPromptPlan {
 	return startupPromptPlan{
-		Nudge:         restartPromptNudge(prompt, hintNudge),
-		MarkDelivered: strings.TrimSpace(prompt) != "",
+		Nudge:         src.resumeNudge(),
+		MarkDelivered: strings.TrimSpace(src.Prompt) != "",
 		launch:        startupPromptResumeLaunch,
 	}
 }
@@ -137,14 +261,18 @@ func (p startupPromptPlan) applyTo(cfg *runtime.Config) {
 // inputs of the shared delivery decision.
 func (tp TemplateParams) startupPromptSource() startupPromptSource {
 	return startupPromptSource{
-		TemplateName:     tp.TemplateName,
-		SessionName:      tp.SessionName,
-		InstanceName:     tp.InstanceName,
-		Prompt:           tp.Prompt,
-		IsACP:            tp.IsACP,
-		ResolvedProvider: tp.ResolvedProvider,
-		HintNudge:        tp.Hints.Nudge,
-		RuntimeName:      tp.EffectiveSessionProvider,
-		CityRuntimes:     tp.CityRuntimes,
+		TemplateName:       tp.TemplateName,
+		SessionName:        tp.SessionName,
+		InstanceName:       tp.InstanceName,
+		Prompt:             tp.Prompt,
+		Beacon:             tp.Beacon,
+		IsACP:              tp.IsACP,
+		HookEnabled:        tp.HookEnabled,
+		ClientProviderChat: tp.ClientProviderChat,
+		ResolvedProvider:   tp.ResolvedProvider,
+		HintNudge:          tp.Hints.Nudge,
+		RuntimeName:        tp.EffectiveSessionProvider,
+		SessionRuntime:     tp.CitySessionProvider,
+		CityRuntimes:       tp.CityRuntimes,
 	}
 }
