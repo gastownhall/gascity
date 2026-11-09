@@ -3674,12 +3674,17 @@ export const zStorageBindingOutcomePayload = z.object({
     binding: z.string(),
     database: z.string(),
     held_different: z.array(z.string()).nullish(),
+    held_different_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     invariant: z.string(),
     lost_cross_edges: z.array(z.string()).nullish(),
     outcome: z.string(),
     presumed_reused: z.array(z.string()).nullish(),
+    presumed_reused_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     proven_beads: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    serving: z.boolean(),
+    recheck: z.boolean().optional(),
+    retained: z.array(z.string()).nullish(),
+    retained_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    serving: z.boolean().optional(),
     stranded: z.array(z.string()).nullish(),
     stranded_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
 });

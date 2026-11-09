@@ -7470,17 +7470,22 @@ type StatusWorkCounts struct {
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding        string    `json:"binding"`
-	Database       string    `json:"database"`
-	HeldDifferent  *[]string `json:"held_different,omitempty"`
-	Invariant      string    `json:"invariant"`
-	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
-	Outcome        string    `json:"outcome"`
-	PresumedReused *[]string `json:"presumed_reused,omitempty"`
-	ProvenBeads    int64     `json:"proven_beads"`
-	Serving        bool      `json:"serving"`
-	Stranded       *[]string `json:"stranded,omitempty"`
-	StrandedCount  *int64    `json:"stranded_count,omitempty"`
+	Binding             string    `json:"binding"`
+	Database            string    `json:"database"`
+	HeldDifferent       *[]string `json:"held_different,omitempty"`
+	HeldDifferentCount  *int64    `json:"held_different_count,omitempty"`
+	Invariant           string    `json:"invariant"`
+	LostCrossEdges      *[]string `json:"lost_cross_edges,omitempty"`
+	Outcome             string    `json:"outcome"`
+	PresumedReused      *[]string `json:"presumed_reused,omitempty"`
+	PresumedReusedCount *int64    `json:"presumed_reused_count,omitempty"`
+	ProvenBeads         int64     `json:"proven_beads"`
+	Recheck             *bool     `json:"recheck,omitempty"`
+	Retained            *[]string `json:"retained,omitempty"`
+	RetainedCount       *int64    `json:"retained_count,omitempty"`
+	Serving             *bool     `json:"serving,omitempty"`
+	Stranded            *[]string `json:"stranded,omitempty"`
+	StrandedCount       *int64    `json:"stranded_count,omitempty"`
 }
 
 // StorageRigPayload defines model for StorageRigPayload.

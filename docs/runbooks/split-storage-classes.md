@@ -893,7 +893,8 @@ dispatching, and the writer that stranded the row, which never consults the
 gate, kept writing.
 
 Now the city serves degraded, as long as no stranded id is held in the binding
-by a different bead:
+by a different bead and the work store holds no retained copy of a bead the
+binding owns (and no clear is left unfinished):
 
 - the stranded rows stay invisible to their class readers until repaired; a
   by-id read of one misses the binding and the work store answers with the
@@ -907,13 +908,19 @@ by a different bead:
 
 A stranded id the binding holds for a different bead still refuses the whole
 city, with the ids in the refusal; resolve it with `recover-stranded`'s
-per-id choices (below).
+per-id choices (below). So do retained copies beside a strand, because a
+reader that reaches the work store first is served the frozen copy and
+re-dispatches finished steps (#5987): the refusal and `gc storage status`
+name the clear, `gc storage migrate --from-work --fleet-stopped`, and
+`recover-stranded` prints it even when it exits 1.
 
 ### Repair in place: a work bead that carries a class key
 
-The common strand is ordinary work that a plain `bd create` stamped with a
-class key, typically `gc.root_bead_id` naming the workflow the writer was
-running. `gc storage status` names such a row as infrastructure class "only
+The common strand is ordinary work that a plain `bd create` stamped with
+`gc.root_bead_id`, naming the workflow the writer was running. When that is
+the row's only class key (no `gc.kind`, `gc.formula_contract` or other class
+key, no class-deciding type or label, and no `gc.step_id`, which marks a real
+formula step), `gc storage status` names it as infrastructure class "only
 because of metadata", with the exact repair. Run it on the running city; no
 stop is needed:
 
@@ -1302,16 +1309,23 @@ from a gate that crashed before deciding.
 subscriber branches on "is this city serving" and all of them answer no. The
 `outcome` field says which no it was and `invariant` says why, so a consumer
 that switches on `outcome` must handle every value, not only the type names.
-`stranded` has its own type because it answers both ways; every event carries
-`serving`, and a stranded event also carries `stranded` (up to 50 ids),
-`stranded_count`, `held_different` and `presumed_reused`.
+`stranded` has its own type because it answers both ways. `serving` is set
+only by a boot gate (a controller boot, or a `gc` process resolving its
+routes) and says what that gate did; it is absent on operator-command and
+recheck events and on events older builds recorded, and absent means "not
+stated", never false. A stranded event also carries `stranded`,
+`held_different`, `presumed_reused` and `retained` (each up to 50 ids) with
+`stranded_count`, `held_different_count`, `presumed_reused_count` and
+`retained_count`.
 
 **Alert on `storage.binding.stranded`.** A stranded city no longer announces
 itself by refusing to start. The controller publishes the event at boot and
-from a read-only recheck it runs every 10 minutes, whenever the stranded set
-changes, and publishes `storage.binding.converged` once it is empty again. A
-recheck that cannot run publishes `storage.binding.uncheckable` and stops
-nothing.
+from a read-only recheck it runs every 10 minutes (events marked
+`recheck: true`), whenever the definitive verdict changes, and publishes
+`storage.binding.converged` once the set is empty again. A recheck whose read
+fails transiently publishes nothing; one that cannot run for a standing
+reason publishes `storage.binding.uncheckable` once. Neither stops anything:
+the running controller keeps serving.
 
 `proven_beads` is zero on every refusal, where it means the size was not
 established rather than that the copy is empty. On `genesis` the zero is real.

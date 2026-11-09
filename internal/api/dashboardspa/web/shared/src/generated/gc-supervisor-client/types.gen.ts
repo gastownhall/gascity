@@ -6359,12 +6359,17 @@ export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
     held_different?: Array<string> | null;
+    held_different_count?: number;
     invariant: string;
     lost_cross_edges?: Array<string> | null;
     outcome: string;
     presumed_reused?: Array<string> | null;
+    presumed_reused_count?: number;
     proven_beads: number;
-    serving: boolean;
+    recheck?: boolean;
+    retained?: Array<string> | null;
+    retained_count?: number;
+    serving?: boolean;
     stranded?: Array<string> | null;
     stranded_count?: number;
 };

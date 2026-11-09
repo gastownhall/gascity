@@ -14300,6 +14300,10 @@
               "null"
             ]
           },
+          "held_different_count": {
+            "format": "int64",
+            "type": "integer"
+          },
           "invariant": {
             "type": "string"
           },
@@ -14324,7 +14328,27 @@
               "null"
             ]
           },
+          "presumed_reused_count": {
+            "format": "int64",
+            "type": "integer"
+          },
           "proven_beads": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "recheck": {
+            "type": "boolean"
+          },
+          "retained": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "retained_count": {
             "format": "int64",
             "type": "integer"
           },
@@ -14350,8 +14374,7 @@
           "database",
           "outcome",
           "proven_beads",
-          "invariant",
-          "serving"
+          "invariant"
         ],
         "type": "object"
       },
