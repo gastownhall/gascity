@@ -1931,8 +1931,10 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
-	return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable,
-		Retained: gap.Retained, Unrecorded: gap.Unrecorded, ClearUnfinished: notePresent && !note.Complete, LostCrossEdges: note.LostCrossEdges}
+	return infraMigrationReport{
+		Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable,
+		Retained: gap.Retained, Unrecorded: gap.Unrecorded, ClearUnfinished: notePresent && !note.Complete, LostCrossEdges: note.LostCrossEdges,
+	}
 }
 
 // reportUncheckableConvergence reports a converged city whose convergence could

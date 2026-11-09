@@ -2662,7 +2662,6 @@ func TestStrandRecheckIgnoresATransientFaultAndContainsAPanic(t *testing.T) {
 	t.Cleanup(func() { strandRecheckInterval = prevInterval })
 	cr := &CityRuntime{storageRoutes: routes, cityPath: cityPath, rec: rec, stderr: io.Discard, logPrefix: "gc start"}
 	stop := cr.startStrandRecheck(context.Background())
-	time.Sleep(20 * time.Millisecond)
 	stopped := make(chan struct{})
 	go func() { stop(); close(stopped) }()
 	select {
