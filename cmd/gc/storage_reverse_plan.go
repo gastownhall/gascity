@@ -101,7 +101,7 @@ type reversePlan struct {
 // scope removed; this run's stamp added; the create-time edge shorthands and
 // the readiness projection stripped.
 func reverseRow(b beads.Bead, stamp string, annotated bool) beads.Bead {
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
+	metadata := make(beads.StringMap, len(b.Metadata))
 	for key, value := range b.Metadata {
 		metadata[key] = value
 	}
