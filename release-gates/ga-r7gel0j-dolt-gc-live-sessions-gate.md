@@ -76,6 +76,23 @@ Ownership is computed by test body using `diff-owned-tests.py`; retained `owned.
 - `internal/supervisor.TestRunDoltGC_ProbeError_FailsClosedWithStageGC`: PASS.
 - `internal/supervisor.TestTriggerNow_RunsSnapshotThenGC`: PASS.
 
+### Exact retained test evidence
+
+```text
+GATE_TEST_EVIDENCE logs_dir=/var/tmp/deploy-ga-r7gel0j.6i0wct_x/c3-run/evidence/remote/logs logs=513 logs_with_results=447
+test_counts: PASS=126834 FAIL=0 SKIP=372
+  (top-level result lines, column 0, summed over the 513 logs; a test that several jobs run counts once per job; sub-tests are not counted)
+logs_without_results: floor-13.log floor-14.log floor-15.log unit-02e0324f1ef05430d7e4.log unit-04c4f9e4335a6f1c2dfa.log unit-0787047af2c4dad6aebc.log unit-0eb92a6bd00590d91db6.log unit-0f39cb7e4c03399a72c4.log unit-1a34395a607c0208a005.log unit-1e67f201b300dc5f9e78.log unit-21372f682c4033d14a80.log unit-22d5121476fcaa40b586.log (+54 more)
+diff_tests_executed:
+  TestWriteManagedDoltConfigFile_AutoGCCommentNamesDoltIgnoreHazard PASS (integration-packages-514989cc035c0e9a8ff5.log, unit-5a9df316125cd0aeff2e.log)
+  TestRunDoltGC_LiveSessionsSkipGCAndLogReason PASS (unit-55002856e0cdcc042d6d.log)
+  TestRunDoltGC_ProbeError_FailsClosedWithStageGC PASS (unit-55002856e0cdcc042d6d.log)
+  TestRunDoltGC_ProbesLiveSessionsBeforeGC PASS (unit-55002856e0cdcc042d6d.log)
+  TestTriggerNow_RunsSnapshotThenGC PASS (unit-55002856e0cdcc042d6d.log)
+GATE_TEST_EVIDENCE_RESULT ok: 5 diff-owned tests verified by name
+test_log_dir: /var/tmp/deploy-ga-r7gel0j.6i0wct_x/c3-run/evidence/remote/logs
+```
+
 ## Fast lanes and CI accounting
 
 - fast_lane: PASS before runtime setup/full-suite launch. Three independent fresh views use the pinned own base; the suite scratch is never regenerated or modified.
