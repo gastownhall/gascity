@@ -1372,7 +1372,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// still writing cannot be copied provably, so a foreign controller is a
 	// refusal before anything opens.
 	if pid := infraMigrationForeignControllerPID(cityPath); pid != 0 {
-		return fail(fmt.Errorf("controller PID %d is live on this city and is still writing infrastructure beads to the work store; the copy cannot be proven against a source under mutation. Stop it (gc stop) and start again", pid))
+		return fail(fmt.Errorf("controller PID %d is live on this city; while it runs, any writer may change the work store, and a copy proven against a moving source proves nothing. Stop it (gc stop) and run this again", pid))
 	}
 
 	var source beads.Store

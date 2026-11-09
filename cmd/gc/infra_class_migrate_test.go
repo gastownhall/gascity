@@ -1085,6 +1085,7 @@ func TestEnsureInfraClassMigratedRefusesWhileAnotherControllerIsLive(t *testing.
 	if !strings.Contains(log.String(), "is live on this city") {
 		t.Fatalf("the refusal did not name the live controller; log: %s", log.String())
 	}
+	assertLiveControllerMessageClaimsNoWrites(t, log.String())
 	// Nothing may claim convergence, and nothing may have been written.
 	target := mustResolveInfraTarget(t, cityPath, cfg)
 	if _, err := os.Stat(target.MarkerPath()); !os.IsNotExist(err) {
