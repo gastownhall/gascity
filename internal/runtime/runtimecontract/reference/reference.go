@@ -62,6 +62,18 @@ const (
 // 66 (no screen) when no box holds the name.
 const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box/cmd0"; echo`
 
+// goldenExec runs the piped command in the box. Its tmux is the box's own:
+// the session `main` exists while the box does (has-session) and its pane
+// shows the agent's command (capture-pane), as the idle-boundary declaration
+// promises; any other tmux command goes to the host's tmux unchanged. eval,
+// not sh -c, so the command sees the box's tmux. The golden does not declare
+// proc.exec, so gc's own idle reads (tmux -u set-environment and
+// show-environment, whose first argument is -u) never reach this model;
+// declaring proc.exec here would need them modeled too.
+const goldenExec = `cmd=$(cat); ` +
+	`tmux() { case "$1" in has-session) [ -d "$box" ] ;; capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;; *) command tmux "$@" ;; esac; }; ` +
+	`eval "$cmd"`
+
 // goldenListRunning lists the city's boxes whose name starts with the
 // prefix ($name holds it), and fails, never lists nothing, when the backend
 // cannot be read.
@@ -92,7 +104,7 @@ reap() { if [ -f "$1/pid" ]; then p=$(cat "$1/pid"); pkill -P "$p" 2>/dev/null; 
 // behavior.
 func Bodies() map[string]string {
 	return map[string]string{
-		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle"]}'`,
+		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle"]}'`,
 		"start":             goldenStart,
 		"stop":              `rm -rf "$box"`,
 		"is-running":        `if [ -d "$box" ]; then echo true; else echo false; fi`,
@@ -107,7 +119,7 @@ func Bodies() map[string]string {
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
-		"exec":              `sh -c "$(cat)"`,
+		"exec":              goldenExec,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).
@@ -148,7 +160,7 @@ const (
 // box keeps the start config it received as start.json.
 func HostFSBodies() map[string]string {
 	b := Bodies()
-	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle","fs.host"],"locality":"local"}'`
+	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","fs.host"],"locality":"local"}'`
 	b["start"] = strings.Replace(strings.Replace(b["start"],
 		`mkdir -p "$box.tmp"; `, `mkdir -p "$box.tmp"; `+goldenHostFSStage, 1),
 		`mv "$box.tmp" "$box"`, goldenHostFSLaunch+`mv "$box.tmp" "$box"`, 1)

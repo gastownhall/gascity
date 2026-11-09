@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -134,6 +135,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleStopIdempotent, set("stop", `if [ -d "$box" ]; then rm -rf "$box"; else exit 1; fi`), "stop errors on a missing session"},
 		{ReqLifecycleUnknownNotRunning, set("is-running", `echo true`), "unknown session reports running"},
 		{ReqConnectionExec, set("exec", `cat >/dev/null; echo wrong`), "exec ignores the command and emits fixed output"},
+		{ReqConnectionIdleBoundary, edit("exec", `has-session) [ -d "$box" ] ;;`, `has-session) return 1 ;;`), "idle-boundary declared but the box has no tmux session main"},
+		{ReqConnectionIdleBoundary, edit("exec", `capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;;`, `capture-pane) return 1 ;;`), "idle-boundary declared but the pane cannot be captured"},
+		{ReqConnectionIdleBoundary, set("exec", `exit 2`), "idle-boundary declared but exec is unimplemented"},
 		{ReqProvisionBoxWithoutAgent, set("provision", `cat >/dev/null; mkdir -p "$box"`), "provision launches the agent (is-running true) instead of just the box"},
 
 		{ReqObserveDeclaredOpsRespond, set("observe", `exit 2`), "observe exits 2"},
@@ -370,6 +374,88 @@ func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
 			if (res.Status == StatusSkip) != skip {
 				t.Errorf("handshake %s: %s = %s (%s), want skip %v", protocol, res.Code, res.Status, res.Detail, skip)
 			}
+		}
+	}
+}
+
+// RPP-CONN-002 gates on the declaration: a script that does not declare
+// idle-boundary SKIPs even when its box has no tmux session, and one that
+// declares it without the capabilities it takes effect with still has its
+// box checked, and is told the declaration has no effect.
+// Kills: a probe gated on behavior (a failing box read as undeclared), and a
+// declared idle-boundary passed without reading the box.
+func TestIdleBoundaryGatesOnTheDeclaration(t *testing.T) {
+	noSession := func(bodies map[string]string) {
+		const from = `has-session) [ -d "$box" ] ;;`
+		if !strings.Contains(bodies["exec"], from) {
+			t.Fatalf("golden exec body has no %q to break", from)
+		}
+		bodies["exec"] = strings.Replace(bodies["exec"], from, `has-session) return 1 ;;`, 1)
+	}
+
+	bodies := reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped"]}'`
+	report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusSkip {
+		t.Errorf("undeclared idle-boundary over a box with no tmux session: %s (%s), want SKIP", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resultFor(t, report, ReqConnectionIdleBoundary)
+	if res.Status != StatusPass || !strings.Contains(res.Detail, "takes effect only with proc.exec") {
+		t.Errorf("golden (idle-boundary without proc.exec): %s (%s), want PASS naming the missing proc.exec", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["idle-boundary"]}'`
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusFail {
+		t.Errorf("idle-boundary alone over a box with no tmux session: %s (%s), want FAIL", res.Status, res.Detail)
+	}
+}
+
+// The idle-boundary probe sends each command exactly as the exec provider
+// sends it on the exec op's stdin, so a pack that handles gc's own commands
+// is the one that passes.
+// Kills: a probe quoting that drifts from the exec provider's.
+func TestIdleBoundaryCommandsMatchTheExecProvider(t *testing.T) {
+	dir := t.TempDir()
+	got := filepath.Join(dir, "stdin")
+	script := filepath.Join(dir, "pack")
+	body := "#!/bin/sh\ncase \"$1\" in\n  protocol) echo '{\"version\":0,\"capabilities\":[\"proc.exec\"]}' ;;\n  exec) cat > '" + got + "' ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvs := [][]string{
+		{"tmux", "has-session", "-t", "main"},
+		{"tmux", "capture-pane", "-t", "main", "-p", "-S", "-120"},
+	}
+	if len(argvs) != len(idleBoundaryCommands) {
+		t.Fatalf("%d idle-boundary commands, want %d", len(idleBoundaryCommands), len(argvs))
+	}
+	p := sessionexec.NewProvider(script)
+	for i, argv := range argvs {
+		if _, _, err := p.Exec(context.Background(), "s", argv); err != nil {
+			t.Fatalf("Exec(%q): %v", argv, err)
+		}
+		sent, err := os.ReadFile(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(sent) != idleBoundaryCommands[i] {
+			t.Errorf("probe command %d = %q, exec provider sends %q", i, idleBoundaryCommands[i], sent)
 		}
 	}
 }

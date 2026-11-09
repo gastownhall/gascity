@@ -39,6 +39,23 @@ const (
 	// the pack reports InputFencingNone, and starts and launches touch no
 	// fence.
 	ProtocolCapabilityInputFence = "input-fence"
+	// ProtocolCapabilityIdleBoundary declares that gc may read the agent's
+	// idle boundary from the box's tmux: the agent runs in the in-box tmux
+	// session `main`, readable with `capture-pane` over the exec connection.
+	// Declared with proc.exec, report-activity and report-attachment, it gives
+	// the pack an idle boundary (WaitForIdle, the ready-prompt publication and
+	// the idle-proof budget) and full idle sleep; without it those three alone
+	// report timed-only sleep, because nothing else proves the box runs tmux.
+	//
+	// The name states the guarantee gc relies on (it may read the agent's idle
+	// boundary), not the mechanism, so it keeps its meaning once carriers other
+	// than tmux exist. When a pack can select its carrier (gh#8903), this
+	// definition widens from
+	// "tmux in the box" to "the carrier the pack declares can answer a Peek",
+	// and RPP-CONN-002 checks the declared carrier's liveness and read; tmux's
+	// check stays the one it runs today. A non-tmux carrier reuses this token
+	// rather than adding one.
+	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain

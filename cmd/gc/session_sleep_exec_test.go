@@ -22,11 +22,14 @@ func writeHandshakePack(t *testing.T, handshake string) string {
 	return path
 }
 
-// An exec pack declaring report-activity, report-attachment and proc.exec
-// resolves an interactive sleep policy as requested; a pack declaring only an
-// activity clock keeps today's off/interactive_capability_insufficient.
+// An exec pack declaring report-activity, report-attachment, proc.exec and
+// idle-boundary resolves an interactive sleep policy as requested; a pack
+// declaring only an activity clock, or the first three without idle-boundary
+// (a box with no tmux for gc to read), keeps
+// off/interactive_capability_insufficient.
 // Kills: a policy resolver that never sees the exec pack's full capability
-// through the production seam-backed provider.
+// through the production seam-backed provider, and an interactive session put
+// to sleep on an idle boundary gc cannot read (gh#8903).
 func TestResolveSessionSleepPolicyExecPackCapability(t *testing.T) {
 	cfg := &config.City{
 		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
@@ -45,9 +48,16 @@ func TestResolveSessionSleepPolicyExecPackCapability(t *testing.T) {
 	}{
 		{
 			name:           "idle boundary declared",
-			handshake:      `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`,
+			handshake:      `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment","idle-boundary"]}`,
 			wantCapability: runtime.SessionSleepCapabilityFull,
 			wantEffective:  "60s",
+		},
+		{
+			name:           "exec, activity and attachment without idle-boundary",
+			handshake:      `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`,
+			wantCapability: runtime.SessionSleepCapabilityTimedOnly,
+			wantEffective:  config.SessionSleepOff,
+			wantReason:     "interactive_capability_insufficient",
 		},
 		{
 			name:           "activity only",
