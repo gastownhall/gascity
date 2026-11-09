@@ -101,6 +101,24 @@ func (p *Provider) cityEnv() []string {
 	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
+// withDeadline returns env, an op's environment as cityEnv built it (nil:
+// gc's own), plus GC_EXEC_DEADLINE_MS: the milliseconds left, rounded down
+// and never negative, until ctx's deadline — the earlier of the op's own
+// timeout and any deadline its parent already carried. A ctx with no
+// deadline leaves env as it is. Call it with the op's armed ctx, after
+// cityEnv has been read.
+func withDeadline(ctx context.Context, env []string) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return env
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	ms := max(time.Until(deadline).Milliseconds(), 0)
+	return append(env, "GC_EXEC_DEADLINE_MS="+strconv.FormatInt(ms, 10))
+}
+
 // run executes the script with the given args using the default timeout.
 func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	return p.runWithTimeout(p.timeout, stdinData, args...)
@@ -132,7 +150,7 @@ func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit in
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cmd.Env = env
+	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -590,7 +608,7 @@ func (p *Provider) startStartupWatch(
 	env := p.cityEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -1172,7 +1190,7 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

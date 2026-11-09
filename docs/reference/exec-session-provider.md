@@ -924,6 +924,16 @@ handshake should still read no state and answer the same for every city:
 `gc start`, the orchestrator and `gc doctor` each probe it in their own
 process and remember the answer per version of the file.
 
+gc sets `GC_EXEC_DEADLINE_MS` on every operation it runs under a deadline
+— all of them but `attach`, and `watch-startup` when its start has none —
+whether or not the provider serves a city. It is the whole milliseconds left,
+rounded down and never negative, until the operation is killed: the earlier
+of the operation's own timeout and any deadline gc's caller already set. A
+script can budget its own inner calls by it. gc counts it from just before
+the spawn, so it is an upper bound; an operation whose deadline has passed
+before it is spawned is not run at all. It is informational: no handshake
+capability declares or gates it.
+
 A script runs with gc's own environment. The session's environment arrives
 in the start config's `env` (see [Session environment](#session-environment)).
 
