@@ -4210,6 +4210,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in, twice. The check runs it,
+and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
+and GC_EXEC_CITY_PATH name a fresh temporary directory, never the city you
+run the check from. A runtime that does not scope its server by
+GC_EXEC_CITY_PATH ends every session the server holds, so check it only
+against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -4238,12 +4246,22 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in (the server group). The
+suite runs it, and the sessions it checks it against, in a private city:
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
+never the city you run the suite from. A runtime that does not scope its
+server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
+only against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
 arguments are always the executable itself.
 
-Use --json for a machine-readable report (CI artifacts). Exits non-zero if
-any required requirement fails.
+Use --json for a machine-readable report (CI artifacts): one JSON document
+with ok:true, or ok:false and an error object when a requirement fails; the
+report fields are present either way, and --env adds the capability report
+under "environment". Exits non-zero if any required requirement fails.
 
 ```
 gc runtime conformance <name|executable> [flags]

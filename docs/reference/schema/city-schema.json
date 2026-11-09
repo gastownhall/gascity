@@ -113,7 +113,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers, and on gc's host for an exec runtime\nwhose handshake declares fs.host with locality local. Template variables\nsame as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",

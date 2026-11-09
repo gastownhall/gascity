@@ -47,6 +47,42 @@ var probes = map[Code]probe{
 	ReqObserveCityScoped:           probeObserveCityScoped,
 	ReqObserveInventoryHasActivity: probeObserveInventoryActivity,
 	ReqObservePeekNoScreen:         probeObservePeekNoScreen,
+
+	ReqObserveAttachedUnattachedFalse: probeObserveAttachedUnattached,
+	ReqObserveAttachedMissingFalse:    probeObserveAttachedMissing,
+
+	ReqMetaRoundTrip:               probeMetaRoundTrip,
+	ReqMetaUnsetKeyEmpty:           probeMetaUnsetKeyEmpty,
+	ReqMetaRemoveThenEmpty:         probeMetaRemoveThenEmpty,
+	ReqMetaEmptyValueOverwrites:    probeMetaEmptyValueOverwrites,
+	ReqMetaOverwritesPrevious:      probeMetaOverwritesPrevious,
+	ReqMetaMultipleKeysIndependent: probeMetaMultipleKeys,
+
+	ReqDiscoveryFindsSessions:       probeDiscoveryFindsSessions,
+	ReqDiscoveryPrefixFiltering:     probeDiscoveryPrefixFiltering,
+	ReqDiscoveryExcludesStopped:     probeDiscoveryExcludesStopped,
+	ReqDiscoveryEmptyPrefix:         probeDiscoveryEmptyPrefix,
+	ReqDiscoveryFailureIsNotAbsence: probeDiscoveryFailureIsNotAbsence,
+
+	ReqProcessEmptyNamesAlive: probeProcessEmptyNamesAlive,
+	ReqProcessFalseAfterStop:  probeProcessFalseAfterStop,
+
+	ReqConcurrencyStart:        probeConcurrencyStart,
+	ReqConcurrencyStop:         probeConcurrencyStop,
+	ReqConcurrencyIsRunning:    probeConcurrencyIsRunning,
+	ReqConcurrencyProcessAlive: probeConcurrencyProcessAlive,
+	ReqConcurrencyListRunning:  probeConcurrencyListRunning,
+
+	ReqServerStopIdempotent:        probeServerStopIdempotent,
+	ReqServerStartAfterStop:        probeServerStartAfterStop,
+	ReqServerStopEndsSession:       probeServerStopEndsSession,
+	ReqServerStopSparesOtherCities: probeServerStopSparesOtherCities,
+
+	ReqFSHostSharedView:        probeFSHostSharedView,
+	ReqFSHostSameUser:          probeFSHostSameUser,
+	ReqFSHostLocal:             probeFSHostLocal,
+	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
+	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
@@ -292,7 +328,13 @@ func probeProvision(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (St
 // requireStart starts name and returns a non-pass status if start itself is
 // broken (a precondition for the lifecycle probes that need a live session).
 func requireStart(ctx context.Context, r *runner, name string) (Status, string) {
-	res := r.start(ctx, name)
+	return requireStartIn(ctx, r, nil, name)
+}
+
+// requireStartIn is requireStart with env added to start's environment (a
+// city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func requireStartIn(ctx context.Context, r *runner, env []string, name string) (Status, string) {
+	res := r.startIn(ctx, env, name)
 	switch {
 	case res.unsupported:
 		return StatusFail, "start returned exit 2; start is a required op"
@@ -305,7 +347,13 @@ func requireStart(ctx context.Context, r *runner, name string) (Status, string) 
 // expectRunning asserts is-running(name) equals want, returning a failed
 // status with context otherwise.
 func expectRunning(ctx context.Context, r *runner, name string, want bool, when string) (Status, string) {
-	res := r.isRunning(ctx, name)
+	return expectRunningIn(ctx, r, nil, name, want, when)
+}
+
+// expectRunningIn is expectRunning with env added to is-running's
+// environment (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func expectRunningIn(ctx context.Context, r *runner, env []string, name string, want bool, when string) (Status, string) {
+	res := r.opEnv(ctx, r.opts.OpTimeout, env, nil, "is-running", name)
 	switch {
 	case res.unsupported:
 		return StatusFail, "is-running returned exit 2; is-running is a required op"
