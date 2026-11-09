@@ -57,7 +57,10 @@ package main
 // testing) and a dispatch hold label (hold:mayor, hold:external;
 // beadmeta.HasDispatchHold). A park recorded only in a note or a label of a
 // pack's own is not honored: the sweep cannot read it, and the bead looks
-// detached. Every restore is logged per bead with the route, the stamped
+// detached. One gap is known: the backstop's scan and a multi-candidate delta
+// re-read filter on the raw bd status, but a single-candidate delta re-read goes
+// through Live.Get, which folds a bd status into open, so that path sees the hold
+// label and not the status (ga-o4ij4km). Every restore is logged per bead with the route, the stamped
 // session it came from and the lane, so a wrong one can be traced to its residue.
 //
 // # Two things the pre-lane sweep could not reach, and now does

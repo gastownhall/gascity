@@ -215,9 +215,10 @@ func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool)
 // (stampRunSessionIdentity), and gc.work_branch is where the claimer was, not
 // proof that anything was pushed. The predicate cannot tell finished work from a
 // claim that went nowhere, so it must not treat the residue as a reason to
-// re-route. What it does honor is a park: a bd status other than open, and a
-// dispatch hold label (hold:mayor, hold:external; beadmeta.HasDispatchHold). A
-// park recorded only in a note is not honored. The predicate is a pure function
+// re-route. What it does honor is a park: a bd status other than open (as far as
+// the caller's read can see one: Live.Get folds it into open), and a dispatch
+// hold label (hold:mayor, hold:external; beadmeta.HasDispatchHold). A park
+// recorded only in a note is not honored. The predicate is a pure function
 // of one bead's fields.
 //
 // This sweep's novel domain is exactly work that carries *no* self-declared

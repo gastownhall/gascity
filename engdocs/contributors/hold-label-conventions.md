@@ -139,7 +139,9 @@ pushed, so the residue never argues for restoring a route. The park vocabulary
 the sweep honors is exactly this: a bd status other than `open`, or a
 canonical hold (`hold:mayor`, `hold:external`). A park recorded only in a bead
 note, or only in a label of a pack's own, is not honored, and the sweep will
-restore the route. Every restore, in either lane, is logged with the bead, the
+restore the route. The status half has one known gap: the scan and a batched
+re-read filter on the raw status, but a single-candidate re-read folds it into
+`open`, so a canonical hold is the park that is always seen (`ga-o4ij4km`). Every restore, in either lane, is logged with the bead, the
 route, the stamped session it came from and the lane (`lane=delta` or
 `lane=backstop`), so a route restored on a bead someone meant to park can be
 traced to the residue that caused it.
