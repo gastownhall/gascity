@@ -112,8 +112,8 @@ func processSecretEnvValues() []string {
 // command's captured output when the command runs HOST-SIDE. Those runners
 // build the child environment the same way — os.Environ() overlaid with the
 // session env the caller assembled — so both halves are in scope for anything
-// the command echoes, and both belong here. Shared so the three host-side
-// runners (this package's [RunSetupCommand], the tmux adapter's and herdr's)
+// the command echoes, and both belong here. Shared so the host-side runners
+// (internal/runtime/setupcmd, which herdr delegates to, and the tmux adapter's)
 // cannot drift apart on which half they cover.
 //
 // Not for a runner that executes the command somewhere else. The ssh provider
