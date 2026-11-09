@@ -601,8 +601,12 @@ name, and a session's start ends its own stopped incarnation's leftovers
 first. A leftover counts as live while a box the script lists carries its
 `GC_SESSION_ID` (from `inventory` on a v2-ready script, otherwise
 `list-running` and `get-meta`); for a listed box whose `GC_SESSION_ID` reads
-empty, the leftover's `GC_SESSION_NAME` decides. A failed or partial listing
-ends nothing that the listing could have shown. gc signals a process only
+empty, the leftover's `GC_SESSION_NAME` decides. That listing runs only
+when the scan found such a process, and it is bounded at 5 seconds, because
+the orphan sweep scans on every controller tick. A listing that fails, is
+partial or runs past the bound leaves tracking unknown: the sweep then reaps
+only the leftovers of closed sessions, and a session's start refuses rather
+than end a leftover the listing could have shown. gc signals a process only
 while it still carries the session's `GC_SESSION_ID` and the start time the
 scan read. Without `fs.host` gc does not scan for the script's sessions.
 
@@ -1063,10 +1067,13 @@ the spawn, so it is an upper bound; an operation whose deadline has passed
 before it is spawned is not run at all. It is informational: no handshake
 capability declares or gates it.
 
-A script runs with gc's own environment, without `GC_SESSION_ID` and
-`GC_RUNTIME_EPOCH`: a gc command run from an agent's shell carries that
-session's identity, and an operation belongs to no session. A server an
-operation starts therefore never reads as that session's leftover process.
+A script runs with gc's own environment, without the session identity a gc
+command run from an agent's shell carries (`GC_SESSION_ID`,
+`GC_SESSION_NAME`, `GC_RUNTIME_EPOCH`, `GC_INSTANCE_TOKEN`, `GC_AGENT`,
+`GC_ALIAS`, `BEADS_ACTOR` and the rest of the list gc's managed Dolt server
+is started without): an operation belongs to no session. A server an
+operation starts therefore never reads as that session's leftover process,
+and never carries its instance token.
 The session's environment arrives in the start config's `env` (see
 [Session environment](#session-environment)).
 

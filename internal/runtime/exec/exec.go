@@ -67,6 +67,10 @@ type Provider struct {
 	setupMaxTimeout time.Duration
 	setupWarnings   io.Writer
 
+	// scanListingTimeout bounds the listing a process-table scan reads to
+	// track its roots (process_scan.go); zero is defaultScanListingTimeout.
+	scanListingTimeout time.Duration
+
 	// hostSetupDue holds the names whose `provision` config gc stripped of
 	// its host work (provisionBox), so the launch that follows runs their
 	// session_setup on the host (execTransport.Launch).

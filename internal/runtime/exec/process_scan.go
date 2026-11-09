@@ -1,10 +1,12 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -29,28 +31,30 @@ var (
 	_ runtime.ConditionalProcessTableScanner = (*seamBackedProvider)(nil)
 )
 
-// opSessionIdentityKeys are the session identity gc's own environment
-// carries when gc runs in an agent's shell (a gc command an agent runs).
-// Every op runs without them: an op is the provider's, never a session's,
-// and a server an op starts and leaves running must not read to the scanner
-// as that session's leftover, which the orphan sweep would end with the
-// session. A session's identity reaches its box in the start config's env.
-var opSessionIdentityKeys = []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH"}
-
-// sessionlessEnviron is gc's environment (execenv.Environ) without
-// opSessionIdentityKeys.
+// sessionlessEnviron is gc's environment (execenv.Environ) without the
+// session identity it carries when gc runs in an agent's shell (a gc command
+// an agent runs): execenv.WithoutSessionIdentity, the list gc's other
+// detached processes are started without. Every op runs with it: an op is
+// the provider's, never a session's, and a server an op starts and leaves
+// running must not read to the scanner as that session's leftover, which
+// the orphan sweep would end with the session, nor carry its instance token
+// into a pack's own identity scans. A session's identity reaches its box in
+// the start config's env.
 func sessionlessEnviron() []string {
-	environ := execenv.Environ()
-	out := make([]string, 0, len(environ))
-	for _, entry := range environ {
-		key, _, _ := strings.Cut(entry, "=")
-		if slices.Contains(opSessionIdentityKeys, key) {
-			continue
-		}
-		out = append(out, entry)
-	}
-	return out
+	return execenv.WithoutSessionIdentity(execenv.Environ())
 }
+
+// processEnvValue reads a scanned process's environment variable; a test
+// fails the read.
+var processEnvValue = proctable.ProcessEnvValue
+
+// defaultScanListingTimeout bounds the listing a scan that found roots
+// reads to track them (trackRoots). The orphan sweep scans on every
+// controller tick, and a pack's listing (an inventory that reads every
+// agent's screen) can take up to the op timeout; past this bound the
+// listing fails, which is a whole-scan failure: the sweep then reaps only
+// the leftovers of closed sessions, and a start refuses rather than reap.
+const defaultScanListingTimeout = 5 * time.Second
 
 // CanScanProcessTable implements [runtime.ConditionalProcessTableScanner]: a
 // pack can be scanned only when its boxes share this host and user. A pack
@@ -113,7 +117,13 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 // and each root the listing cannot rule out as LiveUnlisted, and returns
 // the failures that left a root undecided.
 func (p *Provider) trackRoots(found []runtime.LiveRuntime) error {
-	ids, listErr := p.listedSessionIDs()
+	timeout := p.scanListingTimeout
+	if timeout <= 0 {
+		timeout = defaultScanListingTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ids, listErr := p.listedSessionIDs(ctx)
 	complete := listErr == nil
 	var errs []error
 	if listErr != nil {
@@ -141,10 +151,13 @@ func (p *Provider) trackRoots(found []runtime.LiveRuntime) error {
 		}
 		// The listing cannot rule the root out by its session id: judge it
 		// by the session name its environment carries, as every box's does.
-		name, err := proctable.ProcessEnvValue(root.PID, "GC_SESSION_NAME")
+		name, err := processEnvValue(root.PID, "GC_SESSION_NAME")
 		if err != nil {
+			// The root may be any listed box's: undecided, as a root naming
+			// no session is, so tracking reads unknown (a whole-scan
+			// failure), not as one unreadable entry.
 			root.LiveUnlisted = true
-			errs = append(errs, &proctable.EntryError{PID: root.PID, Err: fmt.Errorf("exec provider %s: reading GC_SESSION_NAME of PID %d: %w", p.script, root.PID, err)})
+			errs = append(errs, fmt.Errorf("exec provider %s: tracking: reading GC_SESSION_NAME of PID %d: %w", p.script, root.PID, err))
 			continue
 		}
 		if slices.Contains(unattributed, name) {
@@ -164,36 +177,45 @@ func (p *Provider) trackRoots(found []runtime.LiveRuntime) error {
 
 // listedSessionIDs returns the GC_SESSION_ID of every box the pack lists,
 // "" for one whose identity it cannot read, with the listing's error: a
-// partial listing returns what it listed.
-func (p *Provider) listedSessionIDs() (map[string]string, error) {
+// partial listing returns what it listed. Every op it runs is bounded by
+// ctx, and a listing ctx ended before it finished is a failure.
+func (p *Provider) listedSessionIDs(ctx context.Context) (map[string]string, error) {
 	ids := make(map[string]string)
 	if p.v2Ready() {
-		names, entries, err := p.ListInventory("")
-		if err != nil && !runtime.IsPartialListError(err) {
+		l, err := p.inventory(ctx)
+		if err != nil {
 			return nil, err
 		}
-		for _, name := range names {
-			e := entries[name]
-			if e.IdentityKnown {
+		for _, name := range l.names {
+			if e, ok := l.entries[name]; ok && e.IdentityKnown {
 				ids[name] = strings.TrimSpace(e.Identity["GC_SESSION_ID"])
 			} else {
 				ids[name] = ""
 			}
 		}
-		return ids, err
+		if !l.complete {
+			return ids, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
+		}
+		return ids, nil
 	}
-	names, err := p.ListRunning("")
-	if err != nil && !runtime.IsPartialListError(err) {
+	out, err := p.runWithContext(ctx, p.timeout, nil, "list-running", "")
+	if err != nil {
 		return nil, err
 	}
-	for _, name := range names {
-		id, metaErr := p.GetMeta(name, "GC_SESSION_ID")
+	for _, name := range strings.Split(out, "\n") {
+		if name == "" {
+			continue
+		}
+		id, metaErr := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, "GC_SESSION_ID")
 		if metaErr != nil {
 			id = ""
 		}
 		ids[name] = strings.TrimSpace(id)
 	}
-	return ids, err
+	if err := ctx.Err(); err != nil {
+		return ids, fmt.Errorf("listing sessions: %w", err)
+	}
+	return ids, nil
 }
 
 // CanScanProcessTable passes the underlying provider's answer through.

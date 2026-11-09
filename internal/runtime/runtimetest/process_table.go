@@ -431,10 +431,21 @@ func randomToken(t *testing.T) string {
 // init: re-parented, as the orphan sweep requires, whatever reaper the test
 // runner's host has. The scanner refuses the live /proc under go test, and
 // a snapshot restricted to the test's own processes keeps any scan away
-// from processes it did not start. A pid already gone is left out.
+// from processes it did not start. A pid already gone is left out. The
+// host's boot time (the btime line of /proc/stat) is kept, so each root's
+// StartedAt is its real start time.
 func SnapshotProcRoot(t *testing.T, pids ...int) string {
 	t.Helper()
 	root := t.TempDir()
+	if hostStat, err := os.ReadFile("/proc/stat"); err == nil {
+		for _, line := range strings.Split(string(hostStat), "\n") {
+			if strings.HasPrefix(line, "btime ") {
+				if err := os.WriteFile(filepath.Join(root, "stat"), []byte(line+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
 	for _, pid := range pids {
 		files, err := readProcFiles(pid)
 		if errors.Is(err, os.ErrNotExist) {

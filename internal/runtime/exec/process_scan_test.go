@@ -8,6 +8,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -245,13 +246,16 @@ func TestProcessScanTerminateRefusals(t *testing.T) {
 // Kills an op that inherits the session identity of a gc run in an agent's
 // shell: a server such an op starts and leaves running would carry that
 // session's GC_SESSION_ID, read to the scanner as its leftover, and be
-// ended by the orphan sweep with the session. Every op, of a provider built
-// for a city or not, runs without GC_SESSION_ID and GC_RUNTIME_EPOCH, and
-// keeps the rest of gc's environment.
+// ended by the orphan sweep with the session, or carry its
+// GC_INSTANCE_TOKEN into a pack's own identity scans. Every op, of a
+// provider built for a city or not, runs without any key of
+// execenv.SessionScopedEnvKeys, the list gc's other detached processes are
+// started without, and keeps the rest of gc's environment.
 func TestOpsRunWithoutTheCallersSessionIdentity(t *testing.T) {
-	t.Setenv("GC_SESSION_ID", "sid-caller")
-	t.Setenv("GC_RUNTIME_EPOCH", "7")
-	t.Setenv("GC_SESSION_NAME", "caller")
+	for _, k := range execenv.SessionScopedEnvKeys {
+		t.Setenv(k, "from-the-caller")
+	}
+	t.Setenv("GC_SCAN_KEEP", "kept")
 	for _, tc := range []struct {
 		name string
 		new  func(script string) *Provider
@@ -262,7 +266,7 @@ func TestOpsRunWithoutTheCallersSessionIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			seen := filepath.Join(dir, "env")
-			script := writeScript(t, dir, `echo "$1 ${GC_SESSION_ID-unset} ${GC_RUNTIME_EPOCH-unset} ${GC_SESSION_NAME-unset}" >> '`+seen+`'`+"\n")
+			script := writeScript(t, dir, `{ echo "op=$1"; env; } >> '`+seen+`'`+"\n")
 			p := tc.new(script)
 			_ = p.IsRunning("box")
 			if _, err := p.GetMeta("box", "k"); err != nil {
@@ -272,10 +276,78 @@ func TestOpsRunWithoutTheCallersSessionIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if fields := strings.Fields(line); len(fields) != 4 || fields[1] != "unset" || fields[2] != "unset" || fields[3] != "caller" {
-					t.Errorf("op saw %q, want GC_SESSION_ID and GC_RUNTIME_EPOCH unset and the rest of gc's environment", line)
+			lines := strings.Split(string(data), "\n")
+			if n := strings.Count(string(data), "GC_SCAN_KEEP=kept"); n != 2 {
+				t.Fatalf("ops saw gc's GC_SCAN_KEEP %d times, want once per op (2):\n%s", n, data)
+			}
+			for _, k := range execenv.SessionScopedEnvKeys {
+				for _, line := range lines {
+					if strings.HasPrefix(line, k+"=") {
+						t.Errorf("an op saw the caller's %s", line)
+					}
 				}
+			}
+		})
+	}
+}
+
+// Kills a GC_SESSION_NAME read failure counted as one unreadable entry:
+// with a listed box whose identity reads empty, a root whose session name
+// cannot be read may be that box's, so tracking is unknown (a whole-scan
+// failure) and the root is LiveUnlisted, as for a root naming no session.
+func TestProcessScanUnreadableSessionNameIsUndecided(t *testing.T) {
+	p := newScanPack(t, true, map[string]string{"get-meta": `:`})
+	l := startScanSession(t, p, "live", "sid-live")
+	for _, f := range []string{"meta.GC_SESSION_ID", "meta.GC_RUNTIME_EPOCH", "meta.GC_INSTANCE_TOKEN", "meta.GT_PROCESS_NAMES"} {
+		if err := os.Remove(filepath.Join(p.boxes, "live", f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	other := startScanSession(t, newScanPack(t, true, nil), "elsewhere", "sid-elsewhere")
+	prev := processEnvValue
+	processEnvValue = func(pid int, key string) (string, error) {
+		if key == "GC_SESSION_NAME" {
+			return "", errors.New("environ unreadable")
+		}
+		return prev(pid, key)
+	}
+	t.Cleanup(func() { processEnvValue = prev })
+	found, err := scanOnly(t, p.sp, "sid-elsewhere", l, other)
+	if len(found) != 1 || found[0].PID != other.PID || found[0].IsTracked || !found[0].LiveUnlisted {
+		t.Fatalf("found = %+v, want the root pid %d untracked and LiveUnlisted", found, other.PID)
+	}
+	if !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("err = %v, want a whole-scan failure (tracking unknown)", err)
+	}
+}
+
+// Kills an unbounded tracking listing: the orphan sweep scans every tick,
+// so a listing slower than the scan's bound fails the tracking (a
+// whole-scan failure, the root LiveUnlisted) instead of holding the tick
+// for the whole op timeout.
+func TestProcessScanListingIsBounded(t *testing.T) {
+	for _, v2 := range []bool{true, false} {
+		t.Run(map[bool]string{true: "inventory", false: "list-running"}[v2], func(t *testing.T) {
+			bodies := map[string]string{"inventory": `sleep 10; exit 1`}
+			if !v2 {
+				bodies = map[string]string{
+					"protocol":     `echo '{"version":0,"capabilities":["fs.host"],"locality":"local"}'`,
+					"list-running": `sleep 10`,
+				}
+			}
+			p := newScanPack(t, true, bodies)
+			p.sp.raw.scanListingTimeout = 200 * time.Millisecond
+			if p.sp.raw.v2Ready() != v2 {
+				t.Fatalf("v2Ready = %t, want %t", !v2, v2)
+			}
+			l := startScanSession(t, newScanPack(t, true, nil), "live", "sid-live")
+			start := time.Now()
+			found, err := scanOnly(t, p.sp, "sid-live", l)
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Fatalf("the scan took %s, want it bounded near 200ms", elapsed)
+			}
+			if len(found) != 1 || found[0].IsTracked || !found[0].LiveUnlisted || !proctable.HasWholeScanFailure(err) {
+				t.Fatalf("found = %+v, %v; want the root LiveUnlisted under a whole-scan failure", found, err)
 			}
 		})
 	}
