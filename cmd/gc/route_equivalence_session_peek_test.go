@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -89,6 +90,8 @@ var peekRouteSeeds = []struct {
 	{key: "closed", state: "asleep", close: true},
 	{key: "closed-alias", state: "asleep", close: true},
 	{key: "broken", state: "active", running: true},
+	{key: "blank", state: "active", running: true},
+	{key: "paneless", state: "asleep"},
 }
 
 func newPeekRouteCity(t *testing.T) *peekRouteCity {
@@ -152,6 +155,8 @@ func newPeekRouteCity(t *testing.T) *peekRouteCity {
 		sessions[seed.key] = s
 	}
 	probe.fail[sessions["broken"].sessionName] = errors.New("pane capture failed")
+	probe.SetPeekOutput(sessions["blank"].sessionName, "")
+	probe.fail[sessions["paneless"].sessionName] = runtime.ErrSessionNotFound
 
 	prevBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = prevBuild })
@@ -271,6 +276,52 @@ func TestSessionPeekRouteEquivalence(t *testing.T) {
 				}
 				if want := min(max(r.lines, 0), 10000); len(apiPeeks) != 1 || apiPeeks[0] != want {
 					t.Fatalf("api Peek lines = %v, want [%d]", apiPeeks, want)
+				}
+			})
+		}
+	}
+}
+
+// A session with nothing to show is named, with its state, on both routes: a
+// live pane that captures blank, and an open seat whose pane is gone (asleep),
+// which the runtime answers the way tmux does. Neither prints a bare newline
+// that reads as a live seat with an empty screen.
+func TestSessionPeekRouteEquivalenceNoPaneOutput(t *testing.T) {
+	c := newPeekRouteCity(t)
+	for _, tc := range []struct{ key, state string }{
+		{key: "blank", state: "active"},
+		{key: "paneless", state: "asleep"},
+	} {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(tc.key+"/json="+strconv.FormatBool(jsonOut), func(t *testing.T) {
+				target := c.sessions[tc.key].id
+				localExit, localOut, localErr := c.peek(target, 50, false, jsonOut)
+				apiExit, apiOut, apiErr := c.peek(target, 50, true, jsonOut)
+				if localExit != 0 || apiExit != 0 {
+					t.Fatalf("exit local=%d api=%d, want 0\nlocal stderr:\n%s\napi stderr:\n%s", localExit, apiExit, localErr, apiErr)
+				}
+				if !strings.Contains(apiErr, "cmd=session peek route=api") || strings.Contains(apiErr, "route=fallback") {
+					t.Fatalf("api stderr = %q, want the API route to answer", apiErr)
+				}
+				if jsonOut {
+					for lane, out := range map[string]string{"local": localOut, "api": apiOut} {
+						var got sessionPeekJSONResult
+						if err := json.Unmarshal([]byte(out), &got); err != nil {
+							t.Fatalf("%s json %q: %v", lane, out, err)
+						}
+						if got.Output != "" || got.LineCount != 0 || got.State != tc.state {
+							t.Fatalf("%s json = %+v, want empty output and state %q", lane, got, tc.state)
+						}
+					}
+					validateJSONAgainstBuiltinSchema(t, []string{"session", "peek"}, []byte(apiOut))
+					return
+				}
+				if localOut != "" || apiOut != "" {
+					t.Fatalf("stdout local=%q api=%q, want nothing", localOut, apiOut)
+				}
+				want := "gc session peek: " + target + " has no pane output (session state: " + tc.state + ")"
+				if l, a := peekRouteErrorLine(localErr), peekRouteErrorLine(apiErr); l != want || a != want {
+					t.Fatalf("no-output line local=%q api=%q, want %q", l, a, want)
 				}
 			})
 		}

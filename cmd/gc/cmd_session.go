@@ -2723,6 +2723,16 @@ type sessionPeekJSONResult struct {
 	Lines         int    `json:"lines"`
 	LineCount     int    `json:"line_count"`
 	Output        string `json:"output"`
+	State         string `json:"state,omitempty"`
+}
+
+// writeSessionPeekNoOutput tells the operator a session has nothing to show,
+// so an asleep seat cannot be mistaken for a live one with a blank screen.
+func writeSessionPeekNoOutput(stderr io.Writer, target, state string) {
+	if state == "" {
+		state = "unknown"
+	}
+	fmt.Fprintf(stderr, "gc session peek: %s has no pane output (session state: %s)\n", target, state) //nolint:errcheck // best-effort stderr
 }
 
 // sessionPeekAPIClient returns (client, "") when the API path is available,
@@ -2776,10 +2786,15 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 			Lines:         lines,
 			LineCount:     outputLineCount(output),
 			Output:        output,
+			State:         cr.Body.State,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if strings.TrimSpace(output) == "" {
+		writeSessionPeekNoOutput(stderr, target, cr.Body.State)
 		return 0
 	}
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
@@ -2833,9 +2848,18 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 	}
 
 	output, err := handle.Peek(context.Background(), lines)
-	if err != nil {
+	if err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// The target resolved to a session above, so a missing pane means the seat
+	// is not running, which is the no-output case.
+	if err != nil {
+		output = ""
+	}
+	state := ""
+	if b, getErr := sessStore.Get(sessionID); getErr == nil {
+		state = b.Metadata["state"]
 	}
 
 	if jsonOutput {
@@ -2846,6 +2870,7 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 			Lines:         lines,
 			LineCount:     outputLineCount(output),
 			Output:        output,
+			State:         state,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -2853,6 +2878,10 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 		return 0
 	}
 
+	if strings.TrimSpace(output) == "" {
+		writeSessionPeekNoOutput(stderr, target, state)
+		return 0
+	}
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
