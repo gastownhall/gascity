@@ -2236,6 +2236,13 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
 			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// The human label (bd's native "waiting on a person"; trimmed,
+			// case-sensitive) is not a dispatch hold, but route-scoped serving
+			// never hands it to a worker, so a pin would hand a person's decision
+			// to a seat the same way. It stays out of beadmeta.DispatchHoldLabels
+			// on purpose; this is the beadmeta.HasHumanLabel answer that serving
+			// gives.
+			beadmeta.HasHumanLabel(sibling.Labels) ||
 			// A pin runs the sibling in this seat's directory, so a sibling
 			// whose evidence binds it to another managed worktree is left
 			// routed for a seat in that worktree, as a fresh claim leaves it.
