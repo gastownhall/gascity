@@ -135,11 +135,23 @@ func TestDeadlineEnvExpiredParentSpawnsNothing(t *testing.T) {
 
 // Kills: the deadline armed before the env is read. Waiting out an in-flight
 // process-env projection is not the op's time, so the op still sees its
-// whole budget once the projection restores.
+// whole budget once the projection restores — on a city provider and on one
+// built for no city alike.
 func TestDeadlineEnvExcludesTheProcessEnvProjectionWait(t *testing.T) {
-	const budget, held = 6 * time.Second, 3 * time.Second
 	script := writeScript(t, t.TempDir(), `echo "$GC_EXEC_DEADLINE_MS"`)
-	p := NewProviderForCity(script, "alpha", "/cities/alpha")
+	t.Run("city", func(t *testing.T) {
+		assertDeadlineExcludesProjection(t, NewProviderForCity(script, "alpha", "/cities/alpha"))
+	})
+	t.Run("no city", func(t *testing.T) {
+		assertDeadlineExcludesProjection(t, NewProvider(script))
+	})
+}
+
+// assertDeadlineExcludesProjection holds a process-env projection across
+// part of p's op budget and checks the op still sees most of that budget.
+func assertDeadlineExcludesProjection(t *testing.T, p *Provider) {
+	t.Helper()
+	const budget, held = 6 * time.Second, 3 * time.Second
 	execenv.ProcessEnvLock.Lock()
 	projected := true
 	restore := func() {
