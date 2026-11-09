@@ -569,3 +569,34 @@ func TestCompletionFactIndexWiringAbsorbsAndInvalidates(t *testing.T) {
 	standalone.absorbCompletionFact(fact)
 	standalone.invalidateCompletionFacts()
 }
+
+// TestDetachedOrphanDeltaPassSkipsBlockedSingleCandidate is gc-4zb through the
+// single-id door (ga-o4ij4km): a one-id candidate batch is re-read with
+// Live.Get, which decodes a bd-blocked bead as "open", so the orphan signature
+// alone re-admits it. A batch of two or more is filtered by bd on the raw
+// status and does not.
+func TestDetachedOrphanDeltaPassSkipsBlockedSingleCandidate(t *testing.T) {
+	sessions := beads.NewMemStoreFrom(0, []beads.Bead{detachedOrphanSessionBead()}, nil)
+
+	// Control: the same orphan really is open, so the lane repairs it.
+	openStore, openBacking := blockedSingleIDFixture(detachedOrphanWorkBead("D-1"), false)
+	report := newDetachedOrphanLane().deltaPass(singleStoreRoutePlan(t, openStore), sessions, []string{"D-1"})
+	if report.restored != 1 {
+		t.Fatalf("control: restored %d (err=%v), want 1 for an orphan that is open", report.restored, report.err)
+	}
+	if got := mustRoutedTo(t, openBacking, "D-1"); got != detachedOrphanTestPool {
+		t.Fatalf("control: D-1 gc.routed_to = %q, want %q", got, detachedOrphanTestPool)
+	}
+
+	blockedStore, blockedBacking := blockedSingleIDFixture(detachedOrphanWorkBead("D-1"), true)
+	report = newDetachedOrphanLane().deltaPass(singleStoreRoutePlan(t, blockedStore), sessions, []string{"D-1"})
+	if report.restored != 0 {
+		t.Errorf("restored %d, want 0: the single-id orphan delta path re-admitted a blocked bead", report.restored)
+	}
+	if blockedBacking.writes != 0 {
+		t.Errorf("issued %d write(s) onto a blocked bead, want 0", blockedBacking.writes)
+	}
+	if got := mustRoutedTo(t, blockedBacking, "D-1"); got != "" {
+		t.Errorf("blocked D-1 gc.routed_to = %q, want empty", got)
+	}
+}

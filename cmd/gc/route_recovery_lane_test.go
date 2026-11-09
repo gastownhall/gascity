@@ -985,3 +985,86 @@ func TestRouteRecoveryBackstopConcurrentWithStandaloneStoreReload(t *testing.T) 
 		t.Fatal("the reload did not open the standalone city store")
 	}
 }
+
+// singleStoreRoutePlan resolves the RoutedWork plan of a city that relocates no
+// class: the one store is both the work ledger and the only leg.
+func singleStoreRoutePlan(t *testing.T, store beads.Store) storeref.ResolvedPlan {
+	t.Helper()
+	topo := assembleResidencyTopology(&config.City{}, store, nil, nil, nil)
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		t.Fatalf("Plan(RoutedWork): %v", err)
+	}
+	return plan
+}
+
+// blockedSingleIDFixture is one bead the backing bd store holds as blocked.
+// Every read that returns a beads.Bead decodes it as "open" (mapBdStatus), and
+// bd's raw --status=open filter, which only a Live List reaches, excludes it.
+// parked says whether the Live List still lists the bead: false is a blocked
+// bead, true is the control, a bead that really is open.
+func blockedSingleIDFixture(seed beads.Bead, parked bool) (collapsedBlockedStatusStore, *countingRouteStore) {
+	backing := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{seed}, nil)}
+	store := collapsedBlockedStatusStore{Store: backing}
+	if !parked {
+		store.liveSnapshot = []beads.Bead{seed}
+	}
+	return store, backing
+}
+
+// TestRouteRecoveryDeltaPassSkipsBlockedSingleCandidate is gc-4zb through the
+// single-id door (ga-o4ij4km). liveOpenCandidates answers a one-id batch with
+// Live.Get, which decodes a bd-blocked bead as "open", where a batch of two or
+// more goes through the Live List that bd filters on the raw status. A journal
+// that names exactly one blocked bead must not get gc.routed_to re-stamped onto
+// it, which is the write the blocked-routed-reaper clears on every patrol.
+func TestRouteRecoveryDeltaPassSkipsBlockedSingleCandidate(t *testing.T) {
+	// Control: the same bead really is open, so the live list returns it and the
+	// lane repairs it. Without this the assertion below would pass on a lane
+	// that never repairs a single candidate.
+	openStore, openBacking := blockedSingleIDFixture(unroutedWorkBead("T-1"), false)
+	report := newRouteRecoveryLane().deltaPass(singleStoreRoutePlan(t, openStore), []string{"T-1"})
+	if report.restored != 1 {
+		t.Fatalf("control: restored %d (err=%v), want 1 for a bead that is open", report.restored, report.err)
+	}
+	if got := mustRoutedTo(t, openBacking, "T-1"); got != routeRecoveryTestPool {
+		t.Fatalf("control: T-1 gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+	}
+
+	blockedStore, blockedBacking := blockedSingleIDFixture(unroutedWorkBead("T-1"), true)
+	report = newRouteRecoveryLane().deltaPass(singleStoreRoutePlan(t, blockedStore), []string{"T-1"})
+	if report.restored != 0 {
+		t.Errorf("restored %d, want 0: the single-id delta path re-admitted a blocked bead", report.restored)
+	}
+	if blockedBacking.writes != 0 {
+		t.Errorf("issued %d write(s) onto a blocked bead, want 0", blockedBacking.writes)
+	}
+	if got := mustRoutedTo(t, blockedBacking, "T-1"); got != "" {
+		t.Errorf("blocked T-1 gc.routed_to = %q, want empty", got)
+	}
+}
+
+// TestRouteRecoveryLedgerCandidatePassSkipsBlockedSingleCandidate is the
+// off-tick twin: the ledger-delta pass takes the same single-id door.
+func TestRouteRecoveryLedgerCandidatePassSkipsBlockedSingleCandidate(t *testing.T) {
+	openStore, openBacking := blockedSingleIDFixture(unroutedWorkBead("T-1"), false)
+	report := newRouteRecoveryLane().ledgerCandidatePass(singleStoreRoutePlan(t, openStore), []string{"T-1"})
+	if report.restored != 1 {
+		t.Fatalf("control: restored %d (err=%v), want 1 for a bead that is open", report.restored, report.err)
+	}
+	if got := mustRoutedTo(t, openBacking, "T-1"); got != routeRecoveryTestPool {
+		t.Fatalf("control: T-1 gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+	}
+
+	blockedStore, blockedBacking := blockedSingleIDFixture(unroutedWorkBead("T-1"), true)
+	report = newRouteRecoveryLane().ledgerCandidatePass(singleStoreRoutePlan(t, blockedStore), []string{"T-1"})
+	if report.restored != 0 {
+		t.Errorf("restored %d, want 0: the single-id ledger-delta path re-admitted a blocked bead", report.restored)
+	}
+	if blockedBacking.writes != 0 {
+		t.Errorf("issued %d write(s) onto a blocked bead, want 0", blockedBacking.writes)
+	}
+	if got := mustRoutedTo(t, blockedBacking, "T-1"); got != "" {
+		t.Errorf("blocked T-1 gc.routed_to = %q, want empty", got)
+	}
+}
