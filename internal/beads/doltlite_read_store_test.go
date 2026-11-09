@@ -160,6 +160,35 @@ func TestDoltliteReadStoreGetReadsCloseReason(t *testing.T) {
 	}
 }
 
+// A close given no reason leaves bd's default "Closed" in the column; the
+// in-process read path reports that as no reason, as BdStore does.
+func TestDoltliteReadStoreGetDropsBdDefaultCloseReason(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	for _, stmt := range []string{
+		`ALTER TABLE issues ADD COLUMN close_reason TEXT`,
+		`UPDATE issues SET status = 'closed', close_reason = 'Closed' WHERE id = 'gc-ready'`,
+	} {
+		if _, err := writer.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	got, err := store.Get("gc-ready")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status = %q, want closed", got.Status)
+	}
+	if got.CloseReason != "" {
+		t.Fatalf("CloseReason for bd's default = %q, want empty", got.CloseReason)
+	}
+}
+
 // A read folds bd's richer statuses into Gas City's three and keeps the one it
 // read as SourceStatus, as BdStore and NativeDoltStore do: this store pushes a
 // named status as bd's raw one, so a cache above needs it to tell a parked row

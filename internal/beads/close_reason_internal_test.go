@@ -41,6 +41,49 @@ func TestNativeDoltStoreGetReadsCloseReason(t *testing.T) {
 	}
 }
 
+// bd writes its default reason, "Closed", into close_reason when a close is
+// given none (cmd/bd/close.go resolveCloseReasons), so a column holding the
+// default reads as "the closer gave no reason" (ga-gmc5uzj, option A).
+func TestBdCloseReasonDropsBdDefault(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, status, reason, want string
+	}{
+		{"closed with the bd default", "closed", "Closed", ""},
+		{"closed with no reason", "closed", "", ""},
+		{"closed with a real reason", "closed", testCloseReason, testCloseReason},
+		{"closed with a reason that merely starts with the default", "closed", "Closed as a duplicate", "Closed as a duplicate"},
+		{"open with the bd default", "open", "Closed", ""},
+		{"open with a stale real reason", "open", testCloseReason, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := bdCloseReason(tc.status, tc.reason); got != tc.want {
+				t.Fatalf("bdCloseReason(%q, %q) = %q, want %q", tc.status, tc.reason, got, tc.want)
+			}
+		})
+	}
+}
+
+// The in-process native read path decodes the same column as BdStore does, so
+// it drops the default too.
+func TestBeadFromNativeIssueDropsBdDefaultCloseReason(t *testing.T) {
+	t.Parallel()
+	b, err := beadFromNativeIssue(&beadslib.Issue{
+		ID:          "gc-closed",
+		Title:       "closed without a reason",
+		Status:      beadslib.StatusClosed,
+		IssueType:   beadslib.TypeTask,
+		CloseReason: "Closed",
+	})
+	if err != nil {
+		t.Fatalf("beadFromNativeIssue: %v", err)
+	}
+	if b.CloseReason != "" {
+		t.Fatalf("CloseReason for bd's default = %q, want empty", b.CloseReason)
+	}
+}
+
 // A migration copy (gc storage migrate) creates the closed row through
 // nativeIssueFromBead; the reason has to survive that copy.
 func TestNativeIssueFromBeadCarriesCloseReason(t *testing.T) {

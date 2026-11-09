@@ -1,6 +1,7 @@
 package beadstest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -116,5 +117,48 @@ func TestFakeBdCreateKeepsParentAndEphemeral(t *testing.T) {
 	}
 	if _, err := store.Get(eph.ID); err != nil {
 		t.Fatalf("bd show did not answer the ephemeral bead: %v", err)
+	}
+}
+
+// TestFakeBdModelsBdDefaultCloseReason pins that a close given no --reason
+// shows bd's default "Closed" on the wire, as the real bd does
+// (cmd/bd/close.go resolveCloseReasons), while a given reason and an open row
+// show what they hold. BdStore must read the default as no reason; a fake that
+// answered "" would let it skip that.
+func TestFakeBdModelsBdDefaultCloseReason(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	reasonless, err := store.Create(beads.Bead{Title: "closed without a reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoned, err := store.Create(beads.Bead{Title: "closed with a reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := store.Create(beads.Bead{Title: "still open", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Run("", "bd", "close", "--json", reasonless.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Run("", "bd", "close", "--json", reasoned.ID, "--reason", "fixed in abc123"); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{reasonless.ID: "Closed", reasoned.ID: "fixed in abc123", open.ID: ""} {
+		out, err := f.Run("", "bd", "show", "--json", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rows []struct {
+			CloseReason string `json:"close_reason"`
+		}
+		if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("show %s = %s, %v", id, out, err)
+		}
+		if rows[0].CloseReason != want {
+			t.Errorf("show %s close_reason = %q, want %q", id, rows[0].CloseReason, want)
+		}
 	}
 }

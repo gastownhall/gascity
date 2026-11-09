@@ -5566,6 +5566,43 @@ func TestBdStoreListReadsCloseReason(t *testing.T) {
 	}
 }
 
+// A bd close given no reason stores bd's default "Closed"; BdStore reports that
+// as no reason on Get and List alike (ga-gmc5uzj).
+func TestBdStoreReadsBdDefaultCloseReasonAsNone(t *testing.T) {
+	const row = `{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"Closed"}`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-closed`:                                       {out: []byte(`[` + row + `]`)},
+		`bd list --json --all --include-infra --include-gates --limit 0`: {out: []byte(`[` + row + `]`)},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Get("bd-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CloseReason != "" {
+		t.Errorf("Get CloseReason = %q, want empty", got.CloseReason)
+	}
+	list, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].CloseReason != "" {
+		t.Errorf("List = %+v, want one bead with an empty CloseReason", list)
+	}
+}
+
+// TestBdStoreCloseReasonConformance runs the close-reason rows through a
+// BdStore driving a fake bd that models bd's default close reason, the shape
+// the real-bd TestBdStoreConformance sees.
+func TestBdStoreCloseReasonConformance(t *testing.T) {
+	beadstest.RunCloseReasonTests(t, func() beads.Store {
+		return beadstest.NewFakeBd().NewBdStore()
+	})
+}
+
 // TestBdStoreCloseNotificationConformance runs the close-notification contract
 // through a CachingStore over a BdStore driving a fake bd, so bd's row shapes
 // (JSON rows, show/list refreshes, close --reason forwarding) are covered.
