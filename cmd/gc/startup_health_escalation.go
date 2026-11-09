@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -28,10 +27,9 @@ const (
 	// attached to an escalation.
 	startupHealthEscalationTailBytes = 4096
 
-	// startupHealthEscalationRedactMargin is how much extra log is read ahead of
-	// the tail so a secret straddling the tail's start is redacted whole before
-	// the tail is cut.
-	startupHealthEscalationRedactMargin = 4096
+	// startupHealthEscalationErrorMaxBytes bounds a mail provider's error as
+	// logged: it is provider-controlled text.
+	startupHealthEscalationErrorMaxBytes = 512
 
 	startupStderrLogName = "start-stderr.log"
 )
@@ -50,8 +48,6 @@ type startupHealthEscalator struct {
 	cityPath string
 	now      func() time.Time
 	stderr   io.Writer
-
-	mu sync.Mutex
 }
 
 // newStartupHealthEscalator builds the escalator for one controller tick. The
@@ -90,10 +86,10 @@ func (e *startupHealthEscalator) sweep() {
 }
 
 // escalate acts on one observed pending episode. The observation may be stale
-// or replayed: only the winner of the pending-to-next compare-and-set acts.
+// or replayed: only the winner of the pending-to-next compare-and-set acts. The
+// compare-and-set is not atomic across concurrent callers; the controller runs
+// one sweep at a time.
 func (e *startupHealthEscalator) escalate(ep session.StartupHealthEpisode) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	name := ep.SessionName
 
 	switch {
@@ -117,7 +113,7 @@ func (e *startupHealthEscalator) escalate(ep session.StartupHealthEpisode) {
 
 	subject, body := e.compose(ep)
 	if _, err := e.mail.Send(startupHealthEscalationSender, e.to, subject, body); err != nil {
-		e.record(name, session.AlertDispositionFailed, fmt.Sprintf("sending to %q failed: %v", e.to, err), ep)
+		e.record(name, session.AlertDispositionFailed, fmt.Sprintf("sending to %q failed: %s", e.to, boundedProviderError(err)), ep)
 		return
 	}
 	e.record(name, session.AlertDispositionSent, fmt.Sprintf("sent to %q", e.to), ep)
@@ -158,9 +154,29 @@ func (e *startupHealthEscalator) compose(ep session.StartupHealthEpisode) (subje
 	fmt.Fprintf(&b, "Last failure: %s\n", ep.LastFailureAt.Format(time.RFC3339))
 	if ep.Kind == session.FailureKindStartupDeath {
 		b.WriteString("\n")
-		b.WriteString(e.stderrSection(ep.SessionName))
+		b.WriteString(e.stderrSection(startupStderrRuntimeName(ep)))
 	}
 	return subject, b.String()
+}
+
+// startupStderrRuntimeName is the runtime session name start-stderr.log was
+// written under: the failed attempt's own, which for a pool row is not the
+// episode key. An episode recorded without one falls back to its key.
+func startupStderrRuntimeName(ep session.StartupHealthEpisode) string {
+	if ep.RuntimeSessionName != "" {
+		return ep.RuntimeSessionName
+	}
+	return ep.SessionName
+}
+
+// boundedProviderError renders a mail provider's error for the log with
+// secrets redacted and its length bounded, on a rune boundary.
+func boundedProviderError(err error) string {
+	text := runtime.RedactSecrets(err.Error(), runtime.SetupCommandSecrets(nil))
+	if len(text) <= startupHealthEscalationErrorMaxBytes {
+		return text
+	}
+	return runeAligned([]byte(text[:startupHealthEscalationErrorMaxBytes]), false) + "..."
 }
 
 // stderrSection renders the redacted tail of the session's start-stderr.log, or
@@ -200,9 +216,10 @@ func startupStderrPath(cityPath, sessionName string) (string, bool) {
 }
 
 // readStartupStderrTail returns at most limit bytes from the end of the file,
-// with secrets redacted and without splitting a UTF-8 sequence. The redaction
-// runs over a wider window than the returned tail so a secret that straddles
-// the cut is replaced whole rather than left half visible.
+// with secrets redacted and without splitting a UTF-8 sequence. It reads
+// runtime.OutputTailRetention(limit) bytes so a secret straddling the cut is
+// redacted whole (runtime.RedactSecretsTail), and drops what may be the head
+// of a secret cut off by the read window.
 func readStartupStderrTail(path string, limit int) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -213,20 +230,21 @@ func readStartupStderrTail(path string, limit int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	window := int64(limit + startupHealthEscalationRedactMargin)
 	start := int64(0)
-	if info.Size() > window {
+	if window := int64(runtime.OutputTailRetention(limit)); info.Size() > window {
 		start = info.Size() - window
 	}
 	buf := make([]byte, info.Size()-start)
 	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
 		return "", err
 	}
-	text := runtime.RedactSecrets(runeAligned(buf, start > 0), runtime.SetupCommandSecrets(nil))
-	if len(text) > limit {
-		text = runeAligned([]byte(text[len(text)-limit:]), true)
+	secrets := runtime.SetupCommandSecrets(nil)
+	text := runeAligned(buf, start > 0)
+	if start > 0 {
+		text = runtime.TrimDecapitatedSecret(text, secrets)
 	}
-	return text, nil
+	text, trimmed := runtime.RedactSecretsTail(text, limit, secrets)
+	return runeAligned([]byte(text), trimmed), nil
 }
 
 // runeAligned converts b to a string; when b begins mid-file, bytes that are

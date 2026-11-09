@@ -16,6 +16,7 @@ const StartupHealthEpisodeType = "startup-health-episode"
 // Metadata keys backing the fields of StartupHealthEpisode on its bead.
 const (
 	StartupHealthSessionNameMetadataKey      = "startup_health_session_name"
+	StartupHealthRuntimeNameMetadataKey      = "startup_health_runtime_session_name"
 	StartupHealthConsecutiveMetadataKey      = "startup_health_consecutive"
 	StartupHealthFirstFailureMetadataKey     = "startup_health_first_failure_at"
 	StartupHealthLastFailureMetadataKey      = "startup_health_last_failure_at"
@@ -70,14 +71,18 @@ const (
 // failures for one session name, used to escalate and quarantine a session
 // whose provider start keeps failing.
 type StartupHealthEpisode struct {
-	SessionName      string
-	ConsecutiveCount int
-	FirstFailureAt   time.Time
-	LastFailureAt    time.Time
-	LastDetail       string
-	Kind             FailureKind
-	AlertDisposition AlertDisposition
-	QuarantinedUntil time.Time
+	SessionName string
+	// RuntimeSessionName is the runtime session name of the last failed
+	// attempt, the name the runtime wrote start-stderr.log under. It differs
+	// from SessionName for a pool row, whose episode is keyed by identity.
+	RuntimeSessionName string
+	ConsecutiveCount   int
+	FirstFailureAt     time.Time
+	LastFailureAt      time.Time
+	LastDetail         string
+	Kind               FailureKind
+	AlertDisposition   AlertDisposition
+	QuarantinedUntil   time.Time
 }
 
 // StartupHealthEpisodeFromMetadata projects a StartupHealthEpisode from a
@@ -87,10 +92,11 @@ type StartupHealthEpisode struct {
 // observe raw persisted state without this projection silently discarding it.
 func StartupHealthEpisodeFromMetadata(meta map[string]string) StartupHealthEpisode {
 	ep := StartupHealthEpisode{
-		SessionName:      meta[StartupHealthSessionNameMetadataKey],
-		LastDetail:       meta[StartupHealthLastDetailMetadataKey],
-		Kind:             FailureKind(meta[StartupHealthKindMetadataKey]),
-		AlertDisposition: AlertDisposition(meta[StartupHealthAlertMetadataKey]),
+		SessionName:        meta[StartupHealthSessionNameMetadataKey],
+		RuntimeSessionName: meta[StartupHealthRuntimeNameMetadataKey],
+		LastDetail:         meta[StartupHealthLastDetailMetadataKey],
+		Kind:               FailureKind(meta[StartupHealthKindMetadataKey]),
+		AlertDisposition:   AlertDisposition(meta[StartupHealthAlertMetadataKey]),
 	}
 	if n, err := strconv.Atoi(meta[StartupHealthConsecutiveMetadataKey]); err == nil {
 		ep.ConsecutiveCount = n
@@ -117,6 +123,7 @@ func StartupHealthEpisodeFromMetadata(meta map[string]string) StartupHealthEpiso
 func startupHealthEpisodeToMetadata(ep StartupHealthEpisode) map[string]string {
 	return map[string]string{
 		StartupHealthSessionNameMetadataKey:      ep.SessionName,
+		StartupHealthRuntimeNameMetadataKey:      ep.RuntimeSessionName,
 		StartupHealthConsecutiveMetadataKey:      strconv.Itoa(ep.ConsecutiveCount),
 		StartupHealthFirstFailureMetadataKey:     formatStartupHealthTime(ep.FirstFailureAt),
 		StartupHealthLastFailureMetadataKey:      formatStartupHealthTime(ep.LastFailureAt),
@@ -152,14 +159,15 @@ func RecordStartupFailure(prior StartupHealthEpisode, kind FailureKind, detail s
 		detailRunes = detailRunes[:startupHealthLastDetailMaxRunes]
 	}
 	next := StartupHealthEpisode{
-		SessionName:      prior.SessionName,
-		ConsecutiveCount: prior.ConsecutiveCount + 1,
-		FirstFailureAt:   firstFailureAt,
-		LastFailureAt:    now,
-		LastDetail:       string(detailRunes),
-		Kind:             kind,
-		AlertDisposition: prior.AlertDisposition,
-		QuarantinedUntil: prior.QuarantinedUntil,
+		SessionName:        prior.SessionName,
+		RuntimeSessionName: prior.RuntimeSessionName,
+		ConsecutiveCount:   prior.ConsecutiveCount + 1,
+		FirstFailureAt:     firstFailureAt,
+		LastFailureAt:      now,
+		LastDetail:         string(detailRunes),
+		Kind:               kind,
+		AlertDisposition:   prior.AlertDisposition,
+		QuarantinedUntil:   prior.QuarantinedUntil,
 	}
 	if next.ConsecutiveCount >= threshold {
 		next.QuarantinedUntil = now.Add(quarantineDuration)

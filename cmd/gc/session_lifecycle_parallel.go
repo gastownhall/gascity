@@ -3183,7 +3183,7 @@ func commitStartResultTraced(
 		// crash-loop accounting: a provider Start that failed still delays the
 		// next one. A collision with an existing session is not a start failure.
 		if result.unattributedErr != nil && result.providerStartCalled && !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
-			recordStartupHealthFailure(info, name, result.unattributedErr, sessFront, clk, stderr)
+			recordStartupHealthFailure(info, name, result.unattributedErr, result.diedDuringStartup, sessFront, clk, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.unattributedErr, result.phases)
 		return startCommitFailed
@@ -3600,7 +3600,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		recordStartupHealthFailure(info, name, result.err, sessFront, clk, stderr)
+		recordStartupHealthFailure(info, name, result.err, result.diedDuringStartup, sessFront, clk, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
@@ -3673,7 +3673,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 // recordStartupHealthFailure accrues one failed start on the session's
 // startup-health episode, which quarantines the name once it reaches
 // defaultMaxWakeAttempts.
-func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
+func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, died bool, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
 	episodeKey := startupHealthEpisodeKey(info, name)
 	prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey)
 	if loadErr != nil {
@@ -3681,11 +3681,8 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 		return
 	}
 	prior.SessionName = episodeKey
-	kind := sessionpkg.FailureKindOther
-	if errors.Is(err, context.DeadlineExceeded) {
-		kind = sessionpkg.FailureKindTimeout
-	}
-	episode := sessionpkg.RecordStartupFailure(prior, kind, err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+	prior.RuntimeSessionName = name
+	episode := sessionpkg.RecordStartupFailure(prior, startupFailureKind(err, died), err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
 	if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 	}

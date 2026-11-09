@@ -411,41 +411,34 @@ func TestStartupHealthEscalationOutcomeWriteFailureNeverResends(t *testing.T) {
 	}
 }
 
-// Replaying one stale pending observation, from any number of goroutines,
-// claims the episode once.
+// The store's pending-to-sending compare-and-set is the one-shot guard, and it
+// is not atomic across callers (SetStartupHealthAlert): the controller runs
+// one sweep at a time, and each tick builds a fresh escalator. So a stale
+// pending observation replayed by later ticks' escalators, each over the same
+// durable store, claims the episode once.
 func TestStartupHealthEscalationReplayedObservationClaimsOnce(t *testing.T) {
 	fx := newEscalationFixture(t, escalationTestRecipient)
 	ep := pendingEpisode("s1", session.FailureKindOther)
 	fx.seed(t, ep)
 
-	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fx.esc.escalate(ep)
-		}()
+		fx.newEscalator(escalationTestRecipient).escalate(ep)
 	}
-	wg.Wait()
 
 	if got := fx.mail.attempts(); got != 1 {
 		t.Fatalf("send attempts = %d, want 1", got)
 	}
 }
 
-func TestStartupHealthEscalationConcurrentSweepsSendOnce(t *testing.T) {
+// Successive ticks' sweeps, each a fresh escalator over the same store, send
+// one escalation for the episode.
+func TestStartupHealthEscalationRepeatedSweepsSendOnce(t *testing.T) {
 	fx := newEscalationFixture(t, escalationTestRecipient)
 	fx.seed(t, pendingEpisode("s1", session.FailureKindOther))
 
-	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fx.esc.sweep()
-		}()
+		fx.newEscalator(escalationTestRecipient).sweep()
 	}
-	wg.Wait()
 
 	if got := fx.mail.attempts(); got != 1 {
 		t.Fatalf("send attempts = %d, want 1", got)
@@ -580,20 +573,36 @@ func TestStartupHealthEscalationTailOnlyForStartupDeath(t *testing.T) {
 }
 
 func TestStartupHealthEscalationSessionNameCannotEscapeDiagnosticsDir(t *testing.T) {
-	fx := newEscalationFixture(t, escalationTestRecipient)
-	outside := filepath.Join(fx.cityPath, "outside")
-	if err := os.MkdirAll(outside, 0o755); err != nil {
-		t.Fatal(err)
+	// The log is read by the runtime session name; a pool row's differs from
+	// its episode key, so both names are held to the same guard.
+	cases := map[string]func(session.StartupHealthEpisode) session.StartupHealthEpisode{
+		"episode key": func(ep session.StartupHealthEpisode) session.StartupHealthEpisode {
+			ep.SessionName = "../../../outside"
+			return ep
+		},
+		"runtime name": func(ep session.StartupHealthEpisode) session.StartupHealthEpisode {
+			ep.RuntimeSessionName = "../../../outside"
+			return ep
+		},
 	}
-	if err := os.WriteFile(filepath.Join(outside, "start-stderr.log"), []byte("ESCAPED\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fx.seed(t, pendingEpisode("../../../outside", session.FailureKindStartupDeath))
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			fx := newEscalationFixture(t, escalationTestRecipient)
+			outside := filepath.Join(fx.cityPath, "outside")
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, "start-stderr.log"), []byte("ESCAPED\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fx.seed(t, mutate(pendingEpisode("s1-pool", session.FailureKindStartupDeath)))
 
-	fx.esc.sweep()
+			fx.esc.sweep()
 
-	if strings.Contains(fx.onlyMessage(t).Body, "ESCAPED") {
-		t.Fatal("session name traversed out of the diagnostics directory")
+			if strings.Contains(fx.onlyMessage(t).Body, "ESCAPED") {
+				t.Fatal("session name traversed out of the diagnostics directory")
+			}
+		})
 	}
 }
 
