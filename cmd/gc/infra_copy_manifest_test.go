@@ -2554,3 +2554,71 @@ func TestStorageStatusNamesTheChoiceForAPresumedReusedStrand(t *testing.T) {
 		t.Errorf("status blames an unfenced writer for a presumed-reused row:\n%s", out)
 	}
 }
+
+// A row that metadata alone made infrastructure class is told its in-place
+// repair first, per id, and is not lumped with the copy-it-in rows.
+func TestInfraStrandedAdviceNamesTheDeclassifyRepair(t *testing.T) {
+	declass := map[string][]string{"su-1": {"gc.root_bead_id"}}
+	advice := infraStrandedAdviceFor([]string{"gc-3", "su-1"}, nil, nil, declass)
+	if !strings.Contains(advice, "`gc bd update su-1 --unset-metadata gc.root_bead_id`") {
+		t.Errorf("advice does not spell the in-place repair for su-1: %s", advice)
+	}
+	if !strings.Contains(advice, "1 of them (gc-3) are absent") {
+		t.Errorf("the copy-it-in sentence does not name only gc-3: %s", advice)
+	}
+	if !strings.Contains(advice, "--"+strandedMoveFlag) {
+		t.Errorf("advice does not name the opt-in copy for a real workflow step: %s", advice)
+	}
+	only := infraStrandedAdviceFor([]string{"su-1"}, nil, nil, declass)
+	if strings.Contains(only, "could not fence them") || !strings.HasPrefix(only, "su-1 is infrastructure class only because of metadata (gc.root_bead_id)") {
+		t.Errorf("declassify only = %q", only)
+	}
+	// A held-different id keeps its own remedy even when its metadata alone
+	// decides its class.
+	held := infraStrandedAdviceFor([]string{"su-1"}, []string{"su-1"}, nil, declass)
+	if strings.Contains(held, "--unset-metadata") {
+		t.Errorf("a held-different id was told to unset metadata: %s", held)
+	}
+}
+
+// gc storage status on a city stranded by an agent's plain `bd create`
+// carrying gc.root_bead_id (substrate 2026-11-09): exit 1, the serving verdict
+// says degraded, and the advice spells the in-place repair for that row and
+// not for a gc:session row stranded beside it.
+func TestStorageStatusNamesTheDeclassifyRepairAndDegradedServing(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "stray session", Type: "session", Labels: []string{"gc:session"}})
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 1 {
+		t.Fatalf("status exited %d with two stranded rows, want 1: %s", code, stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"serving:     degraded — 2 stranded row(s)", "gc bd update " + work.ID + " --unset-metadata gc.root_bead_id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc bd update "+session.ID) {
+		t.Errorf("status tells the gc:session row to drop its metadata:\n%s", out)
+	}
+
+	// The repair in place, as gc bd judges it: unsetting the key returns the
+	// row to work, which the work store holds, and status is clean again.
+	before, err := source.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := coordclass.Mutation{UnsetMetadata: []string{"gc.root_bead_id"}}.Apply(before)
+	if flip := coordclass.CheckFlip(before, after, []coordclass.Class{coordclass.ClassWork}); flip != nil {
+		t.Fatalf("the declassify write is refused by the flip guard: %v", flip)
+	}
+	if err := source.Update(work.ID, beads.UpdateOpts{UnsetMetadata: []string{"gc.root_bead_id"}}); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+	if strings.Contains(stdout.String(), work.ID) {
+		t.Errorf("status still counts %s after the key was removed:\n%s", work.ID, stdout.String())
+	}
+}

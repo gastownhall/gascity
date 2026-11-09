@@ -237,6 +237,51 @@ func TestCLIStorageRoutesRefuseAnUnconvergedCity(t *testing.T) {
 	}
 }
 
+// TestCLIStorageRoutesServeAStrandedCityDegraded is the one-shot tier of the
+// degraded verdict (substrate 2026-11-09): after an agent's plain `bd create`
+// stamped gc.root_bead_id on ordinary work in a converged city, every gc
+// process refused every infrastructure class, so workers could not claim,
+// close, drain-ack or send mail. The class stores are now the binding's, the
+// warning is on stderr once, and work still resolves to work.
+func TestCLIStorageRoutesServeAStrandedCityDegraded(t *testing.T) {
+	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	source := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session", Labels: []string{"gc:session"}})
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the split city config: %v", err)
+	}
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the fixture city did not converge (%s): %s", report.Outcome, log.String())
+	}
+	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	stderr := captureCLIStorageStderr(t)
+
+	work := beads.NewMemStore()
+	sessions := cliSessionStore(work, nil, cityPath)
+	if sessions == beads.Store(work) {
+		t.Fatal("a stranded city served the session class from the work store")
+	}
+	if _, err := sessions.Create(beads.Bead{Title: "a session", Type: "session", Labels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("a session write on a degraded city was refused: %v", err)
+	}
+	if _, err := sessions.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("a session read on a degraded city was refused: %v", err)
+	}
+	_ = cliSessionStore(work, nil, cityPath)
+	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
+		t.Errorf("the process warned %d time(s), want once: %q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), stranded.ID) {
+		t.Errorf("the warning does not name %s: %q", stranded.ID, stderr.String())
+	}
+	if got := resolveClassStore(cliStorageRoutes(cityPath), work, nil, cityPath, config.BeadClassWork, nil); got != beads.Store(work) {
+		t.Errorf("work resolved to %p on a degraded city, want the work store %p", got, work)
+	}
+}
+
 // TestStorageStatusStaysOffTheOneShotFunnel pins the exemption the refusal
 // depends on: the operator surface must keep working on exactly the city the
 // refusal names.

@@ -56,6 +56,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -430,7 +431,16 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			report.Target = target
 		}
 	}
-	if !report.serving() {
+	// A stranded city whose binding names no id twice serves degraded
+	// (infraMigrationReport.servesDegraded): the stranded rows stay invisible
+	// to their class readers, and this process says so once, here, rather than
+	// refusing every class for them.
+	degraded, degradedAdvice := !report.serving() && report.servesDegraded(), ""
+	if degraded {
+		degradedAdvice = infraMigrationOperatorAdvice(report, logPrefix)
+		printStorageWarningOnce(stderr, strandedDegradedWarning(report, logPrefix))
+	}
+	if !report.serving() && !degraded {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice == "" {
 			advice = fmt.Sprintf("%s: binding %q cannot be served and the reason was not reported (%s)", logPrefix, target.Binding, report.Outcome)
@@ -454,8 +464,9 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// whose open then fails has already reported converged. That ordering
 	// predates this file's note handling and is left as it is: the event
 	// stream reports the verdict this gate reached, and the open's own failure
-	// is what the caller prints.
-	recordStorageBindingOutcome(rec, report, "")
+	// is what the caller prints. A degraded verdict is recorded once, as the
+	// stranded event carrying its advice.
+	recordStorageBindingOutcome(rec, report, degradedAdvice)
 	routes, err := openStorageRoutes(plan, target, cfg, cityPath, rec)
 	if err != nil {
 		return nil, err
@@ -799,7 +810,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationConverged:        events.StorageBindingConverged,
 	infraMigrationGenesis:          events.StorageBindingGenesis,
 	infraMigrationUnconverged:      events.StorageBindingUnconverged,
-	infraMigrationStranded:         events.StorageBindingUnconverged,
+	infraMigrationStranded:         events.StorageBindingStranded,
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
 	infraMigrationRetained:         events.StorageBindingUnconverged,
@@ -820,14 +831,22 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 	if !ok {
 		return
 	}
-	raw, err := json.Marshal(storebinding.StorageBindingOutcomePayload{
+	payload := storebinding.StorageBindingOutcomePayload{
 		Binding:        report.Target.Binding,
 		Database:       report.Target.Database,
 		Outcome:        report.Outcome.String(),
 		Invariant:      invariant,
 		ProvenBeads:    report.ProvenBeads,
 		LostCrossEdges: report.LostCrossEdges,
-	})
+		Serving:        report.serving() || report.servesDegraded() || report.Outcome == infraMigrationNotConfigured,
+	}
+	if report.Outcome == infraMigrationStranded {
+		payload.Stranded = report.Stranded[:min(len(report.Stranded), storebinding.StrandedCap)]
+		payload.StrandedCount = len(report.Stranded)
+		payload.HeldDifferent = report.HeldDifferent
+		payload.PresumedReused = report.PresumedReused
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
@@ -837,6 +856,45 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		Subject: report.Target.Binding,
 		Payload: raw,
 	})
+}
+
+// storageWarningsPrinted holds every (writer, message) a gate warning has
+// already gone to, so a process that resolves its routes again — the CLI
+// funnel after a retire, a supervisor re-booting a city — warns once.
+var (
+	storageWarningsMu      sync.Mutex
+	storageWarningsPrinted map[storageWarningKey]bool
+)
+
+type storageWarningKey struct {
+	w   io.Writer
+	msg string
+}
+
+// printStorageWarningOnce writes msg to w unless this process already has.
+func printStorageWarningOnce(w io.Writer, msg string) {
+	if w == nil {
+		return
+	}
+	key := storageWarningKey{w: w, msg: msg}
+	storageWarningsMu.Lock()
+	if storageWarningsPrinted[key] {
+		storageWarningsMu.Unlock()
+		return
+	}
+	if storageWarningsPrinted == nil {
+		storageWarningsPrinted = make(map[storageWarningKey]bool, 1)
+	}
+	storageWarningsPrinted[key] = true
+	storageWarningsMu.Unlock()
+	fmt.Fprintln(w, msg) //nolint:errcheck // best-effort stderr
+}
+
+// strandedDegradedWarning is the one line a process serving a stranded city
+// degraded prints: the count, the first ids, and where to read the rest.
+func strandedDegradedWarning(report infraMigrationReport, logPrefix string) string {
+	return fmt.Sprintf("%s: WARNING: serving degraded — %d infrastructure bead(s) stranded in the work store (%s) are invisible to their class readers until repaired; the rest of the city serves. Run `gc storage status` for the repair.",
+		logPrefix, len(report.Stranded), infraStrandedIDList(report.Stranded))
 }
 
 // openStorageRoutes opens the planned non-work binding and keys its store by

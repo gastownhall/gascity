@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -484,34 +485,118 @@ func TestStorageGateRefusesAnUnconvergedCityAndNamesTheCommand(t *testing.T) {
 	}
 }
 
-// TestStorageGateRefusalNamesTheStrandedIDs pins where the stranded ids have to
-// live: in the refusal STRING.
+// TestStorageGateServesAStrandedCityDegraded pins Fix 1 of the substrate
+// 2026-11-09 incident: an agent's plain `bd create` stamped gc.root_bead_id on
+// ordinary work in a converged split city, the containment check counted the
+// rows as stranded, and the gate refused every infrastructure class in every gc
+// process — the workers could neither claim, close nor drain-ack while the
+// controller, which checks only at boot, kept dispatching. The writer itself
+// never consults the gate.
 //
-// The supervisor records the error it was handed and nothing else, so a bead id
-// attached to a report field, an event payload or a stderr line the supervisor
-// never captured is an id the operator recovering this city never sees. The
-// count alone is an alarm nobody can act on.
-func TestStorageGateRefusalNamesTheStrandedIDs(t *testing.T) {
+// A stranded id the binding does not hold names one bead, so the city now
+// serves degraded: the routes open exactly as on the converged path, one
+// storage.binding.stranded event names the ids and carries the repair, and
+// the process warns once. A session-class strand degrades too: every class
+// does.
+func TestStorageGateServesAStrandedCityDegraded(t *testing.T) {
 	cityPath, cfg, source, _ := convergedInfraCity(t)
-	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "landed after the proof", Type: "session", Labels: []string{"gc:session"}})
+	task := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	bug := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol bug", Type: "bug", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "landed after the proof", Type: "session", Labels: []string{"gc:session"}})
 
 	var stderr bytes.Buffer
-	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err != nil {
+		t.Fatalf("a city with only absent stranded rows refused to start: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	for _, class := range coordclass.Classes() {
+		if !class.IsInfrastructure() {
+			continue
+		}
+		store := routes.stores[class]
+		if store == nil {
+			t.Fatalf("class %s has no store on a degraded city", class)
+		}
+		if _, refused := store.(refusedClassStore); refused {
+			t.Fatalf("class %s is served by a refusing store on a degraded city", class)
+		}
+	}
+
+	event, payload := decodeStorageBindingOutcome(t, rec)
+	if event.Type != events.StorageBindingStranded {
+		t.Fatalf("recorded %s, want %s", event.Type, events.StorageBindingStranded)
+	}
+	if !payload.Serving || payload.Outcome != "stranded" || payload.StrandedCount != 3 || len(payload.HeldDifferent) != 0 {
+		t.Errorf("payload = %+v, want serving stranded with 3 ids and none held different", payload)
+	}
+	for _, id := range []string{task.ID, bug.ID, session.ID} {
+		if !slices.Contains(payload.Stranded, id) || !strings.Contains(payload.Invariant, id) {
+			t.Errorf("the event does not name stranded %s: %+v", id, payload)
+		}
+	}
+	for _, want := range []string{
+		"gc bd update " + task.ID + " --unset-metadata gc.root_bead_id",
+		"gc bd update " + bug.ID + " --unset-metadata gc.root_bead_id",
+		"gc storage status",
+	} {
+		if !strings.Contains(payload.Invariant, want) {
+			t.Errorf("the event's advice does not say %q: %s", want, payload.Invariant)
+		}
+	}
+	if strings.Contains(payload.Invariant, "gc bd update "+session.ID) {
+		t.Errorf("the advice tells a gc:session row to drop its metadata: %s", payload.Invariant)
+	}
+
+	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
+		t.Fatalf("the gate warned %d time(s), want once; stderr: %s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), task.ID) || !strings.Contains(stderr.String(), "gc storage status") {
+		t.Errorf("the warning names neither the ids nor the re-check: %s", stderr.String())
+	}
+	// A second resolution in the same process (the CLI funnel after a
+	// retire, a supervisor re-booting the city) does not warn again.
+	again, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("the second gate refused: %v", err)
+	}
+	_ = again.close()
+	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
+		t.Errorf("the gate warned %d time(s) across two resolutions, want once", got)
+	}
+}
+
+// TestStorageGateRefusesAStrandedIDHeldByADifferentBead is the control: a
+// stranded id the binding holds for ANOTHER bead names two beads, so the city
+// still refuses, with the ids in the refusal string (the supervisor records
+// that string and nothing else) and a stranded event that says it is not
+// serving.
+func TestStorageGateRefusesAStrandedIDHeldByADifferentBead(t *testing.T) {
+	cityPath, cfg, _, _, _, reused := heldReusedIDCity(t)
+
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
 	if err == nil {
 		_ = routes.close()
-		t.Fatal("a city with a stranded infrastructure write started")
+		t.Fatal("a city whose stranded id the binding holds for a different bead started")
 	}
-	if !strings.Contains(err.Error(), stranded.ID) {
-		t.Errorf("the refusal does not name the stranded bead %s: %v", stranded.ID, err)
+	if !strings.Contains(err.Error(), reused.ID) {
+		t.Errorf("the refusal does not name the stranded bead %s: %v", reused.ID, err)
 	}
 	if strings.Contains(err.Error(), "see the ids above") {
 		t.Errorf("the refusal defers to output the supervisor never records: %v", err)
 	}
-	// The refusal must also say what recovery looks like: the ids alone tell
-	// the operator what is wrong, not what to do, and this string is the only
-	// output the supervisor records.
 	if !strings.Contains(err.Error(), "gc storage status") {
 		t.Errorf("the refusal names no recovery re-check: %v", err)
+	}
+	event, payload := decodeStorageBindingOutcome(t, rec)
+	if event.Type != events.StorageBindingStranded || payload.Serving || !slices.Contains(payload.HeldDifferent, reused.ID) {
+		t.Errorf("recorded %s %+v, want a non-serving stranded event naming %s held different", event.Type, payload, reused.ID)
+	}
+	if strings.Contains(stderr.String(), "serving degraded") {
+		t.Errorf("a refusing gate claimed to serve degraded: %s", stderr.String())
 	}
 }
 

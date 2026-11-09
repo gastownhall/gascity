@@ -288,6 +288,7 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageBindingStranded:          AuthorController,
 	StorageRigImport:                AuthorController,
 	StorageRigResidue:               AuthorController,
 }

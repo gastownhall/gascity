@@ -28,17 +28,19 @@ type StorageBindingOutcomePayload struct {
 	// always populated once a binding exists.
 	Database string `json:"database"`
 	// Outcome names what was concluded, and it is FINER than the event type.
-	// Five types carry nine outcomes: not-configured, converged, genesis and
-	// uncheckable each have a type to themselves, while unconverged, stranded,
-	// born-split-blocked, genesis-blocked and retained-copies all arrive as
-	// storage.binding.unconverged.
+	// Six types carry the outcomes: not-configured, converged, genesis,
+	// uncheckable and stranded each have a type to themselves, while
+	// unconverged, born-split-blocked, genesis-blocked, retained-copies and
+	// identity-mismatch all arrive as storage.binding.unconverged.
 	//
-	// They share a type because a subscriber branches on "is this city serving"
-	// and all five answer no; they keep distinct outcomes because an operator
-	// reading one event needs to know which no it was. A consumer switching on
-	// this field must handle all nine — matching only the five type names would
-	// silently drop four real values — and Invariant is the sentence that
-	// explains whichever one arrived.
+	// Those share a type because a subscriber branches on "is this city
+	// serving" and all of them answer no; they keep distinct outcomes because an
+	// operator reading one event needs to know which no it was. Stranded has a
+	// type of its own because it answers both ways (Serving): a stranded city
+	// serves degraded unless a stranded id is held in the binding by a
+	// different bead. A consumer switching on this field must handle every
+	// outcome, and Invariant is the sentence that explains whichever one
+	// arrived.
 	Outcome string `json:"outcome"`
 	// ProvenBeads is the size of the proven-copy manifest a serving verdict
 	// rests on. "Converged" alone does not distinguish a city serving its whole
@@ -73,7 +75,27 @@ type StorageBindingOutcomePayload struct {
 	// on every verdict that reads the cleared note, so the record outlives the
 	// migrate run that dropped them.
 	LostCrossEdges []string `json:"lost_cross_edges,omitempty"`
+	// Serving reports whether the process that reached this verdict serves the
+	// city: true for converged, genesis and not-configured, and for a stranded
+	// city that serves degraded; false for every refusal. It is what a
+	// subscriber branches on for a storage.binding.stranded event, which
+	// arrives both ways.
+	Serving bool `json:"serving"`
+	// Stranded names the stranded ids a storage.binding.stranded event is
+	// about, capped at the first StrandedCap in id order; StrandedCount is the
+	// whole count. Both are empty on every other type.
+	Stranded      []string `json:"stranded,omitempty"`
+	StrandedCount int      `json:"stranded_count,omitempty"`
+	// HeldDifferent names the stranded ids the binding holds for a different
+	// bead. Any one of them makes the city refuse rather than serve degraded.
+	HeldDifferent []string `json:"held_different,omitempty"`
+	// PresumedReused names the stranded ids a legacy manifest lists by a bare
+	// id they are younger than; they do not stop the city serving.
+	PresumedReused []string `json:"presumed_reused,omitempty"`
 }
+
+// StrandedCap bounds the ids a storage.binding.stranded payload lists.
+const StrandedCap = 50
 
 // IsEventPayload marks StorageBindingOutcomePayload as an events.Payload
 // variant.
@@ -112,6 +134,7 @@ func init() {
 		events.StorageBindingUnconverged,
 		events.StorageBindingUncheckable,
 		events.StorageBindingNotConfigured,
+		events.StorageBindingStranded,
 	} {
 		events.RegisterPayload(eventType, StorageBindingOutcomePayload{})
 	}
