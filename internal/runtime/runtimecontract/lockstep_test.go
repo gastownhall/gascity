@@ -205,6 +205,13 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 			// runtime.Provider method backs; see wireOnlyCodes.
 			continue
 		}
+		if req.Group == GroupServer {
+			// server-stop backs TeardownServer, which is not a
+			// RunProviderTests case: it is contract-tested by
+			// runtimetest.RunServerTeardownContract (RUNTIME-CONTRACT-023)
+			// over the same golden reference.
+			continue
+		}
 		if req.Group == GroupFSHost {
 			// fs.host is a handshake token whose promise (a shared filesystem
 			// view and user) no runtime.Provider method states; gc's side of

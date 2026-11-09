@@ -197,11 +197,17 @@ func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string,
 
 // start sends a start config for name and returns the raw outcome.
 func (r *runner) start(ctx context.Context, name string) outcome {
+	return r.startIn(ctx, nil, name)
+}
+
+// startIn is start with env added to the executable's environment (a
+// city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func (r *runner) startIn(ctx context.Context, env []string, name string) outcome {
 	cfg, _ := json.Marshal(struct {
 		WorkDir string `json:"work_dir,omitempty"`
 		Command string `json:"command,omitempty"`
 	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command})
-	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "start", name)
+	return r.opEnv(ctx, r.opts.StartTimeout, env, cfg, "start", name)
 }
 
 // provision sends a provision config for name and returns the raw outcome.

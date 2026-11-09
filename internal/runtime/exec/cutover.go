@@ -52,6 +52,8 @@ var (
 	_ runtime.InventoryGate             = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
 	_ runtime.InventoryLister           = (*seamBackedProvider)(nil)
+
+	_ runtime.ServerLifecycleProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -144,6 +146,18 @@ func (s *seamBackedProvider) ListRunningComplete() bool {
 // V2Readiness passes through to the underlying provider's handshake.
 func (s *seamBackedProvider) V2Readiness() ([]string, error) {
 	return s.raw.V2Readiness()
+}
+
+// ConfigureServer passes through to the underlying provider's no-op
+// (non-seam).
+func (s *seamBackedProvider) ConfigureServer() error {
+	return s.raw.ConfigureServer()
+}
+
+// TeardownServer passes through to the underlying provider, which runs
+// `server-stop` for a pack declaring server-lifecycle (non-seam).
+func (s *seamBackedProvider) TeardownServer() error {
+	return s.raw.TeardownServer()
 }
 
 // DismissKnownDialogs implements [runtime.DialogProvider] (non-seam passthrough).

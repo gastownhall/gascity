@@ -67,6 +67,15 @@ const (
 	// exit 2 from a declared op read as a failure, never as the unknown-op
 	// no-op. With report-attachment it makes an exec runtime v2-ready.
 	ProtocolCapabilityObserveV1 = "observe.v1"
+	// ProtocolCapabilityServerLifecycle declares that the executable owns a
+	// server its boxes run under and implements the `server-stop` op, which
+	// gc runs after it stops the city's sessions (`gc stop`, the
+	// controller's shutdown) to end that server. It exits 0 only when the
+	// server is gone and no session the executable started for the city
+	// remains, and 0 again when there is no server (idempotent). With it the
+	// exec provider's TeardownServer runs `server-stop`; without it,
+	// TeardownServer sends nothing.
+	ProtocolCapabilityServerLifecycle = "server-lifecycle"
 	// ProtocolCapabilityFSHost declares that the executable's boxes share the
 	// controller's host filesystem: they run on the controller's host, as the
 	// controller's user, with the controller's view of the filesystem, so the
