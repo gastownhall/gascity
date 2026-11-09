@@ -126,6 +126,25 @@ func TestRigStoreBindingFreshnessIsStrict(t *testing.T) {
 	}
 }
 
+// TestRigStoreBindingUnparsableCreatedAtIsReported pins that a durable record
+// whose created_at cannot be parsed is left out of the freshness maximum
+// visibly, not silently: the WARN's detail says how many were skipped.
+func TestRigStoreBindingUnparsableCreatedAtIsReported(t *testing.T) {
+	cityDir := t.TempDir()
+	path := writeRigExport(t, cityDir, "demo", []string{
+		issueLine("d-1", "2026-10-03T12:00:00Z"),
+		issueLine("d-2", "not-a-time"),
+		issueLine("d-3", ""),
+	})
+	r := judgeRigStoreBinding(&CheckResult{Name: "rig:demo:store-binding"}, "demo", "demo", "127.0.0.1:1", path, 3, nullTime("2026-10-03T11:59:59Z", t))
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if got := strings.Join(r.Details, "\n"); !strings.Contains(got, "2 export records have an unparsable created_at") {
+		t.Errorf("details = %q, want the unparsable count of 2", got)
+	}
+}
+
 // TestRigStoreBindingLongExportLineDoesNotFailTheRead pins the streaming half
 // of rule R4: the gascity export is 174 MB and a single record can exceed the
 // old bufio.Scanner cap of 10 MB.

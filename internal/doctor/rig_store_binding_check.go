@@ -32,7 +32,9 @@ import (
 // errors exactly when the next export would be quarantined as shrunk.
 const rigStoreBindingMinRetentionPct = 80
 
-// rigStoreBindingQueryTimeout bounds each SQL round-trip the check makes.
+// rigStoreBindingQueryTimeout bounds the whole live-store probe (ping, count
+// and freshness together, via one context) and, as the driver's dial, read and
+// write timeout, each network operation on the connection.
 const rigStoreBindingQueryTimeout = 5 * time.Second
 
 // mysqlUnknownDatabaseErrno is the standard MySQL wire-protocol error
@@ -194,6 +196,9 @@ func judgeRigStoreBinding(r *CheckResult, rigName, database, addr, exportPath st
 		return r
 	}
 	r.Details = append(r.Details, fmt.Sprintf("export baseline: %s (%d durable issues)", filepath.Base(exportPath), stats.durable))
+	if stats.unparsable > 0 {
+		r.Details = append(r.Details, fmt.Sprintf("%d export records have an unparsable created_at and were left out of the freshness comparison", stats.unparsable))
+	}
 
 	if floor := stats.durable * rigStoreBindingMinRetentionPct / 100; stats.durable > 0 && liveCount < floor {
 		r.Status = StatusError
@@ -254,6 +259,9 @@ func openRigStoreBindingConn(host, port, user, password, database string) (*sql.
 type rigExportStats struct {
 	durable int
 	newest  time.Time
+	// unparsable counts durable records whose created_at is not RFC 3339;
+	// they cannot contribute to newest.
+	unparsable int
 }
 
 // latestAcceptedRigExport returns the path to the most recently named
@@ -292,9 +300,12 @@ func latestAcceptedRigExport(cityPath, rigName string) (string, error) {
 // readRigExportStats counts the durable issue records in a JSONL export and
 // finds their newest created_at, truncated to the second in UTC. Records that
 // are not issues (_type other than "issue") or that live in the wisp plane
-// (wisp_plane true) are not in the live issues table and are not counted; this
-// is the rule the export pack's own shrink gate applies. The file is streamed
-// with a json.Decoder, so a record's size is not capped.
+// (wisp_plane true) are not in the live issues table and are not counted. The
+// export pack's shrink gate excludes only the wisp plane; the _type exclusion
+// is this check's own narrowing, and it differs from the gate only for an
+// export carrying non-issue records. Records whose created_at does not parse
+// are counted in unparsable. The file is streamed with a json.Decoder, so a
+// record's size is not capped.
 func readRigExportStats(path string) (rigExportStats, error) {
 	f, err := os.Open(path) //nolint:gosec // path is derived from the city's own export directory
 	if err != nil {
@@ -320,10 +331,13 @@ func readRigExportStats(path string) (rigExportStats, error) {
 			continue
 		}
 		stats.durable++
-		if t, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil {
-			if t = t.UTC().Truncate(time.Second); t.After(stats.newest) {
-				stats.newest = t
-			}
+		t, err := time.Parse(time.RFC3339, rec.CreatedAt)
+		if err != nil {
+			stats.unparsable++
+			continue
+		}
+		if t = t.UTC().Truncate(time.Second); t.After(stats.newest) {
+			stats.newest = t
 		}
 	}
 }
