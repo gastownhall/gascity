@@ -935,6 +935,59 @@ func TestHookClaimTiersKeepTheCASLandingAcrossCanonicalReadback(t *testing.T) {
 			}
 		})
 	}
+	// The fence's two edges. A CAS that lands EXACTLY at window+reserve is
+	// inside the strict greater-than fence and stands; one that lands a
+	// second past it is the straddle the reserve exists to catch, and still
+	// takes the unwind now that the readback no longer spends the fence's
+	// clock.
+	for _, row := range []struct {
+		name       string
+		casLanding time.Duration
+		wantKept   bool
+	}{
+		{name: "exact boundary lands at window+reserve", casLanding: window + reserve, wantKept: true},
+		{name: "genuinely late CAS still unwinds", casLanding: window + reserve + time.Second, wantKept: false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			clock := time.Now()
+			rec := &landingClaimRecorder{}
+			ops := rec.ops(t, turnBoundRoutedWork, &clock)
+			installLandingBdRunner(t, &clock, landingBdTimeline{
+				casLanding: row.casLanding,
+				readback:   5 * time.Second,
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				DrainAck:     true,
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if row.wantKept {
+				if code != 0 {
+					t.Fatalf("code = %d, want 0; a CAS at exactly window+reserve is not past the strict fence; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+				}
+				if len(rec.releases) != 0 {
+					t.Fatalf("releases = %v, want none: the boundary CAS must stand", rec.releases)
+				}
+				return
+			}
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; a CAS past window+reserve must take the straddle unwind; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if len(rec.releases) != 1 || rec.releases[0] != "work-1" {
+				t.Fatalf("releases = %v, want [work-1]: a late CAS must self-release", rec.releases)
+			}
+			if len(rec.windowExpired) != 0 {
+				t.Fatalf("claim_window_expired = %+v, want none: the late-CAS unwind reports the landing, not a spent window", rec.windowExpired)
+			}
+			if rec.drainAcked {
+				t.Fatal("the drain was acknowledged on a straddled claim")
+			}
+		})
+	}
 }
 
 // TestHookClaimLandingRecorder pins the CAS-landing recorder's own contract
