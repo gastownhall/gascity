@@ -17,6 +17,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -391,6 +392,20 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	return findAgentByLegacyTemplate(cfg, template)
 }
 
+// findSessionAgentByTemplate resolves a session's template the way the
+// session itself was built: findAgentByTemplate's exact and migration
+// matches first, then config.FindAgent's rig-stamped copy of a generic
+// scope="rig" agent, which is how session.FindNamedSessionSpec backs each
+// rig's named session. That copy is not an element of cfg.Agents, so
+// callers only read it. The config-drift checks and the v2 template memo's
+// row filter use this helper; other callers keep findAgentByTemplate.
+func findSessionAgentByTemplate(cfg *config.City, template string) *config.Agent {
+	if a := findAgentByTemplate(cfg, template); a != nil {
+		return a
+	}
+	return config.FindAgent(cfg, strings.TrimSpace(template))
+}
+
 // findAgentByLegacyTemplate is findAgentByTemplate's migration fallbacks, for
 // a trimmed template no agent matches exactly: a legacy bound form resolves to
 // the unbound agent, then a legacy unbound form to the one bound agent it
@@ -598,16 +613,18 @@ func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, cl
 // transcriptRoots is the wake failure's conversation probe roots:
 // launchTranscriptRoots of the row's template.
 // rec records a committed manual conversation's resume-failed reset.
-func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string, rec events.Recorder) (sessionpkg.Info, bool) {
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, cityPath string, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string, rec events.Recorder) (sessionpkg.Info, bool) {
 	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return next, true
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
-	if !exitAccrualHolds(info, sessFront) {
+	release, ok := exitAccrualLease(info, sessFront, cityPath)
+	if !ok {
 		return info, true
 	}
+	defer release()
 	// A rapid crash of a resume launch is resume-shaped.
 	info = recordWakeFailure(info, transcriptRoots, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg), resumeFailure{counted: info.ResumeLaunch == "true"}, rec)
 	info = clearLastWokeAt(info, sessFront)
@@ -783,7 +800,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
 // cannot probe, transcript gone) returns false, and the wake failure resets
 // the conversation unless recordWakeFailure retains a committed manual one
-// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is launchTranscriptRoots.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -962,12 +979,14 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 // advanced by every write on either exit path (front-door migration Step 6d,
 // write-returns-Info, STEP6-PREPASS-AUDIT group 5). The default (rapid-crash)
 // path writes nothing and returns the input Info unchanged.
-func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
+func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, cityPath string, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
-		if !exitAccrualHolds(info, sessFront) {
+		release, ok := exitAccrualLease(info, sessFront, cityPath)
+		if !ok {
 			return info, true
 		}
+		defer release()
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
@@ -983,16 +1002,48 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 	}
 }
 
-// exitAccrualHolds reports whether the row, read fresh, still carries the
-// facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
-// destructive decision decides on a fresh read). A tick's snapshot read before
-// an operator's `gc session kill` still names the killed wake, and the dead
-// runtime it then observes is the kill, not a crash: accruing it would count
-// the operator's kill against the session (mc-uhvqj). A moved row, or a failed
-// read, accrues nothing; the next tick decides again.
-func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store) bool {
+// exitAccrualLease takes the row's runtime lease for a rapid-crash or churn
+// accrual and holds it across the accrual's writes; ok is false, and nothing
+// may be written, when the accrual is not decided. The lease is what a
+// starter or stopper holds (I-LEASE): a runtime whose lease a live holder has
+// is that holder's to start or stop, and its death is no crash or churn. An
+// operator's close stops the runtime under its lease and then commits the
+// close fenced on the row's revision; accruing the death it caused would move
+// the revision under that fence, three writes against its three attempts
+// (ga-u2f94s). Held across the writes, the lease also keeps a close from
+// starting between the decision and the last write: the close waits for it.
+//
+// Under the lease the accrual decides again on a fresh read (CONTRACT §12.5).
+// A tick's snapshot read before an operator's `gc session kill` still names
+// the killed wake, and the dead runtime it then observes is the kill, not a
+// crash: accruing it would count the operator's kill against the session
+// (mc-uhvqj). A held lease, a moved or closed row, or a lease or read that
+// fails accrues nothing; the next tick decides again, so a crash under a
+// holder that did not cause it is counted once the holder releases. Failures
+// other than a busy lease or a moved row are logged.
+func exitAccrualLease(info sessionpkg.Info, sessFront *sessionpkg.Store, cityPath string) (release func(), ok bool) {
+	name := strings.TrimSpace(info.SessionName)
+	if name == "" || !filepath.IsAbs(cityPath) {
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: no runtime lease to take (session name %q, city path %q)\n", info.ID, name, cityPath) //nolint:errcheck
+		return nil, false
+	}
+	lease, err := sessionpkg.TryRuntimeLease(sessFront, sessionpkg.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID, TTL: sessionpkg.RuntimeLeaseTTL(0)})
+	switch {
+	case errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy), errors.Is(err, sessionpkg.ErrRuntimeLeaseRowClosed):
+		return nil, false
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: taking runtime %q's lease: %v\n", info.ID, name, err) //nolint:errcheck
+		return nil, false
+	}
 	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
-	return err == nil && held
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session reconciler: deferring the exit accrual of %s: fresh read: %v\n", info.ID, err) //nolint:errcheck
+	}
+	if err != nil || !held {
+		lease.Release()
+		return nil, false
+	}
+	return lease.Release, true
 }
 
 func isDeliberateSleepReason(reason string) bool {
@@ -1179,6 +1230,15 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 		} else if sessionStartRequestedInfo(info, clk) {
 			target = string(sessionpkg.StateStartPending)
 		}
+	}
+	// A live row its start committed active keeps that state while the
+	// start's pending_create_claim is still set (a commit written key by key
+	// that stopped part way), until recoverRunningPendingCreate clears it.
+	// Awake would make the row a pending create again (CanRollback treats
+	// awake as advisory): if that clear has to wait for the runtime lease,
+	// the next tick would roll the row back, stopping its own live box.
+	if alive && info.PendingCreateClaim && sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateActive {
+		target = info.MetadataState
 	}
 	stalePendingCreateRollback := false
 	if !alive && strings.TrimSpace(info.MetadataState) == "failed-create" {
@@ -1517,7 +1577,12 @@ func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string)
 // knownSessionStates is the set of bead metadata "state" values that the
 // current reconciler understands. Beads with unrecognized states are skipped
 // during reconciliation to allow forward-compatible rollback from newer
-// versions that add states like "draining" or "archived".
+// versions that add states, and to leave this binary's own parked rows alone
+// (archived, closing, and a draining without its drain-ack reason). This
+// binary's own close codes are not listed: a row
+// that still carries one is an interrupted close, which the reconciler
+// finishes, or rolls back, before the skip (interruptedCloseGate,
+// finishInterruptedClose).
 var knownSessionStates = map[string]bool{
 	"active":                             true,
 	"asleep":                             true,
@@ -1534,12 +1599,42 @@ var knownSessionStates = map[string]bool{
 	"":                                   true, // empty state is valid (legacy beads)
 }
 
-// isKnownStateInfo returns true if the session's metadata state is recognized by
-// the current reconciler. Unknown states (from a newer version) are skipped to
-// prevent panics during rollback. It keys off the RAW metadata state
+// isKnownStateInfo returns true if the session's metadata state is one this
+// gc version's controller manages. States outside the set are skipped during
+// reconciliation: both the ones another gc version wrote (forward-compatible
+// rollback in a mixed-version fleet) and this version's own parked rows (see
+// knownSessionStates). It keys off the RAW metadata state
 // (Info.MetadataState, untrimmed).
 func isKnownStateInfo(i sessionpkg.Info) bool {
 	return knownSessionStates[i.MetadataState]
+}
+
+// isUnknownStateInfo returns true if the session's raw metadata state is one
+// this gc version's controller does not manage: the rows the census counts as
+// unknown, which v2 skips (A5) and its migration gate refuses to boot over. A
+// drain-ack stop-pending row is excluded: the drain-ack stop-pending handler
+// owns it outright and continues before the skip. The legacy reconciler skips
+// these rows too, except an interrupted close of this binary's own, which it
+// finishes, or rolls back, first (interruptedCloseGate). It keys off the RAW
+// metadata state (Info.MetadataState, untrimmed), like isKnownStateInfo.
+func isUnknownStateInfo(i sessionpkg.Info) bool {
+	return !isKnownStateInfo(i) && !isDrainAckStopPendingInfo(i)
+}
+
+// unknownStateRefusal is the operator-facing reason the controller will not
+// act on a wake, reset or kill of info's row because it skips the row's state,
+// or "" when it does not skip it. A closed row is not refused, whatever close
+// code its state carries: the verb answers it as closed, and a close of it
+// does nothing. Nor is an interrupted close: the reconciler finishes it, or
+// rolls it back to asleep, rather than skip it, and v2 never runs over one.
+func unknownStateRefusal(i sessionpkg.Info) string {
+	if i.Closed || !isUnknownStateInfo(i) {
+		return ""
+	}
+	if _, interrupted := interruptedCloseGate(i); interrupted {
+		return ""
+	}
+	return fmt.Sprintf("its state %q is not one this gc version's controller manages, so the controller skips it; `gc session close %s` releases it", i.MetadataState, i.ID)
 }
 
 // reverseBeads returns a reversed copy of the bead slice.

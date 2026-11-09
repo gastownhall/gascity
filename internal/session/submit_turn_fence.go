@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -147,16 +148,19 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 	})
 	out := SubmitOutcome{Interrupt: &report}
 	if now {
-		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 		// A send the runtime refused as unavailable sent nothing, as
-		// runtime.TurnFenceProvider requires: queue it.
-		if !errors.Is(sendErr, runtime.ErrRuntimeUnavailable) {
+		// runtime.TurnFenceProvider requires: queue it. So did one refused
+		// behind a pending interaction that opened after the up-front look:
+		// the turn may already be interrupted, so the message is queued for
+		// after the interaction is answered, never dropped.
+		if !errors.Is(sendErr, runtime.ErrRuntimeUnavailable) && !errors.Is(sendErr, ErrPendingInteraction) {
 			out.Queued, out.Deferred = queued, queued
 			recordTurnInterrupt(ctx, sessName, report, out, sendErr)
 			return out, sendErr
 		}
 	}
-	if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+	if err := m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit); err != nil {
 		recordTurnInterrupt(ctx, sessName, report, out, err)
 		return out, err
 	}

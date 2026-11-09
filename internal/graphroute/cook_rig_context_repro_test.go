@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -102,7 +103,7 @@ func TestCookRigContext_StoreRefFallbackResolvesBareTarget(t *testing.T) {
 		"rig:dip",      // rootStoreRef supplies the rig context via store-scope fallback
 		"",             // routedTo
 		"",             // sessionName
-		nil, "test-city", cfg, deps,
+		beads.SessionStore{}, "test-city", cfg, deps,
 	)
 	if err != nil {
 		t.Fatalf("store-scope fallback should resolve bare rig target, got: %v", err)
@@ -135,7 +136,7 @@ func TestCookRigContext_StoreRefFallbackResolvesFormulaRoleAlias(t *testing.T) {
 		"rig:dip",      // rootStoreRef supplies the rig context via store-scope fallback
 		"",             // routedTo
 		"",             // sessionName
-		nil, "test-city", cfg, deps,
+		beads.SessionStore{}, "test-city", cfg, deps,
 	)
 	if err != nil {
 		t.Fatalf("store-scope fallback should resolve gc role alias, got: %v", err)
@@ -165,7 +166,7 @@ func TestCookRigContext_ExplicitDefaultBindingResolvesBareTarget(t *testing.T) {
 		recipe, GraphWorkflowRouteVars(recipe, nil),
 		"", "formula-cook", "", "rig:dip",
 		GraphRouteBinding{RigContext: "dip", MetadataOnly: true}, // rig context, no route
-		nil, "test-city", cfg, deps,
+		beads.SessionStore{}, "test-city", cfg, deps,
 	)
 	if err != nil {
 		t.Fatalf("explicit rig-context binding should resolve bare rig target, got: %v", err)
@@ -215,7 +216,7 @@ func TestApplyGraphRoutingPreservesBoundFormulaRoleTarget(t *testing.T) {
 	cfg := boundRoleAliasConfig(true)
 	recipe := cookReproRecipeWithTarget("gc.run-operator")
 
-	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", nil, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
+	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", beads.SessionStore{}, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
 	if err != nil {
 		t.Fatalf("ApplyGraphRouting: %v", err)
 	}
@@ -231,7 +232,7 @@ func TestApplyGraphRoutingFallsBackToBareRoleWhenUnbound(t *testing.T) {
 	cfg := boundRoleAliasConfig(false)
 	recipe := cookReproRecipeWithTarget("gc.run-operator")
 
-	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", nil, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
+	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", beads.SessionStore{}, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
 	if err != nil {
 		t.Fatalf("ApplyGraphRouting: %v", err)
 	}

@@ -179,7 +179,7 @@ func TestInventoryActivityIsTheBatchedRead(t *testing.T) {
 	}
 	l := &runtimeInventoryLane{}
 	listing := []inventoryBackend{{label: "tmux", provider: leaf, names: []string{"s"}}}
-	attrs, hosts, errs := l.enrich(context.Background(), listing, []BackendPass{completeBackend("tmux", "s")})
+	attrs, hosts, _, errs := l.enrich(context.Background(), listing, []BackendPass{completeBackend("tmux", "s")})
 	if len(errs) != 0 || !attrs["s"].ActivityKnown || !attrs["s"].LastActivity.Equal(at) {
 		t.Fatalf("enrich = %+v (%v), want the inventory's activity %v", attrs["s"], errs, at)
 	}

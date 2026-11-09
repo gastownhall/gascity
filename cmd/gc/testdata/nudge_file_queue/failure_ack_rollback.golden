@@ -1647,7 +1647,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -1656,7 +1663,6 @@ state.json:
 result: [n-fence] err=<nil>
 rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
 op SetMetadataBatch BEAD-2
 op Close BEAD-2
 state.json:
@@ -1790,7 +1796,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -1806,7 +1819,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -1815,8 +1835,6 @@ state.json:
 result: [n-drop] err=<nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-3
 op Close BEAD-3
 state.json:
@@ -1936,7 +1954,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -1952,7 +1977,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -1968,18 +2000,22 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
 
 ### a failure of an unknown id
 result: [] err=<nil>
-rewrote_state: true
+rewrote_state: false
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 state.json:
 {
   "pending": [
@@ -2097,7 +2133,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2113,7 +2156,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2129,7 +2179,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2137,10 +2194,7 @@ state.json:
 ### claim the acks
 result: [n-ack1 n-ack2 n-ack3 n-ack4 n-roll] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -2260,7 +2314,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2276,7 +2337,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2292,7 +2360,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2301,9 +2376,6 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-4
 op Close BEAD-4
 state.json:
@@ -2411,7 +2483,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2427,7 +2506,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2443,7 +2529,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2452,9 +2545,6 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-5
 op Close BEAD-5
 state.json:
@@ -2548,7 +2638,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2564,7 +2661,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2580,7 +2684,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2589,9 +2700,6 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-6
 op Close BEAD-6
 state.json:
@@ -2671,7 +2779,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2687,7 +2802,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2703,7 +2825,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2712,9 +2841,6 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-7
 op Close BEAD-7
 state.json:
@@ -2780,7 +2906,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2796,7 +2929,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2812,7 +2952,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2821,9 +2968,6 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
 op SetMetadataBatch BEAD-8
 op Close BEAD-8
 state.json:
@@ -2875,7 +3019,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2891,7 +3042,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2907,7 +3065,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -2965,7 +3130,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -2981,7 +3153,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -2997,7 +3176,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -3055,7 +3241,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -3071,7 +3264,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -3087,7 +3287,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -3130,7 +3337,14 @@ state.json:
       "last_error": "managed wake failed: boom",
       "claimed_at": "T-15",
       "lease_until": "T-16",
-      "dead_at": "T-17"
+      "dead_at": "T-17",
+      "shadow": {
+        "state": "failed",
+        "reason": "managed wake failed: boom",
+        "at": "T-17",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-retry",
@@ -3146,7 +3360,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -3162,7 +3383,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -3178,14 +3406,21 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
 
 ### roll back a missing item
 result: <nil>
-rewrote_state: true
+rewrote_state: false
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 op List {label=nudge:n-never include_closed limit=21}
 state.json:
@@ -3220,7 +3455,14 @@ state.json:
       "last_error": "managed wake failed: boom",
       "claimed_at": "T-15",
       "lease_until": "T-16",
-      "dead_at": "T-17"
+      "dead_at": "T-17",
+      "shadow": {
+        "state": "failed",
+        "reason": "managed wake failed: boom",
+        "at": "T-17",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-retry",
@@ -3236,7 +3478,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -3252,7 +3501,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -3268,7 +3524,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -3276,11 +3539,7 @@ state.json:
 ### claim n-short
 result: [n-short] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-roll include_closed limit=21}
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -3313,7 +3572,14 @@ state.json:
       "last_error": "managed wake failed: boom",
       "claimed_at": "T-15",
       "lease_until": "T-16",
-      "dead_at": "T-17"
+      "dead_at": "T-17",
+      "shadow": {
+        "state": "failed",
+        "reason": "managed wake failed: boom",
+        "at": "T-17",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-retry",
@@ -3329,7 +3595,14 @@ state.json:
       "last_error": "delivery refused",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-13"
+      "dead_at": "T-13",
+      "shadow": {
+        "state": "failed",
+        "reason": "delivery refused",
+        "at": "T-13",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-drop",
@@ -3345,7 +3618,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-fence",
@@ -3361,7 +3641,14 @@ state.json:
       "last_error": "queued nudge session fence mismatch",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-14"
+      "dead_at": "T-14",
+      "shadow": {
+        "state": "failed",
+        "reason": "queued nudge session fence mismatch",
+        "at": "T-14",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -3372,11 +3659,6 @@ rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 op SetMetadataBatch BEAD-10
 op Close BEAD-10
-op List {label=nudge:n-roll include_closed limit=21}
-op List {label=nudge:n-retry include_closed limit=21}
-op List {label=nudge:n-drop include_closed limit=21}
-op List {label=nudge:n-fence include_closed limit=21}
-op List {label=nudge:n-short include_closed limit=21}
 state.json:
 {
   "dead": [
@@ -3393,7 +3675,14 @@ state.json:
       "last_error": "expired",
       "claimed_at": "T-18",
       "lease_until": "T-19",
-      "dead_at": "T-20"
+      "dead_at": "T-20",
+      "shadow": {
+        "state": "expired",
+        "reason": "expired",
+        "at": "T-20",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }

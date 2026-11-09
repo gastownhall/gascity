@@ -10,8 +10,9 @@ import (
 
 // memoryOrderDispatcher is the controller's live order dispatcher and the
 // concrete implementation of the reusable orderdispatch.Dispatcher seam. The
-// webhook receiver (E3/E6) fires orders through this same instance, so a webhook
-// dispatch and a tick dispatch run the identical dispatchOne core.
+// webhook receiver (E3/E6) fires orders through a per-delivery instance
+// (controllerState.WebhookDispatcher), so a webhook dispatch and a tick dispatch
+// run the identical dispatchOne core.
 var _ orderdispatch.Dispatcher = (*memoryOrderDispatcher)(nil)
 
 // Dispatch fires a pre-resolved order through the shared launchResolvedDispatch
@@ -21,11 +22,14 @@ var _ orderdispatch.Dispatcher = (*memoryOrderDispatcher)(nil)
 // target=="order", the order opts in with trigger=="webhook", the {order,rig}
 // is within the webhook's provenance scope, and untrusted payload args have been
 // namespaced into req.ExecEnv (R4). Dispatch therefore only re-checks required
-// params (defense in depth), resolves the order's store, and launches the async
-// dispatch. It returns as soon as the tracking bead is written and the goroutine
-// is launched; the wisp/exec runs asynchronously and its outcome lands on the
-// events feed (OrderFired/Completed/Failed), matching the design's fast-ACK
-// response contract (verify+match+enqueue synchronously, work runs async).
+// params (defense in depth), resolves the order's store target, refuses an order
+// its scope's backend rules out (the tick loop's requires_backend gate, reported
+// once per controller boot as order.inapplicable), opens the store, and launches
+// the async dispatch. It returns as soon as the tracking bead is written and the
+// goroutine is launched; the wisp/exec runs asynchronously and its outcome lands
+// on the events feed (OrderFired/Completed/Failed), matching the design's
+// fast-ACK response contract (verify+match+enqueue synchronously, work runs
+// async).
 func (m *memoryOrderDispatcher) Dispatch(ctx context.Context, req orderdispatch.DispatchRequest) (orderdispatch.DispatchResult, error) {
 	a := req.Order
 	scoped := a.ScopedName()

@@ -58,6 +58,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
         "@io_k8s_api//core/v1:core",

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -54,7 +55,7 @@ func TestSubmitFollowUpQueuesThroughAnInjectedDeferredQueue(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := t.TempDir()
 	queue := &recordingDeferredQueue{}
-	mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(cityPath), WithDeferredSubmitQueue(queue))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(cityPath), WithDeferredSubmitQueue(queue))
 
 	before := time.Now().UTC()
 	info, outcome, err := submitFollowUpToCodex(t, mgr, store)
@@ -71,7 +72,7 @@ func TestSubmitFollowUpQueuesThroughAnInjectedDeferredQueue(t *testing.T) {
 	if !strings.HasPrefix(item.ID, "nudge-") || len(item.ID) != len("nudge-")+12 {
 		t.Fatalf("ID = %q, want nudge-<12>", item.ID)
 	}
-	if item.Agent != "helper-alias" || item.SessionID != info.ID || item.Source != "session" || item.Message != "follow up later" {
+	if item.Agent != "helper-alias" || item.SessionID != info.ID || item.Source != nudgequeue.SourceSubmit || item.Message != "follow up later" {
 		t.Fatalf("item = %+v, want the follow-up addressed to helper-alias for %s", item, info.ID)
 	}
 	if item.ContinuationEpoch != deferredSubmitEpoch(beads.Bead{Metadata: mustSessionMetadata(t, store, info.ID)}) {
@@ -100,7 +101,7 @@ func TestSubmitFollowUpWithoutAnInjectedQueueWritesStateJSON(t *testing.T) {
 	for _, opts := range [][]ManagerOption{nil, {WithDeferredSubmitQueue(nil)}} {
 		store := beads.NewMemStore()
 		cityPath := t.TempDir()
-		mgr := NewManagerWithOptions(store, runtime.NewFake(), append([]ManagerOption{WithCityPath(cityPath)}, opts...)...)
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), append([]ManagerOption{WithCityPath(cityPath)}, opts...)...)
 		if _, _, err := submitFollowUpToCodex(t, mgr, store); err != nil {
 			t.Fatalf("Submit(follow_up): %v", err)
 		}
@@ -134,7 +135,7 @@ func TestSubmitFollowUpWithoutAnInjectedQueueWritesStateJSON(t *testing.T) {
 func TestSubmitFollowUpReportsAnInjectedQueueFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	boom := errors.New("queue refused")
-	mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(t.TempDir()), WithDeferredSubmitQueue(&recordingDeferredQueue{err: boom}))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(t.TempDir()), WithDeferredSubmitQueue(&recordingDeferredQueue{err: boom}))
 	_, _, err := submitFollowUpToCodex(t, mgr, store)
 	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "queueing deferred submit: ") {
 		t.Fatalf("Submit error = %v, want the queue's failure wrapped as a deferred submit", err)
@@ -158,11 +159,11 @@ func TestDeferredSubmitQueueNeedsACityPath(t *testing.T) {
 		{name: "a city path", cityPath: t.TempDir(), want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mgr := NewManagerWithOptions(beads.NewMemStore(), runtime.NewFake(), WithCityPath(tc.cityPath), WithDeferredSubmitQueue(queue))
+			mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), runtime.NewFake(), WithCityPath(tc.cityPath), WithDeferredSubmitQueue(queue))
 			if got := mgr.deferredQueue() != nil; got != tc.want {
 				t.Fatalf("has a deferred queue = %v, want %v", got, tc.want)
 			}
-			err := mgr.enqueueDeferredSubmitLocked(beads.Bead{ID: "s-1"}, "s-name", "hello")
+			err := mgr.enqueueDeferredSubmitLocked(beads.Bead{ID: "s-1"}, "s-name", "hello", nudgequeue.SourceSubmit)
 			if tc.want {
 				if err != nil {
 					t.Fatalf("enqueueDeferredSubmitLocked: %v", err)

@@ -622,3 +622,96 @@ func decodeMoleculeResolvedPayload(t *testing.T, ev events.Event) gcapi.Molecule
 	}
 	return p
 }
+
+// Closing a graph.v2 workflow's input work never cancels the workflow from the
+// autoclose hooks: an in_progress step, the open continuation waiting on it,
+// and their live root are left exactly as they were by both the molecule and
+// the wisp autoclose. Input loss is settled at claim time, not here.
+func TestAutocloseLeavesInFlightWorkflowOpenWhenInputWorkCloses(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "input work", Type: "task"})
+	conv, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}})
+	if err := store.DepAdd(conv.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+		"gc.source_bead_id":                 issue.ID,
+	}})
+	active, _ := store.Create(beads.Bead{Title: "in-flight step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	inProgress, holder := "in_progress", "worker-1"
+	if err := store.Update(active.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &holder}); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := store.Create(beads.Bead{Title: "pending continuation", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	if err := store.DepAdd(next.ID, active.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(blocks): %v", err)
+	}
+	if err := store.Close(issue.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, issue.ID, &out, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, issue.ID, &out, beads.GraphStore{Store: store})
+
+	for id, want := range map[string]string{root.ID: "open", active.ID: "in_progress", next.ID: "open"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != want || got.Metadata[beadmeta.OutcomeMetadataKey] != "" || got.Metadata["close_reason"] != "" {
+			t.Errorf("%s after the input work closed: status=%q metadata=%v, want %s and untouched (out=%q)", id, got.Status, got.Metadata, want, out.String())
+		}
+	}
+}
+
+// TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed pins the
+// rejected arm of the #8729 triage: input-driven cancellation belongs to the
+// claim-time check (the purged verdict), never to the close-time hook. Closing
+// the synthetic input convoy itself — the convoy bead, not a member — must not
+// retire an in-flight graph.v2 workflow: the root and its unfinished steps stay
+// exactly as they were, unstamped by any retirement disposition, and the next
+// claim's input check is what decides the workflow's fate.
+func TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  convoy.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	_ = store.Close(convoy.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, convoy.ID, &out, beads.GraphStore{Store: store})
+
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", out.String())
+	}
+	for _, b := range []struct{ name, id string }{{"root", root.ID}, {"step", step.ID}} {
+		got, err := store.Get(b.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("the in-flight workflow's %s was closed by its input convoy's close; cancellation is the claim-time check's verdict", b.name)
+		}
+		if got.Metadata["close_reason"] != "" || got.Metadata["gc.failure_reason"] != "" {
+			t.Errorf("the in-flight workflow's %s was stamped (close_reason=%q failure_reason=%q) by its input convoy's close", b.name, got.Metadata["close_reason"], got.Metadata["gc.failure_reason"])
+		}
+	}
+}

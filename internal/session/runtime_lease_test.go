@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -33,7 +34,7 @@ func openLeaseStore(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s
@@ -1017,7 +1018,7 @@ func TestRuntimeLeaseRecordTakenAfterAClone(t *testing.T) {
 func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	f := newLeaseFixture(t)
 	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "h/1/n", RuntimeLeaseEpochKey: "3", RuntimeLeaseTTLKey: "240"})
-	if err := ClearRuntimeLeaseForReopen(f.store, f.id); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), f.id); err != nil {
 		t.Fatal(err)
 	}
 	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseTTLKey] != "" || m[RuntimeLeaseEpochKey] != "3" {
@@ -1027,7 +1028,7 @@ func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearRuntimeLeaseForReopen(f.store, other.ID); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), other.ID); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := f.store.Get(other.ID); b.Metadata[RuntimeLeaseHolderKey] != "h/1/n" {

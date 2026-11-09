@@ -10,12 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The session field registry at run time (F1c): what the census proves from
@@ -170,8 +173,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = healRec.keys
 		}},
-		{"v2 A7 row-metadata effect", "agent_name alias alias_history builtin_ancestor close_reason closed_at command configured_named_identity configured_named_session continuation_epoch core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot provider provider_kind resume_command resume_flag resume_style session_id_flag session_key session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at wake_mode", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v6:x", "alias", "stale",
+		{"v2 A7 row-metadata effect", "agent_name alias alias_history builtin_ancestor close_reason closed_at command configured_named_identity configured_named_session continuation_epoch core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot provider provider_kind resume_command resume_flag resume_style session_id_flag session_key session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at wake_mode work_dir", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			c, _ := baselineCase(t, livenessGone, desireSleep, nil, "state", "asleep", "started_config_hash", "v6:x", "alias", "stale", // stopped: a live row mints no key (#5439)
 				poolAliasConflictMetadataKey, "stale", poolAliasConflictCountMetadataKey, "1", poolAliasConflictAtMetadataKey, rowAt(-time.Hour),
 				namedSessionIdentityMetadata, "old", namedSessionMetadataKey, "true", "close_reason", "orphaned", "closed_at", rowAt(-time.Hour))
 			c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
@@ -186,7 +189,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = a7Rec.keys
 		}},
-		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key config_drift_escalated_at continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			withoutA7(t)
 			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
 			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{
@@ -224,7 +227,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			cb.RecordRestart("worker", now)
 			must(t, persistSessionCircuitBreakerMetadata(front, id, cb, "worker", now))
 		}},
-		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 work-ladder step", "work_ladder", []string{"cmd/gc/work_ladder_lane.go:ladderPass.commit"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env, _ := nudgeStepsFixture(t)
 			sess := idleClaimPoolSession()
 			sess.Labels = []string{sessionBeadLabel}
@@ -235,7 +238,64 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
 			}, nil)
 			rec.reset()
-			lane.nudges(context.Background(), env)
+			lane.workLadder(context.Background(), env)
+		}},
+		{"v2 work-ladder step, fresh restart of a rate-limited seat", "continuation_reset_pending restart_requested work_ladder", []string{"cmd/gc/work_ladder_lane.go:ladderPass.commit"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env, _ := nudgeStepsFixture(t)
+			sess := idleClaimPoolSession()
+			sess.Labels = []string{sessionBeadLabel}
+			row, err := rec.MemStore.Create(sess)
+			must(t, err)
+			work := beads.NewMemStore()
+			claim, err := work.Create(beads.Bead{Title: "claimed step", Type: "task"})
+			must(t, err)
+			inProgress := "in_progress"
+			must(t, work.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &row.ID}))
+			claim, err = work.Get(claim.ID)
+			must(t, err)
+			b, err := rec.Get(row.ID)
+			must(t, err)
+			// The seat took a nudge 5m ago, and its provider has refused its
+			// turns since an episode opened 15m ago: the restart is due.
+			delivered := stepsTestNow.Add(-5 * time.Minute)
+			cell := workladder.EncodeLadder(workladder.Record{
+				V: 1, Gen: rowGeneration(b.Metadata), LastNudge: delivered, Delivered: delivered,
+				Entries: []workladder.Entry{{
+					Key: workladder.ClaimKey{Store: "city", Bead: claim.ID}, Kind: workladder.KindClaim, Rung: workladder.RungStarted,
+					Since: delivered.Add(-time.Hour), Attempts: 1, Last: delivered, Next: delivered.Add(workladder.DefaultPausedCap),
+				}},
+				RateLimit: workladder.RateLimit{Phase: workladder.RateLimitOpen, Conv: session.DefaultContinuationEpoch, Since: stepsTestNow.Add(-15 * time.Minute), Checked: stepsTestNow.Add(-time.Minute)},
+			})
+			must(t, rec.MemStore.UpdateIfMatch(row.ID, b.Revision, beads.UpdateOpts{Metadata: map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: claim.ID, "work_ladder": cell}}))
+			env.CityStore = rec
+			env.SP.(*runtime.Fake).SetActivity("session-a", stepsTestNow.Add(-time.Hour))
+			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
+				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{claim}, AssignedStores: []beads.Store{work}, AssignedStoreRefs: []string{""}}
+			}, nil)
+			refused := func(end time.Time) runtime.EndedTurn {
+				return runtime.EndedTurn{TurnID: end.String(), Status: runtime.TurnStatusFailed, EndedAt: end, Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true}}
+			}
+			lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+				return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+					return runtime.TurnHistory{Recent: []runtime.EndedTurn{refused(stepsTestNow.Add(-time.Minute)), refused(stepsTestNow.Add(-2 * time.Minute))}}, nil
+				}
+			}
+			rec.reset()
+			lane.workLadder(context.Background(), env)
+		}},
+		{"v2 work-ladder step, rolled back", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.legacyBackstops"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env, _ := nudgeStepsFixture(t)
+			env.Cfg.Daemon.WorkLadder = "off"
+			sess := idleClaimPoolSession()
+			sess.Labels = []string{sessionBeadLabel}
+			_, err := rec.MemStore.Create(sess)
+			must(t, err)
+			env.CityStore = rec
+			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
+				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
+			}, nil)
+			rec.reset()
+			lane.workLadder(context.Background(), env)
 		}},
 	}
 	// The operator's verbs, in an order each accepts, on one row.
@@ -244,7 +304,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 	opCity := t.TempDir()
 	steps = append(steps, []step{
 		{"operator create (bead only)", "command continuation_epoch generation instance_token pending_create_claim pending_create_started_at provider resume_command resume_flag resume_style session_id_flag session_name session_origin state template work_dir", []string{"internal/session/manager.go:Manager.createBeadOnly"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			m = session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(opCity))
+			m = session.NewManagerWithOptions(beadstest.Sessions(rec), runtime.NewFake(), session.WithCityPath(opCity))
 			_, err := m.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "test-cmd", WorkDir: t.TempDir(), Provider: "fake", BeadOnly: true})
 			must(t, err)
 			id = fieldRow(t, rec.MemStore, "state", "asleep", "sleep_reason", "idle") // the dormant row the later verbs act on
@@ -263,7 +323,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
 		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			_, err := session.WriteKillFence(rec, id, now)
+			_, err := session.WriteKillFence(beadstest.Sessions(rec), id, now)
 			must(t, err)
 		}},
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -384,6 +444,47 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
 			}),
 		},
+		"cmd/gc/reconcile_effect_launch.go:preWakeStep": { // the row as the launch's Start sees it: the PreWake landed, the commit not yet
+			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "continuation_reset_pending", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				k, leaf := launchKit(t, "asleep", meta...)
+				var atStart map[string]string
+				leaf.onStart = func(context.Context) {
+					b, err := k.backing.Get(k.it.Key.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					atStart = maps.Clone(b.Metadata)
+				}
+				if s := k.runKind(); s.Outcome != settledLanded || atStart == nil {
+					t.Fatalf("launch settled %+v, want landed with a Start", s)
+				}
+				return atStart
+			},
+		},
+		"internal/session/incarnation.go:Store.MintIncarnation": { // a Manager start's fresh context consumes the reset, its commit time with it
+			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }, ConsumeResetCommit: true}
+				if _, err := sessionFrontDoor(m).MintIncarnation(context.Background(), nil, req); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"internal/session/content_hold.go:Store.ClearContentHold": { // a resume releases the hold it read
+			[]string{session.ContentHoldKey, "operator@2026-03-08T12:00:00Z"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if cleared, standing, err := sessionFrontDoor(m).ClearContentHold(id, pairs(meta)[session.ContentHoldKey]); err != nil || !cleared {
+					t.Fatalf("ClearContentHold = %t, %q, %v", cleared, standing, err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
 			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch {
@@ -445,7 +546,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -457,7 +558,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -468,7 +569,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if _, err := session.WriteKillFence(m, id, now); err != nil {
+				if _, err := session.WriteKillFence(beadstest.Sessions(m), id, now); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -491,7 +592,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, city), id, false); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, city), id, false); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -748,7 +849,7 @@ func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
 		id := fieldRow(t, rec, "state", "asleep", "provider", "claude")
 		rec.reset()
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(rec), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
 		for _, k := range stopKeys {
@@ -765,7 +866,7 @@ func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(m, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(m), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
 		got := fieldBead(t, m, id).Metadata

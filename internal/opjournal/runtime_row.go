@@ -47,10 +47,12 @@ const (
 	keyRTSchema       = "gc.rt.schema"
 	keyRTConversation = "gc.rt.conversation"
 
-	keyRTGen   = "gc.rt.gen"
-	keyRTEpoch = "gc.rt.epoch"
-	keyRTSeq   = "gc.rt.seq"
-	keyRTLease = "gc.rt.lease"
+	keyRTGen        = "gc.rt.gen"
+	keyRTEpoch      = "gc.rt.epoch"
+	keyRTSeq        = "gc.rt.seq"
+	keyRTLease      = "gc.rt.lease"
+	keyRTPending    = "gc.rt.pending"
+	keyRTPendingGen = "gc.rt.pending_gen"
 
 	keyRTTurnCaps       = "gc.rt.turn.caps"
 	keyRTTurnGen        = "gc.rt.turn.gen"
@@ -83,7 +85,7 @@ const (
 )
 
 var runtimeKeys = []string{
-	keyRTSchema, keyRTConversation, keyRTGen, keyRTEpoch, keyRTSeq, keyRTLease,
+	keyRTSchema, keyRTConversation, keyRTGen, keyRTEpoch, keyRTSeq, keyRTLease, keyRTPending, keyRTPendingGen,
 	keyRTTurnCaps, keyRTTurnGen, keyRTTurnID, keyRTTurnState, keyRTTurnAt,
 	keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnLastAt, keyRTTurnSeen, keyRTTurnObservedAt,
 	keyRTState, keyRTStateAt, keyRTAttached, keyRTAttachedAt, keyRTActivityAt, keyRTObserver,
@@ -94,7 +96,7 @@ var runtimeKeys = []string{
 // updateTextKeys hold free text a fenced update writes; they are refused when
 // bd would type them as a JSON scalar.
 var updateTextKeys = []string{
-	keyRTTurnID, keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnSeen, keyRTObserver,
+	keyRTPending, keyRTTurnID, keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnSeen, keyRTObserver,
 	keyRTBindingThread, keyRTBindingProject, keyRTBindingProviderSession,
 	keyRTHost, keyRTHostProtocol, keyRTHostBuild,
 }
@@ -156,22 +158,24 @@ type HostStamp struct {
 
 // RuntimeRow is one conversation's runtime row: a bead of type "op" with
 // labels gc:rt and gc:rt-conv:<conversation>, no history, never ephemeral,
-// at the pinned id RuntimeRowID. Lanes create it lazily at their first Take
-// and read and update it under revision guards; this codec only maps it.
+// at the pinned id RuntimeRowID. Lanes create it lazily, at their first Take
+// or at the first look that sees a prompt, and read and update it under
+// revision guards; this codec only maps it.
 //
-// Age semantics. The lane cells (Seq and Lease, with the Generation and Epoch
-// lanes serve) are authoritative: lanes write them under the row's revision
-// guard. Every other cell is an observation, published on transitions only
-// (no heartbeat), and every time cell beside it (each _at, and the turn
-// cells' at and last_at) is the observer's clock: when the observer saw the
-// transition, not when it happened. A reader may use an observation only as
-// a hint of that age, never as proof that a runtime or turn is live or gone.
-// The source's own times live on the facts.
+// Age semantics. The lane cells (Seq, Lease and Pending, with the Generation
+// and Epoch lanes serve) are authoritative: lanes write them under the row's
+// revision guard. Every other cell is an observation, published on
+// transitions only (no heartbeat), and every time cell beside it (each _at,
+// and the turn cells' at and last_at) is the observer's clock: when the
+// observer saw the transition, not when it happened. A reader may use an
+// observation only as a hint of that age, never as proof that a runtime or
+// turn is live or gone. The source's own times live on the facts.
 //
-// Writers: lanes at Take and Done (Generation, Epoch, Seq, Lease); the turn
-// observer only (Turn); the lane host or box daemon on observed transitions
-// (State, Attached, ActivityAt, Observer); the runtime binding (Binding); and
-// a serving host (Host).
+// Writers: lanes at Take and Done (Generation, Epoch, Seq, Lease) and at a
+// look that changes what is pending (Pending); the turn observer only (Turn);
+// the lane host or box daemon on observed transitions (State, Attached,
+// ActivityAt, Observer); the runtime binding (Binding); and a serving host
+// (Host).
 type RuntimeRow struct {
 	ID           string
 	Conversation string
@@ -187,6 +191,14 @@ type RuntimeRow struct {
 	Seq uint64
 	// Lease is the in-flight Take's lease, or zero (gc.rt.lease).
 	Lease Lease
+	// Pending is the interaction occurrence the lane's last definitive look
+	// saw pending, <request id>#<n> of generation PendingGen (gc.rt.pending,
+	// gc.rt.pending_gen); both are empty when that look saw none. The
+	// runtime shows at most one prompt, so the cell is enough for a later
+	// look that shows another, or none, to end that occurrence while no
+	// respond names it yet (DES-O1 §10.2).
+	Pending    string
+	PendingGen int64
 
 	// Turn holds the gc.rt.turn.* cells.
 	Turn TurnCells
@@ -260,6 +272,8 @@ func (r RuntimeRow) ownedFields() map[string]string {
 		keyRTEpoch:        formatInt(r.Epoch),
 		keyRTSeq:          formatUint(r.Seq),
 		keyRTLease:        r.Lease.String(),
+		keyRTPending:      r.Pending,
+		keyRTPendingGen:   formatInt(r.PendingGen),
 
 		keyRTTurnCaps:       t.Caps.String(),
 		keyRTTurnGen:        formatInt(t.Generation),
@@ -317,6 +331,9 @@ func (r RuntimeRow) validateShape() error {
 			return invalidf("runtime row lease %s is for conversation %s", r.Lease, r.Lease.Conversation)
 		}
 	}
+	if err := r.validatePending(); err != nil {
+		return err
+	}
 	if err := r.Turn.validate(); err != nil {
 		return err
 	}
@@ -353,6 +370,21 @@ func (r RuntimeRow) validateShape() error {
 		}
 	}
 	return nil
+}
+
+// validatePending checks the pending cell: an interaction occurrence of a
+// generation, or neither.
+func (r RuntimeRow) validatePending() error {
+	switch {
+	case r.Pending == "" && r.PendingGen == 0:
+		return nil
+	case r.Pending == "":
+		return invalidf("runtime row pending generation %d names no occurrence", r.PendingGen)
+	case r.PendingGen < 1:
+		return invalidf("runtime row pending %q has generation %d; want >= 1", r.Pending, r.PendingGen)
+	}
+	_, _, err := ParseInteractionOccurrence(r.Pending)
+	return err
 }
 
 // validateVocabulary refuses an observation value this build does not know,
@@ -517,6 +549,8 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 		Generation:   d.int64(keyRTGen),
 		Epoch:        d.int64(keyRTEpoch),
 		Seq:          d.uint64(keyRTSeq),
+		Pending:      d.meta[keyRTPending],
+		PendingGen:   d.int64(keyRTPendingGen),
 		Turn: TurnCells{
 			Generation: d.int64(keyRTTurnGen),
 			ID:         d.meta[keyRTTurnID],

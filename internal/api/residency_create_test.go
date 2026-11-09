@@ -92,8 +92,9 @@ func newWholeSplitCreateState(t *testing.T) (*fakeState, beads.Store) {
 func newUnsplitCreateState(t *testing.T) *fakeState {
 	t.Helper()
 	fs := newFakeState(t)
-	fs.cityBeadStore = splittest.NewWorkStore(t, "hq")
-	fs.stores["myrig"] = splittest.NewWorkStore(t, "ra")
+	// A city that relocates nothing keeps every class in its work ledgers.
+	fs.cityBeadStore = splittest.NewSingleStore(t, "hq")
+	fs.stores["myrig"] = splittest.NewSingleStore(t, "ra")
 	return fs
 }
 

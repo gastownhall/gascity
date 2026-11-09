@@ -99,10 +99,13 @@ func (c *StreamCursor) Retain(providers map[string]Provider) {
 	}
 }
 
-// Attach records the cities a membership sync attached and the seq each
-// resumes after. They join the composite cursor (a city already in it keeps
-// its position); a departed city that returned resumes at the later of its
-// remembered position and its attach seq.
+// Attach records cities a membership sync is attaching and the seq each
+// resumes after. Call it before a city's watcher attaches: a watcher delivers
+// as soon as it is attached, before the sync that attached it returns, so a
+// city recorded afterwards can have its first events sent under a composite
+// cursor that omits it. They join the composite cursor (a city already in it
+// keeps its position); a departed city that returned resumes at the later of
+// its remembered position and its attach seq.
 func (c *StreamCursor) Attach(started map[string]uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

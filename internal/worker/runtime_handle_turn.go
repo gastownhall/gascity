@@ -31,10 +31,21 @@ func (h *RuntimeHandle) turnCapabilities() TurnCapabilities {
 
 // CurrentTurn reads the session's turns from the provider.
 func (h *RuntimeHandle) CurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	return h.currentTurn(ctx, sharedTurnReads)
+}
+
+// FreshTurn is CurrentTurn from a provider read of its own
+// (TurnHandle.FreshTurn).
+func (h *RuntimeHandle) FreshTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	return h.currentTurn(ctx, freshTurnReads)
+}
+
+// currentTurn reads the session's turns from the provider as reads says.
+func (h *RuntimeHandle) currentTurn(ctx context.Context, reads turnReads) (runtime.TurnHistory, error) {
 	if h.turnCapabilities().Source != TurnSourceProtocol {
 		return runtime.TurnHistory{}, h.noTurnSource()
 	}
-	return h.protocolTurnHistory(ctx)
+	return h.protocolTurnHistory(ctx, reads)
 }
 
 // WatchTurns watches the session's turns from the provider, its turn events
@@ -48,7 +59,10 @@ func (h *RuntimeHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 		ch, err := tp.SubscribeTurnEvents(ctx)
 		events = turnHints(h.sessionName, ch, err)
 	}
-	return startTurnWatch(ctx, protocolTurnWatch(defaultTurnTiming, h.protocolTurnHistory, events, h.sessionName)), nil
+	read := func(ctx context.Context) (runtime.TurnHistory, error) {
+		return h.protocolTurnHistory(ctx, sharedTurnReads)
+	}
+	return startTurnWatch(ctx, protocolTurnWatch(defaultTurnTiming, read, events, h.sessionName)), nil
 }
 
 func (h *RuntimeHandle) noTurnSource() error {
@@ -56,18 +70,18 @@ func (h *RuntimeHandle) noTurnSource() error {
 }
 
 // protocolTurnHistory reads the provider's history of the session, bounded by
-// ctx and shared with concurrent reads of it. Its key is scoped to the city
-// the handle was built for, as a SessionHandle's is, so both handles of one
-// city's session share one read; a handle built without a city is scoped to
-// its provider, which a city does not share with another.
-func (h *RuntimeHandle) protocolTurnHistory(ctx context.Context) (runtime.TurnHistory, error) {
+// ctx, as reads says: shared with concurrent reads of it, or its own
+// (observeTurnRead). Its key is scoped to the city the handle was built for,
+// as a SessionHandle's is, so both handles of one city's session share one
+// read; a handle built without a city is scoped to its provider, which a
+// city does not share with another.
+func (h *RuntimeHandle) protocolTurnHistory(ctx context.Context, reads turnReads) (runtime.TurnHistory, error) {
 	tp, ok := h.provider.(runtime.TurnObservationProvider)
 	if !ok {
 		return runtime.TurnHistory{}, h.noTurnSource()
 	}
 	city, err := sessionpkg.NewCityDir(h.cityPath)
-	key := turnObservationKey("history", turnCityScope(city, err, h.provider), h.sessionName)
-	return ObserveShared(ctx, key, func(ctx context.Context) (runtime.TurnHistory, error) {
+	return observeTurnRead(ctx, reads, "history", turnCityScope(city, err, h.provider), h.sessionName, func(ctx context.Context) (runtime.TurnHistory, error) {
 		hist, err := tp.TurnHistory(ctx, h.sessionName)
 		if err != nil {
 			return runtime.TurnHistory{}, err

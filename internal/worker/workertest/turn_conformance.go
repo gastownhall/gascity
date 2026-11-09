@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -14,11 +15,16 @@ import (
 //   - the capabilities are normalized, and name a known source, interrupt
 //     mode and replacement;
 //   - an unsupported interrupt mode has Fence none;
-//   - a session with no source has nothing on every axis, and CurrentTurn and
-//     WatchTurns refuse it with runtime.ErrTurnIdentityUnsupported;
-//   - a source records turn starts; CurrentTurn either reads a well-formed
-//     history or fails with an error that says why (unavailable, gone,
-//     initializing or unidentifiable), never an empty error;
+//   - a session with no source has nothing on every axis, and CurrentTurn,
+//     FreshTurn and WatchTurns refuse it with
+//     runtime.ErrTurnIdentityUnsupported;
+//   - a source records turn starts; CurrentTurn and FreshTurn each either
+//     read a well-formed history or fail with an error that says why
+//     (unavailable, gone, initializing or unidentifiable), never an empty
+//     error;
+//   - only a failed turn carries a failure, and a failure classed a rate
+//     limit names the source's class or HTTP 429: it is never read out of
+//     the error's text alone;
 //   - WatchTurns sends an update first, history or error, and closes once
 //     ctx ends.
 //
@@ -35,6 +41,9 @@ func CheckTurnHandle(ctx context.Context, h worker.TurnHandle) error {
 		if _, err := h.CurrentTurn(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			return fmt.Errorf("CurrentTurn with no source = %w, want ErrTurnIdentityUnsupported", err)
 		}
+		if _, err := h.FreshTurn(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			return fmt.Errorf("FreshTurn with no source = %w, want ErrTurnIdentityUnsupported", err)
+		}
 		if _, err := h.WatchTurns(ctx); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			return fmt.Errorf("WatchTurns with no source = %w, want ErrTurnIdentityUnsupported", err)
 		}
@@ -43,6 +52,10 @@ func CheckTurnHandle(ctx context.Context, h worker.TurnHandle) error {
 	hist, err := h.CurrentTurn(ctx)
 	if err := checkTurnRead(hist, err); err != nil {
 		return fmt.Errorf("CurrentTurn: %w", err)
+	}
+	hist, err = h.FreshTurn(ctx)
+	if err := checkTurnRead(hist, err); err != nil {
+		return fmt.Errorf("FreshTurn: %w", err)
 	}
 	watchCtx, cancel := context.WithCancel(ctx)
 	ch, err := h.WatchTurns(watchCtx)
@@ -136,6 +149,26 @@ func checkTurnRead(hist runtime.TurnHistory, err error) error {
 		if t.TurnID == hist.Current.TurnID {
 			return fmt.Errorf("recent turn %d %q is also the current turn", i, t.TurnID)
 		}
+		if err := checkTurnFailure(t); err != nil {
+			return fmt.Errorf("recent turn %d %q: %w", i, t.TurnID, err)
+		}
+	}
+	return nil
+}
+
+// checkTurnFailure checks an ended turn's failure: only a failed turn has
+// one, a rate limit is the source's class or HTTP 429, never the text, and a
+// spent quota is a rate limit of the source's own class.
+func checkTurnFailure(t runtime.EndedTurn) error {
+	f := t.Failure
+	if f != (runtime.TurnFailure{}) && t.Status != runtime.TurnStatusFailed {
+		return fmt.Errorf("failure %+v on a turn that ended %q, want only a failed turn to carry one", f, t.Status)
+	}
+	if f.RateLimited && f.Code == "" && f.HTTPStatus != http.StatusTooManyRequests {
+		return fmt.Errorf("failure %+v is a rate limit with neither the source's class nor HTTP 429", f)
+	}
+	if f.Quota && (!f.RateLimited || f.Code == "") {
+		return fmt.Errorf("failure %+v is a spent quota that is not the source's rate-limit class", f)
 	}
 	return nil
 }

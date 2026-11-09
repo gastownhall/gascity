@@ -9,8 +9,10 @@
 #
 # It is a cooldown sweep (mechanical: list gates, compare timestamps, send
 # mail — no LLM judgment), mirroring gate-sweep. Each run enumerates open
-# gates across HQ and every rig via `gc bd gate list` (open-only by default),
-# keeps only `await_type == "human"` gates, and for each one older than the
+# human gates: bd's own across HQ and every rig via `gc bd gate list`
+# (open-only by default, `await_type == "human"`), plus formula-synthesized
+# ones via `gc ready --status open` (`gc.gate_type == "human"`, which also
+# reaches a split city's class binding). For each one older than the
 # staleness threshold whose last re-nudge is older than the re-nudge interval,
 # re-fetches the gate (`gc bd gate list` omits assignee/metadata), resolves the
 # addressee (assignee -> gc.deferred_assignee -> escalation recipient) and

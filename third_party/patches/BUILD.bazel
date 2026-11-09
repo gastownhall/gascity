@@ -10,5 +10,6 @@ exports_files([
     "honnef_unused_objectpath_encoder.patch",
     "revive_bazel_gcimporter.patch",
     "rules_go_nogo_golangci_nolint.patch",
+    "rules_go_nogo_main_repo_data.patch",
     "x_tools_ctrlflow_stdlib_noreturn.patch",
 ])

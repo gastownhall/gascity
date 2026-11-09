@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -485,34 +487,120 @@ func TestStorageGateRefusesAnUnconvergedCityAndNamesTheCommand(t *testing.T) {
 	}
 }
 
-// TestStorageGateRefusalNamesTheStrandedIDs pins where the stranded ids have to
-// live: in the refusal STRING.
+// TestStorageGateServesAStrandedCityDegraded pins Fix 1 of the substrate
+// 2026-11-09 incident: an agent's plain `bd create` stamped gc.root_bead_id on
+// ordinary work in a converged split city, the containment check counted the
+// rows as stranded, and the gate refused every infrastructure class in every gc
+// process — the workers could neither claim, close nor drain-ack while the
+// controller, which checks only at boot, kept dispatching. The writer itself
+// never consults the gate.
 //
-// The supervisor records the error it was handed and nothing else, so a bead id
-// attached to a report field, an event payload or a stderr line the supervisor
-// never captured is an id the operator recovering this city never sees. The
-// count alone is an alarm nobody can act on.
-func TestStorageGateRefusalNamesTheStrandedIDs(t *testing.T) {
+// A stranded id the binding does not hold names one bead, so the city now
+// serves degraded: the routes open exactly as on the converged path, one
+// storage.binding.stranded event names the ids and carries the repair, and
+// the process warns once. A session-class strand degrades too: every class
+// does.
+func TestStorageGateServesAStrandedCityDegraded(t *testing.T) {
 	cityPath, cfg, source, _ := convergedInfraCity(t)
-	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "landed after the proof", Type: "session", Labels: []string{"gc:session"}})
+	task := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	bug := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol bug", Type: "bug", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "landed after the proof", Type: "session", Labels: []string{"gc:session"}})
 
 	var stderr bytes.Buffer
-	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err != nil {
+		t.Fatalf("a city with only absent stranded rows refused to start: %v", err)
+	}
+	warnDegradedServing(routes, &stderr, "gc start")
+	t.Cleanup(func() { _ = routes.close() })
+	for _, class := range coordclass.Classes() {
+		if !class.IsInfrastructure() {
+			continue
+		}
+		store := routes.stores[class]
+		if store == nil {
+			t.Fatalf("class %s has no store on a degraded city", class)
+		}
+		if _, refused := store.(refusedClassStore); refused {
+			t.Fatalf("class %s is served by a refusing store on a degraded city", class)
+		}
+	}
+
+	event, payload := decodeStorageBindingOutcome(t, rec)
+	if event.Type != events.StorageBindingStranded {
+		t.Fatalf("recorded %s, want %s", event.Type, events.StorageBindingStranded)
+	}
+	if payload.Serving == nil || !*payload.Serving || payload.Recheck || payload.Outcome != "stranded" || payload.StrandedCount != 3 || len(payload.HeldDifferent) != 0 {
+		t.Errorf("payload = %+v, want serving stranded with 3 ids and none held different", payload)
+	}
+	for _, id := range []string{task.ID, bug.ID, session.ID} {
+		if !slices.Contains(payload.Stranded, id) || !strings.Contains(payload.Invariant, id) {
+			t.Errorf("the event does not name stranded %s: %+v", id, payload)
+		}
+	}
+	for _, want := range []string{
+		"gc bd update " + task.ID + " --unset-metadata gc.root_bead_id",
+		"gc bd update " + bug.ID + " --unset-metadata gc.root_bead_id",
+		"gc storage status",
+	} {
+		if !strings.Contains(payload.Invariant, want) {
+			t.Errorf("the event's advice does not say %q: %s", want, payload.Invariant)
+		}
+	}
+	if strings.Contains(payload.Invariant, "gc bd update "+session.ID) {
+		t.Errorf("the advice tells a gc:session row to drop its metadata: %s", payload.Invariant)
+	}
+
+	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
+		t.Fatalf("the gate warned %d time(s), want once; stderr: %s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), task.ID) || !strings.Contains(stderr.String(), "gc storage status") {
+		t.Errorf("the warning names neither the ids nor the re-check: %s", stderr.String())
+	}
+	// A second resolution in the same process (the CLI funnel after a
+	// retire, a supervisor re-booting the city) does not warn again.
+	again, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("the second gate refused: %v", err)
+	}
+	warnDegradedServing(again, &stderr, "gc start")
+	_ = again.close()
+	if got := strings.Count(stderr.String(), "WARNING: serving degraded"); got != 1 {
+		t.Errorf("the gate warned %d time(s) across two resolutions, want once", got)
+	}
+}
+
+// TestStorageGateRefusesAStrandedIDHeldByADifferentBead is the control: a
+// stranded id the binding holds for ANOTHER bead names two beads, so the city
+// still refuses, with the ids in the refusal string (the supervisor records
+// that string and nothing else) and a stranded event that says it is not
+// serving.
+func TestStorageGateRefusesAStrandedIDHeldByADifferentBead(t *testing.T) {
+	cityPath, cfg, _, _, _, reused := heldReusedIDCity(t)
+
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
 	if err == nil {
 		_ = routes.close()
-		t.Fatal("a city with a stranded infrastructure write started")
+		t.Fatal("a city whose stranded id the binding holds for a different bead started")
 	}
-	if !strings.Contains(err.Error(), stranded.ID) {
-		t.Errorf("the refusal does not name the stranded bead %s: %v", stranded.ID, err)
+	if !strings.Contains(err.Error(), reused.ID) {
+		t.Errorf("the refusal does not name the stranded bead %s: %v", reused.ID, err)
 	}
 	if strings.Contains(err.Error(), "see the ids above") {
 		t.Errorf("the refusal defers to output the supervisor never records: %v", err)
 	}
-	// The refusal must also say what recovery looks like: the ids alone tell
-	// the operator what is wrong, not what to do, and this string is the only
-	// output the supervisor records.
 	if !strings.Contains(err.Error(), "gc storage status") {
 		t.Errorf("the refusal names no recovery re-check: %v", err)
+	}
+	event, payload := decodeStorageBindingOutcome(t, rec)
+	if event.Type != events.StorageBindingStranded || payload.Serving == nil || *payload.Serving || !slices.Contains(payload.HeldDifferent, reused.ID) || payload.HeldDifferentCount != 1 {
+		t.Errorf("recorded %s %+v, want a non-serving stranded event naming %s held different", event.Type, payload, reused.ID)
+	}
+	if strings.Contains(stderr.String(), "serving degraded") {
+		t.Errorf("a refusing gate claimed to serve degraded: %s", stderr.String())
 	}
 }
 
@@ -1019,12 +1107,11 @@ func TestStorageMigrateRefusesWhileAnotherMigratorHoldsTheCity(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
-// TestStorageMigrateRefusesRigResidueByName covers the rig-scope preflight.
-//
-// The remedy is asserted as carefully as the refusal: it must not name an
-// importer, because this binary carries none, and a remedy naming a command
-// that does not exist is an instruction that fails at the shell.
-func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
+// TestStorageMigrateNoLongerRefusesOverRigHistory: a rig's graph history no
+// longer blocks the city cutover (S4b). The relic legs keep it readable and
+// `gc storage migrate --from-rigs` moves it, so the city migrates, leaves the
+// rig row where it is, and names the rig and the command that imports it.
+func TestStorageMigrateNoLongerRefusesOverRigHistory(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
@@ -1034,163 +1121,72 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code == 0 {
-		t.Fatal("a city with infrastructure beads in a rig scope migrated anyway")
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the city migration refused over rig history: %d %s %s", code, stdout.String(), stderr.String())
 	}
-	got := stderr.String()
-	if !strings.Contains(got, stray.ID) || !strings.Contains(got, "rig alpha") {
-		t.Errorf("the refusal does not name the bead and its rig: %q", got)
+	if got := stdout.String(); !strings.Contains(got, "Rigs awaiting import") || !strings.Contains(got, "alpha") || !strings.Contains(got, "gc storage migrate --from-rigs --fleet-stopped") {
+		t.Errorf("the success message does not name the rig awaiting import and the command: %q", got)
 	}
-	for _, forbidden := range []string{"import", "migrate storage"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("the remedy names %q, which this binary does not carry: %q", forbidden, got)
-		}
-	}
-	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
-		"a migrator that refused must record no convergence")
-}
-
-// TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
-// is the city's own work store (a unified city whose rig .beads carries a copy
-// of the city's remote binding, or resolves to the same database). Its rows
-// ARE the copy's source rows, so they are not residue: refusing them sent the
-// operator to blank the rig path to get a migration through (MC shadow F1).
-// Both shapes are covered: the same handle behind both opens, and a second,
-// independently opened handle over the same rows.
-func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
-	rigPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
-	request := storageTestRequest(t, cfg)
-	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
-
-	city := stubInfraMigrationSource(t)
-	stubInfraControllerPing(t, 0)
-	mustCreateInfraBead(t, city, beads.Bead{Title: "a city wisp", Type: "session", Labels: []string{"alpha", "beta"}})
-	mustCreateInfraBead(t, city, beads.Bead{Title: "ordinary work", Type: "task"})
-	rows, err := city.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil {
-		t.Fatalf("listing the city work store: %v", err)
-	}
-
-	var rig beads.Store
-	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
-	for _, shape := range []struct {
-		name  string
-		store beads.Store
-	}{
-		{"the city's own handle", city},
-		{"a second handle over the same rows", beads.NewMemStoreFrom(len(rows), rows, nil)},
-	} {
-		rig = shape.store
-		if err := censusRigInfraResidue(request.CityPath, cfg); err != nil {
-			t.Errorf("%s: a rig sharing the city work store was refused as residue: %v", shape.name, err)
-		}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the city migration touched the rig row %s: %v", stray.ID, err)
 	}
 }
 
-// TestStorageMigrateRefusesRigRowHeldInAnotherState covers a rig store that
-// holds a city id in a state the city work store does not. The copy carries
-// the city's version, so the rig's would be dropped: each is refused by name,
-// on whichever field differs, because a listing has no version stamp to notice
-// the change by (the native store clears Revision and never fills UpdatedAt).
-// A token or a timestamp only one side publishes is no evidence either way,
-// whichever side that is, and neither is bd's readiness projection or the order
-// labels and edges come back in, so those rows are judged on the rest of the
-// row and accepted.
-func TestStorageMigrateRefusesRigRowHeldInAnotherState(t *testing.T) {
+// TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
+// the upgrade order ends with: a converged city whose work store still holds
+// retained copies, beside a rig scope holding pre-split infrastructure rows.
+// The re-run copies nothing, so the census that guards a copy does not run:
+// the clear proceeds, `gc storage status` exits 0, and the rig row is
+// untouched. Refused, as it was, the city kept the retained copies boot
+// refuses over, and every seat's drain fence stayed closed on them.
+func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
-	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
-
-	city := stubInfraMigrationSource(t)
+	source := stubStrandedRecoverySource(t)
 	stubInfraControllerPing(t, 0)
-	notBlocked := false
-	shared := mustCreateInfraBead(t, city, beads.Bead{
-		Title:        "a city message",
-		Type:         "message",
-		Labels:       []string{"alpha", "beta"},
-		Metadata:     beads.StringMap{"note": "city"},
-		Dependencies: []beads.Dep{{DependsOnID: "gc-target", Type: "blocks"}, {DependsOnID: "gc-other", Type: "related"}},
-		IsBlocked:    &notBlocked,
-	})
+	carried := mustCreateInfraBead(t, source, beads.Bead{Title: "a delivered mail", Type: "message"})
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
 
-	var rig beads.Store
+	cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "gp"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a pre-split workflow step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": "gp-root", "gc.kind": "task"}})
 	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
-	census := func(rows ...beads.Bead) error {
-		rig = beads.NewMemStoreFrom(len(rows), rows, nil)
-		return censusRigInfraResidue(request.CityPath, cfg)
-	}
-	for _, tc := range []struct {
-		name    string
-		mutate  func(beads.Bead) beads.Bead
-		refused bool
-	}{
-		{"title", func(b beads.Bead) beads.Bead { b.Title = "the rig's own copy"; return b }, true},
-		{"status", func(b beads.Bead) beads.Bead { b.Status = "closed"; return b }, true},
-		{"labels", func(b beads.Bead) beads.Bead { b.Labels = []string{"alpha"}; return b }, true},
-		{"metadata", func(b beads.Bead) beads.Bead { b.Metadata = beads.StringMap{"note": "rig"}; return b }, true},
-		{"dependencies", func(b beads.Bead) beads.Bead { b.Dependencies = b.Dependencies[:1]; return b }, true},
-		{"a dependency's type", func(b beads.Bead) beads.Bead {
-			b.Dependencies = []beads.Dep{b.Dependencies[0], {DependsOnID: "gc-other", Type: "blocks"}}
-			return b
-		}, true},
-		{"a published revision", func(b beads.Bead) beads.Bead { b.Revision = shared.Revision + 1; return b }, true},
-		{"a published create time", func(b beads.Bead) beads.Bead { b.CreatedAt = b.CreatedAt.Add(-time.Hour); return b }, true},
-		{"a published update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = b.UpdatedAt.Add(time.Hour); return b }, true},
-		{"an unpublished revision", func(b beads.Bead) beads.Bead { b.Revision = 0; return b }, false},
-		{"an unpublished create time", func(b beads.Bead) beads.Bead { b.CreatedAt = time.Time{}; return b }, false},
-		{"an unpublished update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = time.Time{}; return b }, false},
-		{"label order", func(b beads.Bead) beads.Bead { b.Labels = []string{"beta", "alpha"}; return b }, false},
-		{"edge order", func(b beads.Bead) beads.Bead {
-			b.Dependencies = []beads.Dep{b.Dependencies[1], b.Dependencies[0]}
-			return b
-		}, false},
-		{"the readiness projection", func(b beads.Bead) beads.Bead { blocked := true; b.IsBlocked = &blocked; return b }, false},
-	} {
-		if got := censusRowDiffers(tc.mutate(shared), shared); got != tc.refused {
-			t.Errorf("%s: with the city holding the row that differs in %s, censusRowDiffers = %v, want %v; the answer must not depend on which side holds which state",
-				tc.name, tc.name, got, tc.refused)
-		}
-		err := census(tc.mutate(shared))
-		switch {
-		case !tc.refused && err != nil:
-			t.Errorf("%s: a rig row differing only in %s was refused: %v", tc.name, tc.name, err)
-		case !tc.refused:
-		case err == nil || !strings.Contains(err.Error(), shared.ID+" (rig sandbox)") || !strings.Contains(err.Error(), "in another state"):
-			t.Errorf("%s: a rig row differing in %s was not refused by name as held in another state: %v", tc.name, tc.name, err)
-		case strings.Contains(err.Error(), "Move them"):
-			t.Errorf("%s: the refusal tells the operator to move a row whose id the work store already holds: %v", tc.name, err)
-		}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("precondition: status exits 0 with the retained copy %s in the work store: %s", carried.ID, stdout.String())
 	}
 
-	// Each kind of residue keeps the remedy it needs when both are present.
-	stray := shared
-	stray.ID = "gc-only-in-the-rig"
-	stale := shared
-	stale.Title = "the rig's own copy"
-	err := census(stray, stale)
-	if err == nil {
-		t.Fatal("a rig holding an absent row and a diverged row was not refused")
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear-only re-run = %d, want 0: %s %s", code, stdout.String(), stderr.String())
 	}
-	absentPart, divergedPart, ok := strings.Cut(err.Error(), "Move them into the city work store")
-	if !ok || !strings.Contains(absentPart, stray.ID) || strings.Contains(absentPart, shared.ID) {
-		t.Errorf("the absent row is not named under the move remedy alone: %v", err)
+	if _, err := source.Get(carried.ID); err == nil {
+		t.Errorf("the re-run left the retained copy %s", carried.ID)
 	}
-	if !strings.Contains(divergedPart, shared.ID) || !strings.Contains(divergedPart, storageStopCommand) {
-		t.Errorf("the diverged row is not named under its own remedy, which must say to re-check a stopped city: %v", err)
+	stdout.Reset()
+	stderr.Reset()
+	// The city's own verdict is clean; the rig still awaits its import, and
+	// a split city's deploy gate covers its rigs (D5).
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "rig packs: awaiting import") || strings.Contains(stdout.String(), "blocking invariant") {
+		t.Errorf("status after the clear = %d, want non-zero for the rig alone: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)
 	}
 }
 
@@ -2476,5 +2472,232 @@ func TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes(t *testing.T) {
 
 	if storageWorkConfigContext(root, research) == storageWorkConfigContext(root, factory) {
 		t.Error("two cities with different HQ pins share one config digest, so a plan cannot name the configuration it came from")
+	}
+}
+
+// TestStrandRecheckPublishesOnlyChanges pins the controller's periodic
+// containment recheck: seeded with the boot verdict it publishes nothing
+// until the stranded set changes, publishes the stranded event once per
+// change, converged once the set is empty again, and a check that cannot run
+// is reported as uncheckable without stopping anything.
+func TestStrandRecheckPublishesOnlyChanges(t *testing.T) {
+	cityPath, cfg, source, target := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, rec, &stderr, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("an unchanged converged city published %+v", rec.Events)
+	}
+
+	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	s.tick()
+	s.tick()
+	_, payload := decodeStorageBindingOutcome(t, rec)
+	if rec.Events[0].Type != events.StorageBindingStranded || payload.Serving != nil || !payload.Recheck || !slices.Equal(payload.Stranded, []string{stranded.ID}) {
+		t.Fatalf("recorded %s %+v, want one recheck stranded event naming %s and claiming nothing about serving", rec.Events[0].Type, payload, stranded.ID)
+	}
+	if !strings.Contains(payload.Invariant, "--unset-metadata gc.root_bead_id") {
+		t.Errorf("the recheck's event carries no repair: %s", payload.Invariant)
+	}
+	if !strings.Contains(stderr.String(), stranded.ID) {
+		t.Errorf("the recheck did not log the strand: %q", stderr.String())
+	}
+
+	if err := source.Update(stranded.ID, beads.UpdateOpts{UnsetMetadata: []string{"gc.root_bead_id"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec.Events = nil
+	s.tick()
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.StorageBindingConverged {
+		t.Fatalf("the repaired city published %+v, want one converged event", rec.Events)
+	}
+
+	rec.Events = nil
+	if err := os.Remove(target.ManifestPath()); err != nil {
+		t.Fatal(err)
+	}
+	s.tick()
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.StorageBindingUncheckable {
+		t.Fatalf("a recheck that could not run published %+v, want one uncheckable event", rec.Events)
+	}
+}
+
+// TestStrandRecheckSeedsFromADegradedBoot: a controller that booted degraded
+// does not publish the same strand again on its first recheck.
+func TestStrandRecheckSeedsFromADegradedBoot(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "stray session", Type: "session", Labels: []string{"gc:session"}})
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("a degraded city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	s := newStrandRecheck(routes, cityPath, rec, io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a degraded city")
+	}
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("the first recheck republished the boot strand: %+v", rec.Events)
+	}
+}
+
+// TestStorageGateRefusesAStrandBesideRetainedCopies (review probe): a city
+// whose work store still holds retained copies of binding-owned beads
+// refuses (#5987); one stranded row beside them must not turn that into a
+// degraded serve, and the refusal names the clear.
+func TestStorageGateRefusesAStrandBesideRetainedCopies(t *testing.T) {
+	cityPath, cfg, source, _ := convergedRecoveryCity(t)
+	before := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	if before.Outcome != infraMigrationRetained {
+		t.Fatalf("fixture: outcome %s, want retained", before.Outcome)
+	}
+	work := workShapedStrandedBead(t, source)
+	after := checkInfraClassConvergence(cityPath, cfg, "gc start", io.Discard)
+	if after.Outcome != infraMigrationStranded || after.servesDegraded() || len(after.Retained) == 0 {
+		t.Fatalf("after one strand: outcome=%s retained=%v servesDegraded=%v, want a stranded verdict that carries the retained copies and does not serve", after.Outcome, after.Retained, after.servesDegraded())
+	}
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatalf("one stranded row (%s) made a city with retained copies %v serve degraded (#5987)", work.ID, before.Retained)
+	}
+	if !strings.Contains(err.Error(), storageClearInstruction()) {
+		t.Errorf("the refusal does not name the clear %q: %v", storageClearInstruction(), err)
+	}
+	if strings.Contains(stderr.String(), "serving degraded") {
+		t.Errorf("a refusing gate warned it serves degraded: %s", stderr.String())
+	}
+	if _, payload := decodeStorageBindingOutcome(t, rec); payload.Serving == nil || *payload.Serving {
+		t.Errorf("the refusal's event does not say serving=false: %+v", payload)
+	}
+	var stdout bytes.Buffer
+	doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, io.Discard)
+	if !strings.Contains(stdout.String(), "serving:     refused") || !strings.Contains(stdout.String(), storageClearInstruction()) {
+		t.Errorf("status does not report the refusal and the clear:\n%s", stdout.String())
+	}
+}
+
+// TestRecoverStrandedNamesTheClearAndLeavesTheCityRefused (review probe):
+// recover-stranded carries a session strand (its work-store copy stays until
+// the clear) and leaves a work-shaped row. It must name the clear even though
+// it exits 1, and the gate must not serve the retained copy.
+func TestRecoverStrandedNamesTheClearAndLeavesTheCityRefused(t *testing.T) {
+	cityPath, cfg, source, _ := convergedRecoveryCity(t)
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("fixture: clear outcome %s: %s", got.Outcome, log.String())
+	}
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "late session", Type: "session", Labels: []string{"gc:session"}})
+	work := workShapedStrandedBead(t, source)
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code != 1 {
+		t.Errorf("recover exited %d with %s left, want 1; stdout:\n%s\nstderr:\n%s", code, work.ID, stdout, stderr)
+	}
+	if !strings.Contains(stdout, storageClearInstruction()) {
+		t.Errorf("recover-stranded left %s's carried copy in the work store but never named the clear %q:\n%s", session.ID, storageClearInstruction(), stdout)
+	}
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err == nil {
+		_ = routes.close()
+		t.Fatalf("after recover-stranded carried %s (copy retained until the clear) and left %s, the city serves degraded with a retained copy (#5987)", session.ID, work.ID)
+	}
+}
+
+// TestStrandRecheckIgnoresATransientFaultAndContainsAPanic: a read that
+// fails transiently publishes nothing and, once it clears to the same
+// verdict, nothing either (no uncheckable→converged flap); a panic inside the
+// check is contained; the stop cancels the loop and waits for it.
+func TestStrandRecheckIgnoresATransientFaultAndContainsAPanic(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, rec, &stderr, "gc start")
+
+	prev := openInfraMigrationSource
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		return nil, errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`)
+	}
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("a transient fault published %+v", rec.Events)
+	}
+	if !strings.Contains(stderr.String(), "could not run") {
+		t.Errorf("the transient fault was not logged: %q", stderr.String())
+	}
+	openInfraMigrationSource = prev
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("the fault clearing to the same verdict published %+v", rec.Events)
+	}
+
+	openInfraMigrationSource = func(string) (beads.Store, error) { panic("boom") }
+	s.tick() // must not panic
+	if !strings.Contains(stderr.String(), "panicked") {
+		t.Errorf("the contained panic was not logged: %q", stderr.String())
+	}
+	openInfraMigrationSource = prev
+
+	prevInterval := strandRecheckInterval
+	strandRecheckInterval = time.Millisecond
+	t.Cleanup(func() { strandRecheckInterval = prevInterval })
+	cr := &CityRuntime{storageRoutes: routes, cityPath: cityPath, rec: rec, stderr: io.Discard, logPrefix: "gc start"}
+	stop := cr.startStrandRecheck(context.Background())
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recheck's stop did not return")
+	}
+}
+
+// TestStrandedEventCapsEveryIDList: the stranded payload caps each id list at
+// StrandedCap and carries each whole count.
+func TestStrandedEventCapsEveryIDList(t *testing.T) {
+	ids := make([]string, storebinding.StrandedCap+7)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gc-%03d", i)
+	}
+	rec := events.NewFake()
+	recordStorageGateOutcome(rec, infraMigrationReport{Outcome: infraMigrationStranded, Stranded: ids, HeldDifferent: ids, PresumedReused: ids, Retained: ids}, "x", false)
+	_, payload := decodeStorageBindingOutcome(t, rec)
+	for name, got := range map[string][]string{"stranded": payload.Stranded, "held_different": payload.HeldDifferent, "presumed_reused": payload.PresumedReused, "retained": payload.Retained} {
+		if len(got) != storebinding.StrandedCap {
+			t.Errorf("%s carries %d ids, want the cap %d", name, len(got), storebinding.StrandedCap)
+		}
+	}
+	if payload.StrandedCount != len(ids) || payload.HeldDifferentCount != len(ids) || payload.PresumedReusedCount != len(ids) || payload.RetainedCount != len(ids) {
+		t.Errorf("counts = %+v, want %d each", payload, len(ids))
+	}
+	// An operator command's event states nothing about serving, and an event
+	// an older build recorded (no serving key) decodes as "not stated".
+	rec = events.NewFake()
+	recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationStranded, Stranded: ids[:1]}, "x")
+	if _, payload := decodeStorageBindingOutcome(t, rec); payload.Serving != nil {
+		t.Errorf("an operator command's event claims serving=%v", *payload.Serving)
+	}
+	var old storebinding.StorageBindingOutcomePayload
+	if err := json.Unmarshal([]byte(`{"binding":"infra","outcome":"converged"}`), &old); err != nil || old.Serving != nil {
+		t.Errorf("an older event decodes serving=%v (err %v), want absent", old.Serving, err)
 	}
 }
