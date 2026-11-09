@@ -127,7 +127,13 @@ type staleOpenListStore struct {
 	openSnapshot []beads.Bead
 }
 
-func (s staleOpenListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+// List serves the stale snapshot to a plain query. A Live query bypasses the
+// snapshot and reaches the embedded store, as it reaches bd in production, where
+// the raw status=open filter excludes the bead the claim already moved.
+func (s staleOpenListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		return s.Store.List(q)
+	}
 	return append([]beads.Bead(nil), s.openSnapshot...), nil
 }
 
@@ -200,8 +206,12 @@ func (s staleCacheStore) Get(string) (beads.Bead, error) {
 	return s.cached, nil
 }
 
-// List returns the stale open snapshot.
-func (s staleCacheStore) List(beads.ListQuery) ([]beads.Bead, error) {
+// List returns the stale open snapshot to a plain query. A Live query bypasses
+// the cache to the backing store, like the Live handle does.
+func (s staleCacheStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		return s.Store.List(q)
+	}
 	return []beads.Bead{s.cached}, nil
 }
 

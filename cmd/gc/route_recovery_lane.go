@@ -947,26 +947,15 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 //
 // One query for the whole set is the point: the scan it replaces issued one Get
 // per candidate, and against a remote ledger a batch of 33 Gets is 33 sequential
-// round trips. A single candidate stays a Get, which is strictly cheaper than a
-// filtered List on a backend that cannot push the IN-list down.
+// round trips. A single candidate takes the same filtered List, not a Get: a
+// Get decodes a bd-blocked, review, testing or deferred bead as "open"
+// (mapBdStatus), so only the List's server-side raw-status filter can tell a
+// parked bead from an open one (gc-4zb).
 //
 // It returns the number of store round trips it made so the caller can budget.
 func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
 	if store == nil || len(ids) == 0 {
 		return nil, 0, nil
-	}
-	if len(ids) == 1 {
-		bead, err := beads.HandlesFor(store).Live.Get(ids[0])
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, 1, nil
-			}
-			return nil, 1, err
-		}
-		if bead.Status != "open" {
-			return nil, 1, nil
-		}
-		return []beads.Bead{bead}, 1, nil
 	}
 	rows, err := store.List(beads.ListQuery{IDs: ids, Status: "open", Live: true})
 	if err != nil {
