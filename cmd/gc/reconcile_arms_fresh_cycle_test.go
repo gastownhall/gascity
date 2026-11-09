@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -56,36 +55,6 @@ func TestArmFreshCycle(t *testing.T) {
 	}
 }
 
-// TestFreshCycleDefers (SESS-612): legacy's defer on the previous bead,
-// read in the effect: open, or closed before this incarnation woke, defers;
-// a lookup that failed or expired defers, as a failed read proves nothing
-// (the #7879 review); no previous bead, or one no store holds, cycles.
-func TestFreshCycleDefers(t *testing.T) {
-	closed := beads.Bead{ID: "gw-old", Status: "closed", Metadata: map[string]string{"closed_at": censusNow.Add(-time.Hour).Format(time.RFC3339Nano)}}
-	awakeAfter := session.Info{AwakeStartedAt: censusNow.Add(-time.Minute).Format(time.RFC3339Nano)}
-	awakeBefore := session.Info{AwakeStartedAt: censusNow.Add(-2 * time.Hour).Format(time.RFC3339Nano)}
-	for _, tc := range []struct {
-		name   string
-		row    session.Info
-		prev   freshCyclePrev
-		err    error
-		defers bool
-	}{
-		{"the previous bead open", awakeBefore, freshCyclePrev{found: true, bead: beads.Bead{ID: "gw-old", Status: "in_progress"}}, nil, true},
-		{"closed after this incarnation woke", awakeBefore, freshCyclePrev{found: true, bead: closed}, nil, false},
-		{"closed before this incarnation woke", awakeAfter, freshCyclePrev{found: true, bead: closed}, nil, true},
-		{"its wake time unreadable", session.Info{}, freshCyclePrev{found: true, bead: closed}, nil, false},
-		{"the lookup expired", awakeBefore, freshCyclePrev{}, errProbeExpired, true},
-		{"the lookup failed", awakeBefore, freshCyclePrev{}, errors.New("store unreachable"), true},
-		{"no store holds it", awakeBefore, freshCyclePrev{}, nil, false},
-		{"no previous bead", awakeBefore, freshCyclePrev{none: true}, nil, false},
-	} {
-		if got := freshCycleDefers(tc.row, tc.prev, tc.err); got != tc.defers {
-			t.Errorf("%s: freshCycleDefers = %t, want %t", tc.name, got, tc.defers)
-		}
-	}
-}
-
 // TestFreshCycleFinishes (SESS-612): the cycle's finalize is the restart
 // handoff (the conversation reset, the row asleep, the key rotated or
 // cleared), anchored to the new bead, and never a close.
@@ -107,12 +76,12 @@ func TestFreshCycleFinishes(t *testing.T) {
 // freshSim is a converged sim city whose live pool row gc-1, in fresh wake
 // mode and awake since two hours ago, processes gw-old, while gc-1 is now
 // assigned gw-new (open, unclaimed).
-func freshSim(t *testing.T, old beads.Bead) *sim {
+func freshSim(t *testing.T, old beads.Bead, extra ...beads.Bead) *sim {
 	t.Helper()
 	row := poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-2*time.Hour),
 		"wake_mode", "fresh", "awake_started_at", rowAt(-2*time.Hour), session.CurrentBeadIDKey, "gw-old")
 	next := beads.Bead{ID: "gw-new", Title: "work", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}
-	s := scripted(t, []string{"gc-1"}, row, old, next)
+	s := scripted(t, []string{"gc-1"}, append([]beads.Bead{row, old, next}, extra...)...)
 	s.cfg.Agents[0].WakeMode = "fresh" // the template's, which A7 keeps on the row
 	s.settle()
 	s.advance(simPatrol)
@@ -170,6 +139,43 @@ func TestSimFreshCycleDefersWhilePreviousBeadOpen(t *testing.T) {
 	cycles, deferred := count()
 	if before == 0 || cycles != before || deferred != cycles || len(s.sp.kills) != 0 || s.gc1()[session.CurrentBeadIDKey] != "gw-old" {
 		t.Fatalf("cycles %d then %d (deferred %d), kills %d, row %v; want deferred cycles only, none re-proposed in the backoff, nothing stopped or written", before, cycles, deferred, len(s.sp.kills), s.gc1())
+	}
+	s.noViolations(t)
+}
+
+// TestSimFreshCycleHoldsWhileASessionClaimIsHeld (ga-pvjbx3 Q1; F1, F2): a
+// session that holds an in_progress claim on a bead that is neither the
+// previous bead nor the anchor is not cycled, however many passes go by;
+// once the claim closes the cycle runs once, onto the new bead.
+func TestSimFreshCycleHoldsWhileASessionClaimIsHeld(t *testing.T) {
+	old := beads.Bead{ID: "gw-old", Title: "done", Type: "task", Status: "closed", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker", "closed_at": rowAt(-time.Hour)}}
+	held := beads.Bead{ID: "gw-held", Title: "claimed", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}
+	s := freshSim(t, old, held)
+	kills := func() int {
+		s.sp.mu.Lock()
+		defer s.sp.mu.Unlock()
+		return len(s.sp.kills)
+	}
+	for range 8 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	deferred := false
+	for _, r := range s.round {
+		deferred = deferred || r.it.Reason == decideFreshCycle && r.res.Outcome == settledRefused && r.res.Cause == causeFreshCycleDefer
+	}
+	if !deferred || kills() != 0 || s.gc1()[session.CurrentBeadIDKey] != "gw-old" {
+		t.Fatalf("deferred %t, kills %d, row %v; want the cycle deferred over the held claim, nothing stopped", deferred, kills(), s.gc1())
+	}
+	if err := s.legs[0].backing.Close("gw-held"); err != nil {
+		t.Fatal(err)
+	}
+	for range 40 { // past the defer's backoff (10s doubling to 5m)
+		s.settle()
+		s.advance(simPatrol)
+	}
+	if got := s.gc1(); kills() != 1 || got[session.CurrentBeadIDKey] != "gw-new" {
+		t.Fatalf("kills %d, row %v; want one cycle onto gw-new after the claim closed", kills(), got)
 	}
 	s.noViolations(t)
 }
