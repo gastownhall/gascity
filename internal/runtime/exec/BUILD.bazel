@@ -31,6 +31,7 @@ go_test(
         "capacity_test.go",
         "carrier_fence_integration_test.go",
         "cutover_test.go",
+        "deadline_env_test.go",
         "exec_connection_test.go",
         "exec_fence_integration_test.go",
         "exec_fence_test.go",

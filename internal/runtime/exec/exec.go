@@ -101,6 +101,30 @@ func (p *Provider) cityEnv() []string {
 	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
+// opEnv returns the env a bounded op runs with: cityEnv for a provider built
+// for a city, else gc's environment read through execenv.Environ. Like
+// cityEnv, read it before arming the op's deadline.
+func (p *Provider) opEnv() []string {
+	if env := p.cityEnv(); env != nil {
+		return env
+	}
+	return execenv.Environ()
+}
+
+// withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
+// rounded down and never negative, until ctx's deadline — the earlier of the
+// op's own timeout and any deadline its parent already carried. A ctx with
+// no deadline leaves env as it is. Call it with the op's armed ctx, on the
+// env opEnv read before arming it.
+func withDeadline(ctx context.Context, env []string) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return env
+	}
+	ms := max(time.Until(deadline).Milliseconds(), 0)
+	return append(env, "GC_EXEC_DEADLINE_MS="+strconv.FormatInt(ms, 10))
+}
+
 // run executes the script with the given args using the default timeout.
 func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	return p.runWithTimeout(p.timeout, stdinData, args...)
@@ -127,12 +151,12 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 // cap). Output past the cap is discarded and fails the op, without echoing
 // any of it.
 func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cmd.Env = env
+	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -587,10 +611,10 @@ func (p *Provider) startStartupWatch(
 	name string,
 	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -1167,12 +1191,12 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 	}
 	command := shellQuote(argv)
-	env := p.cityEnv()
+	env := p.opEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
