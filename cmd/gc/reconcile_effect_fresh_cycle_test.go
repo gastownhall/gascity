@@ -391,6 +391,11 @@ func TestFreshCycleAnchor(t *testing.T) {
 			t.Errorf("no snapshot: step %+v, probe err %v; want %s", got.step, got.err, causeFreshCycleDefer)
 		}
 	})
+	t.Run("B6 a padded anchor id still names the live bead", func(t *testing.T) {
+		f := newFreshWork(t)
+		f.c.a.Snapshot.Entries[f.c.k].AssignedWork.BeadID = "  gw-new \n"
+		f.wantGoesOn("the anchor id, trimmed, is a live, non-terminal bead")
+	})
 	t.Run("B5 open and not claimed by the session: the cycle goes on", func(t *testing.T) {
 		f := newFreshWork(t)
 		f.set("gw-new", beads.UpdateOpts{Assignee: ptr("gc-other")})
