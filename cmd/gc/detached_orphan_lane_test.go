@@ -569,3 +569,59 @@ func TestCompletionFactIndexWiringAbsorbsAndInvalidates(t *testing.T) {
 	standalone.absorbCompletionFact(fact)
 	standalone.invalidateCompletionFacts()
 }
+
+// TestDetachedOrphanDeltaLogsEveryRestoreWithItsProvenance pins the operator
+// line the delta lane owes for each route it restores (ga-go3c392): the bead, the
+// route written, the stamped session the route came from, and the lane. The
+// backstop has always logged its restores per bead; the delta lane restored
+// silently, so a restore carried only an aggregate count and nobody could tell
+// which claim residue a route had been rebuilt from.
+//
+// A tick that restores nothing must stay silent — the steady-state tick is the
+// common case and a line per tick would bury the one that matters.
+func TestDetachedOrphanDeltaLogsEveryRestoreWithItsProvenance(t *testing.T) {
+	work := detachedOrphanWorkBead("D-1")
+	work.Metadata[beadmeta.SessionIDMetadataKey] = "S-1"
+	cr, _ := detachedOrphanRuntime(t, detachedOrphanSessionBead(), work)
+	var out bytes.Buffer
+	cr.stderr = &out
+
+	// A quiet tick names nothing and logs nothing.
+	cr.sweepDetachedHandoffOrphansDelta()
+	if out.Len() != 0 {
+		t.Fatalf("a tick that restored nothing logged %q, want no output", out.String())
+	}
+
+	cr.detachedOrphanLaneOf().observe(beadCreatedEvent(t, work))
+	report := cr.sweepDetachedHandoffOrphansDelta()
+	if report.restored != 1 {
+		t.Fatalf("delta restored %d (err=%v), want 1", report.restored, report.err)
+	}
+
+	var restoreLines []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "D-1") {
+			restoreLines = append(restoreLines, line)
+		}
+	}
+	if len(restoreLines) != 1 {
+		t.Fatalf("restore of D-1 logged %d line(s) naming it, want exactly 1; output:\n%s", len(restoreLines), out.String())
+	}
+	for _, want := range []string{
+		detachedOrphanTestPool,
+		"S-1",
+		detachedOrphanTestSession,
+		"lane=delta",
+	} {
+		if !strings.Contains(restoreLines[0], want) {
+			t.Errorf("restore line %q does not contain %q", restoreLines[0], want)
+		}
+	}
+
+	// The next tick has nothing new to say.
+	out.Reset()
+	cr.sweepDetachedHandoffOrphansDelta()
+	if out.Len() != 0 {
+		t.Fatalf("the tick after the restore logged %q, want no output", out.String())
+	}
+}
