@@ -606,3 +606,39 @@ func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 		t.Fatalf("payload.SessionName = %q, want %q", got, want)
 	}
 }
+
+// TestFactoryThreadsRecorderToWorkDirCollisionGuard pins that the factory's
+// event recorder reaches the session manager, so a start refused because
+// another live session occupies the working directory is recorded as
+// session.start_refused_cwd rather than discarded.
+func TestFactoryThreadsRecorderToWorkDirCollisionGuard(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	factory, err := NewFactory(FactoryConfig{
+		Store:    beads.NewMemStore(),
+		Provider: runtime.NewFake(),
+		Recorder: recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	workDir := t.TempDir()
+	create := func(title string) error {
+		_, err := factory.manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
+			Template: "probe", Title: title, Command: "claude", WorkDir: workDir, Provider: "claude",
+		})
+		return err
+	}
+	if err := create("first"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := create("second"); !errors.Is(err, sessionpkg.ErrWorkDirCollision) {
+		t.Fatalf("second create err = %v, want ErrWorkDirCollision", err)
+	}
+	for _, e := range recorder.events {
+		if e.Type == events.SessionStartRefusedCwd {
+			return
+		}
+	}
+	t.Fatalf("no %s event recorded; got %d events", events.SessionStartRefusedCwd, len(recorder.events))
+}

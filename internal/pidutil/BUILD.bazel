@@ -7,6 +7,7 @@ go_library(
         "cmdline_other.go",
         "environ_darwin.go",
         "listener.go",
+        "livecwd.go",
         "pidutil.go",
         "procargs2.go",
         "subreaper.go",
@@ -30,6 +31,7 @@ go_test(
         "cmdline_portable_test.go",
         "environ_darwin_test.go",
         "listener_test.go",
+        "livecwd_test.go",
         "pidutil_test.go",
         "procargs2_test.go",
         "starttime_portable_test.go",
@@ -38,7 +40,10 @@ go_test(
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/pathutil",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

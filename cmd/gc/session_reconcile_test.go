@@ -4121,3 +4121,58 @@ func TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip(t *testing.T) {
 		t.Errorf("unknownStateRefusal(named row, state=%q) = %q, want the state and `gc session close gc-1` named", named.MetadataState, why)
 	}
 }
+
+// TestStartResumeFailure_WorkDirCollisionHoldsConversation pins that a start
+// the runtime refused because another live session occupies the working
+// directory is classified as a held failure: the conversation was never
+// attempted, so a refusal must not read as a resume failure. Both guard
+// sentinels count, joined or wrapped.
+func TestStartResumeFailure_WorkDirCollisionHoldsConversation(t *testing.T) {
+	for name, err := range map[string]error{
+		"collision":   fmt.Errorf("starting: %w: /work held by pid 4242", sessionpkg.ErrWorkDirCollision),
+		"unavailable": fmt.Errorf("starting: %w", sessionpkg.ErrWorkDirLivenessUnavailable),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rf := startResumeFailure(true, false, "key-1", err, "")
+			if !rf.holdConversation {
+				t.Fatalf("startResumeFailure(%v).holdConversation = false, want true", err)
+			}
+		})
+	}
+	if rf := startResumeFailure(true, false, "key-1", errors.New("boom"), ""); rf.holdConversation {
+		t.Error("an unrelated start error must not hold the conversation")
+	}
+}
+
+// TestRecordWakeFailure_WorkDirCollisionKeepsConversationButAccrues pins that
+// a workdir-collision refusal never resets the conversation (even when the
+// transcript probe would clear it) yet still accrues wake attempts, so a
+// permanent collision quarantines rather than spinning.
+func TestRecordWakeFailure_WorkDirCollisionKeepsConversationButAccrues(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "live-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{holdConversation: true}, nil)
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "live-key" {
+		t.Errorf("session_key = %q, want kept across a workdir-collision refusal", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "hash-1" {
+		t.Errorf("started_config_hash = %q, want kept", got)
+	}
+	if got := session.Metadata["wake_attempts"]; got != "2" {
+		t.Errorf("wake_attempts = %q, want 2: the refusal still accrues so a permanent collision quarantines", got)
+	}
+}

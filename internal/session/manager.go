@@ -20,8 +20,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -646,6 +648,8 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	livenessScanner         LivenessScanner
+	eventRecorder           events.Recorder
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
 }
@@ -916,11 +920,38 @@ func WithClock(clk clock.Clock) ManagerOption {
 	}
 }
 
+// WithLivenessScanner supplies the live-process scan behind the
+// working-directory collision guard (ga-ighomh.1). A nil scanner keeps the
+// production scan, pidutil.LiveCWDs.
+func WithLivenessScanner(scanner LivenessScanner) ManagerOption {
+	return func(m *Manager) {
+		if scanner != nil {
+			m.livenessScanner = scanner
+		}
+	}
+}
+
+// WithEventRecorder supplies the events.Recorder that receives the session
+// start-refusal events (ga-ighomh.1). A nil recorder keeps events.Discard.
+func WithEventRecorder(recorder events.Recorder) ManagerOption {
+	return func(m *Manager) {
+		if recorder != nil {
+			m.eventRecorder = recorder
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
 func NewManagerWithOptions(store beads.SessionStore, sp runtime.Provider, opts ...ManagerOption) *Manager {
-	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
+	m := &Manager{
+		store:                   store,
+		sp:                      sp,
+		staleKeyDetectionWaiter: waitForStaleKeyDetection,
+		livenessScanner:         pidutil.LiveCWDs,
+		eventRecorder:           events.Discard,
+	}
 	for _, opt := range opts {
 		opt(m)
 	}

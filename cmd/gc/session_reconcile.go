@@ -828,6 +828,11 @@ type resumeFailure struct {
 	// maxResumeFailuresBeforeReset. A capacity refusal, a deadline, a name
 	// collision and a spawn error are not.
 	counted bool
+	// holdConversation: the start was refused before it reached the provider
+	// because another live session occupies the working directory
+	// (sessionpkg.ErrWorkDirCollision, ErrWorkDirLivenessUnavailable). The
+	// conversation was never attempted, so recordWakeFailure leaves it alone.
+	holdConversation bool
 }
 
 // startResumeFailure classifies a start that did not commit: resumed, its
