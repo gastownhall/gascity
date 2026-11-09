@@ -12,7 +12,12 @@
     "async": { "type": "boolean" },
     "soft": { "type": "boolean" },
     "outcome": { "enum": ["accepted", "applied", "no_change"] },
-    "revision": { "type": "string" }
+    "revision": { "type": "string" },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal warnings from the controller's reply, verbatim and in encounter order; free-form text, do not parse. Absent when there are none, and always absent for outcome=accepted with async=true (that reply is sent before the config is evaluated).",
+      "items": { "type": "string" }
+    }
   },
   "additionalProperties": true
 }

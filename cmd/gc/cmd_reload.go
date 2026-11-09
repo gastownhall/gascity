@@ -179,6 +179,7 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 				Soft:     lifecycleBoolPtr(soft),
 				Outcome:  string(reply.Outcome),
 				Revision: reply.Revision,
+				Warnings: reply.Warnings,
 			})
 		} else if message != "" {
 			fmt.Fprintln(stdout, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stdout
