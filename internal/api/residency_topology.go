@@ -155,3 +155,19 @@ func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordcl
 		CompleteClasses: completeObservedClasses,
 	})
 }
+
+// configuredPrefixes is the work leg's and each rig leg's configured id prefix
+// from cfg, keyed by rig ref: the prefixes residencyTopology reads, which a
+// State's holder completes the topology it mints its Stores from with, so
+// Stores().Topology() and residencyTopology agree (seededState, and the test
+// fakes).
+func configuredPrefixes(cfg *config.City) (hq string, rigs map[storeref.StoreRef]string) {
+	if cfg == nil {
+		return "", nil
+	}
+	rigs = make(map[storeref.StoreRef]string, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		rigs[storeref.RigRef(rig.Name)] = strings.TrimSpace(rig.EffectivePrefix())
+	}
+	return strings.TrimSpace(config.EffectiveHQPrefix(cfg)), rigs
+}

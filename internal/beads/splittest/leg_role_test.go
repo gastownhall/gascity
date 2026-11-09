@@ -1,6 +1,7 @@
 package splittest
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -117,6 +118,78 @@ func TestGateDualModeParityOnAStrictLeaf(t *testing.T) {
 	} {
 		if got := strictViolations(t, dualModePairs[name][1]); len(got) != want {
 			t.Errorf("%s through a leg: %d violations, want %d: %+v", name, len(got), want, got)
+		}
+	}
+}
+
+// declaringLister is a store whose cache-first list and count record how
+// the gate would classify the read they serve (captureStack, as a view's flag
+// and a strict leaf's recordSplit do). A read from a test has no production
+// site to charge, so the classification is what the test can observe.
+type declaringLister struct {
+	*beads.MemStore
+	declared []beads.ReadMarker
+}
+
+func (d *declaringLister) CachedList(beads.ListQuery) ([]beads.Bead, bool) {
+	d.declared = append(d.declared, captureStack().declared())
+	return nil, true
+}
+
+func (d *declaringLister) Count(context.Context, beads.ListQuery, ...string) (int, error) {
+	d.declared = append(d.declared, captureStack().declared())
+	return 0, nil
+}
+
+// TestCapabilityReadsThroughALegDeclareItsRole: a T7d-style cache-first list
+// (As[CachedLister] then CachedList) and a count taken through a relic leg,
+// as a reader or a resident over the leg, are declared relic debt to the
+// gate, as under beads.RelicRead; through a federated leg they are declared
+// federated; with no leg, a strict leg or a plain resident, nothing, so the
+// gate polices them as strict.
+func TestCapabilityReadsThroughALegDeclareItsRole(t *testing.T) {
+	type lookup func(beads.Store) (beads.CachedLister, beads.Counter, bool)
+	viaStore := func(over func(beads.Store) beads.Store) lookup {
+		return func(s beads.Store) (beads.CachedLister, beads.Counter, bool) {
+			l, lok := beads.As[beads.CachedLister](over(s))
+			c, cok := beads.As[beads.Counter](over(s))
+			return l, c, lok && cok
+		}
+	}
+	viaReader := func(mint func(beads.Store) beads.FederatedReader) lookup {
+		return func(s beads.Store) (beads.CachedLister, beads.Counter, bool) {
+			l, lok := beads.ReaderAs[beads.CachedLister](mint(s))
+			c, cok := beads.ReaderAs[beads.Counter](mint(s))
+			return l, c, lok && cok
+		}
+	}
+	for name, tc := range map[string]struct {
+		mark func(func() error) error
+		get  lookup
+		want beads.ReadMarker
+	}{
+		"relic reader":        {unmarked, viaReader(beadstest.RelicLeg), beads.RelicReadMarker},
+		"relic resident":      {unmarked, viaStore(relicLegOver), beads.RelicReadMarker},
+		"relic marker":        {beads.RelicRead, viaStore(itself), beads.RelicReadMarker},
+		"federated reader":    {unmarked, viaReader(beadstest.FederatedLeg), beads.FederatedReadMarker},
+		"federated resident":  {unmarked, viaStore(federatedLegOver), beads.FederatedReadMarker},
+		"no leg":              {unmarked, viaStore(itself), beads.NoReadMarker},
+		"strict reader":       {unmarked, viaReader(beadstest.StrictLeg), beads.NoReadMarker},
+		"resident":            {unmarked, viaStore(residentOver), beads.NoReadMarker},
+		"relic over a handle": {unmarked, viaStore(func(s beads.Store) beads.Store { return beadstest.Orders(relicLegOver(s)) }), beads.RelicReadMarker},
+	} {
+		d := &declaringLister{MemStore: beads.NewMemStore()}
+		_ = tc.mark(func() error {
+			l, c, ok := tc.get(d)
+			if !ok {
+				t.Fatalf("%s: no CachedLister or Counter", name)
+			}
+			_, _ = l.CachedList(beads.ListQuery{AllowScan: true})
+			_, _ = c.Count(context.Background(), beads.ListQuery{AllowScan: true})
+			return nil
+		})
+		if len(d.declared) != 2 || d.declared[0] != tc.want || d.declared[1] != tc.want {
+			t.Errorf("%s: declared %v, want %v for both reads", name, d.declared, tc.want)
 		}
 	}
 }

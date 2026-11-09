@@ -331,7 +331,7 @@ func (s failingConvoyRigState) Stores() storeref.Stores {
 		rigs = map[string]beads.Store{}
 	}
 	rigs[s.rig] = convoyCheckFailStore{Store: beads.NewMemStore(), failConvoyList: true}
-	return mintCityStores(cityPath, routes, work, storeref.RigLegs(rigs))
+	return mintCityStores(cityPath, routes, nil, work, storeref.RigLegs(rigs))
 }
 
 // TestConvoyListRouteEquivalenceFailsOnAFailedRig pins that a store whose

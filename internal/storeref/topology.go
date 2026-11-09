@@ -85,6 +85,13 @@ type Leg struct {
 	Ref    StoreRef
 	Store  beads.Store
 	Prefix string
+
+	// RelicFree reports that the scope store is PROVEN to hold no row of a
+	// relocated class (S4's per-rig records), so a federation that reads it
+	// only for rows written before the split drops it (Stores.Plan). Like
+	// ClassBinding.HasLegacyResidents it is pessimistic: false unless a
+	// census proved it, and meaningful only on a scope (work or rig) leg.
+	RelicFree bool
 }
 
 // ClassBinding is one relocated class binding actually being served.
@@ -269,7 +276,7 @@ func (t Topology) PrefixFaults() []PrefixFault {
 	reached.addIfNew(t.Work.Store)
 	var faults []PrefixFault
 	for _, leg := range t.orderedRigs() {
-		declaring, ok := leg.Store.(HasIDPrefix)
+		declaring, ok := beads.As[HasIDPrefix](leg.Store)
 		if !ok {
 			continue
 		}

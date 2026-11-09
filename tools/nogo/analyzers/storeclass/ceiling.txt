@@ -40,8 +40,6 @@ internal/sling	raw-field	6
 internal/sling	raw-param	10
 internal/sling	raw-result	3
 internal/sling	read-marker	3
-internal/storeref	cap-assert	4
-internal/storeref/storereftest	raw-field	2
 internal/supervisor	raw-field	2
 internal/worker	mint	2
 internal/worker	raw-field	2

@@ -554,6 +554,7 @@ go_test(
         "store_health_rows_measured_test.go",
         "store_health_test.go",
         "store_identity_guard_test.go",
+        "stores_topology_test.go",
         "structured_leakage_test.go",
         "supervisor_dashboard_test.go",
         "supervisor_health_packslock_test.go",

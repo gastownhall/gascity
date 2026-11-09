@@ -27,15 +27,15 @@ import (
 // instance, and optional capabilities reached through beads.As keep working.
 
 // Stores returns the controller's class handles for its current city work
-// store, rig stores and the routes it opened at boot. Every input is read
-// under one cs.mu read lock, the lock update swaps the city and rig stores
-// under, so the handles come from one reload. See storesEpochCache for when it
-// is re-minted.
+// store, rig stores, config and the routes it opened at boot. Every input is
+// read under one cs.mu read lock, the lock update swaps the city and rig
+// stores and the config under, so the handles come from one reload. See
+// storesEpochCache for when it is re-minted.
 func (cs *controllerState) Stores() storeref.Stores {
 	cs.mu.RLock()
-	cityPath, routes, work, rigs := cs.cityPath, cs.storageRoutes, cs.cityBeadStore, cs.rigSetLocked()
+	cityPath, routes, cfg, work, rigs := cs.cityPath, cs.storageRoutes, cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, work, rigs)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs)
 }
 
 // storesOver is Stores over the state's city work store and rig stores with
@@ -44,9 +44,9 @@ func (cs *controllerState) Stores() storeref.Stores {
 // them), so both share the one epoch.
 func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) storeref.Stores {
 	cs.mu.RLock()
-	work, rigs := cs.cityBeadStore, cs.rigSetLocked()
+	cfg, work, rigs := cs.cfg, cs.cityBeadStore, cs.rigSetLocked()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, work, rigs)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs)
 }
 
 // rigSetLocked is the state's rig stores as a rig set. cs.mu must be held.
@@ -71,9 +71,9 @@ func (cr *CityRuntime) cityStores() storeref.Stores {
 		return cr.cs.storesOver(cr.cityPath, cr.storageRoutes)
 	}
 	cr.serviceStateMu.RLock()
-	work, rigs := cr.standaloneCityStore, rigSet{gen: cr.standaloneRigGen, stores: cr.standaloneRigStores}
+	cfg, work, rigs := cr.cfg, cr.standaloneCityStore, rigSet{gen: cr.standaloneRigGen, stores: cr.standaloneRigStores}
 	cr.serviceStateMu.RUnlock()
-	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, work, rigs)
+	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, cfg, work, rigs)
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
