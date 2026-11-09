@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **A stranded split-store city serves degraded instead of refusing.** A
+  converged city whose work store holds infrastructure beads the binding
+  does not serve (for example ordinary work that a plain `bd create`
+  stamped with `gc.root_bead_id`) used to refuse every infrastructure class
+  in every `gc` process until it was repaired. It now serves degraded: the
+  stranded rows stay invisible to their class readers, every process prints
+  one `WARNING: serving degraded` line, `gc storage status` still exits 1
+  and prints `serving: degraded`, `gc doctor` reports an error, and the
+  controller publishes the new `storage.binding.stranded` event at boot and
+  from a read-only recheck every 10 minutes. A stranded id the binding holds
+  for a different bead still refuses the city. Alerting that relied on a
+  refused boot must subscribe to `storage.binding.stranded`; the `stranded`
+  outcome no longer arrives as `storage.binding.unconverged`. Every
+  `storage.binding.*` payload now carries `serving`.
+- **`gc storage recover-stranded` no longer carries work-shaped rows into the
+  binding by default.** A stranded row that metadata alone makes
+  infrastructure class (typically `gc.root_bead_id` on a task or bug) is
+  listed apart with its in-place repair, `gc bd update <id>
+  --unset-metadata gc.root_bead_id`, and left in the work store; the command
+  exits 1 while any is left. Name one with `--move <id>` to copy it into the
+  binding as before.
+- **`gc bd comment`, `comments`, `comments add` and the other by-id verbs
+  that fell through to bd now route through the binding check.** On a bead
+  the infrastructure binding holds they are refused with a routing message
+  (the binding stores no comments) instead of bd's "no issue found"; work
+  beads are unchanged.
+
 - **Read commands print one JSON document whichever route serves them
   (#8453).** In 1.5.1 a supervisor-hosted city (the default shape, with no
   `[api]` port) read these commands locally, except `gc status`, which has
