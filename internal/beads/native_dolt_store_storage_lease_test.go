@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,36 +28,50 @@ type leaseTestHandle struct {
 	*nativeDoltStorageSpy
 	name      string
 	closes    atomic.Int32
+	closedCh  chan struct{} // receives one value per Close call
 	inUse     atomic.Int32
 	closedUse atomic.Int32 // closes that ran while a holder was still using it
 	closeErr  error
 }
 
 func newLeaseTestHandle(name string) *leaseTestHandle {
-	h := &leaseTestHandle{name: name}
+	h := &leaseTestHandle{name: name, closedCh: make(chan struct{}, 64)}
 	h.nativeDoltStorageSpy = &nativeDoltStorageSpy{
 		close: func() error {
 			if h.inUse.Load() > 0 {
 				h.closedUse.Add(1)
 			}
 			h.closes.Add(1)
+			h.closedCh <- struct{}{}
 			return h.closeErr
 		},
 	}
 	return h
 }
 
-// leaseEventually polls cond until it holds or the wait elapses.
-func leaseEventually(t *testing.T, what string, cond func() bool) {
+// leaseSettleWindow is how long a test lets a stray late Close surface before
+// it concludes none is coming. Closes run on detached goroutines, so a
+// negative assertion needs a bounded wait.
+const leaseSettleWindow = 50 * time.Millisecond
+
+// waitClosed blocks until h has been closed, or fails the test.
+func waitClosed(t *testing.T, h *leaseTestHandle) {
 	t.Helper()
-	deadline := time.Now().Add(leaseTestWait)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-h.closedCh:
+	case <-time.After(leaseTestWait):
+		t.Fatalf("timed out waiting for handle %s to close", h.name)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+}
+
+// assertNoClose fails if h is closed within the settle window.
+func assertNoClose(t *testing.T, h *leaseTestHandle, why string) {
+	t.Helper()
+	select {
+	case <-h.closedCh:
+		t.Fatalf("handle %s closed %s", h.name, why)
+	case <-time.After(leaseSettleWindow):
+	}
 }
 
 // leaseCompletesWithin runs fn and reports whether it returned within d.
@@ -138,24 +153,21 @@ func TestNativeDoltStoreReconnectDoesNotWaitForParkedWriter(t *testing.T) {
 	}
 
 	// The retired handle stays open while the writer still holds it.
-	time.Sleep(50 * time.Millisecond)
-	if n := h1.closes.Load(); n != 0 {
-		t.Fatalf("retired handle closed %d time(s) while a writer still held it", n)
-	}
+	assertNoClose(t, h1, "while a writer still held it")
 	unpark()
-	leaseEventually(t, "the retired handle to close on the last release", func() bool { return h1.closes.Load() == 1 })
-	time.Sleep(50 * time.Millisecond)
-	if n := h1.closes.Load(); n != 1 {
-		t.Fatalf("retired handle closed %d times, want exactly once", n)
-	}
-	if n := h2.closes.Load(); n != 0 {
-		t.Fatalf("the serving handle closed %d time(s)", n)
-	}
+	waitClosed(t, h1)
+	assertNoClose(t, h1, "a second time")
+	assertNoClose(t, h2, "while it was serving")
 }
 
 func TestNativeDoltStoreReadsReadOnlyAndCloseDoNotBlockBehindParkedWriter(t *testing.T) {
 	h1, h2 := newLeaseTestHandle("h1"), newLeaseTestHandle("h2")
-	store := leaseStoreOn(h1, h2)
+	store := newNativeDoltStoreForTest(h1)
+	reopened := make(chan struct{})
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		close(reopened)
+		return h2, nil
+	}
 	unpark := parkWriter(t, store)
 	t.Cleanup(unpark)
 
@@ -164,7 +176,7 @@ func TestNativeDoltStoreReadsReadOnlyAndCloseDoNotBlockBehindParkedWriter(t *tes
 	reconnected := make(chan error, 1)
 	gen := leaseGeneration(store)
 	go func() { reconnected <- store.reconnect(context.Background(), gen) }()
-	time.Sleep(20 * time.Millisecond)
+	<-reopened
 
 	if !leaseCompletesWithin(time.Second, func() {
 		_, release, err := store.acquireStorage()
@@ -197,52 +209,52 @@ func TestNativeDoltStoreReadsReadOnlyAndCloseDoNotBlockBehindParkedWriter(t *tes
 	}
 }
 
-func TestNativeDoltStoreCloseStoreReturnsNilWithOpInFlightAndClosesOnLastRelease(t *testing.T) {
-	h1 := newLeaseTestHandle("h1")
-	h1.closeErr = errors.New("close failed")
-	store := leaseStoreOn(h1)
-	unpark := parkWriter(t, store)
-	t.Cleanup(unpark)
+// TestNativeDoltStoreCloseStoreDetachesWithoutWaitingForInFlightOps pins both
+// halves of CloseStore's close contract: with an operation in flight it returns
+// nil and the last release closes the handle; with none in flight it closes
+// synchronously and returns the close error.
+func TestNativeDoltStoreCloseStoreDetachesWithoutWaitingForInFlightOps(t *testing.T) {
+	t.Run("op in flight", func(t *testing.T) {
+		h1 := newLeaseTestHandle("h1")
+		h1.closeErr = errors.New("close failed")
+		store := leaseStoreOn(h1)
+		unpark := parkWriter(t, store)
+		t.Cleanup(unpark)
 
-	var closeErr error
-	if !leaseCompletesWithin(time.Second, func() { closeErr = store.CloseStore() }) {
-		t.Fatal("CloseStore waited for the in-flight operation")
-	}
-	if closeErr != nil {
-		t.Fatalf("CloseStore with an operation in flight = %v, want nil", closeErr)
-	}
-	if n := h1.closes.Load(); n != 0 {
-		t.Fatalf("handle closed %d time(s) before the in-flight operation released it", n)
-	}
-	if _, _, err := store.acquireStorage(); !errors.Is(err, ErrStoreClosed) {
-		t.Fatalf("acquireStorage after CloseStore = %v, want ErrStoreClosed", err)
-	}
-	unpark()
-	leaseEventually(t, "the last release to close the handle", func() bool { return h1.closes.Load() == 1 })
-	time.Sleep(50 * time.Millisecond)
-	if n := h1.closes.Load(); n != 1 {
-		t.Fatalf("handle closed %d times, want exactly once", n)
-	}
-}
+		var closeErr error
+		if !leaseCompletesWithin(time.Second, func() { closeErr = store.CloseStore() }) {
+			t.Fatal("CloseStore waited for the in-flight operation")
+		}
+		if closeErr != nil {
+			t.Fatalf("CloseStore with an operation in flight = %v, want nil", closeErr)
+		}
+		assertNoClose(t, h1, "before the in-flight operation released it")
+		if _, _, err := store.acquireStorage(); !errors.Is(err, ErrStoreClosed) {
+			t.Fatalf("acquireStorage after CloseStore = %v, want ErrStoreClosed", err)
+		}
+		unpark()
+		waitClosed(t, h1)
+		assertNoClose(t, h1, "a second time")
+	})
+	t.Run("no op in flight", func(t *testing.T) {
+		want := errors.New("close failed")
+		h1 := newLeaseTestHandle("h1")
+		h1.closeErr = want
+		store := leaseStoreOn(h1)
 
-func TestNativeDoltStoreCloseStoreWithNoOpInFlightReturnsTheCloseError(t *testing.T) {
-	want := errors.New("close failed")
-	h1 := newLeaseTestHandle("h1")
-	h1.closeErr = want
-	store := leaseStoreOn(h1)
-
-	if err := store.CloseStore(); !errors.Is(err, want) {
-		t.Fatalf("CloseStore = %v, want the handle's close error %v", err, want)
-	}
-	if n := h1.closes.Load(); n != 1 {
-		t.Fatalf("handle closed %d times, want 1", n)
-	}
-	if err := store.CloseStore(); err != nil {
-		t.Fatalf("second CloseStore = %v, want nil", err)
-	}
-	if n := h1.closes.Load(); n != 1 {
-		t.Fatalf("handle closed %d times after a second CloseStore, want 1", n)
-	}
+		if err := store.CloseStore(); !errors.Is(err, want) {
+			t.Fatalf("CloseStore = %v, want the handle's close error %v", err, want)
+		}
+		if n := h1.closes.Load(); n != 1 {
+			t.Fatalf("handle closed %d times, want 1", n)
+		}
+		if err := store.CloseStore(); err != nil {
+			t.Fatalf("second CloseStore = %v, want nil", err)
+		}
+		if n := h1.closes.Load(); n != 1 {
+			t.Fatalf("handle closed %d times after a second CloseStore, want 1", n)
+		}
+	})
 }
 
 func TestNativeDoltStoreDoubleReleaseIsANoOp(t *testing.T) {
@@ -261,23 +273,15 @@ func TestNativeDoltStoreDoubleReleaseIsANoOp(t *testing.T) {
 	release() // must not drop the second holder's reference
 	release()
 
-	if n := h1.closes.Load(); n != 0 {
-		t.Fatalf("handle closed %d time(s) while a second holder still had it", n)
-	}
+	assertNoClose(t, h1, "while a second holder still had it")
 	if err := store.CloseStore(); err != nil {
 		t.Fatalf("CloseStore: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if n := h1.closes.Load(); n != 0 {
-		t.Fatalf("handle closed %d time(s) while a holder still had it after CloseStore", n)
-	}
+	assertNoClose(t, h1, "while a holder still had it after CloseStore")
 	other()
-	leaseEventually(t, "the handle to close once", func() bool { return h1.closes.Load() == 1 })
+	waitClosed(t, h1)
 	other() // a spent release stays spent
-	time.Sleep(50 * time.Millisecond)
-	if n := h1.closes.Load(); n != 1 {
-		t.Fatalf("handle closed %d times, want exactly once", n)
-	}
+	assertNoClose(t, h1, "a second time")
 }
 
 func TestNativeDoltStoreLeaseStressNeverClosesAHeldHandleOrClosesTwice(t *testing.T) {
@@ -318,7 +322,7 @@ func TestNativeDoltStoreLeaseStressNeverClosesAHeldHandleOrClosesTwice(t *testin
 				}
 				h := storage.(*leaseTestHandle)
 				h.inUse.Add(1)
-				time.Sleep(50 * time.Microsecond)
+				runtime.Gosched()
 				h.inUse.Add(-1)
 				release()
 			}
@@ -338,15 +342,10 @@ func TestNativeDoltStoreLeaseStressNeverClosesAHeldHandleOrClosesTwice(t *testin
 	handlesMu.Lock()
 	all := append([]*leaseTestHandle(nil), handles...)
 	handlesMu.Unlock()
-	leaseEventually(t, "every handle to close", func() bool {
-		for _, h := range all {
-			if h.closes.Load() != 1 {
-				return false
-			}
-		}
-		return true
-	})
-	time.Sleep(50 * time.Millisecond)
+	for _, h := range all {
+		waitClosed(t, h)
+	}
+	<-time.After(leaseSettleWindow) // let a stray second Close surface
 	for _, h := range all {
 		if n := h.closes.Load(); n != 1 {
 			t.Errorf("handle %s closed %d times, want exactly once", h.name, n)
@@ -392,12 +391,12 @@ func TestNativeDoltStoreReconnectDuringStampAndCloseKeepsItsHandle(t *testing.T)
 		defer mu.Unlock()
 		ran = append(ran, op+"@"+h.name)
 	}
-	var h1CloseesAtClose atomic.Int32
+	var h1ClosesAtClose atomic.Int32
 	wire := func(h *leaseTestHandle, onUpdate func()) {
 		h.issueLifecycle = func() (issueops.Lifecycle, error) {
 			return &leaseTaggedLifecycle{handle: h, record: func(op string, hh *leaseTestHandle) {
 				if op == "close" {
-					h1CloseesAtClose.Store(h1.closes.Load())
+					h1ClosesAtClose.Store(h1.closes.Load())
 				}
 				record(op, hh)
 			}, onUpdate: onUpdate}, nil
@@ -408,7 +407,7 @@ func TestNativeDoltStoreReconnectDuringStampAndCloseKeepsItsHandle(t *testing.T)
 		if err := store.reconnect(context.Background(), leaseGeneration(store)); err != nil {
 			t.Errorf("reconnect between the stamp and the close: %v", err)
 		}
-		time.Sleep(50 * time.Millisecond)
+		<-time.After(leaseSettleWindow) // a buggy retire would close h1 here
 	})
 	wire(h2, nil)
 
@@ -426,10 +425,10 @@ func TestNativeDoltStoreReconnectDuringStampAndCloseKeepsItsHandle(t *testing.T)
 	if want := []string{"update@h1", "close@h1"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("stampAndClose ran %v, want both writes on the leased handle %v", got, want)
 	}
-	if n := h1CloseesAtClose.Load(); n != 0 {
+	if n := h1ClosesAtClose.Load(); n != 0 {
 		t.Fatalf("the leased handle was closed (%d) before the chain's second write", n)
 	}
-	leaseEventually(t, "the retired handle to close after the chain", func() bool { return h1.closes.Load() == 1 })
+	waitClosed(t, h1)
 }
 
 func TestNativeDoltStoreInstallAfterCloseStoreIsVoidAndClosesTheFreshHandle(t *testing.T) {
@@ -460,11 +459,10 @@ func TestNativeDoltStoreInstallAfterCloseStoreIsVoidAndClosesTheFreshHandle(t *t
 	if err := <-errc; !errors.Is(err, ErrStoreClosed) {
 		t.Fatalf("reconnect after CloseStore = %v, want ErrStoreClosed", err)
 	}
-	leaseEventually(t, "both handles to close", func() bool { return h1.closes.Load() == 1 && h2.closes.Load() == 1 })
-	time.Sleep(50 * time.Millisecond)
-	if h1.closes.Load() != 1 || h2.closes.Load() != 1 {
-		t.Fatalf("closes h1=%d h2=%d, want exactly one each", h1.closes.Load(), h2.closes.Load())
-	}
+	waitClosed(t, h1)
+	waitClosed(t, h2)
+	assertNoClose(t, h1, "a second time")
+	assertNoClose(t, h2, "a second time")
 	if _, _, err := store.acquireStorage(); !errors.Is(err, ErrStoreClosed) {
 		t.Fatalf("acquireStorage after a voided install = %v, want ErrStoreClosed", err)
 	}
