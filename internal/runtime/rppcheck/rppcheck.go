@@ -130,6 +130,7 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	c := &checker{path: path, opts: opts}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
+	c.checkServerLifecycle(ctx)
 	return c.result, nil
 }
 
@@ -205,6 +206,7 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
 	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -217,6 +219,13 @@ const (
 	killObjectCheck    = "capability observe.v1: kill-object"
 	observeAbsentCheck = "capability observe.v1: observe after stop"
 	observeBogusObject = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
+)
+
+// The server-lifecycle smoke checks (`gc runtime conformance` gates the
+// token in full as the server group).
+const (
+	serverStopCheck           = "capability server-lifecycle: server-stop"
+	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
 )
 
 const handshakeCheck = "protocol handshake"
@@ -335,6 +344,58 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// Post-stop it exercises the documented missing-session contract:
 	// best-effort, exit 0.
 	c.checkOptional(ctx, "optional: interrupt", nil, "interrupt", name)
+}
+
+// checkServerLifecycle runs the server-stop a script declaring
+// server-lifecycle owes, under a session of its own: server-stop exits 0 and
+// leaves that session not running, and a second server-stop exits 0 too. A
+// script that does not declare the token is not sent server-stop.
+func (c *checker) checkServerLifecycle(ctx context.Context) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		return
+	}
+	name := c.opts.SessionName + "-server"
+	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
+	if err != nil {
+		c.record(serverStopCheck, StatusFail, fmt.Sprintf("marshaling start config: %v", err))
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no session to stop")
+		return
+	}
+	start := c.runOpTimeout(ctx, c.opts.StartTimeout, cfg, "start", name)
+	// Whatever server-stop does, the session is stopped, on a
+	// cancellation-detached context so an interrupted run does not leak it.
+	defer c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+	if start.unsupported || start.err != nil {
+		c.record(serverStopCheck, StatusSkip, "skipped: start failed")
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: start failed")
+		return
+	}
+
+	switch stop := c.runOp(ctx, nil, "server-stop"); {
+	case stop.unsupported:
+		c.record(serverStopCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
+	case stop.err != nil:
+		c.record(serverStopCheck, StatusFail, stop.err.Error())
+	default:
+		res := c.runOp(ctx, nil, "is-running", name)
+		switch {
+		case res.unsupported || res.err != nil:
+			c.record(serverStopCheck, StatusFail, "is-running after server-stop did not answer")
+		case res.stdout != "false":
+			c.record(serverStopCheck, StatusFail, fmt.Sprintf("is-running after server-stop exited 0 = %q, want \"false\": exit 0 means no session remains", res.stdout))
+		default:
+			c.record(serverStopCheck, StatusPass, "")
+		}
+	}
+
+	switch again := c.runOp(ctx, nil, "server-stop"); {
+	case again.unsupported:
+		c.record(serverStopIdempotentCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
+	case again.err != nil:
+		c.record(serverStopIdempotentCheck, StatusFail, fmt.Sprintf("second server-stop must succeed with no server running: %s", again.err))
+	default:
+		c.record(serverStopIdempotentCheck, StatusPass, "")
+	}
 }
 
 // checkRequiredBool asserts is-running prints exactly the wanted value

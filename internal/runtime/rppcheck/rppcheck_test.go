@@ -736,3 +736,35 @@ func minimalResult(t *testing.T) Result {
 	t.Helper()
 	return runScript(t, minimalScript(t.TempDir()), Options{})
 }
+
+// Kills a smoke check that does not run, or does not gate, the server-stop a
+// script declaring server-lifecycle owes: the golden passes both checks; a
+// server-stop that is not implemented, leaves the session running, or fails
+// the second time fails its check; and an undeclared script is not sent it.
+func TestRun_ServerLifecycleSmoke(t *testing.T) {
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{serverStopCheck, serverStopIdempotentCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	for check, body := range map[string]string{
+		serverStopCheck + " (exit 2)":           `exit 2`,
+		serverStopCheck + " (leaves a session)": `:`,
+		serverStopIdempotentCheck:               `if [ -f "$S/server-stopped" ]; then exit 1; fi; : > "$S/server-stopped"; rm -rf "$B"`,
+	} {
+		res, err := Run(context.Background(), observeReference(t, map[string]string{"server-stop": body}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
+			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
+		}
+	}
+	if hasCheck(minimalResult(t), serverStopCheck) {
+		t.Error("a script without server-lifecycle reports a server-stop check")
+	}
+}

@@ -9,6 +9,7 @@ go_library(
         "probes.go",
         "report.go",
         "runner.go",
+        "server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecontract",
     visibility = ["//:__subpackages__"],
@@ -39,6 +40,7 @@ go_test(
     embed = [":runtimecontract"],
     deps = [
         "//internal/bazeltest",
+        "//internal/runtime",
         "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],

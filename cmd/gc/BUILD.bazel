@@ -1416,6 +1416,7 @@ go_test(
         "cmd_start_warmup_test.go",
         "cmd_status_test.go",
         "cmd_stop_confirm_test.go",
+        "cmd_stop_exec_server_lifecycle_test.go",
         "cmd_stop_server_lifecycle_test.go",
         "cmd_stop_test.go",
         "cmd_storage_repair_sequence_test.go",

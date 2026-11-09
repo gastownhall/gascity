@@ -28,6 +28,10 @@
 //     agent, so the controller can relaunch the agent in a warm box over exec
 //     instead of re-provisioning. In-repo Provision is still the welded Start,
 //     so there is no distinct RunProviderTests case to mirror yet.
+//   - server (the server-lifecycle token's `server-stop`): its provider
+//     method, TeardownServer, is not a RunProviderTests case; it is
+//     contract-tested by runtimetest.RunServerTeardownContract
+//     (RUNTIME-CONTRACT-023) instead.
 //   - observe (observe.v1, PAR-EXEC), but for the requirements a provider
 //     method backs (see wireOnlyCodes): the `observe`, `inventory` and
 //     `kill-object` wire shapes, the attach answer, the fault and city-scope
@@ -60,6 +64,7 @@ const (
 	GroupConnection Group = "connection"
 	GroupProvision  Group = "provision"
 	GroupObserve    Group = "observe"
+	GroupServer     Group = "server"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -186,6 +191,15 @@ const (
 	ReqConcurrencyIsRunning    Code = "RPP-CONCURRENCY-003"
 	ReqConcurrencyProcessAlive Code = "RPP-CONCURRENCY-004"
 	ReqConcurrencyListRunning  Code = "RPP-CONCURRENCY-005"
+
+	// The server group is the server-lifecycle token: a script that owns a
+	// server its boxes run under answers `server-stop`, which gc runs once
+	// every session of the city is drained (runtime.ServerLifecycleProvider's
+	// TeardownServer). Every requirement is Optional (SKIP unless
+	// server-lifecycle is declared). See REQUIREMENTS.md (RUNTIME-RPP-034).
+	ReqServerStopIdempotent  Code = "RPP-SERVER-001"
+	ReqServerStartAfterStop  Code = "RPP-SERVER-002"
+	ReqServerStopEndsSession Code = "RPP-SERVER-003"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -244,6 +258,10 @@ var catalog = []Requirement{
 	{ReqConcurrencyIsRunning, GroupConcurrency, "concurrent is-running of distinct running names all answer true", true},
 	{ReqConcurrencyProcessAlive, GroupConcurrency, "concurrent process-alive of distinct running names, asked about their agent, all answer true (absent = SKIP)", true},
 	{ReqConcurrencyListRunning, GroupConcurrency, "concurrent list-running, each with one running name as its prefix, each list that name (absent = SKIP)", true},
+
+	{ReqServerStopIdempotent, GroupServer, "server-stop is idempotent: exit 0 with no server running, and exit 0 again after a stop (declared server-lifecycle only; never exit 2)", true},
+	{ReqServerStartAfterStop, GroupServer, "after server-stop, a new start succeeds and is-running reports it: the server comes back for the next session", true},
+	{ReqServerStopEndsSession, GroupServer, "after server-stop exits 0, is-running reports false for every session started before it: exit 0 means no session the runtime started remains", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

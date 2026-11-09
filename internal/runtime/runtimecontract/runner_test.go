@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -196,6 +197,13 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqConcurrencyIsRunning, set("is-running", exclusive(g["is-running"])), "is-running refuses while another runs"},
 		{ReqConcurrencyProcessAlive, set("process-alive", exclusive(g["process-alive"])), "process-alive refuses while another runs"},
 		{ReqConcurrencyListRunning, set("list-running", exclusive(g["list-running"])), "list-running refuses while another runs"},
+
+		{ReqServerStopIdempotent, set("server-stop", `if [ -f "$S/server-stopped" ]; then exit 1; fi; : > "$S/server-stopped"; rm -rf "$B"`), "server-stop exits 1 the second time"},
+		{ReqServerStopIdempotent, edit("server-stop", `rm -rf "$B"`, `if [ ! -d "$B" ] || [ -z "$(ls "$B")" ]; then echo "no server running" >&2; exit 1; fi; rm -rf "$B"`), "server-stop fails when no server runs"},
+		{ReqServerStopIdempotent, set("server-stop", `exit 2`), "declared server-stop is not implemented"},
+		{ReqServerStartAfterStop, edit("server-stop", `rm -rf "$B"`, `rm -rf "$B"; : > "$B"`), "server-stop leaves the city unable to start a box"},
+		{ReqServerStopEndsSession, set("server-stop", `:`), "server-stop leaves every box and exits 0"},
+		{ReqServerStopEndsSession, set("server-stop", `rm -rf "$(ls -d "$B"/* | head -n 1)"`), "server-stop ends only one box and exits 0"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
@@ -410,6 +418,41 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Kills a token group that runs for a script not declaring its token: the
+// golden answers every op the group sends, so only the gate can make the
+// group skip, and an undeclared pack is never sent the token's op.
+func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
+	for group, token := range map[Group]string{
+		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
+	} {
+		bodies := reference.Bodies()
+		var caps []string
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle} {
+			if c != token {
+				caps = append(caps, `"`+c+`"`)
+			}
+		}
+		bodies["protocol"] = `echo '{"version":0,"capabilities":[` + strings.Join(caps, ",") + `]}'`
+		report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for _, res := range report.Results {
+			if res.Group != group {
+				continue
+			}
+			seen++
+			if res.Status != StatusSkip {
+				t.Errorf("%s undeclared: %s = %s (%s), want SKIP", token, res.Code, res.Status, res.Detail)
+			}
+		}
+		if seen == 0 {
+			t.Errorf("group %s has no requirement in the report", group)
+		}
 	}
 }
 

@@ -67,7 +67,12 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 	if !report.V2Ready || report.Protocol.Locality != "local" {
 		t.Errorf("handshake: v2-ready %v (missing %v), locality %q; want v2-ready and local", report.V2Ready, report.V2Missing, report.Protocol.Locality)
 	}
-	wantSkip := map[Code]bool{ReqConnectionExec: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true}
+	// The script owns no server of its own (each box is its own screen
+	// session), so it does not declare server-lifecycle.
+	wantSkip := map[Code]bool{
+		ReqConnectionExec: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
+		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
+	}
 	for _, res := range report.Results {
 		switch {
 		case res.Status == StatusFail:

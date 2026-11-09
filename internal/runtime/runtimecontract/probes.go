@@ -69,6 +69,10 @@ var probes = map[Code]probe{
 	ReqConcurrencyIsRunning:    probeConcurrencyIsRunning,
 	ReqConcurrencyProcessAlive: probeConcurrencyProcessAlive,
 	ReqConcurrencyListRunning:  probeConcurrencyListRunning,
+
+	ReqServerStopIdempotent:  probeServerStopIdempotent,
+	ReqServerStartAfterStop:  probeServerStartAfterStop,
+	ReqServerStopEndsSession: probeServerStopEndsSession,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
