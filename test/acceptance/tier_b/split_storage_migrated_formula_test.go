@@ -28,9 +28,10 @@
 //     this binary must refuse and name the repair command; running it repairs
 //     the city.
 //   - BornSplit: a city with [storage] from its first boot. The control.
-//   - RawBdStrandAfterCutover: a born-split city stranded mid-formula by a
-//     plain `bd create` carrying gc.root_bead_id (substrate 2026-11-09). It
-//     serves degraded, finishes the formula, and is repaired in place.
+//   - RawBdStrandAfterCutover / RawBdStrandAfterFreshMigration: a born-split
+//     city, and a freshly migrated one, stranded mid-formula by a plain
+//     `bd create` carrying gc.root_bead_id (substrate 2026-11-09). Each serves
+//     degraded, finishes the formula, and is repaired in place.
 //
 // Requires: bd >= 1.3.0, dolt, jq. The work store is a bd city bound to an
 // external Dolt server the test owns (the --dolt-host canonical-endpoint
@@ -223,15 +224,34 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	t.Run("RawBdStrandAfterCutover", func(t *testing.T) {
 		c := newSplitE2ECity(t, bdPath, doltPath, true, "")
 		root := c.runFirstHalf()
-		ids := []string{
-			c.rawBdCreateStrand(bdPath, root, "task"),
-			c.rawBdCreateStrand(bdPath, root, "bug"),
-		}
-		c.assertStatusDegraded(ids)
-		c.finishDegradedAndRepair(root, ids)
-		c.stop()
-		c.finishAndAssert(root)
+		c.strandServeDegradedAndRepair(bdPath, root)
 	})
+
+	// The same on a city that ran its first half unsplit and was migrated
+	// with this binary (the FreshMigration shape).
+	t.Run("RawBdStrandAfterFreshMigration", func(t *testing.T) {
+		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
+		root := c.runFirstHalf()
+		c.authorSplit()
+		c.migrate()
+		c.strandServeDegradedAndRepair(bdPath, root)
+	})
+}
+
+// strandServeDegradedAndRepair strands a task and a bug carrying
+// gc.root_bead_id=root with raw bd on the stopped city, then requires it to
+// serve degraded, finish the formula, take the in-place repair, and finish
+// clean.
+func (c *splitE2ECity) strandServeDegradedAndRepair(bdPath, root string) {
+	c.t.Helper()
+	ids := []string{
+		c.rawBdCreateStrand(bdPath, root, "task"),
+		c.rawBdCreateStrand(bdPath, root, "bug"),
+	}
+	c.assertStatusDegraded(ids)
+	c.finishDegradedAndRepair(root, ids)
+	c.stop()
+	c.finishAndAssert(root)
 }
 
 // rawBdCreateStrand writes, with the bd binary itself from the city
