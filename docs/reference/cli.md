@@ -4242,8 +4242,10 @@ The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
 arguments are always the executable itself.
 
-Use --json for a machine-readable report (CI artifacts). Exits non-zero if
-any required requirement fails.
+Use --json for a machine-readable report (CI artifacts): one JSON document
+with ok:true, or ok:false and an error object when a requirement fails; the
+report fields are present either way, and --env adds the capability report
+under "environment". Exits non-zero if any required requirement fails.
 
 ```
 gc runtime conformance <name|executable> [flags]
