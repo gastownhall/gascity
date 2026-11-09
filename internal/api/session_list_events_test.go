@@ -2,6 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -86,5 +89,42 @@ func TestCityEventStreamCarriesTypedSessionListEvents(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// session.created and session.closed are the controller's, derived from
+// session beads: POST /v0/events refuses them and records nothing, so a caller
+// cannot add a session to, or drop one from, the list a client keeps.
+func TestEventEmitRefusesSessionListDerivedTypes(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	emit := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newPostRequest(cityURL(state, "/events"), strings.NewReader(body)))
+		return rec
+	}
+	latestSeq := func() uint64 {
+		t.Helper()
+		seq, err := state.eventProv.LatestSeq()
+		if err != nil {
+			t.Fatalf("LatestSeq: %v", err)
+		}
+		return seq
+	}
+	for _, typ := range []string{events.SessionCreated, events.SessionClosed} {
+		before := latestSeq()
+		rec := emit(`{"type":"` + typ + `","actor":"ci","subject":"gc-1"}`)
+		wantStatus(t, typ, rec, http.StatusUnprocessableEntity)
+		if !strings.Contains(rec.Body.String(), "session_list_derived") {
+			t.Fatalf("%s: body = %s, want the session_list_derived refusal", typ, rec.Body.String())
+		}
+		if after := latestSeq(); after != before {
+			t.Fatalf("%s: recorded an event (seq %d -> %d)", typ, before, after)
+		}
+	}
+	before := latestSeq()
+	wantStatus(t, "another type", emit(`{"type":"deploy.completed","actor":"ci"}`), http.StatusCreated)
+	if after := latestSeq(); after == before {
+		t.Fatalf("another type: recorded nothing (seq %d)", after)
 	}
 }

@@ -39750,7 +39750,7 @@
         "summary": "Get v0 city by city name events"
       },
       "post": {
-        "description": "Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, are refused 422.",
+        "description": "Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, and session.created and session.closed, which it derives from session beads, are refused 422.",
         "operationId": "emit-event",
         "parameters": [
           {

@@ -436,13 +436,22 @@ instead of polling `GET /v0/city/{cityName}/sessions`:
 
 Each fires once per transition, for sessions created or closed by any
 path (the CLI, the API, or the orchestrator's own pools), whether or not
-a client is watching. The envelope's `subject` and `session_id` are the
-session ID. Read the session list once when you connect, then apply
-these events; reconnect with `Last-Event-ID` (or `after_seq` /
-`after_cursor`) to get the transitions you missed. A transition that
-happens while the orchestrator is down can be missed, and after a
-restart a close can be announced a second time, so treat the events as
-idempotent updates to the list you read.
+a client is watching. Each also agrees with the session list when it
+fires: a late or out-of-date report of a session's state announces
+nothing. The envelope's `subject` and `session_id` are the session ID.
+Read the session list once when you connect, then apply these events;
+reconnect with `Last-Event-ID` (or `after_seq` / `after_cursor`) to get
+the transitions you missed.
+
+Treat the events as idempotent updates to the list you read:
+
+- After the orchestrator restarts, an open session is announced as
+  created the first time it changes, and a close can be announced a
+  second time.
+- A transition that happens while the orchestrator is down can be missed.
+- A session that closes and reopens, or reopens and closes, before the
+  orchestrator has processed the first change is announced only in the
+  state it ends in.
 
 ### Transport vs Semantic Type
 

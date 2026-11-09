@@ -690,6 +690,15 @@ func IsJournalDerived(eventType string) bool {
 	return eventType == OpChanged || eventType == FactRecorded
 }
 
+// IsSessionListDerived reports whether eventType is one the controller
+// derives from session beads' bead.* notifications (session.created,
+// session.closed). No writer may author one: a client applies it to the
+// session list it read, and only the session bead can say whether the session
+// is open.
+func IsSessionListDerived(eventType string) bool {
+	return eventType == SessionCreated || eventType == SessionClosed
+}
+
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
 // event type has a registered payload — a missing registration is a

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -29,17 +30,39 @@ func sessionListBeadChange(eventType string) (session.BeadChange, bool) {
 // sessionListTransitionsOf returns the controller's session list fold.
 func (cs *controllerState) sessionListTransitionsOf() *session.ListTransitions {
 	cs.sessionListOnce.Do(func() {
-		cs.sessionList = session.NewListTransitions(session.DefaultListTransitionsCapacity)
+		cs.sessionList = session.NewListTransitions(session.DefaultListTransitionsCapacity, cs.servedSessionRow)
 	})
 	return cs.sessionList
 }
 
+// servedSessionRow reads id from the city's session store, the cache-first
+// store GET /v0/city/{cityName}/sessions lists. The watcher reads it after
+// the event was applied to the caches, so the row is what the cache kept: an
+// event the cache refused (a stale close, a snapshot older than the cached
+// row) does not show in it.
+func (cs *controllerState) servedSessionRow(id string) (beads.Bead, bool, error) {
+	sessions := cs.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
+		return beads.Bead{}, false, errors.New("no session store")
+	}
+	b, err := sessions.Get(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return beads.Bead{}, false, nil
+	}
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return b, true, nil
+}
+
 // recordSessionListEvent derives session.created and session.closed from a
-// bead event the watcher consumed. The watcher sees every writer's bead
-// events once (the controller cache's own, a one-shot CLI's, a bd hook's, the
-// cache's inferred ones), so the fold in session.ListTransitions is what
-// makes each open-set transition one event however often the ledger repeats
-// it. id is the event's validated bead id.
+// bead event the watcher consumed, after the event was applied to the
+// caches. The watcher sees every writer's bead events once (the controller
+// cache's own, a one-shot CLI's, a bd hook's, the cache's inferred ones), so
+// the fold in session.ListTransitions is what makes each open-set transition
+// one event however often the ledger repeats it, and what keeps a stale one
+// from announcing a transition the session store does not show. id is the
+// event's validated bead id.
 func (cs *controllerState) recordSessionListEvent(evt events.Event, id string) {
 	change, ok := sessionListBeadChange(evt.Type)
 	if !ok {
@@ -53,16 +76,20 @@ func (cs *controllerState) recordSessionListEvent(evt events.Event, id string) {
 		}
 		b = decoded
 	}
-	listChange, info := cs.sessionListTransitionsOf().Observe(change, b)
+	transition, err := cs.sessionListTransitionsOf().Observe(change, b)
+	if err != nil {
+		log.Printf("session list: %s seq=%d for %s not confirmed: %v", evt.Type, evt.Seq, id, err)
+		return
+	}
 	var (
 		eventType string
 		payload   events.Payload
 	)
-	switch listChange {
+	switch transition.Change {
 	case session.ListChangeCreated:
-		eventType, payload = events.SessionCreated, api.SessionCreatedPayloadFor(info)
+		eventType, payload = events.SessionCreated, api.SessionCreatedPayloadFor(transition.Session)
 	case session.ListChangeClosed:
-		eventType, payload = events.SessionClosed, api.SessionClosedPayloadFor(info, session.CloseReasonOf(b))
+		eventType, payload = events.SessionClosed, api.SessionClosedPayloadFor(transition.Session, transition.CloseReason)
 	default:
 		return
 	}
