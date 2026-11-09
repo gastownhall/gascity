@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "catalog.go",
         "observe.go",
+        "ported.go",
         "probes.go",
         "report.go",
         "runner.go",

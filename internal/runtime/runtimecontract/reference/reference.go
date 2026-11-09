@@ -57,6 +57,12 @@ const (
 // 66 (no screen) when no box holds the name.
 const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box/cmd0"; echo`
 
+// goldenListRunning lists the city's boxes whose name starts with the
+// prefix ($name holds it), and fails, never lists nothing, when the backend
+// cannot be read.
+const goldenListRunning = faultGuard + `for b in "$B"/*; do [ -d "$b" ] || continue; case "$b" in *.tmp) continue ;; esac; ` +
+	`n=$(basename "$b"); case "$n" in "$name"*) echo "$n" ;; esac; done`
+
 // goldenPrelude computes the city's state and the name's box, and the
 // helpers the observe.v1 bodies share: ident prints $box's identity, and
 // alive reports whether a box's agent (cmd0) is among its process names.
@@ -85,6 +91,7 @@ func Bodies() map[string]string {
 		"get-meta":          `if [ -f "$box/meta.$3" ]; then cat "$box/meta.$3"; fi`,
 		"set-meta":          `v=$(cat); if [ -d "$box" ]; then printf %s "$v" > "$box/meta.$3"; fi`,
 		"remove-meta":       `rm -f "$box/meta.$3"`,
+		"list-running":      goldenListRunning,
 		"observe":           goldenObserve,
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,

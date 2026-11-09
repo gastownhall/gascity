@@ -854,6 +854,17 @@ box (exit 0) and a name no box holds (exit 66). `gc runtime check` runs a
 smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
 the reference implementation.
 
+The same command checks the bookkeeping ops every script may implement, each
+skipped when its op answers exit 2 and failed when it answers wrongly:
+
+| Group | Codes | Checks |
+|---|---|---|
+| `meta` | `RPP-META-001` to `006` | `get-meta` answers what `set-meta` stored; an unset or removed key reads empty; an empty value overwrites; keys are independent. Under `observe.v1` a metadata op's exit 2 fails. |
+| `discovery` | `RPP-DISCOVERY-001` to `005` | `list-running` lists running sessions under the prefix and omits stopped ones. With `conformance-faults`, a listing the backend cannot read must fail (non-zero, not 2), never answer an empty list. |
+| `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
+| `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
+| `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+
 ### Switching an existing exec city to v2
 
 Upgrading gc alone changes nothing for a script that does not declare the
