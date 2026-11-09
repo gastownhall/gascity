@@ -451,3 +451,52 @@ func TestHookClaimTiersUnwindALateCASAfterCanonicalReadback(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimTiersStopOnCommittedClaimReadbackFailure pins that a committed
+// CAS whose canonical readback fails stops either claiming tier: exit 1 with the
+// committed-claim diagnostic, and no second candidate, CAS replay, work
+// receipt, idle drain acknowledgement or release.
+func TestHookClaimTiersStopOnCommittedClaimReadbackFailure(t *testing.T) {
+	for _, tier := range hookClaimLandingTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			rec := &turnBoundClaimRecorder{}
+			ops := rec.ops(t, tier.output)
+			invokedAt := time.Now()
+			clock := invokedAt
+			ops.Now = func() time.Time { return clock }
+			ops.InvokedAt = invokedAt
+			ops.ClaimWindow = 40 * time.Second
+			ops.Claim = hookClaimWithBdStore
+			store := &hookClaimLandingStore{}
+			store.install(t, &clock, invokedAt, time.Second, time.Second, errors.New("store unavailable"))
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				JSON:         true,
+				DrainAck:     true,
+			}, ops, &stdout, &stderr)
+
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") ||
+				!strings.Contains(stderr.String(), "store unavailable") {
+				t.Fatalf("stderr = %q, want the committed-claim readback diagnostic", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no work receipt and no drain result", stdout.String())
+			}
+			if want := []string{"work-1"}; !reflect.DeepEqual(store.updates, want) {
+				t.Fatalf("updates = %v, want exactly one CAS: no replay and no second candidate", store.updates)
+			}
+			if rec.drainAcked {
+				t.Fatal("a committed claim's readback failure acknowledged the drain")
+			}
+			if len(rec.releases) != 0 || len(rec.claimReleased) != 0 {
+				t.Fatalf("releases = %v events = %+v, want none: the canonical state is unknown", rec.releases, rec.claimReleased)
+			}
+		})
+	}
+}
