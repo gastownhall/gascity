@@ -5558,6 +5558,204 @@ func TestDeliverSlingNudgeRigBeadShadowTerminalizesOnAck(t *testing.T) {
 	}
 }
 
+// The expiry sweep reaches the shadow of a sling nudge for a rig-store bead: the
+// shadow it owes an expired record is paid over the city nudges store, so a
+// shadow written next to the slung bead would be left queued past its expiry.
+func TestDeliverSlingNudgeRigBeadShadowTerminalizesOnExpiry(t *testing.T) {
+	cityPath, city, _, item := slingNudgeTwoStoreFixture(t)
+	if item.ExpiresAt.IsZero() {
+		t.Fatal("queued sling nudge has no expiry")
+	}
+
+	if err := runNudgeQueueMaintenanceSweep(cityPath, item.ExpiresAt.Add(time.Minute)); err != nil {
+		t.Fatalf("runNudgeQueueMaintenanceSweep: %v", err)
+	}
+
+	shadow, err := city.Get(item.BeadID)
+	if err != nil {
+		t.Fatalf("city shadow %q: %v", item.BeadID, err)
+	}
+	if shadow.Status != "closed" {
+		t.Fatalf("city shadow status = %q, want closed after expiry", shadow.Status)
+	}
+	if got := shadow.Metadata["state"]; got != "expired" {
+		t.Fatalf("city shadow state = %q, want expired", got)
+	}
+}
+
+// nudgeProducerCity prepares the city a producer-table row runs in: a file
+// backed city, a stubbed nudge poller, and an empty rig store standing for the
+// store of the bead being slung.
+func nudgeProducerCity(t *testing.T) (cityPath string, rig beads.Store) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+	return t.TempDir(), beads.NewMemStore()
+}
+
+// Every site that enqueues a nudge writes its shadow to the city nudges store.
+// Every reader and terminalizer of shadows holds that store, so a shadow written
+// anywhere else is unreachable: an ack or an expiry never closes it. The rig
+// store is handed only to the sites that take the store of a bead being slung.
+func TestNudgeShadowProducersLandInTheCityNudgesStore(t *testing.T) {
+	asleepTarget := func(cityPath string) nudgeTarget {
+		return nudgeTarget{
+			cityPath:          cityPath,
+			agent:             config.Agent{Name: "worker"},
+			resolved:          &config.ResolvedProvider{Name: "claude"},
+			sessionID:         "gc-worker",
+			continuationEpoch: "7",
+			sessionName:       "worker-session",
+		}
+	}
+	cases := []struct {
+		name    string
+		enqueue func(t *testing.T, cityPath string, rig beads.Store)
+	}{
+		{"deliverSlingNudge to an asleep session", func(_ *testing.T, cityPath string, rig beads.Store) {
+			var stdout, stderr bytes.Buffer
+			deliverSlingNudge(asleepTarget(cityPath), runtime.NewFake(), rig, openNudgeBeadStore(cityPath), cityPath, "", &stdout, &stderr)
+		}},
+		{"doSlingNudge to a fixed agent", func(_ *testing.T, cityPath string, rig beads.Store) {
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{a}}
+			var stdout, stderr bytes.Buffer
+			doSlingNudge(&a, "test-city", cityPath, cfg, runtime.NewFake(), rig, "", &stdout, &stderr)
+		}},
+		{"doSlingNudge to a pool member behind a prompt", func(t *testing.T, cityPath string, rig beads.Store) {
+			const sessionName = "workflows__ollama-claude-mc-session-test"
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+				t.Fatalf("Start(%q): %v", sessionName, err)
+			}
+			// The member waits on a prompt it never answers and refuses typed
+			// input, so the sling queues its nudge.
+			sp.SetPendingInteraction(sessionName, pendingCallerApproval)
+			sp.NudgeErrors = map[string]error{sessionName: errors.New("member refuses typed input")}
+			a := config.Agent{Name: "ollama-claude", Dir: "gascity", BindingName: "workflows"}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{a}}
+			if _, err := rig.Create(beads.Bead{
+				Title:  "gascity/workflows.ollama-claude-3",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"template":     "gascity/workflows.ollama-claude",
+					"session_name": sessionName,
+					"pool_slot":    "3",
+				},
+			}); err != nil {
+				t.Fatalf("creating the pool member's session bead: %v", err)
+			}
+			var stdout, stderr bytes.Buffer
+			doSlingNudge(&a, "test-city", cityPath, cfg, sp, rig, "", &stdout, &stderr)
+		}},
+		{"enqueueManagedNudgeThenWake (gc session nudge)", func(t *testing.T, cityPath string, _ beads.Store) {
+			target := asleepTarget(cityPath)
+			target.sessionID = ""
+			item := newQueuedNudgeWithOptions(target.agentKey(), "hello", "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+			if _, err := enqueueManagedNudgeThenWake(target, openNudgeBeadStore(cityPath).Store, item); err != nil {
+				t.Fatalf("enqueueManagedNudgeThenWake: %v", err)
+			}
+		}},
+		{"wait dispatch", func(t *testing.T, cityPath string, _ beads.Store) {
+			store := openNudgeBeadStore(cityPath)
+			fake := runtime.NewFake()
+			mgr := newSessionManagerWithConfig(cityPath, store, fake, nil)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: cityPath, Provider: "codex", Hints: runtime.Config{WorkDir: cityPath}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if err := mgr.Start(context.Background(), testOperatorIn(t, cityPath), info.ID, "", runtime.Config{WorkDir: cityPath}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if _, err := store.Create(beads.Bead{
+				Type:        waitBeadType,
+				Labels:      []string{waitBeadLabel, "session:" + info.ID},
+				Description: "Continue after review closes.",
+				Metadata: map[string]string{
+					"session_id":       info.ID,
+					"session_name":     info.SessionName,
+					"kind":             "deps",
+					"state":            waitStateReady,
+					"dep_ids":          "gc-1",
+					"dep_mode":         "all",
+					"registered_epoch": "1",
+					"delivery_attempt": "1",
+				},
+			}); err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
+			if err := dispatchReadyWaitNudges(cityPath, store.Store, fake, time.Now().Add(-time.Minute).UTC()); err != nil {
+				t.Fatalf("dispatchReadyWaitNudges: %v", err)
+			}
+		}},
+		{"enqueueQueuedNudge", func(t *testing.T, cityPath string, _ beads.Store) {
+			if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "hello", time.Now())); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, rig := nudgeProducerCity(t)
+
+			tc.enqueue(t, cityPath, rig)
+
+			if got := nudgeShadowsIn(t, openNudgeBeadStore(cityPath)); len(got) != 1 {
+				t.Fatalf("city nudges store holds %d nudge shadow(s), want 1", len(got))
+			}
+			if got := nudgeShadowsIn(t, rig); len(got) != 0 {
+				t.Fatalf("rig store holds %d nudge shadow(s) %v, want 0: the shadow must not live next to the slung bead", len(got), got)
+			}
+		})
+	}
+}
+
+// A city that relocates the nudges class keeps that one class store: a sling
+// nudge for a rig-store bead writes its shadow there, and none to the work store
+// the class moved off or to the bead's rig store.
+func TestDeliverSlingNudgeOnARelocatedNudgesClassLeavesWorkAndRigStoresWithoutShadows(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+	rig := beads.NewMemStore()
+	target := nudgeTarget{
+		cityPath:          cityPath,
+		cfg:               cfg,
+		agent:             config.Agent{Name: "worker"},
+		resolved:          &config.ResolvedProvider{Name: "claude"},
+		sessionID:         "gc-worker",
+		continuationEpoch: "7",
+		sessionName:       "worker-session",
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, runtime.NewFake(), rig, nil, cityPath, "", &stdout, &stderr)
+
+	routed, work := openOwnedNudgeBeadStore(cityPath)
+	if work == nil {
+		t.Fatal("openOwnedNudgeBeadStore opened no work store")
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	if got := nudgeShadowsIn(t, routed); len(got) != 1 {
+		t.Fatalf("routed nudges class holds %d nudge shadow(s), want 1 (stderr: %s)", len(got), stderr.String())
+	}
+	if got := nudgeShadowsIn(t, work); len(got) != 0 {
+		t.Fatalf("work store holds %d nudge shadow(s) %v, want 0: the class moved off it", len(got), got)
+	}
+	if got := nudgeShadowsIn(t, rig); len(got) != 0 {
+		t.Fatalf("rig store holds %d nudge shadow(s) %v, want 0", len(got), got)
+	}
+}
+
 func assertSessionLastNudgeDeliveredAtStamped(t *testing.T, store beads.Store, sessionID string) {
 	t.Helper()
 	refetched, err := store.Get(sessionID)
