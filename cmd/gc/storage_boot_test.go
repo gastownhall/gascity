@@ -2470,3 +2470,81 @@ func TestStorageWorkConfigContextDistinguishesDerivedHQPrefixes(t *testing.T) {
 		t.Error("two cities with different HQ pins share one config digest, so a plan cannot name the configuration it came from")
 	}
 }
+
+// TestStrandRecheckPublishesOnlyChanges pins the controller's periodic
+// containment recheck: seeded with the boot verdict it publishes nothing
+// until the stranded set changes, publishes the stranded event once per
+// change, converged once the set is empty again, and a check that cannot run
+// is reported as uncheckable without stopping anything.
+func TestStrandRecheckPublishesOnlyChanges(t *testing.T) {
+	cityPath, cfg, source, target := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, rec, &stderr, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("an unchanged converged city published %+v", rec.Events)
+	}
+
+	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	s.tick()
+	s.tick()
+	_, payload := decodeStorageBindingOutcome(t, rec)
+	if rec.Events[0].Type != events.StorageBindingStranded || !payload.Serving || !slices.Equal(payload.Stranded, []string{stranded.ID}) {
+		t.Fatalf("recorded %s %+v, want one serving stranded event naming %s", rec.Events[0].Type, payload, stranded.ID)
+	}
+	if !strings.Contains(payload.Invariant, "--unset-metadata gc.root_bead_id") {
+		t.Errorf("the recheck's event carries no repair: %s", payload.Invariant)
+	}
+	if !strings.Contains(stderr.String(), stranded.ID) {
+		t.Errorf("the recheck did not log the strand: %q", stderr.String())
+	}
+
+	if err := source.Update(stranded.ID, beads.UpdateOpts{UnsetMetadata: []string{"gc.root_bead_id"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec.Events = nil
+	s.tick()
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.StorageBindingConverged {
+		t.Fatalf("the repaired city published %+v, want one converged event", rec.Events)
+	}
+
+	rec.Events = nil
+	if err := os.Remove(target.ManifestPath()); err != nil {
+		t.Fatal(err)
+	}
+	s.tick()
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.StorageBindingUncheckable {
+		t.Fatalf("a recheck that could not run published %+v, want one uncheckable event", rec.Events)
+	}
+}
+
+// TestStrandRecheckSeedsFromADegradedBoot: a controller that booted degraded
+// does not publish the same strand again on its first recheck.
+func TestStrandRecheckSeedsFromADegradedBoot(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "stray session", Type: "session", Labels: []string{"gc:session"}})
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("a degraded city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	rec := events.NewFake()
+	s := newStrandRecheck(routes, cityPath, rec, io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a degraded city")
+	}
+	s.tick()
+	if len(rec.Events) != 0 {
+		t.Fatalf("the first recheck republished the boot strand: %+v", rec.Events)
+	}
+}

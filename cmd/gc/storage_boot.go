@@ -44,6 +44,7 @@ package main
 // copy cannot be on this path.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -58,6 +59,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -124,6 +126,12 @@ type storageRoutes struct {
 	// in place (withControllerCache, withCLIEmission) is noticed on the next
 	// read, so nothing here has to invalidate it.
 	mint atomic.Pointer[routesBindings]
+	// bootVerdict is the containment verdict the gate served these routes
+	// on — converged, or stranded and serving degraded — and target the
+	// binding it is about. The controller's strand recheck starts from it, so
+	// it publishes only a CHANGE from what boot already recorded.
+	bootVerdict infraMigrationReport
+	target      infraBindingTarget
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -471,6 +479,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err != nil {
 		return nil, err
 	}
+	routes.bootVerdict, routes.target = report, target
 	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
 		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
 	}
@@ -888,6 +897,114 @@ func printStorageWarningOnce(w io.Writer, msg string) {
 	storageWarningsPrinted[key] = true
 	storageWarningsMu.Unlock()
 	fmt.Fprintln(w, msg) //nolint:errcheck // best-effort stderr
+}
+
+// strandRecheckInterval is how often a controller re-runs the containment
+// check its boot ran (strandRecheck). Every one-shot gc process already pays
+// one such read-only census; the controller pays one per interval. Zero
+// disables it. A var so a test can shorten it.
+var strandRecheckInterval = 10 * time.Minute
+
+// strandRecheck is the controller's periodic, read-only re-run of the boot
+// gate's containment check (confirmInfraContainment). The controller runs the
+// gate once, at boot, so before this a write that stranded rows after boot —
+// an agent's plain `bd create` carrying gc.root_bead_id — was visible only to
+// the one-shot processes that refused for it. Now it is an event.
+//
+// It REPORTS only. It never re-gates the running controller: the gate serves
+// a stranded city degraded anyway, and taking a running city down over a
+// verdict its writer never sees is what the degraded verdict replaced.
+//
+// It publishes when the verdict changes: storage.binding.stranded when the
+// stranded set changes (by its ids), storage.binding.converged once it is
+// empty again, and storage.binding.uncheckable when the check could not run —
+// which stops nothing.
+type strandRecheck struct {
+	cityPath  string
+	target    infraBindingTarget
+	rec       events.Recorder
+	stderr    io.Writer
+	logPrefix string
+	last      string
+}
+
+// newStrandRecheck seeds the recheck with the verdict the gate served on, so
+// its first tick publishes nothing boot already published. nil when there is
+// no converged binding to recheck.
+func newStrandRecheck(routes *storageRoutes, cityPath string, rec events.Recorder, stderr io.Writer, logPrefix string) *strandRecheck {
+	if routes == nil || routes.target.Database == "" || cityPath == "" {
+		return nil
+	}
+	switch routes.bootVerdict.Outcome {
+	case infraMigrationConverged, infraMigrationGenesis, infraMigrationStranded:
+	default:
+		return nil
+	}
+	return &strandRecheck{
+		cityPath: cityPath, target: routes.target, rec: rec, stderr: stderr, logPrefix: logPrefix,
+		last: strandRecheckKey(routes.bootVerdict),
+	}
+}
+
+// strandRecheckKey is what a change is measured against: the outcome, and
+// for a stranded verdict its ids.
+func strandRecheckKey(report infraMigrationReport) string {
+	switch report.Outcome {
+	case infraMigrationGenesis:
+		return infraMigrationConverged.String()
+	case infraMigrationStranded:
+		return report.Outcome.String() + ":" + strings.Join(report.Stranded, ",") + "|" + strings.Join(report.HeldDifferent, ",")
+	case infraMigrationUncheckable:
+		if report.Fault != nil {
+			return report.Outcome.String() + ":" + report.Fault.Error()
+		}
+	}
+	return report.Outcome.String()
+}
+
+// tick runs one recheck and publishes the verdict if it changed.
+func (s *strandRecheck) tick() {
+	report := confirmInfraContainment(s.cityPath, s.target, s.logPrefix, io.Discard)
+	report.Target = s.target
+	key := strandRecheckKey(report)
+	if key == s.last {
+		return
+	}
+	s.last = key
+	advice := ""
+	if !report.serving() {
+		advice = infraMigrationOperatorAdvice(report, s.logPrefix)
+	}
+	if report.Outcome == infraMigrationStranded && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "%s: the strand recheck found %d stranded infrastructure bead(s) (%s); %s\n", //nolint:errcheck // best-effort stderr
+			s.logPrefix, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedServingLine(len(report.Stranded), len(report.HeldDifferent)))
+	}
+	recordStorageBindingOutcome(s.rec, report, advice)
+}
+
+// run ticks every interval until ctx ends.
+func (s *strandRecheck) run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.tick()
+		}
+	}
+}
+
+// startStrandRecheck starts the controller's strand recheck, when the city has
+// a converged binding to recheck and the interval is positive.
+func (cr *CityRuntime) startStrandRecheck(ctx context.Context) {
+	if strandRecheckInterval <= 0 {
+		return
+	}
+	if s := newStrandRecheck(cr.storageRoutes, cr.cityPath, cr.rec, cr.stderr, cr.logPrefix); s != nil {
+		go s.run(ctx, strandRecheckInterval)
+	}
 }
 
 // strandedDegradedWarning is the one line a process serving a stranded city

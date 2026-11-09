@@ -741,6 +741,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
 
+	// The containment check the boot gate ran, again every
+	// strandRecheckInterval, read-only and report-only: a write that strands
+	// rows after boot becomes a storage.binding.stranded event.
+	cr.startStrandRecheck(ctx)
+
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
 
