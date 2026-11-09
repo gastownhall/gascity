@@ -124,7 +124,7 @@ go_test(
         ],
         "//conditions:default": [],
     }),
-    shard_count = 14,
+    shard_count = 15,
     deps = [
         "//internal/beads",
         "//internal/testenv",
