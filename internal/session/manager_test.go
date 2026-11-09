@@ -2019,7 +2019,7 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create 1: %v", err)
 	}
-	info2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "review", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "review", Title: "second", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create 2: %v", err)
 	}
@@ -2994,7 +2994,7 @@ func TestPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "S2", Command: "echo s2", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	s2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "S2", Command: "echo s2", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3262,7 +3262,7 @@ func TestPruneUsesSuspendedAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recent, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Recent", Command: "echo recent", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	recent, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Recent", Command: "echo recent", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3428,7 +3428,7 @@ func TestPruneDetailedAsleepOptIn(t *testing.T) {
 	}
 
 	// Suspended session, 10 days old per suspended_at.
-	suspended, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Suspended", Command: "echo s", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	suspended, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Suspended", Command: "echo s", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3440,7 +3440,7 @@ func TestPruneDetailedAsleepOptIn(t *testing.T) {
 	}
 
 	// Active session (no terminal state) — must always be skipped.
-	active, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Active", Command: "echo a", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	active, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Active", Command: "echo a", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3491,7 +3491,7 @@ func TestPruneDetailedAsleepUsesSleptAt(t *testing.T) {
 	}
 
 	// Asleep session whose slept_at is 10d old — must be pruned.
-	old, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Old", Command: "echo o", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	old, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Old", Command: "echo o", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3529,7 +3529,7 @@ func TestPruneDetailedSkipsAsleepWithoutValidSleptAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	malformed, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Malformed SleptAt", Command: "echo b", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	malformed, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Malformed SleptAt", Command: "echo b", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3638,7 +3638,7 @@ func TestPruneDetailedDrainedOptInUsesDrainAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	missing, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Missing DrainAt", Command: "echo m", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	missing, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "default", Title: "Missing DrainAt", Command: "echo m", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4818,6 +4818,7 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "one", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
 		t.Fatalf("Create one: %v", err)
 	}
+	stopAllRuntimes(t, sp) // the earlier session shares this dir; only one may be live in it
 	info2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create two: %v", err)
@@ -4945,6 +4946,7 @@ func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "one", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
 		t.Fatalf("Create one: %v", err)
 	}
+	stopAllRuntimes(t, sp) // the earlier session shares this dir; only one may be live in it
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create two: %v", err)
@@ -4985,6 +4987,7 @@ func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *t
 	if err != nil {
 		t.Fatalf("Create one: %v", err)
 	}
+	stopAllRuntimes(t, sp) // the earlier session shares this dir; only one may be live in it
 	info2, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create two: %v", err)
@@ -5025,6 +5028,7 @@ func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "claude", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
 		t.Fatalf("Create claude: %v", err)
 	}
+	stopAllRuntimes(t, sp) // the earlier session shares this dir; only one may be live in it
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "codex", Command: "codex", WorkDir: workDir, Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create codex: %v", err)
@@ -6126,7 +6130,8 @@ func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			mgr := newTestManager(t, store, runtime.NewFake())
+			sp := runtime.NewFake()
+			mgr := newTestManager(t, store, sp)
 			workDir := t.TempDir()
 			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
 			info, err := mgr.CreateSession(context.Background(), opts)
@@ -6134,6 +6139,7 @@ func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) 
 				t.Fatalf("Create: %v", err)
 			}
 			if tc.sibling {
+				stopAllRuntimes(t, sp) // the earlier session shares this dir; only one may be live in it
 				if _, err := mgr.CreateSession(context.Background(), opts); err != nil {
 					t.Fatalf("Create(sibling): %v", err)
 				}
@@ -6327,5 +6333,22 @@ func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
 	}
 	if got := closed.Metadata["usage_closed_at"]; got != closeAt.Format(time.RFC3339Nano) {
 		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
+	}
+}
+
+// stopAllRuntimes stops every runtime sp has running. A test whose subject is
+// two sessions that share one work directory stops the first before creating
+// the second: the working-directory guard (ga-ighomh.1) refuses a start while
+// another session is live in the directory.
+func stopAllRuntimes(t *testing.T, sp *runtime.Fake) {
+	t.Helper()
+	names, err := sp.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	for _, name := range names {
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop %s: %v", name, err)
+		}
 	}
 }

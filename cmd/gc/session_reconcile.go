@@ -840,6 +840,11 @@ type resumeFailure struct {
 // startup; err, its error, which a startup death's last pane output rides
 // in; pane, the dead pane's screen when one was read.
 func startResumeFailure(resumed, died bool, sessionKey string, err error, pane string) resumeFailure {
+	// A start refused for its working directory never reached the provider, so
+	// the conversation was never attempted, resumed or not.
+	if errors.Is(err, sessionpkg.ErrWorkDirCollision) || errors.Is(err, sessionpkg.ErrWorkDirLivenessUnavailable) {
+		return resumeFailure{holdConversation: true}
+	}
 	if !resumed || err == nil || runtime.IsProviderCapacity(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, runtime.ErrSessionExists) {
 		return resumeFailure{}
 	}
@@ -916,7 +921,7 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
 	// failure in a row resets too; a committed manual conversation's reset
 	// records session.conversation_reset{reason:resume-failed}.
-	if info.SessionKey != "" || info.StartedConfigHash != "" {
+	if (info.SessionKey != "" || info.StartedConfigHash != "") && !rf.holdConversation {
 		failures, _ := strconv.Atoi(info.ResumeFailures)
 		manual := sessionpkg.HasStartedManualConversation(info)
 		kept := manual || wakeFailureKeepsConversation(info, transcriptRoots)

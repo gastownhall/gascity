@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -465,6 +466,14 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, err
 	}
 	cfg.Command = freshCmd
+	// Refuse the fresh start into a directory another live session occupies,
+	// before the orphan sweep below can kill anything (ga-ighomh.1).
+	if cwdErr := m.checkNoCWDCollision(ctx, id, *b, cfg.WorkDir); cwdErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("pre-start cwd collision check: %w", cwdErr)
+	}
 	// Refuse the fresh start if a prior escaped process for this session could
 	// not be confirmed dead: a survivor would race this replacement for the
 	// same work bead. This path reuses the existing bead ID, so there is no
@@ -964,6 +973,14 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 	}()
 	if !converged {
+		// Refuse to resume into a directory another live session occupies,
+		// before the orphan sweep below can kill anything (ga-ighomh.1).
+		if cwdErr := m.checkNoCWDCollision(ctx, id, b, cfg.WorkDir); cwdErr != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("pre-start cwd collision check: %w", cwdErr)
+		}
 		// Refuse to resume if a prior escaped process for this session could
 		// not be confirmed dead: a survivor would race this replacement for
 		// the same work bead (duplicate bd close). This is the
@@ -1234,6 +1251,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	// Refuse to respawn into a directory another live session occupies, before
+	// the orphan sweep below can kill anything (ga-ighomh.1).
+	if cwdErr := m.checkNoCWDCollision(ctx, id, b, cfg.WorkDir); cwdErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return fmt.Errorf("pre-start cwd collision check: %w", cwdErr)
+	}
 	// Refuse to respawn if a prior escaped process for this session could not
 	// be confirmed dead: a survivor would race this replacement for the same
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
@@ -2258,12 +2283,44 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 // known. For a live target, closed historical sessions are excluded; for a
 // closed target they are kept so historical same-workdir ambiguity is preserved.
 func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
-	all, err := m.store.List(beads.ListQuery{
+	same, err := m.matchingWorkDirSessionBeads(b, provider, func(other string) bool { return other == workDir })
+	if err != nil {
+		return nil, err
+	}
+	return same, nil
+}
+
+// sameWorkDirSessionBeadsChecked is sameWorkDirSessionBeads for the
+// working-directory collision guard. It differs in two ways. The work_dir
+// comparison is on normalized paths (symlinks resolved, cleaned) on BOTH sides,
+// so a trailing slash or a symlinked spelling of one directory cannot hide an
+// occupant. And on a beads.PartialResultError it returns the rows that did come
+// back together with the (wrapped) partial error rather than dropping them: a
+// fail-closed caller uses beads.IsPartialResult to tell "no other candidates"
+// apart from "we don't actually know" (ga-c5yi8m). Any other list error returns
+// no rows.
+func (m *Manager) sameWorkDirSessionBeadsChecked(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
+	want := pathutil.NormalizePathForCompare(workDir)
+	return m.matchingWorkDirSessionBeads(b, provider, func(other string) bool {
+		return other != "" && pathutil.NormalizePathForCompare(other) == want
+	})
+}
+
+// matchingWorkDirSessionBeads lists the session beads whose work_dir satisfies
+// sameDir, applying the closed-status and provider-family filters of
+// sameWorkDirSessionBeads. A beads.PartialResultError is returned wrapped,
+// alongside the rows that did come back.
+func (m *Manager) matchingWorkDirSessionBeads(b beads.Bead, provider string, sameDir func(workDir string) bool) ([]beads.Bead, error) {
+	all, listErr := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: b.Status == "closed",
 	})
-	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+	if listErr != nil && !beads.IsPartialResult(listErr) {
+		return nil, fmt.Errorf("listing sessions: %w", listErr)
+	}
+	var err error
+	if listErr != nil {
+		err = fmt.Errorf("listing sessions: %w", listErr)
 	}
 	var same []beads.Bead
 	for _, other := range all {
@@ -2280,11 +2337,11 @@ func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string
 		if provider != "" && otherProvider != provider {
 			continue
 		}
-		if other.Metadata["work_dir"] == workDir {
+		if sameDir(other.Metadata["work_dir"]) {
 			same = append(same, other)
 		}
 	}
-	return same, nil
+	return same, err
 }
 
 // KeyedTranscriptPath returns the transcript path only when it resolves to a

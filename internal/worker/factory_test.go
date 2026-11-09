@@ -614,6 +614,7 @@ func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 func TestFactoryThreadsRecorderToWorkDirCollisionGuard(t *testing.T) {
 	recorder := &recordingEventRecorder{}
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    beads.NewMemStore(),
 		Provider: runtime.NewFake(),
 		Recorder: recorder,

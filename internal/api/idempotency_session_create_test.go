@@ -157,15 +157,18 @@ func TestSessionCreateWithoutKeyCreatesEachRequest(t *testing.T) {
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("create %d: status = %d, want 202; body = %s", i, rec.Code, rec.Body.String())
 		}
-		requestIDs = append(requestIDs, decodeAsyncAccepted(t, rec.Body).RequestID)
-	}
-	if requestIDs[0] == requestIDs[1] {
-		t.Fatalf("keyless creates share request_id %q, want distinct requests", requestIDs[0])
-	}
-	for _, id := range requestIDs {
+		id := decodeAsyncAccepted(t, rec.Body).RequestID
+		requestIDs = append(requestIDs, id)
+		// Both requests name the same agent, so they share its work directory.
+		// Let the first finish and stop its runtime before the second request:
+		// the working-directory guard allows one live session in a directory.
 		if success, failure := waitForSessionCreateResult(t, fs.eventProv, id); success == nil {
 			t.Fatalf("session create %s failed: %s: %s", id, failure.ErrorCode, failure.ErrorMessage)
 		}
+		stopAllFakeRuntimes(t, fs.sp)
+	}
+	if requestIDs[0] == requestIDs[1] {
+		t.Fatalf("keyless creates share request_id %q, want distinct requests", requestIDs[0])
 	}
 	if ids := sessionBeadIDs(t, fs); len(ids) != 2 {
 		t.Fatalf("session beads = %v, want 2 without Idempotency-Key", ids)

@@ -1,13 +1,9 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"regexp"
-	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // Liveness scan sources, recorded on liveWorktreeState so an operator can tell
@@ -44,14 +40,6 @@ var liveWorktreeCwdEnumerator = func() ([]byte, error) {
 	return lsofOutputWithTimeout(liveScanFallbackTimeout, "-a", "-d", "cwd", "-F0pn")
 }
 
-// lsofErrAnnotation matches the per-process errors lsof reports inside the n
-// field itself, as an absolute-looking string
-// ("/proc/1/cwd (readlink: Permission denied)"). These pass the absolute-path
-// filter and normalize non-empty, so counting them would make an unreadable scan
-// look like a successful one and defeat the empty-listing rule below — on a host
-// where lsof can read nothing, every record is one of these.
-var lsofErrAnnotation = regexp.MustCompile(`\s\((?:readlink|stat|lstat|opendir|getcwd)[^)]*: [^)]*\)$`)
-
 // collectLiveWorktreeStateFallback enumerates process working directories on a
 // host that has no /proc, so the liveness gate has a real signal there instead
 // of a permanent "indeterminate".
@@ -75,43 +63,16 @@ var lsofErrAnnotation = regexp.MustCompile(`\s\((?:readlink|stat|lstat|opendir|g
 //     the scan still reports scanned=true — so a partial listing is treated the
 //     same way on both platforms.
 //
-// A deadline is the one error that is consulted. Truncation at an arbitrary
+// The parse itself is pidutil.ParseLsofCWDs, shared with the session
+// working-directory collision guard. A deadline is the one error that is consulted. Truncation at an arbitrary
 // point is not the same bounded blind spot as EACCES on processes this user does
 // not own: the records that never arrived are unrelated to permissions, so the
 // listing carries no rule about what it omitted. That fails closed.
 func collectLiveWorktreeStateFallback() liveWorktreeState {
 	out, err := liveWorktreeCwdEnumerator()
-	if errors.Is(err, context.DeadlineExceeded) {
+	state := pidutil.ParseLsofCWDs(out, err)
+	if !state.Scanned {
 		return liveWorktreeState{scanned: false}
 	}
-
-	seen := make(map[string]struct{})
-	var cwds []string
-	// Fields are NUL-terminated; records are newline-separated, so the first
-	// field after a record boundary carries a leading newline to trim.
-	for _, field := range strings.Split(string(out), "\x00") {
-		// Only "n" fields carry a path; "p"/"f" identify the process and
-		// descriptor.
-		path, ok := strings.CutPrefix(strings.Trim(field, "\r\n"), "n")
-		if !ok || !strings.HasPrefix(path, "/") {
-			continue
-		}
-		if lsofErrAnnotation.MatchString(path) {
-			continue
-		}
-		canon := pathutil.NormalizePathForCompare(path)
-		if canon == "" {
-			continue
-		}
-		if _, dup := seen[canon]; dup {
-			continue
-		}
-		seen[canon] = struct{}{}
-		cwds = append(cwds, canon)
-	}
-
-	if len(cwds) == 0 {
-		return liveWorktreeState{scanned: false}
-	}
-	return liveWorktreeState{cwds: cwds, scanned: true, source: liveScanSourceLsof}
+	return liveWorktreeState{cwds: state.CWDs, scanned: true, source: liveScanSourceLsof}
 }

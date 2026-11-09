@@ -140,6 +140,25 @@ see `SESSION-HISTORY-EXACT-KEY`. OpenCode and ZCode still prefer a keyed hit
 model-usage paths in `internal/worker` resolve OpenCode by key only and never
 take the fallback.
 
+## Working-directory collision guard
+
+`checkNoCWDCollision` (`cwd_collision.go`, `SESSION-START-028`) refuses a start
+into a directory another live session of the same provider holds. Every
+Manager path that reaches `sp.Start` (create, stale-key retry, `ensureRunning`,
+runtime-only respawn) calls it before `killExistingOrphans` and the start mint;
+`TestRuntimeStartCallSitesCheckCwdCollisionBeforeOrphanCleanup` pins the order.
+
+- Paths compare equal after `pathutil.NormalizePathForCompare` on both sides; a
+  parent or child directory is not a collision.
+- It fails closed: an unscanned process table (`!Scanned`) or a partial bead
+  list (`beads.PartialResultError`) refuses with reason `liveness_unavailable`.
+- A refusal is terminal for that attempt (`holdConversation`): the conversation
+  is kept and the wake attempt still counts.
+- It guards sequential starts only. Two concurrent starts can both pass the
+  check; per-directory serialization is a follow-up.
+- Tests that need several live sessions give each its own `t.TempDir()` or stop
+  the earlier runtime first.
+
 ## Manual Close During Reconciliation
 
 A desired manual entry retains a previously discovered conversation; it is not

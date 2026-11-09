@@ -62,10 +62,11 @@ func TestFactorySweepSessionModelUsageOpenCodeSharedWorkdir(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 
 	store := beads.NewMemStore()
+	fake := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
 		CityPath:    t.TempDir(),
 		Store:       store,
-		Provider:    runtime.NewFake(),
+		Provider:    fake,
 		SearchPaths: []string{searchBase},
 		UsageSink:   usage.NewLocalSink(sinkPath),
 	})
@@ -89,6 +90,16 @@ func TestFactorySweepSessionModelUsageOpenCodeSharedWorkdir(t *testing.T) {
 		}
 		if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 			t.Fatalf("Start: %v", err)
+		}
+		// The two sessions share one work directory, which is the point of the
+		// test, but the working-directory guard (ga-ighomh.1) allows only one
+		// live session in it: this one has started, so it stops before the next.
+		started, err := store.Get(h.sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fake.Stop(started.Metadata["session_name"]); err != nil {
+			t.Fatalf("Stop: %v", err)
 		}
 		if err := store.SetMetadata(h.sessionID, "session_key", key); err != nil {
 			t.Fatal(err)

@@ -596,7 +596,10 @@ func newMailNotifyWakeCity(t *testing.T, managed bool) *mailNotifyWakeCity {
 // returns its nudge target.
 func (c *mailNotifyWakeCity) addSession(t *testing.T, name string) nudgeTarget {
 	t.Helper()
-	info, err := c.mgr.CreateSession(context.Background(), session.CreateOptions{Template: name, Title: name, Command: "claude", WorkDir: c.dir, Provider: "claude", Hints: runtime.Config{WorkDir: c.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	// Each session gets its own work directory: the working-directory guard
+	// allows one live session of a provider per directory.
+	wd := t.TempDir()
+	info, err := c.mgr.CreateSession(context.Background(), session.CreateOptions{Template: name, Title: name, Command: "claude", WorkDir: wd, Provider: "claude", Hints: runtime.Config{WorkDir: wd}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create(%s): %v", name, err)
 	}
@@ -3468,11 +3471,14 @@ func TestTryDeliverQueuedNudgesByPollerHoldsStarvedNudgeWhileTurnRuns(t *testing
 			mgr := newSessionManagerWithConfig(dir, store, sp, nil)
 			start := func() session.Info {
 				t.Helper()
-				info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				// One work directory per session: the working-directory guard
+				// allows one live session of a provider per directory.
+				wd := t.TempDir()
+				info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: wd, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: wd}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
-				if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: wd}); err != nil {
 					t.Fatalf("Start: %v", err)
 				}
 				return info

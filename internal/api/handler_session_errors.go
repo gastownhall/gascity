@@ -31,6 +31,12 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrInvalidSessionAlias):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+	case errors.Is(err, session.ErrWorkDirCollision):
+		writeError(w, http.StatusConflict, "workdir_collision", err.Error())
+	case errors.Is(err, session.ErrWorkDirLivenessUnavailable):
+		// Retryable: the live-process scan or session read failed, so the
+		// directory could not be verified free.
+		writeError(w, http.StatusServiceUnavailable, "workdir_liveness_unavailable", err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrInvalidSessionTitle):

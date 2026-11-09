@@ -96,7 +96,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 		// first call: every nil check below must see it as no store.
 		cfg.Store = nil
 	}
-	opts := make([]sessionpkg.ManagerOption, 0, 5)
+	opts := make([]sessionpkg.ManagerOption, 0, 6)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
@@ -111,6 +111,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
+	}
+	if cfg.Recorder != nil {
+		opts = append(opts, sessionpkg.WithEventRecorder(cfg.Recorder))
 	}
 	manager := sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: cfg.Store}, cfg.Provider, opts...)
 	return newFactory(manager, cfg)

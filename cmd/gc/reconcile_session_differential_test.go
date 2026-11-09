@@ -1116,6 +1116,9 @@ func parityFixtures() []parityFixture {
 		return func() *config.City {
 			cfg := workerCity(3)
 			cfg.Workspace.MaxActiveSessions = intPtr(1)
+			// Each worker seat works in its own directory: the working-directory
+			// guard refuses a start into a directory another live session holds.
+			cfg.Agents[0].WorkDir = ".gc/work/{{.AgentBase}}"
 			for _, name := range agents {
 				cfg.Agents = append(cfg.Agents, config.Agent{Name: name, StartCommand: "true", MaxActiveSessions: intPtr(3)})
 			}

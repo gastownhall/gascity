@@ -45,6 +45,10 @@ func humaSessionManagerError(err error) error {
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInvalidSessionAlias):
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
+	case errors.Is(err, session.ErrWorkDirCollision):
+		return apierr.SessionConflict.Msg("workdir_collision: " + err.Error())
+	case errors.Is(err, session.ErrWorkDirLivenessUnavailable):
+		return apierr.ServiceUnavailable.Msg("workdir_liveness_unavailable: " + err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInvalidSessionTitle):

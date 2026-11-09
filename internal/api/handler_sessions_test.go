@@ -234,11 +234,27 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
 	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 	return info
+}
+
+// stopAllFakeRuntimes stops every runtime sp has running, for a test that puts
+// a second session in a work directory the first still occupies: the
+// working-directory guard (ga-ighomh.1) refuses a start into an occupied one.
+func stopAllFakeRuntimes(t *testing.T, sp *runtime.Fake) {
+	t.Helper()
+	names, err := sp.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	for _, name := range names {
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop %s: %v", name, err)
+		}
+	}
 }
 
 func suspendSessionForPermissionModeTest(t *testing.T, fs *fakeState, id string) {
@@ -366,7 +382,7 @@ func TestHandleSessionListPreservesPartialRows(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	info := createTestSession(t, store, fs.sp, "Session survivor")
+	info := createTestSession(t, store.MemStore, fs.sp, "Session survivor")
 	survivor, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", info.ID, err)
@@ -1175,7 +1191,6 @@ func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time
 func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
-	workDir := t.TempDir()
 	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 
 	type wantTelemetry struct {
@@ -1192,6 +1207,9 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 	cachedInputTokens := []int{5_840, 29_200}
 	now := time.Now()
 	for i := range wants {
+		// Both sessions stay live, so each gets its own work directory: the
+		// working-directory guard allows one live session per directory.
+		workDir := t.TempDir()
 		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 			Template: "myrig/worker",
 			Title:    fmt.Sprintf("Codex Chat %d", i+1),

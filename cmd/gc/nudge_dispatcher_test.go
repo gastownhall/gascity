@@ -440,11 +440,12 @@ func TestDispatchAllQueuedNudgesJudgesBusySessionsWithTheSnapshotCensus(t *testi
 			mgr := newSessionManagerWithConfig(dir, store.Store, sp, nil)
 			var sessions []session.Info
 			for range 2 {
-				info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				wd := t.TempDir() // one work directory per live session
+				info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: wd, Provider: "codex", Hints: runtime.Config{WorkDir: wd}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
-				if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: wd}); err != nil {
 					t.Fatalf("Start: %v", err)
 				}
 				sessions = append(sessions, info)
@@ -1030,7 +1031,13 @@ func (f *legBDispatchFixture) create(t *testing.T) session.Info {
 // createAs creates a session bead of template's agent.
 func (f *legBDispatchFixture) createAs(t *testing.T, template string) session.Info {
 	t.Helper()
-	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: f.dir, Provider: "codex", Hints: runtime.Config{WorkDir: f.dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	// The first session works in the fixture dir; later ones get their own, as
+	// the working-directory guard allows one live session per directory.
+	wd := f.dir
+	if f.s1.ID != "" {
+		wd = t.TempDir()
+	}
+	info, err := f.mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: wd, Provider: "codex", Hints: runtime.Config{WorkDir: wd}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create %s: %v", template, err)
 	}
@@ -1129,7 +1136,7 @@ func (p onNudgeProvider) NudgeFenced(ctx context.Context, name string, content [
 func TestDispatchClaimsReadTheirOwnCensusWithinAPass(t *testing.T) {
 	f := newLegBDispatchFixture(t) // s1: worker, running
 	s2 := f.createAs(t, "helper")
-	if err := f.mgr.Start(context.Background(), testOperatorIn(t, f.dir), s2.ID, "", runtime.Config{WorkDir: f.dir}); err != nil {
+	if err := f.mgr.Start(context.Background(), testOperatorIn(t, f.dir), s2.ID, "", runtime.Config{WorkDir: s2.WorkDir}); err != nil {
 		t.Fatalf("Start s2: %v", err)
 	}
 	f.fake.Activity[s2.SessionName] = time.Now().Add(-10 * time.Second)

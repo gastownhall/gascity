@@ -1164,6 +1164,14 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
+		// Refuse to start into a directory another live session occupies, before
+		// the orphan sweep below can kill anything (ga-ighomh.1).
+		if cwdErr := m.checkNoCWDCollision(ctx, b.ID, b, cfg.WorkDir); cwdErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(fmt.Errorf("pre-start cwd collision check: %w", cwdErr), rbErr)
+			}
+			return fmt.Errorf("pre-start cwd collision check: %w", cwdErr)
+		}
 		// Start the runtime session. Refuse to start if a prior escaped process
 		// for this session could not be confirmed dead: a survivor would race
 		// the replacement for the same work bead (duplicate bd close).
