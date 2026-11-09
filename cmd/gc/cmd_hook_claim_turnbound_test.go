@@ -988,6 +988,44 @@ func TestHookClaimTiersKeepTheCASLandingAcrossCanonicalReadback(t *testing.T) {
 			}
 		})
 	}
+	// A committed CAS whose canonical readback then fails stops the tier with
+	// the committed-claim diagnostic: no second candidate is tried even though
+	// one is available, nothing is released, and no idle drain is written.
+	t.Run("committed CAS with failed readback stops the tier", func(t *testing.T) {
+		clock := time.Now()
+		rec := &landingClaimRecorder{}
+		// Two candidates, so "stops without another candidate" is observable.
+		ops := rec.ops(t, `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}},{"id":"work-2","status":"open","metadata":{"gc.routed_to":"worker"}}]`, &clock)
+		bdCalls := installLandingBdRunner(t, &clock, landingBdTimeline{readbackFails: true})
+
+		var stdout, stderr bytes.Buffer
+		code := doHookClaim("query", "/rig", hookClaimOptions{
+			Assignee:     "worker-1",
+			RouteTargets: []string{"worker"},
+			DrainAck:     true,
+			JSON:         true,
+		}, ops, &stdout, &stderr)
+
+		if code != 1 {
+			t.Fatalf("code = %d, want 1; a committed claim whose readback failed must stop the tier; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+			t.Fatalf("stderr = %q, want the committed-claim diagnostic", stderr.String())
+		}
+		if len(rec.releases) != 0 {
+			t.Fatalf("releases = %v, want none: canonical state is unknown, so the claim is left parked", rec.releases)
+		}
+		if rec.drainAcked {
+			t.Fatal("the drain was acknowledged on a committed claim: an unknown-ownership stop is not idle")
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout = %q, want no work receipt on an unreadable claim", stdout.String())
+		}
+		// One CAS, one failed readback — the second candidate was never tried.
+		if len(*bdCalls) != 2 {
+			t.Fatalf("bd calls = %#v, want one claim CAS and one failed readback, no second candidate", *bdCalls)
+		}
+	})
 }
 
 // TestHookClaimLandingRecorder pins the CAS-landing recorder's own contract
