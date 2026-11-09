@@ -838,9 +838,9 @@ func runWithTimeoutInGroup(t *testing.T, shell, harness string, budget time.Dura
 			if idle := now.Sub(stdout.lastLine()); idle >= runWithTimeoutStallSnapshotAfter {
 				_, gaps := stdout.snapshot()
 				errOut, _ := stderr.snapshot()
-				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s\nstderr so far: %d lines \"command reaped\", %d lines \"watchdog signaled\"; last lines:\n%s",
+				stallSnapshot = fmt.Sprintf("\nprocess group %d after %s without output (after line %d):\n%s\nstderr so far: %d lines \"command reaped\", %d lines \"timer killed\"; last lines:\n%s",
 					cmd.Process.Pid, idle.Round(time.Millisecond), len(gaps), processGroupMembers(t, cmd.Process.Pid),
-					strings.Count(errOut, "command reaped\n"), strings.Count(errOut, "watchdog signaled\n"), lastLines(errOut, 40))
+					strings.Count(errOut, "command reaped\n"), strings.Count(errOut, "timer killed\n"), lastLines(errOut, 4))
 			}
 		}
 	}
@@ -917,9 +917,11 @@ func processGroupMembers(t *testing.T, pgid int) string {
 
 // instantCommandsWatchdogTimeout is the timeout each call arms in
 // TestRunWithTimeoutLeavesNothingAfterInstantCommands. It is long so that a
-// call that waits out its watchdog instead of returning when the command
-// exits (a TERM to the watchdog that is only acted on once its sleep ends)
-// stands far apart from a call that is merely slow on a loaded runner.
+// call that waits out its timer instead of returning when the command exits
+// stands far apart from a call that is merely slow on a loaded runner. The
+// earlier trap-based watchdog did this on macOS: about one call in thirty
+// took the full timeout because the watchdog stayed blocked on its sleep
+// after the caller's TERM.
 const instantCommandsWatchdogTimeout = 30 * time.Second
 
 // instantCommandsSlowCall is the longest one call may take. Runner slowness
@@ -935,21 +937,18 @@ const instantCommandsSlowCall = instantCommandsWatchdogTimeout / 3
 const instantCommandsBudget = 60 * time.Second
 
 // markRunWithTimeoutSteps makes run_with_timeout report on stderr when it
-// has reaped the command and when it has signaled the watchdog, and traces
-// the watchdog (set -x) to the same stderr, so a stall snapshot shows where
-// the watchdog was when the caller signaled it.
+// has reaped the command and when it has killed its timer, so a stall
+// snapshot shows which wait a stalled call is blocked in.
 func markRunWithTimeoutSteps(t *testing.T, fn string) string {
 	t.Helper()
-	for _, step := range []struct{ old, new string }{
-		{`wait "$cmd_pid" || status=$?`, `wait "$cmd_pid" || status=$?` + "\n    printf 'command reaped\\n' >&2"},
-		{`kill "$watchdog_pid" 2>/dev/null || true`, `kill "$watchdog_pid" 2>/dev/null || true` + "\n    printf 'watchdog signaled\\n' >&2"},
-		{"    (\n        stopped=", "    (\n        PS4='+watchdog '\n        set -x\n        stopped="},
-		{") </dev/null >/dev/null 2>&1 &", ") </dev/null >/dev/null &"},
+	for _, step := range []struct{ after, mark string }{
+		{`wait "$cmd_pid" || status=$?`, "command reaped"},
+		{`kill -s KILL "$sleep_pid" 2>/dev/null || true`, "timer killed"},
 	} {
-		if strings.Count(fn, step.old) != 1 {
-			t.Fatalf("run_with_timeout no longer has exactly one %q", step.old)
+		if strings.Count(fn, step.after) != 1 {
+			t.Fatalf("run_with_timeout no longer has exactly one %q", step.after)
 		}
-		fn = strings.Replace(fn, step.old, step.new, 1)
+		fn = strings.Replace(fn, step.after, step.after+"\n    printf '"+step.mark+"\\n' >&2", 1)
 	}
 	return fn
 }
