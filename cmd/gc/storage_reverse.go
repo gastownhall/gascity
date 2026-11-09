@@ -158,6 +158,12 @@ type storageReverseJournal struct {
 	// their rigs, recorded before it writes: until one proves them, every
 	// run finishes it.
 	Recopying []string `json:"recopying,omitempty"`
+	// ClearEdges is every edge that touched a row the to-rigs clear removes,
+	// in the binding ("binding") and in each rig (its destination), both
+	// directions and with payloads, recorded with ClearStarted before the
+	// first delete: a re-copy after the clear began restores a lost row's
+	// edges from here, those from rows the binding no longer holds included.
+	ClearEdges map[string][]reverseEdge `json:"clear_edges,omitempty"`
 	// PreservedRecorded records that Preserved was computed, on the run's
 	// first plan and only then: an empty Preserved is an answer, not a
 	// question still open.
@@ -1065,6 +1071,7 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 	}
 	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
 	var going []string
+	gates := map[string]bool{}
 	for _, rig := range r.journal.Rigs {
 		m, _, err := readInfraCopyManifestRecordAt(filepath.Join(r.target.Root, infraReversedRigManifestName(rig)), "")
 		if err != nil {
@@ -1083,18 +1090,36 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 				return fmt.Errorf("the binding holds %s, stamped as an import of rig %s, which this reverse did not return to the rig; nothing was removed. %s", b.ID, rig, next)
 			}
 			going = append(going, b.ID)
+			if isCrossStoreGate(b) {
+				gates[b.ID] = true
+			}
 		}
+	}
+	lister, _ := beads.As[beads.DependencyBatchLister](binding)
+	single, _ := beads.As[beads.DepMetadataReader](binding)
+	batch, _ := beads.As[beads.DepMetadataBatchReader](binding)
+	t := &reverseTarget{
+		dest:      reverseClearBinding,
+		rows:      binding,
+		down:      func(ids []string) (map[string][]beads.Dep, error) { return readInfraDownEdges(lister, binding, ids) },
+		deleteIDs: func(ids []string) error { return deleteInBatches(binding, ids) },
+		payloads: func(edges map[string][]beads.Dep) (map[beads.DepPair]string, error) {
+			return readInfraPayloads(batch, single, edges, func(beads.Dep) bool { return true })
+		},
+	}
+	if !r.journal.ClearStarted {
+		edges, err := r.clearEdges(t, setOf(going), gates)
+		if err != nil {
+			return err
+		}
+		r.journal.ClearEdges = edges
 	}
 	r.journal.ClearStarted = true
 	if err := writeStorageReverseJournal(r.request.CityPath, r.journal); err != nil {
 		return err
 	}
-	lister, _ := beads.As[beads.DependencyBatchLister](binding)
-	t := &reverseTarget{
-		dest:      "binding",
-		rows:      binding,
-		down:      func(ids []string) (map[string][]beads.Dep, error) { return readInfraDownEdges(lister, binding, ids) },
-		deleteIDs: func(ids []string) error { return deleteInBatches(binding, ids) },
+	if err := infraEngineCrashPoint("reverse R4 clear recorded"); err != nil {
+		return err
 	}
 	if err := reverseDeleteRows(t, going); err != nil {
 		return err
@@ -1116,6 +1141,42 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 		return err
 	}
 	return infraEngineCrashPoint("reverse R4 renamed")
+}
+
+// reverseClearBinding keys the binding's edges in ClearEdges.
+const reverseClearBinding = "binding"
+
+// clearEdges reads every edge that touches one of going, in the binding (t)
+// and in each rig the reverse returns rows to. An edge onto one of the closed
+// gates the clear removes is left out: the gate is not carried, and the edge
+// it stood for (owner -> blocker) is the plan's to restore.
+func (r *reverseRun) clearEdges(binding *reverseTarget, going, gates map[string]bool) (map[string][]reverseEdge, error) {
+	out := map[string][]reverseEdge{}
+	edges, err := reverseEdgesTouching(binding, going)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range edges {
+		if !gates[e.From] && !gates[e.To] {
+			out[reverseClearBinding] = append(out[reverseClearBinding], e)
+		}
+	}
+	for _, rig := range r.journal.Rigs {
+		dest := rigImportStamp(rig)
+		t, err := reverseTargetOpener(r.request.CityPath, r.request.Cfg, dest)
+		if err != nil {
+			return nil, err
+		}
+		edges, err := reverseEdgesTouching(t, going)
+		t.close()
+		if err != nil {
+			return nil, err
+		}
+		if len(edges) > 0 {
+			out[dest] = edges
+		}
+	}
+	return out, nil
 }
 
 // destinationsHold proves, before the reverse changes the binding or the
@@ -1205,8 +1266,16 @@ func (r *reverseRun) recopyAfterClear(missing []string) error {
 				edges = append(edges, e)
 			}
 		}
+		var recorded []reverseEdge
+		for _, store := range []string{dest, reverseClearBinding} {
+			for _, e := range r.journal.ClearEdges[store] {
+				if lost[e.From] || lost[e.To] {
+					recorded = append(recorded, e)
+				}
+			}
+		}
 		if len(rows) > 0 {
-			if err := r.recopyRows(dest, rows, edges); err != nil {
+			if err := r.recopyRows(dest, rows, edges, recorded, lost, inBinding); err != nil {
 				return err
 			}
 		}
@@ -1227,8 +1296,11 @@ func (r *reverseRun) recopyAfterClear(missing []string) error {
 
 // recopyRows creates each of rows dest does not hold, adds each edge it does
 // not hold, and proves them, among the rows it already holds under the stamp.
-// It deletes nothing.
-func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.DepWithPayload) error {
+// It deletes nothing. Each recorded edge (ClearEdges) joining a lost row to a
+// row dest then holds is restored too; one whose other end only the binding
+// holds crosses stores (the plan recorded it on the row), and one whose other
+// end neither holds is dropped and reported.
+func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.DepWithPayload, recorded []reverseEdge, lost, inBinding map[string]bool) error {
 	open := func() (*reverseTarget, error) {
 		return reverseTargetOpener(r.request.CityPath, r.request.Cfg, dest)
 	}
@@ -1237,15 +1309,51 @@ func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.De
 		return err
 	}
 	defer t.close()
+	phase := "reverse " + dest + " re-copy"
+	stamped, err := t.rows.List(reverseStampQuery(r.journal.Stamp))
+	if err != nil {
+		return err
+	}
+	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return err
+	}
+	inDest := map[string]bool{}
+	for _, b := range all {
+		inDest[b.ID] = true
+	}
+	for _, b := range rows {
+		inDest[b.ID] = true
+	}
+	planned := map[beads.DepPair]bool{}
+	for _, e := range edges {
+		planned[beads.DepPair{IssueID: e.IssueID, DependsOnID: e.DependsOnID}] = true
+	}
+	var dropped []string
+	for _, e := range recorded {
+		pair := beads.DepPair{IssueID: e.From, DependsOnID: e.To}
+		other := e.To
+		if !lost[e.From] {
+			other = e.From
+		}
+		switch {
+		case planned[pair]:
+		case inDest[e.From] && (inDest[e.To] || strings.HasPrefix(e.To, "external:")):
+			planned[pair] = true
+			edges = append(edges, beads.DepWithPayload{Dep: beads.Dep{IssueID: e.From, DependsOnID: e.To, Type: e.Type}, Payload: e.Payload})
+		case inBinding[other]:
+		default:
+			dropped = append(dropped, fmt.Sprintf("%s -[%s]-> %s", e.From, e.Type, e.To))
+		}
+	}
 	for _, e := range edges {
 		if e.Payload != "" && !t.carriesPayload {
 			return fmt.Errorf("%s cannot write the payload on %s -> %s; nothing was written", reverseDestNoun(dest), e.IssueID, e.DependsOnID)
 		}
 	}
-	phase := "reverse " + dest + " re-copy"
-	stamped, err := t.rows.List(reverseStampQuery(r.journal.Stamp))
-	if err != nil {
-		return err
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		fmt.Fprintf(r.stdout, "%s: %d recorded edge(s) of a row copied back into %s not restored, their other end in neither store: %s\n", r.logPrefix, len(dropped), reverseDestNoun(dest), strings.Join(dropped, ", ")) //nolint:errcheck // best-effort stdout
 	}
 	held := map[string]bool{}
 	for _, b := range stamped {
