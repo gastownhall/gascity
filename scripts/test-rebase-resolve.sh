@@ -661,11 +661,13 @@ test_bounded_rebase_real_conflict_refused_untouched() {
 # Regression (ga-nlvpzq / ga-vzckwr round 10): an ADDITIVE-BOTH hunk on an
 # allowlisted _test.go path where naive ours-then-theirs concatenation
 # produces syntactically INVALID Go (two unclosed "if" opens sharing one
-# trailing "}", two consecutive redeclared "wantShardCounts :=" lines) must
-# never be certified as a successful resolution. Per the acceptance criteria
-# the helper must either refuse (rc=12, branch and remote left exactly as
-# before, no push) or produce a result that is valid Go — it must never
-# reach rc=0 with corrupted content reaching the push step.
+# trailing "}") must never be certified as a successful resolution: the
+# helper must either refuse (rc=12, branch and remote left exactly as before,
+# no push) or produce a result that is valid Go. This case pins the
+# UNBALANCED shape only (the parse check). The balanced shapes, where the
+# union parses but redeclares a name, are the next two cases below
+# (same-line rewrite and same-named top-level func), and the check that
+# catches them is documented in rebase-resolve-lib.sh's header.
 test_bounded_rebase_additive_both_invalid_go_never_certified() {
     local remote work seed
     remote="$(new_bare_remote)"

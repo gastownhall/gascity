@@ -45,18 +45,38 @@
 #                   dropping only the conflict markers. We do NOT do this for
 #                   source code — concatenating two divergent code edits can
 #                   produce a duplicate-definition or logic corruption. Test
-#                   files ARE source, so for a *.go union we additionally
-#                   verify the concatenated result still parses before
-#                   accepting it — two hunks that are each a plausible partial
-#                   edit can still concatenate into an unbalanced brace or a
-#                   duplicate declaration (ga-nlvpzq).
+#                   files ARE source, so every awk-resolved *.go path (any
+#                   policy, not only a keep-both union) is additionally
+#                   checked, in this order, before it is accepted
+#                   (ga-nlvpzq, ga-x7rsyi9):
+#                     a. a hunk whose diff3 base section is non-empty, with
+#                        both sides differing, is a REAL conflict: both
+#                        sides rewrote the same lines, which is not an
+#                        addition (the bounded rebase turns diff3 on so the
+#                        base section is present);
+#                     b. the resolved file must parse (`gofmt -e`); the first
+#                        diagnostic line is printed to stderr, and a missing
+#                        gofmt is its own error (rc=2), not a parse failure;
+#                     c. the resolved file must not declare the same
+#                        column-1 top-level func, type, var or const name
+#                        twice, nor the same method (receiver type plus name)
+#                        twice. `init` and `_` are exempt, and lines inside a
+#                        backtick raw string are ignored.
+#                   This is a SYNTACTIC check, not a type-check. Not covered:
+#                   two pure insertions at the same point inside one block
+#                   that redeclare a local with `:=`, and members of grouped
+#                   `var (...)` / `const (...)` / `type (...)` blocks, a
+#                   second name in `var a, b`, and a backtick in a comment or
+#                   a double-quoted string. Those still need `go vet` (the
+#                   pre-push hook's `bazel test //...`).
 #
 # If a file contains ANY hunk that is none of the above (i.e. both sides are
 # non-empty, differ, and the file is NOT an allowlisted additive file), the
 # whole file is declared a REAL conflict and resolution fails — the caller
 # aborts the rebase and routes to the builder.
 #
-# Required external commands: git, awk, cmp, mktemp, tr.
+# Required external commands: git, awk, cmp, mktemp, tr, and gofmt (only for
+# *.go resolutions; when it is missing those resolutions fail with rc=2).
 
 # shellcheck source=./push-ownership-guard.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
@@ -111,6 +131,68 @@ is_additive_keepboth_path() {
     return 1
 }
 
+# go_duplicate_top_level_declaration <file>
+#
+# Prints "<key> (lines A and B)" for the first top-level declaration in the Go
+# file that repeats an earlier one, and nothing when there is none. Returns
+# non-zero only when awk itself fails. Only column-1 declarations are
+# considered: `func`, `type`, `var` and `const` share the package namespace and
+# are keyed by identifier; a method is keyed by receiver base type plus name
+# (pointer and generic parameters stripped). `init` and `_` may repeat. Lines
+# inside a backtick raw string are skipped. Syntactic only; the ceiling is
+# listed in the header's DESIGN item 3.
+go_duplicate_top_level_declaration() {
+    awk '
+        function ident(s) {
+            if (match(s, /^[A-Za-z0-9_]+/)) return substr(s, 1, RLENGTH)
+            return ""
+        }
+        function ticks(s,   t) { t = s; return gsub(/`/, "", t) }
+        {
+            line = $0
+            if (in_raw) {
+                if (ticks(line) % 2 == 1) in_raw = 0
+                next
+            }
+            key = ""
+            if (line ~ /^func[ \t]*\(/) {
+                rest = line
+                sub(/^func[ \t]*\(/, "", rest)
+                close_at = index(rest, ")")
+                if (close_at > 0) {
+                    recv = substr(rest, 1, close_at - 1)
+                    after = substr(rest, close_at + 1)
+                    gsub(/\[[^]]*\]/, "", recv)
+                    n = split(recv, parts, /[ \t]+/)
+                    rtype = parts[n]
+                    sub(/^\*/, "", rtype)
+                    sub(/^[ \t]+/, "", after)
+                    name = ident(after)
+                    if (name != "" && name != "_" && rtype != "") key = "method " rtype "." name
+                }
+            } else if (line ~ /^func[ \t]+[A-Za-z_]/) {
+                rest = line
+                sub(/^func[ \t]+/, "", rest)
+                name = ident(rest)
+                if (name != "init" && name != "_") key = "identifier " name
+            } else if (line ~ /^(type|var|const)[ \t]+[A-Za-z_]/) {
+                rest = line
+                sub(/^(type|var|const)[ \t]+/, "", rest)
+                name = ident(rest)
+                if (name != "_") key = "identifier " name
+            }
+            if (key != "") {
+                if (key in seen) {
+                    print key " (lines " seen[key] " and " NR ")"
+                    exit 0
+                }
+                seen[key] = NR
+            }
+            if (line !~ /^[ \t]*\/\// && ticks(line) % 2 == 1) in_raw = 1
+        }
+    ' "$1"
+}
+
 # resolve_conflict_markers_in_file <path> <allow_additive_keepboth: 0|1>
 #
 # Reads a single working-tree file containing git conflict markers and writes
@@ -127,13 +209,22 @@ is_additive_keepboth_path() {
 #
 # Implementation note: we do the parse/classify/rewrite in a single awk pass so
 # the logic is auditable in one place. awk exits 0 (resolved) / 1 (real
-# conflict) / 2 (malformed markers); we mirror that exit code, except a *.go
-# file that fails to parse after an awk-resolved ADDITIVE-BOTH union is
-# downgraded from 0 to 1 (ga-nlvpzq) — awk only judges markers, not syntax.
+# conflict) / 2 (malformed markers); we mirror that exit code. awk only judges
+# markers, not syntax, so for EVERY awk-resolved *.go path (whatever the
+# keep-both policy) we then run the checks listed in the header's DESIGN item 3:
+# an unparseable result or a repeated top-level declaration is downgraded from
+# 0 to 1, and a missing gofmt returns 2 (ga-nlvpzq, ga-x7rsyi9). A diff3 base
+# section is counted, not discarded: for *.go a non-empty base on a both-sides-
+# differ hunk is a real conflict even when keep-both is allowed.
 resolve_conflict_markers_in_file() {
     local path="$1"
     local allow_keepboth="${2:-0}"
     [[ -f "$path" ]] || return 2
+
+    local is_go=0
+    case "$path" in
+        *.go) is_go=1 ;;
+    esac
 
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/gc-rebase-resolve.XXXXXX")" || return 2
@@ -145,8 +236,11 @@ resolve_conflict_markers_in_file() {
     #   state 2: inside "theirs" (after `=======`, before `>>>>>>>`).
     #
     # A diff3-style merge can also emit a `|||||||` "base" section between ours
-    # and `=======`. We track and discard the base section (it's not part of
-    # either resolution). Its presence does not change triviality.
+    # and `=======`. The base lines are never part of a resolution, but they are
+    # counted (b_count): for a *.go file a both-non-empty-and-differ hunk with a
+    # non-empty base means both sides rewrote the same lines, which is a real
+    # conflict, not an addition. For other files the base does not change
+    # triviality.
     #
     # For each completed hunk we decide:
     #   identical(ours,theirs)            -> emit ours
@@ -154,9 +248,10 @@ resolve_conflict_markers_in_file() {
     #   theirs empty, ours non-empty      -> emit ours
     #   both empty                        -> emit nothing (degenerate; trivial)
     #   both non-empty & differ:
+    #       *.go with a non-empty base    -> REAL CONFLICT (exit 1)
     #       allow_keepboth==1             -> emit ours then theirs (union)
     #       else                          -> REAL CONFLICT (exit 1)
-    if awk -v allow_keepboth="$allow_keepboth" '
+    if awk -v allow_keepboth="$allow_keepboth" -v is_go="$is_go" '
         function flush_hunk(   i, ours_n, theirs_n, identical) {
             ours_n = o_count
             theirs_n = t_count
@@ -177,7 +272,10 @@ resolve_conflict_markers_in_file() {
                 for (i = 1; i <= ours_n; i++) print ours[i]
             } else {
                 # both sides non-empty and differ.
-                if (allow_keepboth == 1) {
+                if (is_go == 1 && b_count > 0) {
+                    real_conflict = 1
+                    exit 1
+                } else if (allow_keepboth == 1) {
                     for (i = 1; i <= ours_n; i++) print ours[i]
                     for (i = 1; i <= theirs_n; i++) print theirs[i]
                 } else {
@@ -186,15 +284,15 @@ resolve_conflict_markers_in_file() {
                 }
             }
             # reset hunk buffers
-            o_count = 0; t_count = 0
+            o_count = 0; t_count = 0; b_count = 0
         }
-        BEGIN { state = 0; o_count = 0; t_count = 0; real_conflict = 0 }
+        BEGIN { state = 0; o_count = 0; t_count = 0; b_count = 0; real_conflict = 0 }
         # Marker detection is anchored at column 1 and requires the canonical
         # 7-character marker so we do not misfire on a "<<<<<<<" that appears
         # mid-content (rare, but be precise).
         /^<<<<<<< / {
             if (state != 0) { malformed = 1; exit 2 }
-            state = 1; o_count = 0; t_count = 0; in_base = 0
+            state = 1; o_count = 0; t_count = 0; b_count = 0; in_base = 0
             next
         }
         /^\|\|\|\|\|\|\|/ {
@@ -216,28 +314,42 @@ resolve_conflict_markers_in_file() {
         {
             if (state == 0) { print; next }
             if (state == 1) {
-                if (in_base) next            # discard diff3 base section
+                if (in_base) { b_count++; next }   # diff3 base: counted, never emitted
                 ours[++o_count] = $0; next
             }
             if (state == 2) { theirs[++t_count] = $0; next }
         }
         END {
-            if (state != 0) { exit 2 }       # unterminated conflict marker
+            # unterminated conflict marker; a real_conflict exit already
+            # left state non-zero and must keep its exit status 1.
+            if (state != 0 && !real_conflict) { exit 2 }
         }
     ' "$path" > "$tmp"; then
         # awk exited 0 — fully resolved per the marker/hunk rules. For a *.go
-        # file, that is necessary but not sufficient: an ADDITIVE-BOTH union
-        # of two partial-edit hunks can still be invalid Go (duplicate
-        # declaration, unbalanced brace) even with zero markers left. Verify
-        # it parses before accepting the resolution.
-        case "$path" in
-            *.go)
-                if ! gofmt -e "$tmp" >/dev/null 2>&1; then
-                    rm -f "$tmp"
-                    return 1
-                fi
-                ;;
-        esac
+        # file that is necessary but not sufficient: a union of two hunks that
+        # are each a plausible edit can still be invalid Go (unbalanced brace)
+        # or redeclare a top-level name, with zero markers left. Run the
+        # *.go checks from the header's DESIGN item 3 (parse, then
+        # duplicate top-level declarations) before accepting the resolution.
+        if [[ $is_go -eq 1 ]]; then
+            if ! command -v gofmt >/dev/null 2>&1; then
+                echo "resolve_conflict_markers_in_file: $path: gofmt not found on PATH; cannot verify a Go resolution" >&2
+                rm -f "$tmp"
+                return 2
+            fi
+            local gofmt_err dup
+            if ! gofmt_err="$(gofmt -e "$tmp" 2>&1 >/dev/null)"; then
+                echo "resolve_conflict_markers_in_file: $path: resolved union is not valid Go: ${gofmt_err%%$'\n'*}" >&2
+                rm -f "$tmp"
+                return 1
+            fi
+            dup="$(go_duplicate_top_level_declaration "$tmp")" || { rm -f "$tmp"; return 2; }
+            if [[ -n "$dup" ]]; then
+                echo "resolve_conflict_markers_in_file: $path: resolved union redeclares top-level $dup" >&2
+                rm -f "$tmp"
+                return 1
+            fi
+        fi
         mv -f "$tmp" "$path"
         return 0
     else
@@ -430,7 +542,7 @@ attempt_bounded_self_rebase() {
         return 20
     fi
 
-    if git rebase "origin/$base_ref" >/dev/null 2>&1; then
+    if git -c merge.conflictStyle=diff3 rebase "origin/$base_ref" >/dev/null 2>&1; then
         : # clean rebase, no conflicts at all — itself a trivial outcome
     else
         local steps=0 max_steps=50
@@ -454,7 +566,7 @@ attempt_bounded_self_rebase() {
             fi
             # Continue the rebase with the staged resolutions. GIT_EDITOR=true
             # accepts the existing commit message non-interactively.
-            if GIT_EDITOR=true git rebase --continue >/dev/null 2>&1; then
+            if GIT_EDITOR=true git -c merge.conflictStyle=diff3 rebase --continue >/dev/null 2>&1; then
                 break   # rebase finished cleanly
             fi
             # --continue returned non-zero: either the next commit also
