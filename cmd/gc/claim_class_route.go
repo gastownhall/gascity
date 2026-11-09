@@ -555,8 +555,12 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 // applying the same post-mutation classification hookClaimWithBdStore applies to
 // the work store so the two claim paths report a lost race, a stale projection
 // and a canonical-readback failure identically.
-func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
-	return hookClaimThroughStore(context.Background(), beadID, assignee,
+//
+// The graph operations take no context; ctx only carries the claiming tier's
+// landing recorder (hookClaimLanding) to the classifier, which records the
+// GraphStore.Claim return before the canonical GraphStore.Get.
+func (r *hookClaimClassRoute) claim(ctx context.Context, beadID, assignee string) (beads.Bead, bool, error) {
+	return hookClaimThroughStore(ctx, beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
 		r.graph.Get, r.graph.Get)
 }
@@ -634,7 +638,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 
 	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 		if route.knownResident(beadID) {
-			return route.claim(beadID, assignee)
+			return route.claim(ctx, beadID, assignee)
 		}
 		// The work-scope claim is the first leg of the escalation: a
 		// not-found here is the signal to probe the binding, so the call is
@@ -661,7 +665,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		case probeErr != nil:
 			return beads.Bead{}, false, probeErr
 		case routed:
-			return route.claim(beadID, assignee)
+			return route.claim(ctx, beadID, assignee)
 		default:
 			return claimed, ok, err
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -498,5 +499,144 @@ func TestHookClaimTiersStopOnCommittedClaimReadbackFailure(t *testing.T) {
 				t.Fatalf("releases = %v events = %+v, want none: the canonical state is unknown", rec.releases, rec.claimReleased)
 			}
 		})
+	}
+}
+
+// claimRouteLandingStore is a class binding whose CAS moves a controlled clock
+// to claimAt and whose reads after that CAS advance it by getTakes, so a test
+// can tell the CAS return from the canonical readback. It is a pointer with
+// pointer receivers: the binding builder keys maps by store, so it must be
+// comparable.
+type claimRouteLandingStore struct {
+	beads.Store
+	clock    *time.Time
+	claimAt  time.Time
+	getTakes time.Duration
+
+	conflict       bool   // the CAS loses the race to other-seat
+	projectedOwner string // overrides the CAS projection's assignee
+	canonicalOwner string // overrides the canonical readback's assignee
+	getErr         error  // fails reads after the CAS
+
+	claims   int
+	claimed  bool
+	postGets int
+}
+
+func (s *claimRouteLandingStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	s.claims++
+	*s.clock = s.claimAt
+	if s.conflict {
+		return beads.Bead{ID: id, Status: "in_progress", Assignee: "other-seat"}, false, nil
+	}
+	claimer, ok := s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("the landing binding's leaf %T has no compare-and-swap claim", s.Store)
+	}
+	claimed, won, err := claimer.Claim(id, assignee)
+	if err != nil || !won {
+		return claimed, won, err
+	}
+	s.claimed = true
+	// The CAS projection carries no metadata, so the caller can only see the
+	// canonical metadata through the readback.
+	projection := beads.Bead{ID: claimed.ID, Status: claimed.Status, Assignee: claimed.Assignee}
+	if s.projectedOwner != "" {
+		projection.Assignee = s.projectedOwner
+	}
+	return projection, true, nil
+}
+
+func (s *claimRouteLandingStore) Get(id string) (beads.Bead, error) {
+	if !s.claimed {
+		return s.Store.Get(id)
+	}
+	s.postGets++
+	*s.clock = s.clock.Add(s.getTakes)
+	if s.getErr != nil {
+		return beads.Bead{}, s.getErr
+	}
+	bead, err := s.Store.Get(id)
+	if err == nil && s.canonicalOwner != "" {
+		bead.Assignee = s.canonicalOwner
+	}
+	return bead, err
+}
+
+// TestClassRoutedClaimRecordsLandingBeforeBindingReadback pins that a claim
+// through the relocated class binding, by either routing entry (a bead already
+// known resident, or the work store's not-found escalation), records its
+// landing when GraphStore.Claim returns rather than after the canonical
+// GraphStore.Get, and still returns the canonical bead and its metadata.
+func TestClassRoutedClaimRecordsLandingBeforeBindingReadback(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	claimAt := start.Add(3 * time.Second)
+
+	type outcome struct {
+		ok       bool
+		err      bool
+		recorded bool
+		postGets int
+	}
+	for _, entry := range []string{"known resident", "not-found escalation"} {
+		for _, tc := range []struct {
+			name  string
+			setup func(*claimRouteLandingStore)
+			want  outcome
+		}{
+			{"claimed", func(*claimRouteLandingStore) {}, outcome{ok: true, recorded: true, postGets: 1}},
+			{"canonical readback fails", func(s *claimRouteLandingStore) { s.getErr = errors.New("binding unavailable") }, outcome{ok: true, err: true, recorded: true, postGets: 1}},
+			{"lost race", func(s *claimRouteLandingStore) { s.conflict = true }, outcome{}},
+			{"mutation projection names another seat", func(s *claimRouteLandingStore) { s.projectedOwner = "other-seat" }, outcome{recorded: true}},
+			{"canonical owner is another seat", func(s *claimRouteLandingStore) { s.canonicalOwner = "other-seat" }, outcome{recorded: true, postGets: 1}},
+		} {
+			t.Run(entry+"/"+tc.name, func(t *testing.T) {
+				leaf := newClaimRouteClassStore(t)
+				mintClaimRouteBead(t, leaf, "gcg-700", map[string]string{"gc.root_bead_id": "root-7"})
+				clock := start
+				class := &claimRouteLandingStore{Store: leaf, clock: &clock, claimAt: claimAt, getTakes: time.Minute}
+				tc.setup(class)
+				route := newClaimRouteFor(t, class)
+				workClaims := 0
+				base := hookClaimOps{Claim: func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+					workClaims++
+					return notFoundClaim(t, "gcg-700")(ctx, dir, env, beadID, assignee)
+				}}
+				if entry == "known resident" {
+					route.resident["gcg-700"] = true
+				}
+				ops := classRoutedHookClaimOps(base, route)
+
+				ctx, landing := withHookClaimLanding(context.Background(), func() time.Time { return clock })
+				claimed, ok, err := ops.Claim(ctx, "/work", nil, "gcg-700", "worker-1")
+
+				if ok != tc.want.ok || (err != nil) != tc.want.err {
+					t.Fatalf("routed claim = (%+v, ok=%v, err=%v), want ok=%v err=%v", claimed, ok, err, tc.want.ok, tc.want.err)
+				}
+				if class.claims != 1 {
+					t.Fatalf("binding CAS attempts = %d, want exactly one", class.claims)
+				}
+				if wantWork := map[bool]int{true: 0, false: 1}[entry == "known resident"]; workClaims != wantWork {
+					t.Fatalf("work-store claims = %d, want %d: no second-store claim", workClaims, wantWork)
+				}
+				if class.postGets != tc.want.postGets {
+					t.Fatalf("reads after the CAS = %d, want %d", class.postGets, tc.want.postGets)
+				}
+				if tc.want.recorded {
+					if !landing.at.Equal(claimAt) {
+						t.Fatalf("recorded landing = %v, want the GraphStore.Claim return %v", landing.at, claimAt)
+					}
+				} else if !landing.at.IsZero() {
+					t.Fatalf("recorded landing = %v, want none for a CAS that did not commit", landing.at)
+				}
+				if tc.want.ok && !tc.want.err {
+					if claimed.Assignee != "worker-1" || claimed.Metadata["gc.root_bead_id"] != "root-7" {
+						t.Fatalf("claimed = %+v, want the canonical bead with its metadata", claimed)
+					}
+				}
+			})
+		}
 	}
 }
