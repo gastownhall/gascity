@@ -424,6 +424,26 @@ nothing twice and clears what was answered while it was down. A client
 connecting without a cursor starts at the head of the log, so it should
 read `GET /v0/city/{cityName}/pending` once and apply events from there.
 
+### Session List Changes
+
+A client that shows the city's sessions can follow the event stream
+instead of polling `GET /v0/city/{cityName}/sessions`:
+
+| Event | Fires when | Payload |
+|---|---|---|
+| `session.created` | a session joins the open set: it was created, or a closed session was reopened | `SessionCreatedPayload`: `session_id`, `template`, `title`, `alias`, `agent_name` |
+| `session.closed` | a session leaves the open set: it closed | `SessionClosedPayload`: the same fields plus `reason`, the close reason the session records |
+
+Each fires once per transition, for sessions created or closed by any
+path (the CLI, the API, or the orchestrator's own pools), whether or not
+a client is watching. The envelope's `subject` and `session_id` are the
+session ID. Read the session list once when you connect, then apply
+these events; reconnect with `Last-Event-ID` (or `after_seq` /
+`after_cursor`) to get the transitions you missed. A transition that
+happens while the orchestrator is down can be missed, and after a
+restart a close can be announced a second time, so treat the events as
+idempotent updates to the list you read.
+
 ### Transport vs Semantic Type
 
 - The SSE `event:` line is the transport envelope:

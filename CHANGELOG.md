@@ -933,6 +933,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Events: `session.created` and `session.closed`.** The city event
+  stream announces each session joining or leaving the open set, with
+  typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a
+  client can follow the session list without polling. See "Session List
+  Changes" in the API reference.
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:

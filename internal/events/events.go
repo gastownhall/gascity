@@ -357,10 +357,20 @@ const (
 	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
-	ConvoyCreated         = "convoy.created"
-	ConvoyClosed          = "convoy.closed"
-	ControllerStarted     = "controller.started"
-	ControllerStopped     = "controller.stopped"
+	// SessionCreated fires when a session joins the city's set of open
+	// sessions (a session bead created open, or a closed one reopened) and
+	// SessionClosed when one leaves it (its session bead closed), so a client
+	// tracks the session list from the stream instead of polling. The
+	// controller derives each from the ledger's session-bead notifications,
+	// once per transition (session.ListTransitions); the envelope's Subject
+	// and SessionID are the session bead.
+	SessionCreated = "session.created"
+	SessionClosed  = "session.closed"
+
+	ConvoyCreated     = "convoy.created"
+	ConvoyClosed      = "convoy.closed"
+	ControllerStarted = "controller.started"
+	ControllerStopped = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -705,6 +715,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
+	SessionCreated, SessionClosed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
