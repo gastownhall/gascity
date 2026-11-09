@@ -12,12 +12,16 @@ import (
 // assigned work is not the bead it is processing, RequiresFreshCycle), which
 // has not claimed that bead itself, is stopped and handed off as a restart
 // onto the new bead, so its next start is a fresh conversation. The stop
-// defers, in the effect, while the previous bead is still open, or when this
-// incarnation woke after that bead closed (it is already fresh); the
-// lookup's failure defers too, as a failed read proves nothing (legacy
-// fails toward the cycle). A defer refuses on the cycle's own backoff key
-// (freshCycleBackoffKey), which holds no other intent of the row, and
-// writes nothing (reconcile_effect_fresh_cycle.go).
+// defers, in the effect, per ga-pvjbx3 Q1-Q3, and fails closed: the previous
+// bead is still the session's (open and assigned to one of its identities),
+// or this incarnation woke after that bead closed (it is already fresh); the
+// session holds ANY in_progress claim, read live on every leg; or the
+// anchor, re-read live, is finished, gone or unreadable. A read that fails or
+// expires defers too, as a failed read proves nothing: this is deliberately
+// stricter than legacy, whose anchor read error goes on to the cycle. A
+// defer refuses on the cycle's own backoff key (freshCycleBackoffKey), which
+// holds no other intent of the row, and writes nothing
+// (reconcile_effect_fresh_cycle.go).
 
 // decideFreshCycle is the fresh cycle's stop reason.
 const decideFreshCycle = "fresh-cycle"

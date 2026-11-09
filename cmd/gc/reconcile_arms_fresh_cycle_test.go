@@ -114,12 +114,12 @@ func TestSimFreshCycleOnReassign(t *testing.T) {
 	s.noViolations(t)
 }
 
-// TestSimFreshCycleDefersWhilePreviousBeadOpen (SESS-612): while the
-// previous bead is still open the cycle defers in the effect, writes
-// nothing, stops nothing, and is not re-proposed every pass (its row
-// backoff).
-func TestSimFreshCycleDefersWhilePreviousBeadOpen(t *testing.T) {
-	old := beads.Bead{ID: "gw-old", Title: "open", Type: "task", Status: "in_progress", Assignee: "gc-other", Metadata: map[string]string{"gc.routed_to": "worker"}}
+// TestSimFreshCycleDefersWhenWokenAfterPreviousClose (SESS-612): while this
+// incarnation has woken since the previous bead closed, the cycle defers in
+// the effect, writes nothing, stops nothing, and is not re-proposed every
+// pass (its row backoff).
+func TestSimFreshCycleDefersWhenWokenAfterPreviousClose(t *testing.T) {
+	old := beads.Bead{ID: "gw-old", Title: "done", Type: "task", Status: "closed", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker", "closed_at": rowAt(-3 * time.Hour)}} // closed before this incarnation woke
 	s := freshSim(t, old)
 	count := func() (cycles, deferred int) {
 		for _, r := range s.round {
@@ -173,6 +173,12 @@ func TestSimFreshCycleHoldsWhileASessionClaimIsHeld(t *testing.T) {
 	for range 40 { // past the defer's backoff (10s doubling to 5m)
 		s.settle()
 		s.advance(simPatrol)
+		if kills() > 0 {
+			break
+		}
+	}
+	for range 3 {
+		s.settle()
 	}
 	if got := s.gc1(); kills() != 1 || got[session.CurrentBeadIDKey] != "gw-new" {
 		t.Fatalf("kills %d, row %v; want one cycle onto gw-new after the claim closed", kills(), got)
@@ -222,7 +228,7 @@ func TestFreshCycleBackoffHoldsOnlyTheCycle(t *testing.T) {
 // suspend of a row whose fresh cycle is deferred stops its runtime on the
 // first pass after it: the deferral holds nothing but the cycle.
 func TestSimSuspendDuringADeferredFreshCycle(t *testing.T) {
-	old := beads.Bead{ID: "gw-old", Title: "open", Type: "task", Status: "in_progress", Assignee: "gc-other", Metadata: map[string]string{"gc.routed_to": "worker"}}
+	old := beads.Bead{ID: "gw-old", Title: "done", Type: "task", Status: "closed", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker", "closed_at": rowAt(-3 * time.Hour)}} // closed before this incarnation woke
 	s := freshSim(t, old)
 	deferred := false
 	for _, r := range s.round {
