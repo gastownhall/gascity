@@ -4573,12 +4573,17 @@ If the session is active with a live tmux session, reattaches.
 If the session is not running while the city's controller runs,
 asks the controller to start it (as "gc session wake" does), waits
 up to --wait-timeout for it to run, then attaches; the runtime is
-never started from this process. With no controller running, a
-suspended session or one whose tmux session died is resumed here
-using the provider's resume mechanism (if supported) or restarted.
+never started from this process. When the controller will not
+start it (its agent, rig or city is suspended, for one), attach
+exits non-zero with the reason. A session no configured agent runs
+(a provider session) is one the controller never starts, so it is
+resumed here. With no controller running, a suspended session or
+one whose tmux session died is resumed here using the provider's
+resume mechanism (if supported) or restarted.
 
 With --no-start, attach only to a running session: a session that
-is not running is neither woken nor started, and attach exits
+is not running is neither woken nor started, a configured named
+session with no open session is not created, and attach exits
 non-zero.
 
 A session still waiting for the reconciler to start it, in a city
@@ -4594,7 +4599,7 @@ gc session attach <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--no-start` | bool |  | attach only if the session is running; never start or wake it |
+| `--no-start` | bool |  | attach only if the session is running; never create, start or wake it |
 | `--wait-timeout` | duration | `2m0s` | max time to wait for the controller to start a stopped session before attaching |
 
 ## gc session close
