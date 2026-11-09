@@ -485,6 +485,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
+	// The session runtime as the skill/MCP materialization gates read it
+	// (steps 9b, 11b, 11c).
+	materializationRT := materializationRuntimeFor(p.city, p.cityName, p.cityPath, p.sessionProvider)
+
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
 	// delivers the skills to the session workdir. The appendix claims
@@ -512,8 +516,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
@@ -673,7 +677,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
-	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+	if isStage2EligibleSession(materializationRT, cfgAgent) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 		wsProvider := ""
@@ -766,8 +770,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+		stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
 		case stage1Delivers || stage2Delivers:
 			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
