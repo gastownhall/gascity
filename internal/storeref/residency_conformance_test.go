@@ -38,10 +38,12 @@ const (
 // internal/api's by-id surface has, where the plane's own router — not this
 // package's shadow rule — decides which work stores can hold the id.
 //
-// Its legs are fixed, so a row shows exactly what the intent contributed: the
+// Its refs are fixed, so a row shows exactly what the intent contributed: the
 // binding legs come from the topology, the work tail comes from the router, and
-// no row can quietly mix the two.
-func corpusRouter() WorkAxisRouter { return newCountingRouter(routedLegs()...) }
+// no row can quietly mix the two. It routes to the work leg, the one leg every
+// topology holds a store for; a multi-leg route and a route to a store the
+// topology lacks are work_axis_test.go's.
+func corpusRouter() WorkAxisRouter { return newCountingRouter(WorkRef) }
 
 // corpusIntents is the intent axis, in a stable printed order.
 func corpusIntents() []struct {
@@ -78,8 +80,8 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T0":                  `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T0":                   `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T0":                     `FirstOwner: ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T0":            `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
-	"ByID(gcg-abc,routed) x T0":           `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T0":            `FirstOwner: ""[WorkFallback,Fatal]`,
+	"ByID(gcg-abc,routed) x T0":           `FirstOwner: ""[WorkFallback,Fatal]`,
 	"RoutedWork x T0":                     `Union(first-leg-wins): ""[Authority,Fatal]`,
 	"AssignedWork(sweep) x T0":            `Union(first-leg-wins): ""[Authority,Fatal]`,
 	"AssignedWork(claim-escalation) x T0": `FirstOwner: ""[Authority,Fatal]`,
@@ -98,7 +100,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T1":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T1":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T1":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T1":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T1":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T1":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T1":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T1":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
@@ -118,7 +120,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T2":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T2":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T2":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:alpha[Shadow,Fatal]`,
-	"ByID(ga-xyz,routed) x T2":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T2":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T2":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T2":                     `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > rig:bravo[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T2":            `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > rig:bravo[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
@@ -139,7 +141,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T3":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T3":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T3":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T3":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T3":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T3":                     "error: storage refused: run `gc storage migrate`",
 	"AssignedWork(sweep) x T3":            "error: storage refused: run `gc storage migrate`",
@@ -162,7 +164,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T3k":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T3k":                     `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T3k":            `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T3k":            `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T3k":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T3k":                     "error: storage refused: run `gc storage migrate`",
 	"AssignedWork(sweep) x T3k":            "error: storage refused: run `gc storage migrate`",
@@ -180,7 +182,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T4":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T4":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T4":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:alpha[Shadow,Fatal]`,
-	"ByID(ga-xyz,routed) x T4":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T4":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T4":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T4":                     `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T4":            `Union(first-leg-wins): ""[Authority,Fatal] > rig:alpha[FederationTail,PartialDegrade] > class:gmnos[FederationTail,Fatal]`,
@@ -203,7 +205,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T5":                  `FirstOwner: class:g[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T5":                   `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T5":                     `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T5":            `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T5":            `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T5":           `FirstOwner: class:g[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T5":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T5":            `Union(first-leg-wins): ""[Authority,Fatal] > class:g[FederationTail,Fatal] > class:s[FederationTail,Fatal]`,
@@ -223,7 +225,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T6":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T6":                   `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T6":                     `FirstOwner: ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T6":            `FirstOwner: ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T6":            `FirstOwner: ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T6":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T6":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T6":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
@@ -242,7 +244,7 @@ var residencyCorpus = map[string]string{
 	"ByID(gcg-abc) x T6r":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"ByID(ga-xyz) x T6r":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(ra-7) x T6r":                     `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
-	"ByID(ga-xyz,routed) x T6r":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(ga-xyz,routed) x T6r":            `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
 	"ByID(gcg-abc,routed) x T6r":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 	"RoutedWork x T6r":                     `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep) x T6r":            `Union(first-leg-wins): ""[Authority,Fatal] > class:gmnos[FederationTail,Fatal]`,

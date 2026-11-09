@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type prefixedAliasStore struct {
@@ -363,11 +364,12 @@ func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
 	state, alphaStore, betaStore := configureBeadRouteState(t)
 	s := New(state)
 
-	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
-		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	loaded := loadedWorkLegs(state.Stores())
+	if got, ok := s.resolveRefByPrefix("ga", loaded); !ok || got != storeref.RigRef("alpha") {
+		t.Errorf("resolveRefByPrefix(ga) = %q, %t, want the alpha rig (store %p)", got, ok, alphaStore)
 	}
-	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
-		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	if got, ok := s.resolveRefByPrefix("gb", loaded); !ok || got != storeref.RigRef("beta") {
+		t.Errorf("resolveRefByPrefix(gb) = %q, %t, want the beta rig (store %p)", got, ok, betaStore)
 	}
 }
 
@@ -389,8 +391,8 @@ func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
 	}
 	s := New(state)
 
-	if got := s.resolveStoreByPrefix("gz"); got != nil {
-		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	if got, ok := s.resolveRefByPrefix("gz", loadedWorkLegs(state.Stores())); ok {
+		t.Fatalf("resolveRefByPrefix(gz) = %q, want no route (route resolves outside every rig); alpha is %p", got, alphaStore)
 	}
 	got := s.beadStoresForID("gz-1")
 	want := []beads.Store{cityStore, alphaStore, betaStore}

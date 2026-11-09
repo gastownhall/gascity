@@ -13,6 +13,8 @@ package api
 // probe ORDER whose leading leg is not a placement.
 
 import (
+	"fmt"
+
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -26,17 +28,26 @@ func errRigRequired() error {
 	return apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 }
 
+// beadCreator is the store a POST /v0/beads body is created in and read back
+// from: a work handle, or the class handle the body's class is served from.
+type beadCreator interface {
+	Create(beads.Bead) (beads.Bead, error)
+	Get(id string) (beads.Bead, error)
+}
+
 // createStoreForBead picks the store a POST /v0/beads body is created in.
 //
 // The rule has two halves and the second is what keeps this change safe. On a
 // city with no class binding — the shipped default — the answer is exactly
-// findStore(rig), byte for byte, and the resolver is never consulted: a
+// the rig's work store (findWorkStore), and the resolver is never consulted: a
 // placement plan over a topology whose work leg is nil has no leg at all, and
 // turning today's "rig is required" into a planning error would break a working
 // create. On a converged city an infrastructure-class body is placed at the
 // binding, because the work ledger it would otherwise land in is the store the
 // city moved that class off; a bead minted there carries the work ledger's id
-// prefix and cannot be relocated afterwards by copying it.
+// prefix and cannot be relocated afterwards by copying it. The bead is created
+// through the class's own handle, which wraps that binding, and which refuses
+// where this site may not serve the class.
 //
 // An infrastructure class combined with an explicit rig is refused rather than
 // resolved. A binding is city-keyed — there is one per city and no per-rig
@@ -51,14 +62,15 @@ func errRigRequired() error {
 // no later copy can change an id. ParentID stays a weak city-scoped reference
 // (see beads.Bead.ParentID) precisely so a cross-store parent is a normal
 // shape here rather than a placement input.
-func (s *Server) createStoreForBead(b beads.Bead, rig string) (beads.Store, error) {
+func (s *Server) createStoreForBead(b beads.Bead, rig string) (beadCreator, error) {
 	class := coordclass.Classify(b)
+	st := s.state.Stores()
 	if !class.IsInfrastructure() {
-		return s.storeOrRigRequired(rig)
+		return s.storeOrRigRequired(st, rig)
 	}
-	topo := s.residencyTopology()
+	topo := st.Topology()
 	if len(topo.Bindings) == 0 && topo.Refused == nil {
-		return s.storeOrRigRequired(rig)
+		return s.storeOrRigRequired(st, rig)
 	}
 	// A standing refusal with no binding to attach it to still has to reach
 	// Plan: it means this build cannot serve the class's store, and falling
@@ -72,23 +84,45 @@ func (s *Server) createStoreForBead(b beads.Bead, rig string) (beads.Store, erro
 		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 	if !plan.TouchesBinding() {
-		return s.storeOrRigRequired(rig)
+		return s.storeOrRigRequired(st, rig)
 	}
 	if rig != "" {
 		return nil, apierr.InvalidRequest.Msg("rig must be empty for a " + class.String() + " bead: this city serves that class from a city-scoped store, not from any rig")
 	}
-	owner, err := storeref.ResolvePlacement(plan)
-	if err != nil {
+	if _, err := storeref.ResolvePlacement(plan); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	return owner.Store, nil
+	store, ok := classCreator(st, class)
+	if !ok {
+		return nil, apierr.Internal.Msg(fmt.Sprintf("no class handle serves %q", class.String()))
+	}
+	return store, nil
 }
 
-// storeOrRigRequired is findStore with its nil case spelled as the refusal
+// classCreator is the handle st serves infrastructure class c from, and false
+// for a class with no handle.
+func classCreator(st storeref.Stores, c coordclass.Class) (beadCreator, bool) {
+	switch c {
+	case coordclass.ClassGraph:
+		return st.Graph(), true
+	case coordclass.ClassSessions:
+		return st.Sessions(), true
+	case coordclass.ClassMessaging:
+		return st.Mail(), true
+	case coordclass.ClassOrders:
+		return st.Orders(), true
+	case coordclass.ClassNudges:
+		return st.Nudges(), true
+	default:
+		return nil, false
+	}
+}
+
+// storeOrRigRequired is findWorkStore with its miss spelled as the refusal
 // callers already receive.
-func (s *Server) storeOrRigRequired(rig string) (beads.Store, error) {
-	store := s.findStore(rig)
-	if store == nil {
+func (s *Server) storeOrRigRequired(st storeref.Stores, rig string) (beadCreator, error) {
+	store, ok := findWorkStore(st, s.state.CityName(), rig)
+	if !ok {
 		return nil, errRigRequired()
 	}
 	return store, nil
