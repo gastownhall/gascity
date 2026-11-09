@@ -3,10 +3,12 @@ package runtimecontract
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -196,6 +198,14 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqConcurrencyIsRunning, set("is-running", exclusive(g["is-running"])), "is-running refuses while another runs"},
 		{ReqConcurrencyProcessAlive, set("process-alive", exclusive(g["process-alive"])), "process-alive refuses while another runs"},
 		{ReqConcurrencyListRunning, set("list-running", exclusive(g["list-running"])), "list-running refuses while another runs"},
+
+		{ReqServerStopIdempotent, set("server-stop", `if [ -f "$S/server-stopped" ]; then exit 1; fi; : > "$S/server-stopped"; rm -rf "$B"`), "server-stop exits 1 the second time"},
+		{ReqServerStopIdempotent, edit("server-stop", `rm -rf "$B"`, `if [ ! -d "$B" ] || [ -z "$(ls "$B")" ]; then echo "no server running" >&2; exit 1; fi; rm -rf "$B"`), "server-stop fails when no server runs"},
+		{ReqServerStopIdempotent, set("server-stop", `exit 2`), "declared server-stop is not implemented"},
+		{ReqServerStartAfterStop, edit("server-stop", `rm -rf "$B"`, `rm -rf "$B"; : > "$B"`), "server-stop leaves the city unable to start a box"},
+		{ReqServerStopEndsSession, set("server-stop", `:`), "server-stop leaves every box and exits 0"},
+		{ReqServerStopEndsSession, set("server-stop", `rm -rf "$(ls -d "$B"/* | head -n 1)"`), "server-stop ends only one box and exits 0"},
+		{ReqServerStopSparesOtherCities, edit("server-stop", `rm -rf "$B"`, `rm -rf "$S"/city*`), "server-stop ends every city's sessions"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
@@ -411,6 +421,90 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Kills a token group that runs for a script not declaring its token: the
+// golden answers every op the group sends, so only the gate can make the
+// group skip, and an undeclared pack is never sent the token's op.
+func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
+	for group, token := range map[Group]string{
+		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
+	} {
+		bodies := reference.Bodies()
+		var caps []string
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle} {
+			if c != token {
+				caps = append(caps, `"`+c+`"`)
+			}
+		}
+		bodies["protocol"] = `echo '{"version":0,"capabilities":[` + strings.Join(caps, ",") + `]}'`
+		report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for _, res := range report.Results {
+			if res.Group != group {
+				continue
+			}
+			seen++
+			if res.Status != StatusSkip {
+				t.Errorf("%s undeclared: %s = %s (%s), want SKIP", token, res.Code, res.Status, res.Detail)
+			}
+		}
+		if seen == 0 {
+			t.Errorf("group %s has no requirement in the report", group)
+		}
+	}
+}
+
+// Kills an RPP-SERVER-004 that runs for a script not declaring city-scoped:
+// a script that does not scope its boxes by city is not held to sparing
+// another city's, so the requirement skips even for a server-stop that ends
+// every city's sessions.
+func TestServerCityScopeSkipsWithoutCityScoped(t *testing.T) {
+	bodies := reference.Bodies()
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["server-lifecycle"]}'`
+	bodies["server-stop"] = `rm -rf "$S"/city*`
+	report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqServerStopSparesOtherCities); res.Status != StatusSkip {
+		t.Errorf("city-scoped undeclared: %s = %s (%s), want SKIP", res.Code, res.Status, res.Detail)
+	}
+}
+
+// Kills a server group that sends server-stop in the city the run inherited:
+// gc runtime conformance run from a city must leave that city's sessions
+// running, though the golden's server-stop, like a city-scoped pack's, ends
+// every session of the city it runs in.
+func TestServerGroupSparesTheCallersCity(t *testing.T) {
+	path := writeGolden(t)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+	const sentinel = "live-city-sentinel"
+	if out, err := goldenOp(path, `{"command":"sleep 300"}`, "start", sentinel); err != nil {
+		t.Fatalf("starting %s in the caller's city: %v (%s)", sentinel, err, out)
+	}
+	report := runGolden(t, path)
+	for _, res := range report.Results {
+		if res.Group == GroupServer && res.Status != StatusPass {
+			t.Errorf("%s = %s (%s), want PASS: the group must run server-stop", res.Code, res.Status, res.Detail)
+		}
+	}
+	if out, err := goldenOp(path, "", "is-running", sentinel); err != nil || out != "true" {
+		t.Fatalf("%s in the caller's city: is-running = %q (%v) after the run, want true: the run's server-stop ended a session of the city it was run from", sentinel, out, err)
+	}
+}
+
+// goldenOp runs one op of the script at path in the test's environment, the
+// city a run started from it inherits.
+func goldenOp(path, stdin string, args ...string) (string, error) {
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
 }
 
 // Kills (SHOULD 3) a v2-ready verdict read from the handshake alone, or

@@ -205,6 +205,13 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 			// runtime.Provider method backs; see wireOnlyCodes.
 			continue
 		}
+		if req.Group == GroupServer {
+			// server-stop backs TeardownServer, which is not a
+			// RunProviderTests case: it is contract-tested by
+			// runtimetest.RunServerTeardownContract (RUNTIME-CONTRACT-023)
+			// over the same golden reference.
+			continue
+		}
 		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire

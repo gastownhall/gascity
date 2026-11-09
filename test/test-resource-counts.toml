@@ -2494,8 +2494,18 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/rppcheck/rppcheck_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimecapability/runner_test.go"
 resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimecontract/runner_test.go"
+resource = "subprocess"
 calls = 1
 
 [[count]]

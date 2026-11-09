@@ -23,8 +23,8 @@ func TestMain(m *testing.M) {
 // Kills a fakeruntime observe.v1 profile that does not keep the promises
 // it declares: the conformance kit passes every requirement but the ones
 // it does not declare (exec, provision, the fault and city-scope tokens,
-// report-activity's last_activity, and the listing fault the fault token
-// gates).
+// report-activity's last_activity, the listing fault the fault token
+// gates, and server-lifecycle).
 func TestObserveProfileIsConformant(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fakeruntime")
@@ -44,6 +44,9 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
+		// No server of its own: server-lifecycle is not declared.
+		runtimecontract.ReqServerStopIdempotent: true, runtimecontract.ReqServerStartAfterStop: true,
+		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,
 	}
 	for _, res := range report.Results {
 		switch {

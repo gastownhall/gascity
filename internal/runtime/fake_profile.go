@@ -148,7 +148,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
-		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
+		return execProfile{core, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -309,6 +309,7 @@ type (
 		FencedInputProvider
 		IdleWaitProvider
 		RelaunchProvider
+		ServerLifecycleProvider
 		sleepTrait
 		probeBudgetTrait
 		execObserveTrait
@@ -724,9 +725,29 @@ func (f FullFake) ConfigureServer() error {
 	return nil
 }
 
-// TeardownServer implements [ServerLifecycleProvider].
+// TeardownServer implements [ServerLifecycleProvider]: every session ends
+// with the server, as a real server's do, but one whose Stop is configured
+// to fail or to leave it running, which the teardown reports as a survivor.
+// A broken fake cannot reach its server.
 func (f FullFake) TeardownServer() error {
-	f.record("TeardownServer", "")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TeardownServer"})
+	if f.broken {
+		return fmt.Errorf("teardown server: %w", ErrRuntimeUnavailable)
+	}
+	var survivors []string
+	for name := range f.sessions {
+		if f.StopErrors[name] != nil || f.StopLeavesRunning[name] {
+			survivors = append(survivors, name)
+			continue
+		}
+		delete(f.sessions, name)
+	}
+	if len(survivors) > 0 {
+		slices.Sort(survivors)
+		return fmt.Errorf("teardown server: session(s) %v may survive", survivors)
+	}
 	return nil
 }
 

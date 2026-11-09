@@ -285,7 +285,8 @@ func (e *opExitError) Unwrap() error { return e.err }
 // start (a pack that cannot start is not a provider), provision (it runs only
 // for a pack that declared proc.provision), is-attached (it runs only for a
 // pack that declared report-attachment; [Provider.IsAttachedWithError]
-// reports its failure as "could not tell"), and the observe.v1 ops. strict
+// reports its failure as "could not tell"), the observe.v1 ops, and
+// server-stop (it runs only for a pack that declared server-lifecycle). strict
 // is a v2-ready script's exit 2 from an op observe.v1 obliges it to
 // implement, which fails as strictExitTwo maps it. A start-op name collision
 // maps to [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail]
@@ -310,7 +311,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object":
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false

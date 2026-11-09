@@ -63,6 +63,11 @@ const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box
 const goldenListRunning = faultGuard + `for b in "$B"/*; do [ -d "$b" ] || continue; case "$b" in *.tmp) continue ;; esac; ` +
 	`n=$(basename "$b"); case "$n" in "$name"*) echo "$n" ;; esac; done`
 
+// goldenServerStop ends the city's server: every box of the city (the city's
+// state, $B) goes with it, whether or not any is left. It is behind the
+// backend fault, like every op that reaches the backend.
+const goldenServerStop = faultGuard + `rm -rf "$B"`
+
 // goldenPrelude computes the city's state and the name's box, and the
 // helpers the observe.v1 bodies share: ident prints $box's identity, and
 // alive reports whether a box's agent (cmd0) is among its process names.
@@ -74,14 +79,14 @@ alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")"
 
 // Bodies returns the op bodies of the golden reference: a
 // fully-conformant, stateful RPP executable that passes every catalog
-// requirement, the observe.v1 profile included, and the in-tree provider
-// contract through the exec provider (runtimetest.RunProviderTests). The
+// requirement, the observe.v1 profile and server-lifecycle included, and the
+// in-tree provider contract through the exec provider (runtimetest.RunProviderTests). The
 // bodies reference the shell state ($S, $B, $box) Script injects.
 // The negative-gating tests override one body to violate exactly one
 // behavior.
 func Bodies() map[string]string {
 	return map[string]string{
-		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped"]}'`,
+		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle"]}'`,
 		"start":             goldenStart,
 		"stop":              `rm -rf "$box"`,
 		"is-running":        `if [ -d "$box" ]; then echo true; else echo false; fi`,
@@ -101,6 +106,9 @@ func Bodies() map[string]string {
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).
 		"provision": `cat >/dev/null`,
+		// server-stop = the city's server going down: every box of the
+		// city ends with it, and with no box left it has nothing to do.
+		"server-stop": goldenServerStop,
 	}
 }
 
