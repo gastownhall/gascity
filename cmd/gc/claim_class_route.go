@@ -558,7 +558,7 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
-		r.graph.Get)
+		r.graph.Get, r.graph.Get)
 }
 
 // listContinuation reads a continuation group out of the binding and records

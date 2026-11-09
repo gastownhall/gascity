@@ -139,6 +139,10 @@ func TestHookClaimThroughStoreRefusesForeignOwnershipOnEitherRead(t *testing.T) 
 					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: tc.mutated}, true, nil
 				},
 				func(string) (beads.Bead, error) {
+					t.Fatal("a committed claim must not take the conflict read")
+					return beads.Bead{}, nil
+				},
+				func(string) (beads.Bead, error) {
 					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: tc.canonical}, nil
 				})
 			if err != nil {

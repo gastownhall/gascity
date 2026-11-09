@@ -260,7 +260,7 @@ func (h *handoffFixture) ops() hookClaimOps {
 					updated, err := h.store.Get(beadID)
 					return updated, err == nil, err
 				},
-				h.store.Get)
+				h.store.Get, h.store.Get)
 		},
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string, patch map[string]string) error {
 			return h.store.Update(beadID, beads.UpdateOpts{Metadata: patch})

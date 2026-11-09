@@ -81,6 +81,12 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
+// hookClaimReadbackTimeout bounds the canonical readback that follows a
+// committed claim CAS. It is separate from hookClaimMutationTimeout: a CAS that
+// commits as the mutation budget runs out must not leave the readback of the
+// bead this session now owns on an exhausted context.
+var hookClaimReadbackTimeout = 10 * time.Second
+
 // hookClaimWindowDefault bounds how long after a `gc hook --claim` invocation
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
@@ -2491,11 +2497,22 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 	return workflowInputDone(ctx, beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates, prove)
 }
 
+// hookClaimWithBdStore claims beadID through the bd context at dir. The CAS and
+// a lost race's diagnostic read run on ctx, the claim's mutation budget; the
+// canonical readback of a committed claim runs on its own
+// hookClaimReadbackTimeout budget, detached from ctx's deadline and
+// cancellation but keeping its values, so a CAS that spends the mutation budget
+// still reads back the bead this session now owns.
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
-		store.Get)
+		store.Get,
+		func(id string) (beads.Bead, error) {
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookClaimReadbackTimeout)
+			defer cancel()
+			return hookClaimBdStoreContext(readCtx, dir, env, assignee).Get(id)
+		})
 }
 
 // hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
@@ -2519,11 +2536,13 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // of draining. Two copies of that would be two chances to disagree, and the
 // paths that disagree about ownership are this program's recurring bug class.
 //
-// claim and get are the store's own operations: the bd context's Claim takes the
-// assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
-// binding's takes it explicitly, so the caller binds them and this function
-// never has to know which shape it is holding.
-func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+// claim, get and reload are the store's own operations: the bd context's Claim
+// takes the assignee implicitly (BEADS_ACTOR in the subprocess env) while the
+// class binding's takes it explicitly, so the caller binds them and this
+// function never has to know which shape it is holding. get is the lost race's
+// diagnostic read; reload is the canonical readback of a committed claim, which
+// a caller may bound separately from the CAS (hookClaimWithBdStore).
+func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get, reload func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -2545,7 +2564,7 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 		// as ours.
 		return claimed, false, nil
 	}
-	canonical, err := get(beadID)
+	canonical, err := reload(beadID)
 	if err != nil {
 		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
 	}
