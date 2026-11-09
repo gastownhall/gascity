@@ -106,7 +106,7 @@ func (f *Flip) Error() string {
 	}
 	return fmt.Sprintf("this write would turn a %s-class bead into a %s-class bead in a store that holds only %s beads; "+
 		"this city keeps %s beads in a different store, so the bead would be stranded where no %s reader looks "+
-		"— and one stranded bead makes every later gc command refuse until it is repaired",
+		"— where it stays invisible to its class readers, and the city reports itself degraded, until it is repaired",
 		f.Before, f.After, strings.Join(held, "/"), f.After, f.After)
 }
 
@@ -160,4 +160,61 @@ func MintCommand(c Class) string {
 	default:
 		return ""
 	}
+}
+
+// ClassMetadataOnly reports the classifier metadata keys whose removal returns
+// b to the work class, when metadata ALONE takes it out of work: no classifier
+// label and no class-deciding type is involved. ok is false for a work bead,
+// and for any bead whose type or labels decide its class (a gc:session bead,
+// a convergence root, a message, a wisp label), because unsetting a key there
+// would not make it work, or would make it the wrong thing.
+//
+// It exists for the stranded-row repair. An agent that copies its workflow
+// root onto ordinary work as provenance (`gc.root_bead_id` on a task, the
+// substrate 2026-11-09 incident) makes that work graph class, and a split
+// city then counts it as stranded. Such a row is repaired in place, on the
+// running city, by unsetting exactly these keys: CheckFlip allows a write that
+// returns a bead to a class its store holds. Copying it into the binding
+// instead would hand ordinary work to a workflow's ownership.
+//
+// The keys are minimal and sorted: a classifier key present on the bead that
+// does not take part in its class (gc.synthetic on a non-convoy) is not named.
+func ClassMetadataOnly(b beads.Bead) (keys []string, ok bool) {
+	if Classify(b) == ClassWork {
+		return nil, false
+	}
+	for _, l := range b.Labels {
+		if isClassifierLabel(l) {
+			return nil, false
+		}
+	}
+	present := make([]string, 0, len(classifierMetadataKeys))
+	for _, k := range ClassifierMetadataKeys() {
+		if strings.TrimSpace(b.Metadata[k]) != "" {
+			present = append(present, k)
+		}
+	}
+	if len(present) == 0 || Classify(Mutation{UnsetMetadata: present}.Apply(b)) != ClassWork {
+		return nil, false
+	}
+	// Drop every key the work verdict does not need.
+	keys = slices.Clone(present)
+	for _, k := range present {
+		trial := slices.DeleteFunc(slices.Clone(keys), func(x string) bool { return x == k })
+		if Classify(Mutation{UnsetMetadata: trial}.Apply(b)) == ClassWork {
+			keys = trial
+		}
+	}
+	return keys, true
+}
+
+// DeclassifyCommand is the one spelling of the in-place repair for a bead
+// ClassMetadataOnly answered for: the gc bd update that unsets those keys.
+func DeclassifyCommand(id string, keys []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc bd update %s", id)
+	for _, k := range keys {
+		fmt.Fprintf(&b, " --unset-metadata %s", k)
+	}
+	return b.String()
 }

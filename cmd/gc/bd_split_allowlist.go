@@ -16,8 +16,9 @@ import (
 
 // On a split city `gc bd` is an ALLOWLIST. bd writes whatever it is told into
 // the work store, and a bead that lands there with an infrastructure class is
-// stranded: every later routed gc command refuses until the fleet is stopped
-// and the row repaired. gc bd forwards only the command paths in
+// stranded: no reader of its class sees it, and the city serves degraded and
+// says so (gc storage status exits 1, a storage.binding.stranded event, a
+// warning on every gc process) until the row is repaired. gc bd forwards only the command paths in
 // bdSplitAllowlist, each with a vetted flag set; anything else is refused with
 // a pointer to the gc-native command.
 //

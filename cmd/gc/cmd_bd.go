@@ -587,7 +587,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// `update --add-label wisp`, `label add <id> gc:session`, `update --type
 	// message`, or an `import` of an archive taken before the split each turn
 	// work-store rows into infrastructure-class rows in place, and one such row
-	// makes every later routed gc command refuse until the fleet is stopped. It
+	// is invisible to its class readers until it is repaired. It
 	// runs after the by-id door, which has already served or refused every
 	// binding resident, so what reaches it is the work scope's. A single-store
 	// city holds every class in its one store and the guard passes everything
