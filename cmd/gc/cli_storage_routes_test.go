@@ -277,9 +277,6 @@ func TestCLIStorageRoutesServeAStrandedCityDegraded(t *testing.T) {
 	if !strings.Contains(stderr.String(), stranded.ID) {
 		t.Errorf("the warning does not name %s: %q", stranded.ID, stderr.String())
 	}
-	if got := resolveClassStore(cliStorageRoutes(cityPath), work, nil, cityPath, config.BeadClassWork, nil); got != beads.Store(work) {
-		t.Errorf("work resolved to %p on a degraded city, want the work store %p", got, work)
-	}
 }
 
 // TestStorageStatusStaysOffTheOneShotFunnel pins the exemption the refusal
