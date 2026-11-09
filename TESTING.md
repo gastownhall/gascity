@@ -1177,6 +1177,24 @@ its `cmd/product-check`, which is stdlib-only and quick. It measures only
 when the change touches the worker host. product-check is skipped if H5 or
 the fetch failed, and still runs if the measurement failed.
 
+### Setup download mirror (RBE_DIST_MIRROR)
+
+Each pool VM downloads three pinned artifacts in setup: NativeLink, Go and
+dolt. rbe-worker's `worker/rbe-fetch` retries each download. If the
+repository variable `RBE_DIST_MIRROR` (the fork pool: `RBE_FORK_DIST_MIRROR`)
+is `https://rbe-warm.ops.gascity.com/dist`, it tries the copy on rbe-west's
+warm bucket first (infra `nativelink-cas/west` README, "Pinned setup
+downloads on R2"). The copy is transport only: every file is checked against
+the sha256 pinned in the rbe-worker tree, and a miss or mismatch falls back
+to upstream. The pool workflows pass the variable to their measure and
+worker steps, `rbe-worker-legacy.yml` does the same, and
+`rbe-worker-env-canary.yml` passes it to its measure step. Unset, every
+download comes from upstream, still retried. Before a pin bump that moves
+NativeLink, Go (`go.mod`) or dolt, the core's `rbe-dist-publish.sh` puts the
+new artifact on the mirror; until it does, workers fall back to upstream.
+Each VM prints one `rbe-fetch:` line per artifact (`source=mirror|upstream`,
+`mirror=hit|off|miss|bad-sha256`). To roll back, unset the variable.
+
 ### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
 
 Before the fork pool reads big blobs from rbe-west's R2 hot tier
@@ -1719,6 +1737,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-12-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext: subprocess | ga-cp3hwi | doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server | P0.4b | 2026-12-31 |
 | Medium owner | `internal/hooks` package `hooks` | TestProviderPluginNodeSuite: subprocess | ga-cp3hwi | the embedded provider-plugin behavior proof is a checked Medium subprocess owner; the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce | P0.4b | 2026-12-31 |
+| Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-12-31 |

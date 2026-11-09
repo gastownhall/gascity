@@ -134,3 +134,35 @@ func TestCheckIdleWait(t *testing.T) {
 		})
 	}
 }
+
+// inputAnswerProvider answers every Nudge, SendKeys and Interrupt with err.
+type inputAnswerProvider struct {
+	runtime.Provider
+	err error
+}
+
+func (p inputAnswerProvider) Nudge(string, []runtime.ContentBlock) error { return p.err }
+func (p inputAnswerProvider) SendKeys(string, ...string) error           { return p.err }
+func (p inputAnswerProvider) Interrupt(string) error                     { return p.err }
+
+func TestCheckMissingSessionInput(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		wantOK bool
+	}{
+		{"reported delivered", nil, false},
+		{"absence not certified", fmt.Errorf("backend: %w", runtime.ErrRuntimeUnavailable), false},
+		{"absence reported", fmt.Errorf("session %q: %w", missingInputSessionName, runtime.ErrSessionNotFound), true},
+	}
+	for _, tc := range cases {
+		for _, in := range missingSessionInputs {
+			t.Run(tc.name+"/"+in.name, func(t *testing.T) {
+				err := checkMissingSessionInput(inputAnswerProvider{Provider: runtime.NewFake(), err: tc.err}, in)
+				if (err == nil) != tc.wantOK {
+					t.Errorf("checkMissingSessionInput(%s=%v) = %v, want ok=%v", in.name, tc.err, err, tc.wantOK)
+				}
+			})
+		}
+	}
+}

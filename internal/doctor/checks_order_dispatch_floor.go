@@ -36,10 +36,11 @@ func WithOrderDispatchFloorInapplicableFunc(fn OrderDispatchFloorInapplicableFun
 // previous pass, so slow passes stretch it), so a ring of N cooldown, cron and
 // event orders takes ceil(N/budget) passes to come all the way round. When
 // every counted order is due together, an order can fire no more often than
-// that: a 30s cooldown beside eight other due orders fires about every 90s,
-// and order-firing-current may later report it stale with no hint that the
-// budget, not the order, is the cause. Orders that are not due spend no
-// budget, so the live dispatcher often does better.
+// that: a 30s cooldown beside eight other due orders fires about every 90s.
+// order-firing-current judges an order's freshness against the same floor
+// (orderDispatchFloor), so waiting its turn in the ring is not reported as
+// stale; this check is where the configuration itself is flagged. Orders that
+// are not due spend no budget, so the live dispatcher often does better.
 //
 // N counts every enabled cooldown, cron and event order, not just the ones due
 // on a given pass. That is an upper bound, and it needs no store reads: a
@@ -104,32 +105,18 @@ func (c *OrderDispatchFloorCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
-	var ring []orders.Order
-	for _, order := range allOrders {
-		switch order.Trigger {
-		case "cooldown", "cron", "event":
-		default:
-			continue
-		}
-		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
-			continue
-		}
-		if c.inapplicable != nil {
-			if _, ok := c.inapplicable(order); ok {
-				continue
+	if c.inapplicable != nil {
+		applicable := allOrders[:0:0]
+		for _, order := range allOrders {
+			if _, ok := c.inapplicable(order); !ok {
+				applicable = append(applicable, order)
 			}
 		}
-		ring = append(ring, order)
+		allOrders = applicable
 	}
-
-	budget := c.cfg.Orders.EffectiveMaxDispatchesPerTick()
+	ring := orderDispatchRing(allOrders, orderFiringCurrentSuspendedRigs(c.cfg, cityPath))
+	floor, budget, passes := orderDispatchFloor(c.cfg, len(ring))
 	patrol := c.cfg.Daemon.PatrolIntervalDuration()
-	passes := (len(ring) + budget - 1) / budget
-	if passes < 1 {
-		passes = 1
-	}
-	floor := time.Duration(passes) * patrol
 
 	cronCache := make(map[string]time.Duration)
 	flagged := 0
@@ -165,6 +152,39 @@ func (c *OrderDispatchFloorCheck) Run(ctx *CheckContext) *CheckResult {
 		flagged, formatDispatchFloorDuration(floor), len(ring), budget, formatDispatchFloorDuration(patrol))
 	result.FixHint = orderDispatchFloorHint(len(ring), patrol, tightest, floor)
 	return result
+}
+
+// orderDispatchRing returns the orders that take a slot in the dispatcher's
+// per-pass rotation: cooldown, cron and event orders outside suspended rigs.
+// Condition orders start outside the budget, and manual and webhook orders are
+// never dispatched on a pass. Callers drop orders inapplicable to their
+// scope's backend first; the dispatcher never runs those.
+func orderDispatchRing(allOrders []orders.Order, suspendedRigs map[string]bool) []orders.Order {
+	var ring []orders.Order
+	for _, order := range allOrders {
+		switch order.Trigger {
+		case "cooldown", "cron", "event":
+		default:
+			continue
+		}
+		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		ring = append(ring, order)
+	}
+	return ring
+}
+
+// orderDispatchFloor is the worst-case cadence the dispatch budget allows a
+// ring of ringSize orders: ceil(ringSize/budget) passes, one patrol interval
+// each. It returns the budget and the pass count with it.
+func orderDispatchFloor(cfg *config.City, ringSize int) (floor time.Duration, budget, passes int) {
+	budget = cfg.Orders.EffectiveMaxDispatchesPerTick()
+	passes = (ringSize + budget - 1) / budget
+	if passes < 1 {
+		passes = 1
+	}
+	return time.Duration(passes) * cfg.Daemon.PatrolIntervalDuration(), budget, passes
 }
 
 // orderDispatchFloorHint names the levers: the budget that would bring the

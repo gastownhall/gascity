@@ -105,6 +105,7 @@ go_test(
         "program_status_test.go",
         "provider_resume_test.go",
         "respond_fence_test.go",
+        "runtime_handle_attach_test.go",
         "runtime_handle_interrupt_test.go",
         "runtime_handle_lease_test.go",
         "runtime_handle_reminder_test.go",

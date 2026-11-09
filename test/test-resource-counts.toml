@@ -2372,6 +2372,12 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/runtime/exec/main_test.go"
+resource = "tmux"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/runtime/fake_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3655,6 +3661,11 @@ calls = 1
 
 [[count]]
 path = "test/workflows/needs_lifecycle_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/workflows/nightly_aggregate_test.go"
 resource = "subprocess"
 calls = 1
 

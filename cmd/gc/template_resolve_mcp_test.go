@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestResolveTemplateMCPIntegration(t *testing.T) {
@@ -271,4 +272,111 @@ url = "https://mcp.example.test/private"
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+// TestResolveTemplateMCPExecPackRuntimeKeyedOnCapability is the permanent
+// regression test for gastownhall/gascity#9006 item (3a): an exec-backed
+// runtime (a pack's [runtimes.<name>] or an exec:<script> selection) with MCP
+// configured resolves wherever its runtime reports the host capability the
+// delivery stage needs, and hard-errors only where it does not. No runtime
+// name is involved in admission.
+func TestResolveTemplateMCPExecPackRuntimeKeyedOnCapability(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+args = ["notes-mcp"]
+`)
+	const packRuntime = "pack-rt"
+	cityCfg := &config.City{
+		Workspace:  config.Workspace{Provider: "gemini"},
+		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Runtimes: map[string]config.DiscoveredRuntime{
+			packRuntime: {Name: packRuntime, Command: "/packs/rt/bin/gc-runtime"},
+		},
+	}
+	buildParams := func(sessionProvider string) *agentBuildParams {
+		return &agentBuildParams{
+			city:            cityCfg,
+			cityName:        "city",
+			cityPath:        cityPath,
+			workspace:       &cityCfg.Workspace,
+			providers:       cityCfg.Providers,
+			lookPath:        stubLookPath,
+			fs:              fsys.OSFS{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			sessionProvider: sessionProvider,
+		}
+	}
+	scopeRootAgent := func() *config.Agent {
+		return &config.Agent{Name: "worker", Scope: "city", Provider: "gemini"}
+	}
+	worktreeAgent := func() *config.Agent {
+		return &config.Agent{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/worker-1"}
+	}
+	hasProjectMCPPreStart := func(tp TemplateParams) bool {
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal project-mcp") {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, selection := range []string{packRuntime, "exec:/opt/bin/gc-session"} {
+		selection := selection
+		t.Run(selection+" with host filesystem and host PreStart resolves", func(t *testing.T) {
+			stubExecRuntimeHostCapabilities(t, func(_, _, _ string) runtime.HostCapabilities {
+				return runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+			})
+			agent := scopeRootAgent()
+			tp, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("stage-1 resolveTemplate: %v", err)
+			}
+			if tp.FPExtra["mcp:gemini"] == "" || hasProjectMCPPreStart(tp) {
+				t.Fatalf("stage-1 delivery: FPExtra=%+v PreStart=%v, want an MCP hash and no project-mcp PreStart", tp.FPExtra, tp.Hints.PreStart)
+			}
+			agent = worktreeAgent()
+			tp, err = resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("stage-2 resolveTemplate: %v", err)
+			}
+			if tp.FPExtra["mcp:gemini"] == "" || !hasProjectMCPPreStart(tp) {
+				t.Fatalf("stage-2 delivery: FPExtra=%+v PreStart=%v, want an MCP hash and a project-mcp PreStart", tp.FPExtra, tp.Hints.PreStart)
+			}
+		})
+
+		t.Run(selection+" with host filesystem only delivers at the scope root", func(t *testing.T) {
+			stubExecRuntimeHostCapabilities(t, func(_, _, _ string) runtime.HostCapabilities {
+				return runtime.HostCapabilities{SharesHostFilesystem: true}
+			})
+			agent := scopeRootAgent()
+			if _, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil); err != nil {
+				t.Fatalf("stage-1 resolveTemplate: %v", err)
+			}
+			agent = worktreeAgent()
+			_, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err == nil || !strings.Contains(err.Error(), "effective MCP cannot be delivered") {
+				t.Fatalf("stage-2 without host PreStart: err = %v, want the undeliverable-MCP error", err)
+			}
+		})
+
+		// Today no exec runtime reports a host capability (the handshake has
+		// no token for it until #9006 item 3b), so without one the hard error
+		// stands — the honest answer, not a silent drop.
+		t.Run(selection+" without host capabilities hard errors", func(t *testing.T) {
+			agent := scopeRootAgent()
+			_, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err == nil || !strings.Contains(err.Error(), "effective MCP cannot be delivered") {
+				t.Fatalf("err = %v, want the undeliverable-MCP error", err)
+			}
+		})
+	}
 }

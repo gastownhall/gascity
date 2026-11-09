@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -47,6 +48,12 @@ type Provider struct {
 	handshakeAt       time.Time
 	handshakeInfo     runtime.ProtocolInfo
 	handshakeErr      error
+
+	// execUnsupported remembers an `exec` exit 2 from a pack whose
+	// successful handshake does not declare proc.exec, so the driving
+	// methods stop spawning `exec` before every dedicated op. An exit 2
+	// while the handshake is failing is not remembered (see Exec).
+	execUnsupported atomic.Bool
 
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
@@ -94,6 +101,30 @@ func (p *Provider) cityEnv() []string {
 	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
+// opEnv returns the env a bounded op runs with: cityEnv for a provider built
+// for a city, else gc's environment read through execenv.Environ. Like
+// cityEnv, read it before arming the op's deadline.
+func (p *Provider) opEnv() []string {
+	if env := p.cityEnv(); env != nil {
+		return env
+	}
+	return execenv.Environ()
+}
+
+// withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
+// rounded down and never negative, until ctx's deadline — the earlier of the
+// op's own timeout and any deadline its parent already carried. A ctx with
+// no deadline leaves env as it is. Call it with the op's armed ctx, on the
+// env opEnv read before arming it.
+func withDeadline(ctx context.Context, env []string) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return env
+	}
+	ms := max(time.Until(deadline).Milliseconds(), 0)
+	return append(env, "GC_EXEC_DEADLINE_MS="+strconv.FormatInt(ms, 10))
+}
+
 // run executes the script with the given args using the default timeout.
 func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	return p.runWithTimeout(p.timeout, stdinData, args...)
@@ -120,12 +151,12 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 // cap). Output past the cap is discarded and fails the op, without echoing
 // any of it.
 func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cmd.Env = env
+	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -580,10 +611,10 @@ func (p *Provider) startStartupWatch(
 	name string,
 	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -917,6 +948,32 @@ func (p *Provider) isRunningOp(name string) (running, definite bool) {
 	}
 }
 
+// requirePresent reports a session the pack can tell is gone as an error
+// wrapping [runtime.ErrSessionNotFound], so a driving call to it is never
+// reported delivered. On a v2-ready pack it reads `observe`: an absent or
+// dead box is gone, and a failed read wraps [runtime.ErrRuntimeUnavailable].
+// Otherwise it asks `is-running`, and only a definite "false" is gone; a pack
+// that cannot tell is let through, as before.
+//
+// The seam-backed driving verbs call it; the raw driving methods do not,
+// because the startup dialog loops drive a box through them.
+func (p *Provider) requirePresent(name string) error {
+	if p.v2Ready() {
+		o, err := p.observe(context.Background(), name, nil)
+		if err != nil {
+			return fmt.Errorf("session %q: %w", name, err)
+		}
+		if o.state != stateRunning {
+			return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+		}
+		return nil
+	}
+	if running, definite := p.isRunningOp(name); definite && !running {
+		return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+	}
+	return nil
+}
+
 // IsAttached reports terminal attachment via `script is-attached <name>`
 // when the executable declared the report-attachment capability in its
 // protocol handshake; otherwise it is always false. Op errors read as
@@ -1130,13 +1187,16 @@ var (
 // own stdin is not separately available; the driving ops reproduced over Exec
 // (tmux send-keys / capture-pane / …) do not need it.
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	if p.execUnsupported.Load() {
+		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+	}
 	command := shellQuote(argv)
-	env := p.cityEnv()
+	env := p.opEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1160,9 +1220,16 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 				// exit code). A runtime that DECLARES the exec connection in its
 				// handshake implements the op, so exit 2 is the command's own exit
 				// code; only an UNDECLARED runtime means "op unimplemented" — fall
-				// back to the dedicated driving ops.
-				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+				// back to the dedicated driving ops. Only a successful
+				// handshake's answer is remembered: a failed one reads as
+				// undeclared until its retry, and remembering that would pin
+				// a proc.exec pack to the dedicated ops for the provider's life.
+				info, herr := p.Protocol()
+				if herr == nil && info.Has(runtime.ProtocolCapabilityConnectionExec) {
 					return stdout.Bytes(), 2, nil
+				}
+				if herr == nil {
+					p.execUnsupported.Store(true)
 				}
 				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 			}
