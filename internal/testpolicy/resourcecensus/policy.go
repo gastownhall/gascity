@@ -305,6 +305,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-12-31",
 		},
 		{
+			PackageDir:      "internal/runtime/exec",
+			PackageName:     "exec",
+			Owner:           "TestMain",
+			Resources:       []Resource{ResourceTmux},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root",
+			ResourceOwner:   "TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it",
+			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-12-31",
+		},
+		{
 			PackageDir:      "internal/runtime/herdr",
 			PackageName:     "herdr",
 			Owner:           "TestServerAliveDetectsLiveServer",
