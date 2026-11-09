@@ -1222,6 +1222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc reload --json` no longer drops the controller's warnings (ga-bbhl94).**
+  The text output printed each warning to stderr, but the JSON result
+  carried none, so an automation operator reading only the document could
+  not tell a clean reload from a degraded one. The result now has an
+  optional `warnings` array of strings, verbatim and in encounter order,
+  omitted when there are none (`schemas/reload/result.schema.json`).
+  `schema_version` stays `"1"`, stderr stays empty in JSON mode, and the
+  failed, busy and timeout outcomes and `gc supervisor reload` are
+  unchanged. A consumer must ignore keys it does not know.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

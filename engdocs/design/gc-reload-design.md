@@ -79,6 +79,10 @@ warnings:
 - stderr prints one line per warning as
   `gc reload: warning: ...`
 
+With `--json`, stderr stays empty and the warnings travel in the result
+document's optional `warnings` string array instead (verbatim, in
+encounter order, omitted when there are none).
+
 Rationale for exit codes:
 
 - `gc reload` keeps the existing `gc` CLI convention of `0` for success
