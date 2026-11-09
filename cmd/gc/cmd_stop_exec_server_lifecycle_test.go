@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -88,14 +90,38 @@ func newServerPack(t *testing.T, declare bool, flags ...string) serverPack {
 		}
 	}
 	p := serverPack{dir: dir, token: token, sp: sessionexec.NewSeamBackedForCity(script, "server-pack-city", dir)}
-	t.Cleanup(func() {
-		for _, pid := range processesCarrying(t, token) {
-			if proc, err := os.FindProcess(pid); err == nil {
-				_ = proc.Kill()
-			}
-		}
-	})
+	t.Cleanup(func() { p.killServer(t) })
 	return p
+}
+
+// killServer kills the pack's server when the test left it running, as the
+// failure-path and undeclared-pack tests do. It reads the pid the pack
+// recorded when it brought the server up, not the process table, so it also
+// runs where there is no /proc (macOS). server-stop removes that record only
+// once its server is gone, so a recorded pid is the live server's.
+func (p serverPack) killServer(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(p.dir, "server.pid"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Errorf("reading the pack's server pid: %v", err)
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Errorf("reading the pack's server pid %q: %v", data, err)
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Errorf("finding the pack's server %d: %v", pid, err)
+		return
+	}
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killing the pack's server %d: %v", pid, err)
+	}
 }
 
 // startBoxes starts names on the pack, which brings its server up.
@@ -126,7 +152,8 @@ func (p serverPack) ops(t *testing.T) []string {
 }
 
 // processesCarrying returns the pids of live processes whose command line
-// carries token. A zombie's command line is empty, so it is not counted.
+// carries token. A zombie's command line is empty, so it is not counted. It
+// reads /proc, so only a test that calls requireProcTable first may use it.
 func processesCarrying(t *testing.T, token string) []int {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
@@ -256,14 +283,17 @@ func TestGCStopLeavesNoPackServerProcess(t *testing.T) {
 
 // TestStopReportsTeardownServerFailure pins that a server-stop which cannot
 // end everything reaches the operator: gc stop prints the pack's account of
-// what may survive.
+// what may survive, as a warning that leaves its exit code alone.
 func TestStopReportsTeardownServerFailure(t *testing.T) {
 	p := newServerPack(t, true, "fail-server-stop")
 	p.startBoxes(t, "fail-a")
 
-	_, stderr := stopServerPackCity(t, p)
+	code, stderr := stopServerPackCity(t, p)
 	if !strings.Contains(stderr, "gc stop: teardown server:") || !strings.Contains(stderr, "session x may survive: backend wedged") {
 		t.Fatalf("stderr = %q, want the teardown failure with the pack's stderr", stderr)
+	}
+	if code != 0 {
+		t.Fatalf("gc stop = %d, want 0: a teardown failure is a warning; stderr=%q", code, stderr)
 	}
 }
 

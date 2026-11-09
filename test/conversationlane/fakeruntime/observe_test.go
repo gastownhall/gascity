@@ -46,7 +46,7 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
 		// No server of its own: server-lifecycle is not declared.
 		runtimecontract.ReqServerStopIdempotent: true, runtimecontract.ReqServerStartAfterStop: true,
-		runtimecontract.ReqServerStopEndsSession: true,
+		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,
 	}
 	for _, res := range report.Results {
 		switch {

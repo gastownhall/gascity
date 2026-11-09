@@ -72,6 +72,7 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 	wantSkip := map[Code]bool{
 		ReqConnectionExec: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
+		ReqServerStopSparesOtherCities: true,
 	}
 	for _, res := range report.Results {
 		switch {

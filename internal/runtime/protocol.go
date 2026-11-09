@@ -69,7 +69,7 @@ const (
 	ProtocolCapabilityObserveV1 = "observe.v1"
 	// ProtocolCapabilityServerLifecycle declares that the executable owns a
 	// server its boxes run under and implements the `server-stop` op, which
-	// gc runs after every session of the city is drained (`gc stop`, the
+	// gc runs after it stops the city's sessions (`gc stop`, the
 	// controller's shutdown) to end that server. It exits 0 only when the
 	// server is gone and no session the executable started for the city
 	// remains, and 0 again when there is no server (idempotent). With it the

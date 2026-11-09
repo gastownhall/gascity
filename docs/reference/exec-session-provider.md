@@ -216,7 +216,7 @@ Capabilities:
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
-| `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs once every session of the city is stopped, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle)). Without it, gc sends no `server-stop`. |
+| `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
 | `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
@@ -340,9 +340,15 @@ published fences takes no fenced input until its agent is relaunched.
 
 A script whose boxes run under a server of its own (a terminal multiplexer, a
 daemon its `start` brings up) declares `server-lifecycle` so that server does
-not outlive the city. gc then runs `script server-stop` once every session of
-the city has been stopped: at `gc stop`, and when the orchestrator shuts the
-city down. It is a backstop as well as a teardown: a session gc's own stops
+not outlive the city. gc then runs `script server-stop` after it stops the
+city's sessions:
+
+| Stop | When gc runs `server-stop` |
+|------|----------------------------|
+| `gc stop` of a city no orchestrator runs | After its own stops, even when the stop is not confirmed. |
+| The orchestrator's shutdown, `gc stop` of a city it runs included | After it stopped every session it listed. It runs none when it could not list them all, or when it leaves the sessions running for the next orchestrator to adopt. |
+
+`server-stop` is a backstop as well as a teardown: a session gc's own stops
 could not see ends with the server.
 
 | Exit | Meaning |
@@ -351,13 +357,25 @@ could not see ends with the server.
 | 1 | A session the script started for the city may still be running. Name it on stderr: `gc stop` prints the message as a teardown warning. |
 
 Stderr on exit 0 is never shown, so do not exit 0 with a warning there. Exit 2
-is a failure, because the script declared the op. gc does not configure the
-server at startup: the script brings it up when an op first needs it. If
-other cities or users share the server, end only the sessions the script
-started for this city (`GC_EXEC_CITY_PATH`) and leave the server running
-while anything else uses it. `gc runtime conformance` checks the op as
-the `server` group (`RPP-SERVER-001` to `RPP-SERVER-003`), and `gc runtime
-check` runs it once.
+is a failure, because the script declared the op. gc reads the token from the
+handshake: if the handshake fails at teardown, gc runs it once more, and if
+that fails too it runs no `server-stop` and prints a teardown warning, since
+the server may survive. gc does not configure the server at startup: the
+script brings it up when an op first needs it. If other cities or users share
+the server, end only the sessions the script started for this city
+(`GC_EXEC_CITY_PATH`) and leave the server running while anything else uses
+it.
+
+`gc runtime conformance` checks the op as the `server` group
+(`RPP-SERVER-001` to `RPP-SERVER-004`; `RPP-SERVER-004`, that `server-stop`
+in one city leaves another city's sessions running, only for a script that
+also declares `city-scoped`). `gc runtime check` runs it twice, the second
+time to check that it is idempotent. Both commands run the op, and the
+sessions they check it against, in a private city: `GC_EXEC_CITY_NAME` and
+`GC_EXEC_CITY_PATH` name a fresh temporary directory, never the city you run
+them from. A script that does not scope its server by `GC_EXEC_CITY_PATH`
+ends every session the server holds, so check it only against a backend that
+no live city uses.
 
 ### Start Config (JSON on stdin)
 

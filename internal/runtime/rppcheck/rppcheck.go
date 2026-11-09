@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
@@ -158,10 +160,23 @@ func (c *checker) runOp(ctx context.Context, stdin []byte, args ...string) opRes
 }
 
 func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) opResult {
+	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
+}
+
+// runOpEnv is runOpTimeout with env added to the executable's environment
+// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
+	var cmdEnv []string
+	if env != nil {
+		// Read before the op's deadline: execenv.Environ waits out an
+		// in-flight native store open, and that wait is not the op's.
+		cmdEnv = append(execenv.Environ(), env...)
+	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, c.path, args...)
+	cmd.Env = cmdEnv
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open; a conformance run should report a hang,
 	// not inherit it.
@@ -350,10 +365,22 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 // server-lifecycle owes, under a session of its own: server-stop exits 0 and
 // leaves that session not running, and a second server-stop exits 0 too. A
 // script that does not declare the token is not sent server-stop.
+//
+// server-stop names no session: it ends every session of the city it runs
+// in. So every op here runs in a private city (privateCity), never in the
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
+// run from a city leaves that city's sessions running.
 func (c *checker) checkServerLifecycle(ctx context.Context) {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		return
 	}
+	city, removeCity, err := privateCity()
+	if err != nil {
+		c.record(serverStopCheck, StatusFail, err.Error())
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no private city to run server-stop in")
+		return
+	}
+	defer removeCity()
 	name := c.opts.SessionName + "-server"
 	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
 	if err != nil {
@@ -361,23 +388,23 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no session to stop")
 		return
 	}
-	start := c.runOpTimeout(ctx, c.opts.StartTimeout, cfg, "start", name)
+	start := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "start", name)
 	// Whatever server-stop does, the session is stopped, on a
 	// cancellation-detached context so an interrupted run does not leak it.
-	defer c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+	defer c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "stop", name)
 	if start.unsupported || start.err != nil {
 		c.record(serverStopCheck, StatusSkip, "skipped: start failed")
 		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: start failed")
 		return
 	}
 
-	switch stop := c.runOp(ctx, nil, "server-stop"); {
+	switch stop := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "server-stop"); {
 	case stop.unsupported:
 		c.record(serverStopCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
 	case stop.err != nil:
 		c.record(serverStopCheck, StatusFail, stop.err.Error())
 	default:
-		res := c.runOp(ctx, nil, "is-running", name)
+		res := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name)
 		switch {
 		case res.unsupported || res.err != nil:
 			c.record(serverStopCheck, StatusFail, "is-running after server-stop did not answer")
@@ -388,7 +415,7 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 		}
 	}
 
-	switch again := c.runOp(ctx, nil, "server-stop"); {
+	switch again := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "server-stop"); {
 	case again.unsupported:
 		c.record(serverStopIdempotentCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
 	case again.err != nil:
@@ -396,6 +423,17 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 	default:
 		c.record(serverStopIdempotentCheck, StatusPass, "")
 	}
+}
+
+// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
+// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
+func privateCity() (env []string, remove func(), err error) {
+	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+	}
+	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
+	return env, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // checkRequiredBool asserts is-running prints exactly the wanted value

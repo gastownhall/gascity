@@ -193,13 +193,15 @@ const (
 	ReqConcurrencyListRunning  Code = "RPP-CONCURRENCY-005"
 
 	// The server group is the server-lifecycle token: a script that owns a
-	// server its boxes run under answers `server-stop`, which gc runs once
-	// every session of the city is drained (runtime.ServerLifecycleProvider's
+	// server its boxes run under answers `server-stop`, which gc runs after
+	// it stops the city's sessions (runtime.ServerLifecycleProvider's
 	// TeardownServer). Every requirement is Optional (SKIP unless
-	// server-lifecycle is declared). See REQUIREMENTS.md (RUNTIME-RPP-034).
-	ReqServerStopIdempotent  Code = "RPP-SERVER-001"
-	ReqServerStartAfterStop  Code = "RPP-SERVER-002"
-	ReqServerStopEndsSession Code = "RPP-SERVER-003"
+	// server-lifecycle is declared; RPP-SERVER-004 also SKIPs unless
+	// city-scoped is). See REQUIREMENTS.md (RUNTIME-RPP-034).
+	ReqServerStopIdempotent        Code = "RPP-SERVER-001"
+	ReqServerStartAfterStop        Code = "RPP-SERVER-002"
+	ReqServerStopEndsSession       Code = "RPP-SERVER-003"
+	ReqServerStopSparesOtherCities Code = "RPP-SERVER-004"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -262,6 +264,7 @@ var catalog = []Requirement{
 	{ReqServerStopIdempotent, GroupServer, "server-stop is idempotent: exit 0 with no server running, and exit 0 again after a stop (declared server-lifecycle only; never exit 2)", true},
 	{ReqServerStartAfterStop, GroupServer, "after server-stop, a new start succeeds and is-running reports it: the server comes back for the next session", true},
 	{ReqServerStopEndsSession, GroupServer, "after server-stop exits 0, is-running reports false for every session started before it: exit 0 means no session the runtime started remains", true},
+	{ReqServerStopSparesOtherCities, GroupServer, "server-stop under one GC_EXEC_CITY_PATH leaves a session started under another running (declared city-scoped only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

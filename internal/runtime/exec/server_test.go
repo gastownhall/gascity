@@ -140,6 +140,49 @@ func TestTeardownServerReportsFailure(t *testing.T) {
 	}
 }
 
+// Kills a TeardownServer that reads a failed handshake as an undeclared
+// pack: the provider keeps the failure for handshakeRetryAfter, so a stop
+// soon after it would leave a declared pack's server, and its sessions,
+// running with no word. Teardown runs one fresh handshake and tears down
+// the server the pack declares; a handshake that fails again is an error
+// naming it, and no server-stop is sent.
+func TestTeardownServerAfterFailedHandshake(t *testing.T) {
+	declared := reference.Bodies()["protocol"]
+	t.Run("transient failure", func(t *testing.T) {
+		up := filepath.Join(t.TempDir(), "backend-up")
+		p := newServerPack(t, map[string]string{"protocol": `if [ ! -f '` + up + `' ]; then echo "backend starting" >&2; exit 1; fi; ` + declared})
+		if err := p.sp.Start(t.Context(), "a", serverStartConfig(t)); err != nil {
+			t.Fatalf("Start a: %v", err)
+		}
+		if _, err := p.sp.raw.Protocol(); err == nil {
+			t.Fatal("the handshake answered before the backend was up; the test proves nothing")
+		}
+		if err := os.WriteFile(up, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		readOpLog(t, p.opLog)
+		if err := p.sp.TeardownServer(); err != nil {
+			t.Fatalf("TeardownServer = %v, want nil once the handshake answers", err)
+		}
+		if ops := readOpLog(t, p.opLog); !slices.Equal(ops, []string{"protocol", "server-stop"}) {
+			t.Fatalf("TeardownServer spawned %v, want one fresh handshake, then server-stop", ops)
+		}
+		if p.sp.IsRunning("a") {
+			t.Error("a still running after TeardownServer")
+		}
+	})
+	t.Run("handshake keeps failing", func(t *testing.T) {
+		p := newServerPack(t, map[string]string{"protocol": `echo "backend down" >&2; exit 1`})
+		err := p.sp.TeardownServer()
+		if err == nil || !strings.Contains(err.Error(), "backend down") {
+			t.Fatalf("TeardownServer = %v, want an error carrying the handshake's failure", err)
+		}
+		if ops := readOpLog(t, p.opLog); slices.Contains(ops, "server-stop") {
+			t.Fatalf("TeardownServer spawned %v, want no server-stop for a pack whose handshake failed", ops)
+		}
+	})
+}
+
 // TestExecServerTeardownContract runs RUNTIME-CONTRACT-023 against the
 // production seam-backed exec provider over the golden reference: a box
 // the server takes with it, a second teardown, and a pack whose server-stop

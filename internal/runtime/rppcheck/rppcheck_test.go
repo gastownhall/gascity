@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -767,4 +768,37 @@ func TestRun_ServerLifecycleSmoke(t *testing.T) {
 	if hasCheck(minimalResult(t), serverStopCheck) {
 		t.Error("a script without server-lifecycle reports a server-stop check")
 	}
+}
+
+// Kills a server-stop smoke check run in the city the check inherited: gc
+// runtime check run from a city must leave that city's sessions running,
+// though the golden's server-stop, like a city-scoped pack's, ends every
+// session of the city it runs in.
+func TestRun_ServerStopSparesTheCallersCity(t *testing.T) {
+	script := observeReference(t, nil)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+	const sentinel = "live-city-sentinel"
+	if out, err := scriptOp(script, `{"command":"sleep 300"}`, "start", sentinel); err != nil {
+		t.Fatalf("starting %s in the caller's city: %v (%s)", sentinel, err, out)
+	}
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, serverStopCheck); c.Status != StatusPass {
+		t.Fatalf("%s = %s (%s), want PASS: the check must run server-stop", serverStopCheck, c.Status, c.Detail)
+	}
+	if out, err := scriptOp(script, "", "is-running", sentinel); err != nil || out != "true" {
+		t.Fatalf("%s in the caller's city: is-running = %q (%v) after the check, want true: the check's server-stop ended a session of the city it was run from", sentinel, out, err)
+	}
+}
+
+// scriptOp runs one op of script in the test's environment, the city a check
+// started from it inherits.
+func scriptOp(script, stdin string, args ...string) (string, error) {
+	cmd := exec.Command(script, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
 }
