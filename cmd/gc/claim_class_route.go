@@ -555,14 +555,15 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 // applying the same post-mutation classification hookClaimWithBdStore applies to
 // the work store so the two claim paths report a lost race, a stale projection
 // and a canonical-readback failure identically.
-func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
-	// The binding's reads are context-free by contract, so its canonical
-	// readback needs no separate budget: it is the same Get as the conflict
-	// diagnostic, never a mutation-context read that a CAS could spend. The
-	// context is interim: the binding's claim carries no recorder until AC-5
-	// forwards the tier's one, so its CAS landing falls back to the tier's
-	// post-return clock sample (#6984).
-	return hookClaimThroughStore(context.Background(), beadID, assignee,
+//
+// ctx is the invoking tier's candidate context: it carries the per-candidate
+// CAS-landing recorder, so a binding claim is fenced on its own CAS instant
+// exactly like a work-store one (#6984). The binding's reads are context-free
+// by contract, so its canonical readback needs no separate budget: it is the
+// same Get as the conflict diagnostic, never a mutation-context read that a
+// CAS could spend.
+func (r *hookClaimClassRoute) claim(ctx context.Context, beadID, assignee string) (beads.Bead, bool, error) {
+	return hookClaimThroughStore(ctx, beadID, assignee,
 		func() (beads.Bead, bool, error) { return r.graph.Claim(beadID, assignee) },
 		r.graph.Get, r.graph.Get)
 }
@@ -640,7 +641,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 
 	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 		if route.knownResident(beadID) {
-			return route.claim(beadID, assignee)
+			return route.claim(ctx, beadID, assignee)
 		}
 		// The work-scope claim is the first leg of the escalation: a
 		// not-found here is the signal to probe the binding, so the call is
@@ -667,7 +668,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		case probeErr != nil:
 			return beads.Bead{}, false, probeErr
 		case routed:
-			return route.claim(beadID, assignee)
+			return route.claim(ctx, beadID, assignee)
 		default:
 			return claimed, ok, err
 		}

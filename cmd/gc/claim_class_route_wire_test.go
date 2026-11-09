@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	beadslib "github.com/steveyegge/beads"
@@ -228,5 +229,85 @@ func TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim(t *testing.T) {
 	}
 	if want := []string{claimCmd, showCmd}; !slices.Equal(ran, want) {
 		t.Fatalf("bd ran %q, want the claim and one read of the same leg %q", ran, want)
+	}
+}
+
+// landingTimingBinding wraps the class binding with a fake-clock cost per leg,
+// so a routed claim's CAS landing can be told apart from the clock its later
+// reads spend. The fields are all comparable (the embedded interface's dynamic
+// type is a store pointer), because the route's residency derivation uses the
+// store as a map key.
+type landingTimingBinding struct {
+	beads.Store
+	clock      *time.Time
+	casLanding time.Duration
+	readback   time.Duration
+	// casAt records the fake-clock instant each CAS committed, appended by the
+	// Claim leg; a pointer so the struct stays comparable.
+	casAt *[]time.Time
+}
+
+func (s landingTimingBinding) Claim(id, assignee string) (beads.Bead, bool, error) {
+	*s.clock = s.clock.Add(s.casLanding)
+	*s.casAt = append(*s.casAt, *s.clock)
+	return s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	}).Claim(id, assignee)
+}
+
+func (s landingTimingBinding) Get(id string) (beads.Bead, error) {
+	*s.clock = s.clock.Add(s.readback)
+	return s.Store.Get(id)
+}
+
+// TestClassRoutedClaimRecordsLandingBeforeBindingReadback pins #6984's
+// recorder on the class route: a claim that escalates to the binding records
+// its CAS landing the instant the binding CAS commits — before the canonical
+// readback that follows it — on the SAME recorder the invoking tier derived,
+// so the binding path is fenced identically to the work-store path. A route
+// that drops the caller's context (passing a plain background one to the
+// classifier) records nothing and the tier's fence falls back to its
+// post-return clock sample, which the binding's readback has already spent.
+func TestClassRoutedClaimRecordsLandingBeforeBindingReadback(t *testing.T) {
+	const wisp = "gcg--9223372036831192999"
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, wisp, map[string]string{"gc.routed_to": "worker"})
+
+	clock := time.Now()
+	casAt := []time.Time(nil)
+	binding := landingTimingBinding{
+		Store:      class,
+		clock:      &clock,
+		casLanding: 2 * time.Second,
+		readback:   45 * time.Second,
+		casAt:      &casAt,
+	}
+	route := newClaimRouteFor(t, binding)
+
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		Claim: notFoundClaim(t, wisp),
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string) (beads.Bead, error) {
+			return beads.Bead{}, beads.ErrNotFound
+		},
+	}, route)
+
+	// The context exactly as a claim tier derives it for one candidate: the
+	// recorder is what carries the CAS landing back out of ops.Claim.
+	claimCtx, landing := withHookClaimLanding(context.Background(), func() time.Time { return clock })
+	claimed, ok, err := ops.Claim(claimCtx, "/data/projects/rig", nil, wisp, "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("claim of %s = (ok=%v err=%v), want it claimed through the binding", wisp, ok, err)
+	}
+	if strings.TrimSpace(claimed.Assignee) != "worker-1" {
+		t.Fatalf("claimed assignee = %q, want worker-1", claimed.Assignee)
+	}
+	if len(casAt) != 1 {
+		t.Fatalf("binding CAS legs = %d (at %v), want exactly one", len(casAt), casAt)
+	}
+	if !casAt[0].Before(clock) {
+		t.Fatalf("fixture: the clock ends at %v, at or before the CAS instant %v — the readback must spend clock after the CAS for this row to mean anything", clock, casAt[0])
+	}
+	if !landing.landed.Equal(casAt[0]) {
+		t.Fatalf("recorded landing = %v, want the binding CAS instant %v: the class route must forward the tier's recorder so the canonical readback cannot spend the straddle fence", landing.landed, casAt[0])
 	}
 }
