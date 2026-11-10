@@ -1291,17 +1291,24 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 // With a relic the probe is the epoch's CloseOwner plan: route, the event's
 // prefix route by ref (beadEventRouteLocked), then the relic's binding, every
 // leg read live through a federated leg (storeref.ResolveOwnerPreferring). Its
-// owner is the epoch's store for the leg, the store the event routed to. A
+// owner is the epoch's store for a route leg, the store the event routed to,
+// and the event's relic for the binding. Under the split-strict gate a
+// physical binding is read as the epoch holds it, unviewed, as every epoch
+// plan reads a relocated class. A
 // route or relic the epoch cannot name (a reload between the event's route
 // and this read) leaves the close unconfirmed, for the sweep to re-read.
 func liveCloseOwner(epoch storeref.Stores, route []storeref.StoreRef, stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {
 	if relic == nil {
 		return liveReadOwner(stores, id)
 	}
+	// The relic is the event's handle on the binding: under the split-strict
+	// gate, its class view (splitStrictEventStores); the epoch names the
+	// binding itself, so the view's front is what is matched.
+	front, _ := storeref.Unview(splitStrictSeam, relic)
 	var relicRef storeref.StoreRef
 	ok := false
 	for _, b := range epoch.Topology().Bindings {
-		if beads.SameStore(b.Leg.Store, relic) { // residency:allow — names the relic binding's ref by identity for the CloseOwner plan; reads nothing
+		if beads.SameStore(b.Leg.Store, front) { // residency:allow — names the relic binding's ref by identity for the CloseOwner plan; reads nothing
 			relicRef, ok = b.Leg.Ref, true
 			break
 		}
@@ -1316,6 +1323,11 @@ func liveCloseOwner(epoch storeref.Stores, route []storeref.StoreRef, stores []b
 	owner, err := storeref.ResolveOwnerPreferring(plan, id, func(b beads.Bead) bool { return b.Status == "closed" })
 	if err != nil {
 		return stores[0], beads.Bead{}, err
+	}
+	if owner.Ref == relicRef {
+		// The relic's close is run through the event's own handle on the
+		// binding (relicStoreRef keys the ID-only mode on it).
+		return relic, owner.Bead, nil
 	}
 	return owner.Store, owner.Bead, nil
 }

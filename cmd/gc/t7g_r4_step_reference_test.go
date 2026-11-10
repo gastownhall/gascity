@@ -324,3 +324,25 @@ func markInProgress(t *testing.T, s beads.Store, id string) {
 		t.Fatal(err)
 	}
 }
+
+// TestLiveCloseOwnerMatchesTheRelicThroughTheGatesView: under the
+// split-strict gate the event's relic is the gate's class view of the
+// binding (splitStrictEventStores). The CloseOwner plan names the binding by
+// the view's front, and a close confirmed in the binding is handed back as
+// the event's own relic handle, so relicStoreRef still takes the ID-only
+// mode.
+func TestLiveCloseOwnerMatchesTheRelicThroughTheGatesView(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = splitStrictGate{}
+	t.Cleanup(func() { splitStrictSeam = saved })
+	city, binding := r4Store(t, "ga", "ga-1", "open"), r4Store(t, "gcg", "ga-1", "closed")
+	relicView := splitStrictGate{}.ClassView(binding)
+	epoch := testStores(city, binding)
+	owner, row, err := liveCloseOwner(epoch, []storeref.StoreRef{storeref.WorkRef}, []beads.Store{city, relicView}, "ga-1", relicView)
+	if confirmInferredClose(row, err) != closeConfirmed || owner != relicView {
+		t.Fatalf("close owner = %T (%v): want the relic's view, confirmed", owner, err)
+	}
+	if ref := relicStoreRef(owner, relicView, "rig:x"); ref != "" {
+		t.Fatalf("relicStoreRef = %q, want the ID-only mode", ref)
+	}
+}
