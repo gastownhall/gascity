@@ -4,7 +4,13 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // sessionLimitChooserPane is the provider session-limit chooser as it renders
@@ -189,4 +195,153 @@ func TestNudgeSessionDismissesDialogBeforeLiteralPaste(t *testing.T) {
 	if captureIdx >= dismissEnterIdx {
 		t.Errorf("dialog capture at %d must precede its dismissal keystroke at %d", captureIdx, dismissEnterIdx)
 	}
+}
+
+// chooserOverClaudePane is a Claude pane parked on the session-limit chooser:
+// its captures show chooser until the "1" "Enter" that picks "Stop and wait"
+// reach it, and the composer underneath (the fakeClaudePane) from then on.
+// The session publishes the ready prompt "❯ ", which reads back trimmed, as
+// the real executor returns tmux output.
+type chooserOverClaudePane struct {
+	*fakeClaudePane
+
+	mu      sync.Mutex
+	chooser string
+	keys    []string // every key or text that reached the chooser
+	peeks   int      // visible-screen captures (no -S) of the chooser
+	// onFirstPeek, when set, runs as the chooser's first visible-screen
+	// capture (a dismissal's peek) is taken, before that capture returns.
+	onFirstPeek func()
+}
+
+func (p *chooserOverClaudePane) execute(args []string) (string, error) {
+	switch tmuxSubcommand(args) {
+	case "show-environment":
+		if args[len(args)-1] == ReadyPromptEnvKey {
+			return strings.TrimSpace(ReadyPromptEnvKey + "=" + DefaultReadyPromptPrefix), nil
+		}
+	case "capture-pane":
+		p.mu.Lock()
+		screen := p.chooser
+		peek := screen != "" && !slices.Contains(args, "-S")
+		if peek {
+			p.peeks++
+		}
+		first := peek && p.peeks == 1
+		hook := p.onFirstPeek
+		p.mu.Unlock()
+		if first && hook != nil {
+			hook()
+		}
+		if screen != "" {
+			return screen, nil
+		}
+	case "send-keys":
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.chooser != "" {
+			p.keys = append(p.keys, args[len(args)-1])
+			if slices.Equal(p.keys, []string{"1", "Enter"}) {
+				p.chooser = ""
+			}
+			return "", nil
+		}
+	}
+	return p.fakeClaudePane.execute(args)
+}
+
+func (p *chooserOverClaudePane) executeCtx(_ context.Context, args []string) (string, error) {
+	return p.execute(args)
+}
+
+// chooserKeys returns what reached the chooser, in order.
+func (p *chooserOverClaudePane) chooserKeys() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.keys)
+}
+
+// A nudge to a Claude session parked on the session-limit chooser clears the
+// chooser before its idle wait: a numbered menu never reads idle, so a nudge
+// that waited first would hold every queued delivery for the whole
+// NudgeIdleTimeout before the dismissal ahead of its text cleared it (#3427:
+// the nudge path must not stall behind the chooser). The message then lands
+// at the composer.
+// Kills: a Provider.nudge that waits for idle before dismissing.
+func TestNudgeDismissesSessionLimitChooserBeforeIdleWait(t *testing.T) {
+	const session, message = "claude-session-limit-chooser", "check deploy status"
+	// The bubble creates this session's nudge lock channel; drop it so
+	// nothing outside the bubble ever touches it.
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	synctest.Test(t, func(t *testing.T) {
+		claude := newFakeClaudePane("")
+		claude.header = []string{"● Done."}
+		claude.sessionName = session
+		pane := &chooserOverClaudePane{fakeClaudePane: claude, chooser: claudeSessionLimitMenu}
+		tm := NewTmux()
+		tm.exec = pane
+
+		start := time.Now()
+		if err := (&Provider{tm: tm}).Nudge(session, runtime.TextContent(message)); err != nil {
+			t.Fatalf("Nudge: %v", err)
+		}
+		if took, wait := time.Since(start), tm.cfg.NudgeIdleTimeout; took >= wait {
+			t.Fatalf("Nudge took %s, want under its %s idle wait: the chooser must be cleared before the wait", took, wait)
+		}
+		if keys := pane.chooserKeys(); !slices.Equal(keys, []string{"1", "Enter"}) {
+			t.Fatalf("keys sent to the chooser = %q, want [1 Enter] (Stop and wait)", keys)
+		}
+		if submitted, _ := claude.state(); !slices.Equal(submitted, []string{message}) {
+			t.Fatalf("submitted = %q, want [%q]: the nudge belongs at the composer", submitted, message)
+		}
+	})
+}
+
+// Two nudges that reach a chooser-parked session together clear it once:
+// the dismissal ahead of the idle wait holds the nudge lock through its
+// settle, so the second nudge peeks only after the chooser is gone. Without
+// the lock both see the chooser and both send "1" "Enter": the keys
+// interleave in the chooser, or the second pair reaches the composer once
+// the first has closed it, where Enter submits the "1" as a turn.
+// Kills: a dismissal ahead of the idle wait that skips the nudge lock.
+func TestNudgeConcurrentNudgesDismissChooserOnce(t *testing.T) {
+	const session = "claude-session-limit-chooser-twice"
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	synctest.Test(t, func(t *testing.T) {
+		claude := newFakeClaudePane("")
+		claude.header = []string{"● Done."}
+		claude.sessionName = session
+		pane := &chooserOverClaudePane{fakeClaudePane: claude, chooser: claudeSessionLimitMenu}
+		tm := NewTmux()
+		tm.exec = pane
+		p := &Provider{tm: tm}
+
+		second := make(chan error, 1)
+		// The second nudge starts while the first holds the chooser's first
+		// peek, and runs until it blocks for good (on the nudge lock, or in a
+		// sleep once it has dismissed the chooser itself).
+		pane.onFirstPeek = func() {
+			go func() { second <- p.Nudge(session, runtime.TextContent("second")) }()
+			synctest.Wait()
+		}
+		firstErr := p.Nudge(session, runtime.TextContent("first"))
+		secondErr := <-second
+		if keys := pane.chooserKeys(); !slices.Equal(keys, []string{"1", "Enter"}) {
+			t.Errorf("keys sent to the chooser = %q, want [1 Enter]", keys)
+		}
+		if n := claude.keyCount("1"); n != 0 {
+			t.Errorf("%d dismissal key(s) %q reached the composer, want none: the chooser was already gone", n, "1")
+		}
+		// Whichever message is submitted second finds the first one's turn
+		// running (this composer stays busy), so that nudge is delivered but
+		// unobserved; both reach the composer.
+		for name, err := range map[string]error{"first": firstErr, "second": secondErr} {
+			if err != nil && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+				t.Errorf("%s Nudge: %v", name, err)
+			}
+		}
+		if submitted, _ := claude.state(); len(submitted) != 2 {
+			t.Errorf("submitted = %q, want both nudges at the composer", submitted)
+		}
+	})
 }

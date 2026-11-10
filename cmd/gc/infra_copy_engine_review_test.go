@@ -124,9 +124,11 @@ func (s *payloadKeepingSource) DepRemove(issueID, dependsOnID string) error {
 }
 
 // TestTheBatchedBackupCarriesAWorkEdgePayloadOntoAMovedRow (review B): a work
-// bead waits on a moved row through a waits-for edge carrying a payload. The
+// bead waited on a moved row through a waits-for edge carrying a payload. The
 // batched backup records the payload on the moved row's dependent, and the
-// clear puts the kept edge back carrying it.
+// clear removes the edge without re-adding it (D9): the backup is its record.
+// The work bead is closed: an open one waiting on the open row refuses the
+// copy.
 func TestTheBatchedBackupCarriesAWorkEdgePayloadOntoAMovedRow(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 	source := &payloadKeepingSource{MemStore: beads.NewMemStore(), payloads: map[[2]string]string{}}
@@ -135,6 +137,9 @@ func TestTheBatchedBackupCarriesAWorkEdgePayloadOntoAMovedRow(t *testing.T) {
 	t.Cleanup(func() { openInfraMigrationSource = prev })
 	moved := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
 	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work", Type: "task"})
+	if err := source.Close(work.ID); err != nil {
+		t.Fatal(err)
+	}
 	const payload = `{"gate":"any-children"}`
 	if err := source.DepAddWithMetadata(work.ID, moved.ID, "waits-for", payload); err != nil {
 		t.Fatal(err)
@@ -160,8 +165,8 @@ func TestTheBatchedBackupCarriesAWorkEdgePayloadOntoAMovedRow(t *testing.T) {
 	if recorded == nil || !recorded.Carried || recorded.Payload != payload {
 		t.Fatalf("the backup records the dependent %s -> %s as %+v, want it carrying %q", work.ID, moved.ID, recorded, payload)
 	}
-	if got, carried, _ := source.DepMetadata(work.ID, moved.ID); !carried || got != payload {
-		t.Fatalf("the kept edge %s -> %s carries (%q, %v) after the clear, want %q", work.ID, moved.ID, got, carried, payload)
+	if deps, _ := source.DepList(work.ID, "down"); len(deps) != 0 {
+		t.Fatalf("%s still depends on %+v after the clear; the clear re-adds no edge", work.ID, deps)
 	}
 }
 
@@ -193,7 +198,7 @@ func TestVerifyInfraCopyRefusesAPayloadOnlyTheBindingCarries(t *testing.T) {
 	}
 	_ = closeBeadStoreHandle(binding)
 	restored := newMCShapedInfraCity(t, 60).source()
-	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, nil)
+	_, _, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, plannedInfraCopy(t, restored))
 	if err == nil || !strings.Contains(err.Error(), edge[0]) || !strings.Contains(err.Error(), "invented") {
 		t.Fatalf("verifyInfraCopy = %v, want a refusal naming the payload only the binding carries on %s -> %s", err, edge[0], edge[1])
 	}
@@ -657,9 +662,9 @@ func TestTheClearSubBatchesADenseChunksEdges(t *testing.T) {
 
 // TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved (round 3
 // X7): on a store that deletes in batches, a clear killed after its first
-// chunk resumes from the whole session the note names. The kept edge from a
-// work bead into a row the first chunk removed is re-added only after the
-// delete loop, so a session that dropped that row would resume without it.
+// chunk resumes from the whole session the note names. The edge from a work
+// bead into a row the first chunk removed is not re-added by the resume (D9);
+// the backup keeps its record.
 func TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 	prevChunk := infraClearChunk
@@ -671,8 +676,8 @@ func TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved(t *testi
 	t.Cleanup(func() { openInfraMigrationSource = prev })
 	first := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
 	second := mustCreateInfraBead(t, source, beads.Bead{Title: "graft queued", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
-	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the running graft", Type: "task"})
-	if err := source.DepAdd(work.ID, first.ID, "blocks"); err != nil {
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work related to the running graft", Type: "task"})
+	if err := source.DepAdd(work.ID, first.ID, "related"); err != nil {
 		t.Fatal(err)
 	}
 	prevBefore := infraClearBeforeDelete
@@ -700,8 +705,21 @@ func TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deps) != 1 || deps[0].DependsOnID != first.ID || deps[0].Type != "blocks" {
-		t.Fatalf("%s deps after the resumed clear = %+v; the kept edge into %s, removed by the first run, must be back", work.ID, deps, first.ID)
+	if len(deps) != 0 {
+		t.Fatalf("%s deps after the resumed clear = %+v; the clear re-adds no edge into %s", work.ID, deps, first.ID)
+	}
+	backup, _, err := readInfraRetainedBackup(mustResolveInfraTarget(t, request.CityPath, request.Cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := false
+	for _, e := range backup {
+		for _, d := range e.Dependents {
+			recorded = recorded || (d.IssueID == work.ID && d.DependsOnID == first.ID && d.Disposition == rigEdgeDropped)
+		}
+	}
+	if !recorded {
+		t.Fatalf("the backup does not record %s -> %s as dropped: %+v", work.ID, first.ID, backup)
 	}
 }
 

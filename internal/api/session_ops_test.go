@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -175,10 +176,19 @@ type rebuiltOverState struct {
 	ev    events.Provider
 }
 
-func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: r.store}
-}
 func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
+
+// Stores is a single-store city over the reopened store, which serves every
+// class as CityBeadStore does: raw, with no gate view. Its rigs are the stores
+// BeadStore returns.
+func (r *rebuiltOverState) Stores() storeref.Stores {
+	rigs := make(map[string]beads.Store, len(r.stores))
+	for rig := range r.stores {
+		rigs[rig] = r.BeadStore(rig)
+	}
+	return mintFakeStores(r.store, rigs, nil, storeref.StoresOptions{}, nil, nil)
+}
+
 func (r *rebuiltOverState) EventProvider() events.Provider {
 	if r.ev != nil {
 		return r.ev

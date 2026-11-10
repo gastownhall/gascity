@@ -2110,7 +2110,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 // sides are therefore compared in canonical order.
 //
 // The state is a controllerState — the production api.State — built from the
-// fixture, so BeadStores(), CityBeadStore() and GraphBeadStore() resolve through
+// fixture, so BeadStores(), CityBeadStore() and Stores() resolve through
 // exactly the dispatch the running controller uses.
 func apiReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
@@ -2146,7 +2146,7 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 // the REAL handler stack over the fixture's stores and decodes the list body.
 //
 // The state is a controllerState — the production api.State — so BeadStores(),
-// CityBeadStore() and GraphBeadStore() resolve through exactly the dispatch the
+// CityBeadStore() and Stores() resolve through exactly the dispatch the
 // running controller uses. suffix is the city-scoped path with its query string,
 // e.g. "/beads/ready" or "/beads?status=in_progress".
 func apiGetBeadListBody(t *testing.T, e splitEnv, suffix string) apiReadyListBody {

@@ -69,6 +69,9 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/remote-stage.toml",
 	// S5-B: the maintenance window's record of a provider it started.
 	".gc/storage-window.json",
+	// S5-E: storage snapshots (binding copies, JSONL, manifests); a copy of
+	// a city's stores is not part of its work dir.
+	".gc/snapshots/**",
 	".gc/scope-ownership.json",
 	// gc bd's trust state for this host's bd binaries: the verdict cache,
 	// its lock, the walks' scratch dirs, and the operator's vouches.

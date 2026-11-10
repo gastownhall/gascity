@@ -15,9 +15,17 @@
 //   - unwrap: a handle's embedded store read back (.Store, through any
 //     embedding) or an unwrap method (Raw) named;
 //   - cap-assert: a type assertion or type switch on a store value (a
-//     beads.Store, an interface that is one, or a store, concrete store or
-//     handle boxed by a conversion): use beads.As or an XFor helper, which
-//     see through the handle;
+//     beads.Store, an interface that is one, a beads.StoreReader, or a store,
+//     concrete store or handle boxed by a conversion): use beads.As or an
+//     XFor helper, which see through the handle;
+//   - cache-peel: on such a store value, an assertion or a type-switch case
+//     naming the cache (*beads.CachingStore), a typed handle (a peel by
+//     hand, as liveReads does), or an interface asking for a method only the
+//     cache has (IsLive, Stats: Config.CacheProbeMethods). A store value may be a handle, and through a
+//     handle the cache assertion answers false and the read serves the
+//     cache; a hand peel misses every class layer it does not name. Use
+//     beads.LiveFor, beads.HandlesFor (which the handles forward) or
+//     beads.As (OD-T7-14). The site also counts as cap-assert;
 //   - test-mint-import: production code importing a test-only minting
 //     package;
 //   - read-marker: a federated or relic read marker named (D9 freezes them:
@@ -168,12 +176,25 @@ const (
 	Mint           Rule = "mint"
 	Unwrap         Rule = "unwrap"
 	CapAssert      Rule = "cap-assert"
+	CachePeel      Rule = "cache-peel"
 	TestMintImport Rule = "test-mint-import"
 	ReadMarker     Rule = "read-marker"
 )
 
 // Rules is every rule, in reporting order.
-var Rules = []Rule{RawParam, RawResult, RawField, RawVar, RawType, Mint, Unwrap, CapAssert, TestMintImport, ReadMarker}
+var Rules = []Rule{RawParam, RawResult, RawField, RawVar, RawType, Mint, Unwrap, CapAssert, CachePeel, TestMintImport, ReadMarker}
+
+// ReservedRules are rules the baseline files may name before the analyzer
+// enforces them. The growth gate judges a change with the merge-base's
+// generator, which refuses a row naming a rule it does not know; so a new
+// rule lands in two changes: reserved here first, inert, then moved into
+// Rules together with its analyzer code and rows.
+var ReservedRules = []Rule{}
+
+// knownRule reports whether a baseline file may name r.
+func knownRule(r Rule) bool {
+	return slices.Contains(Rules, r) || slices.Contains(ReservedRules, r)
+}
 
 // AllRulesBut is every rule except rs, for an Allow entry.
 func AllRulesBut(rs ...Rule) []Rule {
@@ -204,19 +225,22 @@ type Allow struct {
 
 // Config is what the lint guards, by fully qualified name ("importpath.Name").
 type Config struct {
-	Module           string   // module path prefix with a trailing "/": only its packages are linted
-	Store            string   // the raw store interface
-	Handles          []string // the typed class handle types
-	HandleField      string   // the handles' embedded store field
-	UnwrapMethods    []string // handle methods that return the raw store
-	AsFuncs          []string // capability helpers (beads.As): an instance whose T is a store unwraps
-	MintFuncs        []string // functions that mint handles
-	RawCarriers      []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
-	TestMintPackages []string // packages production code may not import
-	Markers          []string // federated/relic read marker functions
-	Allow            []Allow
-	Sealed           []string    // module-relative packages with no baseline
-	Baseline         map[Key]int // the pinned counts, or nil to load them
+	Module            string   // module path prefix with a trailing "/": only its packages are linted
+	Store             string   // the raw store interface
+	Handles           []string // the typed class handle types
+	HandleField       string   // the handles' embedded store field
+	UnwrapMethods     []string // handle methods that return the raw store
+	AsFuncs           []string // capability helpers (beads.As): an instance whose T is a store unwraps
+	MintFuncs         []string // functions that mint handles
+	RawCarriers       []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
+	TestMintPackages  []string // packages production code may not import
+	CacheTypes        []string // concrete cache store types an assertion on a store peels to (cache-peel)
+	CacheProbeMethods []string // methods only the cache has: an interface asking for one peels to it (cache-peel)
+	StoreReaders      []string // read interfaces a store passes as (beads.StoreReader): an assertion on one is on a store
+	Markers           []string // federated/relic read marker functions
+	Allow             []Allow
+	Sealed            []string    // module-relative packages with no baseline
+	Baseline          map[Key]int // the pinned counts, or nil to load them
 	// LoadBaseline, when Baseline is nil, loads the pinned counts the first
 	// time a module package is checked.
 	LoadBaseline func() (map[Key]int, error)
@@ -552,12 +576,70 @@ func (c *checker) file(file *ast.File, base string) {
 				what := "a type switch"
 				if v.Type != nil {
 					what = "a type assertion to " + c.typeString(info.TypeOf(v.Type))
+					c.cachePeel(base, fn, v.Type, "a type assertion")
 				}
 				c.add(base, fn, CapAssert, v.Pos(), what+" on a store: use beads.As, which sees through a typed handle")
+			}
+		case *ast.TypeSwitchStmt:
+			if x := switchOperand(v); x != nil && c.isStoreValue(x) {
+				for _, stmt := range v.Body.List {
+					for _, t := range stmt.(*ast.CaseClause).List {
+						c.cachePeel(base, fn, t, "a type-switch case")
+					}
+				}
 			}
 		}
 		return true
 	})
+}
+
+// cachePeel reports a type an assertion on a store names when it peels the
+// store by hand: the cache, or a typed handle.
+func (c *checker) cachePeel(base, fn string, typ ast.Expr, what string) {
+	t := c.pass.TypesInfo.TypeOf(typ)
+	switch {
+	case t == nil:
+	case slices.Contains(c.cfg.CacheTypes, fullName(deref(t))):
+		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store: through a typed handle it answers false and the read serves the cache; use beads.LiveFor, beads.HandlesFor or beads.As, which see through the handle", what, c.typeString(t)))
+	case c.isHandle(t):
+		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store peels a typed handle by hand and misses every class layer it does not name; use beads.LiveFor, beads.HandlesFor or beads.As, which see through them all", what, c.typeString(t)))
+	default:
+		if m := c.cacheProbeMethod(t); m != "" {
+			c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store asks for the cache's own %s: through a typed handle it answers false; use beads.As, which sees through the handle", what, c.typeString(t), m))
+		}
+	}
+}
+
+// cacheProbeMethod is the first method of interface t that only the cache
+// has (Config.CacheProbeMethods), or "".
+func (c *checker) cacheProbeMethod(t types.Type) string {
+	iface, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return ""
+	}
+	for i := range iface.NumMethods() {
+		if name := iface.Method(i).Name(); slices.Contains(c.cfg.CacheProbeMethods, name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// switchOperand is the value a type switch switches on.
+func switchOperand(sw *ast.TypeSwitchStmt) ast.Expr {
+	var x ast.Expr
+	switch a := sw.Assign.(type) {
+	case *ast.ExprStmt:
+		x = a.X
+	case *ast.AssignStmt:
+		if len(a.Rhs) == 1 {
+			x = a.Rhs[0]
+		}
+	}
+	if ta, ok := ast.Unparen(x).(*ast.TypeAssertExpr); ok {
+		return ta.X
+	}
+	return nil
 }
 
 // signature collects a function type's raw parameters and results.
@@ -818,7 +900,7 @@ func (c *checker) isConcreteStore(t *types.Named) bool {
 func (c *checker) isStoreValue(x ast.Expr) bool {
 	info := c.pass.TypesInfo
 	t := info.TypeOf(x)
-	if c.isStore(t) {
+	if c.isStore(t) || t != nil && slices.Contains(c.cfg.StoreReaders, fullName(t)) {
 		return true
 	}
 	if t != nil && c.storeIface != nil {

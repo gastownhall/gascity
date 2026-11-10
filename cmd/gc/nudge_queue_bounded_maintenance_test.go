@@ -2,12 +2,12 @@ package main
 
 import (
 	"os"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // TestRunNudgeQueueMaintenanceSweep_BoundedPassPreservesBacklogThenConverges
@@ -246,18 +246,24 @@ func TestShouldKeepNudgePollerAlive_DoesNotBlockOnHeldQueueLock(t *testing.T) {
 	}
 
 	// Hold the queue's exclusive lock, exactly as a concurrent maintenance
-	// sweep does while it drains the backlog. flock conflicts are per open
-	// file description, so this conflicts with shouldKeepNudgePollerAlive's
-	// own separate open.
-	lockFile, err := os.OpenFile(nudgequeue.LockPath(dir), os.O_CREATE|os.O_RDWR, 0o600)
+	// sweep does while it drains the backlog. Lock conflicts are per open
+	// file description on Unix and per handle on Windows, so this conflicts
+	// with shouldKeepNudgePollerAlive's own separate open.
+	queueLockPath := nudgequeue.LockPath(dir)
+	lockFile, err := os.OpenFile(queueLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatalf("opening queue lock: %v", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	queueLock, err := filelock.Acquire(lockFile, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       queueLockPath,
+	})
+	if err != nil {
 		t.Fatalf("holding queue lock: %v", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer queueLock.Release() //nolint:errcheck
 
 	target := nudgeTarget{cityPath: dir, alias: "mayor"}
 

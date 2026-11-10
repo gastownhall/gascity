@@ -104,6 +104,9 @@ go_test(
         "compact_backup_remotes_test.go",
         "compact_history_protection_real_dolt_test.go",
         "compact_history_protection_test.go",
+        "compact_live_database_flatten_test.go",
+        "compact_live_database_real_dolt_test.go",
+        "compact_live_database_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
         "compact_real_dolt_callbound_test.go",
@@ -119,6 +122,7 @@ go_test(
         "journal_recovery_runbook_test.go",
         "logs_test.go",
         "main_test.go",
+        "packroot_test.go",
         "port_resolve_test.go",
         "proxied_scope_test.go",
         "pull_remote_selection_test.go",
@@ -164,14 +168,68 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/config",
-        "//internal/formula",
         "//internal/fsys",
         "//internal/orders",
         "//internal/testenv",
-        "//internal/testutil",
         "//internal/workdir",
-        "//test/toolhome",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 exports_files(glob(

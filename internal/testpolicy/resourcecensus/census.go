@@ -745,10 +745,15 @@ func parsedBuildConstraint(content []byte) (bool, error) {
 		return false, err
 	}
 	if goBuild != nil {
-		if _, err := constraint.Parse(string(goBuild)); err != nil {
+		expr, err := constraint.Parse(string(goBuild))
+		if err != nil {
 			return false, err
 		}
-		return true, nil
+		// A //go:build line counts as tagged only when it excludes the file
+		// from the default Linux CI lane; an OS-only constraint such as
+		// "unix" or "!windows" still runs there and stays in the untagged
+		// ratchets.
+		return !expr.Eval(defaultLaneTag), nil
 	}
 	for len(header) > 0 {
 		line := header
@@ -767,6 +772,16 @@ func parsedBuildConstraint(content []byte) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// defaultLaneTag reports whether tag is satisfied on the default
+// linux/amd64 gc CI lane, where no custom build tags are set.
+func defaultLaneTag(tag string) bool {
+	switch tag {
+	case "unix", "linux", "amd64", "gc":
+		return true
+	}
+	return false
 }
 
 // leadingBuildHeader mirrors the placement rules in go/build.parseFileHeader:

@@ -1210,3 +1210,38 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
 	}
 }
+
+// TestCheckEventStart pins where a standalone event check starts: an order
+// that has run reads past its run cursor; one that has never run reads past
+// the event head, so it opens none of the history below it and is due only on
+// an event recorded later (ga-1clac5).
+func TestCheckEventStart(t *testing.T) {
+	ep := events.NewFake()
+	for _, typ := range []string{"bead.closed", "bead.created", "bead.closed"} {
+		ep.Record(events.Event{Type: typ})
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+
+	start, err := CheckEventStart(ep, 0)
+	if err != nil || start != 3 {
+		t.Fatalf("never run: CheckEventStart = %d, %v; want the head 3", start, err)
+	}
+	startFn := func(string) uint64 { return start }
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); got.Due {
+		t.Fatalf("never run, history only: result = %+v, want not due", got)
+	}
+	ep.Record(events.Event{Type: "bead.closed"})
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); !got.Due || got.Reason != "event: 1 bead.closed event(s)" {
+		t.Fatalf("never run, new event: result = %+v, want due on the one new event", got)
+	}
+
+	if start, err := CheckEventStart(ep, 2); err != nil || start != 2 {
+		t.Fatalf("has run: CheckEventStart = %d, %v; want its run cursor 2", start, err)
+	}
+	if start, err := CheckEventStart(nil, 0); err != nil || start != 0 {
+		t.Fatalf("no provider: CheckEventStart = %d, %v; want 0", start, err)
+	}
+	if _, err := CheckEventStart(events.NewFailFake(), 0); err == nil {
+		t.Fatal("unreadable head: CheckEventStart returned no error")
+	}
+}

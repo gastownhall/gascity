@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -114,7 +115,7 @@ func newStaleViewLane(t *testing.T, store beads.Store, conv string, rowGen int64
 func (l *staleViewLane) outcome(op opjournal.Op) *opjournal.Outcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	scope, why, err := sessionOpScope(l.store, l.conv)
+	scope, why, err := sessionOpScope(beadstest.Sessions(l.store), l.conv)
 	if why != "" {
 		l.t.Errorf("reading session %s's generation: %s %v", l.conv, why, err)
 		return nil
@@ -1397,7 +1398,7 @@ func (e *runCancelLaneEnv) interruptHolders(t *testing.T) ([]string, map[string]
 	t.Helper()
 	failed := map[string]error{}
 	holders := []string{e.stepWorker.ID, e.itemWorker.ID}
-	got := e.s.interruptRunHoldersLane(context.Background(), e.fs.cityBeadStore, e.runID, holders, func(id string, err error) { failed[id] = err })
+	got := e.s.interruptRunHoldersLane(context.Background(), beadstest.Sessions(e.fs.cityBeadStore), e.runID, holders, func(id string, err error) { failed[id] = err })
 	slices.Sort(got)
 	return got, failed
 }
@@ -1724,7 +1725,7 @@ func TestRunCancelUnderLaneSkipsAHolderWhoseAgentIsDead(t *testing.T) {
 // newOpsTestStoreOver is the op store the API opens over fs's sessions store.
 func newOpsTestStoreOver(t *testing.T, fs *fakeState) *opjournal.Store {
 	t.Helper()
-	st, err := opjournal.NewStore(fs.SessionsBeadStore(), clock.Real{})
+	st, err := opjournal.NewStore(fs.Stores().Sessions(), clock.Real{})
 	if err != nil {
 		t.Fatalf("open op store: %v", err)
 	}

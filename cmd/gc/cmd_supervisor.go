@@ -1143,6 +1143,15 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		// api_url is the supervisor API base URL from supervisor.toml — the
+		// endpoint the CLI itself dials (supervisorAPIBaseURL) — reported
+		// whether or not the supervisor is running. It is absent, with a
+		// warning on stderr, when supervisor.toml cannot be read.
+		if apiURL, err := supervisorAPIBaseURL(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor status: warning: resolving API URL: %v\n", err) //nolint:errcheck
+		} else {
+			payload["api_url"] = apiURL
+		}
 		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
