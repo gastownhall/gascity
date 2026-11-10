@@ -14,10 +14,11 @@ package main
 //	    edges restored; the work store's id floor
 //	R3  the reverse manifest (infra.reversed.beads), proven
 //	R4  city.toml without [storage] (the pre-split bytes when the split
-//	    journal holds them and nothing else changed since); the served note,
-//	    the cleared notes and every rig record renamed *.reverted-<run>;
+//	    journal holds them and nothing else changed since); the served note
+//	    and the city's and each rig's cleared notes renamed *.reverted-<run>;
 //	    .gc/min-gc-version removed
-//	R5  the binding root renamed *.reverted-<run>; the journal completed
+//	R5  the binding root renamed *.reverted-<run>, the rigs' import records
+//	    with it; the journal completed
 //
 // --to-rigs --rig X is the same engine for one rig's import, with the city
 // phase skipped: R1 into rig X, R3 its manifest, then R4 removes the rows from
@@ -46,6 +47,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -54,6 +56,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -77,6 +80,9 @@ const (
 	// storageSplitJournalName is the guided split's journal (S5-H), which
 	// holds city.toml as it was before the split.
 	storageSplitJournalName = "storage-split.journal.json"
+	// reverseKeepSplitRemedy is the fix of a refusal no change to the city
+	// can clear: the reverse cannot take this city back.
+	reverseKeepSplitRemedy = "nothing was written; keep the city split, or roll back by restoring the snapshot (the runbook's restore steps)"
 )
 
 // The reverse's phases, as the journal records the last one done.
@@ -109,6 +115,13 @@ func storageReverseInstruction(mode reverseMode, rigs []string) string {
 // storageAbortReverseInstruction is the command that abandons a reverse.
 func storageAbortReverseInstruction() string {
 	return "gc storage migrate --" + storageAbortReverseFlag + " --" + storageFleetStoppedFlag
+}
+
+// storageReverseRollbackAdvice is the rollback a refused hand revert of the
+// split names first: the reverse copies the binding's rows back before it
+// retires the split, so it loses nothing written since the cutover.
+func storageReverseRollbackAdvice() string {
+	return fmt.Sprintf("To roll back to the work store and keep every bead written to the binding since the cutover, put [storage] back as the split had it and run `%s`, which copies the binding's rows back before it retires the split (\"Reversing the split\" in docs/runbooks/split-storage-classes.md).", storageReverseInstruction(reverseToWork, nil))
 }
 
 // reverseRename is one record R4 moved aside.
@@ -412,7 +425,7 @@ func doStorageReverse(ctx context.Context, request storageOperatorRequest, opts 
 		defer openPreflightLaneWindow(request.CityPath, request.Cfg)()
 	}
 
-	run := reverseRun{request: request, opts: opts, target: target, journal: journal, logPrefix: logPrefix, stdout: stdout, stderr: stderr}
+	run := reverseRun{request: request, opts: opts, target: target, journal: journal, resumed: open, logPrefix: logPrefix, stdout: stdout, stderr: stderr}
 	if !open {
 		now := time.Now().UTC()
 		run.journal = storageReverseJournal{
@@ -473,10 +486,14 @@ func reverseRunID(now time.Time) string {
 
 // reverseRun is one reverse in progress.
 type reverseRun struct {
-	request   storageOperatorRequest
-	opts      reverseOptions
-	target    infraBindingTarget
-	journal   storageReverseJournal
+	request storageOperatorRequest
+	opts    reverseOptions
+	target  infraBindingTarget
+	journal storageReverseJournal
+	// resumed records that the run found the journal open: every other
+	// storage verb refuses the city until the reverse is finished or
+	// abandoned (storageReverseRefusal).
+	resumed   bool
 	planned   *reversePlan
 	logPrefix string
 	stdout    io.Writer
@@ -535,6 +552,57 @@ func reverseRigRoots(cityPath string, cfg *config.City) []string {
 		roots = append(roots, rigStoreRoot(cityPath, rig))
 	}
 	return roots
+}
+
+// reverseArchiveRefusals refuses a binding root R5 cannot archive. R5 renames
+// the root with everything under it, so it refuses a root that would take
+// with it:
+//
+//   - the city's own state or a rig: a root that is or holds the city's .gc
+//     (a path of ".gc" or ".", or any directory above the city) or a rig;
+//   - a store, or part of one: a root that is, holds or lies inside a
+//     directory a store keeps its files in, the city's .beads (bd's, and the
+//     managed Dolt server's data, .beads/dolt) and each rig's .beads and .gc.
+//
+// A root inside the city's .gc, such as the default .gc/store, takes nothing
+// else with it.
+func reverseArchiveRefusals(cityPath string, cfg *config.City, target infraBindingTarget) []rigImportRefusal {
+	var held []string
+	if gcDir := filepath.Join(cityPath, ".gc"); pathIsWithin(target.Root, gcDir) {
+		held = append(held, "the city's .gc ("+gcDir+")")
+	}
+	held = append(held, reverseStoreDirTaken(target.Root, filepath.Join(cityPath, ".beads"), "the city's store directory .beads")...)
+	for _, rig := range reverseRigs(cityPath, cfg) {
+		root := rigStoreRoot(cityPath, rig)
+		if pathIsWithin(target.Root, root) {
+			held = append(held, "rig "+rig.Name+" ("+root+")")
+			continue
+		}
+		for _, dir := range []string{".beads", ".gc"} {
+			held = append(held, reverseStoreDirTaken(target.Root, filepath.Join(root, dir), "rig "+rig.Name+"'s store directory "+dir)...)
+		}
+	}
+	if len(held) == 0 {
+		return nil
+	}
+	return []rigImportRefusal{{
+		IDs:    []string{"binding " + target.Binding + " at " + target.Root},
+		Reason: fmt.Sprintf("R5 archives the binding root whole, renaming it %s.reverted-<run>, and that would take %s with it", target.Root, strings.Join(held, " and ")),
+		Remedy: reverseKeepSplitRemedy,
+	}}
+}
+
+// reverseStoreDirTaken names what an archive of root would take of dir, the
+// directory named name where a store keeps its files: all of it when root is
+// or holds dir, part of it when root lies inside dir, and nothing otherwise.
+func reverseStoreDirTaken(root, dir, name string) []string {
+	switch {
+	case pathIsWithin(root, dir):
+		return []string{name + " (" + dir + ")"}
+	case pathIsWithin(dir, root):
+		return []string{"part of " + name + " (" + dir + ")"}
+	}
+	return nil
 }
 
 // reverseRigs are the configured rigs with a store of their own.
@@ -660,7 +728,13 @@ func (r *reverseRun) plan() (reversePlan, error) {
 		DerivesParent: map[string]bool{}, DropsRef: map[string]bool{},
 		Fresh: r.journal.Phase == reverseStarted && len(r.journal.Dests) == 0,
 	}
-	r.journal.BindingSHA256 = read.fingerprint()
+	// The fingerprint is of the binding the copies are made from. A resume
+	// from R2 plans again but copies nothing, so it keeps the fingerprint its
+	// copies were proven against, and the re-proofs compare the binding with
+	// that one.
+	if r.journal.Phase < reverseR2 {
+		r.journal.BindingSHA256 = read.fingerprint()
+	}
 	var refusals []rigImportRefusal
 	dests := []string{reverseCityDest}
 	for _, rig := range reverseRigs(cityPath, cfg) {
@@ -756,9 +830,21 @@ func (r *reverseRun) plan() (reversePlan, error) {
 		plan.Refusals = []rigImportRefusal{{IDs: []string{"the city work store"}, Reason: fmt.Sprintf("the city's clear of its retained copies has not finished (%s is pending), so the work store holds copies of rows the binding holds", infraClearedNotePath(cityPath)), Remedy: "finish it with `" + storageClearInstruction() + "`, then re-run"}}
 		return plan, nil
 	}
+	// The split's leftovers in the stores the reverse gives every class back
+	// come first, as the pending clear does: the plan's own refusal of a
+	// leftover under an id it writes (one held "as another bead") names the
+	// wrong fix.
+	leftovers, err := r.storeLeftovers(in, &plan)
+	if err != nil {
+		return reversePlan{}, err
+	}
+	if len(leftovers) > 0 {
+		plan.Refusals = leftovers
+		return plan, nil
+	}
 	for _, dest := range sortedMapKeys(plan.Rows) {
 		if t := targets[dest]; t != nil && t.unsupported != "" && len(plan.Rows[dest]) > 0 {
-			refusals = append(refusals, rigImportRefusal{IDs: []string{reverseDestNoun(dest)}, Reason: t.unsupported, Remedy: "nothing was written; keep the city split, or roll back by restoring the snapshot (the runbook's restore steps)"})
+			refusals = append(refusals, rigImportRefusal{IDs: []string{reverseDestNoun(dest)}, Reason: t.unsupported, Remedy: reverseKeepSplitRemedy})
 		}
 	}
 	if r.opts.Mode == reverseToWork && r.journal.CityTOMLBefore == nil {
@@ -773,11 +859,282 @@ func (r *reverseRun) plan() (reversePlan, error) {
 			refusals = append(refusals, rigImportRefusal{IDs: []string{"city.toml"}, Reason: err.Error(), Remedy: "remove [storage] by hand where it is declared, then re-run"})
 		}
 	}
+	if r.opts.Mode == reverseToWork {
+		refusals = append(refusals, reverseArchiveRefusals(cityPath, cfg, r.target)...)
+	}
 	if len(payloadKept) > 0 {
 		refusals = append(refusals, rigImportRefusal{IDs: payloadKept, Reason: "each edge carries a payload and is held onto a row the reverse writes, in a store that cannot write a payload: a resume or an abort that has to put it back would lose its payload", Remedy: "keep the city split, or remove the edge once it is no longer needed; nothing was written"})
 	}
 	plan.Refusals = append(refusals, plan.Refusals...)
 	return plan, nil
+}
+
+// storeLeftovers is the containment check of every store the reverse gives
+// every class back: the work store on a --to-work (workStoreLeftovers), and
+// each rig it returns (rigStoreLeftovers).
+func (r *reverseRun) storeLeftovers(in reverseInput, plan *reversePlan) ([]rigImportRefusal, error) {
+	var refusals []rigImportRefusal
+	if r.opts.Mode == reverseToWork {
+		city, err := r.workStoreLeftovers(in.Held[reverseCityDest], plan)
+		if err != nil {
+			return nil, err
+		}
+		refusals = city
+	}
+	return append(refusals, r.rigStoreLeftovers(in, plan)...), nil
+}
+
+// heldRemedy is remedy, a fix that runs another storage verb, as this run
+// names it: a resumed reverse that can still be abandoned holds every such
+// verb (storageReverseRefusal), so the abort comes first.
+func (r *reverseRun) heldRemedy(remedy string) string {
+	if !r.resumed || r.journal.ClearStarted {
+		return remedy
+	}
+	return fmt.Sprintf("a fix here that runs a `gc storage` command needs this reverse abandoned first (`%s`), as each refuses while it is open, and the reverse started again once the rows are settled; %s", storageAbortReverseInstruction(), remedy)
+}
+
+// reverseStrands sorts the stranded rows of one store the reverse gives
+// every class back, without this run's own, as the reverse settles them.
+// Refused, each labeled with its type and status: the ids under which the
+// binding holds a different bead (twice), and the open rows the store would
+// serve again (reviving). Left there as they are: the rest (left).
+type reverseStrands struct {
+	twice, reviving []string
+	left            reverseLeftovers
+}
+
+// add files the stranded row id: b as the plan read it (known is false when
+// it read none), twice when the binding holds a different bead under id, and
+// asWork the metadata keys alone that make it infrastructure, nil when they
+// do not.
+func (s *reverseStrands) add(id string, b beads.Bead, known, twice bool, asWork []string) {
+	label := id
+	if known {
+		label = fmt.Sprintf("%s (%s, %s)", id, b.Type, b.Status)
+	}
+	switch {
+	case twice:
+		s.twice = append(s.twice, label)
+	case asWork != nil:
+		if s.left.AsWork == nil {
+			s.left.AsWork = map[string][]string{}
+		}
+		s.left.AsWork[id] = asWork
+	case known && !rigRowOpen(b):
+		s.left.Closed = append(s.left.Closed, id)
+	default:
+		s.reviving = append(s.reviving, label)
+	}
+}
+
+// leave records in plan the rows the reverse leaves in dest.
+func (s reverseStrands) leave(plan *reversePlan, dest string) {
+	if len(s.left.AsWork) == 0 && len(s.left.Closed) == 0 {
+		return
+	}
+	if plan.Leftovers == nil {
+		plan.Leftovers = map[string]reverseLeftovers{}
+	}
+	plan.Leftovers[dest] = s.left
+}
+
+// workStoreLeftovers is a --to-work's containment check: boot's own
+// classification (classifyInfraContainmentGap) of the work store's
+// infrastructure rows against the forward copy's manifest, without the rows
+// this run wrote (they carry its stamp). Once the split is retired the work
+// store serves every class, so a row the binding does not serve is no longer
+// hidden from its class readers, as it is while a stranded city serves
+// degraded:
+//
+//   - an open stranded row would come back to life: an open message is
+//     delivered, an open session or wait runs again. It is refused and
+//     named, with the ways to settle it.
+//   - a stranded id the binding holds for a different bead would name two
+//     beads once the binding's row is copied back. It is refused with
+//     recover-stranded's per-id choices.
+//   - a retained copy of a row the binding owns sits under an id the plan
+//     writes. One refusal names the clear, as boot does, not one "held as
+//     another bead" per row, whose hand delete skips the clear's backup and
+//     edge detach.
+//   - a row that is infrastructure class only because of metadata, and a
+//     closed stranded row, stay in the work store as they are, where a
+//     single-store city keeps them. The plan reports them.
+//
+// workRows is the work store's rows by id, as the plan read them. A binding
+// that converged before its manifest was recorded cannot be checked, since
+// nothing tells a stranded row from one the binding's GC collected: the plan
+// says so and goes on, because the reverse is the one rollback that keeps
+// every row the binding holds.
+func (r *reverseRun) workStoreLeftovers(workRows map[string]beads.Bead, plan *reversePlan) ([]rigImportRefusal, error) {
+	manifest, recorded, err := readInfraCopyManifestRecord(r.target)
+	if err != nil {
+		return nil, err
+	}
+	if !recorded {
+		plan.StrandsUnchecked = true
+		return nil, nil
+	}
+	gap, err := classifyInfraContainmentGap(r.request.CityPath, r.target, manifest)
+	if err != nil {
+		return nil, err
+	}
+	ours := func(id string) bool {
+		return workRows[id].Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
+	}
+	heldDifferent := setOf(gap.HeldDifferent)
+	var strands reverseStrands
+	stranded := false
+	for _, id := range gap.Stranded {
+		if ours(id) {
+			continue
+		}
+		stranded = true
+		b, known := workRows[id]
+		strands.add(id, b, known, heldDifferent[id], gap.Declassifiable[id])
+	}
+	strands.leave(plan, reverseCityDest)
+	var refusals []rigImportRefusal
+	if len(strands.reviving) > 0 {
+		refusals = append(refusals, rigImportRefusal{
+			IDs:    strands.reviving,
+			Reason: "each is an open infrastructure row the work store holds that the binding does not serve (stranded): no class reader sees it while the city is split, and once the split is retired the work store serves it, so an open message would be delivered and an open session or wait would come back to life",
+			Remedy: r.heldRemedy(fmt.Sprintf("close each one that must not come back with `bd close <id>`, run from the city directory (a closed one stays in the work store as it is); purge stranded mail nobody will read instead (rehearse it with `%s --%s message --dry-run`); or carry them on (`%s` copies every stranded row into the binding as it is, `%s` clears their work-store copies, and the reverse brings them back); then re-run",
+				storageRecoveryCommand, strandedPurgeTypeFlag, storageRecoveryInstruction(), storageClearInstruction())),
+		})
+	}
+	if len(strands.twice) > 0 {
+		refusals = append(refusals, rigImportRefusal{
+			IDs:    strands.twice,
+			Reason: "the binding holds a different bead under each of these ids (the work store minted the id again after the copy carried the original), so copying the binding's row back would put two beads under one id",
+			Remedy: r.heldRemedy(fmt.Sprintf("decide per id with `%s` and --%s <id> (the work store's row replaces the binding's) or --%s <id> (the work store's row is removed and the binding's stays), each backing up the row it removes first, then re-run",
+				storageRecoveryInstruction(), strandedReplaceBindingRowFlag, strandedDropWorkRowFlag)),
+		})
+	}
+	var retained, unrecorded []string
+	for _, id := range gap.Retained {
+		if !ours(id) {
+			retained = append(retained, id)
+		}
+	}
+	for _, id := range gap.Unrecorded {
+		if !ours(id) {
+			unrecorded = append(unrecorded, id)
+		}
+	}
+	if len(retained) > 0 {
+		refusal := reverseRetainedRefusal(retained, unrecorded, stranded)
+		refusal.Remedy = r.heldRemedy(refusal.Remedy)
+		refusals = append(refusals, refusal)
+	}
+	return refusals, nil
+}
+
+// rigStoreLeftovers is the containment check of each rig the reverse gives
+// every class back (--to-work: every rig with a store of its own; --to-rigs:
+// the rigs it names): the census's own classification (classifyRigRows) of
+// the rig's rows against its import manifest, without the rows this run
+// wrote. Readers of graph, orders and sessions rows skip the store of a rig
+// proven relic-free (rigGraphRelicFree), so an infrastructure row a raw
+// writer put there after the rig's import, or its clean record, is hidden
+// from them, and the census calls the rig stranded. A --to-work makes the
+// rig's store serve every class, and a --to-rigs gives the rig its relic legs
+// back, so:
+//
+//   - an open stranded row would come back to life. It is refused and named,
+//     with the rig's ways to settle it.
+//   - a row of any class under an id the rig's import moved for a different
+//     bead would share the id with that bead once the reverse returns it. It
+//     is refused with the import's own fix for such a row.
+//   - a row that is infrastructure class only because of metadata, and a
+//     closed stranded row, stay in the rig as they are. The plan reports
+//     them.
+//
+// A rig that is not relic-free hides nothing: its relic legs serve it.
+func (r *reverseRun) rigStoreLeftovers(in reverseInput, plan *reversePlan) []rigImportRefusal {
+	rigs := r.journal.Rigs
+	if r.opts.Mode == reverseToWork {
+		rigs = sortedMapKeys(in.Configured)
+	}
+	routes := &storageRoutes{rigMarkers: &rigGraphMarkers{bindingRoot: r.target.Root, cityPath: r.request.CityPath, rigs: reverseRigs(r.request.CityPath, r.request.Cfg)}}
+	var refusals []rigImportRefusal
+	for _, rig := range rigs {
+		if !routes.rigGraphRelicFree(rig) {
+			continue
+		}
+		dest := rigImportStamp(rig)
+		held := in.Held[dest]
+		classes := classifyRigRows(slices.Collect(maps.Values(held)), in.Manifests[rig])
+		ours := func(id string) bool {
+			return held[id].Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
+		}
+		twice := map[string]bool{}
+		var strands reverseStrands
+		for _, id := range classes.Reused {
+			if !ours(id) && plan.BindingIDs[id] {
+				twice[id] = true
+				strands.add(id, held[id], true, true, nil)
+			}
+		}
+		for _, id := range classes.Stranded {
+			if ours(id) || twice[id] {
+				continue
+			}
+			asWork, _ := coordclass.ClassMetadataOnly(held[id])
+			strands.add(id, held[id], true, false, asWork)
+		}
+		strands.leave(plan, dest)
+		refusals = append(refusals, r.rigStrandRefusals(rig, strands)...)
+	}
+	return refusals
+}
+
+// rigStrandRefusals are the refusals of the stranded rows rig's store holds
+// (rigStoreLeftovers).
+func (r *reverseRun) rigStrandRefusals(rig string, strands reverseStrands) []rigImportRefusal {
+	var refusals []rigImportRefusal
+	if len(strands.reviving) > 0 {
+		served := "once the split is retired its store serves every class"
+		if r.opts.Mode == reverseToRigs {
+			served = "once its import is returned its relic legs serve it again"
+		}
+		configured, _ := rigImportRigNamed(r.request.Cfg, rig)
+		refusals = append(refusals, rigImportRefusal{
+			IDs:    strands.reviving,
+			Reason: fmt.Sprintf("each is an open infrastructure row rig %s holds that its import never carried (stranded): no class reader sees it while the rig is relic-free, and %s, so an open message would be delivered and an open session or wait would come back to life", rig, served),
+			Remedy: r.heldRemedy(fmt.Sprintf("close each one that must not come back with `bd close <id>`, run from the rig's directory %s (a closed one stays in the rig as it is); or carry them on (`%s` copies them into the binding, and the reverse brings them back with the rig's other rows); then re-run",
+				rigStoreRoot(r.request.CityPath, configured), rigImportInstruction(rig))),
+		})
+	}
+	if len(strands.twice) > 0 {
+		refusals = append(refusals, rigImportRefusal{
+			IDs:    strands.twice,
+			Reason: fmt.Sprintf("rig %s minted each of these ids again after its import moved the bead that first held it, and the reverse returns that bead under its id, so the two would share one id", rig),
+			Remedy: rigReusedIDRemedy,
+		})
+	}
+	return refusals
+}
+
+// reverseRetainedRefusal is the one refusal of the work store's retained
+// copies. It names the clear, boot's remedy (infraMigrationOperatorAdvice),
+// with recover-stranded first for the copies the manifest does not record,
+// which the clear refuses. stranded is whether the work store also holds a
+// stranded row, which the clear refuses while it is there.
+func reverseRetainedRefusal(retained, unrecorded []string, stranded bool) rigImportRefusal {
+	remedy := fmt.Sprintf("clear them with `%s`, which backs up and proves each before it removes it, then re-run", storageClearInstruction())
+	if len(unrecorded) > 0 {
+		remedy = fmt.Sprintf("the copy manifest does not record %d of them (%s), and the clear removes only what it records: record them with `%s`, then clear them all with `%s`, which backs up and proves each before it removes it, then re-run",
+			len(unrecorded), infraStrandedIDList(unrecorded), storageRecoveryInstruction(), storageClearInstruction())
+	}
+	if stranded {
+		remedy = fmt.Sprintf("the clear refuses while the work store holds a stranded row, so settle those first (`%s` names each with its repair); then %s", storageStatusInstruction(), remedy)
+	}
+	return rigImportRefusal{
+		IDs:    []string{reverseDestNoun(reverseCityDest)},
+		Reason: fmt.Sprintf("it still holds %d retained pre-migration cop(ies) of rows the binding owns (%s), under the ids the reverse writes the binding's rows back to", len(retained), infraStrandedIDList(retained)),
+		Remedy: remedy,
+	}
 }
 
 // report prints what the plan moves.
@@ -795,10 +1152,35 @@ func (r *reverseRun) report(plan reversePlan) {
 		fmt.Fprintf(r.stdout, "%s: %d workflow root(s) carry their formula's name as a ref, which their store does not hold; it is not carried\n", r.logPrefix, plan.RefsDropped) //nolint:errcheck // best-effort stdout
 	}
 	if plan.Gates > 0 {
-		fmt.Fprintf(r.stdout, "%s: %d closed cross-store gate(s) not carried (each owner's record restores the edge it stood for)\n", r.logPrefix, plan.Gates) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(r.stdout, "%s: %d closed cross-store gate(s) not carried (each row that waited on one gets the edge it stood for, row -> blocker, where the two land in one store; where an operator closed the gate and that edge would hold an open row again, the reverse refuses)\n", r.logPrefix, plan.Gates) //nolint:errcheck // best-effort stdout
 	}
 	for _, d := range plan.Dropped {
 		fmt.Fprintf(r.stdout, "%s: edge not carried: %s\n", r.logPrefix, d) //nolint:errcheck // best-effort stdout
+	}
+	r.reportLeftovers(plan)
+}
+
+// reportLeftovers prints the rows the binding does not serve that the reverse
+// leaves as they are in the stores it gives every class back
+// (storeLeftovers), and a check that could not run.
+func (r *reverseRun) reportLeftovers(plan reversePlan) {
+	for _, dest := range sortedMapKeys(plan.Leftovers) {
+		left, where := plan.Leftovers[dest], reverseDestNoun(dest)
+		if len(left.AsWork) > 0 {
+			keys := map[string]bool{}
+			for _, ks := range left.AsWork {
+				for _, k := range ks {
+					keys[k] = true
+				}
+			}
+			fmt.Fprintf(r.stdout, "%s: %d row(s) %s holds that the binding does not serve are infrastructure class only because of metadata (%s); they stay there as the work they are: %s\n", r.logPrefix, len(left.AsWork), where, strings.Join(sortedSetKeys(keys), ", "), infraStrandedIDList(sortedMapKeys(left.AsWork))) //nolint:errcheck // best-effort stdout
+		}
+		if len(left.Closed) > 0 {
+			fmt.Fprintf(r.stdout, "%s: %d closed row(s) %s holds that the binding does not serve (stranded) stay there as they are: %s\n", r.logPrefix, len(left.Closed), where, infraStrandedIDList(left.Closed)) //nolint:errcheck // best-effort stdout
+		}
+	}
+	if plan.StrandsUnchecked {
+		fmt.Fprintf(r.stdout, "%s: %s converged before %s was recorded, so a row %s holds that the binding does not serve (a stranded write) cannot be told from one the binding collected, and none is checked: once the split is retired, every row there is served\n", r.logPrefix, r.target.Database, r.target.ManifestPath(), reverseDestNoun(reverseCityDest)) //nolint:errcheck // best-effort stdout
 	}
 }
 
@@ -1026,11 +1408,9 @@ func (r *reverseRun) writeManifests() error {
 		}
 		byManifest[name] = append(byManifest[name], rows...)
 	}
-	if r.opts.Mode == reverseToRigs {
-		for _, rig := range r.journal.Rigs {
-			if name := infraReversedRigManifestName(rig); byManifest[name] == nil {
-				byManifest[name] = []beads.Bead{}
-			}
+	for _, name := range r.manifestNames() {
+		if byManifest[name] == nil {
+			byManifest[name] = []beads.Bead{}
 		}
 	}
 	now := time.Now().UTC()
@@ -1060,23 +1440,35 @@ func (r *reverseRun) writeManifests() error {
 }
 
 // clearRigRowsFromBinding is a to-rigs R4: with the rows proven in the rig,
-// the binding's copies go, and with them the closed gates the rig's import
-// minted, each edge to a row the binding keeps first; then the rig's import
+// the binding's copies go, and with them the closed gates that go with them
+// (planReverse): those the rig's import minted, and those the runtime minted
+// for a row the reverse returned (by owner, as they carry no import stamp),
+// but not one a row the binding keeps still waits on, which stays with it;
+// each edge to a row the binding keeps goes first. Then the rig's import
 // records are renamed so it reads as awaiting import. Every binding row
 // stamped as the rig's import must be one the reverse manifest records or a
-// closed gate, or nothing is removed.
+// closed gate, and every gate a returned row owns must be closed, or nothing
+// is removed.
 func (r *reverseRun) clearRigRowsFromBinding() error {
 	binding, err := openInfraDestination(r.target)
 	if err != nil {
 		return err
 	}
 	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
+	next := fmt.Sprintf("Abandon the reverse with `%s` and start again", storageAbortReverseInstruction())
+	if r.journal.ClearStarted {
+		next = fmt.Sprintf("The clear has begun, so the reverse cannot be abandoned: return the row to the rig by hand, or restore from snapshot %s in %s", r.journal.Snapshot, r.journal.SnapshotTo)
+	}
 	var going []string
 	gates := map[string]bool{}
+	returned := map[string]string{} // each row the reverse returned, to its rig
 	for _, rig := range r.journal.Rigs {
 		m, _, err := readInfraCopyManifestRecordAt(filepath.Join(r.target.Root, infraReversedRigManifestName(rig)), "")
 		if err != nil {
 			return err
+		}
+		for id := range m.IDs {
+			returned[id] = rig
 		}
 		stamped, err := binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rig)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 		if err != nil {
@@ -1084,10 +1476,6 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 		}
 		for _, b := range stamped {
 			if !m.IDs[b.ID] && (!isCrossStoreGate(b) || rigRowOpen(b)) {
-				next := fmt.Sprintf("Abandon the reverse with `%s` and start again", storageAbortReverseInstruction())
-				if r.journal.ClearStarted {
-					next = fmt.Sprintf("The clear has begun, so the reverse cannot be abandoned: return the row to the rig by hand, or restore from snapshot %s in %s", r.journal.Snapshot, r.journal.SnapshotTo)
-				}
 				return fmt.Errorf("the binding holds %s, stamped as an import of rig %s, which this reverse did not return to the rig; nothing was removed. %s", b.ID, rig, next)
 			}
 			going = append(going, b.ID)
@@ -1108,6 +1496,19 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 			return readInfraPayloads(batch, single, edges, func(beads.Dep) bool { return true })
 		},
 	}
+	owned, err := returnedRowGates(t, returned, gates, next)
+	if err != nil {
+		return err
+	}
+	for _, id := range owned {
+		going = append(going, id)
+		gates[id] = true
+	}
+	waited, err := reverseWaitedGates(t, setOf(going), gates)
+	if err != nil {
+		return err
+	}
+	going = slices.DeleteFunc(going, func(id string) bool { return waited[id] })
 	if !r.journal.ClearStarted {
 		edges, err := r.clearEdges(t, setOf(going), gates)
 		if err != nil {
@@ -1144,13 +1545,67 @@ func (r *reverseRun) clearRigRowsFromBinding() error {
 	return infraEngineCrashPoint("reverse R4 renamed")
 }
 
+// returnedRowGates is each cross-store gate the binding (t) holds whose owner
+// the reverse returned (returned: each row, to its rig) and that gates does
+// not already name: one the runtime minted for that row, with no import
+// stamp. Each must be closed: an open one refuses the clear, naming next.
+func returnedRowGates(t *reverseTarget, returned map[string]string, gates map[string]bool, next string) ([]string, error) {
+	minted, err := t.rows.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, b := range minted {
+		owner := b.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey]
+		rig, owned := returned[owner]
+		switch {
+		case !owned || gates[b.ID]:
+		case rigRowOpen(b):
+			return nil, fmt.Errorf("the binding holds %s, an open cross-store gate for %s, which this reverse returned to rig %s; nothing was removed. %s", b.ID, owner, rig, next)
+		default:
+			out = append(out, b.ID)
+		}
+	}
+	return out, nil
+}
+
+// reverseWaitedGates is each of gates, the closed gates the clear judges,
+// that a row the binding keeps (one going does not name) still waits on: it
+// stays in the binding with that row, as planReverse plans it.
+func reverseWaitedGates(t *reverseTarget, going, gates map[string]bool) (map[string]bool, error) {
+	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", reverseDestNoun(t.dest), err)
+	}
+	var kept []string
+	for _, b := range all {
+		if !going[b.ID] {
+			kept = append(kept, b.ID)
+		}
+	}
+	down, err := t.down(kept)
+	if err != nil {
+		return nil, err
+	}
+	waited := map[string]bool{}
+	for _, deps := range down {
+		for _, d := range deps {
+			if gates[d.DependsOnID] {
+				waited[d.DependsOnID] = true
+			}
+		}
+	}
+	return waited, nil
+}
+
 // reverseClearBinding keys the binding's edges in ClearEdges.
 const reverseClearBinding = "binding"
 
 // clearEdges reads every edge that touches one of going, in the binding (t)
 // and in each rig the reverse returns rows to. An edge onto one of the closed
-// gates the clear removes is left out: the gate is not carried, and the edge
-// it stood for (owner -> blocker) is the plan's to restore.
+// gates the clear judges, one it removes or one it keeps for a row the
+// binding keeps, is left out: the gate is not carried, and the edge it stood
+// for (row -> blocker) is the plan's to restore.
 func (r *reverseRun) clearEdges(binding *reverseTarget, going, gates map[string]bool) (map[string][]reverseEdge, error) {
 	out := map[string][]reverseEdge{}
 	edges, err := reverseEdgesTouching(binding, going)
@@ -1415,19 +1870,26 @@ func (r *reverseRun) recopyRows(dest string, rows []beads.Bead, edges []beads.De
 	return nil
 }
 
+// manifestNames are the reverse manifests R3 writes, each one even when the
+// plan returns no row to it, and missingReturned reads back: one per rig for
+// --to-rigs, the city's for --to-work.
+func (r *reverseRun) manifestNames() []string {
+	if r.opts.Mode != reverseToRigs {
+		return []string{infraReversedManifestName}
+	}
+	names := make([]string, 0, len(r.journal.Rigs))
+	for _, rig := range r.journal.Rigs {
+		names = append(names, infraReversedRigManifestName(rig))
+	}
+	return names
+}
+
 // missingReturned is each row the reverse manifests record that no store the
 // journal names holds under this run's stamp.
 func (r *reverseRun) missingReturned() ([]string, error) {
-	var manifests []string
-	if r.opts.Mode == reverseToRigs {
-		for _, rig := range r.journal.Rigs {
-			manifests = append(manifests, filepath.Join(r.target.Root, infraReversedRigManifestName(rig)))
-		}
-	} else {
-		manifests = append(manifests, filepath.Join(r.target.Root, infraReversedManifestName))
-	}
 	want := map[string]bool{}
-	for _, path := range manifests {
+	for _, name := range r.manifestNames() {
+		path := filepath.Join(r.target.Root, name)
 		m, recorded, err := readInfraCopyManifestRecordAt(path, "")
 		if err != nil {
 			return nil, err

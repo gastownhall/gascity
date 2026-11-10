@@ -163,15 +163,16 @@ func bindingRowAsBefore(t *testing.T, city reverseEngineCity, id string) beads.B
 }
 
 // TestReverseReprovesTheBindingBeforeItChanges (SHOULD 9): a binding that
-// changes after its rows were copied, before the reverse manifest (R3) or
-// before the archive (R5), puts the reverse back to R0, and the next run
-// copies the change.
+// changes after its rows were copied, before the reverse manifest (R3), in
+// the same run or before a resume that plans again, or before the archive
+// (R5), puts the reverse back to R0, and the next run copies the change.
 func TestReverseReprovesTheBindingBeforeItChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name, after string
 		kill        bool
 	}{
 		{"before R3", "reverse phase " + reversePhaseName(reverseR2), false},
+		{"before R3, on a resume", "reverse phase " + reversePhaseName(reverseR2), true},
 		{"before R5, on a resume", "reverse phase " + reversePhaseName(reverseR4), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

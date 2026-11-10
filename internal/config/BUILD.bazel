@@ -158,6 +158,7 @@ go_test(
         "patch_test.go",
         "pricing_registry_test.go",
         "pricing_test.go",
+        "program_status_decide_test.go",
         "program_status_test.go",
         "progress_stall_test.go",
         "provenance_test.go",

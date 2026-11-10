@@ -62,6 +62,20 @@ func (f *Fake) SetProgramHold(name string, hold bool) {
 	f.ProgramPanes[name] = row
 }
 
+// SetProgramSettle marks session name's agent-pane row as declaring the
+// record-driven interrupt settle, or not ([ProgramPaneRow.SettleDeclared]),
+// under the fake's lock.
+func (f *Fake) SetProgramSettle(name string, settle bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ProgramPanes == nil {
+		f.ProgramPanes = map[string]ProgramPaneRow{}
+	}
+	row := f.ProgramPanes[name]
+	row.SettleDeclared = settle
+	f.ProgramPanes[name] = row
+}
+
 // SetProgramCachedPane sets the row a FullFake's ProgramStatus judges for
 // session name in place of its fresh row ([Fake.ProgramCachedPanes]), under
 // the fake's lock.
@@ -183,14 +197,15 @@ func (f *Fake) programHoldReadLocked(name string) (ProgramHoldReading, bool) {
 //     is open and its tap's liveness is unknown, it is deferred with its
 //     nonce kept, since the pipe may be its live tap's;
 //   - an armed pane whose pipe is open and tap not gone is unchanged, but
-//     for a hold declaration that differs from want's, which is set or
-//     withdrawn (declared);
+//     for a hold or settle declaration that differs from want's, which is
+//     set or withdrawn (declared);
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
 //   - otherwise the pane is armed under a new nonce naming it, with nothing
-//     published yet, declaring the hold exactly when want does.
+//     published yet, declaring the hold and the settle exactly when want
+//     does.
 //
-// A disarmed pane declares no hold.
+// A disarmed pane declares neither.
 func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (ProgramCaptureAction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -216,8 +231,9 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 		row.Tap, row.TapLiveness = "", ProgramTapUnknown
 		row.RecordForm, row.Record = ProgramRecordAbsent, ProgramStatus{}
 		action = ProgramCaptureDisarmed
-	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone && row.HoldDeclared != want.HoldMidTurn:
-		row.HoldDeclared = want.HoldMidTurn
+	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone &&
+		(row.HoldDeclared != want.HoldMidTurn || row.SettleDeclared != want.DecideSettle):
+		row.HoldDeclared, row.SettleDeclared = want.HoldMidTurn, want.DecideSettle
 		action = ProgramCaptureDeclared
 	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone:
 		action = ProgramCaptureUnchanged
@@ -231,10 +247,10 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 	}
 	switch action {
 	case ProgramCaptureArmed:
-		row.HoldDeclared = want.HoldMidTurn
+		row.HoldDeclared, row.SettleDeclared = want.HoldMidTurn, want.DecideSettle
 		f.ProgramPanes[name] = row
 	case ProgramCaptureDisarmed:
-		row.HoldDeclared = false
+		row.HoldDeclared, row.SettleDeclared = false, false
 		f.ProgramPanes[name] = row
 	case ProgramCaptureDeclared:
 		f.ProgramPanes[name] = row

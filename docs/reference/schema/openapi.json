@@ -14291,6 +14291,19 @@
           "database": {
             "type": "string"
           },
+          "held_different": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "held_different_count": {
+            "format": "int64",
+            "type": "integer"
+          },
           "invariant": {
             "type": "string"
           },
@@ -14306,7 +14319,52 @@
           "outcome": {
             "type": "string"
           },
+          "presumed_reused": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "presumed_reused_count": {
+            "format": "int64",
+            "type": "integer"
+          },
           "proven_beads": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "recheck": {
+            "type": "boolean"
+          },
+          "retained": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "retained_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "serving": {
+            "type": "boolean"
+          },
+          "stranded": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "stranded_count": {
             "format": "int64",
             "type": "integer"
           }
@@ -14979,6 +15037,7 @@
             "storage.binding.converged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingGenesis",
             "storage.binding.not_configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
+            "storage.binding.stranded": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingStranded",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
             "storage.rig_import": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport",
@@ -15328,6 +15387,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingStranded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable"
@@ -17154,6 +17216,7 @@
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
                 "storage.binding.not_configured",
+                "storage.binding.stranded",
                 "storage.rig_import",
                 "storage.rig_residue"
               ]
@@ -21791,6 +21854,63 @@
         "title": "TypedEventStreamEnvelope storage.binding.not_configured",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStorageBindingStranded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageBindingOutcomePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.binding.stranded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.binding.stranded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeStorageBindingUncheckable": {
         "additionalProperties": false,
         "properties": {
@@ -22987,6 +23107,7 @@
             "storage.binding.converged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingGenesis",
             "storage.binding.not_configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
+            "storage.binding.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingStranded",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
             "storage.rig_import": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport",
@@ -23336,6 +23457,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingStranded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable"
@@ -25277,6 +25401,7 @@
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
                 "storage.binding.not_configured",
+                "storage.binding.stranded",
                 "storage.rig_import",
                 "storage.rig_residue"
               ]
@@ -30237,6 +30362,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.binding.not_configured",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageBindingStranded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageBindingOutcomePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.binding.stranded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.binding.stranded",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeStorageBindingUncheckable": {
@@ -56958,7 +57144,7 @@
     },
     "/v0/city/{cityName}/session/{id}/wake": {
       "post": {
-        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. 409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. `gc session wake` applies the same rules.",
+        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, or a startup-health quarantine); the detail names the remedy. A session its idle sleep policy holds asleep is not refused: the controller starts it on the recorded wake. 409 session-conflict refuses a session in a state the controller skips before anything is written; the detail names the raw state and `gc session close`, the command that releases the row. `gc session wake` applies the same rules.",
         "operationId": "post-v0-city-by-city-name-session-by-id-wake",
         "parameters": [
           {

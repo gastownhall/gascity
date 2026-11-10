@@ -43,8 +43,8 @@ func TestTmuxProgramStatusContract(t *testing.T) {
 		Held: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
 			return start(t, mode, runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}, script).session()
 		},
-		Nudged: func(t *testing.T, mode runtime.ProgramStatusMode, nudge string, script ...string) runtimetest.ProgramStatusSession {
-			return startNudgedProgramSession(t, companion, emitter, mode, nudge, script).session()
+		Nudged: func(t *testing.T, mode runtime.ProgramStatusMode, decide bool, nudge string, script ...string) runtimetest.ProgramStatusSession {
+			return startNudgedProgramSession(t, companion, emitter, mode, decide, nudge, script).session()
 		},
 		Inherited: func(t *testing.T, mode runtime.ProgramStatusMode) runtimetest.ProgramStatusSession {
 			s := start(t, mode, runtime.ProgramStatusArm{}, nil)
@@ -107,11 +107,12 @@ const nudgedReadyDelayMs = 2000
 const nudgedFamily = "testfam"
 
 // startNudgedProgramSession starts an armed emitter running script under
-// mode, with startup nudge nudge, and returns once the start (its startup
+// mode, with startup nudge nudge, its arm opting the startup ladder into the
+// record when decide is true, and returns once the start (its startup
 // ladder included, on shortened backoffs) has returned and the capture has
 // published at least what script wrote. A nudge the start typed runs as the
 // program's next step.
-func startNudgedProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, nudge string, script []string) *programSession {
+func startNudgedProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, decide bool, nudge string, script []string) *programSession {
 	t.Helper()
 	backoffs := startupNudgeRetryBackoffs
 	startupNudgeRetryBackoffs = []time.Duration{100 * time.Millisecond, 100 * time.Millisecond}
@@ -125,7 +126,7 @@ func startNudgedProgramSession(t *testing.T, companion, emitter string, mode run
 	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
 	s := &programSession{p: p, name: "gc-ps-nudged", emitter: emitter}
 	s.cfg = runtime.Config{
-		Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: runtime.ProgramStatusArm{Capture: true, DecideStartup: decide},
 		Nudge: nudge, ReadyDelayMs: nudgedReadyDelayMs, Env: map[string]string{"GC_PROVIDER": nudgedFamily},
 	}
 	if err := p.Start(context.Background(), s.name, s.cfg); err != nil {

@@ -6,7 +6,7 @@ version = 1
 [[count]]
 path = ".github/workflows/ci.yml"
 resource = "test_target"
-calls = 2
+calls = 6
 
 [[count]]
 path = ".github/workflows/fork-verify.yml"
@@ -2372,6 +2372,12 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/runtime/exec/main_test.go"
+resource = "tmux"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/runtime/fake_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2488,8 +2494,18 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/rppcheck/rppcheck_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimecapability/runner_test.go"
 resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimecontract/runner_test.go"
+resource = "subprocess"
 calls = 1
 
 [[count]]
@@ -2982,7 +2998,8 @@ calls = 1
 [[count]]
 path = "scripts/makefile_install_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
+medium = 1
 
 [[count]]
 path = "scripts/precommit_contract_test.go"
@@ -3180,7 +3197,7 @@ tagged = true
 [[count]]
 path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
 resource = "subprocess"
-calls = 6
+calls = 7
 tagged = true
 
 [[count]]
@@ -3654,6 +3671,11 @@ calls = 1
 
 [[count]]
 path = "test/workflows/needs_lifecycle_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "test/workflows/nightly_aggregate_test.go"
 resource = "subprocess"
 calls = 1
 

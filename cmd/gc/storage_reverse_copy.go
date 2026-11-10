@@ -286,7 +286,8 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 }
 
 // reverseAddEdges adds each edge t does not hold as planned, replacing one
-// held with another type or wanting a payload.
+// held with another type, one wanting a payload, and one holding a payload
+// the plan does not carry.
 func reverseAddEdges(t *reverseTarget, edges []beads.DepWithPayload, clock infraEngineClock, phase string) error {
 	sources := map[string]bool{}
 	for _, e := range edges {
@@ -295,6 +296,12 @@ func reverseAddEdges(t *reverseTarget, edges []beads.DepWithPayload, clock infra
 	present, err := t.down(sortedMapKeys(sources))
 	if err != nil {
 		return err
+	}
+	var heldPayloads map[beads.DepPair]string
+	if t.payloads != nil {
+		if heldPayloads, err = t.payloads(present); err != nil {
+			return err
+		}
 	}
 	var add []beads.DepWithPayload
 	for _, e := range edges {
@@ -305,7 +312,7 @@ func reverseAddEdges(t *reverseTarget, edges []beads.DepWithPayload, clock infra
 			}
 		}
 		switch {
-		case have == e.Type && e.Payload == "":
+		case have == e.Type && e.Payload == "" && heldPayloads[beads.DepPair{IssueID: e.IssueID, DependsOnID: e.DependsOnID}] == "":
 			continue
 		case have != "":
 			if err := t.rows.DepRemove(e.IssueID, e.DependsOnID); err != nil {

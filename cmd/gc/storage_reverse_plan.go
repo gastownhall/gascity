@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -75,14 +76,15 @@ type reversePlan struct {
 	// edges restored.
 	Edges map[string][]beads.DepWithPayload
 	// Leaving are the binding rows a to-rigs reverse removes from the
-	// binding once their copies are proven: the moved rows and their rig's
-	// closed gates.
+	// binding once their copies are proven: the moved rows and the closed
+	// gates no row the binding keeps waits on (reverseClosedGates).
 	Leaving []string
 	// Restored counts the recorded cross edges restored.
 	Restored int
 	// Dropped names each edge not carried, with why.
 	Dropped []string
-	// Gates counts the closed cross-store gates not carried.
+	// Gates counts the closed cross-store gates not carried that go with the
+	// reverse: on a to-rigs, those that leave the binding.
 	Gates int
 	// RefsKept counts the rows whose step ref a destination does not store,
 	// kept in gc.step_ref.
@@ -93,7 +95,24 @@ type reversePlan struct {
 	// BindingIDs is every id the binding held when the plan was read: a
 	// prepare never deletes a stamped row whose binding copy is gone.
 	BindingIDs map[string]bool
-	Refusals   []rigImportRefusal
+	// Leftovers are, by destination, the stranded rows the store holds that
+	// the reverse leaves where they are (reverseRun.storeLeftovers).
+	Leftovers map[string]reverseLeftovers
+	// StrandsUnchecked records that the binding converged before its copy
+	// manifest was recorded, so a --to-work could not check the work store
+	// for rows the binding does not serve.
+	StrandsUnchecked bool
+	Refusals         []rigImportRefusal
+}
+
+// reverseLeftovers are the stranded rows of one store that a reverse leaves
+// there as they are, where a store that serves every class keeps them.
+type reverseLeftovers struct {
+	// AsWork maps each row that is infrastructure class only because of
+	// metadata to those keys.
+	AsWork map[string][]string
+	// Closed are the closed ones.
+	Closed []string
 }
 
 // reverseRow returns b as a reverse writes it: the forward stamp, the record
@@ -121,16 +140,29 @@ func isCrossStoreGate(b beads.Bead) bool {
 	return hasLabel(b.Labels, dispatch.CrossStoreGateLabel)
 }
 
+// reverseReturns reports whether a to-rigs reverse returns b: a row stamped
+// as the import of a rig it names.
+func reverseReturns(in reverseInput, b beads.Bead) bool {
+	rig, imported := strings.CutPrefix(b.Metadata[infraMigrationStampKey], rigImportStamp(""))
+	return imported && rig != "" && in.Rigs[rig]
+}
+
 // reverseRoute says where one binding row goes: dest ("" when it stays),
 // skip when it is a closed gate the reverse does not carry, or a refusal.
-func reverseRoute(in reverseInput, b beads.Bead) (dest string, skip bool, refusal string) {
+// byID is every binding row by id. A to-rigs reverse moves the rows it
+// returns, and judges a cross-store gate with its owner: a gate the runtime
+// minted for an imported row carries no import stamp
+// (dispatch.NewCrossStoreGate). A closed one leaves the binding only once no
+// row it keeps waits on it (reverseClosedGates).
+func reverseRoute(in reverseInput, byID map[string]beads.Bead, b beads.Bead) (dest string, skip bool, refusal string) {
 	stamp := b.Metadata[infraMigrationStampKey]
 	rig, imported := strings.CutPrefix(stamp, rigImportStamp(""))
 	imported = imported && rig != ""
-	if in.Mode == reverseToRigs && (!imported || !in.Rigs[rig]) {
+	gate := isCrossStoreGate(b)
+	if in.Mode == reverseToRigs && !reverseReturns(in, b) && (!gate || !reverseReturns(in, byID[b.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey]])) {
 		return "", false, ""
 	}
-	if isCrossStoreGate(b) {
+	if gate {
 		if rigRowOpen(b) {
 			return "", false, "open-gate"
 		}
@@ -164,7 +196,7 @@ func planReverse(in reverseInput) reversePlan {
 		byID[b.ID] = b
 	}
 	for _, b := range sortedBeads(in.Binding) {
-		dest, skip, refusal := reverseRoute(in, b)
+		dest, skip, refusal := reverseRoute(in, byID, b)
 		if refusal != "" {
 			refused[b.ID] = true
 		}
@@ -177,10 +209,6 @@ func planReverse(in reverseInput) reversePlan {
 			continue
 		case skip:
 			closedGate[b.ID] = true
-			plan.Gates++
-			if in.Mode == reverseToRigs {
-				leaving[b.ID] = true
-			}
 			continue
 		case dest == "":
 			continue
@@ -220,6 +248,13 @@ func planReverse(in reverseInput) reversePlan {
 			leaving[b.ID] = true
 		}
 	}
+	waits, gone := reverseClosedGates(in, closedGate, refused, destOf)
+	plan.Gates = len(gone)
+	if in.Mode == reverseToRigs {
+		for _, id := range gone {
+			leaving[id] = true
+		}
+	}
 	plan.Leaving = sortedMapKeys(leaving)
 	if in.Fresh {
 		for _, dest := range sortedMapKeys(in.Held) {
@@ -254,28 +289,28 @@ func planReverse(in reverseInput) reversePlan {
 		recordsFor[on] = append(recordsFor[on], r)
 	}
 
-	// whereIs is where an id lives once the reverse is done, and whether it
-	// is known open: a moved row, a row the binding keeps, or a row a
-	// destination already holds, prefer's first.
-	whereIs := func(id, prefer string) (string, bool, bool) {
+	// whereIs is where an id lives once the reverse is done, and its row
+	// there: a moved row, a row the binding keeps, or a row a destination
+	// already holds, prefer's first.
+	whereIs := func(id, prefer string) (string, beads.Bead, bool) {
 		if dest, ok := destOf[id]; ok {
-			return dest, rigRowOpen(byID[id]), true
+			return dest, byID[id], true
 		}
 		if b, ok := byID[id]; ok {
 			if closedGate[id] {
-				return "", false, false
+				return "", beads.Bead{}, false
 			}
-			return "binding", rigRowOpen(b), true
+			return "binding", b, true
 		}
 		if b, ok := in.Held[prefer][id]; ok {
-			return prefer, rigRowOpen(b), true
+			return prefer, b, true
 		}
 		for _, dest := range sortedMapKeys(in.Held) {
 			if b, ok := in.Held[dest][id]; ok {
-				return dest, rigRowOpen(b), true
+				return dest, b, true
 			}
 		}
-		return "", false, false
+		return "", beads.Bead{}, false
 	}
 	type edgeKey struct{ from, to string }
 	added := map[string]map[edgeKey]bool{}
@@ -323,8 +358,8 @@ func planReverse(in reverseInput) reversePlan {
 				continue
 			}
 			if closedGate[to] {
-				// The gate is not carried; its record on its owner restores
-				// the edge it stood for (below).
+				// The gate is not carried; the edge it stood for, from this
+				// row onto the gate's blocker, is judged below.
 				continue
 			}
 			payload := in.Payloads[beads.DepPair{IssueID: id, DependsOnID: to}]
@@ -334,7 +369,7 @@ func planReverse(in reverseInput) reversePlan {
 				}
 				continue
 			}
-			toDest, toOpen, known := whereIs(to, fromDest)
+			toDest, toRow, known := whereIs(to, fromDest)
 			_, toMoving := destOf[to]
 			switch {
 			case !moving && !toMoving:
@@ -347,16 +382,22 @@ func planReverse(in reverseInput) reversePlan {
 			case moving && toDest == fromDest:
 				addEdge(fromDest, d, payload)
 			case moving:
-				judge(d, payload, fromDest, toDest, rigRowOpen(from), toOpen, "it would cross stores, and one side is closed")
+				judge(d, payload, fromDest, toDest, rigRowOpen(from), rigRowOpen(toRow), "it would cross stores, and one side is closed")
 			default:
 				// A row the binding keeps onto one that leaves (to-rigs).
-				judge(d, payload, "binding", toDest, rigRowOpen(from), toOpen, "it would cross stores, and one side is closed")
+				judge(d, payload, "binding", toDest, rigRowOpen(from), rigRowOpen(toRow), "it would cross stores, and one side is closed")
 			}
 		}
 	}
 
+	// overrides are the edges a closed gate stood for whose restore would
+	// undo an operator's close of the gate (reverseUndoesOverride): refused.
+	overrides := reverseOverrides{}
+	gatesFor := reverseGatesFor(byID, closedGate)
+
 	// The recorded cross edges (gc.migrated_cross_edges), restored where both
-	// ends now share a store.
+	// ends now share a store; a gated one whose restore would undo an
+	// operator's close of its gate refuses instead.
 	for _, id := range sortedMapKeys(destOf) {
 		raw := strings.TrimSpace(byID[id].Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
 		if raw == "" {
@@ -376,10 +417,13 @@ func planReverse(in reverseInput) reversePlan {
 			if r.Dir == "in" {
 				d = beads.Dep{IssueID: r.Other, DependsOnID: id, Type: r.Type}
 			}
-			otherDest, _, known := whereIs(r.Other, dest)
+			otherDest, other, known := whereIs(r.Other, dest)
 			if !known || otherDest != dest {
 				plan.Dropped = append(plan.Dropped, fmt.Sprintf("%s -[%s]-> %s: recorded on %s, and its other end is not in %s", d.IssueID, d.Type, d.DependsOnID, id, reverseDestNoun(dest)))
 				recordsFor[id] = append(recordsFor[id], r)
+				continue
+			}
+			if r.Action == rigEdgeGated && overrides.undone(byID, gatesFor[beads.DepPair{IssueID: id, DependsOnID: r.Other}], d, other) {
 				continue
 			}
 			before := len(plan.Edges[dest])
@@ -423,21 +467,34 @@ func planReverse(in reverseInput) reversePlan {
 	}
 
 	// A closed cross-store gate is not carried, but the edge it stood for is:
-	// its owner -> blocker, from the gate's own metadata, where both ends
-	// share a store. A gate a migration minted has a record on its owner too
-	// (above); a gate the runtime minted (S3b) has only its metadata.
-	for _, id := range sortedMapKeys(closedGate) {
-		owner, blocker := byID[id].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey], byID[id].Metadata[beadmeta.CrossStoreBlockerMetadataKey]
-		dest, moving := destOf[owner]
-		if !moving || blocker == "" {
-			continue
-		}
-		if blockerDest, _, known := whereIs(blocker, dest); known && blockerDest == dest {
-			before := len(plan.Edges[dest])
-			addEdge(dest, beads.Dep{IssueID: owner, DependsOnID: blocker, Type: "blocks"}, "")
-			if len(plan.Edges[dest]) > before {
+	// each moved row that waited on it gets row -> blocker, from the gate's
+	// own metadata (reverseGateEdges), where it lands with the blocker. A
+	// gate's owner waits on it only when a migration minted it; a drain's
+	// control, which owns the gates the runtime mints (S3b), waits on its
+	// items, so it gets no edge. Where the blocker lands in another store, or
+	// in none, the row records the edge as one the reverse drops, unless its
+	// record already holds it (a migration's gate: its owner's record, above).
+	// An edge whose restore would undo an operator's close of its gate
+	// refuses instead, as its record does.
+	for _, e := range reverseGateEdges(byID, waits, destOf, in.Payloads) {
+		blockerDest, blocker, known := whereIs(e.dep.DependsOnID, e.dest)
+		switch {
+		case known && blockerDest == e.dest && overrides.undone(byID, []string{e.gate}, e.dep, blocker):
+			// Refused below.
+		case known && blockerDest == e.dest:
+			before := len(plan.Edges[e.dest])
+			addEdge(e.dest, e.dep, e.payload)
+			if len(plan.Edges[e.dest]) > before {
 				plan.Restored++
 			}
+		case reverseRecordsEdge(recordsFor[e.dep.IssueID], e.dep):
+		default:
+			why := "no store holds " + e.dep.DependsOnID
+			if known {
+				why = "it would cross stores (" + reverseDestNoun(blockerDest) + ")"
+			}
+			plan.Dropped = append(plan.Dropped, fmt.Sprintf("%s -[%s]-> %s: the edge closed gate %s stood for, and %s", e.dep.IssueID, e.dep.Type, e.dep.DependsOnID, e.gate, why))
+			record(e.dep.IssueID, e.dep, e.payload)
 		}
 	}
 
@@ -464,12 +521,12 @@ func planReverse(in reverseInput) reversePlan {
 			case row.ParentID == "" || reverseHasID(parents[row.ID], row.ParentID):
 			default:
 				d := beads.Dep{IssueID: row.ID, DependsOnID: row.ParentID, Type: "parent-child"}
-				parentDest, parentOpen, known := whereIs(row.ParentID, dest)
+				parentDest, parent, known := whereIs(row.ParentID, dest)
 				switch {
 				case known && parentDest == dest:
 					addEdge(dest, d, "")
 				case known:
-					judge(d, "", dest, parentDest, rigRowOpen(*row), parentOpen, "its parent would be in another store, and one side is closed")
+					judge(d, "", dest, parentDest, rigRowOpen(*row), rigRowOpen(parent), "its parent would be in another store, and one side is closed")
 					row.ParentID = ""
 				default:
 					plan.Dropped = append(plan.Dropped, fmt.Sprintf("%s -[parent-child]-> %s: no store holds the parent", d.IssueID, d.DependsOnID))
@@ -501,6 +558,8 @@ func planReverse(in reverseInput) reversePlan {
 		"run the reverse again: a new run takes a new stamp")
 	refuse(openGates, "each is an open cross-store gate: a single store has no release lane, so the gate would hold its owner forever",
 		"release it (close the work it waits on) or cancel the owner's workflow (`gc workflow delete <root>`), then re-run")
+	refuse(sortedMapKeys(overrides), "an operator closed each gate, releasing the open row that waited on it whatever the blocker does, and a single store has no gate to keep that: the row would land with its unfinished blocker and wait on it again",
+		"finish or close the blocker, or close the row, then re-run; to let a drain's item run while its blocker stays open, remove each listed row's edge onto the gate and the drain's convoy member's edge onto the blocker (a drain on one store projects that edge onto its item on every pass)")
 	refuse(d8, "each is an open row the binding minted for a rig's scope: on a single-store city no reader reaches it there (D8)",
 		"finish or cancel its workflow (`gc workflow delete <root>`), then re-run; closed ones move to the city store")
 	refuse(unconfigured, "each was imported from a rig this city no longer configures, so there is no store to return it to",
@@ -541,7 +600,7 @@ func reverseDestNoun(dest string) string {
 	return dest
 }
 
-// sortedBeads returns rows sorted by id, without mutating the caller's slice.
+// reverseHasID reports whether ids holds id.
 func reverseHasID(ids []string, id string) bool {
 	for _, v := range ids {
 		if v == id {
@@ -551,6 +610,126 @@ func reverseHasID(ids []string, id string) bool {
 	return false
 }
 
+// reverseRecordsEdge reports whether records, a row's cross-edge records, hold
+// d, an edge out of that row.
+func reverseRecordsEdge(records []rigCrossEdgeRecord, d beads.Dep) bool {
+	for _, r := range records {
+		if r.Dir == "out" && r.Type == d.Type && r.Other == d.DependsOnID {
+			return true
+		}
+	}
+	return false
+}
+
+// reverseClosedGates sorts the closed cross-store gates a plan does not carry
+// (closed) by the rows that wait on them. waits maps each to the edges onto it
+// from the binding's rows, a refused row's aside (its edges are not judged),
+// and gone names those that go with the reverse: every one on a --to-work,
+// which retires the binding, and on a --to-rigs each one no row the binding
+// keeps (one destOf does not route) waits on. A gate a kept row waits on
+// stays in the binding with it, closed: the release lane retires a released
+// gate whose owner its store no longer holds live.
+func reverseClosedGates(in reverseInput, closed, refused map[string]bool, destOf map[string]string) (map[string][]beads.Dep, []string) {
+	waits := map[string][]beads.Dep{}
+	for _, id := range sortedMapKeys(in.Down) {
+		if refused[id] || closed[id] {
+			continue
+		}
+		for _, d := range in.Down[id] {
+			if closed[d.DependsOnID] {
+				d.IssueID = id
+				waits[d.DependsOnID] = append(waits[d.DependsOnID], d)
+			}
+		}
+	}
+	var gone []string
+	for _, id := range sortedMapKeys(closed) {
+		kept := in.Mode == reverseToRigs && slices.ContainsFunc(waits[id], func(d beads.Dep) bool { return destOf[d.IssueID] == "" })
+		if !kept {
+			gone = append(gone, id)
+		}
+	}
+	return waits, gone
+}
+
+// reverseGateEdge is the edge a closed cross-store gate stood for, for one
+// moved row that waited on it: the row's edge onto the gate, its type and
+// payload kept, pointed at the gate's blocker.
+type reverseGateEdge struct {
+	gate, dest string // the gate, and where the row lands
+	dep        beads.Dep
+	payload    string
+}
+
+// reverseGateEdges is the edge each gate of waits (reverseClosedGates) stood
+// for, for each row that waits on it and moves (destOf), by gate. A gate
+// that names no blocker stands for no other edge than the row's own onto it.
+func reverseGateEdges(byID map[string]beads.Bead, waits map[string][]beads.Dep, destOf map[string]string, payloads map[beads.DepPair]string) []reverseGateEdge {
+	var out []reverseGateEdge
+	for _, gate := range sortedMapKeys(waits) {
+		blocker := strings.TrimSpace(byID[gate].Metadata[beadmeta.CrossStoreBlockerMetadataKey])
+		for _, w := range waits[gate] {
+			dest, moving := destOf[w.IssueID]
+			if !moving {
+				continue
+			}
+			d := w
+			if blocker != "" {
+				d.DependsOnID = blocker
+			}
+			out = append(out, reverseGateEdge{gate: gate, dest: dest, dep: d, payload: payloads[beads.DepPair{IssueID: w.IssueID, DependsOnID: gate}]})
+		}
+	}
+	return out
+}
+
+// reverseGatesFor indexes the closed gates a plan does not carry (closed) by
+// the edge each stands for, owner -> blocker: the edge a migration's gate
+// stands for is recorded on its owner as gated.
+func reverseGatesFor(byID map[string]beads.Bead, closed map[string]bool) map[beads.DepPair][]string {
+	out := map[beads.DepPair][]string{}
+	for _, id := range sortedMapKeys(closed) {
+		meta := byID[id].Metadata
+		key := beads.DepPair{IssueID: strings.TrimSpace(meta[beadmeta.CrossStoreGateOwnerMetadataKey]), DependsOnID: strings.TrimSpace(meta[beadmeta.CrossStoreBlockerMetadataKey])}
+		out[key] = append(out[key], id)
+	}
+	return out
+}
+
+// reverseUndoesOverride reports whether restoring d, row -> blocker, the edge
+// that gate (a closed cross-store gate) stood for, would hold row again
+// although the gate released it for good: an operator closed the gate, a close
+// the runtime never takes back (dispatch.CrossStoreGateStateOverridden),
+// unlike the controller's release, retire or teardown close
+// (dispatch.IsControllerClosedCrossStoreGate), which a live drain takes back
+// once the blocker holds again; d blocks; row is open; and blocker, the row it
+// lands with, does not release it. A single store has no gate to keep such a
+// release, and a live drain there projects its member's edge onto its item
+// again on every pass, so the reverse refuses the edge rather than drop it.
+func reverseUndoesOverride(gate beads.Bead, d beads.Dep, row, blocker beads.Bead) bool {
+	return !dispatch.IsControllerClosedCrossStoreGate(gate) && beads.IsReadyBlockingDependencyType(d.Type) && rigRowOpen(row) && !rigRowSatisfied(blocker)
+}
+
+// reverseOverrides are the refusal lines of the edges a plan does not restore
+// because their restore would undo an operator's close of the gate that stood
+// for them, each once: a migration's gate meets its owner's gated record and
+// its owner's edge onto it.
+type reverseOverrides map[string]bool
+
+// undone reports whether restoring d, the edge one of gates stood for, onto
+// blocker as it lands with d's row, would undo an operator's close of that
+// gate (reverseUndoesOverride), and records d when it would.
+func (o reverseOverrides) undone(byID map[string]beads.Bead, gates []string, d beads.Dep, blocker beads.Bead) bool {
+	for _, gate := range gates {
+		if reverseUndoesOverride(byID[gate], d, byID[d.IssueID], blocker) {
+			o[fmt.Sprintf("%s -[%s]-> %s (gate %s)", d.IssueID, d.Type, d.DependsOnID, gate)] = true
+			return true
+		}
+	}
+	return false
+}
+
+// sortedBeads returns rows sorted by id, without mutating the caller's slice.
 func sortedBeads(rows []beads.Bead) []beads.Bead {
 	out := append([]beads.Bead(nil), rows...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

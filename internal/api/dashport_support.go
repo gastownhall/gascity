@@ -262,9 +262,16 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 // classStores mints the seeded city's handles: a single-store topology, so
 // every class handle wraps the city store, exactly as on a default
 // (non-relocated) controller city, and each seeded rig is a rig scope over its
-// own store, by name as the controller lists them.
+// own store, by name as the controller lists them, with the configured
+// prefixes, so Stores().Topology() is the API's residencyTopology.
 func (s *seededState) classStores() storeref.Stores {
-	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}, storeref.StoresOptions{})
+	topo := storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(s.cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+	}
+	return storeref.NewStores(topo, storeref.StoresOptions{})
 }
 
 // Stores is the seeded city's class handles (classStores). The seeded stores

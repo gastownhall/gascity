@@ -43,6 +43,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
 	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
 	"FreshActivityProvider":           reflect.TypeFor[runtime.FreshActivityProvider](),
+	"HeldFileProvider":                reflect.TypeFor[runtime.HeldFileProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentityObserver":                reflect.TypeFor[runtime.IdentityObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),

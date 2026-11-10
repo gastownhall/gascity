@@ -108,6 +108,25 @@ extra work:
   grouped into a single transaction.
 - `Ping` runs `list` to confirm the script is reachable.
 
+### Optional operations
+
+A script lists the optional operations it implements from `capabilities`; a
+script that exits 2 there offers none.
+
+| Operation | Invocation | Stdin | Stdout |
+|-----------|-----------|-------|--------|
+| `capabilities` | `script capabilities` | — | the optional operations it offers, one per line or as a JSON array of strings |
+| `import` | `script import` | bead JSON, `id` included | the bead as stored, or nothing |
+
+`import` creates a bead under the id it already carries. Its stdin holds `id`,
+`title`, `status`, `type`, `priority`, `created_at`, `updated_at`, `assignee`,
+`from`, `parent_id`, `ref`, `description`, `labels`, `metadata`, `ephemeral`,
+`no_history`, `defer_until`, and `close_reason`, and the script must store the
+`id`, `status`, and timestamps exactly as given. When it prints nothing, the
+provider reads the bead back with `get`. The reverse storage migration
+(`gc storage migrate --to-work` or `--to-rigs`) copies beads back through
+`import` and refuses an exec store whose `capabilities` do not list it.
+
 ### `ready` and ephemeral tiers
 
 `ready` returns open, unblocked beads. The orchestrator's demand scans pass

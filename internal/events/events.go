@@ -648,6 +648,17 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+	// StorageBindingStranded reports a converged city whose work store holds
+	// infrastructure-class rows the binding does not serve — a write gc could
+	// not fence, such as an agent's plain `bd create` carrying
+	// gc.root_bead_id. The payload's serving field says whether the city
+	// serves degraded around them (the stranded rows invisible to their class
+	// readers) or refuses, because a stranded id is held in the binding by a
+	// different bead. The controller publishes it at boot and from its periodic
+	// read-only recheck whenever the stranded set changes, and a converged
+	// event once it is empty again. Alerting subscribes to this type: a
+	// stranded city no longer announces itself by refusing to start.
+	StorageBindingStranded = "storage.binding.stranded"
 
 	// StorageRigImport is published once per rig by `gc storage migrate
 	// --from-rigs`: what the import did for that rig (imported, clean,
@@ -738,7 +749,7 @@ var KnownEventTypes = []string{
 	OpChanged, FactRecorded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
-	StorageBindingNotConfigured,
+	StorageBindingNotConfigured, StorageBindingStranded,
 	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
