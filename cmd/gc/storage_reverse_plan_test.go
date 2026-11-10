@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 const planTestStamp = "infra/20261107T000000Z"
@@ -26,12 +28,35 @@ func planRow(id, status, stamp, scope string) beads.Bead {
 	return beads.Bead{ID: id, Title: id, Type: "task", Status: status, Metadata: m}
 }
 
+// planGate is a cross-store gate of owner on blocker. A closed one is closed
+// as the release lane closes a gate whose blocker closed (released, with its
+// reason), so it reads as closed by the controller
+// (dispatch.IsControllerClosedCrossStoreGate); gateClosedAs closes it another
+// way.
 func planGate(id, status, stamp, owner, blocker string) beads.Bead {
 	b := planRow(id, status, stamp, "")
 	b.Labels = []string{dispatch.CrossStoreGateLabel}
 	b.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] = owner
 	b.Metadata[beadmeta.CrossStoreBlockerMetadataKey] = blocker
+	if status == "closed" {
+		b.Metadata[beadmeta.CrossStoreGateStateMetadataKey] = dispatch.CrossStoreGateStateReleased
+		b.Metadata["close_reason"] = "blocker " + blocker + " closed"
+	}
 	return b
+}
+
+// gateClosedAs is the closed gate g with the state marker and the close reason
+// given ("" for none) in place of planGate's release.
+func gateClosedAs(g beads.Bead, state, reason string) beads.Bead {
+	delete(g.Metadata, beadmeta.CrossStoreGateStateMetadataKey)
+	delete(g.Metadata, "close_reason")
+	if state != "" {
+		g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] = state
+	}
+	if reason != "" {
+		g.Metadata["close_reason"] = reason
+	}
+	return g
 }
 
 func withRecords(b beads.Bead, records ...rigCrossEdgeRecord) beads.Bead {
@@ -312,16 +337,311 @@ func TestPlanReverseRecordsWhatItDoesNotCarry(t *testing.T) {
 }
 
 // TestPlanReverseRestoresARuntimeGatesEdge (SHOULD 11): a closed gate the
-// runtime minted carries no record on its owner; the edge it stood for comes
-// back from the gate's own metadata.
+// runtime minted carries no record; the edge it stood for comes back from the
+// gate's own metadata, on the row that waited on it. The runtime mints a gate
+// for a drain (internal/dispatch/drain.go): its owner, the drain control,
+// waits only on its item, so the owner gets no edge.
 func TestPlanReverseRestoresARuntimeGatesEdge(t *testing.T) {
-	in := planInput([]beads.Bead{planRow("gcg-x", "open", "", ""), planGate("gcg-xsg-9", "closed", "", "gcg-x", "mc-w")},
-		[]beads.Dep{{IssueID: "gcg-x", DependsOnID: "gcg-xsg-9", Type: "blocks"}})
+	in := planInput([]beads.Bead{planRow("gcg-ctl", "open", "", ""), planRow("gcg-x", "open", "", ""), planGate("gcg-xsg-9", "closed", "", "gcg-ctl", "mc-w")},
+		[]beads.Dep{{IssueID: "gcg-ctl", DependsOnID: "gcg-x", Type: "blocks"}, {IssueID: "gcg-x", DependsOnID: "gcg-xsg-9", Type: "blocks"}})
 	in.Held[reverseCityDest]["mc-w"] = planRow("mc-w", "closed", "", "")
 	plan := planReverse(in)
-	if got := planEdgeSet(plan); got != "gcg-x>mc-w:blocks:" || plan.Restored != 1 {
-		t.Fatalf("edges = %s (restored %d), want the gate's owner -> blocker", got, plan.Restored)
+	if got := planEdgeSet(plan); got != "gcg-ctl>gcg-x:blocks:,gcg-x>mc-w:blocks:" || plan.Restored != 1 {
+		t.Fatalf("edges = %s (restored %d), want the item's edge onto the gate's blocker and none from the control", got, plan.Restored)
 	}
+}
+
+// TestPlanReverseRoutesARuntimeGateByItsOwner: the runtime mints a gate as a
+// drain does (internal/dispatch/drain.go): owned by the drain control, which
+// waits only on its item root, and waited on by the item's rows. It carries
+// no import stamp (dispatch.NewCrossStoreGate), so --to-rigs routes it by its
+// owner. Both reverses give each moved row that waited on a closed one the
+// edge it stood for, row -> blocker, where the row lands with the blocker,
+// and the row records it as dropped where it does not; the owner gets
+// neither. --to-rigs takes the gate out of the binding only when every row
+// that waits on it leaves: a row the binding keeps keeps it there, with its
+// edge onto it. A --to-rigs refuses such a gate open, and leaves a gate whose
+// owner the binding keeps as it is, open or closed.
+func TestPlanReverseRoutesARuntimeGateByItsOwner(t *testing.T) {
+	packs := rigImportStamp("packs")
+	// drain is a finished drain: its control gp-drain, which the rig's import
+	// moved, holds its item root waiting[0], and each row of waiting waits on
+	// the gate the runtime minted for the control on blocker.
+	drain := func(mode reverseMode, status, blocker string, waiting ...beads.Bead) reverseInput {
+		control := planRow("gp-drain", "closed", packs, "rig:packs")
+		rows := []beads.Bead{control, planGate("gcg-drain-gate", status, "", control.ID, blocker)}
+		deps := []beads.Dep{{IssueID: control.ID, DependsOnID: waiting[0].ID, Type: "blocks"}}
+		for _, w := range waiting {
+			rows = append(rows, w)
+			deps = append(deps, beads.Dep{IssueID: w.ID, DependsOnID: "gcg-drain-gate", Type: "blocks"})
+		}
+		in := planInput(rows, deps)
+		in.Mode, in.Rigs = mode, map[string]bool{"packs": true}
+		in.Held[packs]["gp-work"] = planRow("gp-work", "closed", "", "")
+		in.Held[reverseCityDest]["mc-work"] = planRow("mc-work", "closed", "", "")
+		return in
+	}
+	minted := planRow("gcg-item", "closed", "", "") // the binding minted it after the import
+	item, member := planRow("gp-item", "closed", packs, "rig:packs"), planRow("gp-member", "closed", packs, "rig:packs")
+	controlEdge := "gp-drain -[blocks]-> gcg-item: it would cross stores, and one side is closed"
+	for _, tc := range []struct {
+		name     string
+		in       reverseInput
+		edges    string
+		restored int
+		dropped  []string
+		leaving  string
+		gates    int
+	}{
+		{
+			"to-rigs: the binding keeps the item, and the gate with it", drain(reverseToRigs, "closed", "gp-work", minted),
+			"", 0,
+			[]string{controlEdge},
+			"gp-drain", 0,
+		},
+		{
+			"to-rigs: a blocker in another store changes nothing while the gate stays", drain(reverseToRigs, "closed", "mc-work", minted),
+			"", 0,
+			[]string{controlEdge},
+			"gp-drain", 0,
+		},
+		{
+			"to-rigs: a returned row gets the edge, and the row the binding keeps keeps the gate", drain(reverseToRigs, "closed", "gp-work", minted, member),
+			"rig:packs gp-member>gp-work", 1,
+			[]string{controlEdge},
+			"gp-drain,gp-member", 0,
+		},
+		{
+			"to-rigs: every row that waits on it returns, so the gate leaves with them", drain(reverseToRigs, "closed", "gp-work", item, member),
+			"rig:packs gp-drain>gp-item,rig:packs gp-item>gp-work,rig:packs gp-member>gp-work", 2, nil, "gcg-drain-gate,gp-drain,gp-item,gp-member", 1,
+		},
+		{
+			"to-work: the item gets the edge where it lands with the blocker", drain(reverseToWork, "closed", "mc-work", minted),
+			"city gcg-item>mc-work", 1,
+			[]string{controlEdge},
+			"", 1,
+		},
+		{
+			"to-work: the item records the edge where it would cross stores", drain(reverseToWork, "closed", "gp-work", minted),
+			"", 0,
+			[]string{"gcg-item -[blocks]-> gp-work: the edge closed gate gcg-drain-gate stood for, and it would cross stores (the store of rig packs)", controlEdge},
+			"", 1,
+		},
+		{
+			"to-work: every row that waits on it lands with the blocker", drain(reverseToWork, "closed", "gp-work", item, member),
+			"rig:packs gp-drain>gp-item,rig:packs gp-item>gp-work,rig:packs gp-member>gp-work", 2, nil, "", 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := planReverse(tc.in)
+			if len(plan.Refusals) != 0 {
+				t.Fatalf("unexpected refusal: %s", planRefusal(plan))
+			}
+			var edges []string
+			for _, dest := range sortedMapKeys(plan.Edges) {
+				for _, e := range plan.Edges[dest] {
+					edges = append(edges, fmt.Sprintf("%s %s>%s", dest, e.IssueID, e.DependsOnID))
+				}
+			}
+			if got := strings.Join(edges, ","); got != tc.edges || plan.Restored != tc.restored {
+				t.Fatalf("edges = %q (restored %d), want %q (restored %d)", got, plan.Restored, tc.edges, tc.restored)
+			}
+			if got, want := strings.Join(plan.Dropped, "\n"), strings.Join(tc.dropped, "\n"); got != want {
+				t.Fatalf("dropped:\n%s\nwant:\n%s", got, want)
+			}
+			if got := strings.Join(plan.Leaving, ","); got != tc.leaving || plan.Gates != tc.gates {
+				t.Fatalf("leaving = %q, gates not carried %d; want %q and %d", got, plan.Gates, tc.leaving, tc.gates)
+			}
+			for _, b := range plan.Rows[packs] {
+				if b.ID == "gp-drain" && strings.Contains(b.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], "-work") {
+					t.Fatalf("the control records %s: it never waited on the gate's blocker", b.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
+				}
+			}
+		})
+	}
+	t.Run("to-work: the item's record holds the edge it does not carry", func(t *testing.T) {
+		plan := planReverse(drain(reverseToWork, "closed", "gp-work", minted))
+		records := map[string]string{}
+		for _, rows := range plan.Rows {
+			for _, b := range rows {
+				records[b.ID] = b.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]
+			}
+		}
+		for id, want := range map[string]string{
+			"gcg-item": `[{"dir":"in","type":"blocks","other":"gp-drain","other_status_at_import":"closed","action":"dropped"},{"dir":"out","type":"blocks","other":"gp-work","other_status_at_import":"closed","action":"dropped"}]`,
+			"gp-drain": `[{"dir":"out","type":"blocks","other":"gcg-item","other_status_at_import":"closed","action":"dropped"}]`,
+		} {
+			if records[id] != want {
+				t.Fatalf("%s records %s, want %s", id, records[id], want)
+			}
+		}
+	})
+	if got := planRefusal(planReverse(drain(reverseToRigs, "open", "gp-work", minted))); !strings.Contains(got, "gcg-drain-gate (gate for gp-drain on gp-work)") || !strings.Contains(got, "open cross-store gate") {
+		t.Fatalf("--to-rigs over an open gate of a row it returns: %q", got)
+	}
+	for _, status := range []string{"open", "closed"} {
+		in := planInput([]beads.Bead{planRow("gp-1", "closed", packs, "rig:packs"), planRow("gcg-ctl", "open", "", ""), planRow("gcg-it", "open", "", ""), planGate("gcg-ctl-gate", status, "", "gcg-ctl", "gp-work")},
+			[]beads.Dep{{IssueID: "gcg-ctl", DependsOnID: "gcg-it", Type: "blocks"}, {IssueID: "gcg-it", DependsOnID: "gcg-ctl-gate", Type: "blocks"}})
+		in.Mode, in.Rigs = reverseToRigs, map[string]bool{"packs": true}
+		plan := planReverse(in)
+		if len(plan.Refusals) != 0 || strings.Join(plan.Leaving, ",") != "gp-1" || plan.Gates != 0 || len(plan.Edges[packs]) != 0 || len(plan.Dropped) != 0 {
+			t.Fatalf("--to-rigs over a %s gate of a control the binding keeps: refusals %q, leaving %v, gates %d, rig edges %v, dropped %v", status, planRefusal(plan), plan.Leaving, plan.Gates, plan.Edges[packs], plan.Dropped)
+		}
+	}
+}
+
+// TestPlanReverseKeepsOneRecordOfAGatedEdge: a gate a rig's import minted
+// stands for an edge its owner's record already holds (gated). Where the
+// blocker lands in another store, the owner carries that record on and the
+// edge is reported once: the gate adds no second record and no second line.
+func TestPlanReverseKeepsOneRecordOfAGatedEdge(t *testing.T) {
+	packs := rigImportStamp("packs")
+	for _, mode := range []reverseMode{reverseToWork, reverseToRigs} {
+		t.Run(string(mode), func(t *testing.T) {
+			owner := withRecords(planRow("gp-owner", "open", packs, "rig:packs"), rigCrossEdgeRecord{Dir: "out", Type: "blocks", Other: "mc-work", Action: rigEdgeGated})
+			in := planInput([]beads.Bead{owner, planGate("gcg-xsg-7", "closed", packs, owner.ID, "mc-work")},
+				[]beads.Dep{{IssueID: owner.ID, DependsOnID: "gcg-xsg-7", Type: "blocks"}})
+			in.Mode, in.Rigs = mode, map[string]bool{"packs": true}
+			in.Held[reverseCityDest]["mc-work"] = planRow("mc-work", "closed", "", "")
+			plan := planReverse(in)
+			if len(plan.Refusals) != 0 {
+				t.Fatalf("unexpected refusal: %s", planRefusal(plan))
+			}
+			if got := strings.Join(plan.Dropped, "\n"); got != "gp-owner -[blocks]-> mc-work: recorded on gp-owner, and its other end is not in the store of rig packs" {
+				t.Fatalf("dropped:\n%s\nwant the gated edge once", got)
+			}
+			if got := plan.Rows[packs][0].Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; got != `[{"dir":"out","type":"blocks","other":"mc-work","action":"gated"}]` {
+				t.Fatalf("the owner records %s, want its gated record alone", got)
+			}
+		})
+	}
+}
+
+// TestPlanReverseRefusesToHoldWhatAnOperatorReleased: an operator's close of a
+// cross-store gate is final (dispatch.CrossStoreGateStateOverridden): the rows
+// that waited on it run whatever its blocker does. A single store has no gate
+// to keep that, so where the edge the gate stood for, row -> blocker, would
+// hold an open row on a blocker that lands with it and does not release it,
+// both reverses refuse, naming the row, the blocker and the gate, and restore
+// nothing for it. That holds for a drain's gate, through its item's edge onto
+// the gate, and for a migration's, through its owner's gated record, which the
+// owner's edge onto the gate meets again (one line), or alone. The
+// controller's closes (a release, a retire, a teardown's), which the runtime
+// takes back when the blocker holds again, restore the edge, and so do a
+// blocker that releases, a closed row and an edge that does not block; a
+// blocker in another store is recorded as before.
+func TestPlanReverseRefusesToHoldWhatAnOperatorReleased(t *testing.T) {
+	packs := rigImportStamp("packs")
+	// drain is a live drain whose control gp-drain the rig's import moved: the
+	// control holds its item root gp-item, which waits on the gate the runtime
+	// minted for the control on blocker.
+	drain := func(gate func(beads.Bead) beads.Bead, row, blocker beads.Bead, depType string) reverseInput {
+		control := planRow("gp-drain", "open", packs, "rig:packs")
+		return planInput([]beads.Bead{control, row, gate(planGate("gcg-drain-gate", "closed", "", control.ID, blocker.ID))}, []beads.Dep{
+			{IssueID: control.ID, DependsOnID: row.ID, Type: "blocks"},
+			{IssueID: row.ID, DependsOnID: "gcg-drain-gate", Type: depType},
+		})
+	}
+	// migrated is a gate the rig's import minted for the edge row -> blocker:
+	// the row records it as gated and, when waits is set, waits on the gate.
+	migrated := func(waits bool) func(func(beads.Bead) beads.Bead, beads.Bead, beads.Bead, string) reverseInput {
+		return func(gate func(beads.Bead) beads.Bead, row, blocker beads.Bead, depType string) reverseInput {
+			row = withRecords(row, rigCrossEdgeRecord{Dir: "out", Type: "blocks", Other: blocker.ID, Action: rigEdgeGated})
+			var deps []beads.Dep
+			if waits {
+				deps = append(deps, beads.Dep{IssueID: row.ID, DependsOnID: "gp-xsg-7", Type: depType})
+			}
+			return planInput([]beads.Bead{row, gate(planGate("gp-xsg-7", "closed", packs, row.ID, blocker.ID))}, deps)
+		}
+	}
+	shapes := []struct {
+		name, row, gate string
+		in              func(gate func(beads.Bead) beads.Bead, row, blocker beads.Bead, depType string) reverseInput
+	}{
+		{"a drain's gate", "gp-item", "gcg-drain-gate", drain},
+		{"a migration's gate", "gp-owner", "gp-xsg-7", migrated(true)},
+		{"a migration's gate its owner no longer waits on", "gp-owner", "gp-xsg-7", migrated(false)},
+	}
+	released := func(g beads.Bead) beads.Bead { return g }
+	overridden := func(g beads.Bead) beads.Bead { return gateClosedAs(g, dispatch.CrossStoreGateStateOverridden, "") }
+	openBlocker := planRow("gp-work", "open", "", "")
+	closedBlocked := planRow("gp-work", "closed", "", "")
+	closedBlocked.Metadata[beadmeta.WorkOutcomeMetadataKey] = beadmeta.WorkOutcomeBlocked
+	cases := []struct {
+		name      string
+		gate      func(beads.Bead) beads.Bead
+		rowStatus string
+		blocker   beads.Bead
+		dest      string // where the blocker is held
+		depType   string
+		refused   bool
+		restored  bool
+	}{
+		{"marked overridden", overridden, "open", openBlocker, packs, "blocks", true, false},
+		{"closed with no reason", func(g beads.Bead) beads.Bead { return gateClosedAs(g, "", "") }, "open", openBlocker, packs, "blocks", true, false},
+		{"closed with an operator's reason", func(g beads.Bead) beads.Bead { return gateClosedAs(g, "", "unblocked by hand") }, "open", openBlocker, packs, "blocks", true, false},
+		{"overridden, its blocker closed blocked", overridden, "open", closedBlocked, packs, "blocks", true, false},
+		{"released by the controller", released, "open", openBlocker, packs, "blocks", false, true},
+		{"retired by the controller", func(g beads.Bead) beads.Bead {
+			return gateClosedAs(g, dispatch.CrossStoreGateStateRetired, "drain control gp-drain is closed or gone")
+		}, "open", openBlocker, packs, "blocks", false, true},
+		{"closed by a run's cancel", func(g beads.Bead) beads.Bead { return gateClosedAs(g, "", sourceworkflow.RunCanceledCloseReason) }, "open", openBlocker, packs, "blocks", false, true},
+		{"overridden, its blocker closed", overridden, "open", planRow("gp-work", "closed", "", ""), packs, "blocks", false, true},
+		{"overridden, its row closed", overridden, "closed", openBlocker, packs, "blocks", false, true},
+		{"overridden, its blocker in another store", overridden, "open", openBlocker, reverseCityDest, "blocks", false, false},
+	}
+	for _, mode := range []reverseMode{reverseToWork, reverseToRigs} {
+		for _, shape := range shapes {
+			for _, tc := range cases {
+				t.Run(fmt.Sprintf("%s/%s/%s", mode, shape.name, tc.name), func(t *testing.T) {
+					in := shape.in(tc.gate, planRow(shape.row, tc.rowStatus, packs, "rig:packs"), tc.blocker, tc.depType)
+					in.Mode, in.Rigs = mode, map[string]bool{"packs": true}
+					in.Held[tc.dest][tc.blocker.ID] = tc.blocker
+					plan := planReverse(in)
+					edge := beads.Dep{IssueID: shape.row, DependsOnID: "gp-work", Type: tc.depType}
+					restored := slices.ContainsFunc(plan.Edges[packs], func(e beads.DepWithPayload) bool { return e.Dep == edge })
+					wantRestored := 0
+					if tc.restored {
+						wantRestored = 1
+					}
+					if restored != tc.restored || plan.Restored != wantRestored {
+						t.Fatalf("%s -[%s]-> gp-work restored: %v (restored %d), want %v", shape.row, tc.depType, restored, plan.Restored, tc.restored)
+					}
+					got := planRefusal(plan)
+					if !tc.refused {
+						if got != "" {
+							t.Fatalf("unexpected refusal: %s", got)
+						}
+						return
+					}
+					if len(plan.Refusals) != 1 || len(plan.Refusals[0].IDs) != 1 {
+						t.Fatalf("refusals = %q, want the one edge once", got)
+					}
+					for _, want := range []string{
+						fmt.Sprintf("%s -[blocks]-> gp-work (gate %s)", shape.row, shape.gate),
+						"an operator closed",
+						"finish or close the blocker, or close the row",
+						"convoy member's edge onto the blocker",
+					} {
+						if !strings.Contains(got, want) {
+							t.Fatalf("the refusal does not say %q:\n%s", want, got)
+						}
+					}
+				})
+			}
+		}
+	}
+	t.Run("an edge that does not block onto a drain's gate", func(t *testing.T) {
+		for _, mode := range []reverseMode{reverseToWork, reverseToRigs} {
+			in := drain(overridden, planRow("gp-item", "open", packs, "rig:packs"), openBlocker, "related")
+			in.Mode, in.Rigs = mode, map[string]bool{"packs": true}
+			in.Held[packs][openBlocker.ID] = openBlocker
+			plan := planReverse(in)
+			if got := planRefusal(plan); got != "" || plan.Restored != 1 {
+				t.Fatalf("%s: refusals %q, restored %d; want gp-item -[related]-> gp-work restored", mode, got, plan.Restored)
+			}
+		}
+	})
 }
 
 // TestPlanReverseParentsForAStoreThatDerivesThem (MUST 4): into a store that

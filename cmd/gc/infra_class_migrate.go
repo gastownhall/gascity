@@ -633,8 +633,8 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	case infraMigrationGenesisBlocked:
 		if report.Cleared != nil {
-			return fmt.Sprintf("%s: this city's work store was cleared of its infrastructure beads into binding %q (%s records it), and [storage.classes] now leave every class on %q. Started this way the city would run with NO infrastructure state: its workflows, sessions, messages, orders and nudges are in that binding, and the pre-cutover rows are in the backup %s. To keep serving the split, point the classes back at %q. To roll back to the work store, stop the city, restore the backup into the work store as described under \"Restoring the work store from the backup\" in docs/runbooks/split-storage-classes.md, and then remove %s as your attestation that the restore is done. Beads written to the binding after the cutover are not in the backup, and a rollback loses them.",
-				logPrefix, report.Cleared.Binding, report.ServedNotePath, config.StorageWorkBinding, report.Cleared.Backup, report.Cleared.Binding, report.ServedNotePath)
+			return fmt.Sprintf("%s: this city's work store was cleared of its infrastructure beads into binding %q (%s records it), and [storage.classes] now leave every class on %q. Started this way the city would run with NO infrastructure state: its workflows, sessions, messages, orders and nudges are in that binding, and the pre-cutover rows are in the backup %s. To keep serving the split, point the classes back at %q. %s The fallback is the backup: stop the city, restore it into the work store as described under \"Restoring the work store from the backup\" in the same runbook, and then remove %s as your attestation that the restore is done. Beads written to the binding after the cutover are not in the backup, and that rollback loses them.",
+				logPrefix, report.Cleared.Binding, report.ServedNotePath, config.StorageWorkBinding, report.Cleared.Backup, report.Cleared.Binding, storageReverseRollbackAdvice(), report.ServedNotePath)
 		}
 		if report.ServedProvider == "" {
 			// The note exists but could not be read. It is still evidence
@@ -645,6 +645,11 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		} else {
 			situation = fmt.Sprintf("%s: this city's infrastructure classes are served from binding %q (provider %q), and this configuration points them somewhere else. Nothing here proves the configured target holds what the served binding holds, so this refuses rather than risk making every bead written there invisible. Verify or recover the served binding's contents first; removing %s is the operator's attestation that they are recovered, still reachable through the new configuration, or deliberately abandoned.",
 				logPrefix, report.ServedBinding, report.ServedProvider, report.ServedNotePath)
+			// A revert to the work store, of a binding the reverse can copy
+			// from: the reverse is the rollback that loses nothing.
+			if report.Target.Binding == config.StorageWorkBinding && report.ServedProvider == config.StorageProviderSQLiteBeads {
+				situation += " " + storageReverseRollbackAdvice()
+			}
 		}
 		// Neither canned tail applies: the revert grant is evidence about the
 		// NEW target and says nothing about the served binding this outcome

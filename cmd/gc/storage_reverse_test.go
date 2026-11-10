@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -18,11 +19,18 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // reverseCityTOMLText is a split city's city.toml, with a comment the
 // reverse must keep, an optional [daemon] session_reconciler, and its rigs.
 func reverseCityTOMLText(reconciler string, rigs ...config.Rig) string {
+	return reverseCityTOMLTextAt(".gc/store", reconciler, rigs...)
+}
+
+// reverseCityTOMLTextAt is reverseCityTOMLText with the binding's path at
+// bindingPath.
+func reverseCityTOMLTextAt(bindingPath, reconciler string, rigs ...config.Rig) string {
 	var b strings.Builder
 	b.WriteString("# a city that was split\n[workspace]\nname = \"reverse-city\"\n\n")
 	if reconciler != "" {
@@ -32,7 +40,7 @@ func reverseCityTOMLText(reconciler string, rigs ...config.Rig) string {
 		fmt.Fprintf(&b, "[[rigs]]\nname = %q\npath = %q\nprefix = %q\n\n", rig.Name, rig.Path, rig.Prefix)
 	}
 	b.WriteString("# the split\n[storage.classes]\nwork = \"work\"\ngraph = \"infra\"\nsessions = \"infra\"\nmessaging = \"infra\"\norders = \"infra\"\nnudges = \"infra\"\n\n")
-	b.WriteString("[storage.bindings.infra]\nprovider = \"sqlite-beads\"\npath = \".gc/store\"\n\n# trailing comment\n")
+	fmt.Fprintf(&b, "[storage.bindings.infra]\nprovider = \"sqlite-beads\"\npath = %q\n\n# trailing comment\n", bindingPath)
 	return b.String()
 }
 
@@ -52,11 +60,19 @@ type reverseEngineCity struct {
 
 func newReverseEngineCity(t *testing.T, rows int, reconciler string) reverseEngineCity {
 	t.Helper()
+	return newReverseEngineCityAt(t, rows, reconciler, ".gc/store")
+}
+
+// newReverseEngineCityAt is newReverseEngineCity with the binding's path at
+// bindingPath.
+func newReverseEngineCityAt(t *testing.T, rows int, reconciler, bindingPath string) reverseEngineCity {
+	t.Helper()
 	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	smallEngineBatches(t)
 	city := newEngineCity(t, rows, "sqlite")
-	if err := os.WriteFile(filepath.Join(city.cityPath, "city.toml"), []byte(reverseCityTOMLText(reconciler)), 0o644); err != nil {
+	city.target = mustResolveInfraTarget(t, city.cityPath, infraSplitConfig(bindingPath))
+	if err := os.WriteFile(filepath.Join(city.cityPath, "city.toml"), []byte(reverseCityTOMLTextAt(bindingPath, reconciler)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// GC_BEADS=file names a file store, whose exact snapshot copies its file;
@@ -77,8 +93,9 @@ func newReverseEngineCity(t *testing.T, rows int, reconciler string) reverseEngi
 	for _, b := range rigTestList(t, city.source) {
 		before[b.ID] = b
 	}
-	if report, said := city.migrate(t); report.Outcome != infraMigrationConverged {
-		t.Fatalf("the forward migration = %v: %s", report.Outcome, said)
+	var said bytes.Buffer
+	if report := migrateInfraClasses(t, city.cityPath, infraSplitConfig(bindingPath), &said); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the forward migration = %v: %s", report.Outcome, said.String())
 	}
 	// The served-binding note, as the command and the first boot write it.
 	plan, err := resolveCityStoragePlan(city.cityPath, cfg)
@@ -662,7 +679,7 @@ func TestReverseRefusesWhatItCannotCarry(t *testing.T) {
 }
 
 // closeBindingGates closes every cross-store gate the forward copy minted, as
-// the release lane does once their blockers close.
+// the release lane does once their blockers close (releaseCrossStoreGate).
 func closeBindingGates(t *testing.T, city reverseEngineCity) {
 	t.Helper()
 	binding, err := openInfraDestination(city.target)
@@ -672,10 +689,24 @@ func closeBindingGates(t *testing.T, city reverseEngineCity) {
 	defer closeBeadStoreHandle(binding) //nolint:errcheck // test cleanup
 	for _, b := range rigTestList(t, binding) {
 		if isCrossStoreGate(b) && rigRowOpen(b) {
-			if err := binding.Close(b.ID); err != nil {
-				t.Fatal(err)
-			}
+			releaseCrossStoreGate(t, binding, b)
 		}
+	}
+}
+
+// releaseCrossStoreGate closes gate as the release lane closes one whose
+// blocker closed: one write carrying the status, the released marker and its
+// reason, so it reads as closed by the controller
+// (dispatch.IsControllerClosedCrossStoreGate). A plain close, with no marker
+// and no controller reason, reads as an operator's.
+func releaseCrossStoreGate(t *testing.T, store beads.Store, gate beads.Bead) {
+	t.Helper()
+	closed := "closed"
+	if err := store.Update(gate.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{
+		beadmeta.CrossStoreGateStateMetadataKey: dispatch.CrossStoreGateStateReleased,
+		"close_reason":                          "blocker " + gate.Metadata[beadmeta.CrossStoreBlockerMetadataKey] + " closed",
+	}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -747,6 +778,229 @@ func TestReverseClosedGatesAndD8(t *testing.T) {
 	city.assertReversedNotLossy(t)
 }
 
+// TestReverseToWorkGivesADrainsItemTheEdgeItsGateStoodFor: a gate the
+// runtime mints in the binding after the cutover is a drain's
+// (internal/dispatch/drain.go): owned by the drain control, which waits only
+// on its item, and waited on by the item. --to-work gives the item back the
+// edge the closed gate stood for, item -> blocker, and the control none.
+func TestReverseToWorkGivesADrainsItemTheEdgeItsGateStoodFor(t *testing.T) {
+	city := newReverseEngineCity(t, 300, "")
+	closeBindingGates(t, city)
+	blocker := ""
+	for _, b := range city.rows {
+		if !isInfra(b) {
+			blocker = b.ID
+			break
+		}
+	}
+	if blocker == "" {
+		t.Fatal("the fixture holds no work row for the drain to wait on")
+	}
+	control := createInBinding(t, city, beads.Bead{Title: "a drain control the binding minted", Type: "task"}, true)
+	item := createInBinding(t, city, beads.Bead{Title: "its item", Type: "task"}, true)
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.DepAdd(control.ID, item.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := binding.Create(dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, control, blocker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.DepAdd(item.ID, gate.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	releaseCrossStoreGate(t, binding, gate)
+	_ = closeBeadStoreHandle(binding)
+	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("--to-work = %d: %s%s", code, stdout, stderr)
+	}
+	if !hasEdge(t, city.source, item.ID, blocker) || !hasEdge(t, city.source, control.ID, item.ID) {
+		t.Fatalf("the work store lacks %s -> %s or %s -> %s", item.ID, blocker, control.ID, item.ID)
+	}
+	if hasEdge(t, city.source, control.ID, blocker) {
+		t.Fatalf("the work store holds %s -> %s, an edge the control never had", control.ID, blocker)
+	}
+	if _, err := city.source.Get(gate.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the reverse carried the gate %s: %v", gate.ID, err)
+	}
+}
+
+// TestReverseToWorkRefusesToHoldADrainItemAnOperatorReleased: an operator's
+// close of a live drain's gate released its open item whatever the blocker
+// does (dispatch.CrossStoreGateStateOverridden), whether the drain has marked
+// the close yet or not. --to-work would land the item with its open blocker
+// in the work store, where the edge the gate stood for holds it again, so it
+// refuses, dry run included, naming the item, the blocker and the gate, and
+// writes nothing. Once the blocker closes, the reverse restores the edge, and
+// the item is ready.
+func TestReverseToWorkRefusesToHoldADrainItemAnOperatorReleased(t *testing.T) {
+	for _, marked := range []bool{true, false} {
+		t.Run(fmt.Sprintf("marked=%v", marked), func(t *testing.T) {
+			city := newReverseEngineCity(t, 300, "")
+			closeBindingGates(t, city)
+			blocker := ""
+			for _, b := range city.rows {
+				if !isInfra(b) && rigRowOpen(b) {
+					blocker = b.ID
+					break
+				}
+			}
+			if blocker == "" {
+				t.Fatal("the fixture holds no open work row for the drain to wait on")
+			}
+			control := createInBinding(t, city, beads.Bead{Title: "a live drain's control the binding minted", Type: "task"}, false)
+			item := createInBinding(t, city, beads.Bead{Title: "its item", Type: "task"}, false)
+			binding, err := openInfraDestination(city.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := binding.DepAdd(control.ID, item.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			gate, err := binding.Create(dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, control, blocker))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := binding.DepAdd(item.ID, gate.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			if err := binding.Close(gate.ID); err != nil {
+				t.Fatal(err)
+			}
+			if marked {
+				if err := binding.SetMetadata(gate.ID, beadmeta.CrossStoreGateStateMetadataKey, dispatch.CrossStoreGateStateOverridden); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = closeBeadStoreHandle(binding)
+
+			before := workStoreFingerprint(t, city.source)
+			want := fmt.Sprintf("%s -[blocks]-> %s (gate %s)", item.ID, blocker, gate.ID)
+			for _, dry := range []bool{true, false} {
+				code, stdout, stderr := city.reverse(t, reverseOptions{DryRun: dry})
+				if code == 0 || !strings.Contains(stderr, want) || !strings.Contains(stderr, "an operator closed each gate") {
+					t.Fatalf("--to-work (dry run %v) over an operator's close of the gate = %d, want a refusal naming %s: %s%s", dry, code, want, stdout, stderr)
+				}
+			}
+			if workStoreFingerprint(t, city.source) != before || fileExists(storageReverseJournalPath(city.request.CityPath)) {
+				t.Fatal("a refused reverse wrote to the work store or its journal")
+			}
+
+			if err := city.source.Close(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+				t.Fatalf("--to-work once the blocker closed = %d: %s%s", code, stdout, stderr)
+			}
+			if !hasEdge(t, city.source, item.ID, blocker) {
+				t.Fatalf("the work store lacks %s -> %s", item.ID, blocker)
+			}
+			ready, err := city.source.Ready()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(ready, func(b beads.Bead) bool { return b.ID == item.ID }) {
+				t.Fatalf("the item %s is not ready once its blocker closed", item.ID)
+			}
+		})
+	}
+}
+
+// withNoCarriedRow deletes every binding row, but the closed cross-store
+// gates when gates is set: the binding of a split nothing used, or of one
+// whose coordination rows were purged, which holds no row a --to-work
+// carries.
+func withNoCarriedRow(t *testing.T, city reverseEngineCity, gates bool) {
+	t.Helper()
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBeadStoreHandle(binding) //nolint:errcheck // test cleanup
+	kept := 0
+	for _, b := range rigTestList(t, binding) {
+		if gates && isCrossStoreGate(b) && !rigRowOpen(b) {
+			kept++
+			continue
+		}
+		if err := binding.Delete(b.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gates && kept == 0 {
+		t.Fatal("the binding holds no closed gate to keep")
+	}
+}
+
+// TestReverseToWorkOfABindingThatCarriesNoRow: a binding holding no row the
+// reverse carries (none at all, or only closed gates) still gets its reverse
+// manifest, empty, so the reverse finishes, in one run and after a kill at
+// every boundary it passes, and leaves the work store as it was.
+func TestReverseToWorkOfABindingThatCarriesNoRow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gates bool
+	}{
+		{"empty", false},
+		{"only closed gates", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newCity := func(t *testing.T) (reverseEngineCity, string) {
+				t.Helper()
+				city := newReverseEngineCity(t, 120, "")
+				closeBindingGates(t, city)
+				withNoCarriedRow(t, city, tc.gates)
+				return city, workStoreFingerprint(t, city.source)
+			}
+			assertReversed := func(t *testing.T, city reverseEngineCity, before string) {
+				t.Helper()
+				if after := workStoreFingerprint(t, city.source); after != before {
+					t.Fatalf("the reverse changed the work store:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+				archived, _ := filepath.Glob(city.target.Root + ".reverted-*")
+				if len(archived) != 1 {
+					t.Fatalf("the binding root was archived as %v, want one *.reverted-<run>", archived)
+				}
+				manifest, recorded, err := readInfraCopyManifestRecordAt(filepath.Join(archived[0], infraReversedManifestName), "")
+				if err != nil || !recorded || len(manifest.IDs) != 0 {
+					t.Fatalf("the reverse manifest records %v (recorded %v, %v), want it recorded and empty", sortedMapKeys(manifest.IDs), recorded, err)
+				}
+				city.assertRevertedCityServesSingleStore(t)
+			}
+			var points []string
+			city, before := newCity(t)
+			prev := infraEngineCrashPoint
+			infraEngineCrashPoint = func(p string) error {
+				if p != reverseGuardedSeam {
+					points = append(points, p)
+				}
+				return nil
+			}
+			code, stdout, stderr := city.reverse(t, reverseOptions{})
+			infraEngineCrashPoint = prev
+			if code != 0 {
+				t.Fatalf("--to-work = %d: %s%s", code, stdout, stderr)
+			}
+			assertReversed(t, city, before)
+			for _, point := range points {
+				t.Run(point, func(t *testing.T) {
+					city, before := newCity(t)
+					killReverseAt(t, city, point)
+					if point != "reverse phase "+reversePhaseName(reverseComplete) {
+						if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+							t.Fatalf("the run after a kill at %s = %d: %s%s", point, code, stdout, stderr)
+						}
+					}
+					assertReversed(t, city, before)
+				})
+			}
+		})
+	}
+}
+
 // TestReverseDryRunWritesNothing: --dry-run prints the plan and writes
 // nothing at all.
 func TestReverseDryRunWritesNothing(t *testing.T) {
@@ -767,8 +1021,366 @@ func TestReverseDryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// TestReverseRefusesABindingRootThatHoldsTheCity: R5 archives the binding
+// root whole, so a binding whose path is the city's .gc or the city itself is
+// refused at plan time, the dry run included, and the city's .gc, the work
+// store and the binding are left as they were.
+func TestReverseRefusesABindingRootThatHoldsTheCity(t *testing.T) {
+	for _, bindingPath := range []string{".gc", "."} {
+		t.Run("path "+bindingPath, func(t *testing.T) {
+			city := newReverseEngineCityAt(t, 60, "", bindingPath)
+			closeBindingGates(t, city)
+			assertReverseRefusesTheArchive(t, city, "the city's .gc", filepath.Join(city.cityPath, ".gc", "beads.json"))
+		})
+	}
+}
+
+// TestReverseRefusesABindingRootInAStoreDirectory: a binding at the city's
+// .beads, or inside it, is refused the same way, the dry run included. bd
+// keeps the work store there and the managed Dolt server its data
+// (.beads/dolt), so R5 would take the directory every row was just copied
+// back into, or part of it, and report the reverse done.
+func TestReverseRefusesABindingRootInAStoreDirectory(t *testing.T) {
+	for _, tc := range []struct{ name, path, want string }{
+		{"the store directory", ".beads", "and that would take the city's store directory .beads ("},
+		{"the managed Dolt data", ".beads/dolt", "and that would take part of the city's store directory .beads ("},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := newReverseEngineCityAt(t, 60, "", tc.path)
+			closeBindingGates(t, city)
+			data := filepath.Join(city.cityPath, ".beads", "dolt", "work", "sentinel")
+			if err := os.MkdirAll(filepath.Dir(data), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(data, []byte("the managed Dolt server's data\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			assertReverseRefusesTheArchive(t, city, tc.want, data)
+		})
+	}
+}
+
+// assertReverseRefusesTheArchive runs a --to-work, dry run and real, over a
+// binding root R5 cannot archive. Each must refuse with a reason saying want
+// and write nothing: kept (a file the archive would take), the binding's
+// marker and database stay where they are, the work store is unchanged, and
+// there is no journal, reverting record or snapshot.
+func assertReverseRefusesTheArchive(t *testing.T, city reverseEngineCity, want, kept string) {
+	t.Helper()
+	before := workStoreFingerprint(t, city.source)
+	for _, opts := range []reverseOptions{{DryRun: true}, {}} {
+		code, stdout, stderr := city.reverse(t, opts)
+		if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") || !strings.Contains(stderr, want) {
+			t.Fatalf("--to-work (dry run %v) with the binding root at %s = %d, want it refused saying %q: %s%s", opts.DryRun, city.target.Root, code, want, stdout, stderr)
+		}
+	}
+	if archived, _ := filepath.Glob(city.target.Root + ".reverted-*"); len(archived) != 0 {
+		t.Fatalf("a refused reverse archived the binding root as %v", archived)
+	}
+	for _, path := range []string{kept, city.target.MarkerPath(), city.target.Database} {
+		if !fileExists(path) {
+			t.Fatalf("a refused reverse moved %s", path)
+		}
+	}
+	for _, path := range []string{storageReverseJournalPath(city.cityPath), filepath.Join(city.target.Root, infraRevertingRecordName), storageSnapshotDefaultDir(city.cityPath)} {
+		if fileExists(path) {
+			t.Fatalf("a refused reverse wrote %s", path)
+		}
+	}
+	if after := workStoreFingerprint(t, city.source); after != before {
+		t.Fatal("a refused reverse wrote to the work store")
+	}
+}
+
+// TestReverseArchiveRefusals: a binding root R5 would archive with the city's
+// .gc or a rig under it (the .gc itself, the city, a directory above either)
+// is refused, naming what it holds, and so is one that is, holds or lies
+// inside a store's directory (the city's .beads, a rig's .beads or .gc),
+// naming what it would take of it. A root of the binding's own, beside them
+// or inside the city's .gc, is not.
+func TestReverseArchiveRefusals(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	rigPath := filepath.Join(parent, "rigs", "frontend")
+	cityGC, cityBeads := filepath.Join(cityPath, ".gc"), filepath.Join(cityPath, ".beads")
+	rigBeads, rigGC := filepath.Join(rigPath, ".beads"), filepath.Join(rigPath, ".gc")
+	for _, dir := range []string{filepath.Join(cityGC, "store"), filepath.Join(cityBeads, "dolt", "work"), filepath.Join(rigBeads, "dolt"), rigGC} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fe"}}}
+	gcDir, rig := "the city's .gc ("+cityGC+")", "rig frontend ("+rigPath+")"
+	beadsDir := "the city's store directory .beads (" + cityBeads + ")"
+	rigBeadsDir := "rig frontend's store directory .beads (" + rigBeads + ")"
+	rigGCDir := "rig frontend's store directory .gc (" + rigGC + ")"
+	for _, tc := range []struct {
+		root string
+		want []string
+	}{
+		{filepath.Join(cityGC, "store"), nil},
+		{filepath.Join(cityPath, ".gc-store"), nil},
+		{filepath.Join(cityPath, ".beads-store"), nil},
+		{filepath.Join(parent, "rigs-store"), nil},
+		{filepath.Join(rigPath, "infra-store"), nil},
+		{cityGC, []string{gcDir}},
+		{cityPath, []string{gcDir, beadsDir}},
+		{filepath.Join(parent, "rigs"), []string{rig}},
+		{parent, []string{gcDir, beadsDir, rig}},
+		{cityBeads, []string{beadsDir}},
+		{filepath.Join(cityBeads, "dolt"), []string{"part of " + beadsDir}},
+		{filepath.Join(cityBeads, "dolt", "work"), []string{"part of " + beadsDir}},
+		{rigBeads, []string{rigBeadsDir}},
+		{filepath.Join(rigBeads, "dolt", "fe"), []string{"part of " + rigBeadsDir}},
+		{rigGC, []string{rigGCDir}},
+		{filepath.Join(rigGC, "store"), []string{"part of " + rigGCDir}},
+	} {
+		refusals := reverseArchiveRefusals(cityPath, cfg, infraBindingTarget{Binding: "infra", Root: tc.root})
+		if len(tc.want) == 0 {
+			if len(refusals) != 0 {
+				t.Fatalf("a binding root at %s refused: %v", tc.root, refusals)
+			}
+			continue
+		}
+		if len(refusals) != 1 || !strings.Contains(refusals[0].String(), "binding infra") || refusals[0].Remedy != reverseKeepSplitRemedy {
+			t.Fatalf("a binding root at %s = %v, want one refusal naming the binding", tc.root, refusals)
+		}
+		want := fmt.Sprintf("R5 archives the binding root whole, renaming it %s.reverted-<run>, and that would take %s with it", tc.root, strings.Join(tc.want, " and "))
+		if refusals[0].Reason != want {
+			t.Fatalf("a binding root at %s refused with\n%s\nwant\n%s", tc.root, refusals[0].Reason, want)
+		}
+	}
+}
+
+// strandInWorkStore writes b into the work store as a raw bd writer does
+// after the cutover, with no gate in its way, closed when closed is set: a
+// row the binding does not serve.
+func strandInWorkStore(t *testing.T, city reverseEngineCity, b beads.Bead, closed bool) beads.Bead {
+	t.Helper()
+	under, _, _ := unwrapBeadPolicyStore(city.source)
+	created, err := under.Create(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed {
+		if err := under.Close(created.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return created
+}
+
+// TestReverseRefusesTheStrandedRowsItWouldRevive: a stranded city serves
+// degraded, its stranded rows invisible to their class readers. A --to-work
+// makes the work store serve every class, so it refuses, dry run included,
+// each open stranded row it would bring back to life, names the ways to
+// settle them, and writes nothing. A row that is infrastructure class only
+// because of metadata, and a closed stranded row, stay in the work store as
+// they are, which the reverse reports; once the open rows are closed, it
+// finishes and leaves all four as the writer left them.
+func TestReverseRefusesTheStrandedRowsItWouldRevive(t *testing.T) {
+	city := newReverseEngineCity(t, 120, "")
+	closeBindingGates(t, city)
+	mail := strandInWorkStore(t, city, beads.Bead{Title: "context cycle", Type: "message", Assignee: "worker"}, false)
+	session := strandInWorkStore(t, city, beads.Bead{Title: "landed after the proof", Type: "session", Labels: []string{"gc:session"}}, false)
+	read := strandInWorkStore(t, city, beads.Bead{Title: "already read", Type: "message", Assignee: "worker"}, true)
+	work := strandInWorkStore(t, city, beads.Bead{Title: "patrol finding", Type: "task", Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gcg-622605"}}, false)
+	if report := confirmInfraContainment(city.cityPath, city.target, "probe", io.Discard); !report.servesDegraded() || len(report.Stranded) != 4 {
+		t.Fatalf("the city before the reverse = %v, stranded %v, want it served degraded over the four rows", report.Outcome, report.Stranded)
+	}
+	before := workStoreFingerprint(t, city.source)
+	for _, opts := range []reverseOptions{{DryRun: true}, {}} {
+		code, stdout, stderr := city.reverse(t, opts)
+		if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") {
+			t.Fatalf("--to-work (dry run %v) over open stranded rows = %d: %s%s", opts.DryRun, code, stdout, stderr)
+		}
+		for _, want := range []string{mail.ID + " (message, open)", session.ID + " (session, open)", "bd close <id>", "--purge-type message", storageRecoveryInstruction(), storageClearInstruction()} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("the refusal does not say %q: %s", want, stderr)
+			}
+		}
+		for _, id := range []string{read.ID, work.ID} {
+			if strings.Contains(stderr, id+" (") {
+				t.Fatalf("the refusal names %s, which the reverse leaves as it is: %s", id, stderr)
+			}
+		}
+		for _, want := range []string{"1 row(s) the city work store holds", work.ID, beadmeta.RootBeadIDMetadataKey, "1 closed row(s)", read.ID} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("the plan does not report %q: %s", want, stdout)
+			}
+		}
+	}
+	if after := workStoreFingerprint(t, city.source); after != before || fileExists(storageReverseJournalPath(city.cityPath)) {
+		t.Fatal("a refused reverse wrote to the work store or its journal")
+	}
+	under, _, _ := unwrapBeadPolicyStore(city.source)
+	for _, id := range []string{mail.ID, session.ID} {
+		if err := under.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("--to-work once the open stranded rows are closed = %d: %s%s", code, stdout, stderr)
+	}
+	city.assertRevertedCityServesSingleStore(t)
+	for id, want := range map[string]string{mail.ID: "closed", session.ID: "closed", read.ID: "closed", work.ID: "open"} {
+		b, err := city.source.Get(id)
+		if err != nil || b.Status != want || b.Metadata[beadmeta.InfraReversedFromMetadataKey] != "" {
+			t.Fatalf("after the reverse the work store holds %s as %q (stamp %q, %v), want it %s as the writer left it", id, b.Status, b.Metadata[beadmeta.InfraReversedFromMetadataKey], err, want)
+		}
+	}
+}
+
+// TestReverseRefusesAStrandedIDTheBindingHoldsForAnotherBead: the work store
+// minted again an id the copy carried, and the binding holds the original
+// under it. Copying the binding's row back would put two beads under one id,
+// so the reverse refuses it, closed as it is, with recover-stranded's per-id
+// choices rather than a hand delete.
+func TestReverseRefusesAStrandedIDTheBindingHoldsForAnotherBead(t *testing.T) {
+	city := newReverseEngineCity(t, 120, "")
+	closeBindingGates(t, city)
+	var carried beads.Bead
+	for _, id := range sortedMapKeys(city.before) {
+		if b := city.before[id]; isInfra(b) && b.Type == "message" {
+			carried = b
+			break
+		}
+	}
+	if carried.ID == "" {
+		t.Fatal("no message row in the fixture")
+	}
+	under, _, _ := unwrapBeadPolicyStore(city.source)
+	later := carried.CreatedAt.Add(time.Hour)
+	if _, err := under.(beads.ForeignIDCreator).CreateWithForeignID(beads.Bead{ID: carried.ID, Title: "minted again", Type: "message", Status: "closed", CreatedAt: later, UpdatedAt: later}); err != nil {
+		t.Fatal(err)
+	}
+	if report := confirmInfraContainment(city.cityPath, city.target, "probe", io.Discard); !slices.Equal(report.HeldDifferent, []string{carried.ID}) {
+		t.Fatalf("the containment check = %v, held for a different bead %v, want %s", report.Outcome, report.HeldDifferent, carried.ID)
+	}
+	before := workStoreFingerprint(t, city.source)
+	code, stdout, stderr := city.reverse(t, reverseOptions{DryRun: true})
+	if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") || !strings.Contains(stderr, carried.ID+" (message, closed)") {
+		t.Fatalf("--to-work --dry-run over a reused id = %d: %s%s", code, stdout, stderr)
+	}
+	for _, want := range []string{"--" + strandedReplaceBindingRowFlag, "--" + strandedDropWorkRowFlag, storageRecoveryInstruction()} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "as another bead") {
+		t.Fatalf("the refusal sends the reused id to a hand delete: %s", stderr)
+	}
+	if after := workStoreFingerprint(t, city.source); after != before {
+		t.Fatal("a refused reverse wrote to the work store")
+	}
+}
+
+// newRetainedReverseEngineCity is newReverseEngineCity migrated as gc 1.5.0
+// did (copy, prove, mark, and no clear): the work store keeps its retained
+// copies, and there is no cleared note.
+func newRetainedReverseEngineCity(t *testing.T, rows int) reverseEngineCity {
+	t.Helper()
+	prev := clearRetainedInfraCopiesFn
+	clearRetainedInfraCopiesFn = func(string, infraBindingTarget, io.Writer) (infraClearResult, error) { return infraClearResult{}, nil }
+	defer func() { clearRetainedInfraCopiesFn = prev }()
+	return newReverseEngineCity(t, rows, "")
+}
+
+// TestReverseRefusesRetainedCopiesOnceNamingTheClear: a city migrated as gc
+// 1.5.0 did keeps its retained pre-migration copies, which boot refuses until
+// the clear removes them. The reverse refuses them once, naming the clear,
+// not once per row as an id held "as another bead", whose hand delete would
+// skip the clear's backup and edge detach. After the clear it finishes
+// without loss.
+func TestReverseRefusesRetainedCopiesOnceNamingTheClear(t *testing.T) {
+	city := newRetainedReverseEngineCity(t, 120)
+	closeBindingGates(t, city)
+	if _, err := storageBootGate(city.cityPath, city.request.Cfg, "gc start", nil, io.Discard); err == nil || !strings.Contains(err.Error(), storageClearInstruction()) {
+		t.Fatalf("boot over retained copies = %v, want the refusal naming the clear", err)
+	}
+	before := workStoreFingerprint(t, city.source)
+	for _, opts := range []reverseOptions{{DryRun: true}, {}} {
+		code, stdout, stderr := city.reverse(t, opts)
+		if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") || !strings.Contains(stderr, "retained pre-migration cop(ies)") || !strings.Contains(stderr, storageClearInstruction()) || strings.Contains(stderr, "as another bead") {
+			t.Fatalf("--to-work (dry run %v) over retained copies = %d: %s%s", opts.DryRun, code, stdout, stderr)
+		}
+	}
+	if after := workStoreFingerprint(t, city.source); after != before || fileExists(storageReverseJournalPath(city.cityPath)) {
+		t.Fatal("a refused reverse wrote to the work store or its journal")
+	}
+	var said bytes.Buffer
+	if report := migrateInfraClasses(t, city.cityPath, infraSplitConfig(".gc/store"), &said); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the clear = %v: %s", report.Outcome, said.String())
+	}
+	// The clear records on each work row the edges it dropped: those are the
+	// rows the round trip compares the work rows with.
+	city.afterForward = map[string]beads.Bead{}
+	for _, b := range rigTestList(t, city.source) {
+		city.afterForward[b.ID] = b
+	}
+	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("--to-work after the clear = %d: %s%s", code, stdout, stderr)
+	}
+	city.assertReversedNotLossy(t)
+	city.assertRevertedCityServesSingleStore(t)
+}
+
+// TestReverseWithNoCopyManifestSaysTheStrandCheckIsOff: a binding that
+// converged before its copy manifest was recorded cannot tell a stranded row
+// from one its GC collected. The reverse, the one rollback that keeps every
+// binding row, does not refuse it: it says the check is off, and finishes.
+func TestReverseWithNoCopyManifestSaysTheStrandCheckIsOff(t *testing.T) {
+	city := newReverseEngineCity(t, 60, "")
+	closeBindingGates(t, city)
+	if err := os.Remove(city.target.ManifestPath()); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := city.reverse(t, reverseOptions{})
+	if code != 0 || !strings.Contains(stdout, "converged before "+city.target.ManifestPath()+" was recorded") {
+		t.Fatalf("--to-work with no copy manifest = %d: %s%s", code, stdout, stderr)
+	}
+	city.assertReversedNotLossy(t)
+	city.assertRevertedCityServesSingleStore(t)
+}
+
+// TestRevertAdviceNamesTheReverseFirst: a hand revert of the split (the
+// classes pointed back at work, or [storage] deleted) is refused, and the
+// refusal names the reverse, the rollback that keeps every bead written to
+// the binding since the cutover, before the backup restore, which loses them.
+// A re-point to another binding, and a served binding the reverse cannot copy
+// from, are not told to run it.
+func TestRevertAdviceNamesTheReverseFirst(t *testing.T) {
+	reverse := storageReverseInstruction(reverseToWork, nil)
+	work := infraBindingTarget{Binding: config.StorageWorkBinding}
+	cleared := infraMigrationReport{Outcome: infraMigrationGenesisBlocked, Target: work, ServedNotePath: "/city/.gc/storage-infra-cleared.json", Cleared: &infraClearedNote{Binding: "infra", Backup: "/city/.gc/store/" + infraRetainedBackupName}}
+	served := infraMigrationReport{Outcome: infraMigrationGenesisBlocked, Target: work, ServedNotePath: "/city/.gc/storage-served-binding.json", ServedBinding: "infra", ServedProvider: config.StorageProviderSQLiteBeads}
+	repointed := served
+	repointed.Target = infraBindingTarget{Binding: "elsewhere"}
+	foreign := served
+	foreign.ServedProvider = "bd"
+	for _, tc := range []struct {
+		name   string
+		report infraMigrationReport
+		want   bool
+	}{
+		{"a cleared city reverted", cleared, true},
+		{"an uncleared city reverted", served, true},
+		{"a re-point to another binding", repointed, false},
+		{"a served binding the reverse cannot copy from", foreign, false},
+	} {
+		if advice := infraMigrationOperatorAdvice(tc.report, "gc start"); strings.Contains(advice, reverse) != tc.want {
+			t.Fatalf("%s: the advice names %q = %v, want %v: %s", tc.name, reverse, !tc.want, tc.want, advice)
+		}
+	}
+	advice := infraMigrationOperatorAdvice(cleared, "gc start")
+	if restore := strings.Index(advice, "Restoring the work store from the backup"); restore < 0 || strings.Index(advice, reverse) > restore {
+		t.Fatalf("the cleared city's advice does not name the reverse before the backup restore: %s", advice)
+	}
+}
+
 // TestReverseHoldsEveryOtherStorageVerb: while a reverse is open, the forward
-// migration, the rig import and the binding restore refuse, naming it.
+// migration, the rig import, the binding restore and recover-stranded (its
+// repair, its purge and the purge's restore) refuse, naming it.
 func TestReverseHoldsEveryOtherStorageVerb(t *testing.T) {
 	city := newReverseEngineCity(t, 120, "")
 	closeBindingGates(t, city)
@@ -800,6 +1412,25 @@ func TestReverseHoldsEveryOtherStorageVerb(t *testing.T) {
 	if code := doStorageSnapshotRestore(context.Background(), city.request, journal.SnapshotTo, journal.Snapshot, "restore", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "reverse migration") {
 		t.Fatalf("restore during a reverse = %d: %s", code, stderr.String())
 	}
+	for name, run := range map[string]func(io.Writer) int{
+		"recover-stranded": func(w io.Writer) int {
+			return doStorageRecoverStranded(context.Background(), city.request, strandedRecoveryOptions{}, &stdout, w)
+		},
+		"recover-stranded --dry-run": func(w io.Writer) int {
+			return doStorageRecoverStranded(context.Background(), city.request, strandedRecoveryOptions{DryRun: true}, &stdout, w)
+		},
+		"recover-stranded --purge-type": func(w io.Writer) int {
+			return doStoragePurgeStranded(context.Background(), city.request, strandedPurgeOptions{Type: "message", DryRun: true}, &stdout, w)
+		},
+		"recover-stranded --restore-purge": func(w io.Writer) int {
+			return doStorageRestorePurge(context.Background(), city.request, filepath.Join(city.target.Root, "infra.purged.jsonl"), true, &stdout, w)
+		},
+	} {
+		var errOut bytes.Buffer
+		if code := run(&errOut); code == 0 || !strings.Contains(errOut.String(), "reverse migration") || !strings.Contains(errOut.String(), storageAbortReverseInstruction()) {
+			t.Fatalf("%s during a reverse = %d: %s", name, code, errOut.String())
+		}
+	}
 	stdout.Reset()
 	if code := doStorageStatusCity(city.request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "reverse: BLOCKED") {
 		t.Fatalf("status during a reverse = %d: %s", code, stdout.String())
@@ -813,6 +1444,78 @@ func TestReverseHoldsEveryOtherStorageVerb(t *testing.T) {
 	reverted := storageOperatorRequest{CityPath: city.cityPath, Cfg: cfg, FleetStopped: true}
 	if code := doStorageSnapshotRestore(context.Background(), reverted, journal.SnapshotTo, journal.Snapshot, "restore", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "no binding to restore") {
 		t.Fatalf("restore on a reverted city = %d: %s", code, stderr.String())
+	}
+}
+
+// TestReverseResumeNamesTheAbortBeforeAHeldVerb: a row a raw writer strands
+// in the work store while a reverse is open is refused when the reverse
+// resumes, dry run included. Every storage verb the refusal's fixes run holds
+// while the journal is open (recover-stranded writes neither the binding nor
+// its manifest), so the refusal names --abort-reverse before them. Once the
+// reverse is abandoned, its carry-on fix runs, and a new reverse brings the
+// row back.
+func TestReverseResumeNamesTheAbortBeforeAHeldVerb(t *testing.T) {
+	city := newReverseEngineCity(t, 120, "")
+	closeBindingGates(t, city)
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if strings.HasPrefix(p, "reverse city verify") {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	code, _, _ := city.reverse(t, reverseOptions{})
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatal("the kill did not stop the reverse")
+	}
+	mail := strandInWorkStore(t, city, beads.Bead{Title: "landed mid-reverse", Type: "message", Assignee: "worker"}, false)
+	for _, opts := range []reverseOptions{{DryRun: true}, {}} {
+		code, stdout, stderr := city.reverse(t, opts)
+		abort, held := strings.Index(stderr, storageAbortReverseInstruction()), strings.Index(stderr, storageRecoveryInstruction())
+		if code == 0 || !strings.Contains(stderr, mail.ID+" (message, open)") || abort < 0 || held < abort {
+			t.Fatalf("the resume (dry run %v) over a row stranded mid-reverse = %d, want it refused naming the abort before recover-stranded: %s%s", opts.DryRun, code, stdout, stderr)
+		}
+	}
+	bindingState := func() string {
+		t.Helper()
+		binding, err := openInfraBindingReadOnly(city.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeBeadStoreHandle(binding) //nolint:errcheck // test cleanup
+		manifest, _, err := readInfraCopyManifestRecord(city.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%s\nmanifest %v", workStoreFingerprint(t, binding), sortedMapKeys(manifest.IDs))
+	}
+	before := bindingState()
+	var stdout, stderr bytes.Buffer
+	if code := doStorageRecoverStranded(context.Background(), city.request, strandedRecoveryOptions{}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "reverse migration") {
+		t.Fatalf("recover-stranded during the reverse = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if bindingState() != before {
+		t.Fatal("recover-stranded wrote the binding or its manifest while the reverse was open")
+	}
+	if code, out, errOut := city.abort(t); code != 0 {
+		t.Fatalf("--abort-reverse = %d: %s%s", code, out, errOut)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRecoverStranded(context.Background(), city.request, strandedRecoveryOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("recover-stranded once the reverse is abandoned = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), city.request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear of the carried row's work-store copy = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if code, out, errOut := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("a new reverse = %d: %s%s", code, out, errOut)
+	}
+	if got, err := city.source.Get(mail.ID); err != nil || got.Status != "open" || got.Metadata[beadmeta.InfraReversedFromMetadataKey] == "" {
+		t.Fatalf("after the new reverse the work store holds %s as %q (stamp %q, %v), want it back, open and stamped", mail.ID, got.Status, got.Metadata[beadmeta.InfraReversedFromMetadataKey], err)
 	}
 }
 
@@ -911,8 +1614,9 @@ func TestStorageMigrateReverseFlags(t *testing.T) {
 // TestReverseResumeRecopiesWhatTheBindingChanged: a row an earlier run copied
 // is kept only while it still equals the binding's row with exactly its
 // planned edges; one the binding changed since, or whose edge the binding
-// dropped, is deleted and copied again, and the reverse ends equal to the
-// binding as it is now.
+// dropped, is deleted and copied again, an edge whose payload the binding
+// cleared is replaced, and the reverse ends equal to the binding as it is
+// now.
 func TestReverseResumeRecopiesWhatTheBindingChanged(t *testing.T) {
 	city := newReverseEngineCity(t, 300, "")
 	closeBindingGates(t, city)
@@ -938,6 +1642,18 @@ func TestReverseResumeRecopiesWhatTheBindingChanged(t *testing.T) {
 			from, unlinked = d.IssueID, d.DependsOnID
 		}
 	}
+	// An edge with a payload that does not touch from: the resume deletes
+	// and copies from again, and that delete would take the edge with it.
+	var cleared beads.Dep
+	for _, d := range city.deps {
+		_, carried := city.payloads[[2]string{d.IssueID, d.DependsOnID}]
+		if carried && d.IssueID != from && d.DependsOnID != from && isInfra(city.before[d.IssueID]) && isInfra(city.before[d.DependsOnID]) && cleared.IssueID == "" {
+			cleared = d
+		}
+	}
+	if cleared.IssueID == "" {
+		t.Fatal("the fixture holds no infrastructure edge with a payload")
+	}
 	for id, b := range city.before {
 		if isInfra(b) && b.Type == "message" && retitled == "" {
 			retitled = id
@@ -948,6 +1664,11 @@ func TestReverseResumeRecopiesWhatTheBindingChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := binding.DepRemove(from, unlinked); err != nil {
+		t.Fatal(err)
+	}
+	// A plain re-add clears the edge's payload in the binding; the work
+	// store's copy of the edge still carries it.
+	if err := binding.DepAdd(cleared.IssueID, cleared.DependsOnID, cleared.Type); err != nil {
 		t.Fatal(err)
 	}
 	_ = closeBeadStoreHandle(binding)
@@ -966,6 +1687,9 @@ func TestReverseResumeRecopiesWhatTheBindingChanged(t *testing.T) {
 		if d.DependsOnID == unlinked {
 			t.Fatalf("the work store keeps %s -> %s, which the binding dropped", from, unlinked)
 		}
+	}
+	if payload, carried, err := city.source.(beads.DepMetadataReader).DepMetadata(cleared.IssueID, cleared.DependsOnID); err != nil || carried {
+		t.Fatalf("the work store's %s -> %s carries (%q, %v), %v; want no payload, as the binding holds it", cleared.IssueID, cleared.DependsOnID, payload, carried, err)
 	}
 }
 

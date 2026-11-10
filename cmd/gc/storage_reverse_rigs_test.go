@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // reverseRigFixture is a split city with a rig whose graph rows a S4b import
@@ -30,22 +31,29 @@ type reverseRigFixture struct {
 
 func newReverseRigFixture(t *testing.T) *reverseRigFixture {
 	t.Helper()
-	clearGCEnv(t)
-	t.Setenv("GC_BEADS", "file")
-	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"}, config.Rig{Name: "other", Prefix: "go"})
 	root := graphRow("gp-root1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs", "gc.kind": "workflow"})
 	step := graphRow("gp-step1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs"})
 	unscoped := graphRow("gp-step2", "gp-root1", "closed", nil) // the import annotates its scope
 	wisp := graphRow("gp-wisp-a1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs"})
 	wisp.Ephemeral = true
 	open := graphRow("gp-d1", "gp-d1", "open", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs"})
-	f.seed("packs", []beads.Bead{root, step, unscoped, wisp, open, workRow("gp-w1", "closed"), workRow("gp-w2", "closed"), workRow("gp-w3", "open")}, []beads.Dep{
+	return newReverseRigFixtureOf(t, []beads.Bead{root, step, unscoped, wisp, open, workRow("gp-w1", "closed"), workRow("gp-w2", "closed"), workRow("gp-w3", "open")}, []beads.Dep{
 		{IssueID: "gp-step1", DependsOnID: "gp-root1", Type: "parent-child"},
 		{IssueID: "gp-step2", DependsOnID: "gp-step1", Type: "blocks"},
 		{IssueID: "gp-d1", DependsOnID: "gp-w1", Type: "blocks"},    // dropped (W closed), recorded on gp-d1
 		{IssueID: "gp-w2", DependsOnID: "gp-step1", Type: "tracks"}, // dropped (W closed), recorded on gp-step1
 		{IssueID: "gp-w3", DependsOnID: "gp-w1", Type: "related"},   // work to work: never moves
 	})
+}
+
+// newReverseRigFixtureOf is newReverseRigFixture with rig packs seeded with
+// rows and deps before its import.
+func newReverseRigFixtureOf(t *testing.T, rows []beads.Bead, deps []beads.Dep) *reverseRigFixture {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"}, config.Rig{Name: "other", Prefix: "go"})
+	f.seed("packs", rows, deps)
 	f.seed("other", []beads.Bead{workRow("go-w1", "open")}, nil)
 	// GC_BEADS=file names a file store for the city too, whose exact
 	// snapshot copies its file; its rows come from the stubbed work store.
@@ -187,6 +195,197 @@ func TestReverseToRigsRoundTripsARigImport(t *testing.T) {
 	}
 }
 
+// TestReverseToRigsReturnsARuntimeGatesEdge: after the import, the runtime
+// mints cross-store gates in the binding as a drain does
+// (internal/dispatch/drain.go): owned by the drain control, here gp-d1, a row
+// the import moved, with no import stamp (dispatch.NewCrossStoreGate), and
+// waited on by the rows of the drain's item, never by the control, which
+// waits on the item's root. While they are open, --to-rigs refuses them, dry
+// run included, and writes nothing. Once they are closed, each returned row
+// that waited on one gets back the edge it stood for, row -> blocker, and the
+// control gets none. A gate a row the binding keeps still waits on stays in
+// the binding with that row's edge; a gate only returned rows waited on
+// leaves with them. A gate whose owner the binding keeps stays there as it
+// is, open, with its edge.
+func TestReverseToRigsReturnsARuntimeGatesEdge(t *testing.T) {
+	r := newReverseRigFixture(t)
+	opts := reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}
+	binding, err := openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mint := func(owner beads.Bead, blocker string, waiting ...string) beads.Bead {
+		t.Helper()
+		gate, err := binding.Create(dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, owner, blocker))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range waiting {
+			if err := binding.DepAdd(id, gate.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return gate
+	}
+	control, err := binding.Get("gp-d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The drain's item root, which the binding minted after the import: the
+	// control holds it, finished, and it waits on the first gate together
+	// with gp-step2, an imported step the drain projected onto that gate.
+	// Only gp-step1 waits on the second.
+	item := mustCreateInfraBead(t, binding, beads.Bead{Title: "a drain item the binding minted", Type: "task"})
+	if err := binding.DepAdd(control.ID, item.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.Close(item.ID); err != nil {
+		t.Fatal(err)
+	}
+	keptGate := mint(control, "gp-w2", item.ID, "gp-step2")
+	leavingGate := mint(control, "gp-w3", "gp-step1")
+	other := mustCreateInfraBead(t, binding, beads.Bead{Title: "a drain control the binding minted", Type: "task"})
+	otherItem := mustCreateInfraBead(t, binding, beads.Bead{Title: "its item", Type: "task"})
+	if err := binding.DepAdd(other.ID, otherItem.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	otherGate := mint(other, "gp-w1", otherItem.ID)
+	_ = closeBeadStoreHandle(binding)
+	if keptGate.Metadata[infraMigrationStampKey] != "" {
+		t.Fatalf("the runtime's gate carries an import stamp: %v", keptGate.Metadata)
+	}
+
+	rigBefore, bindingBefore := workStoreFingerprint(t, r.rig("packs")), workStoreFingerprint(t, r.binding())
+	dry := opts
+	dry.DryRun = true
+	for _, run := range []reverseOptions{dry, opts} {
+		code, stdout, stderr := r.reverse(t, run)
+		if code == 0 || !strings.Contains(stderr, keptGate.ID+" (gate for gp-d1 on gp-w2)") || !strings.Contains(stderr, leavingGate.ID+" (gate for gp-d1 on gp-w3)") || !strings.Contains(stderr, "open cross-store gate") || strings.Contains(stderr, otherGate.ID) {
+			t.Fatalf("--to-rigs (dry run %v) over the open gates of a row it returns = %d: %s%s", run.DryRun, code, stdout, stderr)
+		}
+	}
+	if workStoreFingerprint(t, r.rig("packs")) != rigBefore || workStoreFingerprint(t, r.binding()) != bindingBefore || fileExists(storageReverseJournalPath(r.request.CityPath)) {
+		t.Fatal("a refused reverse wrote to the rig, the binding or its journal")
+	}
+
+	binding, err = openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gate := range []beads.Bead{keptGate, leavingGate} {
+		releaseCrossStoreGate(t, binding, gate)
+	}
+	_ = closeBeadStoreHandle(binding)
+	code, stdout, stderr := r.reverse(t, opts)
+	if code != 0 {
+		t.Fatalf("--to-rigs once the gates are closed = %d: %s%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "1 closed cross-store gate(s) not carried") {
+		t.Fatalf("the reverse did not report the one gate that left the binding: %s", stdout)
+	}
+	r.seededEdges = append(r.seededEdges, "gp-step1 -[blocks]-> gp-w3", "gp-step2 -[blocks]-> gp-w2")
+	sort.Strings(r.seededEdges)
+	r.assertRigAsSeeded(t)
+	after := r.binding()
+	if _, err := after.Get(leavingGate.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the binding still holds a gate only returned rows waited on: %v", err)
+	}
+	if got, err := after.Get(keptGate.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("the gate a row the binding keeps waits on = %+v, %v; want it there, closed", got, err)
+	}
+	if deps, err := after.DepList(item.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != keptGate.ID {
+		t.Fatalf("the edges of the item the binding keeps = %v, %v; want its edge onto its gate", deps, err)
+	}
+	if got, err := after.Get(otherGate.ID); err != nil || got.Status != "open" {
+		t.Fatalf("the gate of a control the binding keeps = %+v, %v; want it there, open", got, err)
+	}
+	if deps, err := after.DepList(otherItem.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != otherGate.ID {
+		t.Fatalf("the edges of that control's item = %v, %v; want its edge onto its gate", deps, err)
+	}
+}
+
+// TestReverseToRigsRefusesToHoldARowAnOperatorReleased: the rig's import moved
+// gp-g1, open, behind a cross-store gate on gp-w9, open work that stays in the
+// rig, and recorded the edge on gp-g1 as gated. An operator's close of that
+// gate released gp-g1 whatever gp-w9 does, whether the close is marked
+// overridden or not. --to-rigs would put gp-g1 -> gp-w9 back in the rig with
+// both open, from the record and from gp-g1's edge onto the gate, so it
+// refuses, dry run included, naming the edge once with its gate, and writes
+// nothing; once gp-w9 closes, it restores the edge. A gate the controller
+// released restores the edge with gp-w9 open: the runtime reopens such a gate
+// when its blocker holds again.
+func TestReverseToRigsRefusesToHoldARowAnOperatorReleased(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		close   func(t *testing.T, binding beads.Store, gate beads.Bead)
+		refused bool
+	}{
+		{"marked overridden", func(t *testing.T, binding beads.Store, gate beads.Bead) {
+			t.Helper()
+			closed := "closed"
+			if err := binding.Update(gate.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.CrossStoreGateStateMetadataKey: dispatch.CrossStoreGateStateOverridden}}); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"closed with no reason", func(t *testing.T, binding beads.Store, gate beads.Bead) {
+			t.Helper()
+			if err := binding.Close(gate.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"released by the controller", releaseCrossStoreGate, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReverseRigFixtureOf(t, []beads.Bead{
+				graphRow("gp-g1", "gp-g1", "open", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs"}),
+				workRow("gp-w9", "open"),
+			}, []beads.Dep{{IssueID: "gp-g1", DependsOnID: "gp-w9", Type: "blocks"}})
+			binding, err := openInfraDestination(r.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gate beads.Bead
+			for _, b := range rigTestList(t, binding) {
+				if isCrossStoreGate(b) && b.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] == "gp-g1" {
+					gate = b
+				}
+			}
+			owner, err := binding.Get("gp-g1")
+			if err != nil || gate.ID == "" || !hasEdge(t, binding, "gp-g1", gate.ID) || !strings.Contains(owner.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], `"action":"gated"`) {
+				t.Fatalf("the import did not gate gp-g1 on gp-w9: gate %+v, owner %+v, %v", gate, owner, err)
+			}
+			tc.close(t, binding, gate)
+			_ = closeBeadStoreHandle(binding)
+			opts := reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}
+
+			if tc.refused {
+				rigBefore, bindingBefore := workStoreFingerprint(t, r.rig("packs")), workStoreFingerprint(t, r.binding())
+				want := fmt.Sprintf("gp-g1 -[blocks]-> gp-w9 (gate %s)", gate.ID)
+				dry := opts
+				dry.DryRun = true
+				for _, run := range []reverseOptions{dry, opts} {
+					code, stdout, stderr := r.reverse(t, run)
+					if code == 0 || strings.Count(stderr, want) != 1 || !strings.Contains(stderr, "an operator closed each gate") {
+						t.Fatalf("--to-rigs (dry run %v) over an operator's close of the import's gate = %d, want one refusal of %s: %s%s", run.DryRun, code, want, stdout, stderr)
+					}
+				}
+				if workStoreFingerprint(t, r.rig("packs")) != rigBefore || workStoreFingerprint(t, r.binding()) != bindingBefore || fileExists(storageReverseJournalPath(r.request.CityPath)) {
+					t.Fatal("a refused reverse wrote to the rig, the binding or its journal")
+				}
+				if err := r.rig("packs").Close("gp-w9"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code, stdout, stderr := r.reverse(t, opts); code != 0 {
+				t.Fatalf("--to-rigs = %d: %s%s", code, stdout, stderr)
+			}
+			if !hasEdge(t, r.rig("packs"), "gp-g1", "gp-w9") {
+				t.Fatalf("the rig lacks gp-g1 -> gp-w9: %v", rigEdgeFingerprint(t, r.rig("packs")))
+			}
+		})
+	}
+}
+
 // TestReverseToRigsResumesFromEveryBoundary kills --to-rigs at every
 // boundary: boot refuses while the journal is open, and the next run
 // finishes it without loss.
@@ -286,15 +485,21 @@ func TestReverseToRigsAbortRemovesOnlyItsRows(t *testing.T) {
 	}
 }
 
+// writeSplitCityTOML writes the fixture's city.toml, with its rigs and its
+// binding, which a --to-work edits at R4.
+func (r *reverseRigFixture) writeSplitCityTOML(t *testing.T) {
+	t.Helper()
+	toml := reverseCityTOMLTextAt(r.cfg.Storage.Bindings["infra"].Path, "", r.cfg.Rigs...)
+	if err := os.WriteFile(filepath.Join(r.request.CityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestReverseToWorkReturnsARigImport: --to-work returns the rig's imported
 // rows to the rig (S4c inside the whole reverse) and retires the city's split.
 func TestReverseToWorkReturnsARigImport(t *testing.T) {
 	r := newReverseRigFixture(t)
-	toml := reverseCityTOMLText("", r.cfg.Rigs...)
-	toml = strings.Replace(toml, `path = ".gc/store"`, fmt.Sprintf("path = %q", r.cfg.Storage.Bindings["infra"].Path), 1)
-	if err := os.WriteFile(filepath.Join(r.request.CityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	r.writeSplitCityTOML(t)
 	code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToWork})
 	if code != 0 {
 		t.Fatalf("--to-work = %d: %s%s", code, stdout, stderr)
@@ -395,6 +600,194 @@ func TestReverseRefusesARigImportNotFinished(t *testing.T) {
 	code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
 	if code == 0 || !strings.Contains(stderr, "the rig's import has not finished") || !strings.Contains(stderr, rigImportInstruction("packs")) {
 		t.Fatalf("--to-rigs over an unfinished import = %d: %s", code, stderr)
+	}
+}
+
+// TestReverseRefusesTheStrandedRowsItWouldReviveInARig: an imported rig is
+// relic-free, so its readers skip its store, and a row a raw writer put there
+// after the import is hidden from them: the census calls the rig stranded.
+// Each reverse gives that store every class back (--to-work retires the
+// split, --to-rigs gives the rig its relic legs), so each refuses, dry run
+// included, every open stranded row the rig would serve again, names the
+// rig's ways to settle it, and writes nothing. It refuses and reports exactly
+// the rows the census calls stranded: a closed one, and one that is
+// infrastructure class only because of metadata, stay in the rig as they
+// are, which the reverse reports. A rig awaiting import hides nothing, its
+// relic legs serving it, so its open row is not refused. Once the open rows
+// are closed, the reverse finishes and leaves the four as the writer left
+// them.
+func TestReverseRefusesTheStrandedRowsItWouldReviveInARig(t *testing.T) {
+	for _, mode := range []reverseMode{reverseToRigs, reverseToWork} {
+		t.Run(string(mode), func(t *testing.T) {
+			r := newReverseRigFixture(t)
+			opts := reverseOptions{Mode: mode, Rigs: []string{"packs"}}
+			if mode == reverseToWork {
+				r.writeSplitCityTOML(t)
+				opts.Rigs = nil
+			}
+			rig := r.rig("packs")
+			mail := mustCreateInfraBead(t, rig, beads.Bead{Title: "stranded mail", Type: "message", Assignee: "worker"})
+			session := mustCreateInfraBead(t, rig, beads.Bead{Title: "stranded session", Type: "session", Labels: []string{"gc:session"}})
+			read := mustCreateInfraBead(t, rig, beads.Bead{Title: "read mail", Type: "message", Assignee: "worker"})
+			if err := rig.Close(read.ID); err != nil {
+				t.Fatal(err)
+			}
+			work := mustCreateInfraBead(t, rig, beads.Bead{Title: "patrol finding", Type: "task", Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gp-root1"}})
+			awaiting := mustCreateInfraBead(t, r.rig("other"), beads.Bead{Title: "mail its relic legs serve", Type: "message", Assignee: "worker"})
+			census := map[string]rigCensusRow{}
+			for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target, false) {
+				census[row.Rig] = row
+			}
+			stranded := []string{mail.ID, session.ID, read.ID, work.ID}
+			sort.Strings(stranded)
+			if got := census["packs"]; got.State != rigCensusStranded || strings.Join(got.Stranded, ",") != strings.Join(stranded, ",") || !r.relicFree("packs") {
+				t.Fatalf("rig packs before the reverse: %s stranded %v (relic-free %v), want stranded %v", got.State, got.Stranded, r.relicFree("packs"), stranded)
+			}
+			if got := census["other"]; got.State != rigCensusAwaiting || r.relicFree("other") {
+				t.Fatalf("rig other before the reverse: %s (relic-free %v), want awaiting import", got.State, r.relicFree("other"))
+			}
+			packs, _ := rigImportRigNamed(r.cfg, "packs")
+			before := workStoreFingerprint(t, r.rig("packs"))
+			dry := opts
+			dry.DryRun = true
+			for _, run := range []reverseOptions{dry, opts} {
+				code, stdout, stderr := r.reverse(t, run)
+				if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") {
+					t.Fatalf("--%s (dry run %v) over open stranded rig rows = %d: %s%s", mode, run.DryRun, code, stdout, stderr)
+				}
+				for _, want := range []string{mail.ID + " (message, open)", session.ID + " (session, open)", "rig packs holds", "bd close <id>", rigStoreRoot(r.request.CityPath, packs), rigImportInstruction("packs")} {
+					if !strings.Contains(stderr, want) {
+						t.Fatalf("the refusal does not say %q: %s", want, stderr)
+					}
+				}
+				for _, id := range []string{read.ID, work.ID, awaiting.ID} {
+					if strings.Contains(stderr, id+" (") {
+						t.Fatalf("the refusal names %s, which the reverse leaves as it is: %s", id, stderr)
+					}
+				}
+				for _, want := range []string{"1 closed row(s) the store of rig packs holds", read.ID, "1 row(s) the store of rig packs holds", work.ID, beadmeta.RootBeadIDMetadataKey} {
+					if !strings.Contains(stdout, want) {
+						t.Fatalf("the plan does not report %q: %s", want, stdout)
+					}
+				}
+			}
+			if after := workStoreFingerprint(t, r.rig("packs")); after != before || fileExists(storageReverseJournalPath(r.request.CityPath)) {
+				t.Fatal("a refused reverse wrote to the rig or its journal")
+			}
+			for _, id := range []string{mail.ID, session.ID} {
+				if err := rig.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code, stdout, stderr := r.reverse(t, opts); code != 0 {
+				t.Fatalf("--%s once the open stranded rows are closed = %d: %s%s", mode, code, stdout, stderr)
+			}
+			for store, want := range map[string]map[string]string{
+				"packs": {mail.ID: "closed", session.ID: "closed", read.ID: "closed", work.ID: "open"},
+				"other": {awaiting.ID: "open"},
+			} {
+				for id, status := range want {
+					b, err := r.rig(store).Get(id)
+					if err != nil || b.Status != status || b.Metadata[beadmeta.InfraReversedFromMetadataKey] != "" {
+						t.Fatalf("after the reverse rig %s holds %s as %q (stamp %q, %v), want it %s as the writer left it", store, id, b.Status, b.Metadata[beadmeta.InfraReversedFromMetadataKey], err, status)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestReverseRefusesARigRowUnderAnIDItsImportMoved: the rig minted again an
+// id its import moved, and the binding holds the original under it. Each
+// reverse returns that original to the rig under its id, so it refuses the
+// rig's row, of either class and open or closed, with the import's own fix
+// for such a row, not as an id held "as another bead", whose hand delete
+// would lose one of them.
+func TestReverseRefusesARigRowUnderAnIDItsImportMoved(t *testing.T) {
+	for _, mode := range []reverseMode{reverseToRigs, reverseToWork} {
+		for _, again := range []beads.Bead{
+			{Title: "minted again", Type: "message", Assignee: "worker", Status: "closed"},
+			{Title: "a task minted again", Type: "task", Status: "open"},
+		} {
+			t.Run(string(mode)+"/"+again.Type, func(t *testing.T) {
+				r := newReverseRigFixture(t)
+				opts := reverseOptions{Mode: mode, Rigs: []string{"packs"}, DryRun: true}
+				if mode == reverseToWork {
+					r.writeSplitCityTOML(t)
+					opts.Rigs = nil
+				}
+				again.ID = "gp-step1"
+				again.CreatedAt = r.seeded["gp-step1"].CreatedAt.Add(time.Hour)
+				again.UpdatedAt = again.CreatedAt
+				if _, err := r.rig("packs").(beads.ForeignIDCreator).CreateWithForeignID(again); err != nil {
+					t.Fatal(err)
+				}
+				stranded := map[string]string{"message": "gp-step1", "task": ""}[again.Type]
+				for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target, false) {
+					if row.Rig == "packs" && (strings.Join(row.Reused, ",") != "gp-step1" || strings.Join(row.Stranded, ",") != stranded) {
+						t.Fatalf("the census of rig packs: %s (%v), reused %v, stranded %v, want gp-step1 reused and %q stranded", row.State, row.Err, row.Reused, row.Stranded, stranded)
+					}
+				}
+				before := workStoreFingerprint(t, r.rig("packs"))
+				code, stdout, stderr := r.reverse(t, opts)
+				if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") || !strings.Contains(stderr, fmt.Sprintf("gp-step1 (%s, %s)", again.Type, again.Status)) || !strings.Contains(stderr, rigReusedIDRemedy) {
+					t.Fatalf("--%s --dry-run over a rig row under an id its import moved = %d: %s%s", mode, code, stdout, stderr)
+				}
+				if strings.Contains(stderr, "as another bead") || strings.Contains(stdout, "stay there as") {
+					t.Fatalf("the reverse sends the reused id to a hand delete, or reports it as left in the rig: %s%s", stdout, stderr)
+				}
+				if after := workStoreFingerprint(t, r.rig("packs")); after != before {
+					t.Fatal("a refused reverse wrote to the rig")
+				}
+			})
+		}
+	}
+}
+
+// TestReverseRigCheckLeavesOutItsOwnRows: the rig check leaves out a row
+// that carries this run's stamp, one a resumed run wrote itself, however the
+// rig's manifest reads it; the same row under another run's stamp is a
+// stranded row like any other.
+func TestReverseRigCheckLeavesOutItsOwnRows(t *testing.T) {
+	r := newReverseRigFixture(t)
+	manifest, _, err := r.loc("packs").readManifest()
+	if err != nil || manifest == nil {
+		t.Fatalf("rig packs's manifest = %v, %v", manifest, err)
+	}
+	const stamp = "infra/20261110T000000.000000000Z-0a0b0c0d"
+	run := reverseRun{request: r.request, opts: reverseOptions{Mode: reverseToRigs}, target: r.target, journal: storageReverseJournal{Rigs: []string{"packs"}, Stamp: stamp}}
+	for _, tc := range []struct {
+		stamp   string
+		refused bool
+	}{{stamp, false}, {"infra/20261109T000000.000000000Z-0a0b0c0d", true}} {
+		mail := beads.Bead{ID: "gp-mail", Title: "mail", Type: "message", Status: "open", Assignee: "worker", Metadata: beads.StringMap{beadmeta.InfraReversedFromMetadataKey: tc.stamp}}
+		in := reverseInput{Held: map[string]map[string]beads.Bead{rigImportStamp("packs"): {mail.ID: mail}}, Manifests: map[string]*infraCopyManifest{"packs": manifest}}
+		refusals := run.rigStoreLeftovers(in, &reversePlan{})
+		if refused := len(refusals) == 1 && strings.Contains(refusals[0].String(), "gp-mail (message, open)"); refused != tc.refused || len(refusals) > 1 {
+			t.Fatalf("a stranded open row stamped %q: refusals %v, want refused %v", tc.stamp, refusals, tc.refused)
+		}
+	}
+}
+
+// TestReverseToWorkChecksARigRecordedClean: a rig recorded clean is
+// relic-free too, so an open infrastructure row a raw writer put there
+// afterwards is hidden, and a --to-work refuses it. While the rig awaits
+// import, its relic legs serve the same row, and it is not refused.
+func TestReverseToWorkChecksARigRecordedClean(t *testing.T) {
+	r := newReverseRigFixture(t)
+	r.writeSplitCityTOML(t)
+	mail := mustCreateInfraBead(t, r.rig("other"), beads.Bead{Title: "mail", Type: "message", Assignee: "worker"})
+	if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToWork, DryRun: true}); code != 0 || r.relicFree("other") {
+		t.Fatalf("--to-work --dry-run over an open row in a rig awaiting import (relic-free %v) = %d: %s%s", r.relicFree("other"), code, stdout, stderr)
+	}
+	other, _ := rigImportRigNamed(r.cfg, "other")
+	loc := r.loc("other")
+	if err := loc.writeRecord(loc.CleanPath(), "rig other holds no infrastructure bead (a census before the write)", rigStoreRoot(r.request.CityPath, other)); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToWork, DryRun: true})
+	if code == 0 || !r.relicFree("other") || !strings.Contains(stderr, mail.ID+" (message, open)") || !strings.Contains(stderr, "rig other holds") {
+		t.Fatalf("--to-work --dry-run over an open row in a rig recorded clean (relic-free %v) = %d: %s%s", r.relicFree("other"), code, stdout, stderr)
 	}
 }
 
@@ -620,6 +1013,57 @@ func TestReverseToRigsReListsTheRigBeforeTheClear(t *testing.T) {
 	if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
 		t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
 	}
+	r.assertRigAsSeeded(t)
+}
+
+// TestReverseToRigsReprovesTheBindingOnAResume (SHOULD 9): a binding row
+// changed between a run killed once its copies were proven (R2) and the
+// resume, which plans again, puts the reverse back to R0 before the clear
+// can remove the newer row, and the next run returns the newer row to the
+// rig.
+func TestReverseToRigsReprovesTheBindingOnAResume(t *testing.T) {
+	r := newReverseRigFixture(t)
+	opts := reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}
+	title := "written after the copy"
+	var updated time.Time
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p != "reverse phase "+reversePhaseName(reverseR2) {
+			return nil
+		}
+		binding, err := openInfraDestination(r.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeBeadStoreHandle(binding) //nolint:errcheck // test cleanup
+		if err := binding.Update("gp-step1", beads.UpdateOpts{Title: &title}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := binding.Get("gp-step1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated = got.UpdatedAt
+		return errors.New("killed")
+	}
+	code, _, stderr := r.reverse(t, opts)
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatalf("the kill did not stop the reverse: %s", stderr)
+	}
+	code, stdout, stderr := r.reverse(t, opts)
+	if code == 0 || !strings.Contains(stderr, "the binding changed after its rows were copied") {
+		t.Fatalf("a resume over a changed binding = %d: %s%s", code, stdout, stderr)
+	}
+	if journal, _, _ := readStorageReverseJournal(r.request.CityPath); journal.Phase != reverseR0 || journal.ClearStarted {
+		t.Fatalf("journal phase %d, clear started %v; want R0 and no clear", journal.Phase, journal.ClearStarted)
+	}
+	if code, stdout, stderr := r.reverse(t, opts); code != 0 {
+		t.Fatalf("the next run = %d: %s%s", code, stdout, stderr)
+	}
+	want := r.seeded["gp-step1"]
+	want.Title, want.UpdatedAt = title, updated
+	r.seeded["gp-step1"] = want
 	r.assertRigAsSeeded(t)
 }
 

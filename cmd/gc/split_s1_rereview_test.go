@@ -385,8 +385,8 @@ func TestRevertOfACityThisBuildMigrated(t *testing.T) {
 	}}}
 	_ = os.Remove(infraClearedNotePath(cityPath))
 	_, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
-		t.Errorf("revert with only the cleared note removed = %v, want the served-note hold naming %s", err, bornSplitServedNotePath(cityPath))
+	if err == nil || !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) || !strings.Contains(err.Error(), storageReverseInstruction(reverseToWork, nil)) {
+		t.Errorf("revert with only the cleared note removed = %v, want the served-note hold naming %s and the reverse", err, bornSplitServedNotePath(cityPath))
 	}
 	if err := os.Remove(bornSplitServedNotePath(cityPath)); err != nil {
 		t.Fatal(err)
