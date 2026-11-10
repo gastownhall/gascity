@@ -4,7 +4,8 @@ package conversationlane_test
 
 // The bd-dolt arm: a beads workspace that the pinned bd's `bd init --server`
 // provisioned against a dolt sql-server the harness runs, served natively.
-// bd runs only to provision it (init and the custom types); the city binds
+// bd runs only to provision it (init and the custom types), and the linked
+// library then migrates it to its own schema (adoptLinkedSchema); the city binds
 // its sessions class to the workspace through a beads-workspace binding,
 // whose engine opens the server in-process over SQL
 // (internal/storebinding/beadsworkspace: OpenNativeDoltStoreAtWithoutAmbientEnv),
@@ -107,6 +108,41 @@ func (c *laneCity) provisionServedWorkspace() {
 	c.runTool(env, root, "git", "init", "--quiet")
 	c.runTool(env, root, bd, "init", "--server", "--server-host", "127.0.0.1", "--server-port", strconv.Itoa(srv.port), "-p", laneIDPrefix, "--skip-hooks", "--skip-agents")
 	c.runTool(env, root, bd, "config", "set", "types.custom", strings.Join(c.customTypes(), ","))
+	cursor, err := srv.schemaCursor()
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.bdSchema = cursor
+	if c.opts.provisionerSchemaBehind {
+		if err := srv.setSchemaCursor(cursor - 1); err != nil {
+			c.t.Fatal(err)
+		}
+	}
+	c.adoptLinkedSchema(root)
+}
+
+// adoptLinkedSchema migrates the workspace at root to the schema of the
+// beads library gc links, as the operator of a shared server does once
+// every client of it runs that library: the test is the server's only
+// other client. bd is pinned to a release, and the library gc links may be
+// ahead of every release (the enterprise release line links a newer
+// library than the public bd it pins); the library refuses to migrate a
+// database a dolt sql-server shares without that consent
+// (gastownhall/beads#5920), so without this step the city's binding, which
+// opens with the consent withheld, could not open a workspace the pinned
+// bd provisioned. A workspace already at the library's schema opens
+// unchanged.
+func (c *laneCity) adoptLinkedSchema(root string) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), bdProvisionTimeout)
+	defer cancel()
+	storage, err := beads.OpenNativeStorage(ctx, root, map[string]string{beads.BDAllowRemoteMigrateEnvKey: "1"})
+	if err != nil {
+		c.t.Fatalf("migrating the workspace at %s to the linked beads library's schema: %v", root, err)
+	}
+	if err := storage.Close(); err != nil {
+		c.t.Fatalf("closing the workspace at %s after its migration: %v", root, err)
+	}
 }
 
 // bdToolBase is the environment bd, git and dolt run with, before
@@ -230,13 +266,53 @@ func startDoltServer(dolt, dataDir, logPath string, env []string) (*doltServer, 
 // collectGarbage runs DOLT_GC on the server's one database, the workspace
 // bd provisioned under the binding's id prefix.
 func (s *doltServer) collectGarbage() error {
-	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s", s.port, laneIDPrefix))
+	db, err := s.openWorkspaceDB()
 	if err != nil {
-		return fmt.Errorf("opening the dolt sql-server on port %d: %w", s.port, err)
+		return err
 	}
 	defer func() { _ = db.Close() }()
 	if _, err := db.Exec("CALL DOLT_GC()"); err != nil {
 		return fmt.Errorf("collecting garbage on the dolt sql-server on port %d: %w", s.port, err)
+	}
+	return nil
+}
+
+// openWorkspaceDB opens the server's one database, the workspace bd
+// provisioned under the binding's id prefix.
+func (s *doltServer) openWorkspaceDB() (*sql.DB, error) {
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s", s.port, laneIDPrefix))
+	if err != nil {
+		return nil, fmt.Errorf("opening the dolt sql-server on port %d: %w", s.port, err)
+	}
+	return db, nil
+}
+
+// schemaCursor reads the workspace's schema cursor: the highest migration
+// version its schema_migrations records.
+func (s *doltServer) schemaCursor() (int, error) {
+	db, err := s.openWorkspaceDB()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = db.Close() }()
+	var cursor int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		return 0, fmt.Errorf("reading the workspace's schema cursor on port %d: %w", s.port, err)
+	}
+	return cursor, nil
+}
+
+// setSchemaCursor rewinds the workspace's schema cursor to version by
+// forgetting every migration above it, as a workspace an older bd
+// provisioned records them.
+func (s *doltServer) setSchemaCursor(version int) error {
+	db, err := s.openWorkspaceDB()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("DELETE FROM schema_migrations WHERE version > ?", version); err != nil {
+		return fmt.Errorf("rewinding the workspace's schema cursor to %d on port %d: %w", version, s.port, err)
 	}
 	return nil
 }

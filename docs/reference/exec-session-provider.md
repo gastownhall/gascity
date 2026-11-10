@@ -585,11 +585,30 @@ For such a script gc does the session's host work itself, around `start` (or
    `session_setup_script` on the host with `GC_SESSION` set. A failure is a
    warning; the session keeps running.
 
+gc does this host work only into a name that holds no live box:
+`is-running` prints `false` or, on a v2-ready script, `observe` reads the
+name absent or its box dead (a start recycles a dead box, so the work is
+done again, as after a death under tmux). Into a name a running box holds,
+or one whose read fails, it does none of it and sends the full config.
+
+When gc relaunches the agent in a warm box (a script declaring
+`proc.provision` and `proc.exec`), it runs `session_setup` and
+`session_setup_script` on the host again after the launch, as the tmux
+runtime does. It does not stage the work dir or run `pre_start` again: the
+box is warm. A script without `proc.provision` is relaunched by a `stop`
+and a `start`, which do all of the host work again.
+
 gc runs no `session_live` for an exec runtime; the field stays in the start
-config. gc does this host work only into a name the script reports vacant:
-`is-running` prints `false` or, on a v2-ready script, `observe` reads it
-absent. Into a name a box already holds, or one whose read fails, it does
-none of it and sends the full config.
+config. Commands there are typically tmux theming and keybindings, written
+as `tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} ...` so that they reach the
+city's tmux server. Only gc's tmux runtime sets `GC_TMUX_SOCKET`; on gc's
+host without it, those commands reach the user's own default tmux server.
+So a script declaring `fs.host` runs `session_live` only against a tmux
+server of its own (for example, with `GC_TMUX_SOCKET` set to that server's
+socket name), and otherwise must not run it. The same applies to the
+`session_setup` commands gc runs on the host for such a script: gc runs them
+without `GC_TMUX_SOCKET`, so keep commands that drive tmux out of an agent's
+`session_setup` when its runtime declares `fs.host`.
 
 There is no flag in the start config that says gc did the work. A script
 does exactly what its start config carries: a gc that did the host work
@@ -597,10 +616,23 @@ left those fields out, and an older gc (or one whose cached handshake
 predates the script declaring `fs.host`) sends them, and the script does
 them, as before.
 
+The reverse also holds. gc keeps a successful handshake for the provider's
+life, so a script edited in place to drop `fs.host` still gets start
+configs without those fields until gc restarts, and nothing does that work.
+Restart gc after removing `fs.host` from a script it is running.
+
 With `fs.host`, gc also reads the agent's transcript on its own host for
 turn tracking, and the runtime passes the skill and MCP materialization
 gates, so an agent with MCP configured resolves at its scope root and in a
 worktree.
+
+The skill and MCP gates read the handshake through gc's admission probe,
+which gc remembers for each version of the script file. The first gate check
+for a version (or the first after a failed probe's 30-second retry window)
+runs `protocol`, bounded at 10 seconds, and concurrent checks wait for that
+one probe. A script that is slow to start or hangs in `protocol` delays that
+check by up to 10 seconds. A failed or timed-out probe reads as no `fs.host`
+until a later probe succeeds.
 
 On a v2-ready script with `fs.host`, gc also scans its host's process table
 for a session's leftover processes, as it does for tmux and subprocess
@@ -636,9 +668,13 @@ it.
 `gc runtime conformance` checks the promise in its `fshost` group: a box's
 command copies a file the runner wrote and records its `id -u`, which the
 runner reads back on its own host; a `start` config's `overlay_dir` and
-`pre_start` are carried out, and a failing `pre_start` fails `start` with no
-box; and, with `observe.v1`, `observe`'s `agent_pid` is a live host process
-of the caller's user.
+`pre_start` are carried out, a failing `pre_start` fails `start` with no
+box, and a config that carries neither stages and runs nothing; with
+`observe.v1`, `observe`'s `agent_pid` is a live host process of the
+caller's user; and a box's command reads a file the runner wrote under its
+`HOME`, so a box that shares only the work dir (a container bind-mounting
+`/tmp`, say) fails. `gc runtime check` warns when a handshake declares
+`fs.host` without `"locality": "local"`.
 
 ### Work-dir export exclusions
 

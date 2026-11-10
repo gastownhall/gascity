@@ -17,7 +17,8 @@ import (
 // pre_start before the box is created and session_setup after the agent is
 // up, all on the host, and leaves that work out of the start config, so the
 // pack does exactly what the config carries. It does that only into a name
-// the pack reports vacant (Start, provisionBox, startFresh). Every reader of
+// the pack reports holding no live box (Start, provisionBox, startFresh), and
+// it runs session_setup again after a separable Relaunch. Every reader of
 // the token goes through sharesHostFS, so locality and the token are read
 // together.
 

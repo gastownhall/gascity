@@ -17,7 +17,8 @@ package storeref
 // serve, so the minted refs are the ones the route planes name
 // (class:gmnos). The topology carries the plane's own refusal, and fails
 // closed when the per-class refusals cover every relocated class
-// (everyRelocatedClassRefused).
+// (everyRelocatedClassRefused); a binding whose every class is refused is
+// minted over the refusing store, under its own ref, so its leg refuses too.
 
 import (
 	"fmt"
@@ -32,7 +33,8 @@ import (
 // the rig legs and the bindings over the handles' own stores, with the
 // prefixes, census bits, relic-free and suspension bits t carried for them.
 // The bindings are grouped from each class's placement without the plane's
-// per-class refusals (see the file comment).
+// per-class refusals (see the file comment); a binding the plane refuses in
+// full is then minted over its refusing store (bindingRefusal).
 func mintedTopology(t Topology, opts StoresOptions, s Stores) Topology {
 	work := s.city.Work.Raw()
 	out := Topology{
@@ -93,7 +95,34 @@ func mintedTopology(t Topology, opts StoresOptions, s Stores) Topology {
 	if out.Refused == nil {
 		out.Refused = everyRelocatedClassRefused(out.Bindings, opts)
 	}
+	for i, b := range out.Bindings {
+		if refusal, ok := bindingRefusal(b, opts); ok {
+			out.Bindings[i].Leg.Store = refusal
+		}
+	}
 	return out
+}
+
+// bindingRefusal is the store that refuses b when the plane refuses every one
+// of b's classes (StoresOptions.ClassRefusals), and false otherwise. Such a
+// binding's leg is minted over it, under the binding's own ref: the routes
+// name the binding, and every read of it, a by-id probe included, refuses as
+// each of its class handles does. That is what keeps a refused topology's
+// binding legs refusing (planByID reads the legs, not Refused). A binding
+// whose classes are refused only in part keeps the store: the classes the
+// plane still serves are served from it.
+func bindingRefusal(b ClassBinding, opts StoresOptions) (beads.Store, bool) {
+	var first beads.Store
+	for _, class := range b.Classes {
+		refusal, ok := opts.ClassRefusals[class]
+		if !ok || refusal == nil {
+			return nil, false
+		}
+		if first == nil {
+			first = refusal
+		}
+	}
+	return first, first != nil
 }
 
 // everyRelocatedClassRefused is the plane's refusal when its per-class

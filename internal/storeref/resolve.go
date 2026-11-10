@@ -122,11 +122,19 @@ type ByID struct {
 // WorkAxisRouter answers "which work stores can hold this id, in what order"
 // for a plane whose by-id work axis is routed rather than probed.
 //
-// The first leg returned is the plan's RESIDUAL — returned unprobed by
-// ResolveOwner when it is also the last, which is what keeps a single-answer
-// route byte-identical to the caller reading its own store. Any further legs
-// are read in order, so a multi-leg answer proves absence rather than handing
-// back a residual.
+// It answers by ref, and the plan reads each ref's leg from the topology it
+// is planned over: the work leg for WorkRef, the rig leg for a rig ref, a
+// suspended rig's included (the plane routes to it as to any rig). So a
+// router names stores and never hands one over, and a plan's work legs are
+// the epoch's own. A ref the topology holds no store for is a plan error, not
+// a skipped leg: a route that names a store this epoch did not open has
+// nothing to say about where the bead is.
+//
+// The first ref is the plan's RESIDUAL — returned unprobed by ResolveOwner
+// when it is also the last, which is what keeps a single-answer route
+// byte-identical to the caller reading its own store. Any further legs are
+// read in order, so a multi-leg answer proves absence rather than handing back
+// a residual.
 //
 // DECLARING ONE IS A REVIEWED ACT. An implementation replaces this package's
 // by-id work rule with the plane's own, so a second one is a second answer to
@@ -137,9 +145,9 @@ type ByID struct {
 // must land with a cross-plane router-agreement pin. The rule is stated in
 // full beside the pattern in scripts/residency-boundary-patterns.txt.
 type WorkAxisRouter interface {
-	// WorkLegsForID returns the work legs for id, or nil to leave the
-	// resolver's own [work, covering-shadows] rule in place.
-	WorkLegsForID(id string) []Leg
+	// WorkLegsForID returns the refs of the work legs for id, in order, or
+	// nil to leave the resolver's own [work, covering-shadows] rule in place.
+	WorkLegsForID(id string) []StoreRef
 }
 
 // RoutedWork is the claimable/ready federation: `gc ready`, demand tiers.
@@ -288,7 +296,11 @@ func planByID(in ByID, t Topology) (ResolvedPlan, error) {
 		// owns the work axis, and its answer REPLACES the probed tail below
 		// rather than joining it. Consulted only here: inside a namespace the
 		// binding is the authority and the tail is this package's probe list.
-		if routed := routedWorkLegs(in, id); len(routed) > 0 {
+		routed, err := routedWorkLegs(in, id, t)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		if len(routed) > 0 {
 			plan.Legs = append(plan.Legs, routed...)
 			return dedupeLegs(plan), nil
 		}
@@ -451,20 +463,38 @@ func bindingTailLegs(bindings []ClassBinding) []PlanLeg {
 // absence. Every leg is Fatal: a work store that cannot be read has told the
 // resolution nothing, and reporting that as a missing bead is the shape this
 // package exists to prevent.
-func routedWorkLegs(in ByID, id string) []PlanLeg {
+func routedWorkLegs(in ByID, id string, t Topology) ([]PlanLeg, error) {
 	if in.WorkAxis == nil {
-		return nil
+		return nil, nil
 	}
-	legs := in.WorkAxis.WorkLegsForID(id)
-	out := make([]PlanLeg, 0, len(legs))
-	for i, leg := range legs {
+	refs := in.WorkAxis.WorkLegsForID(id)
+	out := make([]PlanLeg, 0, len(refs))
+	for i, ref := range refs {
+		leg, ok := t.workLeg(ref)
+		if !ok {
+			return nil, fmt.Errorf("storeref: the by-id work axis routed %q to %q, which this topology holds no store for", id, legName(ref))
+		}
 		role := RoleShadow
 		if i == 0 {
 			role = RoleWorkFallback
 		}
 		out = append(out, PlanLeg{Leg: leg, Role: role, OnError: PolicyFatal})
 	}
-	return out
+	return out, nil
+}
+
+// workLeg is the work leg ref names on t: the work leg for WorkRef, else the
+// rig leg of that ref, suspended or not. A leg with no store is not one.
+func (t Topology) workLeg(ref StoreRef) (Leg, bool) {
+	if ref == WorkRef {
+		return t.Work, t.Work.Store != nil
+	}
+	for _, leg := range t.Rigs {
+		if leg.Ref == ref && leg.Store != nil {
+			return leg, true
+		}
+	}
+	return Leg{}, false
 }
 
 // shadowLegsCovering returns the work legs whose CONFIGURED prefix also covers

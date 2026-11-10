@@ -83,6 +83,7 @@ var probes = map[Code]probe{
 	ReqFSHostLocal:             probeFSHostLocal,
 	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
 	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
+	ReqFSHostHomeView:          probeFSHostHomeView,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
