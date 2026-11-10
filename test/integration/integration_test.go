@@ -756,18 +756,24 @@ func cleanupIntegrationDoltSQLServersUnderRoot(root string) {
 // .beads/dolt after Dolt stopped. It returns a description of every process
 // that survived, so a failed stop is reported instead of racing RemoveAll.
 func stopIntegrationOwnedProcesses(roots ...string) []string {
+	return stopIntegrationOwnedProcessesWith(readProcessSnapshot, integrationProcessCwd, os.Getpid(), terminateIntegrationPIDs, roots...)
+}
+
+// stopIntegrationOwnedProcessesWith is stopIntegrationOwnedProcesses over an
+// injectable process table, cwd lookup, identity and terminator, so the
+// survivor path can be exercised without a real unkillable process.
+func stopIntegrationOwnedProcessesWith(snapshot func() map[int]procSnapshot, cwdOf func(int) string, self int, terminate func(map[int]bool), roots ...string) []string {
 	const passes = 3 // a killed client can race one last spawn; the set shrinks to empty
 	for range passes {
-		procs := readProcessSnapshot()
-		killSet := integrationOwnedProcessKillSet(procs, integrationProcessCwd, os.Getpid(), roots...)
+		killSet := integrationOwnedProcessKillSet(snapshot(), cwdOf, self, roots...)
 		if len(killSet) == 0 {
 			return nil
 		}
-		terminateIntegrationPIDs(killSet)
+		terminate(killSet)
 	}
 	var survivors []string
-	procs := readProcessSnapshot()
-	for pid := range integrationOwnedProcessKillSet(procs, integrationProcessCwd, os.Getpid(), roots...) {
+	procs := snapshot()
+	for pid := range integrationOwnedProcessKillSet(procs, cwdOf, self, roots...) {
 		survivors = append(survivors, fmt.Sprintf("pid=%d ppid=%d cmd=%s", pid, procs[pid].ppid, procs[pid].cmd))
 	}
 	slices.Sort(survivors)
