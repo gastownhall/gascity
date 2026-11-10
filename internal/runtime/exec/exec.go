@@ -115,8 +115,7 @@ func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Prov
 // cityEnv returns the env an op of a provider built for a city runs with:
 // gc's environment, read through execenv.Environ without a session's
 // identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
-// it before arming the op's deadline: execenv.Environ waits out an
-// in-flight native store open, and that wait is not the op's.
+// it before arming the op's deadline, so the read is not the op's.
 func (p *Provider) cityEnv() []string {
 	if !p.citySet {
 		return nil

@@ -5695,9 +5695,9 @@ func TestMirrorBeadsDoltScopeEnvClearsTLSForExternalLocalEndpoint(t *testing.T) 
 
 // TestMirrorBeadsDoltScopeEnvReadsAmbientTLSViaNativeOpenGuard proves the external
 // carry resolves the ambient BEADS_DOLT_SERVER_TLS through the native-open env guard
-// (ambientNativeDoltOpenEnv, mutex-guarded) rather than a bare os.Getenv.
-// withNativeDoltOpenEnv mutates BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu while a
-// concurrent scope opens, so an unguarded read could carry another scope's transient TLS
+// (ambientNativeDoltOpenEnv, which answers from the environment a native open's
+// projection window found) rather than a bare os.Getenv. A native open mutates
+// BEADS_DOLT_SERVER_TLS inside its projection window while a concurrent scope opens, so an unguarded read could carry another scope's transient TLS
 // into this projection. The stub returns a sentinel distinct from the ambient value so a
 // regression to os.Getenv (which would read the ambient value and never call the stub)
 // fails this test.
@@ -5740,8 +5740,8 @@ func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
 // ambient BEADS_* fallback on the scope env-build path, and the ambient BD_BIN
 // pin, reads through the native-open env guard. gc ready opens its rig stores
 // concurrently, and a native open projects its scope's socket, credential
-// command and credentials file into the process env under nativeDoltOpenEnvMu
-// for the whole library open; a proxied native open withholds every BD_* key
+// command and credentials file into the process env inside the execenv projection
+// window for the whole library open; a proxied native open withholds every BD_* key
 // for that window instead. A bare os.Getenv in a second scope's concurrent env
 // build would adopt the first scope's endpoint or credentials, or lose the
 // operator's bd pin. Each BEADS_* case holds another scope's projection in the

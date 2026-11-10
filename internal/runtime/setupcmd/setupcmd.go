@@ -75,8 +75,9 @@ func Run(ctx context.Context, command string, env map[string]string, opts Option
 	if opts.Timeout <= 0 {
 		return fmt.Errorf("setup command timeout must be positive, got %v", opts.Timeout)
 	}
-	// Read the base env before arming the deadline: execenv.Environ waits out
-	// an in-flight process-env projection, and that wait is not the command's.
+	// Read the base env before arming the deadline, so the read is not the
+	// command's. During a process-env projection it is the environment as the
+	// projection found it.
 	baseEnv := execenv.Environ()
 	idle, grace := time.Duration(0), waitDelay
 	if opts.MaxTimeout > 0 {

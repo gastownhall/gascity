@@ -28,12 +28,6 @@ const nativeDoltStoreActor = "gascity"
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
-	// nativeDoltOpenEnvMu is the process-wide execenv.ProcessEnvLock, not a
-	// lock of this package's own: every open window projects BEADS_* variables
-	// into the process env under it, and the session runtimes build child
-	// environments through execenv.Environ under the same lock, so a session
-	// spawned during an open never inherits the open's projection.
-	nativeDoltOpenEnvMu         = &execenv.ProcessEnvLock
 	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
@@ -81,44 +75,53 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 }
 
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
-// snapshot after any in-flight native Dolt open has restored scoped BEADS_* env.
+// snapshot that excludes any in-flight native Dolt open's projection: while an
+// open holds its projection window it is the environment as the open found it,
+// otherwise the live one. It never waits for the open.
 func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
 	return execenv.Environ()
 }
 
-// AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
-// under nativeDoltOpenEnvMu so it reflects the restored ambient environment
-// rather than a value a concurrent native Dolt open is temporarily projecting.
-// withNativeDoltOpenEnv mutates the keys in nativeDoltOpenEnvKeys (which include
-// BEADS_DOLT_SERVER_TLS) under this mutex, so a bare os.Getenv of one of those
-// keys can observe another scope's transient projection; this guarded read
-// cannot. It mirrors os.Getenv: an unset key returns "".
+// AmbientNativeDoltOpenEnv returns the ambient process-env value for key, so it
+// reflects the environment outside any native Dolt open rather than a value a
+// concurrent open is temporarily projecting. The open mutates the keys in
+// nativeDoltOpenEnvKeys (which include BEADS_DOLT_SERVER_TLS) inside its
+// projection window, so a bare os.Getenv of one of those keys can observe
+// another scope's transient projection; this read answers from the environment
+// the window found. It never waits for the open, and mirrors os.Getenv: an
+// unset key returns "".
 func AmbientNativeDoltOpenEnv(key string) string {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
-	return os.Getenv(key)
+	return execenv.Getenv(key)
 }
 
 func processEnvSnapshotExcludingNativeDoltOpen() []string {
 	return ProcessEnvSnapshotExcludingNativeDoltOpen()
 }
 
-func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credentialCommand string) (func(), error) {
-	nativeDoltOpenEnvMu.Lock()
+// withNativeDoltOpenEnvAndCredentialCommand enters the process environment
+// projection window, projects the scoped native open environment inside it, and
+// returns the function that restores the environment and closes the window. It
+// fails with an error wrapping ctx's if ctx ends while another open holds the
+// window.
+func withNativeDoltOpenEnvAndCredentialCommand(ctx context.Context, env map[string]string, credentialCommand string) (func(), error) {
+	exit, err := execenv.EnterProjectionWindow(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("entering native Dolt open window: %w", err)
+	}
 	restore, err := withNativeDoltOpenEnvAndCredentialCommandLocked(env, credentialCommand)
 	if err != nil {
-		nativeDoltOpenEnvMu.Unlock()
+		exit()
 		return nil, err
 	}
 	return func() {
 		restore()
-		nativeDoltOpenEnvMu.Unlock()
+		exit()
 	}, nil
 }
 
 // withNativeDoltOpenEnvAndCredentialCommandLocked projects the scoped native
-// open environment while nativeDoltOpenEnvMu is already held. The lock-aware
-// form is used by hermetic opens, which must withhold the whole BEADS_ namespace
+// open environment while the caller holds the projection window. The
+// window-aware form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
 // BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
 // library sees it only when the caller decided it.
@@ -210,9 +213,9 @@ func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 const beadsEnvPrefix = "BEADS_"
 
 // withWithheldBeadsEnvLocked performs whole-namespace withholding while
-// nativeDoltOpenEnvMu is already held. Keeping this operation on the same lock
-// as snapshots and ordinary native opens makes the process environment appear
-// atomic to every caller that uses the guarded helpers.
+// the caller holds the projection window. Doing it inside the window, with the
+// ordinary native opens, makes the process environment appear atomic to every
+// caller that reads it through the execenv helpers.
 //
 // It withholds BEADS_ and nothing else, on purpose. Direct and hosted opens are
 // the callers, and their contract is unchanged by the proxied lane: a second
@@ -222,8 +225,8 @@ func withWithheldBeadsEnvLocked() (func(), error) {
 }
 
 // withWithheldPrefixesLocked unsets every ambient variable under any of the
-// given prefixes and returns the restore, with nativeDoltOpenEnvMu already
-// held.
+// given prefixes and returns the restore, with the caller already holding the
+// projection window.
 //
 // It is prefix-parameterised rather than fixed at BEADS_ because the
 // proxied-native window has a second namespace to answer for: bd's own BD_
@@ -265,13 +268,17 @@ func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
 }
 
 // openNativeStorageWithoutAmbientEnvWithCredentialCommand opens native
-// storage while holding the same process-environment lock used by snapshots
-// and ordinary native opens. The whole BEADS_ namespace is withheld before
-// the selected scoped values are projected, and both restorations happen
-// before the lock is released.
+// storage inside the process-environment projection window that ordinary
+// native opens use. The whole BEADS_ namespace is withheld before the selected
+// scoped values are projected, and both restorations happen before the window
+// closes. It fails with an error wrapping ctx's if ctx ends while another open
+// holds the window.
 func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context, scopeRoot, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
+	exit, err := execenv.EnterProjectionWindow(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("entering native Dolt open window: %w", err)
+	}
+	defer exit()
 
 	restoreNamespace, err := withWithheldBeadsEnvLocked()
 	if err != nil {
@@ -380,7 +387,7 @@ type NativeDoltStore struct {
 	// tick notices the generation change from its own goroutine and sets this;
 	// the reconnect itself happens on the next READER's goroutine, through the
 	// injected reopen hook, because opening the library means mutating the
-	// process environment under nativeDoltOpenEnvMu and, while a reader exists
+	// process environment inside a projection window and, while a reader exists
 	// to carry it, a background ticker is the wrong place for that.
 	//
 	// "While a reader exists" is the whole rule, not a hedge (council pr2
@@ -680,7 +687,7 @@ func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]str
 }
 
 func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot string, env map[string]string, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
-	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(env, credentialCommand)
+	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(ctx, env, credentialCommand)
 	if err != nil {
 		return nil, "", err
 	}

@@ -545,13 +545,13 @@ func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, si
 // of sleeps every interval, on a proxy bd may be trying to retire.
 //
 // Its whole budget is the READ budget, not the long-lived admission budget
-// (council pr2 D-F16). The library open inside it holds nativeDoltOpenEnvMu —
-// process-global, and what every other scope's native open and
-// ProcessEnvSnapshotExcludingNativeDoltOpen wait on — and the read path's
+// (council pr2 D-F16). The library open inside it holds the process-wide
+// execenv projection window, which every other scope's native open waits on
+// until its own context ends, and the read path's
 // equivalent reopen already runs under the read's ctx, ProxiedReadBudget. The
 // 90s long-lived budget exists for a controller BOOT that may wait out a drain;
 // a ProbeOnce recovery never waits, so the only thing the extra 80s bought was
-// a background timer, with no caller waiting, able to hold that lock for a
+// a background timer, with no caller waiting, able to hold that window for a
 // minute and a half against a proxy that served the probe and then wedged.
 func (o *proxiedNativeOpener) recoverNativeLeaf() beads.NativeLeafReopener {
 	return func(parent context.Context) (*beads.NativeDoltStore, beads.Pin, error) {

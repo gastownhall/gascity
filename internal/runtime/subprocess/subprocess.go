@@ -133,8 +133,8 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	// instead of passing KEY=, so namespace isolation remains real to children.
 	// The parent env is read through execenv.Environ so a native beads store
 	// open projecting its scope's BEADS_* variables cannot leak into the session.
-	// It is read before p.mu: execenv.Environ waits out an in-flight open, and
-	// the provider's other calls must not wait with it.
+	// It is read before p.mu, so the provider's other calls never wait on the
+	// read; execenv.Environ itself never waits for an open's projection window.
 	env := execenv.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))

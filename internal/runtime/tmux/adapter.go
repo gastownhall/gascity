@@ -1920,8 +1920,9 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
-	// Read the base env before arming the deadline: execenv.Environ waits out
-	// an in-flight native store open, and that wait is not the command's.
+	// Read the base env before arming the deadline, so the read is not the
+	// command's. During a native store open it is the environment as the open
+	// found it.
 	baseEnv := execenv.Environ()
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget

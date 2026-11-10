@@ -2076,7 +2076,7 @@ func nativeDoltOneShotOpenEnvForScopeContext(ctx context.Context, cityPath strin
 // that this pin accompanies).
 //
 // The key is load-bearing only while it stays in
-// beads.nativeDoltOpenEnvKeys: withNativeDoltOpenEnv projects exactly that
+// beads.nativeDoltOpenEnvKeys: the native open projects exactly that
 // allowlist into the process environment for the duration of an open, so a
 // key absent from it never reaches the library's os.Getenv and this cap
 // silently becomes a no-op.
@@ -2491,10 +2491,10 @@ func mirrorNativeDoltTLSEnv(env map[string]string, carryAmbientTLS bool) {
 	// projected map, which CityRuntimeEnvMapForRuntimeDir builds fresh without the
 	// ambient value. An explicit scoped value wins; otherwise mirror it from the
 	// ambient process env — the same signal bd reads. Read the ambient value
-	// through the native-open env guard, not a bare os.Getenv: withNativeDoltOpenEnv
-	// mutates BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu, so an unguarded read
-	// here could observe a concurrent cross-scope open's transient TLS rather than
-	// the true ambient value.
+	// through the native-open env guard, not a bare os.Getenv: a native open
+	// mutates BEADS_DOLT_SERVER_TLS inside its projection window, so an unguarded
+	// read here could observe a concurrent cross-scope open's transient TLS rather
+	// than the true ambient value.
 	if tls := strings.TrimSpace(env["BEADS_DOLT_SERVER_TLS"]); tls != "" {
 		env["BEADS_DOLT_SERVER_TLS"] = tls
 	} else if ambient := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS")); ambient != "" {
