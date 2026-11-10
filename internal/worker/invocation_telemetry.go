@@ -335,6 +335,10 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverOpenCodeInvocationTranscript,
 		extract:  SessionLogAdapter.OpenCodeTailUsage,
 	},
+	"copilot": {
+		discover: discoverCopilotInvocationTranscript,
+		extract:  SessionLogAdapter.CopilotTailUsage,
+	},
 }
 
 // invocationUsageFamily resolves a provider string to its registered
@@ -350,6 +354,8 @@ func invocationUsageFamily(provider string) string {
 		return "codex"
 	case "opencode":
 		return "opencode"
+	case "copilot":
+		return "copilot"
 	}
 	return ""
 }
@@ -505,6 +511,36 @@ func formulaOfActingBead(resolve func(id string) (beads.Bead, error), actingID s
 // without a key yet likewise records nothing.
 func discoverOpenCodeInvocationTranscript(h *SessionHandle, _ string, _ time.Time, meta map[string]string) string {
 	return sessionlog.FindOpenCodeSessionFileByID(h.adapter.SearchPaths, strings.TrimSpace(meta["session_key"]))
+}
+
+// copilotInvocationDiscoveryWindow bounds how far after the wake anchor a
+// Copilot session log's session.start may fall and still be attributed to the
+// session. Copilot writes session.start when the CLI process starts, seconds
+// after the wake (5-16s across 398 pool-seat wakes in a live city). It is
+// much tighter than codex's window because Copilot pool seats reuse one work
+// dir: the next session in the same seat started as soon as 132s after the
+// previous one, and a wider window would see both and refuse as ambiguous.
+const copilotInvocationDiscoveryWindow = 90 * time.Second
+
+// discoverCopilotInvocationTranscript resolves a GitHub Copilot CLI session
+// log (~/.copilot/session-state/<id>/events.jsonl). When the bead carries a
+// session_key it is the session directory name, so the lookup is exact.
+// Without one (gc does not learn Copilot's session id today) the log is the
+// one whose cwd is the session's work dir and whose session.start falls in
+// the wake window. Pool seats reuse a work dir across sessions, so the window
+// is what keeps an earlier session's log from being attributed to this one;
+// two in-window matches are refused rather than guessed.
+func discoverCopilotInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
+	workDir := contract.WorkerDirFromMetadata(meta)
+	if key := strings.TrimSpace(meta["session_key"]); key != "" {
+		return sessionlog.FindCopilotSessionFileByID(h.adapter.SearchPaths, workDir, key)
+	}
+	anchor := createdAt
+	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
+		anchor = woke
+	}
+	path, _ := sessionlog.FindCopilotSessionFileNearScan(h.adapter.SearchPaths, workDir, anchor, copilotInvocationDiscoveryWindow)
+	return path
 }
 
 // usageIdentity returns the dedup identity of one invocation: the provider
@@ -689,7 +725,8 @@ func (f *Factory) sweepSessionModelUsage(
 	}
 	path, scanClean, emptyIsPermanent := discover(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
-	keylessCodex := family == "codex" && keyless
+	// A keyless copilot scan is the same (cwd, wake-window) fallback as codex.
+	keylessCodex := (family == "codex" || family == "copilot") && keyless
 	keylessClaude := family == "claude" && keyless
 	if (keylessCodex || keylessClaude) && !scanClean {
 		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
@@ -755,7 +792,7 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 	}
 	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
-	keylessCodex := family == "codex" && keyless
+	keylessCodex := (family == "codex" || family == "copilot") && keyless
 	keylessClaude := family == "claude" && keyless
 	if (keylessCodex || keylessClaude) && !scanClean {
 		return "", false
@@ -932,6 +969,26 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		}
 		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
+		return scanPath, scanClean, true
+	case "copilot":
+		workDir := contract.WorkerDirFromMetadata(meta)
+		if key := strings.TrimSpace(meta["session_key"]); key != "" {
+			return sessionlog.FindCopilotSessionFileByID(f.searchPaths, workDir, key), true, false
+		}
+		// Keyless: the same cwd + wake-window rule as the prompt-op seam,
+		// anchored at the awake interval's start. Without a workdir or anchor
+		// nothing bounds the scan, so the miss is clean and permanent.
+		notBefore, _ := sweepIntervalWindow(meta, now)
+		if notBefore.IsZero() {
+			if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
+				notBefore = woke
+			}
+		}
+		if workDir == "" || notBefore.IsZero() {
+			return "", true, true
+		}
+		scanPath, scanClean := sessionlog.FindCopilotSessionFileNearScan(
+			f.searchPaths, workDir, notBefore, copilotInvocationDiscoveryWindow)
 		return scanPath, scanClean, true
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is

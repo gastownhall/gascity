@@ -145,6 +145,13 @@ func ExtractTailUsageSince(path, cursorID string) ([]TailUsage, error) {
 // by the caller, so tests can drive the cap branch without building a
 // multi-megabyte transcript.
 func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsage, error) {
+	return extractTailUsageSinceWith(path, cursorID, maxScanBytes, parseTailUsage)
+}
+
+// extractTailUsageSinceWith is the growing-window scan behind
+// ExtractTailUsageSince, with the per-family window parser supplied by the
+// caller. Copilot session logs reuse it with their own parser.
+func extractTailUsageSinceWith(path, cursorID string, maxScanBytes int64, parse func([]byte) ([]TailUsage, error)) ([]TailUsage, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -156,7 +163,7 @@ func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsa
 		if err != nil {
 			return nil, err
 		}
-		return parseTailUsage(data)
+		return parse(data)
 	}
 
 	for window := int64(tailChunkSize); ; window *= 2 {
@@ -164,7 +171,7 @@ func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsa
 		if err != nil {
 			return nil, err
 		}
-		usages, err := parseTailUsage(data)
+		usages, err := parse(data)
 		if err != nil {
 			return nil, err
 		}

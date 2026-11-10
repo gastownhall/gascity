@@ -168,6 +168,14 @@ func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlo
 	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// CopilotTailUsage reads per-invocation token usage from a GitHub Copilot CLI
+// session log. Validation merges the Copilot default root
+// (~/.copilot/session-state) on top of the configured search paths, and the
+// scan window grows until cursorID is in view.
+func (a SessionLogAdapter) CopilotTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractCopilotTailUsageFromSearchPaths(a.SearchPaths, path, cursorID)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
