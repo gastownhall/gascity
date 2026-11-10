@@ -39,7 +39,41 @@ func TestRPPHandleConformance(t *testing.T) {
 	})
 	reporter.Require(t, vanishedNudgeNotDeliveredResult(t))
 	reporter.Require(t, hostFSTranscriptTurnsResult(t))
-	reporter.Require(t, hostFSLeftoverReapedResult(t))
+	t.Run(string(RequirementRPPHostFSLeftoverReaped), func(t *testing.T) {
+		requireHostFSLeftoverReaped(t, reporter, goruntime.GOOS)
+	})
+}
+
+// requireHostFSLeftoverReaped records WC-RPP-006 on goos. Where the row is
+// unsupported (no /proc) it records the outcome and skips; elsewhere a
+// non-passing result fails t.
+func requireHostFSLeftoverReaped(t *testing.T, reporter *SuiteReporter, goos string) {
+	t.Helper()
+	result := hostFSLeftoverReapedResult(t, goos)
+	if result.Status == ResultUnsupported {
+		reporter.Record(result)
+		t.Skip(result.Detail)
+		return
+	}
+	reporter.Require(t, result)
+}
+
+// TestRPPHostFSLeftoverReapedSkipsWithoutProcfs proves WC-RPP-006 is recorded
+// as unsupported and skipped, not failed, on a platform without /proc.
+func TestRPPHostFSLeftoverReapedSkipsWithoutProcfs(t *testing.T) {
+	reporter := &SuiteReporter{suite: "rpp-handle-skip"}
+	var skipped bool
+	t.Run("darwin", func(t *testing.T) {
+		t.Cleanup(func() { skipped = t.Skipped() })
+		requireHostFSLeftoverReaped(t, reporter, "darwin")
+	})
+	if !skipped {
+		t.Fatal("WC-RPP-006 on darwin did not skip")
+	}
+	if len(reporter.results) != 1 || reporter.results[0].Status != ResultUnsupported ||
+		reporter.results[0].Requirement != RequirementRPPHostFSLeftoverReaped {
+		t.Fatalf("recorded results = %+v, want one unsupported WC-RPP-006", reporter.results)
+	}
 }
 
 func TestRPPHandleCatalogRegistersItsRequirements(t *testing.T) {
@@ -129,10 +163,11 @@ func hostFSTranscriptTurnsResult(t *testing.T) Result {
 // before the new incarnation launches. The same pack without fs.host
 // claims no scanner. The process-table scan reads a snapshot of the
 // leftover alone, so the start can reach no process the check did not
-// start.
-func hostFSLeftoverReapedResult(t *testing.T) Result {
+// start. On a goos other than linux, which has no /proc to snapshot, the
+// row is unsupported.
+func hostFSLeftoverReapedResult(t *testing.T, goos string) Result {
 	t.Helper()
-	if goruntime.GOOS != "linux" {
+	if goos != "linux" {
 		return Unsupported(rppHandleProfile, RequirementRPPHostFSLeftoverReaped, "the check reads /proc snapshots, which only linux has")
 	}
 	if _, ok := runtime.AsProcessTableScanner(sessionexec.NewSeamBackedForCity(rppHostFSPack(t, false), "rpp-conformance", t.TempDir())); ok {
