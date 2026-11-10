@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -83,6 +84,7 @@ func TestGcBdFixtureStopsCancelledOrderWriters(t *testing.T) {
 		// If teardown killed the client, its socket is already at EOF. Otherwise
 		// release the real write and await completion, exposing any proxy/Dolt
 		// resurrection while the fixture directories still exist.
+		before := gcBdTeardownProxyState(t, cityDir)
 		if _, err := io.WriteString(writer, "release\n"); err != nil {
 			t.Logf("outcome writer socket already closed: %v", err)
 		}
@@ -96,12 +98,11 @@ func TestGcBdFixtureStopsCancelledOrderWriters(t *testing.T) {
 		if len(survivors) > 0 {
 			t.Errorf("owned processes remain before TempDir removal: %s", strings.Join(survivors, "; "))
 		}
-		// An entry created after the fixture's two bd dolt stops proves a live
-		// writer, independently of the much narrower ENOTEMPTY removal race.
-		if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt", "proxy.secret")); err == nil {
-			t.Error("owned bd proxy can write after fixture teardown, before TempDir removal")
-		} else if !os.IsNotExist(err) {
-			t.Errorf("checking retired proxy: %v", err)
+		// bd creates proxy.secret at init and keeps it after a graceful stop.
+		// Only a change after teardown proves a late proxy write.
+		after := gcBdTeardownProxyState(t, cityDir)
+		if !maps.EqualFunc(before, after, time.Time.Equal) {
+			t.Errorf("owned bd proxy wrote after fixture teardown, before TempDir removal: before=%v after=%v", before, after)
 		}
 	})
 	cityDir, rigDir = newGCBdLatencyFixture(t, env, root)
@@ -160,6 +161,68 @@ exec %s "$@"
 		t.Fatal(err)
 	}
 	orderStarted = true
+}
+
+func gcBdTeardownProxyState(t *testing.T, cityDir string) map[string]time.Time {
+	t.Helper()
+	state := make(map[string]time.Time)
+	for _, name := range []string{"proxy.spawn", "proxy.pid", "proxy.stop-epoch", "proxy.secret"} {
+		info, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt", name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("snapshot retired proxy %s: %v", name, err)
+		}
+		state[name] = info.ModTime()
+	}
+	return state
+}
+
+func TestGcBdTeardownProxyStateDetectsPostStopWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changed string
+	}{
+		{name: "unchanged init artifacts"},
+		{name: "new spawn", changed: "proxy.spawn"},
+		{name: "new pid", changed: "proxy.pid"},
+		{name: "rewritten stop epoch", changed: "proxy.stop-epoch"},
+		{name: "rewritten init secret", changed: "proxy.secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			doltDir := filepath.Join(cityDir, ".beads", "dolt")
+			if err := os.MkdirAll(doltDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stoppedAt := time.Unix(1_700_000_000, 0)
+			writeAt := func(name string, at time.Time) {
+				t.Helper()
+				path := filepath.Join(doltDir, name)
+				if err := os.WriteFile(path, []byte("proxy state"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeAt("proxy.secret", stoppedAt)
+			writeAt("proxy.stop-epoch", stoppedAt)
+			before := gcBdTeardownProxyState(t, cityDir)
+			if len(before) != 2 || !before["proxy.secret"].Equal(stoppedAt) || !before["proxy.stop-epoch"].Equal(stoppedAt) {
+				t.Fatalf("post-stop snapshot = %v, want the two existing artifacts at %v", before, stoppedAt)
+			}
+			if tc.changed != "" {
+				writeAt(tc.changed, stoppedAt.Add(time.Second))
+			}
+			after := gcBdTeardownProxyState(t, cityDir)
+			unchanged := maps.EqualFunc(before, after, time.Time.Equal)
+			if unchanged != (tc.changed == "") {
+				t.Fatalf("proxy state unchanged=%v after %q: before=%v after=%v", unchanged, tc.changed, before, after)
+			}
+		})
+	}
 }
 
 // gcBdTeardownBarrier synchronizes actual child processes without polling or
