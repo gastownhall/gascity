@@ -103,10 +103,6 @@ func processEnvSnapshotExcludingNativeDoltOpen() []string {
 	return ProcessEnvSnapshotExcludingNativeDoltOpen()
 }
 
-func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
-	return withNativeDoltOpenEnvAndCredentialCommand(env, "")
-}
-
 func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credentialCommand string) (func(), error) {
 	nativeDoltOpenEnvMu.Lock()
 	restore, err := withNativeDoltOpenEnvAndCredentialCommandLocked(env, credentialCommand)
@@ -212,28 +208,6 @@ func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 
 // beadsEnvPrefix is the namespace the upstream library configures itself from.
 const beadsEnvPrefix = "BEADS_"
-
-// withWithheldBeadsEnv unsets every ambient BEADS_-prefixed variable and
-// returns the restore.
-//
-// It is prefix-based rather than a key list on purpose. The scoped projection
-// above names the thirteen variables gc itself sets; the library reads many
-// more — a credential command, database and directory overrides, a central
-// config path — and the list grows with the library. A caller that must be
-// sure a workspace is served by its own configuration alone cannot maintain a
-// mirror of somebody else's environment surface, so it withholds the namespace.
-func withWithheldBeadsEnv() (func(), error) {
-	nativeDoltOpenEnvMu.Lock()
-	restore, err := withWithheldBeadsEnvLocked()
-	if err != nil {
-		nativeDoltOpenEnvMu.Unlock()
-		return nil, err
-	}
-	return func() {
-		restore()
-		nativeDoltOpenEnvMu.Unlock()
-	}, nil
-}
 
 // withWithheldBeadsEnvLocked performs whole-namespace withholding while
 // nativeDoltOpenEnvMu is already held. Keeping this operation on the same lock

@@ -1,8 +1,11 @@
 package execenv
 
 import (
+	"context"
+	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // ProcessEnvLock serializes transient changes to this process's environment
@@ -26,3 +29,27 @@ func Environ() []string {
 	defer ProcessEnvLock.Unlock()
 	return os.Environ()
 }
+
+// errProjectionWindowNotImplemented marks the RED-commit stubs below: they
+// compile so the tests that pin the lock-free readers and the projection window
+// fail at runtime, and the commit's lint gate passes without being skipped.
+var errProjectionWindowNotImplemented = errors.New("execenv: projection window not implemented")
+
+var (
+	projectionSeq    atomic.Uint64
+	projectionToken  = func() chan struct{} { c := make(chan struct{}, 1); c <- struct{}{}; return c }()
+	cleanEnvSnapshot atomic.Pointer[[]string]
+)
+
+// EnterProjectionWindow is a RED-commit stub.
+func EnterProjectionWindow(_ context.Context) (exit func(), err error) {
+	return nil, errProjectionWindowNotImplemented
+}
+
+// LookupEnv is a RED-commit stub.
+func LookupEnv(_ string) (string, bool) { return "", false }
+
+// Getenv is a RED-commit stub.
+func Getenv(_ string) string { return "" }
+
+func lookupSnapshot(_ []string, _ string) (string, bool) { return "", false }
