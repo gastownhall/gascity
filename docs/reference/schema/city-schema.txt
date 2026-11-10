@@ -2037,7 +2037,7 @@
         },
         "unread_retention_ttl": {
           "type": "string",
-          "description": "UnreadRetentionTTL is how long a never-read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables the unread-mail\nphase; it is opt-in so unread mail is never closed by default."
+          "description": "UnreadRetentionTTL is how long a never-read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables the unread-mail\nphase; it is opt-in so unread mail is never closed by default. Closing is\nnot reclaiming: a closed unread mail bead stays in the store, addressable\nby ID, and is reclaimed only by the reaper's closed-wisp purge on bd 1.3.1\nor newer; on an older bd it is retained indefinitely."
         }
       },
       "additionalProperties": false,

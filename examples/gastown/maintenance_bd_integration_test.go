@@ -25,10 +25,12 @@ import (
 // for a proxied scope, select bd's proxied route. The orders themselves never
 // learn which topology they are on.
 //
-// bd comes from GC_TEST_BD_BIN or PATH (CI pins v1.3.0). Steps that need a bd
-// newer than the pin skip with the reason when bd lacks them:
+// bd comes from GC_TEST_BD_BIN or PATH; the integration build pins the bd in
+// deps.env (BD_VERSION, the installable default; BD_PREV_VERSION is the
+// supported floor). Steps that need a bd newer than the floor skip with the
+// reason when bd lacks them:
 //   - the reaper's Step 3 needs `bd purge --wisps-plane --limit` (the beads
-//     purge hotfix);
+//     purge hotfix, bd 1.3.1 or newer);
 //   - backing up a proxied scope needs proxied `bd backup` (beads PR 6879).
 // Fixtures live in t.TempDir with an isolated HOME and never touch port 3307.
 

@@ -551,8 +551,8 @@ func (p *Provider) Archive(id string) error {
 // closeArchived marks an unread message read, then closes it. Archive means
 // "dismissed", and a dismissed message left unread was lost twice over: it
 // kept reading as unread in any history view, and the read-gated retention
-// sweep (SweepReadMessagesBefore / PurgeReadMessageWisps) never reclaims an
-// unread message, so it lingered forever. Marking read first is the
+// sweep and mail arm (SweepReadMessagesBefore / PurgeReadMessageWisps) never
+// select an unread message, so it lingered unreclaimed. Marking read first is the
 // same order ArchiveInjectedAutoHandoffs already uses. alreadyRead skips the
 // write when the caller has seen the read label.
 func (p *Provider) closeArchived(id string, alreadyRead bool) error {
@@ -649,9 +649,10 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 // handoff carries before a crash/race/re-cycle. Marking read stops re-injection
 // (CheckAutoHandoffs fetches only unread); closing with RetentionSweepCloseReason
 // keeps the bead addressable (isRemovedMessageBead treats it as system-aged, not
-// user-removed) so an unconsumed handoff stays recoverable, and the already-correct
-// read-gated TTL sweep (PurgeReadMessageWisps) reclaims it later — one unified
-// retention path, no special-case delete, no permanent data loss.
+// user-removed) so an unconsumed handoff stays recoverable, and a purge reclaims
+// it later (the opt-in wisp GC mail arm PurgeReadMessageWisps when enabled, or the
+// reaper's closed-wisp purge) — one unified retention path, no special-case
+// delete, no permanent data loss.
 func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 	var (
 		errs     []error
@@ -694,9 +695,9 @@ func isUnreadInjectedAutoHandoff(b beads.Bead) bool {
 // archiveInjectedAutoHandoffs marks each injected handoff read and closes it,
 // retain-addressable, mirroring SweepReadMessagesBefore: mail.read (so a later
 // SessionStart does not re-inject it, a read-back reports it read, and the
-// read-gated purge can reclaim it), the retention close_reason (so
+// read-gated mail arm can reclaim it), the retention close_reason (so
 // isRemovedMessageBead keeps the closed handoff addressable — recoverable —
-// until PurgeReadMessageWisps reclaims it) and the "read" label. Never a hard
+// until a purge reclaims it) and the "read" label. Never a hard
 // delete.
 //
 // It writes in two phases. First every handoff is closed, each by one
@@ -928,8 +929,10 @@ func beadmailError(operation string, err error) error {
 //
 // Retention-swept read mail is NOT user-removed and must be excluded here. The
 // always-on nudge-mail watchdog closes read mail past its TTL (stamping
-// [RetentionSweepCloseReason]) and PurgeReadMessageWisps deletes it later;
-// between close and purge the message is only system-aged. Gating on bare
+// [RetentionSweepCloseReason]); the sweep never deletes it, and a purge
+// (the opt-in wisp GC mail arm PurgeReadMessageWisps, or the reaper's
+// closed-wisp purge) may delete it later. Until then the message is only
+// system-aged. Gating on bare
 // Status!="open" turned every retention-swept read message into a not-found the
 // moment the sweep ran — an always-on regression for any caller that holds a
 // message ID and re-reads or replies to it after the TTL (a long-latency human
@@ -940,10 +943,12 @@ func isRemovedMessageBead(b beads.Bead) bool {
 	if b.Type != messageBeadType || b.Status == "open" {
 		return false
 	}
-	// Retention-swept mail is system-aged, not user-removed. Read-swept mail
-	// stays addressable until PurgeReadMessageWisps deletes it; unread-swept
-	// mail stays addressable indefinitely (no purge arm collects it). Both
-	// reasons are system-aged, so neither is hidden here.
+	// Retention-swept mail is system-aged, not user-removed. A swept bead,
+	// read or unread, stays closed and addressable by ID until a purge
+	// deletes it: the reaper's closed-wisp purge (bd 1.3.1 or newer) reclaims
+	// either class, the opt-in wisp GC mail arm (PurgeReadMessageWisps) only
+	// read mail. On an older bd, unread-swept mail is retained indefinitely.
+	// Both reasons are system-aged, so neither is hidden here.
 	reason := b.Metadata["close_reason"]
 	return reason != RetentionSweepCloseReason && reason != UnreadRetentionSweepCloseReason
 }
@@ -1120,8 +1125,8 @@ func readMessagesBefore(store beads.MailStore, before time.Time, limit int) ([]b
 // RetentionSweepCloseReason is the canonical close_reason the read-mail
 // retention sweep stamps on a message bead before closing it. It is the marker
 // that tells isRemovedMessageBead a closed message bead is system-aged
-// (retention-swept, still addressable by direct ID until PurgeReadMessageWisps
-// deletes it) rather than user-removed. The production sweep — the always-on
+// (retention-swept, still addressable by direct ID until a purge deletes it)
+// rather than user-removed. The production sweep — the always-on
 // cmd/gc nudge-mail watchdog — passes this constant as SweepReadMessagesBefore's
 // closeReason, keeping the writer and the direct-ID reader in lockstep. The
 // 20-character floor satisfies validation.on-close=error.
@@ -1234,11 +1239,19 @@ func unreadMessagesBefore(store beads.MailStore, before time.Time) ([]beads.Bead
 // recognizes both reasons. The 20-character floor satisfies
 // validation.on-close=error.
 //
-// Unlike [RetentionSweepCloseReason], no purge arm reclaims unread-swept beads
-// today: PurgeReadMessageWisps selects on the mail.read metadata key, which
-// unread mail never carries, and reapOrphanedClosedWisps skips beads without
-// root_bead_id. Such a bead is closed-but-not-reclaimed. Extending reclamation
-// to unread mail is tracked separately.
+// Closing is not reclaiming: the sweep closes the bead and never deletes it,
+// so an unread-swept bead stays in the store, addressable by ID. Unlike
+// [RetentionSweepCloseReason], the wisp GC mail arm never selects it
+// (PurgeReadMessageWisps keys on the mail.read=true metadata, which unread
+// mail does not carry), reapOrphanedClosedWisps skips it (it has no
+// root_bead_id and is not a task), and wisp-compact never sees it. Its only
+// reclaim path is the reaper's closed-wisp purge (order Step 3, bd 1.3.1 or
+// newer), which purges a closed message wisp older than GC_REAPER_PURGE_AGE;
+// on an older supported bd it is retained indefinitely, which is accepted.
+// A later Read or MarkRead by ID writes mail.read=true on such a bead, which
+// makes it eligible for the read arm too: that is the price of keeping swept
+// beads addressable, not a bug. No purge arm for unread-swept mail is planned
+// (ga-vujfwq).
 const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc retention window"
 
 // SweepUnreadMessagesBefore closes unread message beads created before
@@ -1307,6 +1320,11 @@ func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 
 // PurgeReadMessageWisps deletes read message beads in the wisp tier (open or
 // closed) created before cutoff — the wisp-GC retention sweep for consumed mail.
+// It is the opt-in mail arm of the wisp GC: the controller runs it only when
+// wisp_gc_interval is positive and [mail] retention_ttl is explicitly positive,
+// and the clock is CreatedAt, not the time of the retention close. Beads that
+// do not carry mail.read=true (unread-swept mail) are never selected; the
+// reaper's closed-wisp purge is their only reclaim path.
 // The candidate query and the delete loop live here because wisp-tier delete is
 // bead-lifecycle behavior the mail.Message domain object omits. Each bead's
 // dependencies are stripped before it is deleted (dependency-free single-row

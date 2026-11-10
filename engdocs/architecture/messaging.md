@@ -181,6 +181,30 @@ Send → [unread, open]
   └── Archive/Delete → [closed] (permanent, skips read)
 ```
 
+### Swept mail: closed, retained, addressable
+
+The retention sweeps run by the nudge-mail watchdog (`gc order
+sweep-nudge-mail`) close message beads past a TTL and never delete them.
+A swept bead is `closed`, its `close_reason` is
+`beadmail.RetentionSweepCloseReason` (read mail) or
+`beadmail.UnreadRetentionSweepCloseReason` (unread mail, opt-in through
+`[mail] unread_retention_ttl`), and it stays addressable by ID: `Get`, `Read`,
+`MarkRead` and `Reply` still resolve it, because `isRemovedMessageBead` treats
+both reasons as system-aged rather than user-removed. Closing is not
+reclaiming. Who reclaims a swept bead depends on its class:
+
+| Class | Marker | Reclaimed by |
+|---|---|---|
+| Read-swept | `RetentionSweepCloseReason`, `read` label, `mail.read=true` | The opt-in wisp GC mail arm (`beadmail.PurgeReadMessageWisps`; needs `[daemon] wisp_gc_interval` > 0 and an explicit `[mail] retention_ttl` > 0, clock is `CreatedAt`, not close time), and the reaper order's closed-wisp purge (Step 3) on bd 1.3.1 or newer |
+| Unread-swept | `UnreadRetentionSweepCloseReason`, no `mail.read` | Only the reaper order's closed-wisp purge (Step 3) on bd 1.3.1 or newer. The mail arm keys on `mail.read=true` and never selects it, the orphan reaper skips it (no `root_bead_id`, not a task), and wisp-compact never sees it. On an older supported bd it is retained indefinitely, which is accepted |
+
+A later `Read` or `MarkRead` by ID on an unread-swept bead writes
+`mail.read=true`, which makes it eligible for the read arm too. That is the
+price of keeping swept beads addressable, not a bug. Step 3 reclaiming a
+closed message wisp is pinned on real bd by
+`TestReaperStep3ReclaimsRetentionSweptMessageWisps`
+(`examples/gastown/maintenance_bd_integration_test.go`).
+
 ## Known Limitations
 
 - **beadmail.Inbox scans all beads.** Uses `store.List()` with

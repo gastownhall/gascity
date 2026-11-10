@@ -3250,8 +3250,10 @@ Close stale delivered nudge beads and read mail beads.
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
 closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
 opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
-mail beads past it are also closed, so mail nobody ever reads ages out instead
-of accumulating forever. A budget cap of 50 closes
+mail beads past it are also closed, so mail nobody ever reads stops showing as
+open. Closing is not deleting: a swept bead stays in the store, addressable by
+ID, until a purge reclaims it (the reaper order's closed-wisp purge on bd 1.3.1
+or newer; the opt-in wisp GC mail arm also reclaims read mail). A budget cap of 50 closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -3264,10 +3266,10 @@ gc order sweep-nudge-mail [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | log what would be closed; make no changes |
-| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is closed; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
-| `--unread-mail-ttl` | duration | `0s` | min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled) |
+| `--unread-mail-ttl` | duration | `0s` | min age before an unread mail bead is closed; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled) |
 
 ## gc order sweep-tracking
 

@@ -742,9 +742,12 @@ func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 // isRemovedMessageBead drift on the unread arm: SweepUnreadMessagesBefore
 // closes never-read mail past its (much longer) TTL stamping
 // UnreadRetentionSweepCloseReason, and during that closed state the message
-// must stay addressable by direct ID exactly as read-swept mail does. Unlike
-// the read path there is no purge arm behind it, so "stays addressable" here
-// has no "until purge" bound.
+// must stay addressable by direct ID exactly as read-swept mail does. The
+// sweep closes and never deletes. The wisp GC mail arm never selects an
+// unread-swept bead (it has no mail.read=true), so it stays addressable until
+// the reaper's closed-wisp purge (bd 1.3.1 or newer) reclaims it, and
+// indefinitely on an older bd; the real-bd pin for that purge is
+// TestReaperStep3ReclaimsRetentionSweptMessageWisps in examples/gastown.
 func TestRetentionSweptUnreadMailStaysAddressable(t *testing.T) {
 	store := beads.NewMemStore()
 	p := newTestProvider(store)

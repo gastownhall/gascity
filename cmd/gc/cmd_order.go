@@ -2228,8 +2228,10 @@ func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
 closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
 opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
-mail beads past it are also closed, so mail nobody ever reads ages out instead
-of accumulating forever. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
+mail beads past it are also closed, so mail nobody ever reads stops showing as
+open. Closing is not deleting: a swept bead stays in the store, addressable by
+ID, until a purge reclaims it (the reaper order's closed-wisp purge on bd 1.3.1
+or newer; the opt-in wisp GC mail arm also reclaims read mail). A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2245,8 +2247,8 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		},
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
-	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
-	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled)")
+	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is closed; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
+	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is closed; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd

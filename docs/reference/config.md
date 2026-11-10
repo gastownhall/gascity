@@ -564,7 +564,7 @@ MailConfig holds mail provider settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
 | `retention_ttl` | string |  |  | RetentionTTL has two consumers: it is how long read messages are retained before purge, and how long a read mail bead stays open before the nudge-mail sweep closes it. Empty or "0" disables read-message purge. The sweep distinguishes the two: empty leaves it at its own 60-minute default, while "0" disables its mail-close phase. |
-| `unread_retention_ttl` | string |  |  | UnreadRetentionTTL is how long a never-read mail bead stays open before the nudge-mail sweep closes it. Empty or "0" disables the unread-mail phase; it is opt-in so unread mail is never closed by default. |
+| `unread_retention_ttl` | string |  |  | UnreadRetentionTTL is how long a never-read mail bead stays open before the nudge-mail sweep closes it. Empty or "0" disables the unread-mail phase; it is opt-in so unread mail is never closed by default. Closing is not reclaiming: a closed unread mail bead stays in the store, addressable by ID, and is reclaimed only by the reaper's closed-wisp purge on bd 1.3.1 or newer; on an older bd it is retained indefinitely. |
 
 ## MaintenanceConfig
 

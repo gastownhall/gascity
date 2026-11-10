@@ -434,25 +434,43 @@ the bead as a side effect of reading (marking it "read").
 
 ### Wisp garbage collection
 
-The controller runs a periodic wisp GC for closed molecules.
-`memoryWispGC.runGC()` in `cmd/gc/wisp_gc.go`:
+The controller runs a periodic wisp GC, `memoryWispGC.runGC()` in
+`cmd/gc/wisp_gc.go`. It is configured by `[daemon] wisp_gc_interval` and
+`wisp_ttl`, and by `[mail] retention_ttl` for its mail arm. `newWispGC()`
+returns nil (GC disabled) when `interval <= 0` or when both `wisp_ttl` and
+the mail retention TTL are zero or negative; a nil GC is never run, so
+`wisp_ttl` alone, or an explicit `[mail] retention_ttl` alone, is enough to
+turn it on. One pass runs these arms:
 
-1. Lists closed molecules: `bd list --json --limit=0 --status=closed --type=molecule`
-2. Compares each molecule's CreatedAt against a TTL cutoff
-3. Deletes expired ones: `bd delete <id> --force`
+1. **Graph closure purge** (only when `wisp_ttl > 0`):
+   `purgeExpiredBeadClosuresWith` deletes closed workflow and molecule roots
+   with their descendants once the root's CreatedAt is older than the TTL
+   cutoff (the clock is CreatedAt, not close time). The same pass closes
+   abandoned open roots first.
+2. **Orphaned closed wisps** (only when `wisp_ttl > 0`):
+   `reapOrphanedClosedWisps` reaps closed wisp-tier descendants whose owning
+   root is gone. It skips beads without a `root_bead_id` and message beads.
+3. **Closed infra-session purge** (only when `wisp_ttl > 0` and the city has a
+   relocated SQLite sessions ledger): closed agent-session rows older than
+   `GC_INFRA_SESSION_PURGE_AGE`.
+4. **Read-mail arm** (only when `[mail] retention_ttl` is explicitly
+   positive): `beadmail.PurgeReadMessageWisps` deletes read message wisps
+   (`mail.read=true`) whose CreatedAt is older than the retention TTL. It never
+   selects unread mail.
 
-The GC interval and TTL are configured via `[daemon]` config
-(`wisp_gc_interval` and `wisp_ttl`). `newWispGC()` returns nil if either
-is zero (disabled). The controller nil-guards before calling
-`shouldRun()`.
+The controller nil-guards before calling `shouldRun()`.
 
-### BdStore.Purge()
+### Bulk wisp-plane purge
 
-For bulk cleanup, `BdStore.Purge()` (in
-`internal/beads/bdstore.go`) runs `bd purge --json` with a 60-second
-timeout. This is an admin operation outside the Store interface, used by
-the controller for periodic database maintenance. It removes closed
-ephemeral beads from the Dolt database entirely.
+The controller has no bulk purge of its own. `BdStore.Purge()` (in
+`internal/beads/bdstore.go`) wraps `bd purge --json`, but no production code
+calls it. Bulk reclamation of closed wisps, messages included, is the
+maintenance reaper order's Step 3, which runs
+`bd purge --wisps-plane --older-than $GC_REAPER_PURGE_AGE` (default 168h) in
+bounded batches. It needs a bd with the purge hotfix
+(1.3.1 or newer); on an older bd the reaper reports `bd-purge-unsupported` and
+reclaims nothing. For mail, Step 3 is the only reclaim path for unread-swept
+beads; see "Swept mail" in [Messaging](messaging.md).
 
 ### Order cooldown tracking
 
@@ -518,7 +536,8 @@ also normalized to open.
 | Completion | `doConvoyAutocloseWith()` | `cmd/gc/cmd_convoy.go` |
 | Completion | `doConvoyCheck()` | `cmd/gc/cmd_convoy.go` |
 | Afterlife | `memoryWispGC.runGC()` | `cmd/gc/wisp_gc.go` |
-| Afterlife | `BdStore.Purge()` | `internal/beads/bdstore.go` |
+| Afterlife | `beadmail.PurgeReadMessageWisps()` | `internal/mail/beadmail/beadmail.go` |
+| Afterlife | reaper order Step 3 (`bd purge --wisps-plane`) | `internal/bootstrap/packs/core/assets/scripts/reaper.sh` |
 | Afterlife | `beadmail.Provider.Archive()` | `internal/mail/beadmail/beadmail.go` |
 
 ## See Also

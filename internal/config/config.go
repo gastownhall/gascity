@@ -2024,7 +2024,10 @@ type MailConfig struct {
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 	// UnreadRetentionTTL is how long a never-read mail bead stays open before
 	// the nudge-mail sweep closes it. Empty or "0" disables the unread-mail
-	// phase; it is opt-in so unread mail is never closed by default.
+	// phase; it is opt-in so unread mail is never closed by default. Closing is
+	// not reclaiming: a closed unread mail bead stays in the store, addressable
+	// by ID, and is reclaimed only by the reaper's closed-wisp purge on bd 1.3.1
+	// or newer; on an older bd it is retained indefinitely.
 	UnreadRetentionTTL string `toml:"unread_retention_ttl,omitempty"`
 }
 
