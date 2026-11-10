@@ -3,6 +3,7 @@ package storeref
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -220,6 +221,40 @@ func TestStoresTopologyFailsClosedOnAWorkerSite(t *testing.T) {
 	some := map[coordclass.Class]RefusingClassStore{coordclass.ClassGraph: refusingStore{}, coordclass.ClassSessions: refusingStore{}}
 	if got := NewStores(f.topo, StoresOptions{ClassRefusals: some}).Topology(); got.Refused != nil {
 		t.Errorf("refusing some relocated classes refused the topology: %v", got.Refused)
+	}
+}
+
+// refusingGetStore refuses every by-id read with its standing refusal.
+type refusingGetStore struct{ refusingStore }
+
+func (s refusingGetStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.StorageRefusal() }
+
+// TestFullyRefusedBindingLegRefuses: a binding whose every class the plane
+// refuses is minted over the refusing store, under its own ref, so a by-id
+// read that reaches it (inside its namespace, or as the residence probe of a
+// work-shaped id) refuses as each class handle does instead of reading the
+// binding. A binding refused in part keeps its store.
+func TestFullyRefusedBindingLegRefuses(t *testing.T) {
+	f := newT2()
+	f.legStore(ClassRef(infraClasses)).seed(t, graphNamespacedID)
+	refusal := refusingGetStore{refusingStore{beads.NewMemStore()}}
+	all := map[coordclass.Class]RefusingClassStore{}
+	for _, c := range infraClasses {
+		all[c] = refusal
+	}
+	minted := NewStores(f.topo, StoresOptions{ClassRefusals: all}).Topology()
+	if len(minted.Bindings) != 1 || minted.Bindings[0].Leg.Ref != ClassRef(infraClasses) || minted.Bindings[0].Leg.Store != beads.Store(refusal) {
+		t.Fatalf("fully refused: bindings %+v, want class:gmnos over the refusing store", minted.Bindings)
+	}
+	plan := mustPlan(t, ByID{ID: graphNamespacedID}, minted)
+	if _, err := ResolveOwnerRow(plan, graphNamespacedID); err == nil || !strings.Contains(err.Error(), newRefusal().Error()) {
+		t.Fatalf("a by-id read inside the refused binding's namespace = %v, want its refusal", err)
+	}
+
+	some := map[coordclass.Class]RefusingClassStore{coordclass.ClassGraph: refusal}
+	partial := NewStores(f.topo, StoresOptions{ClassRefusals: some}).Topology()
+	if got := partial.Bindings[0].Leg.Store; got != beads.Store(f.legStore(ClassRef(infraClasses))) {
+		t.Fatalf("refused in part: the binding leg reads %s, want the binding", storeNameOf(got))
 	}
 }
 

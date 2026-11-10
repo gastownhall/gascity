@@ -46,7 +46,7 @@ func newClassFlipAPIFixture(t *testing.T, split bool) classFlipAPIFixture {
 		f.graphID = "gcg-1"
 	}
 	f.h = newTestCityHandler(t, state)
-	f.bindings = len((&Server{state: state}).residencyTopology().Bindings)
+	f.bindings = len(state.Stores().Topology().Bindings)
 	return f
 }
 
