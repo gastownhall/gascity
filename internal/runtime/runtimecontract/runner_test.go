@@ -234,8 +234,11 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqFSHostRunsWhatItCarries, hedit("start", `if [ -n "$od" ] && [ -n "$wd" ]; then`, `if false; then`), "skips the overlay_dir its config carries"},
 		{ReqFSHostRunsWhatItCarries, hedit("start", `if [ -n "$ps" ]; then`, `if false; then`), "skips the pre_start its config carries"},
 		{ReqFSHostRunsWhatItCarries, hedit("start", `|| { rm -rf "$box.tmp"; echo "pre_start failed" >&2; exit 1; }`, `|| true`), "swallows a failing pre_start"},
+		{ReqFSHostRunsWhatItCarries, hedit("start", `ps=$(printf %s "$cfg" | sed -n 's/.*"pre_start":\["\([^"]*\)"\].*/\1/p'); `, `ps=$(printf %s "$cfg" | sed -n 's/.*"pre_start":\["\([^"]*\)"\].*/\1/p'); if [ -n "$ps" ]; then printf %s "$ps" > "$S/last-pre-start"; elif [ -f "$S/last-pre-start" ]; then ps=$(cat "$S/last-pre-start"); fi; `), "runs a remembered pre_start its config does not carry"},
+		{ReqFSHostRunsWhatItCarries, hedit("start", `if [ -n "$od" ] && [ -n "$wd" ]; then`, `if [ -n "$od" ]; then printf %s "$od" > "$S/last-overlay"; elif [ -f "$S/last-overlay" ]; then od=$(cat "$S/last-overlay"); fi; if [ -n "$od" ] && [ -n "$wd" ]; then`), "stages a remembered overlay_dir its config does not carry"},
 		{ReqFSHostAgentPIDOnHost, hedit("observe", `"$(cat "$box/pid")"`, `999999999`), "reports a pid absent on the host (another pid namespace)"},
 		{ReqFSHostAgentPIDOnHost, hedit("observe", `if [ -f "$box/pid" ]; then printf ',"agent_pid"`, `if false; then printf ',"agent_pid"`), "reports no agent_pid"},
+		{ReqFSHostHomeView, hedit("start", `if [ -n "$cmd" ]; then`, `if [ -n "$cmd" ]; then mkdir -p "$S/home"; cmd=$(printf %s "$cmd" | sed "s|$HOME|$S/home|g"); `), "runs the command with a home directory of its own at the caller's HOME (a container bind-mounting only the work dir)"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

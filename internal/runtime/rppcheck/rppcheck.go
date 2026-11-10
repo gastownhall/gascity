@@ -220,7 +220,9 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // a claim about the box's tmux, read over exec, not an op of its own, so it
 // maps to "" too (RPP-CONN-002 checks it), and so does proc.exec, whose exec
 // op `gc runtime conformance` checks (RPP-CONN-001) and which the
-// idle-boundary migration warning names.
+// idle-boundary migration warning names. fs.host is a promise about where a
+// box runs, checked by the conformance fshost group, so it maps to "" as
+// well; declared without locality local it draws a warning instead.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -228,6 +230,7 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityConnectionExec:   "",
 	runtime.ProtocolCapabilityIdleBoundary:     "",
 	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
+	runtime.ProtocolCapabilityFSHost:           "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -288,8 +291,17 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if missingIdleBoundary(info) {
 		detail += "; " + idleBoundaryMigrationWarning
 	}
+	if info.Has(runtime.ProtocolCapabilityFSHost) && !info.SharesHostFS() {
+		detail += "; " + fsHostWithoutLocalityWarning
+	}
 	c.record(handshakeCheck, StatusPass, detail)
 }
+
+// fsHostWithoutLocalityWarning names a handshake declaring fs.host without
+// locality local: gc reads fs.host only together with it
+// (runtime.ProtocolInfo.SharesHostFS), so it does no host work, reads no
+// local transcripts and admits no skills or MCP for this runtime.
+const fsHostWithoutLocalityWarning = `warning: fs.host is declared without "locality": "local", so gc ignores it: it does no host work, reads no local transcripts and admits no skills or MCP for this runtime; declare "locality": "local" too if the boxes share gc's host filesystem and user`
 
 // idleBoundaryMigrationWarning names the migration state a pack is in when it
 // declares the three capabilities that once gave it an idle boundary but not

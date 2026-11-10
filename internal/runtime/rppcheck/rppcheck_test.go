@@ -281,6 +281,40 @@ func TestRun_WarnsOnTheTripleWithoutIdleBoundary(t *testing.T) {
 	}
 }
 
+// fs.host narrows locality local: a handshake declaring it without
+// "locality": "local" passes, but is told gc reads fs.host as undeclared and
+// does no host work for it. With locality local, fs.host is a token gc
+// honors, not an unknown one.
+// Kills: a pack whose fs.host gc silently ignores.
+func TestRun_WarnsOnFSHostWithoutLocalityLocal(t *testing.T) {
+	const from = `{"version":0,"capabilities":["report-attachment","report-activity"]}`
+	for _, tc := range []struct {
+		handshake string
+		warn      bool
+	}{
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"]}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"remote"}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"local"}`, false},
+		{`{"version":0,"capabilities":["report-attachment","report-activity"],"locality":"local"}`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.handshake, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.handshake, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, fsHostWithoutLocalityWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want the fs.host locality warning %v", tc.handshake, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.handshake, detail)
+		}
+	}
+}
+
 func TestRun_DeclaredCapabilityNotImplementedFails(t *testing.T) {
 	state := t.TempDir()
 	// Declares report-attachment but the is-attached op falls through to
