@@ -69,8 +69,9 @@ func (cs *controllerState) ActiveWorkStep(ctx context.Context, assignees []strin
 	return &api.ActiveWorkStep{ID: step.ID, Title: step.Title, Description: step.Description}, nil
 }
 
-// activeWorkStep resolves the step over the stores scopeRoot names, each bound
-// to ctx where its store allows (activeWorkStepReader).
+// activeWorkStep resolves the step over the stores scopeRoot names, the
+// Molecule{Active} plan's legs bound to ctx where their store allows
+// (storeref.BindLegs over scopedStoreLike).
 func (cs *controllerState) activeWorkStep(ctx context.Context, assignees []string, scopeRoot string) (*beads.Bead, error) {
 	cs.mu.RLock()
 	cfg := cs.cfg
@@ -98,21 +99,16 @@ func (cs *controllerState) activeWorkStep(ctx context.Context, assignees []strin
 	oneStore := len(plan.Legs) == 1
 	// Each store is bound to ctx when it runs subprocesses (scopedStoreLike),
 	// so a request the hook gave up on stops its bd children.
-	var bindErr error
 	bound, err := storeref.BindLegs(plan, func(store beads.Store) (beads.Store, error) {
 		scoped, err := scopedStoreLike(ctx, cityPath, cfg, store)
 		if err != nil {
-			bindErr = fmt.Errorf("binding the store to the request: %w", err)
-			return nil, bindErr
+			return nil, fmt.Errorf("binding the store to the request: %w", err)
 		}
 		if scoped != nil {
 			return scoped, nil
 		}
 		return store, nil
 	})
-	if bindErr != nil {
-		return nil, bindErr
-	}
 	if err != nil {
 		return nil, err
 	}

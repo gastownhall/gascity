@@ -62,28 +62,39 @@ func r4Store(t *testing.T, prefix, id, state string) beads.Store {
 }
 
 // TestLiveCloseOwnerAgreesWithTheFrozenReference runs every combination of
-// row states across the route (the configured prefix's store, or the
-// fallback's rigs then the city) and the relic binding, through the
+// row states across the route (the configured prefix's store, the
+// fallback's rigs then the city, or none for an unbound rig) and the relic
+// binding, through the
 // CloseOwner plan and through the pre-T7g loop over the same stores in the
 // same order: the verdict, and the owner of a confirmed close, agree.
 func TestLiveCloseOwnerAgreesWithTheFrozenReference(t *testing.T) {
 	const id = "ga-7"
 	states := []string{"open", "closed", "missing", "unreadable"}
-	for _, fallback := range []bool{false, true} {
+	for _, kind := range []string{"configured", "fallback", "unbound rig"} {
 		for _, city := range states {
 			for _, rig := range states {
 				for _, relic := range states {
-					if !fallback && rig != "missing" {
-						continue // the configured route is one store
+					if kind != "fallback" && rig != "missing" {
+						continue // the configured route is one store, an unbound rig's none
 					}
-					name := fmt.Sprintf("fallback=%v/city=%s/rig=%s/relic=%s", fallback, city, rig, relic)
+					if kind == "unbound rig" && city != "missing" {
+						continue // the route is empty: only the relic is read
+					}
+					name := fmt.Sprintf("route=%s/city=%s/rig=%s/relic=%s", kind, city, rig, relic)
 					cityStore, rigStore, relicStore := r4Store(t, "ga", id, city), r4Store(t, "ra", id, rig), r4Store(t, "gcg", id, relic)
 					epoch := testStoresWithRigs(cityStore, relicStore, map[string]testRig{"alpha": {store: rigStore, prefix: "ra"}})
 					route := []storeref.StoreRef{storeref.WorkRef}
 					stores := []beads.Store{cityStore, relicStore}
-					if fallback {
+					switch kind {
+					case "fallback":
 						route = []storeref.StoreRef{storeref.RigRef("alpha"), storeref.WorkRef}
 						stores = []beads.Store{rigStore, cityStore, relicStore}
+					case "unbound rig":
+						// The configured prefix names a rig with no open
+						// store: no route, the relic alone (withRelicStore
+						// over no event store).
+						route = nil
+						stores = []beads.Store{relicStore}
 					}
 					wantStore, wantRow, wantErr := liveCloseOwnerReference(stores, id)
 					gotStore, gotRow, gotErr := liveCloseOwner(epoch, route, stores, id, relicStore)
@@ -348,5 +359,48 @@ func TestLiveCloseOwnerMatchesTheRelicThroughTheGatesView(t *testing.T) {
 	}
 	if ref := relicStoreRef(owner, relicView, "rig:x"); ref != "" {
 		t.Fatalf("relicStoreRef = %q, want the ID-only mode", ref)
+	}
+}
+
+// TestActiveWorkStepFollowOnReadsAreStrictLive (F6, the controller path): with
+// the legs bound and read live, the listing reader carries the federated
+// role and the follow-on reader none, so the gate still polices the step
+// reads the controller makes through its clones.
+func TestActiveWorkStepFollowOnReadsAreStrictLive(t *testing.T) {
+	work, graph := newTestMem("ga"), newTestMem("gcg")
+	plan, err := testStores(work, graph).Plan(storeref.Molecule{Kind: storeref.MoleculeActive, Scope: storeref.WorkRef, Near: work, NearRef: stepWorkStoreRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := storeref.BindLegs(plan, func(s beads.Store) (beads.Store, error) { return s, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legs []stepMoleculeLeg
+	storeref.EachTypedLeg(bound, func(leg storeref.TypedLeg) { legs = append(legs, stepMoleculeLegOf(leg, true)) })
+	if len(legs) != 2 {
+		t.Fatalf("legs = %d, want graph and work", len(legs))
+	}
+	for i, leg := range legs {
+		if lt := fmt.Sprintf("%T", leg.list); !strings.Contains(lt, "federatedReads") {
+			t.Errorf("leg %d's live listing reader is %s, want the federated-role adapter", i, lt)
+		}
+		if st := fmt.Sprintf("%T", leg.strict); strings.Contains(st, "federated") || strings.Contains(st, "relic") {
+			t.Errorf("leg %d's live follow-on reader is %s, want a reader with no leg role", i, st)
+		}
+	}
+}
+
+// TestLiveCloseOwnerFailsClosedOnAWorkerSite (round 2, M3): a worker site
+// whose every class is refused mints its binding over the refusing store
+// (T7c), so the relic the residence probe proved (the raw binding) is no
+// binding of the epoch: the close stays unconfirmed, for the sweep, never
+// refuted and never confirmed in a store the epoch does not serve.
+func TestLiveCloseOwnerFailsClosedOnAWorkerSite(t *testing.T) {
+	city, relic := r4Store(t, "ga", "ga-1", "open"), r4Store(t, "gcg", "ga-1", "closed")
+	epoch := workerSiteEpoch(city, relic, nil)
+	_, row, err := liveCloseOwner(epoch, []storeref.StoreRef{storeref.WorkRef}, []beads.Store{city, relic}, "ga-1", relic)
+	if confirmInferredClose(row, err) != closeUnconfirmed {
+		t.Fatalf("a worker site's relic close = %v (%v), want unconfirmed", confirmInferredClose(row, err), err)
 	}
 }

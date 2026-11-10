@@ -22,6 +22,13 @@ import (
 // would decide a purge from rows it is not about to delete. Every such
 // mismatch fails closed: the graph arm lists nothing and purges nothing, a
 // holder question answers "held", and the work arm skips the leg.
+//
+// A worker site whose descriptor attaches none of the binding's classes is
+// such a mismatch: its census still lists the raw binding as a leg (it is not
+// the graph store the epoch hands out, which refuses), while the epoch names
+// the binding's ref over the refusing store (T7c). The pre-T7g GC read the
+// raw binding there; now that leg fails closed
+// (TestWispGCFailsClosedOnAWorkerSite).
 
 // wispGCRoots is one pass's readers.
 type wispGCRoots struct {

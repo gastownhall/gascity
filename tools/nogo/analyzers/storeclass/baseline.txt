@@ -1647,7 +1647,7 @@ cmd/gc/wisp_gc.go	sourceIsLiveIn	raw-param	1
 cmd/gc/wisp_gc.go	wispGCHolders	raw-field	2
 cmd/gc/wisp_gc.go	wispGCHolders.readHolders	raw-param	2
 cmd/gc/wisp_gc.go	wispGCHolders.sourceStore	raw-result	1
-cmd/gc/wisp_gc.go	wispGCLegs	raw-param	2
+cmd/gc/wisp_gc.go	wispGCLegs	raw-param	1
 cmd/gc/wisp_gc.go	wispGCLegs	raw-result	1
 cmd/gc/wisp_gc_work_lane.go	workArmLeg	raw-field	1
 cmd/gc/wisp_gc_work_lane.go	workMoleculeGC.pass	raw-param	2

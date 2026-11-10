@@ -206,7 +206,6 @@ type wispGC interface {
 // the GC must find it there to close it when abandoned and collect it once
 // expired.
 type wispGCLegs interface {
-	each(visit func(beads.Store))
 	// eachLeg is each with every leg's store ref, its stable identity.
 	eachLeg(visit func(ref string, store beads.Store))
 	// unusable is why the leg set answers nothing (a refused city). A holder

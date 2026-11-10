@@ -1100,11 +1100,15 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	wake := cs.wakeOf()
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(id)
-	route := cs.beadEventRouteLocked(id)
 	probe := cs.beadEventRelicProbeLocked(id)
 	var storeRef string
+	var route []storeref.StoreRef
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+		if probe.routes == nil {
+			// Only a relic's close confirmation reads the route by ref.
+			route = cs.beadEventRouteLocked(id)
+		}
 	}
 	cs.mu.RUnlock()
 	relic, residentProven := probe.residentStore(id)
@@ -1241,7 +1245,11 @@ func (cs *controllerState) applyInferredClose(evt events.Event, route []storeref
 	if cs.deferIfQuiescent(evt.Subject) {
 		return
 	}
-	store, live, err := liveCloseOwner(cs.Stores(), route, stores, evt.Subject, relic)
+	var epoch storeref.Stores
+	if relic != nil {
+		epoch = cs.Stores() // only the relic's CloseOwner plan reads it
+	}
+	store, live, err := liveCloseOwner(epoch, route, stores, evt.Subject, relic)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
 		cs.emitCompletedFact(live, evt.Actor)
@@ -1294,7 +1302,11 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 // owner is the epoch's store for a route leg, the store the event routed to,
 // and the event's relic for the binding. Under the split-strict gate a
 // physical binding is read as the epoch holds it, unviewed, as every epoch
-// plan reads a relocated class. A
+// plan reads a relocated class. An empty route (the id's configured prefix
+// names a rig with no open store) plans the relic alone. On a worker site
+// whose every class is refused the epoch's binding is the refusing store
+// (T7c), so a relic proven in the raw binding is no binding of the epoch and
+// its close stays unconfirmed (TestLiveCloseOwnerFailsClosedOnAWorkerSite). A
 // route or relic the epoch cannot name (a reload between the event's route
 // and this read) leaves the close unconfirmed, for the sweep to re-read.
 func liveCloseOwner(epoch storeref.Stores, route []storeref.StoreRef, stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {

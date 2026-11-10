@@ -397,6 +397,12 @@ func TestMoleculeAutocloseAgreesWithTheFrozenReference(t *testing.T) {
 		for _, sd := range seeds {
 			name := recipe.name + "/" + sd.name
 			t.Run(name, func(t *testing.T) {
+				if recipe.name == "gate on" && sd.name == "graph root, step on the work ledger" {
+					// A step carrying gc.root_bead_id is graph class: the
+					// gate's work view cannot hold it, and the stranded
+					// shape is where a graph row sits on the work ledger.
+					t.Skip("a graph-class step cannot be placed through the gate's work view")
+				}
 				plant := func(s fedShape) string {
 					const rootID, stepID = "ga-root", "ga-step"
 					for _, st := range sd.rootIn(s) {
@@ -548,7 +554,8 @@ func TestCloseCompletedConvoyAcrossAgreesWithTheFrozenReference(t *testing.T) {
 		name                   string
 		firstOpen, secondOpen  bool
 		firstChild, secondKids bool
-		secondErr              error
+		tracked                string // "open", "closed", "dangling": a tracks-edge member in the first store
+		firstErr, secondErr    error
 		same                   bool
 		nilSecond              bool
 	}
@@ -562,6 +569,12 @@ func TestCloseCompletedConvoyAcrossAgreesWithTheFrozenReference(t *testing.T) {
 		{name: "the second store fails behind an open first child", firstChild: true, firstOpen: true, secondErr: errors.New("binding down")},
 		{name: "the second store is the first", firstChild: true, same: true},
 		{name: "no second store", firstChild: true, nilSecond: true},
+		{name: "an open tracked member", firstChild: true, tracked: "open", secondKids: true},
+		{name: "a closed tracked member", firstChild: true, tracked: "closed", secondKids: true},
+		{name: "a dangling tracked member", firstChild: true, tracked: "dangling", secondKids: true},
+		{name: "only a closed tracked member, no second store", tracked: "closed", nilSecond: true},
+		{name: "the first store fails", firstChild: true, firstErr: errors.New("convoy store down"), secondKids: true},
+		{name: "the first store fails alone", firstChild: true, firstErr: errors.New("convoy store down"), nilSecond: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -574,6 +587,20 @@ func TestCloseCompletedConvoyAcrossAgreesWithTheFrozenReference(t *testing.T) {
 						_ = first.Close("ga-k")
 					}
 				}
+				switch c.tracked {
+				case "open", "closed":
+					fedCreate(t, first, beads.Bead{ID: "ga-m", Title: "member", Type: "task"})
+					if c.tracked == "closed" {
+						_ = first.Close("ga-m")
+					}
+					if err := first.DepAdd(convoy.ID, "ga-m", convoycore.TrackingDepType); err != nil {
+						t.Fatal(err)
+					}
+				case "dangling":
+					if err := first.DepAdd(convoy.ID, "ga-gone", convoycore.TrackingDepType); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if c.secondKids {
 					fedCreate(t, secondMem, beads.Bead{ID: "gcg-k", Title: "child", Type: "task", ParentID: convoy.ID})
 					if !c.secondOpen {
@@ -582,13 +609,18 @@ func TestCloseCompletedConvoyAcrossAgreesWithTheFrozenReference(t *testing.T) {
 				}
 				lists := 0
 				var second beads.Store = secondStoreLists{Store: secondMem, lists: &lists, err: c.secondErr}
+				var firstStore beads.Store = first
+				if c.firstErr != nil {
+					firstLists := 0
+					firstStore = secondStoreLists{Store: first, lists: &firstLists, err: c.firstErr}
+				}
 				switch {
 				case c.same:
-					second = first
+					second = firstStore
 				case c.nilSecond:
 					second = nil
 				}
-				return first, second, &lists, convoy
+				return firstStore, second, &lists, convoy
 			}
 			rf, rs, rlists, rconvoy := build()
 			wantClosed, wantErr := closeCompletedConvoyAcrossReference(rf, rs, rconvoy)

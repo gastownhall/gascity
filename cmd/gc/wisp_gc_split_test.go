@@ -372,7 +372,6 @@ func TestWispGCHolderGuardLeavesARootOpenWhileARigIsSuspended(t *testing.T) {
 // unreadableLegs is a leg set that cannot be read (a refused city).
 type unreadableLegs struct{}
 
-func (unreadableLegs) each(func(beads.Store))            {}
 func (unreadableLegs) unusable() error                   { return errNoWorkStore }
 func (unreadableLegs) suspendedRigs() []string           { return nil }
 func (unreadableLegs) eachLeg(func(string, beads.Store)) {}

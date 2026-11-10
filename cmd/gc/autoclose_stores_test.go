@@ -65,7 +65,7 @@ func TestTestStoresHandsOutTheGraphStoreItWasGiven(t *testing.T) {
 // of legs (every leg with a store that is not graph, by ref), minted as the
 // test mint mints legs (federated), for a test that drives the GC over stores
 // it built: each census leg reads its own store. WorkLegs.wispGCRoots, the
-// production builder, plans them over an epoch (wisp_gc_roots_test.go).
+// production builder, plans them over an epoch (t7g_wisp_gc_reference_test.go).
 func testWispGCRoots(graph beads.Store, legs wispGCLegs) wispGCRoots {
 	out := wispGCRoots{graph: beadstest.FederatedLeg(graph), work: map[string]beads.FederatedReader{}, workErr: map[string]error{}}
 	if legs == nil || legs.unusable() != nil {

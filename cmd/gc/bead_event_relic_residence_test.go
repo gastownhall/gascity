@@ -308,3 +308,55 @@ func TestUnownedBeadEventBroadcastIsUnchangedWithoutRoutes(t *testing.T) {
 		t.Fatalf("broadcast stores = %d, want the two work stores", len(got))
 	}
 }
+
+// TestRelicCloseUnderAnUnboundRigAutoclosesItsRoot is the round-2 review's M1
+// repro: a relic whose id carries the prefix of a configured rig this
+// controller holds no store for (an unbound rig). Its event route is empty
+// (the prefix owns the id, the store is absent), so the relic binding is the
+// only store that can confirm the close: the CloseOwner plan is the relic
+// alone, and the root autocloses, on the event path and on the sweep, as it
+// did before the CloseOwner conversion.
+func TestRelicCloseUnderAnUnboundRigAutoclosesItsRoot(t *testing.T) {
+	syncAutoclose(t)
+	for _, path := range []string{"event", "sweep"} {
+		t.Run(path, func(t *testing.T) {
+			f := newRelicEventFixture(t, false)
+			f.cs.cfg.Rigs = append(f.cs.cfg.Rigs, config.Rig{Name: "beta", Path: t.TempDir(), Prefix: "rb"})
+			creator := f.binding.(beads.ForeignIDCreator)
+			root, err := creator.CreateWithForeignID(beads.Bead{ID: "rb-901", Title: "Formula: mol-unbound", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := creator.CreateWithForeignID(beads.Bead{ID: "rb-902", Title: "Step 1", Type: "step", ParentID: root.ID, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = splittest.TakeResidenceViolations(f.binding)
+			if err := f.binding.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			f.cs.mu.RLock()
+			route := f.cs.beadEventRouteLocked(step.ID)
+			f.cs.mu.RUnlock()
+			if len(route) != 0 {
+				t.Fatalf("precondition: the unbound rig's id has route %v, want none", route)
+			}
+			switch path {
+			case "event":
+				payload, err := json.Marshal(beads.Bead{ID: step.ID, Title: "Step 1", Type: "step", Status: "closed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "agent", Subject: step.ID, Payload: payload})
+			case "sweep":
+				f.cs.autocloseSweepOf().deferID(step.ID, sweepTestClock(0))
+				if got := f.cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 1 {
+					t.Fatalf("sweep pass = %+v, want the relic's close confirmed and its autoclose run", got)
+				}
+			}
+			if got, err := f.binding.Get(root.ID); err != nil || got.Status != "closed" {
+				t.Fatalf("relic root %s under an unbound rig = %q (%v) after its only step closed, want closed", root.ID, got.Status, err)
+			}
+		})
+	}
+}

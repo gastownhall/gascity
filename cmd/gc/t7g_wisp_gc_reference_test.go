@@ -125,7 +125,7 @@ func referenceHolderWalk(graph beads.Store, legs wispGCLegs, rootID string) bool
 	}
 	live := false
 	if legs != nil {
-		legs.each(func(store beads.Store) {
+		legs.eachLeg(func(_ string, store beads.Store) {
 			if live || store == nil || sameBeadStore(store, graph) {
 				return
 			}
@@ -157,46 +157,77 @@ func (s gcShape) roots() wispGCRoots {
 }
 
 // gcRecipes are the shapes: unsplit (graph is the city store, and the rigs
-// hold v1 molecule roots the GC must never read), unsplit with the gate's
-// views, whole split with rigs (the census legs), a suspended rig the census
-// leaves out, a stranded split served degraded (a graph-class wisp root on
-// the work ledger), and a refused binding.
+// hold v1 molecule roots the GC must never read), unsplit under the gate's
+// views, whole split with rigs, a suspended rig the census leaves out, a
+// stranded split served degraded (the boot census reports the binding
+// holds legacy residents, and the work ledger holds a graph-class wisp
+// root), a per-class split (graph on one binding, the other classes on
+// another, which the census reads as a work leg), and a refused binding.
+// The split shapes register their routes for the census dir, as the
+// controller does at boot (newSplitEnvWith), so the census carries its
+// binding legs, and mint the epoch as the controller does (mintCityStores).
 func gcRecipes(t *testing.T) map[string]func() gcShape {
-	census := func(city beads.Store, rigs map[string]beads.Store, suspended string) wispGCLegs {
+	// The epochs are minted with the production seam; the split-strict
+	// gate's projection would view the census's raw stores (a mismatch the
+	// conversion fails closed on, which TestWispGCFailsClosedOnACensusTheEpochDisagreesWith pins).
+	saved := splitStrictSeam
+	splitStrictSeam = nil
+	t.Cleanup(func() { splitStrictSeam = saved })
+	rigsOf := func() map[string]beads.Store {
+		return map[string]beads.Store{"alpha": newTestMem("ra"), "bravo": newTestMem("rb")}
+	}
+	split := func(suspended string, routes *storageRoutes, city beads.Store, extra map[string]beads.Store) gcShape {
 		dir := t.TempDir()
+		rigs := rigsOf()
 		cfg := &config.City{Workspace: config.Workspace{Name: "c"}}
 		for _, name := range []string{"alpha", "bravo"} {
-			cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: filepath.Join(dir, name), Suspended: name == suspended})
+			cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: filepath.Join(dir, name), Prefix: map[string]string{"alpha": "ra", "bravo": "rb"}[name], Suspended: name == suspended})
 		}
-		return workLegsFromCensus(dir, cfg, cityWorkLegOf(beads.WorkStore{Store: city}), rigs)
+		registerResidencyRoutes(dir, routes, func() beads.Store { return city })
+		t.Cleanup(func() { unregisterResidencyRoutes(dir, routes) })
+		legs := workLegsFromCensus(dir, cfg, cityWorkLegOf(beads.WorkStore{Store: city}), rigs)
+		var susp map[string]bool
+		if suspended != "" {
+			susp = map[string]bool{suspended: true}
+		}
+		epoch := mintCityStores(dir, routes, cfg, city, storeref.RigLegs(rigs), susp)
+		stores := map[string]beads.Store{"city": city, "graph": epoch.Graph().Store, "alpha": rigs["alpha"], "bravo": rigs["bravo"]}
+		for k, v := range extra {
+			stores[k] = v
+		}
+		return gcShape{graph: epoch.Graph().Store, legs: legs, epoch: epoch, stores: stores}
 	}
-	rigsOf := func() (map[string]beads.Store, map[string]testRig) {
-		alpha, bravo := newTestMem("ra"), newTestMem("rb")
-		return map[string]beads.Store{"alpha": alpha, "bravo": bravo},
-			map[string]testRig{"alpha": {store: alpha, prefix: "ra"}, "bravo": {store: bravo, prefix: "rb"}}
-	}
-	split := func(suspended string, graph beads.Store) gcShape {
-		city := newTestMem("ga")
-		rigs, testRigs := rigsOf()
-		stores := map[string]beads.Store{"city": city, "graph": graph, "alpha": rigs["alpha"], "bravo": rigs["bravo"]}
-		return gcShape{graph: graph, legs: census(city, rigs, suspended), epoch: testStoresWithRigs(city, graph, testRigs), stores: stores}
+	whole := func(suspended string) gcShape {
+		return split(suspended, splitRoutes(newTestMem("gcg")), newTestMem("ga"), nil)
 	}
 	return map[string]func() gcShape{
 		"unsplit": func() gcShape {
 			city := newTestMem("ga")
-			rigs, testRigs := rigsOf()
-			return gcShape{graph: city, epoch: testStoresWithRigs(city, city, testRigs), stores: map[string]beads.Store{"city": city, "alpha": rigs["alpha"], "bravo": rigs["bravo"]}}
+			rigs := rigsOf()
+			return gcShape{graph: city, epoch: mintCityStores("", nil, nil, city, storeref.RigLegs(rigs), nil), stores: map[string]beads.Store{"city": city, "alpha": rigs["alpha"], "bravo": rigs["bravo"]}}
 		},
 		"gate on": func() gcShape {
 			physical := newTestMem("ga")
 			epoch := storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: physical}}, storeref.StoresOptions{Projection: splitStrictGate{}})
 			return gcShape{graph: epoch.Graph().Store, epoch: epoch, stores: map[string]beads.Store{"city": physical}}
 		},
-		"whole split":               func() gcShape { return split("", newTestMem("gcg")) },
-		"suspended rig":             func() gcShape { return split("bravo", newTestMem("gcg")) },
-		"stranded, served degraded": func() gcShape { return split("", newTestMem("gcg")) },
+		"whole split":   func() gcShape { return whole("") },
+		"suspended rig": func() gcShape { return whole("bravo") },
+		"stranded, served degraded": func() gcShape {
+			binding := newTestMem("gcg")
+			routes := splitRoutes(binding)
+			routes.relics = map[beads.Store]bool{binding: true}
+			return split("", routes, newTestMem("ga"), nil)
+		},
+		"per-class split": func() gcShape {
+			graph, other := newTestMem("gcg"), newTestMem("gcs")
+			routes := splitRoutes(other)
+			routes.stores[coordclass.ClassGraph] = graph
+			return split("", routes, newTestMem("ga"), map[string]beads.Store{"other": other})
+		},
 		"refused": func() gcShape {
-			return split("", refusedClassStore{err: standingStorageRefusal{err: errors.New("storage refused: run `gc storage migrate`")}})
+			refused := refusedClassStore{err: standingStorageRefusal{err: errors.New("storage refused: run `gc storage migrate`")}}
+			return split("", splitRoutes(refused), newTestMem("ga"), nil)
 		},
 	}
 }
@@ -349,6 +380,38 @@ func TestWispGCReadsAgreeWithTheFrozenReference(t *testing.T) {
 			if fmt.Sprint(gotLegs) != fmt.Sprint(refLegs) {
 				t.Errorf("work arm legs = %v, reference %v", gotLegs, refLegs)
 			}
+			// The registered routes put the bindings in the census: the
+			// graph binding is excluded by identity, and the per-class
+			// split's other binding is a leg the GC reads.
+			var censusClassRefs []string
+			if s.legs != nil {
+				s.legs.eachLeg(func(ref string, _ beads.Store) {
+					if storeref.IsClassRef(ref) {
+						censusClassRefs = append(censusClassRefs, ref)
+					}
+				})
+			}
+			switch name {
+			case "refused":
+				if s.legs.unusable() == nil {
+					t.Error("a refused city's census answered legs: its work legs must fail closed")
+				}
+			case "whole split", "suspended rig", "stranded, served degraded":
+				if len(censusClassRefs) != 1 {
+					t.Errorf("census binding legs = %v, want the one binding", censusClassRefs)
+				}
+			case "per-class split":
+				if len(censusClassRefs) != 2 {
+					t.Errorf("census binding legs = %v, want both bindings", censusClassRefs)
+				}
+				readsOther := false
+				for _, ref := range gotLegs {
+					readsOther = readsOther || storeref.IsClassRef(ref)
+				}
+				if !readsOther {
+					t.Errorf("the per-class split's non-graph binding is not a GC work leg: %v", gotLegs)
+				}
+			}
 			if s.legs == nil && len(roots.work) != 0 {
 				t.Errorf("a city whose routes relocate nothing has work-leg readers %v: the GC must read graph alone", roots.work)
 			}
@@ -395,7 +458,7 @@ func TestWispGCPurgeSetIsUnchanged(t *testing.T) {
 			if got, want := gcRows(t, conv), gcRows(t, ref); got != want {
 				t.Errorf("rows after the GC:\n got  %s\n want %s", got, want)
 			}
-			if name == "whole split" && gcRows(t, ref) == seeded {
+			if (name == "whole split" || name == "per-class split") && gcRows(t, ref) == seeded {
 				t.Error("the reference GC changed nothing on the whole split: the comparison is vacuous")
 			}
 		})
@@ -519,5 +582,55 @@ func TestTickWispGCReadsHoldersThroughTheCensusLegs(t *testing.T) {
 	})
 	if got, err := graph.Get(root.ID); err == nil && got.Status != "closed" {
 		t.Fatalf("stepless wisp %s is %s with its only (rig) source terminal; stderr: %s", root.ID, got.Status, cr.stderr.(*bytes.Buffer).String())
+	}
+}
+
+// workerSiteEpoch is the epoch a worker site mints when its descriptor
+// attaches none of the binding's classes: every relocated class is refused
+// per class, and since T7c (#9033) the binding is minted over the refusing
+// store, so the epoch names no store the census's raw binding is.
+func workerSiteEpoch(city, binding beads.Store, rigs map[string]beads.Store) storeref.Stores {
+	var classes []coordclass.Class
+	refusals := map[coordclass.Class]storeref.RefusingClassStore{}
+	refusing := refusedClassStore{err: standingStorageRefusal{err: errors.New("worker site: class not attached")}}
+	for _, c := range coordclass.Classes() {
+		if c.IsInfrastructure() {
+			classes = append(classes, c)
+			refusals[c] = refusing
+		}
+	}
+	topo := storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: city}, Rigs: storeref.RigLegs(rigs)}
+	topo.Bindings, _ = storeref.BuildBinding(binding, classes, storeref.BindingOptions{})
+	return storeref.NewStores(topo, storeref.StoresOptions{ClassRefusals: refusals})
+}
+
+// TestWispGCFailsClosedOnAWorkerSite (round 2, M3): on a worker site whose
+// every class is refused, the census still lists the raw binding as a leg
+// (it is not the graph store the epoch hands out, which refuses), and the
+// epoch resolves the binding's ref to the refusing store, not to the
+// census's. That leg is not read: a holder behind it is held, and the work
+// arm skips it. The pre-T7g GC read the raw binding there as a work leg;
+// failing closed is the decided behavior (t7g-design.md §4).
+func TestWispGCFailsClosedOnAWorkerSite(t *testing.T) {
+	s := gcRecipes(t)["whole split"]()
+	binding := s.stores["graph"]
+	epoch := workerSiteEpoch(s.stores["city"], binding, map[string]beads.Store{"alpha": s.stores["alpha"], "bravo": s.stores["bravo"]})
+	graph := epoch.Graph()
+	roots := s.legs.wispGCRoots(epoch, graph)
+	var bindingRef string
+	s.legs.eachLeg(func(ref string, store beads.Store) {
+		if beads.SameStore(store, binding) {
+			bindingRef = ref
+		}
+	})
+	if bindingRef == "" {
+		t.Fatal("precondition: the census lists no binding leg")
+	}
+	if _, err := roots.workLeg(bindingRef); err == nil {
+		t.Fatalf("the census binding leg %q has a reader on a worker site: it must fail closed", bindingRef)
+	}
+	h := wispGCHolders{graph: graph.Store, roots: roots, legs: s.legs}
+	if !h.readHolders(beads.Bead{ID: "gcg-x"}, false, nil, "") {
+		t.Error("a holder behind the worker site's unreadable binding leg was answered not held")
 	}
 }

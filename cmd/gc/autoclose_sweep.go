@@ -44,6 +44,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -300,8 +301,12 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		}
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
-		route := cs.beadEventRouteLocked(id)
 		probe := cs.beadEventRelicProbeLocked(id)
+		var route []storeref.StoreRef
+		if probe.routes != nil {
+			// Only a relic's close confirmation reads the route by ref.
+			route = cs.beadEventRouteLocked(id)
+		}
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
@@ -322,7 +327,11 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveCloseOwner(cs.Stores(), route, stores, id, relic)
+		var epoch storeref.Stores
+		if relic != nil {
+			epoch = cs.Stores() // only the relic's CloseOwner plan reads it
+		}
+		store, live, err := liveCloseOwner(epoch, route, stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)
