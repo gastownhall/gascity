@@ -53,6 +53,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 	if step.Ralph.Check == nil {
 		return nil, fmt.Errorf("expanding ralph %q: missing check spec", step.ID)
 	}
+	if step.Ralph.MaxAttemptsVar != "" {
+		return nil, fmt.Errorf("expanding ralph %q: max_attempts var %q is unresolved", step.ID, step.Ralph.MaxAttemptsVar)
+	}
 
 	attempt := 1
 	iterationID := fmt.Sprintf("%s.iteration.%d", step.ID, attempt)
@@ -407,23 +410,55 @@ func appendUniqueCopy(slice []string, item string) []string {
 	return out
 }
 
+// bindCheckMaxAttemptsVars records, on every check in steps at any depth whose
+// max_attempts names a var, that var's value in scope: the vars of the
+// expansion whose template defines the steps, layered over its invoker's. It
+// does not validate the value; ResolveCheckMaxAttemptsVars does, after
+// condition filtering, so a check a condition excludes never fails on it. A
+// check keeps the first value bound to it, and a var scope has no value for
+// stays unbound.
+func bindCheckMaxAttemptsVars(steps []*Step, scope map[string]string) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		bindCheckMaxAttemptsVar(step, scope)
+		bindCheckMaxAttemptsVars(step.Children, scope)
+		if step.Loop != nil {
+			bindCheckMaxAttemptsVars(step.Loop.Body, scope)
+		}
+	}
+}
+
+func bindCheckMaxAttemptsVar(step *Step, scope map[string]string) {
+	spec := step.Ralph
+	if spec == nil || spec.MaxAttemptsVar == "" || spec.maxAttemptsVarBound {
+		return
+	}
+	raw, ok := scope[spec.MaxAttemptsVar]
+	if !ok {
+		return
+	}
+	bound := cloneRalphSpec(spec)
+	bound.maxAttemptsVarValue = raw
+	bound.maxAttemptsVarBound = true
+	step.Ralph = bound
+}
+
 // ResolveCheckMaxAttemptsVars replaces every check's max_attempts "{{name}}"
-// placeholder, at any depth, with the integer value of that formula var. It
-// runs before ApplyRalph freezes max_attempts into control metadata and step
-// specs, so everything downstream sees a literal count. The value must be an
-// integer of at least 1.
+// placeholder, at any depth, with the integer value of that formula var: the
+// value bound from the expansion that defines the check, else the var's value
+// in vars. It runs after condition filtering, so it validates only the checks
+// a condition keeps, and before ApplyRalph freezes max_attempts into control
+// metadata and step specs, so everything downstream sees a literal count. The
+// value must be an integer of at least 1.
 func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
 	for _, step := range steps {
 		if step == nil {
 			continue
 		}
-		if step.Ralph != nil && step.Ralph.MaxAttemptsVar != "" {
-			if _, ok := vars[step.Ralph.MaxAttemptsVar]; !ok {
-				return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, step.Ralph.MaxAttemptsVar)
-			}
-			if err := resolveCheckMaxAttemptsVar(step, vars); err != nil {
-				return err
-			}
+		if err := resolveCheckMaxAttemptsVar(step, vars); err != nil {
+			return err
 		}
 		if err := ResolveCheckMaxAttemptsVars(step.Children, vars); err != nil {
 			return err
@@ -437,25 +472,33 @@ func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
 	return nil
 }
 
-// resolveCheckMaxAttemptsVar replaces step's check max_attempts placeholder
-// with the integer value its var has in vars. A step without a placeholder, or
-// whose var vars has no value for, is left as it is.
+// resolveCheckMaxAttemptsVar replaces step's check max_attempts placeholder,
+// if it has one, with the integer value of its var.
 func resolveCheckMaxAttemptsVar(step *Step, vars map[string]string) error {
-	if step.Ralph == nil || step.Ralph.MaxAttemptsVar == "" {
+	spec := step.Ralph
+	if spec == nil || spec.MaxAttemptsVar == "" {
 		return nil
 	}
-	name := step.Ralph.MaxAttemptsVar
+	name := spec.MaxAttemptsVar
 	raw, ok := vars[name]
+	if spec.maxAttemptsVarBound {
+		raw, ok = spec.maxAttemptsVarValue, true
+	}
 	if !ok {
-		return nil
+		return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, name)
+	}
+	if residual := CheckResidualVars(raw); len(residual) > 0 {
+		return fmt.Errorf("step %q: check max_attempts var %q = %q contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, name, raw, strings.Join(residual, ", "))
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || n < 1 {
 		return fmt.Errorf("step %q: check max_attempts var %q = %q, want an integer >= 1", step.ID, name, raw)
 	}
-	spec := cloneRalphSpec(step.Ralph)
-	spec.MaxAttempts = n
-	spec.MaxAttemptsVar = ""
-	step.Ralph = spec
+	resolved := cloneRalphSpec(spec)
+	resolved.MaxAttempts = n
+	resolved.MaxAttemptsVar = ""
+	resolved.maxAttemptsVarValue = ""
+	resolved.maxAttemptsVarBound = false
+	step.Ralph = resolved
 	return nil
 }

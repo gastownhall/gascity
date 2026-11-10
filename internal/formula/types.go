@@ -712,6 +712,13 @@ type RalphSpec struct {
 	// MaxAttempts and clears it before the check is expanded.
 	MaxAttemptsVar string `json:"-" toml:"-"`
 
+	// maxAttemptsVarValue is MaxAttemptsVar's value in the var scope of the
+	// expansion that defines the step, recorded when that expansion is
+	// applied; maxAttemptsVarBound reports that it was. Compile resolves an
+	// unbound var against the vars it compiles with.
+	maxAttemptsVarValue string
+	maxAttemptsVarBound bool
+
 	// Check defines how each attempt is validated.
 	Check *RalphCheckSpec `json:"check,omitempty" toml:"check,omitempty"`
 }

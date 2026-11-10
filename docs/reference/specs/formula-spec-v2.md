@@ -754,8 +754,10 @@ substitutes the var's value (the caller's `--var`, else the declared default)
 before materialization, so the control bead and spec sidecar carry a literal
 count. In an expansion template the var resolves against the expansion's vars
 (its defaults and the rule's or step's overrides) before the invoking
-formula's. The value must be an integer ≥ 1; a missing, non-integer, or
-smaller value fails compilation. Any other string is a parse error.
+formula's; when one expansion invokes another, the outer expansion's vars come
+before the root formula's. The value must be an integer ≥ 1; a missing,
+non-integer, or smaller value fails compilation, unless the step's `condition`
+(section 1.5) excludes the check. Any other string is a parse error.
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration
