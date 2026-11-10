@@ -3058,10 +3058,64 @@ func TestBdStoreReadyServesDependentWhenBlockerIsAbsentFromBothTiers(t *testing.
 			if len(got) != 1 || got[0].ID != "bd-dependent" {
 				t.Fatalf("Ready() = %+v, want [bd-dependent]", got)
 			}
-			if len(calls.query) != 1 {
-				t.Fatalf("wisp-tier fallback ran %d times, want once: %v", len(calls.query), calls.query)
+			// Both exact-ID legs run: the unqualified query, then the
+			// ephemeral=true-qualified wisp-tier query.
+			if len(calls.query) != 2 {
+				t.Fatalf("exact-ID confirmation ran %d queries, want 2 (unqualified, then wisp tier): %v", len(calls.query), calls.query)
 			}
 		})
+	}
+}
+
+// ephemeralOnlyBlockerQuery answers only the wisp-tier exact-ID clause for
+// bd-blocker with wisp; the unqualified id="bd-blocker" query finds nothing,
+// as it would if bd's unqualified query covered the issues table alone.
+func ephemeralOnlyBlockerQuery(wisp func() ([]byte, error)) func([]string) ([]byte, error) {
+	return func(args []string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, `ephemeral=true AND id="bd-blocker"`):
+			return wisp()
+		case slices.Contains(args, `id="bd-blocker"`):
+			return []byte(`[]`), nil
+		}
+		return nil, fmt.Errorf("unexpected query: %v", args)
+	}
+}
+
+// The unqualified exact-ID query is not relied on to reach the wisp tier: a
+// wisp-tier blocker it does not return is confirmed with the explicit
+// ephemeral=true AND id=… clause Get uses, and a closed
+// gc.work_outcome=blocked row found there vetoes the dependent.
+func TestBdStoreReadyFindsWispBlockerOnlyViaEphemeralQualifiedQuery(t *testing.T) {
+	wispRow := []byte(`[{"id":"bd-blocker","title":"wisp blocker","status":"closed","issue_type":"task","created_at":"2025-01-15T10:00:00Z","metadata":{"gc.work_outcome":"blocked"}}]`)
+	query := ephemeralOnlyBlockerQuery(func() ([]byte, error) { return wispRow, nil })
+	runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), blockerShowMiss, query)
+	got, err := beads.NewBdStore("/city", runner).Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want empty: a wisp-tier blocker closed gc.work_outcome=blocked, found only by the ephemeral-qualified query, must veto its dependent", got)
+	}
+	if len(calls.query) != 2 {
+		t.Fatalf("bd query ran %d times, want 2 (unqualified, then wisp tier): %v", len(calls.query), calls.query)
+	}
+}
+
+// The same wisp-tier confirmation, but the ephemeral-qualified query fails:
+// the blocker is unproven, so Ready() must fail, naming it, rather than serve
+// the dependent.
+func TestBdStoreReadyFailsWhenEphemeralQualifiedBlockerQueryFails(t *testing.T) {
+	query := ephemeralOnlyBlockerQuery(func() ([]byte, error) {
+		return nil, errors.New("exit status 1: Error: connection refused")
+	})
+	runner, _ := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), blockerShowMiss, query)
+	got, err := beads.NewBdStore("/city", runner).Ready()
+	if err == nil {
+		t.Fatalf("Ready() = %+v, nil error: a blocker whose wisp-tier confirmation failed was served as absent", got)
+	}
+	if !strings.Contains(err.Error(), "bd-blocker") {
+		t.Errorf("Ready() error = %q, want it to name the blocker whose lookup failed", err)
 	}
 }
 

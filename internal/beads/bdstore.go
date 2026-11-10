@@ -1712,8 +1712,9 @@ func (s *BdStore) Get(id string) (Bead, error) {
 // requested bead, so it is ErrNotFound as is. bd's not-found envelope alone
 // cannot tell a missing bead from a failed lookup (isBdNotFoundEnvelope), so
 // absence must be confirmed by an exact-ID bd query that succeeds with no
-// rows. That query matches wisps too, which is why it runs only after the
-// wisp fallback has had its chance at the bead. Any other outcome (an ID the
+// rows. That query is unqualified and may match wisps too, which is why it
+// runs only after the wisp fallback has had its chance at the bead. Any other
+// outcome (an ID the
 // query cannot carry, a query error, a row, unparseable output) leaves
 // absence unproven and returns the bd show error.
 func (s *BdStore) bdShowMissError(id string, showErr error) error {
@@ -3693,10 +3694,14 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 // resolves, and a failure carrying only bd's not-found envelope (a remote bd
 // serve, or a lookup that failed against Dolt; see isBdNotFoundEnvelope) proves
 // nothing either. Every ID bd show did not return is therefore confirmed with
-// the both-tier exact-ID bd query bdShowMissError uses, which also reaches the
-// dotted child IDs molecule steps carry ("ga-abc.1"). Only a bead-level miss
-// from that query (isBdNoIssueMatch, isBdBeadNotFound) or an empty result
-// counts as absent, and a blocker absent from both tiers is the
+// the unqualified exact-ID bd query bdShowMissError uses, which covers
+// issues-table omissions. That form is not relied on to reach the wisp tier:
+// an ID it does not return is confirmed again with the explicit
+// "ephemeral=true AND id=…" clause getEphemeralByID uses. Both quote the ID,
+// so they also reach the dotted child IDs molecule steps carry ("ga-abc.1").
+// Only a bead-level miss from both queries (isBdNoIssueMatch,
+// isBdBeadNotFound, or on the wisp leg isBdQueryUnsupported) or an empty
+// result counts as absent, and a blocker absent from both tiers is the
 // no-evidence-of-blocking degrade filterReadyByWorkOutcome documents. A lookup
 // that failed (bd or its database unreachable, a query bd does not support, an
 // undecodable reply, an ID no exact query can carry) proves nothing about the
@@ -3749,24 +3754,48 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 		}
 		// isExactIDQueryable admits only printable ASCII without '"' or '\',
 		// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
-		qout, qerr := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
-		if qerr != nil {
-			if isBdNoIssueMatch(qerr) || isBdBeadNotFound(qerr) {
-				continue
-			}
-			return nil, nil, fmt.Errorf("confirming blocker %q: bd query: %w", id, qerr)
+		quoted := strconv.Quote(id)
+		b, ok, err := s.confirmBlocker(id, "id="+quoted, "bd query", false)
+		if err != nil {
+			return nil, nil, err
 		}
-		issues, parseErr := parseIssuesTolerant(extractJSON(qout))
-		if parseErr != nil {
-			return nil, nil, fmt.Errorf("confirming blocker %q: %w", id, parseErr)
-		}
-		for _, issue := range issues {
-			if b := issue.toBead(); b.ID == id {
-				record(b)
+		if !ok {
+			b, ok, err = s.confirmBlocker(id, "ephemeral=true AND id="+quoted, "bd query (wisp tier)", true)
+			if err != nil {
+				return nil, nil, err
 			}
+			b.Ephemeral = true
+		}
+		if ok {
+			record(b)
 		}
 	}
 	return statusByID, workOutcomeByID, nil
+}
+
+// confirmBlocker runs one exact-ID bd query leg of blockerStatuses for id
+// with the given query clause and reports the row whose ID is id, if any. A
+// bead-level miss (isBdNoIssueMatch, isBdBeadNotFound, and isBdQueryUnsupported
+// when missUnsupported is set) or an empty result is a miss; any other failure,
+// including an undecodable reply, is an error naming the blocker and leg.
+func (s *BdStore) confirmBlocker(id, clause, leg string, missUnsupported bool) (Bead, bool, error) {
+	out, err := s.runBDTransientRead("query", "--json", clause, "--all", "--limit", "1")
+	if err != nil {
+		if isBdNoIssueMatch(err) || isBdBeadNotFound(err) || (missUnsupported && isBdQueryUnsupported(err)) {
+			return Bead{}, false, nil
+		}
+		return Bead{}, false, fmt.Errorf("confirming blocker %q: %s: %w", id, leg, err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	if parseErr != nil {
+		return Bead{}, false, fmt.Errorf("confirming blocker %q: %s: %w", id, leg, parseErr)
+	}
+	for _, issue := range issues {
+		if b := issue.toBead(); b.ID == id {
+			return b, true, nil
+		}
+	}
+	return Bead{}, false, nil
 }
 
 func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {

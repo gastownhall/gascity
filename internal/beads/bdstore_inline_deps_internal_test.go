@@ -82,14 +82,22 @@ func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 		return nil, errors.New(f.closedReadRefusal)
 	case args[0] == "list":
 		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && (all || !r.closed) && !r.offscope })
+	case args[0] == "query" && len(args) > 2 && strings.HasPrefix(args[2], `ephemeral=true AND id="`):
+		// The wisp-tier exact-ID clause BdStore.blockerStatuses confirms a
+		// blocker with when the unqualified form returned nothing.
+		id, err := strconv.Unquote(strings.TrimPrefix(args[2], "ephemeral=true AND id="))
+		if err != nil {
+			return nil, fmt.Errorf("fake bd query: bad id clause %q: %w", args[2], err)
+		}
+		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && r.id == id && (all || !r.closed) && !r.offscope })
 	case args[0] == "query" && len(args) > 2 && strings.HasPrefix(args[2], `id="`):
-		// The exact-ID clause BdStore.blockerStatuses confirms a blocker with
-		// carries no ephemeral=true, so it matches across both tiers.
+		// The unqualified exact-ID clause is not assumed to reach the wisp
+		// tier, so it matches issues-table rows only.
 		id, err := strconv.Unquote(strings.TrimPrefix(args[2], "id="))
 		if err != nil {
 			return nil, fmt.Errorf("fake bd query: bad id clause %q: %w", args[2], err)
 		}
-		return f.renderRows(func(r bdLedgerRow) bool { return r.id == id && (all || !r.closed) && !r.offscope })
+		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && r.id == id && (all || !r.closed) && !r.offscope })
 	case args[0] == "query":
 		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "ready":
