@@ -89,7 +89,7 @@ type wizardConfig struct {
 	startCommand     string                // custom start command (workspace-level)
 	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
 	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
-	storage          initStorageChoice     // --storage; "" means initStorageDefault
+	storage          initStorageChoice     // --storage; initStorageUnset when not given
 	prefix           string                // --prefix; "" derives the bead prefix from the city name
 	err              error
 }
@@ -448,7 +448,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
-	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes)")
+	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime starts single-store, and an explicit split is refused there) or single (every class on the work ledger)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	// --from copies its source verbatim and never adds the split (a K8S pod
@@ -488,6 +488,7 @@ type initJSONResult struct {
 	DefaultProvider  string   `json:"default_provider,omitempty"`
 	Providers        []string `json:"providers,omitempty"`
 	BootstrapProfile string   `json:"bootstrap_profile,omitempty"`
+	Storage          string   `json:"storage,omitempty"`
 }
 
 func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, templateName, defaultProvider string, providers []string, bootstrapProfile, mode string, stdout io.Writer) error {
@@ -498,6 +499,10 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, te
 		return nil
 	}
 	cityPath, err := initTargetPath(args)
+	if err != nil {
+		return err
+	}
+	storage, err := initStorageLayout(cityPath)
 	if err != nil {
 		return err
 	}
@@ -512,6 +517,7 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, te
 		DefaultProvider:  strings.TrimSpace(defaultProvider),
 		Providers:        append([]string(nil), providers...),
 		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
+		Storage:          storage,
 	})
 }
 
@@ -1483,10 +1489,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg.Storage = storage
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	// A split city (--storage=split) may not carry a reserved bead prefix, so
-	// the new city is never given one it would then be refused for. The city
-	// shape is built, and this runs, before the scaffold, so a refusal leaves
-	// nothing behind.
+	// A split city (gc init's default) may not carry a reserved bead prefix,
+	// so the new city is never given one it would then be refused for. The
+	// city shape is built, and this runs, before the scaffold, so a refusal
+	// leaves nothing behind.
 	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

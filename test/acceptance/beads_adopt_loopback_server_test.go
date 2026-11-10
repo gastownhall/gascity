@@ -86,7 +86,10 @@ func newLoopbackServerAdoption(t *testing.T, name string, initArgs func(up *help
 		}
 	})
 
-	args := []string{"init", "--skip-provider-readiness", "--no-start", "--provider", "claude"}
+	// Single-store, as every beads topology shape is (helpers.TopologyEnv):
+	// the subject is the adopted rig store, and the tool-home wrapper this
+	// environment puts on PATH is a bd a split city's gc bd refuses.
+	args := []string{"init", "--skip-provider-readiness", "--no-start", "--provider", "claude", "--storage=single"}
 	if initArgs != nil {
 		args = append(args, initArgs(up)...)
 	}

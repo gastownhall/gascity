@@ -71,6 +71,16 @@ func stubInitSplitBDJudge(t *testing.T, inventory string, err error) *[]string {
 	return &judged
 }
 
+// admitInitSplitBD makes the bd a new city's gc bd would run a pinned bd
+// 1.3.4, which a split city admits, so a test of a plain gc init on a bd work
+// store sees the born-split default rather than the test harness's fake bd
+// held single-store.
+func admitInitSplitBD(t *testing.T) {
+	t.Helper()
+	stubInitBDVersion(t, "bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)")
+	stubInitSplitBDJudge(t, "bd-1.3.4", nil)
+}
+
 // initStorageTestCity runs doInit on a fake filesystem and returns the written
 // city.toml parsed, or nil when doInit wrote none.
 func initStorageTestCity(t *testing.T, cityPath string, wiz wizardConfig) (*fsys.Fake, *config.City, int, string) {
@@ -123,7 +133,7 @@ func TestParseInitStorageChoice(t *testing.T) {
 		raw  string
 		want initStorageChoice
 	}{
-		{"", initStorageSingle},
+		{"", initStorageUnset},
 		{"single", initStorageSingle},
 		{"split", initStorageSplit},
 		{" split ", initStorageSplit},
@@ -140,16 +150,109 @@ func TestParseInitStorageChoice(t *testing.T) {
 	}
 }
 
-// Until the flip (A1), a plain gc init stays single-store.
-func TestInitDefaultsToSingleStore(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+// A plain gc init, with no --storage, is born split (the split-by-default
+// flip, A1): every template gets the born-split block, and nothing is printed.
+func TestInitDefaultsToBornSplit(t *testing.T) {
+	for _, template := range []string{"", "minimal", "gastown", "gascity", "custom", "empty"} {
+		t.Run("template="+template, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "")
+			_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{configName: template})
+			if code != 0 {
+				t.Fatalf("doInit = %d: %s", code, stderr)
+			}
+			assertBornSplit(t, cfg)
+			if strings.Contains(stderr, "single-store") {
+				t.Errorf("stderr = %q, want no single-store notice for a born-split default", stderr)
+			}
+		})
+	}
+}
+
+// A plain gc init on a bd the split city's gc bd would refuse starts
+// single-store and says why, as an explicit split request does.
+func TestInitDefaultHoldsABDBelowTheSplitFloorSingleStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_SESSION", "")
+	bd := initStorageFakeBD(t)
+	stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+	stubInitSplitBDJudge(t, "bd-1.3.2", nil)
 	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{})
 	if code != 0 {
 		t.Fatalf("doInit = %d: %s", code, stderr)
 	}
 	if cfg.Storage != nil {
-		t.Fatalf("a plain gc init wrote [storage] %+v; the default stays single-store", cfg.Storage)
+		t.Fatalf("a plain gc init on OSS bd 1.3.1 wrote [storage] %+v; want single-store", cfg.Storage)
+	}
+	for _, want := range []string{bd, "single-store", initSplitBDMinVersion, "upgrade bd", "gc storage migrate"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr %q does not mention %q", stderr, want)
+		}
+	}
+}
+
+// Remote session runtimes stay single-store until worker-site transport
+// (CN-2). An explicit split request on one is refused; a plain gc init starts
+// the city single-store and says why.
+func TestInitDefaultStartsARemoteSessionRuntimeSingleStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, configured, wantRuntime string
+	}{
+		{name: "GC_SESSION=k8s", env: "k8s", wantRuntime: "k8s"},
+		{name: "GC_SESSION=hybrid", env: "hybrid", wantRuntime: "hybrid"},
+		{name: "configured ssh", configured: "ssh:build-host", wantRuntime: "ssh:build-host"},
+		{name: "configured exec", configured: "exec:/opt/runtime.sh", wantRuntime: "exec:/opt/runtime.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", tc.env)
+			if tc.configured != "" {
+				prev := initCityConfigHook
+				initCityConfigHook = func(cfg *config.City) { cfg.Session.Provider = tc.configured }
+				t.Cleanup(func() { initCityConfigHook = prev })
+				prevLocal := execRuntimeDeclaresLocal
+				execRuntimeDeclaresLocal = func(string, string, string) bool { return false }
+				t.Cleanup(func() { execRuntimeDeclaresLocal = prevLocal })
+			}
+			_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{})
+			if code != 0 {
+				t.Fatalf("doInit = %d: %s", code, stderr)
+			}
+			if cfg.Storage != nil {
+				t.Fatalf("a plain gc init on a remote session runtime wrote [storage] %+v; want single-store", cfg.Storage)
+			}
+			for _, want := range []string{tc.wantRuntime, "single-store", "CN-2", "gc storage migrate"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr %q does not mention %q", stderr, want)
+				}
+			}
+		})
+	}
+}
+
+// A born-split city may not carry a reserved bead prefix, so a plain gc init
+// of a city whose name derives one (gas-city-gateway derives gcg) is refused
+// with its fixes, before anything is written; --storage=single keeps the old
+// behavior.
+func TestInitDefaultRefusesAReservedDerivedPrefixWithItsFixes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	f, _, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{})
+	if code == 0 {
+		t.Fatal("a plain gc init of gas-city-gateway with its derived gcg prefix was not refused")
+	}
+	if !strings.Contains(stderr, "--prefix") {
+		t.Errorf("the refusal %q does not name --prefix", stderr)
+	}
+	if len(f.Files) != 0 {
+		t.Errorf("the refused init wrote %d file(s)", len(f.Files))
+	}
+	_, cfg, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{storage: initStorageSingle})
+	if code != 0 {
+		t.Fatalf("doInit --storage=single = %d: %s", code, stderr)
+	}
+	if cfg.Storage != nil {
+		t.Fatalf("--storage=single wrote [storage] %+v", cfg.Storage)
 	}
 }
 
@@ -164,7 +267,7 @@ func TestInitStorageSingleWritesNoStorage(t *testing.T) {
 		t.Fatalf("--storage=single wrote [storage] %+v", cfg.Storage)
 	}
 	if stderr != "" {
-		t.Errorf("--storage=single printed %q, want nothing while single is the default", stderr)
+		t.Errorf("--storage=single printed %q, want nothing for an explicit opt-out", stderr)
 	}
 }
 
@@ -621,5 +724,77 @@ func TestResolveInitStorageSplitAdmissionRuling(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// gc init --json reports the storage layout the new city was written with,
+// read from its city.toml, so a caller sees a split request that started
+// single-store.
+func TestInitJSONReportsTheStorageLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		toml    string
+		want    string
+		present bool
+	}{
+		{name: "born split", toml: "[workspace]\nname = \"bright-lights\"\n", want: "split", present: true},
+		{name: "single-store", toml: "[workspace]\nname = \"bright-lights\"\n", want: "single", present: true},
+		{name: "no city.toml", present: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := filepath.Join(t.TempDir(), "city")
+			if tc.toml != "" {
+				cfg, perr := config.Parse([]byte(tc.toml))
+				if perr != nil {
+					t.Fatal(perr)
+				}
+				if tc.want == "split" {
+					cfg.Storage = bornSplitStorageConfig()
+				}
+				data, merr := cfg.Marshal()
+				if merr != nil {
+					t.Fatal(merr)
+				}
+				if err := os.MkdirAll(cityPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout bytes.Buffer
+			if err := writeInitJSONOrExit(0, true, []string{cityPath}, "", "minimal", "", nil, "", "default", &stdout); err != nil {
+				t.Fatalf("writeInitJSONOrExit: %v", err)
+			}
+			got := requireSingleJSONLine(t, &stdout)
+			value, ok := got["storage"]
+			if ok != tc.present || (tc.present && value != tc.want) {
+				t.Fatalf("init JSON storage = %v (present %t), want %q (present %t): %+v", value, ok, tc.want, tc.present, got)
+			}
+		})
+	}
+}
+
+// A born-split city runs the v2 session reconciler from its first boot unless
+// its config carries a v2 gap, which keeps it on legacy with the reason named
+// (design F11): the block gc init writes puts sessions and graph on the
+// sqlite-beads binding v2 needs.
+func TestBornSplitCityResolvesTheV2ReconcilerUnlessAGapIsConfigured(t *testing.T) {
+	noEnv := func(string) (string, bool) { return "", false }
+	bornSplit := &config.City{Storage: bornSplitStorageConfig()}
+	res, err := resolveReconcilerMode(bornSplit, "", noEnv)
+	if err != nil {
+		t.Fatalf("resolveReconcilerMode: %v", err)
+	}
+	if res.Mode != reconcilerV2 {
+		t.Fatalf("a born-split city resolves %v (%v), want v2", res.Mode, res.Fallbacks)
+	}
+	gap := &config.City{Storage: bornSplitStorageConfig(), Agents: []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}}
+	res, err = resolveReconcilerMode(gap, "", noEnv)
+	if err != nil {
+		t.Fatalf("resolveReconcilerMode with a v2 gap: %v", err)
+	}
+	if res.Mode != reconcilerLegacy || !strings.Contains(strings.Join(res.Fallbacks, "\n"), "depends_on") {
+		t.Fatalf("a born-split city with depends_on resolves %v (%v), want legacy naming depends_on", res.Mode, res.Fallbacks)
 	}
 }

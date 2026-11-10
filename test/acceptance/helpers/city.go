@@ -88,6 +88,25 @@ func (c *City) Init(provider string) {
 	})
 }
 
+// InitSingleStore is Init with --storage=single: the city keeps every storage
+// class on its work ledger instead of being born split, for tests whose
+// subject is single-store behavior.
+func (c *City) InitSingleStore(provider string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness", "--storage=single"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	args = append(args, c.Dir)
+	out, err := c.runInit(args...)
+	if err != nil {
+		c.t.Fatalf("gc init --storage=single failed: %v\n%s", err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupRuntime()
+	})
+}
+
 // InitNoStart runs gc init without registering or starting the city, retrying
 // once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitNoStart(provider string) {

@@ -22,13 +22,14 @@ exec bd close gc-1
 stdout 'Closed bead: gc-1'
 
 # --- Send mail → should emit mail.sent ---
+# The city is born split, so mail is minted in the infrastructure store.
 
 exec gc mail send mayor 'hey there'
-stdout 'Sent message bl-2 to mayor'
+stdout 'Sent message gcg-1 to mayor'
 
 # --- Read mail → should emit mail.read ---
 
-exec gc mail read bl-2
+exec gc mail read gcg-1
 stdout 'Body:     hey there'
 
 # --- Event-producing commands append to the local city log ---

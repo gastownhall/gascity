@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,13 +20,12 @@ import (
 type initStorageChoice string
 
 const (
+	// initStorageUnset is no --storage: the city is born split where a split
+	// city is admitted, and starts single-store elsewhere with the reason.
+	initStorageUnset  initStorageChoice = ""
 	initStorageSingle initStorageChoice = "single"
 	initStorageSplit  initStorageChoice = "split"
 )
-
-// initStorageDefault is the choice when --storage is not given. New cities
-// stay single-store until the split-by-default flip.
-const initStorageDefault = initStorageSingle
 
 // initSplitBindingName names the binding a born-split city's five
 // infrastructure classes share.
@@ -40,12 +40,10 @@ const initSplitBDMinVersion = "1.3.2"
 // single-store gets the split.
 const initSplitBDRemedy = "To split it, upgrade bd to v" + initSplitBDMinVersion + " or later (https://github.com/gastownhall/beads/releases), then run gc storage migrate (docs/runbooks/split-storage-classes.md)."
 
-// parseInitStorageChoice parses --storage. Empty means the default.
+// parseInitStorageChoice parses --storage. Empty is initStorageUnset.
 func parseInitStorageChoice(raw string) (initStorageChoice, error) {
 	switch choice := initStorageChoice(strings.TrimSpace(raw)); choice {
-	case "":
-		return initStorageDefault, nil
-	case initStorageSingle, initStorageSplit:
+	case initStorageUnset, initStorageSingle, initStorageSplit:
 		return choice, nil
 	default:
 		return "", fmt.Errorf("--storage %q: want %q or %q", raw, initStorageSingle, initStorageSplit)
@@ -89,16 +87,24 @@ func bornSplitStorageConfig() *config.StorageConfig {
 
 // resolveInitStorage decides the [storage] a plain gc init writes for cfg, the
 // city shape it built at cityPath, and choice. It returns nil for a
-// single-store city, and a notice for stderr when a split request starts the
-// city single-store. It refuses a split on a remote session runtime: a split
-// city's remote sessions refuse mail, nudges, sessions, orders and workflows
-// until worker-site transport (CN-2) exists.
+// single-store city, and a notice for stderr when the city starts
+// single-store although it was not asked to.
+//
+// A city is born split unless it asked for single-store, or a split city
+// would not serve it: a remote session runtime, whose sessions refuse mail,
+// nudges, sessions, orders and workflows on a split city until worker-site
+// transport (CN-2) exists, or a bd that a split city's gc bd refuses. An
+// explicit --storage=split on a remote session runtime is refused rather than
+// quietly overridden.
 func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageChoice) (*config.StorageConfig, string, error) {
-	if choice != initStorageSplit {
+	if choice == initStorageSingle {
 		return nil, "", nil
 	}
 	if runtime, remote := cityRunsRemoteSessions(cfg, cityPath); remote {
-		return nil, "", fmt.Errorf("--storage=split: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; use --storage=single", runtime)
+		if choice == initStorageSplit {
+			return nil, "", fmt.Errorf("--storage=split: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; use --storage=single", runtime)
+		}
+		return nil, fmt.Sprintf("gc init: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; this city starts single-store. %s", runtime, initSplitLaterRemedy), nil
 	}
 	if providerUsesBdStoreContract(initWorkStoreProvider(cfg)) {
 		if notice := splitBDFloorNotice(); notice != "" {
@@ -106,6 +112,30 @@ func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageCho
 		}
 	}
 	return bornSplitStorageConfig(), "", nil
+}
+
+// initSplitLaterRemedy is how a city that started single-store splits later.
+const initSplitLaterRemedy = "To split it later, run gc storage migrate (docs/runbooks/split-storage-classes.md)."
+
+// initStorageLayout names the storage layout of the city.toml at cityPath for
+// gc init --json: "split" when it relocates any class off the work ledger,
+// else "single". It returns "" when the city has no city.toml.
+func initStorageLayout(cityPath string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the new city's city.toml: %w", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return "", fmt.Errorf("parsing the new city's city.toml: %w", err)
+	}
+	if config.RelocatesAnyClass(cfg) {
+		return string(initStorageSplit), nil
+	}
+	return string(initStorageSingle), nil
 }
 
 // splitBDFloorNotice judges the bd a new split city's gc bd would run, and
