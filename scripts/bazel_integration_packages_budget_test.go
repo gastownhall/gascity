@@ -16,10 +16,11 @@ import (
 
 // integrationPackagesShards: //test:integration_packages' test targets and
 // each one's shard_count (1 when unsharded), i.e. the integration-packages
-// lane's test actions, one per target shard. aquery-verified (79 TestRunner
+// lane's test actions, one per target shard. aquery-verified (86 TestRunner
 // actions) with beads_test at 11 shards (gascity #8083), plus
 // //test/conversationlane's six targets (OJ-12x, split by its
-// INTEGRATION_SOLO_TESTS on 2026-10-24); recompute with
+// INTEGRATION_SOLO_TESTS on 2026-10-24) and //test/dolttest:dolttest_test;
+// recompute with
 //
 //	T=$(bazel query 'tests(//test:integration_packages)' | paste -sd+ | sed 's/+/ + /g')
 //	bazel aquery --define=gotags=integration "mnemonic(\"TestRunner\", $T)" --output=text |
@@ -54,6 +55,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/storebinding:storebinding_test":                  1,
 	"//test/containerhost:containerhost_test":                    1,
 	"//test/dashport:dashport_test":                              1,
+	"//test/dolttest:dolttest_test":                              1,
 	"//cmd/gc:gc_bd_runtime_custom_types_heal_test":              1,
 	"//cmd/gc:gc_managed_beads_native_cli_test":                  1,
 	"//cmd/gc:gc_managed_bd_rig_hard_kill_test":                  1,
@@ -232,7 +234,7 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // first scheduling wave. Farm owner maintainer-city-c3's before/after found
 // no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
 // so #7795 was reverted and the lane is back to running in two waves under
-// the inherited --jobs=64. 85 test actions (aquery-verified, see
+// the inherited --jobs=64. 86 test actions (aquery-verified, see
 // integrationPackagesShards above) is accepted as a known, pinned exception
 // so the budget check still catches further growth. If the count grows
 // above this pin, that is this lane asking for a bigger second-wave tail,
@@ -245,7 +247,10 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // Raised to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test (the
 // OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
 // the second wave without lengthening its tail.
-const integrationPackagesTwoWaveExceptionPinned = 86
+// Raised to 87 for //test/dolttest:dolttest_test (one
+// unsharded action that runs in about a second locally, 3 s under host load),
+// which adds a slot to the second wave but nothing to the lane's tail.
+const integrationPackagesTwoWaveExceptionPinned = 87
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may
