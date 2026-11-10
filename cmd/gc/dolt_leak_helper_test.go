@@ -484,13 +484,13 @@ func TestRequireNoLeakedDoltAfterReportsStillAlivePIDAsCleanupFailure(t *testing
 func TestIsStaleCmdGCTestConfigPathSkipsActiveRoot(t *testing.T) {
 	activeRoot := filepath.Join("/tmp", "gctest-active")
 	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
-	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
+	if isStaleCmdGCTestConfigPath(os.Getpid(), activeConfig, []string{activeRoot}, "/tmp") {
 		t.Fatalf("active config path %q classified as stale", activeConfig)
 	}
 
 	staleRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale", testCmdGCTempRootPrefix, nonLivePID(t)))
 	staleConfig := filepath.Join(staleRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
-	if !isStaleCmdGCTestConfigPath(staleConfig, []string{activeRoot}, "/tmp") {
+	if !isStaleCmdGCTestConfigPath(os.Getpid(), staleConfig, []string{activeRoot}, "/tmp") {
 		t.Fatalf("stale config path %q not classified as stale", staleConfig)
 	}
 }
@@ -499,7 +499,7 @@ func TestIsStaleCmdGCTestConfigPathSkipsActiveSiblingRoot(t *testing.T) {
 	activeRoot := filepath.Join("/tmp", "gctest-sibling")
 	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
-	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
+	if isStaleCmdGCTestConfigPath(os.Getpid(), activeConfig, []string{activeRoot}, "/tmp") {
 		t.Fatalf("active sibling config path %q classified as stale", activeConfig)
 	}
 }
@@ -508,7 +508,7 @@ func TestIsStaleCmdGCTestConfigPathSkipsLivePeerOwnerPIDRoot(t *testing.T) {
 	peerRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-peer", testCmdGCTempRootPrefix, os.Getpid()))
 	peerConfig := filepath.Join(peerRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
-	if isStaleCmdGCTestConfigPath(peerConfig, nil, "/tmp") {
+	if isStaleCmdGCTestConfigPath(os.Getpid(), peerConfig, nil, "/tmp") {
 		t.Fatalf("live peer config path %q classified as stale", peerConfig)
 	}
 }
@@ -518,7 +518,7 @@ func TestIsStaleCmdGCTestConfigPathUsesCurrentGCTOwnerPID(t *testing.T) {
 	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCTempRootPrefix, ownerPID))
 	configPath := filepath.Join(root, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
-	if isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+	if isStaleCmdGCTestConfigPathWithPIDCheck(os.Getpid(), configPath, nil, "/tmp", func(pid int) bool {
 		if pid != ownerPID {
 			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
 		}
@@ -526,7 +526,7 @@ func TestIsStaleCmdGCTestConfigPathUsesCurrentGCTOwnerPID(t *testing.T) {
 	}) {
 		t.Fatalf("live current gct owner config path %q classified as stale", configPath)
 	}
-	if !isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+	if !isStaleCmdGCTestConfigPathWithPIDCheck(os.Getpid(), configPath, nil, "/tmp", func(pid int) bool {
 		if pid != ownerPID {
 			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
 		}
@@ -541,7 +541,7 @@ func TestIsStaleCmdGCTestConfigPathUsesShardOwnerPID(t *testing.T) {
 	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCShardTempRootPrefix, ownerPID))
 	configPath := filepath.Join(root, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
-	if isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+	if isStaleCmdGCTestConfigPathWithPIDCheck(os.Getpid(), configPath, nil, "/tmp", func(pid int) bool {
 		if pid != ownerPID {
 			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
 		}
@@ -549,7 +549,7 @@ func TestIsStaleCmdGCTestConfigPathUsesShardOwnerPID(t *testing.T) {
 	}) {
 		t.Fatalf("live shard cmd/gc owner config path %q classified as stale", configPath)
 	}
-	if !isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+	if !isStaleCmdGCTestConfigPathWithPIDCheck(os.Getpid(), configPath, nil, "/tmp", func(pid int) bool {
 		if pid != ownerPID {
 			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
 		}
@@ -574,7 +574,7 @@ func TestIsTestConfigPathRetainsLegacyGCTestAllowlistOnly(t *testing.T) {
 func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
 	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
-	if isStaleCmdGCTestConfigPath(legacyConfig, nil, "/tmp") {
+	if isStaleCmdGCTestConfigPath(os.Getpid(), legacyConfig, nil, "/tmp") {
 		t.Fatalf("legacy unowned config path %q classified as stale", legacyConfig)
 	}
 }
@@ -590,7 +590,7 @@ func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRoot(t *testing.T) {
 	tempParent := t.TempDir()
 
 	goneConfig := filepath.Join(tempParent, "TestAbandoned1234", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
-	if !isStaleCmdGCTestConfigPath(goneConfig, nil, tempParent) {
+	if !isStaleCmdGCTestConfigPath(os.Getpid(), goneConfig, nil, tempParent) {
 		t.Fatalf("abandoned go tempdir config path %q (file gone) not classified as stale", goneConfig)
 	}
 
@@ -601,7 +601,7 @@ func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRoot(t *testing.T) {
 	if err := os.WriteFile(liveConfig, []byte("listener:\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if isStaleCmdGCTestConfigPath(liveConfig, nil, tempParent) {
+	if isStaleCmdGCTestConfigPath(os.Getpid(), liveConfig, nil, tempParent) {
 		t.Fatalf("live go tempdir config path %q (file on disk) classified as stale", liveConfig)
 	}
 }

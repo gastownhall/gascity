@@ -388,7 +388,7 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	tempParent := filepath.Dir(filepath.Clean(g.tempRoot))
 	var leaked []DoltProcInfo
 	for _, proc := range procs {
-		if !isStaleCmdGCTestConfigPath(extractConfigPath(proc.Argv), activeRoots, tempParent) {
+		if !isStaleCmdGCTestConfigPath(proc.PID, extractConfigPath(proc.Argv), activeRoots, tempParent) {
 			continue
 		}
 		leaked = append(leaked, proc)
@@ -444,11 +444,11 @@ func cmdGCTestActiveRoots(currentRoot string) []string {
 	return cleaned
 }
 
-func isStaleCmdGCTestConfigPath(configPath string, activeRoots []string, tempParent string) bool {
-	return isStaleCmdGCTestConfigPathWithPIDCheck(configPath, activeRoots, tempParent, pidAlive)
+func isStaleCmdGCTestConfigPath(pid int, configPath string, activeRoots []string, tempParent string) bool {
+	return isStaleCmdGCTestConfigPathWithPIDCheck(pid, configPath, activeRoots, tempParent, pidAlive)
 }
 
-func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
+func isStaleCmdGCTestConfigPathWithPIDCheck(_ int, configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
 	if configPath == "" || tempParent == "" {
 		return false
 	}
@@ -996,16 +996,59 @@ func startFakeDoltSQLServer(t *testing.T, cityPath string) *exec.Cmd {
 	if err := os.WriteFile(configPath, []byte("fake dolt config\n"), 0o644); err != nil {
 		t.Fatalf("write %s: %v", configPath, err)
 	}
+	return launchFakeDoltSQLServer(t, configPath, fakeDoltSQLServerShape{})
+}
+
+// fakeDoltBwrapBin is where launchFakeDoltSQLServer binds the test binary
+// inside a bwrap victim's private /tmp. The binary can itself live under the
+// host's /tmp (go test builds it under $TMPDIR), which the victim's tmpfs
+// would hide.
+const fakeDoltBwrapBin = "/tmp/dolt-mntns-fake-bin"
+
+// fakeDoltSQLServerShape selects how launchFakeDoltSQLServer starts the fake.
+// The zero value is the plain shape: the test binary re-executed directly.
+type fakeDoltSQLServerShape struct {
+	// bwrap starts the fake in a bwrap sandbox with a private /tmp (a
+	// stand-in for a Bazel linux-sandbox action's _hermetic_tmp), so the
+	// fake's paths exist only in its own mount namespace.
+	bwrap bool
+	// unsharePID additionally gives the sandbox its own PID namespace. Only
+	// meaningful with bwrap.
+	unsharePID bool
+	// setup is shell run inside the sandbox before the fake is exec'd. The
+	// fake inherits the shell's open file descriptors.
+	setup string
+}
+
+// launchFakeDoltSQLServer is the one place a fake dolt sql-server process is
+// started; see startFakeDoltSQLServer for what the fake is and why. In the
+// bwrap shape cmd.Process is the sandbox's launcher, not the fake: find the
+// fake's own PID by its --config with findFakeDoltPID.
+func launchFakeDoltSQLServer(t *testing.T, configPath string, shape fakeDoltSQLServerShape) *exec.Cmd {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("resolve test binary path: %v", err)
 	}
-	cmd := exec.Command(self)
 	// Override argv so /proc/<pid>/cmdline reads as "dolt sql-server --config
 	// <configPath>" — maybeRunFakeDoltSQLServer never looks at os.Args, so
 	// the spoofed content is never parsed or validated by anything.
-	cmd.Args = []string{"dolt", "sql-server", "--config", configPath}
-	cmd.Env = append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
+	name := self
+	args := []string{"dolt", "sql-server", "--config", configPath}
+	env := append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
+	if shape.bwrap {
+		name = "bwrap"
+		args = []string{"bwrap", "--dev-bind", "/", "/", "--tmpfs", "/tmp", "--ro-bind", self, fakeDoltBwrapBin, "--die-with-parent"}
+		if shape.unsharePID {
+			args = append(args, "--unshare-pid")
+		}
+		script := "set -eu\n" + shape.setup + "\nexec -a dolt \"$BIN\" sql-server --config \"$CFG\""
+		args = append(args, "--", "bash", "-c", script)
+		env = append(env, "BIN="+fakeDoltBwrapBin, "CFG="+configPath)
+	}
+	cmd := exec.Command(name)
+	cmd.Args = args
+	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	readyR, readyW, err := os.Pipe()
@@ -1139,4 +1182,11 @@ func testFakeDoltSQLServerExitsOnSIGTERM(t *testing.T) {
 	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Fatalf("fake dolt sql-server ended with %v, want termination by SIGTERM", fake.ProcessState)
 	}
+}
+
+// pathGoneInOwnMountNamespace is a placeholder for the red commit: it judges
+// the path in the caller's own namespace, ignoring pid.
+func pathGoneInOwnMountNamespace(_ int, path string) bool {
+	_, err := statWithTimeout(path)
+	return errors.Is(err, os.ErrNotExist)
 }

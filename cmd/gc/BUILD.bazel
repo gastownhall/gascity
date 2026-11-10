@@ -1609,6 +1609,7 @@ go_test(
         "dolt_handoff_refusal_test.go",
         "dolt_identity_test.go",
         "dolt_init_wait_test.go",
+        "dolt_leak_guard_mntns_test.go",
         "dolt_leak_helper_test.go",
         "dolt_lifecycle_race_test.go",
         "dolt_mode_configstate_test.go",
