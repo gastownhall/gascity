@@ -67,8 +67,9 @@ type Provider struct {
 	setupMaxTimeout time.Duration
 	setupWarnings   io.Writer
 
-	// scanListingTimeout bounds the listing a process-table scan reads to
-	// track its roots (process_scan.go); zero is defaultScanListingTimeout.
+	// scanListingTimeout bounds the listing the orphan sweep's
+	// process-table scan reads to track its roots (process_scan.go); zero
+	// is defaultScanListingTimeout.
 	scanListingTimeout time.Duration
 
 	// hostSetupDue holds the names whose `provision` config gc stripped of

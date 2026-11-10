@@ -19,10 +19,11 @@ import (
 // orphan kill can find a session's leftover processes, the ones that left
 // the agent's process group and outlived its terminal, by the
 // GC_SESSION_ID they carry, exactly as they do for tmux and subprocess
-// sessions. Every exec provider implements the scanner, but only a pack
-// sharing the host can scan (runtime.ConditionalProcessTableScanner): for
-// any other pack, runtime.AsProcessTableScanner reads it as having none,
-// and its methods find nothing and terminate nothing.
+// sessions. Every exec provider implements the scanner, but only a
+// v2-ready pack sharing the host can scan (canScan,
+// runtime.ConditionalProcessTableScanner): for any other pack,
+// runtime.AsProcessTableScanner reads it as having none, and its methods
+// find nothing and terminate nothing.
 
 var (
 	_ runtime.ProcessTableScanner            = (*Provider)(nil)
@@ -48,39 +49,73 @@ func sessionlessEnviron() []string {
 // fails the read.
 var processEnvValue = proctable.ProcessEnvValue
 
-// defaultScanListingTimeout bounds the listing a scan that found roots
-// reads to track them (trackRoots). The orphan sweep scans on every
-// controller tick, and a pack's listing (an inventory that reads every
-// agent's screen) can take up to the op timeout; past this bound the
-// listing fails, which is a whole-scan failure: the sweep then reaps only
-// the leftovers of closed sessions, and a start refuses rather than reap.
+// defaultScanListingTimeout bounds the listing the orphan sweep's scan (an
+// empty id) reads to track the roots it found (trackingContext). The sweep
+// scans on every controller tick, and a pack's listing (an inventory that
+// reads every agent's screen) can take up to the op timeout; past this
+// bound the listing fails, which is a whole-scan failure: the sweep then
+// reaps only the leftovers of closed sessions.
 const defaultScanListingTimeout = 5 * time.Second
 
+// canScan reports a pack whose leftovers the scanner can judge: its boxes
+// share this host and user (sharesHostFS), so its agents are processes of
+// this host, and it is v2-ready, so its listing is an attested `inventory`
+// (ListRunningComplete) that proves a box it does not list gone. A pack
+// whose boxes run elsewhere, or in a container of this host, runs nothing
+// this host's table can attribute to it. Any other pack lists through
+// `list-running`, which proves nothing absent: its exit 2 (an op the script
+// does not know) and a backend fault that prints nothing both read as an
+// empty listing, and every root of a live box would then read as a
+// leftover for a start to end.
+func (p *Provider) canScan() bool {
+	return p.sharesHostFS() && p.ListRunningComplete()
+}
+
 // CanScanProcessTable implements [runtime.ConditionalProcessTableScanner]: a
-// pack can be scanned only when its boxes share this host and user. A pack
-// whose boxes run elsewhere, or in a container of this host, runs no
-// process this host's table can attribute to it.
+// pack can be scanned only when canScan holds.
 func (p *Provider) CanScanProcessTable() bool {
-	return p.sharesHostFS()
+	return p.canScan()
 }
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] with the
 // host's process-table scan (proctable.ScanBySessionID). A root is tracked
-// when a box the pack lists carries its session id. A root the listing
-// cannot rule out (the listing failed or was partial, or a listed box's
-// identity is unreadable and the root names no other session) is
-// LiveUnlisted and the failure is returned, so no caller reaps a live
+// when a box the pack's inventory lists carries its session id. A root the
+// inventory cannot rule out (it failed, timed out or was partial, or a
+// listed box's identity is unreadable and the root names no other session)
+// is LiveUnlisted and the failure is returned, so no caller reaps a live
 // box's process on a listing it could not read. A pack that cannot scan
 // finds nothing.
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	if !p.sharesHostFS() {
+	if !p.canScan() {
 		return nil, nil
 	}
 	found, scanErr := proctable.ScanBySessionID(id)
 	if len(found) == 0 {
 		return found, scanErr
 	}
-	return found, errors.Join(scanErr, p.trackRoots(found))
+	ctx, cancel := p.trackingContext(id)
+	defer cancel()
+	return found, errors.Join(scanErr, p.trackRoots(ctx, found))
+}
+
+// trackingContext returns the context the inventory of a scan for id runs
+// under, besides the op's own timeout. The orphan sweep's scan (an empty
+// id) runs on every controller tick, so its inventory is bounded at
+// scanListingTimeout (defaultScanListingTimeout when unset). A scan for one
+// session (a start's orphan kill) runs only for that session, so its
+// inventory gets the op timeout, like the session's other ops: under the
+// sweep's bound, a pack whose inventory is healthy but slower would refuse
+// every start of a session that left a process behind, and nothing reaps
+// that process while the session's row is open.
+func (p *Provider) trackingContext(id string) (context.Context, context.CancelFunc) {
+	if id != "" {
+		return context.WithCancel(context.Background())
+	}
+	timeout := p.scanListingTimeout
+	if timeout <= 0 {
+		timeout = defaultScanListingTimeout
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner]: it ends a
@@ -91,8 +126,8 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 // session id or start identity to bind the kill to, and every root of a
 // pack that cannot scan.
 func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
-	if !p.sharesHostFS() {
-		return fmt.Errorf("exec provider %s: refusing to terminate PID %d for session %s: the pack's boxes do not share this host", p.script, r.PID, r.SessionID)
+	if !p.canScan() {
+		return fmt.Errorf("exec provider %s: refusing to terminate PID %d for session %s: the pack cannot be scanned (its boxes do not share this host, or it is not v2-ready)", p.script, r.PID, r.SessionID)
 	}
 	if r.PID <= 1 {
 		return fmt.Errorf("exec provider %s: invalid PID %d for session %s", p.script, r.PID, r.SessionID)
@@ -115,14 +150,8 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 
 // trackRoots marks each root of found that a box the pack lists carries,
 // and each root the listing cannot rule out as LiveUnlisted, and returns
-// the failures that left a root undecided.
-func (p *Provider) trackRoots(found []runtime.LiveRuntime) error {
-	timeout := p.scanListingTimeout
-	if timeout <= 0 {
-		timeout = defaultScanListingTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+// the failures that left a root undecided. The listing runs under ctx.
+func (p *Provider) trackRoots(ctx context.Context, found []runtime.LiveRuntime) error {
 	ids, listErr := p.listedSessionIDs(ctx)
 	complete := listErr == nil
 	var errs []error
@@ -175,45 +204,26 @@ func (p *Provider) trackRoots(found []runtime.LiveRuntime) error {
 	return errors.Join(errs...)
 }
 
-// listedSessionIDs returns the GC_SESSION_ID of every box the pack lists,
-// "" for one whose identity it cannot read, with the listing's error: a
-// partial listing returns what it listed. Every op it runs is bounded by
-// ctx, and a listing ctx ended before it finished is a failure.
+// listedSessionIDs returns the GC_SESSION_ID of every box the pack's
+// inventory lists, "" for one whose identity it cannot read, with the
+// inventory's error: a partial inventory returns what it listed, a failed
+// one nothing. The inventory runs under ctx and the op timeout; one that
+// ctx ends before it answers is a failure.
 func (p *Provider) listedSessionIDs(ctx context.Context) (map[string]string, error) {
-	ids := make(map[string]string)
-	if p.v2Ready() {
-		l, err := p.inventory(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, name := range l.names {
-			if e, ok := l.entries[name]; ok && e.IdentityKnown {
-				ids[name] = strings.TrimSpace(e.Identity["GC_SESSION_ID"])
-			} else {
-				ids[name] = ""
-			}
-		}
-		if !l.complete {
-			return ids, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
-		}
-		return ids, nil
-	}
-	out, err := p.runWithContext(ctx, p.timeout, nil, "list-running", "")
+	l, err := p.inventory(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range strings.Split(out, "\n") {
-		if name == "" {
-			continue
+	ids := make(map[string]string, len(l.names))
+	for _, name := range l.names {
+		if e, ok := l.entries[name]; ok && e.IdentityKnown {
+			ids[name] = strings.TrimSpace(e.Identity["GC_SESSION_ID"])
+		} else {
+			ids[name] = ""
 		}
-		id, metaErr := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, "GC_SESSION_ID")
-		if metaErr != nil {
-			id = ""
-		}
-		ids[name] = strings.TrimSpace(id)
 	}
-	if err := ctx.Err(); err != nil {
-		return ids, fmt.Errorf("listing sessions: %w", err)
+	if !l.complete {
+		return ids, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
 	}
 	return ids, nil
 }

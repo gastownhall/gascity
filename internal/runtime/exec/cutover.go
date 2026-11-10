@@ -23,9 +23,9 @@ import (
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
 //
-// The process-table scanner, which only a pack sharing the host can use
-// (process_scan.go), and the local-transcript trait (hoststage.go) are
-// passed through from the files that define them.
+// The process-table scanner, which only a v2-ready pack sharing the host
+// can use (process_scan.go), and the local-transcript trait (hoststage.go)
+// are passed through from the files that define them.
 //
 // ExecProvider is deliberately NOT passed through: exec's Exec op is the
 // connection the carrier drives over INTERNALLY (no production caller

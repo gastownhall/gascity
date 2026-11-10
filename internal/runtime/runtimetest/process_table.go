@@ -175,13 +175,26 @@ func findLeftover(t *testing.T, s runtime.ProcessTableScanner, l contractLeftove
 }
 
 // checkLeftoverFound reports how sp breaks RUNTIME-CONTRACT-024 in finding
-// its session's leftover, or nil when it keeps the contract.
+// its session's leftover, while the session runs and after its stop, or nil
+// when it keeps the contract.
 func checkLeftoverFound(t *testing.T, sp runtime.Provider, l contractLeftover) error {
 	t.Helper()
 	s, err := scannerOf(sp)
 	if err != nil {
 		return err
 	}
+	if err := checkLeftoverWhileRunning(t, s, l); err != nil {
+		return err
+	}
+	return checkLeftoverAfterStop(t, sp, s, l)
+}
+
+// checkLeftoverWhileRunning reports how s breaks RUNTIME-CONTRACT-024 for
+// the leftover of a running session: the scan for the session reports it
+// alone, with its session, city and start identity, tracked under the
+// session's name, and a scan for another session reports nothing.
+func checkLeftoverWhileRunning(t *testing.T, s runtime.ProcessTableScanner, l contractLeftover) error {
+	t.Helper()
 	found, err := findLeftover(t, s, l, l.sessionID)
 	if err != nil {
 		return err
@@ -195,13 +208,21 @@ func checkLeftoverFound(t *testing.T, sp runtime.Provider, l contractLeftover) e
 	if other, err := findLeftover(t, s, l, l.sessionID+"-other"); err != nil || len(other) != 0 {
 		return fmt.Errorf("runtime contract 024: scan for another session = %+v, %w; want nothing", other, err)
 	}
+	return nil
+}
+
+// checkLeftoverAfterStop stops l's session on sp and reports how s breaks
+// RUNTIME-CONTRACT-024 for the leftover that outlives it: the scan for the
+// session reports it untracked, and the orphan sweep's scan reports it.
+func checkLeftoverAfterStop(t *testing.T, sp runtime.Provider, s runtime.ProcessTableScanner, l contractLeftover) error {
+	t.Helper()
 	if err := sp.Stop(l.name); err != nil {
 		return fmt.Errorf("runtime contract 024: stopping %s: %w", l.name, err)
 	}
 	if !pidutil.AliveWithStartTime(l.PID, l.Identity) {
 		return fmt.Errorf("runtime contract 024: the leftover pid %d did not outlive its session's stop; the case proves nothing", l.PID)
 	}
-	found, err = findLeftover(t, s, l, l.sessionID)
+	found, err := findLeftover(t, s, l, l.sessionID)
 	if err != nil {
 		return err
 	}

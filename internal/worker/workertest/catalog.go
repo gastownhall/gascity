@@ -229,7 +229,7 @@ func RPPHandleCatalog() []Requirement {
 		{
 			Code:        RequirementRPPHostFSLeftoverReaped,
 			Group:       "rpp",
-			Description: "A session on a pack runtime whose handshake shares the controller's host (locality local with fs.host) that is started again after a stop first reaps the process its stopped incarnation left behind (a child that outlived the agent, carrying the session's GC_SESSION_ID and city), as a tmux or subprocess session does; the same pack without fs.host claims no process-table scanner.",
+			Description: "A session on a v2-ready pack runtime whose handshake shares the controller's host (locality local with fs.host) that is started again after a stop first reaps the process its stopped incarnation left behind (a child that outlived the agent, carrying the session's GC_SESSION_ID and city), as a tmux or subprocess session does; the same pack without fs.host claims no process-table scanner.",
 		},
 	}
 }

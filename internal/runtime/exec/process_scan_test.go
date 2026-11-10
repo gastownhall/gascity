@@ -61,10 +61,11 @@ func scanStartConfig(t *testing.T) runtime.Config {
 
 // Kills a scanner that is not conditional on the handshake: only a pack
 // declaring fs.host with locality local runs its agents as processes of
-// this host, so only it scans. fs.host alone, locality local alone (a
-// container of this host), no declaration and a failed handshake read as no
-// scanner, through the raw and the production seam-backed provider alike,
-// and find nothing without reading the process table.
+// this host, and only a v2-ready one lists them attested, so only such a
+// pack scans. fs.host alone, locality local alone (a container of this
+// host), a pack that is not v2-ready, no declaration and a failed handshake
+// read as no scanner, through the raw and the production seam-backed
+// provider alike, and find nothing without reading the process table.
 func TestProcessScanConditionalOnHandshake(t *testing.T) {
 	const base = `"observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle"`
 	for _, tc := range []struct {
@@ -78,6 +79,7 @@ func TestProcessScanConditionalOnHandshake(t *testing.T) {
 		{"fs.host without locality", `echo '{"version":0,"capabilities":[` + base + `,"fs.host"]}'`, true, false},
 		{"locality local without fs.host", `echo '{"version":0,"capabilities":[` + base + `],"locality":"local"}'`, true, false},
 		{"fs.host with locality remote", `echo '{"version":0,"capabilities":[` + base + `,"fs.host"],"locality":"remote"}'`, true, false},
+		{"fs.host with locality local, not v2-ready", `echo '{"version":0,"capabilities":["report-attachment","fs.host"],"locality":"local"}'`, true, false},
 		{"failed handshake", `echo "backend down" >&2; exit 1`, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,20 +152,63 @@ func scanOnly(t *testing.T, sp runtime.Provider, id string, leftovers ...runtime
 	return sp.(runtime.ProcessTableScanner).FindRuntimesBySessionID(id)
 }
 
-// Kills tracking that reads a failed listing as "no box": a root the pack
-// cannot list is LiveUnlisted, so a start refuses rather than reap it, and
-// the failure is a whole-scan failure, so the sweep reaps only the roots of
-// closed sessions.
+// Kills tracking that reads a failed or partial listing as "no box": a
+// root the pack cannot list, or that its partial inventory (complete false)
+// does not list, is LiveUnlisted, so a start refuses rather than reap it,
+// and the failure is a whole-scan failure, so the sweep reaps only the
+// roots of closed sessions.
 func TestProcessScanFailedListingCannotRuleOutABox(t *testing.T) {
-	p := newScanPack(t, true, nil)
-	l := startScanSession(t, p, "live", "sid-live")
-	t.Setenv("GC_RPP_FAULT", "unavailable")
-	found, err := scanOnly(t, p.sp, "sid-live", l)
-	if len(found) != 1 || found[0].PID != l.PID || found[0].IsTracked || !found[0].LiveUnlisted {
-		t.Fatalf("found = %+v, want the leftover pid %d untracked and LiveUnlisted", found, l.PID)
+	for _, tc := range []struct {
+		name   string
+		bodies map[string]string
+		fault  bool
+	}{
+		{name: "failed listing", fault: true},
+		{name: "partial listing", bodies: map[string]string{"inventory": `echo '{"complete":false,"sessions":[]}'`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newScanPack(t, true, tc.bodies)
+			l := startScanSession(t, p, "live", "sid-live")
+			if tc.fault {
+				t.Setenv("GC_RPP_FAULT", "unavailable")
+			}
+			found, err := scanOnly(t, p.sp, "sid-live", l)
+			if len(found) != 1 || found[0].PID != l.PID || found[0].IsTracked || !found[0].LiveUnlisted {
+				t.Fatalf("found = %+v, want the leftover pid %d untracked and LiveUnlisted", found, l.PID)
+			}
+			if !proctable.HasWholeScanFailure(err) {
+				t.Fatalf("err = %v, want a whole-scan failure (tracking unknown)", err)
+			}
+		})
 	}
-	if !proctable.HasWholeScanFailure(err) {
-		t.Fatalf("err = %v, want a whole-scan failure (tracking unknown)", err)
+}
+
+// Kills a scanner that rules a live box's leftover out on a listing that
+// cannot prove the box gone: a pack sharing the host that is not v2-ready
+// lists through `list-running`, whose exit 2 (an op it does not know) reads
+// as an empty listing, so it does not scan. Its running box's leftover is
+// never reported, and TerminateRuntime refuses to end it.
+func TestProcessScanNeedsAnAttestedListing(t *testing.T) {
+	p := newScanPack(t, true, map[string]string{
+		"protocol":     `echo '{"version":0,"capabilities":["fs.host"],"locality":"local"}'`,
+		"list-running": `exit 2`,
+	})
+	if !p.sp.raw.sharesHostFS() || p.sp.raw.v2Ready() {
+		t.Fatalf("sharesHostFS = %t, v2Ready = %t; want a pack sharing the host that is not v2-ready", p.sp.raw.sharesHostFS(), p.sp.raw.v2Ready())
+	}
+	l := startScanSession(t, p, "live", "sid-live")
+	if _, ok := runtime.AsProcessTableScanner(p.sp); ok {
+		t.Error("a pack that is not v2-ready claims a process-table scanner")
+	}
+	if found, err := scanOnly(t, p.sp, "sid-live", l); len(found) != 0 || err != nil {
+		t.Errorf("FindRuntimesBySessionID = %+v, %v; want nothing: its listing cannot prove the box gone", found, err)
+	}
+	live := runtime.LiveRuntime{SessionID: "sid-live", PID: l.PID, PPID: 1, StartIdentity: l.Identity}
+	if err := p.sp.TerminateRuntime(live); err == nil {
+		t.Fatalf("TerminateRuntime(%+v) = nil, want a refusal", live)
+	}
+	if !pidutil.AliveWithStartTime(l.PID, l.Identity) {
+		t.Fatalf("TerminateRuntime ended the running box's leftover pid %d", l.PID)
 	}
 }
 
@@ -190,6 +235,19 @@ func TestProcessScanUnattributedBoxTracksByName(t *testing.T) {
 	found, err = scanOnly(t, p.sp, "sid-elsewhere", other)
 	if err != nil || len(found) != 1 || found[0].IsTracked || found[0].LiveUnlisted {
 		t.Fatalf("found = %+v, %v; want the other session's leftover untracked: it names a session this pack does not list", found, err)
+	}
+
+	prev := processEnvValue
+	processEnvValue = func(pid int, key string) (string, error) {
+		if key == "GC_SESSION_NAME" {
+			return "", nil
+		}
+		return prev(pid, key)
+	}
+	t.Cleanup(func() { processEnvValue = prev })
+	found, err = scanOnly(t, p.sp, "sid-elsewhere", other)
+	if len(found) != 1 || found[0].IsTracked || !found[0].LiveUnlisted || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("found = %+v, %v; want a root naming no session LiveUnlisted under a whole-scan failure: it may be the unattributed box's", found, err)
 	}
 }
 
@@ -321,34 +379,52 @@ func TestProcessScanUnreadableSessionNameIsUndecided(t *testing.T) {
 	}
 }
 
-// Kills an unbounded tracking listing: the orphan sweep scans every tick,
-// so a listing slower than the scan's bound fails the tracking (a
+// Kills an unbounded sweep listing: the orphan sweep scans every tick, so
+// an inventory slower than the sweep scan's bound fails the tracking (a
 // whole-scan failure, the root LiveUnlisted) instead of holding the tick
 // for the whole op timeout.
-func TestProcessScanListingIsBounded(t *testing.T) {
-	for _, v2 := range []bool{true, false} {
-		t.Run(map[bool]string{true: "inventory", false: "list-running"}[v2], func(t *testing.T) {
-			bodies := map[string]string{"inventory": `sleep 10; exit 1`}
-			if !v2 {
-				bodies = map[string]string{
-					"protocol":     `echo '{"version":0,"capabilities":["fs.host"],"locality":"local"}'`,
-					"list-running": `sleep 10`,
-				}
-			}
-			p := newScanPack(t, true, bodies)
-			p.sp.raw.scanListingTimeout = 200 * time.Millisecond
-			if p.sp.raw.v2Ready() != v2 {
-				t.Fatalf("v2Ready = %t, want %t", !v2, v2)
-			}
-			l := startScanSession(t, newScanPack(t, true, nil), "live", "sid-live")
-			start := time.Now()
-			found, err := scanOnly(t, p.sp, "sid-live", l)
-			if elapsed := time.Since(start); elapsed > 5*time.Second {
-				t.Fatalf("the scan took %s, want it bounded near 200ms", elapsed)
-			}
-			if len(found) != 1 || found[0].IsTracked || !found[0].LiveUnlisted || !proctable.HasWholeScanFailure(err) {
-				t.Fatalf("found = %+v, %v; want the root LiveUnlisted under a whole-scan failure", found, err)
-			}
-		})
+func TestProcessScanSweepListingIsBounded(t *testing.T) {
+	p := newScanPack(t, true, map[string]string{"inventory": `sleep 10; exit 1`})
+	p.sp.raw.scanListingTimeout = 200 * time.Millisecond
+	l := startScanSession(t, newScanPack(t, true, nil), "live", "sid-live")
+	start := time.Now()
+	found, err := scanOnly(t, p.sp, "", l)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("the sweep's scan took %s, want it bounded near 200ms", elapsed)
+	}
+	if len(found) != 1 || found[0].IsTracked || !found[0].LiveUnlisted || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("found = %+v, %v; want the root LiveUnlisted under a whole-scan failure", found, err)
+	}
+}
+
+// Kills a session's scan bounded like the orphan sweep's: a start's orphan
+// kill scans one session, so its inventory gets the op timeout. An
+// inventory slower than the sweep's bound fails the sweep's tracking, yet
+// tracks the start's scan, where the stopped incarnation's leftover reads
+// as an orphan and TerminateRuntime ends it; under the sweep's bound every
+// start would refuse while nothing reaps it.
+func TestProcessScanSessionScanWaitsOutTheSweepBound(t *testing.T) {
+	p := newScanPack(t, true, map[string]string{"inventory": "sleep 1; " + reference.HostFSBodies()["inventory"]})
+	p.sp.raw.scanListingTimeout = 200 * time.Millisecond
+	l := startScanSession(t, p, "asleep", "sid-asleep")
+	if err := p.sp.Stop("asleep"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !pidutil.AliveWithStartTime(l.PID, l.Identity) {
+		t.Fatalf("the leftover pid %d did not outlive its session's stop; the case proves nothing", l.PID)
+	}
+	found, err := scanOnly(t, p.sp, "", l)
+	if len(found) != 1 || !found[0].LiveUnlisted || !proctable.HasWholeScanFailure(err) {
+		t.Fatalf("the sweep's scan = %+v, %v; want the root LiveUnlisted under a whole-scan failure: the inventory runs past its bound", found, err)
+	}
+	found, err = scanOnly(t, p.sp, "sid-asleep", l)
+	if err != nil || len(found) != 1 || found[0].PID != l.PID || found[0].IsTracked || found[0].LiveUnlisted {
+		t.Fatalf("the session's scan = %+v, %v; want the leftover pid %d untracked under the complete inventory", found, err, l.PID)
+	}
+	if err := p.sp.TerminateRuntime(found[0]); err != nil {
+		t.Fatalf("TerminateRuntime(%+v) = %v, want nil", found[0], err)
+	}
+	if pidutil.AliveWithStartTime(l.PID, l.Identity) {
+		t.Fatalf("the leftover pid %d still runs after TerminateRuntime", l.PID)
 	}
 }

@@ -3,9 +3,9 @@ package runtime
 // ConditionalProcessTableScanner is implemented by providers that satisfy
 // [ProcessTableScanner] but can scan only under a condition: composites that
 // forward to their backends scan only when a backend can, and an exec
-// provider only when its pack's boxes share the host. A provider reporting
-// false has no process-table capability, exactly as if it did not implement
-// [ProcessTableScanner].
+// provider only when its pack is v2-ready and its boxes share the host. A
+// provider reporting false has no process-table capability, exactly as if it
+// did not implement [ProcessTableScanner].
 type ConditionalProcessTableScanner interface {
 	// CanScanProcessTable reports whether the provider's scanner methods can
 	// find anything.

@@ -219,7 +219,7 @@ Capabilities:
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
 | `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
-| `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
+| `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, on a v2-ready script reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
 | `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
@@ -592,23 +592,36 @@ turn tracking, and the runtime passes the skill and MCP materialization
 gates, so an agent with MCP configured resolves at its scope root and in a
 worktree.
 
-With `fs.host`, gc also scans its host's process table for a session's
-leftover processes, as it does for tmux and subprocess sessions: a process
-that left the agent's process group and outlived its terminal, carrying the
-session's `GC_SESSION_ID` and `GC_CITY_PATH`. The orphan sweep ends such a
-process once its session is closed, or stopped with no live box under its
-name, and a session's start ends its own stopped incarnation's leftovers
-first. A leftover counts as live while a box the script lists carries its
-`GC_SESSION_ID` (from `inventory` on a v2-ready script, otherwise
-`list-running` and `get-meta`); for a listed box whose `GC_SESSION_ID` reads
-empty, the leftover's `GC_SESSION_NAME` decides. That listing runs only
-when the scan found such a process, and it is bounded at 5 seconds, because
-the orphan sweep scans on every controller tick. A listing that fails, is
-partial or runs past the bound leaves tracking unknown: the sweep then reaps
-only the leftovers of closed sessions, and a session's start refuses rather
-than end a leftover the listing could have shown. gc signals a process only
-while it still carries the session's `GC_SESSION_ID` and the start time the
-scan read. Without `fs.host` gc does not scan for the script's sessions.
+On a v2-ready script with `fs.host`, gc also scans its host's process table
+for a session's leftover processes, as it does for tmux and subprocess
+sessions: a process that left the agent's process group and outlived its
+terminal, carrying the session's `GC_SESSION_ID` and `GC_CITY_PATH`. The
+orphan sweep ends such a process once its session is closed, or stopped with
+no live box under its name, and a session's start ends its own stopped
+incarnation's leftovers first. A leftover counts as live while a box the
+script's [`inventory`](#inventory) lists carries its `GC_SESSION_ID`; for a
+listed box whose `GC_SESSION_ID` reads empty, the leftover's
+`GC_SESSION_NAME` decides. gc does not scan for the sessions of a script
+that is not v2-ready: its `list-running` cannot prove a box gone (an exit 2,
+or an empty answer from a backend it could not read, lists nothing), so a
+live box's process would read as a leftover. Without `fs.host` gc does not
+scan either.
+
+The inventory runs only when the scan found such a process. For the orphan
+sweep it is bounded at 5 seconds, because the sweep scans on every
+orchestrator tick; for a session's start it may take as long as a listing
+call. An inventory that fails, is partial or runs past its bound leaves
+tracking unknown: the sweep then reaps only the leftovers of closed
+sessions, and a session's start refuses rather than end a leftover the
+inventory could have shown. gc signals a process only while it still
+carries the session's `GC_SESSION_ID` and the start time the scan read.
+
+Start a process that serves several boxes, such as a multiplexer or a daemon
+the boxes run under, from the operation's own environment, never after
+applying a start config's `env`. A process that carries a session's
+`GC_SESSION_ID` and outlives that session's box is that session's leftover:
+gc ends it with its process group, and every box it serves goes down with
+it.
 
 `gc runtime conformance` checks the promise in its `fshost` group: a box's
 command copies a file the runner wrote and records its `id -u`, which the
