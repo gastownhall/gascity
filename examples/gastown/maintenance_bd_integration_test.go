@@ -808,3 +808,62 @@ func TestReaperOwnerProtectionOnRealBd(t *testing.T) {
 		t.Fatalf("a held wisp was escalated:\n%s", calls)
 	}
 }
+
+// TestReaperStep3ReclaimsRetentionSweptMessageWisps pins the swept-mail
+// contract on real bd: mail retention sweeps close message beads and never
+// delete them, and a closed message wisp is reclaimed by the reaper's Step 3
+// closed-wisp purge once it is older than GC_REAPER_PURGE_AGE, whichever
+// close reason the sweep stamped. Step 3 is the only reclaim path for an
+// unread-swept message (the wisp GC mail arm selects only mail.read=true
+// beads), so this is the test that fails if a bd or a reaper change leaves
+// unread-swept mail retained forever on a bd that supports the purge.
+//
+// It skips on a bd that cannot purge the wisps plane in bounded batches (bd
+// 1.3.0 and builds between), where the reaper reports bd-purge-unsupported
+// and swept mail is retained indefinitely.
+func TestReaperStep3ReclaimsRetentionSweptMessageWisps(t *testing.T) {
+	bd := requireRealBd(t)
+	c := newBdTopologyCity(t, bd)
+	if !c.bdSupportsPurgeWispsPlane(t) {
+		t.Skip("bd purge lacks --wisps-plane/--limit (needs the beads purge hotfix, bd 1.3.1 or newer); the reaper reports bd-purge-unsupported on this bd")
+	}
+	city := c.addScope(t, "", "sweptdb", "sw", true)
+
+	// The close reasons are the literals of beadmail.RetentionSweepCloseReason
+	// and beadmail.UnreadRetentionSweepCloseReason; this package cannot import
+	// them without a production dependency, and the reaper never reads them,
+	// so Step 3 must reclaim a closed message whatever the reason says.
+	const (
+		readSweepReason   = "mail gc-swept: read mail bead past gc retention window"
+		unreadSweepReason = "mail gc-swept: unread mail bead past gc retention window"
+	)
+	ids := map[string]string{}
+	create := func(key string, args ...string) {
+		ids[key] = strings.TrimSpace(c.bdIn(t, city, append([]string{"create", "--silent", "-t", "message", "--ephemeral"}, args...)...))
+	}
+	create("unreadOld", "unread mail swept long ago", "--metadata", `{"mail.read":"false"}`)
+	create("readOld", "read mail swept long ago", "-l", "read", "--metadata", `{"mail.read":"true"}`)
+	create("unreadYoung", "unread mail swept just now", "--metadata", `{"mail.read":"false"}`)
+	c.bdIn(t, city, "close", ids["unreadOld"], ids["unreadYoung"], "--force", "--reason", unreadSweepReason)
+	c.bdIn(t, city, "close", ids["readOld"], "--force", "--reason", readSweepReason)
+	// Age two of the closed messages past the default 168h purge age; the
+	// third stays inside it.
+	c.bdIn(t, city, "sql", fmt.Sprintf(
+		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 500 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 400 HOUR), closed_at = DATE_SUB(NOW(), INTERVAL 400 HOUR) WHERE id IN ('%s', '%s')",
+		ids["unreadOld"], ids["readOld"]))
+	for _, key := range []string{"unreadOld", "readOld", "unreadYoung"} {
+		if got := c.status(t, city, ids[key]); got != "closed" {
+			t.Fatalf("seeded %s %s = %s, want closed (a retention sweep closes, it never deletes)", key, ids[key], got)
+		}
+	}
+
+	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"))
+	for _, key := range []string{"unreadOld", "readOld"} {
+		if got := c.status(t, city, ids[key]); got != "gone" {
+			t.Fatalf("%s %s = %s after the reaper; Step 3 must reclaim a closed message wisp older than the purge age\n%s\n%s", key, ids[key], got, out, outcome)
+		}
+	}
+	if got := c.status(t, city, ids["unreadYoung"]); got != "closed" {
+		t.Fatalf("unreadYoung %s = %s after the reaper; a message closed inside the purge age must stay closed and addressable\n%s\n%s", ids["unreadYoung"], got, out, outcome)
+	}
+}
