@@ -58,18 +58,30 @@ func enumerateWispGCRootsReference(store beads.Store, selectors []wispGCRootSele
 	return entries, nil
 }
 
-func closedWispGCEntriesReference(store beads.Store) ([]beads.Bead, error) {
-	return enumerateWispGCRootsReference(store, wispGCRootSelectors(), "closed")
+func closedWispGCEntriesReference(store beads.Store) (roots []beads.Bead, err error) {
+	err = beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRootsReference(store, wispGCRootSelectors(), "closed")
+		return err
+	})
+	return roots, err
 }
 
-func openWispGCRootCandidatesReference(store beads.Store) ([]beads.Bead, error) {
-	return enumerateWispGCRootsReference(store, wispGCRootSelectors(), "open", "in_progress")
+func openWispGCRootCandidatesReference(store beads.Store) (roots []beads.Bead, err error) {
+	err = beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRootsReference(store, wispGCRootSelectors(), "open", "in_progress")
+		return err
+	})
+	return roots, err
 }
 
 func enumerateWorkClassMoleculeRootsReference(store beads.Store, statuses ...string) ([]beads.Bead, error) {
 	sel := wispGCMoleculeRootSelector()
 	sel.query.TierMode = beads.TierIssues
-	roots, err := enumerateWispGCRootsReference(store, []wispGCRootSelector{sel}, statuses...)
+	var roots []beads.Bead
+	err := beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRootsReference(store, []wispGCRootSelector{sel}, statuses...)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +100,11 @@ func enumerateWorkClassMoleculeRootsReference(store beads.Store, statuses ...str
 
 func storeHoldsLiveAttachmentSourceReference(store beads.Store, rootID string) bool {
 	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
-		holders, err := store.List(beads.ListQuery{Metadata: map[string]string{key: rootID}, IncludeClosed: true, TierMode: beads.TierBoth})
+		var holders []beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			holders, err = store.List(beads.ListQuery{Metadata: map[string]string{key: rootID}, IncludeClosed: true, TierMode: beads.TierBoth})
+			return err
+		})
 		if err != nil {
 			return true
 		}
@@ -494,9 +510,10 @@ func TestTickWispGCReadsHoldersThroughTheCensusLegs(t *testing.T) {
 	if err := rig.Close(src.ID); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * time.Millisecond)
 	withCloseAbandonedEnforced(t, func() {
-		withCloseAbandonedTTL(t, time.Millisecond, func() {
+		// A negative idle TTL puts the cutoff ahead of now: the root just
+		// created counts as idle, with no wait.
+		withCloseAbandonedTTL(t, -time.Hour, func() {
 			cr.tickWispGC(&tickPass{})
 		})
 	})

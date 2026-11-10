@@ -22,7 +22,11 @@ func liveCloseOwnerReference(stores []beads.Store, id string) (beads.Store, bead
 	var openStore beads.Store
 	var open beads.Bead
 	for _, store := range stores {
-		b, err := beads.HandlesFor(store).Live.Get(id)
+		var b beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			b, err = beads.HandlesFor(store).Live.Get(id)
+			return err
+		})
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 		case err != nil || b.Status == "closed":

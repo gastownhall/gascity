@@ -29,14 +29,14 @@ import (
 // --- frozen references ---
 
 func autocloseLocateReference(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
-	b, err := first.Get(id)
+	b, err := beads.FederatedGet(first, id)
 	if err == nil {
 		return b, first, nil
 	}
 	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
 		return beads.Bead{}, first, err
 	}
-	b, err = second.Get(id)
+	b, err = beads.FederatedGet(second, id)
 	if err != nil {
 		return beads.Bead{}, second, err
 	}
@@ -116,7 +116,17 @@ func closeCompletedConvoyAcrossReference(store, childStore beads.Store, convoy b
 		return false, nil
 	}
 	across := childStore != nil && !sameBeadStore(childStore, store)
-	children, err := listConvoyChildren(store, convoy.ID, true)
+	var children []beads.Bead
+	var err error
+	if across {
+		err = beads.FederatedRead(func() error {
+			var listErr error
+			children, listErr = listConvoyChildren(store, convoy.ID, true)
+			return listErr
+		})
+	} else {
+		children, err = listConvoyChildren(store, convoy.ID, true)
+	}
 	if err != nil {
 		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 	}
@@ -126,7 +136,12 @@ func closeCompletedConvoyAcrossReference(store, childStore beads.Store, convoy b
 		}
 	}
 	if across {
-		elsewhere, err := childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc, TierMode: beads.FederatedReadTier})
+		var elsewhere []beads.Bead
+		err := beads.FederatedRead(func() error {
+			var listErr error
+			elsewhere, listErr = childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc, TierMode: beads.FederatedReadTier})
+			return listErr
+		})
 		if err != nil {
 			return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 		}
@@ -194,7 +209,12 @@ func collectInputConvoyWorkflowRootsReference(workStore, graphStore beads.Store,
 		return nil
 	}
 	if graphStore != workStore {
-		graphConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: graphStore}, parent.ID)
+		var graphConvoys []beads.Bead
+		err := beads.FederatedRead(func() error {
+			var listErr error
+			graphConvoys, listErr = convoycore.TrackingConvoysForItem(beads.WorkStore{Store: graphStore}, parent.ID)
+			return listErr
+		})
 		if err != nil {
 			return nil
 		}
