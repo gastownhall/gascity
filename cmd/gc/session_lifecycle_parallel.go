@@ -480,6 +480,10 @@ type startExecutionOptions struct {
 	// deferralSeen is the never-started pending creates the run's planning
 	// snapshot contained. Nil publishes nothing to the memo.
 	deferralSeen map[string]struct{}
+	// gateDeferred is the sessions the reconciler turned away at a start gate
+	// of its own before they became candidates (the fleet breaker's), so the
+	// run records them with the deferrals the executor makes itself.
+	gateDeferred []string
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -4835,6 +4839,9 @@ func executePlannedStartsTraced(
 	// with no candidates still publishes, so the memo drops a drained backlog.
 	deferrals := startOpts.deferralMemo.beginPass(startOpts.deferralSeen)
 	defer deferrals.finish(ctx)
+	for _, id := range startOpts.gateDeferred {
+		deferrals.noteGateDeferred(id)
+	}
 	if len(candidates) == 0 {
 		return 0
 	}
@@ -5063,7 +5070,7 @@ func executePlannedStartsTraced(
 				// gate defers before the identity breaker's restart accounting
 				// and before PreWake, so a deferred start writes nothing and
 				// spends no wake budget.
-				fleetTkt, fleetAdmit := fleetGuard.Admit(candidate.info.ID, candidate.logicalTemplate(cfg))
+				fleetTkt, fleetAdmit := fleetGuard.AdmitStart(candidate.info, candidate.logicalTemplate(cfg))
 				if !fleetAdmit {
 					abandonCapacityTicket(ticket, rec, stderr)
 					if release != nil {
@@ -5072,6 +5079,9 @@ func executePlannedStartsTraced(
 					if done != nil {
 						done()
 					}
+					// The create waits on the breaker, not on anything about
+					// itself, and has no hold of its own: the memo keeps it.
+					deferrals.noteGateDeferred(candidate.info.ID)
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByFleetStartBreaker), time.Time{}, time.Time{}, nil)
 					if trace != nil {
 						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonFleetStartBreakerOpen, TraceOutcomeDeferredByFleetStartBreaker, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{

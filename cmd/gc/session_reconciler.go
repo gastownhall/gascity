@@ -2210,6 +2210,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
+	// fleetGateDeferred is the sessions the fleet breaker's gate turned away
+	// this pass, before they reached the executor.
+	var fleetGateDeferred []string
 	var wakeTargets []wakeTarget
 	rollbacksThisTick := 0
 	// attemptRollbackPendingCreate returns the metadata batch the rollback mirrored
@@ -4951,8 +4954,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Fleet start breaker gate: while automatic starts are limited to
 			// probes and none is due, skip without writing or spending wake
 			// budget. Aggregated into the per-tick fleet record.
-			if !fleetGuard.Eligible() {
+			if !fleetGuard.EligibleFor(target.info) {
 				fleetGuard.NoteDeferred()
+				// The create waits on the breaker, not on anything about
+				// itself, and has no hold of its own: the memo keeps it.
+				fleetGateDeferred = append(fleetGateDeferred, target.info.ID)
 				continue
 			}
 
@@ -5343,7 +5349,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
-		effectiveStartOptions...,
+		append(append([]startExecutionOption(nil), effectiveStartOptions...), withStartGateDeferred(fleetGateDeferred))...,
 	)
 	startedThisTick = plannedWakes
 	capacityGuard.recordTick(trace, rec, stderr)

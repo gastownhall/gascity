@@ -132,7 +132,8 @@ func TestFleetBreakerAdmitDeniedPendingCreateSurvivesTheLease(t *testing.T) {
 		t.Fatal("premise: a probe is still due after pass 1, so pass 2's gate would let candidates through")
 	}
 
-	d.env.clk.Advance(time.Minute)
+	// Short of the probe's stability window, so the breaker is still not closed.
+	d.env.clk.Advance(time.Second)
 	d.tick(t)
 	d.requireNoneClosed(t, "pass 2, past the lease")
 	if got := d.notRunning(); len(got) != 2 {
@@ -243,7 +244,12 @@ func TestReconcile_FleetGateLetsOperatorRequestedStartsThrough(t *testing.T) {
 			env.addDesired("worker", "worker", false)
 			session := env.createSessionBead("worker", "worker")
 			env.markSessionCreating(&session)
-			env.setSessionMetadata(&session, tc.meta(env.clk.Now()))
+			meta := tc.meta(env.clk.Now())
+			if meta["session_origin"] == "manual" {
+				// A user-made create is a never-started pending create.
+				meta["pending_create_claim"] = "true"
+			}
+			env.setSessionMetadata(&session, meta)
 			pinFleetJitter(env.guard)
 			env.openFleetBreaker(t)
 

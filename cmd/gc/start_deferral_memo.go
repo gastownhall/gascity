@@ -180,6 +180,15 @@ func withStartDeferralSeen(seen map[string]struct{}) startExecutionOption {
 	}
 }
 
+// withStartGateDeferred records ids, sessions the reconciler turned away at a
+// start gate before they became candidates, as deferred by this run. A run with
+// no candidates still records them.
+func withStartGateDeferred(ids []string) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.gateDeferred = ids
+	}
+}
+
 // startOptions returns the executor options that tie a reconcile run to the
 // memo: nothing for a nil memo; a memo-less run when the store read was partial,
 // which did not see every pending create and so must not replace the record; and

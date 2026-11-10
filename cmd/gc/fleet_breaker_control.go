@@ -194,8 +194,14 @@ func newBreakerCmd(stdout, stderr io.Writer) *cobra.Command {
 The fleet start breaker pauses automatic session starts when several
 different sessions fail to start (or stay up) within a short window, or when
 the runtime's state cache has gone stale. While it is open, automatic starts
-are limited to a probe at a time until a started session stays up. User
-initiated starts (attach, new, nudge) are never gated.
+are limited to a probe at a time until a started session stays up.
+Operator-requested starts are never gated and their failures are never
+counted: an explicit wake (gc session wake, a nudge that wakes a session, the
+wake API) and a session made by hand (gc session new, materialize). Automatic
+starts are gated, including the controller's own create of a named session.
+gc session new for a configured named identity without an alias is stamped as
+a named session, which the controller cannot tell from its own create, so it
+stays gated.
 
 The breaker guards the legacy session reconciler only. A city that runs the
 v2 reconciler is not covered: its starts are never gated, and these commands

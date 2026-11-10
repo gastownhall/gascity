@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // fleetBreakerScope is the breaker.state_changed scope of the fleet start
@@ -344,6 +346,38 @@ func (g *fleetStartGuard) Eligible() bool {
 	}
 	b := g.breaker()
 	return b.Available() || b.ProbeDue()
+}
+
+// operatorRequestedStart reports whether info's next start is one an operator
+// asked for rather than one the controller decided on: an explicit wake
+// (`gc session wake`, a nudge that wakes the session, the wake API) or a
+// never-started create the operator made by hand (`gc session new`,
+// materialize stamp session_origin=manual). The fleet breaker limits automatic
+// starts only, so these are neither gated nor counted. A create for a
+// configured named identity is stamped with the controller's own origin and
+// stays gated.
+func operatorRequestedStart(info sessionpkg.Info) bool {
+	if explicitWakePendingInfo(info) {
+		return true
+	}
+	return neverStartedPendingCreate(info) && strings.TrimSpace(info.SessionOrigin) == "manual"
+}
+
+// EligibleFor is Eligible for the start of the session info describes: an
+// operator-requested start is always eligible.
+func (g *fleetStartGuard) EligibleFor(info sessionpkg.Info) bool {
+	return operatorRequestedStart(info) || g.Eligible()
+}
+
+// AdmitStart is Admit for the start of the session info describes, an
+// instance of template. An operator-requested start is admitted without a
+// ticket: nothing resolves it, so its failure or early death counts toward no
+// trip and it never takes the probe.
+func (g *fleetStartGuard) AdmitStart(info sessionpkg.Info, template string) (*fleetTicket, bool) {
+	if operatorRequestedStart(info) {
+		return nil, true
+	}
+	return g.Admit(info.ID, template)
 }
 
 // NoteDeferred counts a start the gate kept from being attempted, for the
