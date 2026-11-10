@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -674,14 +675,14 @@ func conformanceByIDWriteResidence(t *testing.T, e splitEnv) {
 // ledger under the work prefix.
 func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 	ctx := context.Background()
-	res, err := molecule.Instantiate(ctx, e.graphStore(), conformanceGraphRecipe(), molecule.Options{})
+	res, err := molecule.Instantiate(ctx, beadstest.GraphMolecule(e.graphStore()), conformanceGraphRecipe(), molecule.Options{})
 	if err != nil {
 		t.Fatalf("materialize durable graph molecule: %v", err)
 	}
 	if res.Created != 2 {
 		t.Fatalf("durable molecule created %d beads, want 2 (root + finalize step)", res.Created)
 	}
-	wres, err := molecule.Instantiate(ctx, e.graphStore(), conformanceWispRecipe(), molecule.Options{})
+	wres, err := molecule.Instantiate(ctx, beadstest.GraphMolecule(e.graphStore()), conformanceWispRecipe(), molecule.Options{})
 	if err != nil {
 		t.Fatalf("materialize root-only wisp molecule: %v", err)
 	}
@@ -1431,7 +1432,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		t.Fatalf("create nudge bead: %v", err)
 	}
 	e.mintWisp(t, "sweep wisp")
-	if _, err := molecule.Instantiate(context.Background(), e.graphStore(), conformanceGraphRecipe(), molecule.Options{}); err != nil {
+	if _, err := molecule.Instantiate(context.Background(), beadstest.GraphMolecule(e.graphStore()), conformanceGraphRecipe(), molecule.Options{}); err != nil {
 		t.Fatalf("materialize sweep molecule: %v", err)
 	}
 
@@ -1514,7 +1515,7 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 		}
 	}
 
-	after, err := session.ListAllSessionBeads(e.sessionsStore(), beads.ListQuery{})
+	after, err := session.ListAllSessionBeads(beadstest.Sessions(e.sessionsStore()), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("list session beads after warm ticks: %v", err)
 	}
@@ -2109,7 +2110,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 // sides are therefore compared in canonical order.
 //
 // The state is a controllerState — the production api.State — built from the
-// fixture, so BeadStores(), CityBeadStore() and GraphBeadStore() resolve through
+// fixture, so BeadStores(), CityBeadStore() and Stores() resolve through
 // exactly the dispatch the running controller uses.
 func apiReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
@@ -2145,7 +2146,7 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 // the REAL handler stack over the fixture's stores and decodes the list body.
 //
 // The state is a controllerState — the production api.State — so BeadStores(),
-// CityBeadStore() and GraphBeadStore() resolve through exactly the dispatch the
+// CityBeadStore() and Stores() resolve through exactly the dispatch the
 // running controller uses. suffix is the city-scoped path with its query string,
 // e.g. "/beads/ready" or "/beads?status=in_progress".
 func apiGetBeadListBody(t *testing.T, e splitEnv, suffix string) apiReadyListBody {

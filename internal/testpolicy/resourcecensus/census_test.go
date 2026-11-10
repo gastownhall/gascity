@@ -1585,6 +1585,33 @@ func TestResource() { time.Sleep(1) }
 			wantTagged: true,
 		},
 		{
+			name:   "go build unix runs on the default lane",
+			source: "//go:build unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:   "go build not windows runs on the default lane",
+			source: "//go:build !windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:   "go build not darwin and not windows runs on the default lane",
+			source: "//go:build !darwin && !windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:       "go build integration and unix",
+			source:     "//go:build integration && unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
+			name:       "go build integration or dolt_integration and unix",
+			source:     "//go:build (integration || dolt_integration) && unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
+			name:       "go build windows",
+			source:     "//go:build windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
 			name:       "go build after UTF-8 BOM",
 			source:     "\ufeff//go:build integration\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
 			wantTagged: true,

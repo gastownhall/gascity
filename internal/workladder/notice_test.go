@@ -181,7 +181,7 @@ func TestSettleNotice(t *testing.T) {
 			e = marked(e, "gc-op-1", at, tc.paused)
 			r := rec(1, e)
 			before := EncodeLadder(r)
-			out, alert, ok := SettleNotice(r, "gc-op-1", tc.fate)
+			out, alert, ok := SettleNotice(r, "gc-op-1", tc.fate, time.Time{})
 			if !ok {
 				t.Fatal("SettleNotice did not find the mark")
 			}
@@ -199,17 +199,17 @@ func TestSettleNotice(t *testing.T) {
 	}
 	t.Run("attempts floor at zero", func(t *testing.T) {
 		e := marked(Entry{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Since: t0, Last: at}, "gc-op-1", at, false)
-		out, _, ok := SettleNotice(rec(1, e), "gc-op-1", NoticeWithdrawn)
+		out, _, ok := SettleNotice(rec(1, e), "gc-op-1", NoticeWithdrawn, time.Time{})
 		if !ok || out.Entries[0].Attempts != 0 || out.Entries[0].Paused != 1 {
 			t.Fatalf("settled = %+v, %v", out.Entries[0], ok)
 		}
 	})
 	t.Run("an unknown op", func(t *testing.T) {
 		r := rec(1, marked(base, "gc-op-1", at, false))
-		if out, alert, ok := SettleNotice(r, "gc-op-2", NoticeDelivered); ok || alert || !reflect.DeepEqual(out, r) {
+		if out, alert, ok := SettleNotice(r, "gc-op-2", NoticeDelivered, time.Time{}); ok || alert || !reflect.DeepEqual(out, r) {
 			t.Fatalf("SettleNotice(unknown) = %+v, %v, %v", out, alert, ok)
 		}
-		if _, _, ok := SettleNotice(r, "", NoticeDelivered); ok {
+		if _, _, ok := SettleNotice(r, "", NoticeDelivered, time.Time{}); ok {
 			t.Fatal("SettleNotice matched an empty op id")
 		}
 	})
@@ -285,7 +285,7 @@ func TestReleaseFoundStartedDropsTheMark(t *testing.T) {
 		t.Fatalf("entry %+v, want a fresh started episode with no mark", got)
 	}
 	for _, fate := range []NoticeFate{NoticeRefused, NoticeWithdrawn, NoticeFailed, NoticeDelivered} {
-		if out, _, ok := SettleNotice(r, "op-1", fate); ok || !reflect.DeepEqual(out, r) {
+		if out, _, ok := SettleNotice(r, "op-1", fate, time.Time{}); ok || !reflect.DeepEqual(out, r) {
 			t.Fatalf("fate %d: settled %+v on the started episode", fate, out.Entries[0])
 		}
 	}

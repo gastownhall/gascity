@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -49,7 +50,7 @@ func TestAttachEpochFenceConcurrentAttachesConvergeOnOneSubDAG(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			recipe := makeWorkflowRecipe("attempt", "run")
-			results[i], errs[i] = Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+			results[i], errs[i] = Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 				IdempotencyKey: control.ID + ":attempt:2",
 				ExpectedEpoch:  1,
 			})
@@ -105,7 +106,7 @@ func TestAttachEpochFenceConcurrentAttachesConvergeOnOneSubDAG(t *testing.T) {
 
 	// A third re-entrant call converges on the winner.
 	recipe := makeWorkflowRecipe("attempt", "run")
-	third, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	third, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: control.ID + ":attempt:2",
 		ExpectedEpoch:  2,
 	})
@@ -129,7 +130,7 @@ func TestAttachRequireIncapableRefusesBeforeSideEffects(t *testing.T) {
 
 	before, _ := store.ListOpen()
 	recipe := makeWorkflowRecipe("attempt", "run")
-	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{ExpectedEpoch: 1})
+	_, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{ExpectedEpoch: 1})
 	if !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("err = %v, want the typed require refusal", err)
 	}
@@ -166,7 +167,7 @@ func TestAdvanceAttachEpochFenceLoserPath(t *testing.T) {
 	}
 	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
 
-	err = advanceAttachEpochFence(store, conflictOnlyWriter{}, control.ID, 1, result)
+	err = advanceAttachEpochFence(beadstest.GraphMolecule(store), conflictOnlyWriter{}, control.ID, 1, result)
 	if !errors.Is(err, ErrEpochConflict) {
 		t.Fatalf("fence loser err = %v, want ErrEpochConflict", err)
 	}
@@ -207,7 +208,7 @@ func TestAdvanceAttachEpochFenceLoserSkipsActivatedCandidate(t *testing.T) {
 	}
 	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
 
-	err = advanceAttachEpochFence(store, conflictOnlyWriter{}, control.ID, 1, result)
+	err = advanceAttachEpochFence(beadstest.GraphMolecule(store), conflictOnlyWriter{}, control.ID, 1, result)
 	if !errors.Is(err, ErrEpochConflict) {
 		t.Fatalf("fence loser err = %v, want ErrEpochConflict", err)
 	}
@@ -248,7 +249,7 @@ func TestAdvanceAttachEpochFenceAmbiguousErrorLeavesSubDAGLive(t *testing.T) {
 	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
 
 	inner, _ := beads.ConditionalWriterFor(store)
-	fenceErr := advanceAttachEpochFence(store, commitThenErrWriter{inner: inner, err: errors.New("i/o timeout")}, control.ID, 1, result)
+	fenceErr := advanceAttachEpochFence(beadstest.GraphMolecule(store), commitThenErrWriter{inner: inner, err: errors.New("i/o timeout")}, control.ID, 1, result)
 	if fenceErr == nil || errors.Is(fenceErr, ErrEpochConflict) {
 		t.Fatalf("ambiguous fence err = %v, want a transient (non-conflict) error", fenceErr)
 	}
@@ -276,7 +277,7 @@ func TestAdvanceAttachEpochIfNeededCASNeverDoubleAdvances(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = advanceAttachEpochIfNeeded(store, control.ID, 1)
+			errs[i] = advanceAttachEpochIfNeeded(beadstest.GraphMolecule(store), control.ID, 1)
 		}()
 	}
 	wg.Wait()
@@ -351,7 +352,7 @@ func TestAttachFencedWinnerActivatedLoserNeverRunnable(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			recipe := makeWorkflowRecipe("attempt", "run")
-			results[i], errs[i] = Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+			results[i], errs[i] = Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 				IdempotencyKey: control.ID + ":attempt:2",
 				ExpectedEpoch:  1,
 			})
@@ -421,7 +422,7 @@ func TestAttachAmbiguousFenceConvergesDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := &Result{RootID: sub.ID, IDMapping: map[string]string{"root": sub.ID}}
-	fenceErr := advanceAttachEpochFence(store, commitThenErrWriter{inner: inner, err: errors.New("i/o timeout")}, control.ID, 1, result)
+	fenceErr := advanceAttachEpochFence(beadstest.GraphMolecule(store), commitThenErrWriter{inner: inner, err: errors.New("i/o timeout")}, control.ID, 1, result)
 	if fenceErr == nil || errors.Is(fenceErr, ErrEpochConflict) {
 		t.Fatalf("ambiguous fence err = %v, want transient", fenceErr)
 	}
@@ -432,7 +433,7 @@ func TestAttachAmbiguousFenceConvergesDeterministically(t *testing.T) {
 	// Retry: findExistingAttach's recovery must adopt the pending candidate,
 	// activate it, and return it as the duplicate with the epoch advanced.
 	recipe := makeWorkflowRecipe("attempt", "run")
-	retry, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	retry, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: control.ID + ":attempt:2",
 		ExpectedEpoch:  2, // the ambiguous write committed: epoch is 2
 	})
@@ -484,7 +485,7 @@ func TestFindExistingAttachResolvesDualPendingDeterministically(t *testing.T) {
 	}
 
 	recipe := makeWorkflowRecipe("attempt", "run")
-	got, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+	got, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{
 		IdempotencyKey: control.ID + ":attempt:2",
 		ExpectedEpoch:  2,
 	})

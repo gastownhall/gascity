@@ -42,19 +42,25 @@ const (
 )
 
 // preparePool gives a pool city its tmux socket root and the pool seat's
-// agent script. The root is under /tmp, not the test's TMPDIR: a socket
-// path past 104 bytes does not bind.
+// agent script.
 func (c *laneCity) preparePool() {
 	c.t.Helper()
+	c.prepareTmux()
+	c.writeFile(c.poolAgent(), "#!/bin/sh\nexec cat >> "+shellQuote(c.typedPath())+"\n", 0o755)
+}
+
+// prepareTmux gives a real-tmux city its tmux socket root. The root is under
+// /tmp, not the test's TMPDIR: a socket path past 104 bytes does not bind.
+func (c *laneCity) prepareTmux() {
+	c.t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
-		c.t.Fatalf("a pool city runs real tmux: %v", err)
+		c.t.Fatalf("a real-tmux city needs tmux: %v", err)
 	}
 	root, err := os.MkdirTemp("/tmp", "gclt")
 	if err != nil {
 		c.t.Fatalf("creating the tmux socket root: %v", err)
 	}
 	c.tmuxRoot = root
-	c.writeFile(c.poolAgent(), "#!/bin/sh\nexec cat >> "+shellQuote(c.typedPath())+"\n", 0o755)
 }
 
 // poolAgent is the pool seat's start command: it appends every line typed

@@ -12,20 +12,8 @@ package main
 //
 // # The edge policy
 //
-// No cross-store edge is ever written. An edge whose two ends both move is
-// copied. An edge that would cross the boundary is either encoded another way
-// or refused:
-//
-//   - D -> W (a moved row depends on rig work), blocking, W unsatisfied and D
-//     open: a `blocks` edge becomes an S3b cross-store gate in the binding (a
-//     same-store edge D -> gate the release lane opens once W is satisfied);
-//     waits-for and conditional-blocks refuse, the gate encodes only blocks.
-//   - W -> D (open work blocked by an open moved row): refuses. There is no
-//     gate pattern for a work store.
-//   - tracks or parent-child with both ends open: refuses. These are
-//     membership edges live code reads (drain-unit convoys).
-//   - Every other boundary edge is dropped and recorded on the moved row
-//     (gc.migrated_cross_edges) and in the rig's backup.
+// No cross-store edge is ever written. The edges are planned by the shared
+// crossBoundaryPlan (cross_boundary_plan.go), which the city copy runs too.
 //
 // Each refusal names the beads and the fix.
 
@@ -218,20 +206,19 @@ type rigPlanContext struct {
 // or another rig, or that another city's agent claims, refuses.
 func planRigImport(ctx rigPlanContext) rigImportPlan {
 	rig, cityName, snap, manifest, held := ctx.Rig, ctx.CityName, ctx.Snap, ctx.Manifest, ctx.Held
-	plan := rigImportPlan{Rig: rig, Generation: coordclass.CurrentGeneration, Records: map[string][]rigCrossEdgeRecord{}, RetainedRecords: map[string][]rigCrossEdgeRecord{}}
+	plan := rigImportPlan{Rig: rig, Generation: coordclass.CurrentGeneration, RetainedRecords: map[string][]rigCrossEdgeRecord{}}
 	if manifest != nil {
 		plan.Generation = manifest.Generation
 	}
 	stamp := rigImportStamp(rig)
-	infra := map[string]bool{}
+	moves := infraClassMoves(plan.Generation)
 	moved := map[string]bool{}
 	inBinding := map[string]bool{} // rows that are (or will be) binding rows
 	var collisions, reused, foreign, claimed, unheld, unreadable []string
 	for _, b := range snap.rows {
-		if coordclass.ClassifyAt(b, plan.Generation) == coordclass.ClassWork {
+		if !moves(b) {
 			continue
 		}
-		infra[b.ID] = true
 		plan.Infra++
 		h, holds := held[b.ID]
 		if manifest != nil && manifest.Carried(b) {
@@ -345,54 +332,19 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 		})
 	}
 
-	record := func(id string, rec rigCrossEdgeRecord) {
-		plan.Records[id] = append(plan.Records[id], rec)
-	}
-	statusOf := func(id string) string {
-		if b, ok := snap.byID[id]; ok {
-			return b.Status
-		}
-		if b, ok := held[id]; ok {
-			return b.Status
-		}
-		return ""
-	}
-	for _, b := range snap.rows {
-		for _, d := range snap.down[b.ID] {
-			from, to := d.IssueID, d.DependsOnID
-			if from == "" {
-				from = b.ID
-			}
-			fromMoved, toMoved := moved[from], moved[to]
-			if !fromMoved && !toMoved {
-				continue
-			}
-			edge := beads.Dep{IssueID: from, DependsOnID: to, Type: d.Type}
-			switch {
-			case fromMoved && toMoved:
-				plan.Copy = append(plan.Copy, edge)
-			case fromMoved:
-				plan.planOutEdge(ctx, edge, infra, inBinding, record, statusOf)
-			default:
-				plan.planInEdge(edge, snap, infra, inBinding, held, record)
-			}
-		}
-	}
-	for id := range plan.Records {
-		recs := plan.Records[id]
-		sort.Slice(recs, func(i, j int) bool {
-			if recs[i].Dir != recs[j].Dir {
-				return recs[i].Dir < recs[j].Dir
-			}
-			return recs[i].Other < recs[j].Other
-		})
-	}
-	sort.Slice(plan.Copy, func(i, j int) bool {
-		if plan.Copy[i].IssueID != plan.Copy[j].IssueID {
-			return plan.Copy[i].IssueID < plan.Copy[j].IssueID
-		}
-		return plan.Copy[i].DependsOnID < plan.Copy[j].DependsOnID
+	boundary := crossBoundaryPlan(crossBoundaryInput{
+		Snap:            snap,
+		Moves:           moves,
+		Moved:           moved,
+		InBinding:       inBinding,
+		Held:            held,
+		Elsewhere:       ctx.Elsewhere,
+		ElsewhereUnread: ctx.ElsewhereUnread,
+		WorkNoun:        "rig work",
+		SourceNoun:      "the rig",
 	})
+	plan.Copy, plan.Gates, plan.Records = boundary.Copy, boundary.Gates, boundary.Records
+	plan.Refusals = append(plan.Refusals, boundary.Refusals...)
 	sort.Strings(plan.Annotated)
 	return plan
 }
@@ -412,102 +364,14 @@ func rigScopeIsForeign(ref, rig, cityName string) bool {
 	}
 }
 
-// planOutEdge decides an edge from a moved row D onto a row that does not
-// move.
-func (plan *rigImportPlan) planOutEdge(ctx rigPlanContext, edge beads.Dep, infra, inBinding map[string]bool, record func(string, rigCrossEdgeRecord), statusOf func(string) string) {
-	snap, held := ctx.Snap, ctx.Held
-	d := snap.byID[edge.IssueID]
-	to := edge.DependsOnID
-	if w, ok := snap.byID[to]; ok && !infra[to] {
-		plan.planWorkBlocker(d, w, edge, record)
-		return
-	}
-	if inBinding[to] {
-		// An infrastructure row an earlier import carried, or one the
-		// binding holds as this city's: both ends are binding rows.
-		plan.Copy = append(plan.Copy, edge)
-		return
-	}
-	if strings.HasPrefix(to, "external:") {
-		plan.Copy = append(plan.Copy, edge)
-		record(d.ID, rigCrossEdgeRecord{Dir: "out", Type: edge.Type, Other: to, Action: rigEdgeExternal})
-		return
-	}
-	if _, ok := held[to]; ok {
-		plan.Copy = append(plan.Copy, edge)
-		return
-	}
-	plan.planElsewhereBlocker(ctx, d, edge, record, statusOf)
-}
-
-// planElsewhereBlocker decides D -> X where neither the rig nor the binding
-// holds X: X may be held by another store (another rig, the city work store).
-// A blocker held elsewhere is encoded as an S3b gate (built for exactly a
-// blocker held in another store) or refused; the edge is dropped only once X
-// is proven gone from every store.
-func (plan *rigImportPlan) planElsewhereBlocker(ctx rigPlanContext, d beads.Bead, edge beads.Dep, record func(string, rigCrossEdgeRecord), statusOf func(string) string) {
-	to := edge.DependsOnID
-	rec := rigCrossEdgeRecord{Dir: "out", Type: edge.Type, Other: to, OtherStatus: statusOf(to), Action: rigEdgeDropped}
-	blocking := beads.IsReadyBlockingDependencyType(edge.Type)
-	if (!blocking && !rigMembershipEdge(edge.Type)) || !rigRowOpen(d) {
-		record(d.ID, rec)
-		return
-	}
-	copies := ctx.Elsewhere[to]
-	if len(copies) == 0 {
-		if len(ctx.ElsewhereUnread) > 0 {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{d.ID, to},
-				Reason: fmt.Sprintf("open %s depends (%s) on %s, which neither the rig nor the binding holds, and store(s) that may hold it could not be read (%s)", d.ID, edge.Type, to, strings.Join(ctx.ElsewhereUnread, "; ")),
-				Remedy: "restore access to those stores so the import can find the blocker, then re-run",
-			})
-			return
-		}
-		rec.OtherStatus = "absent from every store"
-		record(d.ID, rec)
-		return
-	}
-	rec.OtherStatus = copies[0].Status
-	if rigMembershipEdge(edge.Type) {
-		for _, c := range copies {
-			if rigRowOpen(c) {
-				plan.Refusals = append(plan.Refusals, rigImportRefusal{
-					IDs:    []string{d.ID, to},
-					Reason: fmt.Sprintf("%s and %s (held in another store) are both open and joined by a %s edge, a membership edge that cannot cross stores", d.ID, to, edge.Type),
-					Remedy: fmt.Sprintf("close the workflow (or the convoy) %s belongs to, or close %s, then re-run", d.ID, to),
-				})
-				return
-			}
-		}
-		record(d.ID, rec)
-		return
-	}
-	for _, c := range copies {
-		if rigRowSatisfied(c) {
-			continue
-		}
-		if edge.Type != "blocks" {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{d.ID, to},
-				Reason: fmt.Sprintf("open %s waits (%s) on unfinished %s, held in another store, and a cross-store gate encodes only blocks", d.ID, edge.Type, to),
-				Remedy: fmt.Sprintf("finish %s, or close %s's workflow, then re-run", to, d.ID),
-			})
-			return
-		}
-		plan.Gates = append(plan.Gates, rigImportGate{Owner: d, Blocker: to})
-		rec.Action = rigEdgeGated
-		break
-	}
-	record(d.ID, rec)
-}
-
 // elsewhereCandidates names the blockers the plan must look for outside the
 // rig and the binding: targets of an open infrastructure row's blocking or
 // membership edge that neither holds.
 func elsewhereCandidates(snap rigSnapshot, gen coordclass.Generation, held map[string]beads.Bead) []string {
 	want := map[string]bool{}
+	moves := infraClassMoves(gen)
 	for _, b := range snap.rows {
-		if !rigRowOpen(b) || coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
+		if !rigRowOpen(b) || !moves(b) {
 			continue
 		}
 		for _, d := range snap.down[b.ID] {
@@ -527,82 +391,13 @@ func elsewhereCandidates(snap rigSnapshot, gen coordclass.Generation, held map[s
 	return sortedMapKeys(want)
 }
 
-// planWorkBlocker decides D -> W where W is rig work that stays.
-func (plan *rigImportPlan) planWorkBlocker(d, w beads.Bead, edge beads.Dep, record func(string, rigCrossEdgeRecord)) {
-	rec := rigCrossEdgeRecord{Dir: "out", Type: edge.Type, Other: w.ID, OtherStatus: w.Status, Action: rigEdgeDropped}
-	switch {
-	case rigMembershipEdge(edge.Type):
-		if rigRowOpen(d) && rigRowOpen(w) {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{d.ID, w.ID},
-				Reason: fmt.Sprintf("%s and rig work %s are both open and joined by a %s edge, a membership edge that cannot cross stores", d.ID, w.ID, edge.Type),
-				Remedy: fmt.Sprintf("close the workflow (or the convoy) %s belongs to, or close %s, then re-run", d.ID, w.ID),
-			})
-			return
-		}
-	case beads.IsReadyBlockingDependencyType(edge.Type):
-		if rigRowOpen(d) && !rigRowSatisfied(w) {
-			if edge.Type != "blocks" {
-				plan.Refusals = append(plan.Refusals, rigImportRefusal{
-					IDs:    []string{d.ID, w.ID},
-					Reason: fmt.Sprintf("open %s waits (%s) on unfinished rig work %s, and a cross-store gate encodes only blocks", d.ID, edge.Type, w.ID),
-					Remedy: fmt.Sprintf("finish %s, or close %s's workflow, then re-run", w.ID, d.ID),
-				})
-				return
-			}
-			plan.Gates = append(plan.Gates, rigImportGate{Owner: d, Blocker: w.ID})
-			rec.Action = rigEdgeGated
-		}
-	}
-	record(d.ID, rec)
-}
-
-// planInEdge decides an edge from a row that does not move onto a moved row D.
-func (plan *rigImportPlan) planInEdge(edge beads.Dep, snap rigSnapshot, infra, inBinding map[string]bool, held map[string]beads.Bead, record func(string, rigCrossEdgeRecord)) {
-	from := edge.IssueID
-	d := snap.byID[edge.DependsOnID]
-	if inBinding[from] {
-		if _, ok := held[from]; ok {
-			// An earlier import carried the dependent: both ends are now
-			// binding rows.
-			plan.Copy = append(plan.Copy, edge)
-			return
-		}
-	}
-	w, ok := snap.byID[from]
-	if !ok || infra[from] {
-		record(d.ID, rigCrossEdgeRecord{Dir: "in", Type: edge.Type, Other: from, Action: rigEdgeDropped})
-		return
-	}
-	switch {
-	case rigMembershipEdge(edge.Type):
-		if rigRowOpen(d) && rigRowOpen(w) {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{w.ID, d.ID},
-				Reason: fmt.Sprintf("rig work %s and %s are both open and joined by a %s edge, a membership edge that cannot cross stores", w.ID, d.ID, edge.Type),
-				Remedy: fmt.Sprintf("close the workflow (or the convoy) %s belongs to, or close %s, then re-run", d.ID, w.ID),
-			})
-			return
-		}
-	case beads.IsReadyBlockingDependencyType(edge.Type):
-		if rigRowOpen(w) && !rigRowSatisfied(d) {
-			plan.Refusals = append(plan.Refusals, rigImportRefusal{
-				IDs:    []string{w.ID, d.ID},
-				Reason: fmt.Sprintf("open rig work %s is blocked (%s) by open %s, and a work store cannot hold a cross-store gate", w.ID, edge.Type, d.ID),
-				Remedy: fmt.Sprintf("finish or cancel %s's workflow, or remove the edge with `gc bd dep remove %s %s`, then re-run", d.ID, w.ID, d.ID),
-			})
-			return
-		}
-	}
-	record(d.ID, rigCrossEdgeRecord{Dir: "in", Type: edge.Type, Other: w.ID, OtherStatus: w.Status, Action: rigEdgeDropped})
-}
-
 // bindingIDsToProbe is every id the plan asks the binding about: the rig's
 // infrastructure rows, and every edge endpoint the rig does not hold.
 func bindingIDsToProbe(snap rigSnapshot, gen coordclass.Generation) []string {
 	want := map[string]bool{}
+	moves := infraClassMoves(gen)
 	for _, b := range snap.rows {
-		if coordclass.ClassifyAt(b, gen) != coordclass.ClassWork {
+		if moves(b) {
 			want[b.ID] = true
 		}
 		for _, d := range snap.down[b.ID] {
@@ -642,13 +437,20 @@ func rigImportRow(b beads.Bead, rig string, records []rigCrossEdgeRecord) beads.
 // rigImportHashFloor is the bd min_hash_length the rig needs once the
 // imported ids leave it: one longer than the longest hash suffix among them,
 // wisp ids included (bd mints wisp suffixes under the same length bounds), so
-// a short id the rig mints later can never re-mint an imported one (the
-// mc-wisp-jkl id-reuse defect, moved to rigs). Zero means no id needs it.
+// a short id the rig mints later cannot re-mint an imported one (the
+// mc-wisp-jkl id-reuse defect, moved to rigs); at bd's cap of 8 (below) that
+// holds only probabilistically. Zero means no id needs it.
+//
+// Only a suffix bd could have minted counts (bdHashShaped): a cross-store
+// gate's "xsg-<12 hex>" or a hand-named id is not one bd will mint again.
+// The floor never passes bdMaxMintedHashLength, the longest suffix bd mints:
+// bd's CLI and native minting ignore a higher one, and a hosted `bd serve`
+// pads every id it mints to it with zeros.
 func rigImportHashFloor(ids []string) int {
 	longest := 0
 	for _, id := range ids {
 		suffix := rigIDHashSuffix(id)
-		if suffix == "" {
+		if !bdHashShaped(suffix) {
 			continue
 		}
 		if n := len(suffix); n > longest {
@@ -658,7 +460,25 @@ func rigImportHashFloor(ids []string) int {
 	if longest == 0 {
 		return 0
 	}
-	return longest + 1
+	return min(longest+1, bdMaxMintedHashLength)
+}
+
+// bdMaxMintedHashLength is the longest hash suffix bd mints, and so the
+// highest id floor worth setting.
+const bdMaxMintedHashLength = 8
+
+// bdHashShaped reports whether suffix is one bd mints: base36, 3 to
+// bdMaxMintedHashLength characters.
+func bdHashShaped(suffix string) bool {
+	if len(suffix) < 3 || len(suffix) > bdMaxMintedHashLength {
+		return false
+	}
+	for _, r := range suffix {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // rigIDHashSuffix returns the hash segment of a bd id ("gp-k0nvi" -> "k0nvi",

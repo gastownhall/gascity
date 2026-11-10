@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -39,7 +40,7 @@ func TestRestageSupersedesPendingStagedBrief(t *testing.T) {
 	assertHandoffProvisionalRecord(t, second, "origin-instance")
 	assertHandoffSuperseded(t, store, first.ID, second.ID)
 	assertSessionStagesHandoff(t, store, sessionBead.ID, second.ID)
-	if visible, err := beadmail.New(store).Check("worker"); err != nil || len(visible) != 0 {
+	if visible, err := newTestBeadMail(store).Check("worker"); err != nil || len(visible) != 0 {
 		t.Fatalf("Check after restage = (%#v, %v), want no visible handoff", visible, err)
 	}
 	if !strings.Contains(stdout, first.ID) {
@@ -103,7 +104,7 @@ func TestRestageAfterStagedTimeoutRestartsReleaseLifecycle(t *testing.T) {
 
 	assertHandoffReleased(t, env.store, sessionBead.ID, second.ID)
 	assertEventCount(t, recorder.Events, redSessionHandoffReleasedEvent, 1)
-	visible, err := beadmail.New(env.store).Check("worker")
+	visible, err := newTestBeadMail(env.store).Check("worker")
 	if err != nil {
 		t.Fatalf("Check after successor: %v", err)
 	}
@@ -312,7 +313,7 @@ func TestRestageRoutesEachClassToItsOwnStore(t *testing.T) {
 	if _, err := msgStore.Get(sessionBead.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("session bead %s reached the message store (err = %v), want it in the session store only", sessionBead.ID, err)
 	}
-	if visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker"); err != nil || len(visible) != 0 {
+	if visible, err := beadmail.NewWithStores(beadstest.Mail(msgStore), beadstest.Sessions(sessStore)).Check("worker"); err != nil || len(visible) != 0 {
 		t.Fatalf("Check with the classes split = (%#v, %v), want no visible handoff", visible, err)
 	}
 }
@@ -373,7 +374,7 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 			t.Errorf("session %s = %q, want true: the restart marker belongs to the sessions class", key, staged.Metadata[key])
 		}
 	}
-	if visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker"); err != nil || len(visible) != 0 {
+	if visible, err := beadmail.NewWithStores(beadstest.Mail(msgStore), beadstest.Sessions(sessStore)).Check("worker"); err != nil || len(visible) != 0 {
 		t.Fatalf("Check before a successor = (%#v, %v), want no visible handoff", visible, err)
 	}
 
@@ -390,7 +391,7 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	if released, failed := releaseStagedSelfHandoffs(beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore}, rows, cfg, clock.Real{}, events.NewFake()); released != 1 || failed != 0 {
 		t.Fatalf("releaseStagedSelfHandoffs = (released=%d, failed=%d), want (1, 0)", released, failed)
 	}
-	visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker")
+	visible, err := beadmail.NewWithStores(beadstest.Mail(msgStore), beadstest.Sessions(sessStore)).Check("worker")
 	if err != nil || len(visible) != 1 || visible[0].ID != second.ID {
 		t.Fatalf("Check after release = (%#v, %v), want exactly the second brief %q", visible, err, second.ID)
 	}

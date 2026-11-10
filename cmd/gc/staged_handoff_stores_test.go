@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -42,7 +41,7 @@ func newDistinctHandoffStores(t *testing.T) (msgStore, sessStore beads.Store) {
 func stageHandoffAcrossStores(t *testing.T, msgStore, sessStore beads.Store, originToken, currentToken string, stagedAt time.Time) (beads.Bead, beads.Bead) {
 	t.Helper()
 	sessionBead := seedRestartableHandoffSession(t, sessStore, "worker", currentToken)
-	message, _, err := beadmail.New(msgStore).SendHandoff(mail.HandoffIntent{
+	message, _, err := newTestBeadMail(msgStore).SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "context cycle",
@@ -187,7 +186,7 @@ func TestReconcileReleasesStagedHandoffAcrossDistinctStores(t *testing.T) {
 			t.Fatalf("remove padding %s: %v", padding.ID, err)
 		}
 	}
-	message, _, err := beadmail.New(msgStore).SendHandoff(mail.HandoffIntent{
+	message, _, err := newTestBeadMail(msgStore).SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "context cycle",

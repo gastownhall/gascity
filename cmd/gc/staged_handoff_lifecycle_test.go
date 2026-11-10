@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -84,7 +83,7 @@ func TestRestartableSelfHandoffStagesBeforeRestartRequest(t *testing.T) {
 		t.Fatalf("handoff_staged_message_id = %q, want %q", updated.Metadata[redHandoffStagedMessageIDKey], message.ID)
 	}
 
-	provider := beadmail.New(store)
+	provider := newTestBeadMail(store)
 	if visible, err := provider.Check("worker"); err != nil || len(visible) != 0 {
 		t.Fatalf("Check before successor = (%#v, %v), want no visible handoff", visible, err)
 	}
@@ -134,7 +133,7 @@ func TestFailedSelfHandoffRemainsProvisionalAndAuditable(t *testing.T) {
 			if updated.Metadata[redHandoffStageCommittedAtKey] == "" || updated.Metadata[redHandoffStagedMessageIDKey] != message.ID {
 				t.Fatalf("failed restart lost its durable staged-hand-off audit: %#v", updated.Metadata)
 			}
-			provider := beadmail.New(store)
+			provider := newTestBeadMail(store)
 			if visible, checkErr := provider.Check("worker"); checkErr != nil || len(visible) != 0 {
 				t.Fatalf("Check after restart failure = (%#v, %v), want provisional handoff hidden", visible, checkErr)
 			}
@@ -195,7 +194,7 @@ func TestControllerLossLeavesSelfHandoffProvisional(t *testing.T) {
 	}
 	message := onlyOpenHandoffMessage(t, store)
 	assertHandoffProvisionalRecord(t, message, "origin-instance")
-	mailProvider := beadmail.New(store)
+	mailProvider := newTestBeadMail(store)
 	if visible, err := mailProvider.Check("worker"); err != nil || len(visible) != 0 {
 		t.Fatalf("Check after controller loss = (%#v, %v), want provisional handoff hidden", visible, err)
 	}
@@ -253,7 +252,7 @@ func TestNonRestartingHandoffModesRemainOrdinaryMail(t *testing.T) {
 			if hasString(message.Labels, redHandoffStagedLabel) || message.Metadata[redHandoffStagedMetadataKey] != "" {
 				t.Fatalf("non-restarting handoff was made provisional: labels=%#v metadata=%#v", message.Labels, message.Metadata)
 			}
-			provider := beadmail.New(store)
+			provider := newTestBeadMail(store)
 			visible, err := provider.Check(message.Assignee)
 			if err != nil {
 				t.Fatalf("Check ordinary handoff: %v", err)
@@ -276,7 +275,7 @@ func TestLiveSuccessorReleasesStagedHandoffExactlyOnce(t *testing.T) {
 	assertEventCount(t, recorder.Events, redSessionHandoffSuccessorStartedEvent, 1)
 	assertEventCount(t, recorder.Events, redSessionHandoffReleasedEvent, 1)
 
-	provider := beadmail.New(env.store)
+	provider := newTestBeadMail(env.store)
 	visible, err := provider.CheckAutoHandoffs([]string{"worker"})
 	if err != nil {
 		t.Fatalf("CheckAutoHandoffs after successor: %v", err)
@@ -290,7 +289,7 @@ func TestLiveSuccessorReleasesStagedHandoffExactlyOnce(t *testing.T) {
 
 	// A fresh provider models the successor process starting again; a second
 	// reconcile models retry/replay of the controller observation.
-	provider = beadmail.New(env.store)
+	provider = newTestBeadMail(env.store)
 	refreshedSession, err := env.store.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatalf("get session before replay: %v", err)
@@ -318,7 +317,7 @@ func TestOriginatingIncarnationCannotReleaseStagedHandoff(t *testing.T) {
 		t.Fatalf("get staged handoff: %v", err)
 	}
 	assertHandoffProvisionalRecord(t, staged, "same-instance")
-	provider := beadmail.New(env.store)
+	provider := newTestBeadMail(env.store)
 	if visible, err := provider.CheckAutoHandoffs([]string{"worker"}); err != nil || len(visible) != 0 {
 		t.Fatalf("originating incarnation saw its own handoff = (%#v, %v)", visible, err)
 	}
@@ -346,7 +345,7 @@ func TestStagedHandoffTimeoutNeverReleasesToOriginatingIncarnation(t *testing.T)
 		t.Fatalf("get staged handoff: %v", err)
 	}
 	assertHandoffProvisionalRecord(t, staged, "same-instance")
-	provider := beadmail.New(env.store)
+	provider := newTestBeadMail(env.store)
 	if visible, err := provider.CheckAutoHandoffs([]string{"worker"}); err != nil || len(visible) != 0 {
 		t.Fatalf("CheckAutoHandoffs after timeout = (%#v, %v), want no exposed handoff", visible, err)
 	}
@@ -463,7 +462,7 @@ func newStagedSuccessorReconcileScenario(t *testing.T, originToken, currentToken
 		redHandoffReleaseAttemptedAtKey: "",
 	})
 
-	provider := beadmail.New(env.store)
+	provider := newTestBeadMail(env.store)
 	message, _, err := provider.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",

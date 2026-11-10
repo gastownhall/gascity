@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -70,12 +70,17 @@ func holdControllerLock(t *testing.T, cityDir string) {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock controller lock file: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	})
 }
@@ -220,6 +225,38 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Errorf("status = %d, want Error", r.Status)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs:      []config.Rig{{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Federation: config.RigFederationRig}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigSharingADirectory(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: shared, Prefix: "al"},
+			{Name: "beta", Path: shared, Prefix: "be", Federation: config.RigFederationRig},
+		},
+	}
+	c := NewConfigValidCheck(cfg)
+	// A nil context must not panic.
+	r := c.Run(nil)
+	if r.Status != StatusError || !strings.Contains(r.Message, "needs its own store directory") {
+		t.Errorf("status = %d, msg = %q; want the shared-directory error", r.Status, r.Message)
 	}
 }
 

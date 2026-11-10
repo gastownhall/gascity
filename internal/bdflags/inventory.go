@@ -19,8 +19,9 @@ import (
 
 // The pinned bd command inventories: bd's own cobra command tree — every
 // command, alias and flag, hidden ones included, with each flag's type,
-// default and NoOptDefVal — dumped from the bd source of each build gc bd's
-// split-city allowlist is pinned to (inventorygen/generate.sh). They are the
+// default and NoOptDefVal — and its `create --graph` plan schema, dumped from
+// the bd source of each build gc bd's split-city allowlist is pinned to
+// (inventorygen/generate.sh). They are the
 // ground truth gc resolves a gc bd argv against: it builds a mirror cobra tree
 // from the inventory of the bd it is about to run (InventoryFor) and lets the
 // same cobra and pflag versions bd uses (v1.10.2 / v1.0.10) resolve the command
@@ -79,6 +80,16 @@ type InventoryProvenance struct {
 	CGOEnabled string `json:"cgo_enabled"`
 }
 
+// InventoryGraphPlan is the schema a bd build decodes a `create --graph` plan
+// with: the JSON field names of the plan object and of its node, edge and
+// node-dep objects, each sorted, reflected from bd's own plan types.
+type InventoryGraphPlan struct {
+	Plan []string `json:"plan"`
+	Node []string `json:"node"`
+	Edge []string `json:"edge"`
+	Dep  []string `json:"dep"`
+}
+
 // Inventory is one pinned bd build's command tree.
 type Inventory struct {
 	// Name is the inventory file's base name ("bd-1.3.2"), the id a city
@@ -87,7 +98,9 @@ type Inventory struct {
 	Version    string              `json:"version"`
 	Build      string              `json:"build"`
 	Provenance InventoryProvenance `json:"provenance"`
-	Commands   []InventoryCommand  `json:"commands"`
+	// GraphPlan is the build's `create --graph` plan schema.
+	GraphPlan InventoryGraphPlan `json:"graph_plan"`
+	Commands  []InventoryCommand `json:"commands"`
 
 	byPath map[string]*InventoryCommand
 }

@@ -10,17 +10,17 @@ import (
 )
 
 type deliveryContextService struct {
-	store      beads.Store
+	store      beads.MailStore
 	locks      *bindingLockPool
 	transcript bindingMembershipEnsurer
 }
 
 type deliveryCleaner struct {
-	store beads.Store
+	store beads.MailStore
 	locks *bindingLockPool
 }
 
-func newDeliveryContextService(store beads.Store, locks *bindingLockPool, transcript bindingMembershipEnsurer) DeliveryContextService {
+func newDeliveryContextService(store beads.MailStore, locks *bindingLockPool, transcript bindingMembershipEnsurer) DeliveryContextService {
 	return &deliveryContextService{store: store, locks: locks, transcript: transcript}
 }
 

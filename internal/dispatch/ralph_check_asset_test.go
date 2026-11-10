@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -87,7 +88,8 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 	subject := beads.Bead{ID: "run-asset-resolved", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: searchPaths,
@@ -147,7 +149,8 @@ func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) 
 		},
 	}
 
-	result, err := runRalphCheck(store, check, beads.Bead{ID: "run-from-previous-pin", Type: "task"}, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, beads.Bead{ID: "run-from-previous-pin", Type: "task"}, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(activeEntry, "formulas")},
@@ -219,7 +222,7 @@ needs = ["gate"]
 	}
 
 	store := beads.NewMemStore()
-	cooked, err := molecule.Cook(context.Background(), store, "pin-child", []string{historicalFormulas}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "pin-child", []string{historicalFormulas}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook(pin-child): %v", err)
 	}
@@ -252,7 +255,8 @@ needs = ["gate"]
 	// The pin has moved: only the new cache entry is a current formula layer,
 	// and city/store are unrelated to the check's location, so the historical
 	// provenance on the root is the only thing that can admit the check.
-	result, err := runRalphCheck(store, control, beads.Bead{ID: "run-extends-previous-pin", Type: "task"}, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), control, beads.Bead{ID: "run-extends-previous-pin", Type: "task"}, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(activeEntry, "formulas")},
@@ -324,7 +328,7 @@ func TestRalphCheckHistoricalFormulaRootsRejectsUnboundEvidence(t *testing.T) {
 				beadmeta.FormulaSourceMetadataKey: tt.formulaSource,
 				beadmeta.FormulaHashMetadataKey:   tt.hash,
 			}}
-			if roots := ralphCheckHistoricalFormulaRoots(beads.NewMemStore(), bead, tt.checkPath); len(roots) != 0 {
+			if roots := ralphCheckHistoricalFormulaRoots(beadstest.Graph(beads.NewMemStore()), bead, tt.checkPath); len(roots) != 0 {
 				t.Fatalf("unbound historical evidence received trusted roots: %v", roots)
 			}
 		})
@@ -365,7 +369,8 @@ func TestRunRalphCheckRejectsAssetPathWhenLayerNotTrusted(t *testing.T) {
 	subject := beads.Bead{ID: "run-untrusted", Type: "task"}
 
 	// No FormulaSearchPaths → the pack dir is not a trusted root.
-	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	_, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -469,7 +474,8 @@ path = "../assets/scripts/checks/{target}.sh"
 	}
 	subject := beads.Bead{ID: "run-expanded-templated", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: searchPaths,
@@ -544,7 +550,8 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 	subject := beads.Bead{ID: "run-nonformulas-layer", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: searchPaths,

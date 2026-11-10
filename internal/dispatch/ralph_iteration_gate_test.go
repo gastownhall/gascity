@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // compiledRalphGateFormula is the gastownhall/gascity#2519 shape: a ralph with
@@ -60,7 +61,7 @@ func TestCompiledRalphDoesNotSpawnNextIterationWhileMembersInProgress(t *testing
 			t.Fatalf("claiming %s: %v", id, err)
 		}
 	}
-	if err := updateMetadataAndClose(fx.store, alpha.rawID, workerPass); err != nil {
+	if err := updateMetadataAndClose(beadstest.Graph(fx.store), alpha.rawID, workerPass); err != nil {
 		t.Fatalf("closing %s: %v", alpha.ID, err)
 	}
 
@@ -95,7 +96,7 @@ func TestCompiledRalphGateFixtureSpawnsNextIterationAfterMembersClose(t *testing
 	ledger := snapshotLedger(t, fx.ledger)
 	for _, suffix := range []string{"loop.iteration.1.alpha", "loop.iteration.1.beta", "loop.iteration.1.gamma"} {
 		b := ledgerBeadByRefSuffix(t, ledger, suffix)
-		if err := updateMetadataAndClose(fx.store, b.rawID, workerPass); err != nil {
+		if err := updateMetadataAndClose(beadstest.Graph(fx.store), b.rawID, workerPass); err != nil {
 			t.Fatalf("closing %s: %v", b.ID, err)
 		}
 	}

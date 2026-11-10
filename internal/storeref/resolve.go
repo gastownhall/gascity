@@ -74,7 +74,6 @@ package storeref
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -82,9 +81,10 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
-// Intent is a QUESTION about residency. The six are the census's own pattern
-// classes; the closed interface is what stops a seventh from being answered by
-// a hand-rolled store list somewhere else.
+// Intent is a QUESTION about residency. The first six are the census's own
+// pattern classes, and T7 adds the three federations the tree still rolled by
+// hand (intents.go); the closed interface is what stops another from being
+// answered by a hand-rolled store list somewhere else.
 type Intent interface{ intent() }
 
 // ByID is one bead, read or write-after-read.
@@ -122,11 +122,19 @@ type ByID struct {
 // WorkAxisRouter answers "which work stores can hold this id, in what order"
 // for a plane whose by-id work axis is routed rather than probed.
 //
-// The first leg returned is the plan's RESIDUAL — returned unprobed by
-// ResolveOwner when it is also the last, which is what keeps a single-answer
-// route byte-identical to the caller reading its own store. Any further legs
-// are read in order, so a multi-leg answer proves absence rather than handing
-// back a residual.
+// It answers by ref, and the plan reads each ref's leg from the topology it
+// is planned over: the work leg for WorkRef, the rig leg for a rig ref, a
+// suspended rig's included (the plane routes to it as to any rig). So a
+// router names stores and never hands one over, and a plan's work legs are
+// the epoch's own. A ref the topology holds no store for is a plan error, not
+// a skipped leg: a route that names a store this epoch did not open has
+// nothing to say about where the bead is.
+//
+// The first ref is the plan's RESIDUAL — returned unprobed by ResolveOwner
+// when it is also the last, which is what keeps a single-answer route
+// byte-identical to the caller reading its own store. Any further legs are
+// read in order, so a multi-leg answer proves absence rather than handing back
+// a residual.
 //
 // DECLARING ONE IS A REVIEWED ACT. An implementation replaces this package's
 // by-id work rule with the plane's own, so a second one is a second answer to
@@ -137,9 +145,9 @@ type ByID struct {
 // must land with a cross-plane router-agreement pin. The rule is stated in
 // full beside the pattern in scripts/residency-boundary-patterns.txt.
 type WorkAxisRouter interface {
-	// WorkLegsForID returns the work legs for id, or nil to leave the
-	// resolver's own [work, covering-shadows] rule in place.
-	WorkLegsForID(id string) []Leg
+	// WorkLegsForID returns the refs of the work legs for id, in order, or
+	// nil to leave the resolver's own [work, covering-shadows] rule in place.
+	WorkLegsForID(id string) []StoreRef
 }
 
 // RoutedWork is the claimable/ready federation: `gc ready`, demand tiers.
@@ -196,6 +204,9 @@ func (AssignedWork) intent() {}
 func (Session) intent()      {}
 func (Census) intent()       {}
 func (Class) intent()        {}
+func (Molecule) intent()     {}
+func (OrderRuns) intent()    {}
+func (Workflow) intent()     {}
 
 // Plan resolves an intent over a topology.
 //
@@ -242,6 +253,10 @@ func planFor(i Intent, t Topology) (ResolvedPlan, error) {
 		return planCensus(in, t)
 	case Class:
 		return planClass(in, t)
+	case Molecule, OrderRuns, Workflow:
+		// These decide relocation by handle identity and read their legs from
+		// the minted handles, which a Topology does not carry (OD-T7-5).
+		return ResolvedPlan{}, fmt.Errorf("storeref: %T is planned over a city's Stores (Stores.Plan), not over a Topology", i)
 	default:
 		return ResolvedPlan{}, fmt.Errorf("storeref: unknown residency intent %T", i)
 	}
@@ -281,7 +296,11 @@ func planByID(in ByID, t Topology) (ResolvedPlan, error) {
 		// owns the work axis, and its answer REPLACES the probed tail below
 		// rather than joining it. Consulted only here: inside a namespace the
 		// binding is the authority and the tail is this package's probe list.
-		if routed := routedWorkLegs(in, id); len(routed) > 0 {
+		routed, err := routedWorkLegs(in, id, t)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		if len(routed) > 0 {
 			plan.Legs = append(plan.Legs, routed...)
 			return dedupeLegs(plan), nil
 		}
@@ -444,20 +463,38 @@ func bindingTailLegs(bindings []ClassBinding) []PlanLeg {
 // absence. Every leg is Fatal: a work store that cannot be read has told the
 // resolution nothing, and reporting that as a missing bead is the shape this
 // package exists to prevent.
-func routedWorkLegs(in ByID, id string) []PlanLeg {
+func routedWorkLegs(in ByID, id string, t Topology) ([]PlanLeg, error) {
 	if in.WorkAxis == nil {
-		return nil
+		return nil, nil
 	}
-	legs := in.WorkAxis.WorkLegsForID(id)
-	out := make([]PlanLeg, 0, len(legs))
-	for i, leg := range legs {
+	refs := in.WorkAxis.WorkLegsForID(id)
+	out := make([]PlanLeg, 0, len(refs))
+	for i, ref := range refs {
+		leg, ok := t.workLeg(ref)
+		if !ok {
+			return nil, fmt.Errorf("storeref: the by-id work axis routed %q to %q, which this topology holds no store for", id, legName(ref))
+		}
 		role := RoleShadow
 		if i == 0 {
 			role = RoleWorkFallback
 		}
 		out = append(out, PlanLeg{Leg: leg, Role: role, OnError: PolicyFatal})
 	}
-	return out
+	return out, nil
+}
+
+// workLeg is the work leg ref names on t: the work leg for WorkRef, else the
+// rig leg of that ref, suspended or not. A leg with no store is not one.
+func (t Topology) workLeg(ref StoreRef) (Leg, bool) {
+	if ref == WorkRef {
+		return t.Work, t.Work.Store != nil
+	}
+	for _, leg := range t.Rigs {
+		if leg.Ref == ref && leg.Store != nil {
+			return leg, true
+		}
+	}
+	return Leg{}, false
 }
 
 // shadowLegsCovering returns the work legs whose CONFIGURED prefix also covers
@@ -503,15 +540,20 @@ func dedupeLegs(p ResolvedPlan) ResolvedPlan {
 // whatever stores the caller opened, so the resolver cannot make that
 // assumption about them.
 //
-// An uncomparable store is therefore treated as distinct from everything. That
-// is the safe direction of the two: a duplicated leg is read twice, while a
-// wrongly-dropped one is a leg silently missing from a federated answer, which
-// is the whole failure class this package exists to close.
+// Identity is beads.SameStore: the store below every class layer, so a class
+// handle, a leg or a resident handle is the same leg as the store it wraps,
+// and two handles of different classes over one store are one leg. Stores.Plan
+// plans over minted handles, and == on two handles over one store is false: a
+// single-store city would read its one store once per handle. An
+// uncomparable store is distinct from everything (SameStore answers false),
+// which is the safe direction of the two: a duplicated leg is read twice,
+// while a wrongly-dropped one is a leg silently missing from a federated
+// answer, the whole failure class this package exists to close.
 //
-// Identity is ==, so two DIFFERENT backends behind a value-typed store that
-// happens to compare equal — a zero-size store double, say — read as one leg.
-// Every production store is reference-identified (a pointer, or a wrapper
-// carrying one), which is what makes == the right rule here.
+// Two DIFFERENT backends behind a value-typed store that happens to compare
+// equal — a zero-size store double, say — read as one leg. Every production
+// store is reference-identified (a pointer, or a wrapper carrying one), which
+// is what makes physical identity the right rule here.
 type storeSet struct{ seen []beads.Store }
 
 // addIfNew reports whether store is a leg worth keeping — non-nil, and not one
@@ -520,21 +562,13 @@ func (s *storeSet) addIfNew(store beads.Store) bool {
 	if store == nil {
 		return false
 	}
-	if !comparableStore(store) {
-		return true
-	}
 	for _, have := range s.seen {
-		if comparableStore(have) && have == store {
+		if beads.SameStore(have, store) {
 			return false
 		}
 	}
 	s.seen = append(s.seen, store)
 	return true
-}
-
-func comparableStore(store beads.Store) bool {
-	t := reflect.TypeOf(store)
-	return t != nil && t.Comparable()
 }
 
 // ResolveOwner probes a FirstOwner plan and pins the store that holds id.
@@ -573,8 +607,14 @@ func ResolveOwner(p ResolvedPlan, id string) (beads.Store, StoreRef, error) {
 // Owner is a by-id resolution: the store that holds the bead, and the row
 // itself when a probe already read it.
 type Owner struct {
-	// Store is the store to read and write the bead through.
+	// Store is the store to read and write the bead through. It is the raw
+	// form of Resident, kept until its consumers take the handle (T7h).
 	Store beads.Store
+
+	// Resident is Store as the writable handle on the store that holds the
+	// bead (OD-T7-10): its reads are strict (OD-T7-3), and a write follows the
+	// proven read to the same store. It is zero exactly when Store is nil.
+	Resident beads.ResidentStore
 
 	// Ref names that store for a diagnostic or a persisted census row.
 	Ref StoreRef
@@ -671,65 +711,142 @@ var ErrProvenRelicRefusal = errors.New("a relic proof for this id (the binding h
 // reports whether an owner was pinned; bindingOnly stops the walk at the work
 // axis instead of handing the work leg back unprobed.
 func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, error) {
-	if p.Mode != ModeFirstOwner {
-		// Named for the executor the caller actually called. This is the one
-		// message in the package a shared body can get wrong that way, and a
-		// caller sent to ResolveOwner's contract when it broke
-		// ResolveBindingOwner's reads a doc about a work leg it does not have.
-		executor := "ResolveOwner"
-		if bindingOnly {
-			executor = "ResolveBindingOwner"
-		}
-		return Owner{}, false, fmt.Errorf("storeref: %s needs a %s plan, got %s", executor, ModeFirstOwner, p.Mode)
+	// Named for the executor the caller actually called. This is the one
+	// message in the package a shared body can get wrong that way, and a
+	// caller sent to ResolveOwner's contract when it broke
+	// ResolveBindingOwner's reads a doc about a work leg it does not have.
+	executor := "ResolveOwner"
+	if bindingOnly {
+		executor = "ResolveBindingOwner"
 	}
-	id = strings.TrimSpace(id)
-	if p.ID != "" && p.ID != id {
-		return Owner{}, false, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
+	id, err := checkFirstOwnerPlan(p, id, executor)
+	if err != nil {
+		return Owner{}, false, err
 	}
-	if len(p.Legs) == 0 {
-		return Owner{}, false, errors.New("storeref: plan has no legs")
-	}
+	var unresolved legFailure
 	for i, leg := range p.Legs {
 		if bindingOnly && leg.Role.ownedByCallersWorkAxis() {
 			return Owner{}, false, nil
 		}
 		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
+			return ownerOf(leg.Leg), true, nil
 		}
 		// Each leg is a planned residence probe: missing here is how the walk
-		// moves to the next leg, so the read is marked federated.
-		b, err := beads.FederatedGet(leg.Leg.Store, id)
+		// moves to the next leg, so the read goes through a federated leg (or
+		// a relic one, where the plan declared it).
+		b, err := probeReader(leg).Get(id)
+		if err == nil {
+			owner := ownerOf(leg.Leg)
+			owner.Bead, owner.Read = b, true
+			return owner, true, nil
+		}
+		skip, fail := classifyProbeError(leg, id, err)
 		switch {
-		case err == nil:
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil
-		case errors.Is(err, beads.ErrNotFound):
+		case skip:
 			continue
-		case leg.Role == RoleResidenceProbe && leg.OnError == PolicyFatal && IsStandingRefusal(err):
-			// A residence probe the planner made Fatal: the carve-out below was
-			// withdrawn because this binding is PROVEN to hold ids outside its
-			// reserved namespaces. Say so, or the operator reads a sentence
-			// identical to an in-namespace refusal and looks for a missing bead
-			// rather than for the evidence that denied it.
-			//
-			// The POLICY is the key here, not the role, and this arm is ordered
-			// first so that stays true. planByID is the only producer of a Fatal
-			// residence probe today, so keying on the role alone selects the
-			// same legs — but the sentence this arm attaches is a claim about
-			// the EVIDENCE, and the evidence is what set the policy. Below the
-			// tolerated arm the role key would have been load-bearing for
-			// nothing and unfalsifiable besides; above it, dropping the policy
-			// clause claims every tolerated residence probe and the no-evidence
-			// controls die (ga-e3dvx).
-			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w: %w", id, legName(leg.Leg.Ref), err, ErrProvenRelicRefusal)
-		case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
-			// A refused city still serves WORK, and this leg was only ever a
-			// residence probe for an id no relocated class could own.
+		case leg.OnError == PolicyFatalUnlessResolved:
+			unresolved.remember(leg.Leg.Ref, fail)
 			continue
 		default:
-			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
+			return Owner{Ref: leg.Leg.Ref}, false, fail
 		}
 	}
+	if unresolved.err != nil {
+		return Owner{Ref: unresolved.ref}, false, unresolved.err
+	}
 	return Owner{}, false, nil
+}
+
+// checkFirstOwnerPlan refuses a plan a first-owner executor cannot run: another
+// mode, a by-id plan resolved for a different id, or no legs. It returns the
+// trimmed id.
+func checkFirstOwnerPlan(p ResolvedPlan, id, executor string) (string, error) {
+	if p.Mode != ModeFirstOwner {
+		return "", fmt.Errorf("storeref: %s needs a %s plan, got %s", executor, ModeFirstOwner, p.Mode)
+	}
+	id = strings.TrimSpace(id)
+	if p.ID != "" && p.ID != id {
+		return "", fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
+	}
+	if len(p.Legs) == 0 {
+		return "", errors.New("storeref: plan has no legs")
+	}
+	unresolved, workAxis := false, false
+	for _, leg := range p.Legs {
+		unresolved = unresolved || leg.OnError == PolicyFatalUnlessResolved
+		workAxis = workAxis || leg.Role.ownedByCallersWorkAxis()
+	}
+	if unresolved && workAxis {
+		// The work axis's residual is handed back unprobed and its shadows
+		// prove absence; a remembered error behind them has nothing to win or
+		// lose against, so the combination is a plan no planner makes.
+		return "", fmt.Errorf("storeref: %s cannot run a plan that mixes %s legs with a by-id work axis", executor, PolicyFatalUnlessResolved)
+	}
+	return id, nil
+}
+
+// ownerOf is the owner a leg names: its store, raw and as a resident handle.
+func ownerOf(leg Leg) Owner {
+	owner := Owner{Store: leg.Store, Ref: leg.Ref}
+	if leg.Store != nil {
+		owner.Resident = beads.MintResident(leg.Store, string(leg.Ref))
+	}
+	return owner
+}
+
+// legFailure is the first hard error a PolicyFatalUnlessResolved walk passed.
+type legFailure struct {
+	ref StoreRef
+	err error
+}
+
+func (f *legFailure) remember(ref StoreRef, err error) {
+	if f.err == nil {
+		f.ref, f.err = ref, err
+	}
+}
+
+// classifyProbeError reads a failed probe of id on leg: skip reports a miss the
+// walk moves past (not found, or a tolerated standing refusal); otherwise fail
+// is the error naming the leg.
+func classifyProbeError(leg PlanLeg, id string, err error) (skip bool, fail error) {
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return true, nil
+	case leg.Role == RoleResidenceProbe && leg.OnError == PolicyFatal && IsStandingRefusal(err):
+		// A residence probe the planner made Fatal: the carve-out below was
+		// withdrawn because this binding is PROVEN to hold ids outside its
+		// reserved namespaces. Say so, or the operator reads a sentence
+		// identical to an in-namespace refusal and looks for a missing bead
+		// rather than for the evidence that denied it.
+		//
+		// The POLICY is the key here, not the role, and this arm is ordered
+		// first so that stays true. planByID is the only producer of a Fatal
+		// residence probe today, so keying on the role alone selects the
+		// same legs — but the sentence this arm attaches is a claim about
+		// the EVIDENCE, and the evidence is what set the policy. Below the
+		// tolerated arm the role key would have been load-bearing for
+		// nothing and unfalsifiable besides; above it, dropping the policy
+		// clause claims every tolerated residence probe and the no-evidence
+		// controls die (ga-e3dvx).
+		return false, fmt.Errorf("reading %q from %s: %w: %w", id, legName(leg.Leg.Ref), err, ErrProvenRelicRefusal)
+	case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
+		// A refused city still serves WORK, and this leg was only ever a
+		// residence probe for an id no relocated class could own.
+		return true, nil
+	default:
+		return false, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
+	}
+}
+
+// probeReader is the reader a first-owner walk probes leg through: a relic leg
+// where the plan declared one, else a federated leg, whose miss the next leg
+// covers.
+func probeReader(leg PlanLeg) beads.FederatedReader {
+	if leg.Gate == beads.RelicLegRole {
+		return beads.MintRelicLeg(leg.Leg.Store, string(leg.Leg.Ref))
+	}
+	return beads.MintFederatedLeg(leg.Leg.Store, string(leg.Leg.Ref))
 }
 
 // ResolvePlacement is the ModeSingleOwner executor: the one store a
@@ -792,34 +909,7 @@ type UnionResult[T any] struct {
 // city is down" are the same message, and the caller loses a diagnosis it had
 // already paid for (internal/api's graphPlaneUnavailable carries exactly these).
 func Union[T any](p ResolvedPlan, id func(T) string, fn func(Leg) ([]T, error)) (UnionResult[T], error) {
-	var out UnionResult[T]
-	seen := make(map[string]bool)
-	walked, err := Walk(p, func(leg Leg) (bool, error) {
-		items, ferr := fn(leg)
-		if ferr != nil {
-			return false, ferr
-		}
-		for _, item := range items {
-			if id != nil {
-				if key := id(item); key != "" {
-					if seen[key] {
-						continue
-					}
-					seen[key] = true
-				}
-			}
-			out.Items = append(out.Items, item)
-		}
-		return false, nil
-	})
-	out.Partial = walked.Partial
-	out.LegErrors = walked.LegErrors
-	if err != nil {
-		out.Items = nil
-		out.Partial = true
-		return out, err
-	}
-	return out, nil
+	return unionPlan(p, id, func(l PlanLeg) ([]T, error) { return fn(l.Leg) })
 }
 
 // EachLeg visits every leg of a plan in order, with the reason it is there and
@@ -875,35 +965,8 @@ type WalkResult struct {
 // Union is implemented on top of this, so the two executors cannot disagree
 // about what a leg failure means.
 func Walk(p ResolvedPlan, visit func(Leg) (stop bool, err error)) (WalkResult, error) {
-	var out WalkResult
-	if p.Mode != ModeUnion {
-		return out, fmt.Errorf("storeref: Walk needs a %s plan, got %s", ModeUnion, p.Mode)
-	}
-	for _, leg := range p.Legs {
-		out.Visited++
-		stop, err := visit(leg.Leg)
-		if err != nil {
-			if leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err) {
-				// A refused city still serves WORK, and a leg carrying this
-				// policy was only ever consulted in case the binding held the
-				// answer. The city is refused, not degraded.
-				continue
-			}
-			if leg.OnError != PolicyPartialDegrade {
-				out.Partial = true
-				return out, fmt.Errorf("reading %s: %w", legName(leg.Leg.Ref), err)
-			}
-			out.Partial = true
-			out.LegErrors = append(out.LegErrors, LegError{Ref: leg.Leg.Ref, Err: err})
-			continue
-		}
-		if stop {
-			out.Stopped = true
-			out.StoppedAt = leg.Leg.Ref
-			return out, nil
-		}
-	}
-	return out, nil
+	out, _, err := walkPlan(p, func(l PlanLeg) (bool, error) { return visit(l.Leg) })
+	return out, err
 }
 
 // legName renders a ref for an error message, where an empty string would read
