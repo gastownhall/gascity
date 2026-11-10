@@ -9,6 +9,7 @@ import (
 	beadslib "github.com/steveyegge/beads"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // bdEnvPrefix is the namespace bd's own CLI configures itself from. It is not
@@ -75,7 +76,8 @@ var proxiedNativeOpenEnvKeys = append(append([]string(nil), nativeDoltOpenEnvKey
 // OpenNativeDoltStoreAtProxied opens a native Dolt-backed store against a
 // database served by bd's proxy, through a hermetic environment window.
 //
-// The window is one indivisible transition under nativeDoltOpenEnvMu:
+// The window is one indivisible transition inside the process environment
+// projection window (execenv.EnterProjectionWindow):
 //
 //  1. withhold the whole BEADS_ and BD_ namespaces, so nothing the ambient
 //     shell carries can re-point the open or unlock a migration;
@@ -85,10 +87,12 @@ var proxiedNativeOpenEnvKeys = append(append([]string(nil), nativeDoltOpenEnvKey
 //  3. open, read the issue prefix while the env still stands;
 //  4. restore both, in reverse.
 //
-// Holding nativeDoltOpenEnvMu across all four is what makes the process
+// Holding the projection window across all four is what makes the process
 // environment look atomic to ProcessEnvSnapshotExcludingNativeDoltOpen and to
-// AmbientNativeDoltOpenEnv: a concurrent scope open or a bd-child env build
-// blocks rather than reading this window's transient values.
+// AmbientNativeDoltOpenEnv: a concurrent bd-child env build or ambient read
+// answers from the environment the window found rather than reading this
+// window's transient values, and a concurrent scope open waits for the window
+// until its own context ends.
 //
 // It does NOT decide whether the scope may be served natively. That is
 // admission's job, which runs first and produces the pin this env is built
@@ -141,8 +145,11 @@ func OpenNativeStorageAtProxied(ctx context.Context, scopeRoot string, env map[s
 }
 
 func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
+	exit, err := execenv.EnterProjectionWindow(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("entering proxied native Dolt open window: %w", err)
+	}
+	defer exit()
 
 	restoreNamespaces, err := withWithheldPrefixesLocked(beadsEnvPrefix, bdEnvPrefix)
 	if err != nil {

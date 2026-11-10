@@ -49,7 +49,7 @@ import (
 //
 // A re-pin needs a fresh library handle against the new generation's port, and
 // opening one means the hermetic env window: a process-global environment
-// mutation under nativeDoltOpenEnvMu. While the native leaf is still serving the
+// mutation inside the execenv projection window. While the native leaf is still serving the
 // tick deliberately does NOT perform it. It re-runs ADMISSION (file reads plus
 // one probe session — no library, no fork) and then marks the native handle's
 // pool stale, so the next READ reconnects through the injected reopen hook on
@@ -581,8 +581,9 @@ func cursorDriftAgainst(pinned, observed proxyendpoint.Cursors) (lane, dir strin
 // There is no reader to hand the work to — every read is on the bd leaf, and
 // the native reopen hook is unreachable — so the choice is not "which
 // goroutine" but "recovery or none". The window is still the hermetic one
-// under nativeDoltOpenEnvMu, so a concurrent scope open or bd-child env build
-// blocks on it rather than reading a transient value.
+// inside the projection window, so a concurrent bd-child env build reads the
+// environment the window found rather than a transient value, and a concurrent
+// scope open waits for the window until its own context ends.
 //
 // It spends NO provider verb. The reopener admission runs with nil Ops, so the
 // tick's "never forks bd" invariant survives: a recovery that needs bd to make

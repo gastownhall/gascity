@@ -161,9 +161,9 @@ type nativeJournalActivationSet struct {
 	handles map[beadslib.Storage]*nativeJournalActivation
 	// now is the clock the recheck interval is measured on.
 	now func() time.Time
-	// resolve re-resolves a scope's activation; nil resolves it as bd does
-	// whenever no open holds the environment (resolveScope). A test swaps it
-	// to land a close or a re-record in a resolution.
+	// resolve re-resolves a scope's activation; nil resolves it as bd does,
+	// from the ambient environment. A test swaps it to land a close or a
+	// re-record in a resolution.
 	resolve func(beadsDir string) bool
 }
 
@@ -195,11 +195,10 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage, beadsDir s
 // interval. A handle that closes, or is recorded anew, while its scope
 // resolves reports false.
 //
-// Its callers hold the store's read lock, so the re-resolution never waits
-// for nativeDoltOpenEnvMu: an open elsewhere in the process holds that for its
-// whole window, and the store's close, and every reader queued behind that
-// close, would wait as long. While an open holds it, active keeps the last
-// answer and leaves checkedAt alone, so the next question resolves again.
+// Its callers hold the store's read lock, and the re-resolution reads the
+// ambient environment without waiting for any open's projection window, so the
+// store's close, and every reader queued behind that close, never wait on an
+// open elsewhere in the process.
 func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	if !nativeStorageComparable(storage) {
 		return false
@@ -220,7 +219,7 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	beadsDir := entry.beadsDir
 	a.mu.Unlock()
 
-	enabled, resolved := a.resolveScope(beadsDir)
+	enabled := a.resolveScope(beadsDir)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sweepLocked()
@@ -229,20 +228,16 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 		// the answer is about a handle that is gone.
 		return false
 	}
-	if !resolved {
-		return entry.enabled
-	}
 	entry.enabled, entry.checkedAt = enabled, now
 	return enabled
 }
 
-// resolveScope re-resolves beadsDir's activation, reporting resolved false
-// when an open holds the environment it reads.
-func (a *nativeJournalActivationSet) resolveScope(beadsDir string) (enabled, resolved bool) {
+// resolveScope re-resolves beadsDir's activation.
+func (a *nativeJournalActivationSet) resolveScope(beadsDir string) bool {
 	if a.resolve != nil {
-		return a.resolve(beadsDir), true
+		return a.resolve(beadsDir)
 	}
-	return tryAmbientEventsJournalEnabledFor(beadsDir)
+	return ambientEventsJournalEnabledFor(beadsDir)
 }
 
 func (a *nativeJournalActivationSet) clock() time.Time {
