@@ -360,3 +360,64 @@ func TestRelicCloseUnderAnUnboundRigAutoclosesItsRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestRouteRowCloseBesideARelicAutoclosesTheWorkMolecule (round 3): a work
+// bead reuses a proven relic's id, and it is the WORK row that closes while
+// the relic stays open. The close is confirmed on its prefix route, so the
+// event path (or the sweep) computes that route and the work molecule
+// autocloses there and then: on the event path the close is settled by the
+// event's own run, under its actor, and owes the sweep nothing. Without the
+// route the plan is the relic alone, whose open row refutes the close.
+func TestRouteRowCloseBesideARelicAutoclosesTheWorkMolecule(t *testing.T) {
+	syncAutoclose(t)
+	for _, path := range []string{"event", "sweep"} {
+		t.Run(path, func(t *testing.T) {
+			f := newRelicEventFixture(t, false)
+			work := f.cs.cityBeadStore
+			creator, ok := work.(beads.ForeignIDCreator)
+			if !ok {
+				t.Fatalf("work leaf %T cannot pin an id", work)
+			}
+			hq := config.EffectiveHQPrefix(f.cs.cfg)
+			root, err := creator.CreateWithForeignID(beads.Bead{ID: hq + "-960", Title: "work molecule", Type: "molecule"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A v1 poured molecule's step: work class (no gc.root_bead_id),
+			// found through its legacy parent beside it.
+			if _, err := creator.CreateWithForeignID(beads.Bead{ID: f.openID, Title: "Step 1", Type: "step", ParentID: root.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if err := work.Close(f.openID); err != nil {
+				t.Fatal(err)
+			}
+			stores := f.cs.beadEventStores(f.openID)
+			if !storesInclude(stores, f.binding) {
+				t.Fatalf("precondition: %s is not a proven relic (event stores %d)", f.openID, len(stores))
+			}
+			switch path {
+			case "event":
+				payload, err := json.Marshal(beads.Bead{ID: f.openID, Title: "Step 1", Type: "step", Status: "closed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "agent", Subject: f.openID, Payload: payload})
+				sweep := f.cs.autocloseSweepOf()
+				if !sweep.hasRan(f.openID) || sweep.isPending(f.openID) {
+					t.Errorf("the event's own run did not settle %s (ran=%v pending=%v): the close was left to the sweep", f.openID, sweep.hasRan(f.openID), sweep.isPending(f.openID))
+				}
+			case "sweep":
+				f.cs.autocloseSweepOf().deferID(f.openID, sweepTestClock(0))
+				if got := f.cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 1 || got.Refuted != 0 {
+					t.Fatalf("sweep pass = %+v, want the work row's close confirmed and its autoclose run", got)
+				}
+			}
+			if got, err := work.Get(root.ID); err != nil || got.Status != "closed" {
+				t.Fatalf("work molecule %s = %q (%v) after its only step closed beside an open relic, want closed", root.ID, got.Status, err)
+			}
+			if got, _ := f.binding.Get(f.openID); got.Status == "closed" {
+				t.Fatalf("the open relic %s was closed", f.openID)
+			}
+		})
+	}
+}

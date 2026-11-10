@@ -1105,7 +1105,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	var route []storeref.StoreRef
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
-		if probe.routes == nil {
+		if probe.routes != nil {
 			// Only a relic's close confirmation reads the route by ref.
 			route = cs.beadEventRouteLocked(id)
 		}
