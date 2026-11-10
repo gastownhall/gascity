@@ -35,13 +35,15 @@ const (
 	// callers attribute them to the last store.
 	MoleculeAttachment
 
-	// MoleculeRoots enumerates molecule roots for the wisp GC. On a city that
-	// relocates the graph class (by handle identity) it is the graph placement
-	// (Authority, Fatal), then every serving work leg, the city's and each
-	// rig's ascending (RoleV1, PartialDegrade), where v1 poured roots and the
-	// attachment holders live. On a city that relocates nothing it is the
-	// graph placement alone: the GC reads no work leg there
-	// (cmd/gc/city_runtime.go tickWispGC, wisp_gc_work_lane.go).
+	// MoleculeRoots enumerates molecule roots for the wisp GC: the graph
+	// placement at Scope (Authority, Fatal), then the leg each of Work names,
+	// in Work's order (RoleV1, PartialDegrade), where v1 poured roots and the
+	// attachment holders live. The work legs are the caller's census, by ref,
+	// not the epoch's: the GC reads the legs every seat-work question reads
+	// (cmd/gc's WorkLegs), and only when the routes relocate graph, so with
+	// no refs it is the graph placement alone (tickWispGC,
+	// wisp_gc_work_lane.go). A ref names a leg whatever its suspension: the
+	// census decides which rigs serve.
 	MoleculeRoots
 
 	// MoleculeActive is the step reminder's molecule readers for one agent:
@@ -85,6 +87,90 @@ type Molecule struct {
 	// Near is no leg. Roots reads no Near.
 	Near    beads.Store
 	NearRef StoreRef
+
+	// Work is MoleculeRoots' work legs, by ref (WorkRef, a rig ref, a binding
+	// ref), in order. A ref this epoch holds no store for is a plan error.
+	Work []StoreRef
+}
+
+// ConvoyKind is which convoy federation a Convoy intent plans. Each kind is
+// one hand-rolled federation cmd/gc's convoy autoclose and wisp autoclose
+// read today, with its legs, order and gate roles pinned here (t7g-design.md
+// §4).
+type ConvoyKind int
+
+const (
+	// ConvoyParent finds a row's legacy parent (a work convoy): Near, the
+	// row's own store, then the work home ID's prefix names (the open rig
+	// whose configured prefix is the longest that ID carries, suspended or
+	// not, else the city work store). The home is planned only when Near is
+	// no work store of the epoch (a work store's rows keep their parent
+	// beside them) and ID is in no reserved class namespace (a binding-minted
+	// parent has no work-ledger home). First owner; only a not-found moves the
+	// walk on; both legs federated (cmd/gc doConvoyAutocloseWith).
+	ConvoyParent ConvoyKind = iota
+
+	// ConvoyTracking lists the tracking convoys of an item: Near, the item's
+	// own store, read strict (the work class's own read), then the graph
+	// placement at Scope, federated, for a convoy minted single-store-era on
+	// the graph side. A union; any leg's failure fails the whole read, which
+	// the reader takes as "decline" (cmd/gc collectInputConvoyWorkflowRoots).
+	ConvoyTracking
+
+	// ConvoyChildren lists a convoy's legacy children: Near, the convoy's own
+	// store, then Elsewhere, the store its children may also sit in, when it
+	// is another store. Near is strict alone and federated when paired; a
+	// union walked lazily (the reader stops at the first open child), every
+	// leg Fatal (cmd/gc closeCompletedConvoyAcross).
+	ConvoyChildren
+)
+
+// String renders the kind.
+func (k ConvoyKind) String() string {
+	switch k {
+	case ConvoyParent:
+		return "Parent"
+	case ConvoyTracking:
+		return "Tracking"
+	case ConvoyChildren:
+		return "Children"
+	default:
+		return "ConvoyKind(?)"
+	}
+}
+
+// Convoy is a convoy's federation: where its parent, its tracking convoys or
+// its children may live. Near is the caller's store value as it holds it
+// today (the closed row's, the item's, the convoy's); the shape is the kind's.
+type Convoy struct {
+	Kind ConvoyKind
+
+	// Scope is the scope whose graph placement ConvoyTracking reads.
+	Scope StoreRef
+
+	// ID is the parent ConvoyParent looks for; its plan is id-specific.
+	ID string
+
+	Near    beads.Store
+	NearRef StoreRef
+
+	// Elsewhere is ConvoyChildren's second store, nil for none.
+	Elsewhere beads.Store
+}
+
+// CloseOwner is the store a close event's row is confirmed in (R4): the
+// event's route, the refs of the stores its id routes to (the prefix route's
+// one store, or the unconfigured fallback's every rig then the city), then
+// Relic, the binding the residence probe proved holds the id, unless the
+// route already holds it. First owner, every leg Fatal and federated: the
+// reader (ResolveOwnerPreferring) takes the first row that reads closed, and
+// any failed read before one leaves the close unconfirmed. Route refs name a
+// rig whatever its suspension (the event routed there); a ref this epoch
+// holds no store for is a plan error.
+type CloseOwner struct {
+	ID    string
+	Route []StoreRef
+	Relic StoreRef
 }
 
 // OrderRuns is an order's run evidence, as the order dispatcher's open-work
@@ -154,3 +240,6 @@ const (
 	// WorkflowSkipsSuspendedRigs leaves a suspended rig unread.
 	WorkflowSkipsSuspendedRigs
 )
+
+func (Convoy) intent()     {}
+func (CloseOwner) intent() {}

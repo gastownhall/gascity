@@ -21,7 +21,9 @@ package storeref
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -189,7 +191,8 @@ func (s Stores) Holds(ref StoreRef) []coordclass.Class {
 	return holds
 }
 
-// Plan plans a T7 federation intent (Molecule, OrderRuns, Workflow) over the
+// Plan plans a T7 federation intent (Molecule, OrderRuns, Workflow, Convoy,
+// CloseOwner) over the
 // epoch's minted handles, deciding relocation by handle identity (OD-T7-5).
 // Every other intent is the plane's topology question and is refused here: a
 // plane plans it with Plan over its own topology.
@@ -209,6 +212,10 @@ func (s Stores) Plan(i Intent) (ResolvedPlan, error) {
 		plan, err = s.planOrderRuns(in)
 	case Workflow:
 		plan, err = s.planWorkflow(in)
+	case Convoy:
+		plan, err = s.planConvoy(in)
+	case CloseOwner:
+		plan, err = s.planCloseOwner(in)
 	default:
 		return ResolvedPlan{}, fmt.Errorf("storeref: %T is the plane's topology question; plan it with Plan over the plane's topology, not Stores.Plan", i)
 	}
@@ -320,12 +327,12 @@ func (s Stores) planMolecule(in Molecule) (ResolvedPlan, error) {
 		return plan, nil
 	case MoleculeRoots:
 		plan := ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{s.leg(coordclass.ClassGraph, graph, in.Scope, RoleAuthority, PolicyFatal)}}
-		if !s.relocated() {
-			return plan, nil
-		}
-		plan.Legs = append(plan.Legs, s.leg(coordclass.ClassWork, s.city.Work.Raw(), WorkRef, RoleV1, PolicyPartialDegrade))
-		for _, r := range s.topo.orderedRigs() {
-			plan.Legs = append(plan.Legs, s.leg(coordclass.ClassWork, r.Store, r.Ref, RoleV1, PolicyPartialDegrade))
+		for _, ref := range in.Work {
+			store, err := s.storeByRef(ref)
+			if err != nil {
+				return ResolvedPlan{}, fmt.Errorf("storeref: Molecule(Roots) work leg: %w", err)
+			}
+			plan.Legs = append(plan.Legs, PlanLeg{Leg: Leg{Ref: ref, Store: store}, Role: RoleV1, OnError: PolicyPartialDegrade, Gate: beads.FederatedLegRole})
 		}
 		return plan, nil
 	case MoleculeActive:
@@ -413,6 +420,155 @@ func (s Stores) planWorkflow(in Workflow) (ResolvedPlan, error) {
 	}
 	for _, r := range rigs {
 		scope(r, r.RelicFree, in.IncludeRetiredRigs)
+	}
+	return plan, nil
+}
+
+// storeByRef is the store ref names in this epoch: the city work store for
+// WorkRef, a rig's work store for its ref (suspended or not: the caller named
+// it), a binding's store for its ref. Any other ref is an error.
+func (s Stores) storeByRef(ref StoreRef) (beads.Store, error) {
+	if ref == WorkRef {
+		return s.city.Work.Raw(), nil
+	}
+	if r, ok := s.rigFrame(ref); ok {
+		return r.work.Raw(), nil
+	}
+	for _, b := range s.topo.Bindings {
+		if b.Leg.Ref == ref {
+			return b.Leg.Store, nil
+		}
+	}
+	return nil, fmt.Errorf("storeref: this epoch holds no store for %q", legName(ref))
+}
+
+// refOf names store in this epoch: its binding's ref, the city work ref, a
+// rig's ref, or fallback when it is none of them.
+func (s Stores) refOf(store beads.Store, fallback StoreRef) StoreRef {
+	if b, ok := bindingOver(s.topo, store); ok {
+		return b.Leg.Ref
+	}
+	if beads.SameStore(store, s.city.Work.Raw()) {
+		return WorkRef
+	}
+	for _, r := range s.rigs {
+		if beads.SameStore(store, r.work.Raw()) {
+			return r.ref
+		}
+	}
+	return fallback
+}
+
+// isWorkStore reports whether store is the city's or a rig's work store in
+// this epoch, by physical identity.
+func (s Stores) isWorkStore(store beads.Store) bool {
+	if beads.SameStore(store, s.city.Work.Raw()) {
+		return true
+	}
+	for _, r := range s.rigs {
+		if beads.SameStore(store, r.work.Raw()) {
+			return true
+		}
+	}
+	return false
+}
+
+// workHome is the work store id's prefix names: the opened rig (suspended or
+// not) whose configured prefix is the longest id carries, else the city work
+// store.
+func (s Stores) workHome(id string) Leg {
+	home := Leg{Ref: WorkRef, Store: s.city.Work.Raw()}
+	best := -1
+	for _, leg := range s.topo.Rigs {
+		r, ok := s.rigFrame(leg.Ref)
+		if !ok || leg.Prefix == "" || !strings.HasPrefix(id, leg.Prefix+"-") || len(leg.Prefix) <= best {
+			continue
+		}
+		best = len(leg.Prefix)
+		home = Leg{Ref: r.ref, Store: r.work.Raw()}
+	}
+	return home
+}
+
+// classReservedID reports whether id is in any reserved class namespace, the
+// binding-minted ids, relocated or not (cmd/gc bdIDIsClassReserved's rule).
+func classReservedID(id string) bool {
+	for _, prefix := range beadmeta.AllReservedClassPrefixes() {
+		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// planConvoy pins each convoy kind's legs (intents.go).
+func (s Stores) planConvoy(in Convoy) (ResolvedPlan, error) {
+	if beads.IsNilStore(in.Near) {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a Convoy(%s) plan needs its Near store", in.Kind)
+	}
+	near := PlanLeg{Leg: Leg{Ref: in.NearRef, Store: in.Near}, Role: RoleNear, OnError: PolicyFatal, Gate: beads.FederatedLegRole}
+	switch in.Kind {
+	case ConvoyParent:
+		id := strings.TrimSpace(in.ID)
+		if id == "" {
+			return ResolvedPlan{}, fmt.Errorf("storeref: a Convoy(%s) plan needs the parent's id", in.Kind)
+		}
+		plan := ResolvedPlan{Mode: ModeFirstOwner, ID: id, Legs: []PlanLeg{near}}
+		if !s.isWorkStore(in.Near) && !classReservedID(id) {
+			plan.Legs = append(plan.Legs, PlanLeg{Leg: s.workHome(id), Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole})
+		}
+		return plan, nil
+	case ConvoyTracking:
+		graph, err := s.graphAt(in.Scope)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		near.Gate = beads.NoLegRole
+		plan := ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{near}}
+		if !beads.SameStore(graph, in.Near) {
+			plan.Legs = append(plan.Legs, s.leg(coordclass.ClassGraph, graph, in.Scope, RoleFederationTail, PolicyFatal))
+		}
+		return plan, nil
+	case ConvoyChildren:
+		if beads.IsNilStore(in.Elsewhere) || beads.SameStore(in.Elsewhere, in.Near) {
+			near.Gate = beads.NoLegRole
+			return ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{near}}, nil
+		}
+		elsewhere := PlanLeg{Leg: Leg{Ref: s.refOf(in.Elsewhere, "elsewhere"), Store: in.Elsewhere}, Role: RoleFederationTail, OnError: PolicyFatal, Gate: beads.FederatedLegRole}
+		return ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{near, elsewhere}}, nil
+	default:
+		return ResolvedPlan{}, fmt.Errorf("storeref: unknown convoy kind %d", in.Kind)
+	}
+}
+
+// planCloseOwner is the route's legs, then the relic's (intents.go
+// CloseOwner).
+func (s Stores) planCloseOwner(in CloseOwner) (ResolvedPlan, error) {
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan needs the event's bead id")
+	}
+	if len(in.Route) == 0 {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan for %q needs the event's route", id)
+	}
+	plan := ResolvedPlan{Mode: ModeFirstOwner, ID: id}
+	add := func(ref StoreRef, role Role) error {
+		store, err := s.storeByRef(ref)
+		if err != nil {
+			return fmt.Errorf("storeref: CloseOwner(%q): %w", id, err)
+		}
+		plan.Legs = append(plan.Legs, PlanLeg{Leg: Leg{Ref: ref, Store: store}, Role: role, OnError: PolicyFatal, Gate: beads.FederatedLegRole})
+		return nil
+	}
+	for _, ref := range in.Route {
+		if err := add(ref, RoleAuthority); err != nil {
+			return ResolvedPlan{}, err
+		}
+	}
+	if in.Relic != "" {
+		if err := add(in.Relic, RoleFederationTail); err != nil {
+			return ResolvedPlan{}, err
+		}
 	}
 	return plan, nil
 }
