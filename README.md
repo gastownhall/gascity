@@ -108,7 +108,7 @@ directory's name) in place of `hello-world`.
 `gc sling` prints a `Dashboard:` link to the formula run, for example:
 
 ```text
-Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
+Dashboard: http://127.0.0.1:8372/city/my-city/runs/gcg-1025
 ```
 
 That line is the result of getting Gas City running: if you are an agent
@@ -122,7 +122,7 @@ to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
 minute or two, and `hello.sh` is committed in `~/hello-world`:
 
 ```bash
-gc bd show hw-4up
+gc bd show gcg-1025
 ```
 
 **Next:** work through the seven numbered

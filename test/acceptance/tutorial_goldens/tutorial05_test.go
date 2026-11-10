@@ -3,7 +3,6 @@
 package tutorialgoldens
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,8 +113,6 @@ id = "attempt"
 title = "Try to deploy"
 `, 0o644)
 
-	var pancakesRootID string
-
 	t.Run("cat > formulas/pancakes.toml << 'EOF'", func(t *testing.T) {
 		cmd := tutorialPancakesFormulaShellCommand(t)
 		if out, err := ws.runShell(cmd, ""); err != nil {
@@ -179,8 +176,6 @@ EOF`
 	})
 
 	t.Run("gc formula cook pancakes", func(t *testing.T) {
-		// The page cooks in the city scope: gc sling refuses cross-store
-		// routes, so the city-scoped worker can only take a city-cooked root.
 		ws.setCWD(myCity)
 		out, err := ws.runShell("gc formula cook pancakes", "")
 		if err != nil {
@@ -189,6 +184,7 @@ EOF`
 		// Parse the "Root: <id>" line rather than the first bead-shaped
 		// token: store WARN lines mention paths like .../my-city, which
 		// the loose bead-ID pattern also matches.
+		var pancakesRootID string
 		for _, line := range strings.Split(out, "\n") {
 			if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Root: "); ok {
 				pancakesRootID = strings.TrimSpace(rest)
@@ -198,18 +194,13 @@ EOF`
 		if pancakesRootID == "" {
 			t.Fatalf("could not parse pancakes root id:\n%s", out)
 		}
-	})
-
-	t.Run("gc sling worker mc-79s", func(t *testing.T) {
-		if pancakesRootID == "" {
-			t.Fatal("missing pancakes root id")
+		// The page's city is born split, so the workflow lives in the
+		// infrastructure store, whose ids start gcg-.
+		if !strings.HasPrefix(pancakesRootID, "gcg-") {
+			t.Fatalf("cooked root %s is not an infrastructure-store id (gcg-); the page says a workflow's beads live there:\n%s", pancakesRootID, out)
 		}
-		out, err := ws.runShell(fmt.Sprintf("gc sling worker %s", pancakesRootID), "")
-		if err != nil {
-			t.Fatalf("gc sling worker %s: %v\n%s", pancakesRootID, err, out)
-		}
-		if !strings.Contains(out, "Slung") {
-			t.Fatalf("gc sling worker output mismatch:\n%s", out)
+		if !strings.Contains(out, "Created: 7") {
+			t.Fatalf("tutorial contract: cooking pancakes creates 7 beads (root, five steps, finalize):\n%s", out)
 		}
 	})
 

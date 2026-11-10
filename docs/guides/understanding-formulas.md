@@ -101,11 +101,13 @@ follows from the contract).
 Three verbs create formula instances:
 
 - **Cook creates without routing.** `gc formula cook <name>` compiles the
-  formula, writes its beads into the current scope's store, and stops.
-  Nothing wakes up. Cook to inspect the beads first, route the work
-  yourself, or graft a sub-DAG onto existing work with `--attach <bead-id>`.
-  `--attach` is limited on a **split city** — one that serves the graph
-  class from its own `[storage]` binding. See
+  formula, writes its beads, and stops. Nothing wakes up. Cook to inspect
+  the beads first, route the work yourself, or graft a sub-DAG onto existing
+  work with `--attach <bead-id>`. On a **split city** — one that serves the
+  graph class from its own `[storage]` binding, as every city `gc init`
+  creates does — a v2 workflow's beads live in that binding, and `gc sling`
+  does not route them by hand: launch the formula with `--formula` instead.
+  `--attach` is limited there too. See
   [Grafting on a split city](#grafting-on-a-split-city).
 - **Sling creates and routes.** `gc sling <target> <name> --formula` cooks
   and routes in one motion: a v2 formula starts a workflow, a v1 formula
@@ -782,7 +784,7 @@ The two frameworks above compose. Find your situation, read across:
 |---|---|---|---|
 | Ordered steps worked by one agent | v1 or v2 | `gc sling --formula` | v1 run (a *molecule*) or v2 workflow |
 | Steps spread across agents or pools | v2 | `gc sling --formula` | workflow |
-| Inspect or route the beads yourself | either | `gc formula cook` | unrouted run (v1) or workflow (v2) |
+| Inspect the beads before anything runs | either | `gc formula cook` | unrouted run (v1) or workflow (v2) |
 | A sub-DAG grafted onto existing work | either | `gc formula cook --attach` | steps blocking the given bead (see [Grafting on a split city](#grafting-on-a-split-city)) |
 | One run per convoy member | v2 | `gc sling --on` (targeted) | workflow with drain units |
 | Verified or hardened steps | v2 | any | workflow with check or retry controls |

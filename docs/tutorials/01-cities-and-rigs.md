@@ -332,7 +332,7 @@ $ cd ~/my-project
 ~/my-project
 $ gc sling my-project/claude "Write hello world in python to the file hello.py"
 Created mp-ff9 — "Write hello world in python to the file hello.py"
-Attached workflow mp-6yh (formula "mol-do-work") to mp-ff9
+Attached workflow gcg-1025 (formula "mol-do-work") to mp-ff9
 ```
 
 One command set the whole loop in motion: sling created a work bead, attached

@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     city prefix.
   - Raw `bd` shows only the work ledger. Use `gc session list`, `gc mail`,
     `gc formula` and `gc ready` for the rest; `gc bd ready` refuses.
+  - `gc sling` routes work beads only. A v2 workflow that `gc formula cook`
+    creates lives in the infrastructure store, so `gc sling <target> <root>`
+    refuses it and names the launch to use instead: `gc sling <target>
+    <formula> --formula`, or `--on <formula>` against a work bead.
   - Its bd must be one a split city's `gc bd` runs: bd 1.3.2, 1.3.3 or 1.3.4,
     or the pinned Enterprise 1.3.0 build, reached directly rather than
     through a shim or wrapper script. With OSS bd 1.3.0 or 1.3.1, or a bd gc

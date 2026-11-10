@@ -94,7 +94,6 @@ var tutorialPageManifests = []pageManifest{
 			"cat > agents/worker/prompt.template.md << 'EOF'",
 			"gc sling mayor pancakes --formula",
 			"gc formula cook pancakes",
-			"gc sling worker mc-79s",
 			`gc formula cook greeting --var name="Alice"`,
 			"gc formula cook greeting",
 			`gc formula show greeting --var name="Alice"`,

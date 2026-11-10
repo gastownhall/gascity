@@ -86,7 +86,7 @@ it: one agent reads the task, does it, and closes it. It prints a `Dashboard:`
 link to the run:
 
 ```text
-Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
+Dashboard: http://127.0.0.1:8372/city/my-city/runs/gcg-1025
 ```
 
 That line is the result of getting Gas City running. An agent doing this setup
@@ -102,7 +102,7 @@ It reports `CLOSED` when the run is done, usually within a minute or two, and
 `hello.sh` is committed in `~/hello-world`:
 
 ```bash
-gc bd show hw-4up
+gc bd show gcg-1025
 ```
 
 This is the smallest formula: one bead, one agent. Gas City's real power is
