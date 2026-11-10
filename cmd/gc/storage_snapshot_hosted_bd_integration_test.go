@@ -20,6 +20,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // hostedSnapshotForbiddenPorts are the ports a test must never bind or reach.
@@ -94,10 +95,23 @@ func TestStorageSnapshotHostedBdWorkStore(t *testing.T) {
 
 	// The hosted side: Dolt, a bd workspace on it, and bd serve.
 	dataDir := t.TempDir()
-	port := hostedSnapshotFreePort(t)
-	dolt := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir, "--loglevel=warning")
-	dolt.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
-	startHostedSnapshotProcess(t, dolt)
+	// dolttest.StartSQLServer retries a probed port that is lost before dolt
+	// binds it; the picks stay outside the reserved ports.
+	dolt := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBin,
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir, "--loglevel=warning"}
+		},
+		Env: append(os.Environ(), "DOLT_ROOT_PATH="+dataDir),
+		PickPort: func() (int, error) {
+			return hostedSnapshotFreePort(t), nil
+		},
+	})
+	port := dolt.Port
+	t.Cleanup(func() {
+		_ = dolt.Process.Kill()
+		<-dolt.Exited
+	})
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second); err == nil {

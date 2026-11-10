@@ -26,11 +26,17 @@ const (
 	sqlServerAttemptTimeout = 60 * time.Second
 	// sqlServerLogTailLines is how much of the server log a failure carries.
 	sqlServerLogTailLines = 40
-	// sqlServerPortTaken ends what dolt prints, in any case, when it cannot
-	// bind the port it was handed ("Port N already in use."). The match also
-	// needs "port " so dolt's unix-socket warning ("file already in use") is
-	// not taken for a lost port.
-	sqlServerPortTaken = "already in use"
+	// sqlServerPortHeldByListener is what dolt prints, in any case, when its
+	// own pre-bind dial of the port is answered ("Port N already in use."):
+	// another listener holds it. It names the port and not just "already in
+	// use" so dolt's unix-socket warning ("file already in use") is not taken
+	// for a lost port.
+	sqlServerPortHeldByListener = "port %d already in use"
+	// sqlServerPortHeldBySocket is what dolt prints when that dial is refused
+	// but the bind then fails ("listen tcp 127.0.0.1:N: bind: address already
+	// in use"): a socket that is not a listener holds the port, such as the
+	// source port of another process's loopback connect().
+	sqlServerPortHeldBySocket = ":%d: bind: address already in use"
 )
 
 var (
@@ -114,7 +120,9 @@ func (s *SQLServer) Stop() {
 // the server lives.
 //
 // A port picked by probe-and-close can be taken by another listener before
-// dolt binds it. Dolt then exits with "Port N already in use.", and a readiness
+// dolt binds it. Dolt then exits with "Port N already in use." when another
+// listener holds the port, or with "listen tcp 127.0.0.1:N: bind: address
+// already in use" when a socket that is not a listener does, and a readiness
 // probe that accepts any answering server would run the test against the other
 // process's server. StartSQLServer checks that its own process listens on the
 // port and retries on a fresh port when dolt lost it; any other early exit, or
@@ -206,7 +214,7 @@ func startSQLServerOnPort(t testing.TB, spec SQLServerSpec, host, logPath string
 		case <-exited:
 			output := readServerLog(logPath)
 			lower := strings.ToLower(output)
-			if strings.Contains(lower, "port ") && strings.Contains(lower, sqlServerPortTaken+".") {
+			if logSaysPortLost(lower, port) {
 				return nil, true
 			}
 			t.Fatalf("dolt sql-server exited before it listened on %s: %v\n%s", addr, waitErr, tailLines(output, sqlServerLogTailLines))
@@ -225,6 +233,13 @@ func startSQLServerOnPort(t testing.TB, spec SQLServerSpec, host, logPath string
 		case <-time.After(sqlServerPollInterval):
 		}
 	}
+}
+
+// logSaysPortLost reports whether lowerLog, a server log in lower case, says dolt
+// could not bind port because something else holds it.
+func logSaysPortLost(lowerLog string, port int) bool {
+	return strings.Contains(lowerLog, fmt.Sprintf(sqlServerPortHeldByListener, port)) ||
+		strings.Contains(lowerLog, fmt.Sprintf(sqlServerPortHeldBySocket, port))
 }
 
 // ownsPort reports whether process pid holds a listening socket on port.
