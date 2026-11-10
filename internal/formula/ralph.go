@@ -406,3 +406,40 @@ func appendUniqueCopy(slice []string, item string) []string {
 	out = append(out, item)
 	return out
 }
+
+// ResolveCheckMaxAttemptsVars replaces every check's max_attempts "{{name}}"
+// placeholder, at any depth, with the integer value of that formula var. It
+// runs before ApplyRalph freezes max_attempts into control metadata and step
+// specs, so everything downstream sees a literal count. The value must be an
+// integer of at least 1.
+func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if step.Ralph != nil && step.Ralph.MaxAttemptsVar != "" {
+			name := step.Ralph.MaxAttemptsVar
+			raw, ok := vars[name]
+			if !ok {
+				return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, name)
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(raw))
+			if err != nil || n < 1 {
+				return fmt.Errorf("step %q: check max_attempts var %q = %q, want an integer >= 1", step.ID, name, raw)
+			}
+			spec := cloneRalphSpec(step.Ralph)
+			spec.MaxAttempts = n
+			spec.MaxAttemptsVar = ""
+			step.Ralph = spec
+		}
+		if err := ResolveCheckMaxAttemptsVars(step.Children, vars); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := ResolveCheckMaxAttemptsVars(step.Loop.Body, vars); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

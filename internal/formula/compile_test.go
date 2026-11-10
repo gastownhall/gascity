@@ -2882,3 +2882,158 @@ title = "Review by {reviewer}"
 		t.Fatalf("title = %q, want the expansion default resolved against the provided var", step.Title)
 	}
 }
+
+func writeCheckMaxAttemptsVarFormula(t *testing.T, varsBlock string) string {
+	t.Helper()
+	dir := t.TempDir()
+	formulaContent := `
+formula = "check-var-demo"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+` + varsBlock + `
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.check]
+max_attempts = "{{attempts}}"
+
+[steps.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	if err := os.WriteFile(filepath.Join(dir, "check-var-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func checkControlMaxAttempts(t *testing.T, recipe *Recipe) (string, int) {
+	t.Helper()
+	control := recipe.StepByID("check-var-demo.implement")
+	if control == nil {
+		t.Fatal("check control step missing")
+	}
+	spec := recipe.StepByID("check-var-demo.implement.spec")
+	if spec == nil {
+		t.Fatal("check spec step missing")
+	}
+	var frozen Step
+	if err := json.Unmarshal([]byte(spec.Description), &frozen); err != nil {
+		t.Fatalf("decode frozen spec: %v", err)
+	}
+	if frozen.Ralph == nil {
+		t.Fatal("frozen spec lost its check")
+	}
+	return control.Metadata[beadmeta.MaxAttemptsMetadataKey], frozen.Ralph.MaxAttempts
+}
+
+func TestCompileCheckMaxAttemptsFromVar(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+default = "3"
+`)
+
+	for _, tc := range []struct {
+		vars map[string]string
+		want string
+	}{
+		{vars: nil, want: "3"},
+		{vars: map[string]string{"attempts": "5"}, want: "5"},
+	} {
+		recipe, err := Compile(context.Background(), "check-var-demo", []string{dir}, tc.vars)
+		if err != nil {
+			t.Fatalf("Compile(%v): %v", tc.vars, err)
+		}
+		meta, frozen := checkControlMaxAttempts(t, recipe)
+		if meta != tc.want {
+			t.Errorf("Compile(%v): gc.max_attempts = %q, want %q", tc.vars, meta, tc.want)
+		}
+		if fmt.Sprint(frozen) != tc.want {
+			t.Errorf("Compile(%v): frozen spec max_attempts = %d, want %s", tc.vars, frozen, tc.want)
+		}
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarRejectsBadValues(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+default = "3"
+`)
+
+	for _, value := range []string{"0", "-1", "two", "", "2.5"} {
+		_, err := Compile(context.Background(), "check-var-demo", []string{dir}, map[string]string{"attempts": value})
+		if err == nil {
+			t.Fatalf("Compile(attempts=%q) succeeded, want error", value)
+		}
+		requireErrorContains(t, err, "max_attempts")
+		requireErrorContains(t, err, "attempts")
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarRequiresValue(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+required = true
+`)
+
+	if _, err := Compile(context.Background(), "check-var-demo", []string{dir}, nil); err == nil {
+		t.Fatal("Compile without a value for a required max_attempts var succeeded, want error")
+	}
+	recipe, err := Compile(context.Background(), "check-var-demo", []string{dir}, map[string]string{"attempts": "4"})
+	if err != nil {
+		t.Fatalf("Compile(attempts=4): %v", err)
+	}
+	if meta, _ := checkControlMaxAttempts(t, recipe); meta != "4" {
+		t.Fatalf("gc.max_attempts = %q, want 4", meta)
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarUndeclaredFails(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, "")
+
+	_, err := Compile(context.Background(), "check-var-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile with an undeclared max_attempts var succeeded, want error")
+	}
+	requireErrorContains(t, err, "attempts")
+}
+
+func TestParseCheckMaxAttemptsRejectsNonPlaceholderStrings(t *testing.T) {
+	for _, raw := range []string{`"3"`, `"{{attempts}}x"`, `"{attempts}"`, `"{{ }}"`} {
+		var step Step
+		data := map[string]interface{}{}
+		if err := json.Unmarshal([]byte(`{"id":"s","title":"S","check":{"max_attempts":`+raw+`,"check":{"mode":"exec","path":"c.sh"}}}`), &data); err != nil {
+			t.Fatal(err)
+		}
+		err := step.UnmarshalTOML(data)
+		if err == nil {
+			t.Fatalf("max_attempts = %s parsed, want error", raw)
+		}
+		requireErrorContains(t, err, "max_attempts")
+	}
+}
+
+func TestCheckMaxAttemptsVarRoundTripsThroughJSON(t *testing.T) {
+	spec := RalphSpec{MaxAttemptsVar: "attempts", Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"max_attempts":"{{attempts}}"`) {
+		t.Fatalf("encoded spec = %s, want the max_attempts placeholder", encoded)
+	}
+	var decoded RalphSpec
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.MaxAttemptsVar != "attempts" || decoded.MaxAttempts != 0 {
+		t.Fatalf("decoded = %+v, want MaxAttemptsVar=attempts", decoded)
+	}
+}
