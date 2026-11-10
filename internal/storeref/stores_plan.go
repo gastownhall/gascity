@@ -574,10 +574,11 @@ func (s Stores) planCloseOwner(in CloseOwner) (ResolvedPlan, error) {
 	if id == "" {
 		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan needs the event's bead id")
 	}
+	// A relic alone is a plan: the event's prefix names a store this epoch
+	// did not open (an unbound rig), and the binding the residence probe
+	// proved holds the id is the one place left to confirm it.
 	if len(in.Route) == 0 && in.Relic == "" {
-		// A relic alone is a plan: the event's prefix names a store this
-		// epoch did not open (an unbound rig), and the binding the residence
-		// probe proved holds the id is the one place left to confirm it.
+		// Neither a route nor a relic: there is no store to confirm the close in.
 		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan for %q needs the event's route or its relic", id)
 	}
 	plan := ResolvedPlan{Mode: ModeFirstOwner, ID: id}
