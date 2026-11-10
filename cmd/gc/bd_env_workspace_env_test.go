@@ -16,6 +16,8 @@ import (
 // filesystem's timestamp resolution.
 var workspaceEnvStamp = time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
 
+// writeWorkspaceEnvCityTOML writes body as cityPath/city.toml and sets its
+// mtime to stamp, so a test controls exactly what the stat stamp sees.
 func writeWorkspaceEnvCityTOML(t *testing.T, cityPath, body string, stamp time.Time) {
 	t.Helper()
 	path := filepath.Join(cityPath, "city.toml")
@@ -153,6 +155,9 @@ func TestWorkspaceStrictPinReportsPathWithoutBdFromTheMemo(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEnvTableIsMemoizedByCityTOMLStat pins the memo: repeated lookups
+// read city.toml once, the table handed out is a clone the caller cannot use to
+// poison the memo, and a rewrite or an mtime-only change invalidates the entry.
 func TestWorkspaceEnvTableIsMemoizedByCityTOMLStat(t *testing.T) {
 	resetWorkspaceEnvCache()
 	t.Cleanup(resetWorkspaceEnvCache)
@@ -216,6 +221,11 @@ func TestWorkspaceEnvTableIsMemoizedByCityTOMLStat(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEnvTableDoesNotCacheErrorsOrMissingCities pins what the memo
+// refuses to hold: a missing city.toml is the empty answer and a malformed one
+// is an error, and neither is cached, so a repaired file is read once and then
+// served from the memo. The optional resolver treats a missing file as no pin
+// without reading anything.
 func TestWorkspaceEnvTableDoesNotCacheErrorsOrMissingCities(t *testing.T) {
 	resetWorkspaceEnvCache()
 	t.Cleanup(resetWorkspaceEnvCache)
