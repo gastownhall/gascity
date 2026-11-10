@@ -1889,12 +1889,19 @@ func waitForLedgerFeed(t *testing.T, timeout time.Duration, cond func() bool, wh
 	}
 }
 
+// ledgerFeedDeliveryWait bounds how long an out-of-band write may take to
+// reach the cache through the feed. A quiet host delivers in under 1s (the
+// tailer's idle poll is up to 1s); a host under load takes several times that,
+// and the wait only has to fail a feed that never delivers (ga-1ki1ibba).
+const ledgerFeedDeliveryWait = 10 * time.Second
+
 // TestLedgerFeedOverEmbeddedDolt tails a real native store with the journal
 // on: a Create and then a Close made through the backing, behind the cache,
-// reach the cache and the legacy wake within 2s. The cache's reconcile gate
-// stays closed, so no re-scan can deliver them however long the test runs
-// (under -race it outlasts the first re-scan's 30s cadence). Writes through
-// the cache neither notify as cache-reconcile nor wake.
+// reach the cache and the legacy wake within ledgerFeedDeliveryWait. The
+// cache's reconcile gate stays closed, so no re-scan can deliver them however
+// long the test runs (under -race it outlasts the first re-scan's 30s
+// cadence). Writes through the cache neither notify as cache-reconcile nor
+// wake.
 func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	runLedgerFeedOverEmbeddedDolt(t, ledgerFeedHooks{}, nil)
 }
@@ -2015,7 +2022,7 @@ func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *at
 	if err != nil {
 		t.Fatalf("backing Create: %v", err)
 	}
-	waitForLedgerFeed(t, 2*time.Second, func() bool {
+	waitForLedgerFeed(t, ledgerFeedDeliveryWait, func() bool {
 		got, err := cache.Get(row.ID)
 		return err == nil && got.Status == "open" && slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadCreated+"/"+cacheReconcileActor)
 	}, "the out-of-band create to reach the cache")
@@ -2025,7 +2032,7 @@ func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *at
 	if err := native.Close(row.ID); err != nil {
 		t.Fatalf("backing Close: %v", err)
 	}
-	waitForLedgerFeed(t, 2*time.Second, func() bool {
+	waitForLedgerFeed(t, ledgerFeedDeliveryWait, func() bool {
 		return slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadClosed+"/"+cacheReconcileActor)
 	}, "the out-of-band close to reach the cache")
 	if n := drain(); n == 0 {
