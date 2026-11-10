@@ -22,9 +22,12 @@ import (
 // The T7d equivalence table: every reader that now reads storeref's Workflow
 // legs, run beside its frozen copy (workflow_legs_reference_test.go) on every
 // shape, gate on and off, each on a fresh fixture. A run must give the same
-// result and touch the same stores in the same order, each read with the same
-// split-strict verdict, and leave the same rows behind, but for the verdicts
-// the plan moves on purpose (t7dMovedVerdicts).
+// result and touch the same physical stores in the same order, each read with
+// the same split-strict verdict, and leave the same rows behind, but for the
+// verdicts the plan moves on purpose (t7dMovedVerdicts). The log names the
+// physical store a read or write reached, not the gate view it went through;
+// the results name the view (t7dFixture.name), so a leg that moved to the
+// other view of one store shows there.
 
 // t7dCity is the fixtures' city name. Its rigs sort around it: alpha and beta
 // before it, so a co-resident id shows which of a rig and the city a
@@ -155,13 +158,23 @@ func (s t7dRefusingStore) DepList(id, direction string) ([]beads.Dep, error) {
 
 // t7dShape is one fixture shape.
 type t7dShape struct {
-	split            bool // a whole split: every class in one binding
-	rigNamedLikeCity bool // a rig named test-city, holding a root
-	suspendBeta      bool // the holder reports rig beta suspended
-	relicFreeAlpha   bool // rig alpha is proven relic-free (the S4 bit)
-	refused          bool // a worker site refusing every relocated class
-	stranded         bool // a graph root stranded in the city work store, served degraded
-	cached           bool // the city and rig stores behind a CachingStore
+	city             string // the city's name; empty is t7dCity
+	split            bool   // a whole split: every class in one binding
+	rigNamedLikeCity bool   // a rig named like the city, holding a root
+	relicFreeNamed   bool   // that rig is proven relic-free (the S4 bit)
+	suspendBeta      bool   // the holder reports rig beta suspended
+	relicFreeAlpha   bool   // rig alpha is proven relic-free (the S4 bit)
+	refused          bool   // a worker site refusing every relocated class
+	stranded         bool   // a graph root stranded in the city work store, served degraded
+	cached           bool   // the city and rig stores behind a CachingStore
+}
+
+// cityName is the shape's city name.
+func (sh t7dShape) cityName() string {
+	if sh.city != "" {
+		return sh.city
+	}
+	return t7dCity
 }
 
 // t7dShapes is the corpus.
@@ -179,6 +192,14 @@ var t7dShapes = map[string]t7dShape{
 	"stranded, served degraded":     {split: true, stranded: true},
 	"stranded, relic-free, cached":  {split: true, stranded: true, relicFreeAlpha: true, cached: true},
 	"whole split, every rig marked": {split: true, suspendBeta: true, relicFreeAlpha: true, rigNamedLikeCity: true},
+	// A rig named like the city, proven relic-free, beside a graph run
+	// stranded in the city store: isGraphConvoyID reads neither (the rig
+	// takes the city's place in BeadStores(), and its leg is retired).
+	"stranded, relic-free rig named like city": {split: true, rigNamedLikeCity: true, relicFreeNamed: true, stranded: true},
+	// A city named "aaa", so the rig named like it, a leg the workflow scan
+	// skips, sorts before every other rig.
+	"skipped rig sorts first, split":   {city: "aaa", split: true, rigNamedLikeCity: true},
+	"skipped rig sorts first, unsplit": {city: "aaa", rigNamedLikeCity: true},
 }
 
 // t7dFixture is one built shape.
@@ -295,15 +316,16 @@ func t7dWorkflow(t *testing.T, store *beads.MemStore, prefix, workflowID, scopeK
 // same rows, creation stamps included, and neither sees the other's writes.
 func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	t.Helper()
+	city := sh.cityName()
 	templates := map[string]*beads.MemStore{}
 	mem := func(name, prefix string) *beads.MemStore {
 		m := &beads.MemStore{HonorExplicitIDs: true, IDPrefix: prefix}
 		templates[name] = m
 		return m
 	}
-	city, alpha, beta := mem("city", "tc"), mem("alpha", "al"), mem("beta", "be")
+	cityMem, alpha, beta := mem("city", "tc"), mem("alpha", "al"), mem("beta", "be")
 	var binding, named *beads.MemStore
-	home := city
+	home := cityMem
 	if sh.split {
 		binding = mem("binding", "gcg")
 		home = binding
@@ -313,7 +335,7 @@ func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	}
 
 	// The live run: in the binding on a split city, else in the city.
-	t7dWorkflow(t, home, home.IDPrefix+"1", "run-1", beadmeta.ScopeKindCity, t7dCity)
+	t7dWorkflow(t, home, home.IDPrefix+"1", "run-1", beadmeta.ScopeKindCity, city)
 	// A pre-split rig tree, a work convoy and a rig run.
 	t7dWorkflow(t, alpha, "al9", "run-9", beadmeta.ScopeKindRig, "alpha")
 	t7dBead(t, alpha, beads.Bead{ID: "al-cv1", Title: "work convoy", Type: "convoy"})
@@ -321,17 +343,23 @@ func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	// Co-resident ids: co-1 a plain task in alpha and a workflow root in the
 	// city; co-2 a workflow root in the home store and a task in alpha.
 	t7dBead(t, alpha, beads.Bead{ID: "co-1", Title: "plain", Type: "task"})
-	t7dBead(t, city, beads.Bead{ID: "co-1", Title: "graph", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowIDMetadataKey: "co-1"}})
-	if home != city {
+	t7dBead(t, cityMem, beads.Bead{ID: "co-1", Title: "graph", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowIDMetadataKey: "co-1"}})
+	if home != cityMem {
 		t7dBead(t, home, beads.Bead{ID: "co-2", Title: "graph", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowIDMetadataKey: "co-2"}})
 	}
 	t7dBead(t, alpha, beads.Bead{ID: "co-2", Title: "plain", Type: "task"})
 	if named != nil {
-		t7dWorkflow(t, named, "tx7", "run-7", beadmeta.ScopeKindRig, t7dCity)
+		t7dWorkflow(t, named, "tx7", "run-7", beadmeta.ScopeKindRig, city)
 		t7dBead(t, named, beads.Bead{ID: "co-1", Title: "named", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.WorkflowIDMetadataKey: "co-1"}})
 	}
 	if sh.stranded {
-		t7dWorkflow(t, city, "tc3", "run-3", beadmeta.ScopeKindCity, t7dCity)
+		t7dWorkflow(t, cityMem, "tc3", "run-3", beadmeta.ScopeKindCity, city)
+	}
+	// A twin: one run's tree in the home store and, under the same ids, in
+	// alpha (an import's copy before its clear).
+	t7dWorkflow(t, home, "tw", "run-tw", beadmeta.ScopeKindRig, "alpha")
+	if home != alpha {
+		t7dWorkflow(t, alpha, "tw", "run-tw", beadmeta.ScopeKindRig, "alpha")
 	}
 	// Order runs: the live history where tracking is born, pre-split history
 	// in a rig.
@@ -383,14 +411,14 @@ func (sh t7dShape) fixture(t *testing.T, templates map[string]*beads.MemStore) t
 		return s
 	}
 	fs := newFakeState(t)
-	fs.cityName = t7dCity
-	fs.cfg.Workspace.Name = t7dCity
+	fs.cityName = sh.cityName()
+	fs.cfg.Workspace.Name = sh.cityName()
 	fs.cityBeadStore = top("city", city)
 	fs.stores = map[string]beads.Store{"alpha": top("alpha", alpha), "beta": top("beta", beta)}
 	fs.cfg.Rigs = []config.Rig{{Name: "alpha", Path: "/nonexistent/alpha"}, {Name: "beta", Path: "/nonexistent/beta"}}
 	if named != nil {
-		fs.stores[t7dCity] = top("named", named)
-		fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: t7dCity, Path: "/nonexistent/tx"})
+		fs.stores[sh.cityName()] = top("named", named)
+		fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: sh.cityName(), Path: "/nonexistent/tx"})
 	}
 	if binding != nil {
 		b := top("binding", binding)
@@ -410,8 +438,9 @@ func (sh t7dShape) fixture(t *testing.T, templates map[string]*beads.MemStore) t
 		fs.rigBits.suspended = map[string]bool{"beta": true}
 	}
 	fx.state = fs
-	if sh.relicFreeAlpha {
-		fx.state = relicReportingState{fakeState: fs, relicFree: map[string]bool{"alpha": true}}
+	if sh.relicFreeAlpha || sh.relicFreeNamed {
+		relicFree := map[string]bool{"alpha": sh.relicFreeAlpha, sh.cityName(): sh.relicFreeNamed}
+		fx.state = relicReportingState{fakeState: fs, relicFree: relicFree}
 	}
 	*log = nil
 	return fx
@@ -478,7 +507,7 @@ func t7dEventBead(id, rootID, hint string) beads.Bead {
 }
 
 // t7dOps is every converted reader, on ids and refs covering each leg.
-func t7dOps() []t7dOp {
+func t7dOps(city string) []t7dOp {
 	var ops []t7dOp
 	ops = append(ops,
 		t7dOp{
@@ -498,21 +527,21 @@ func t7dOps() []t7dOp {
 		t7dOp{
 			name: "workflowWritableStores+orders",
 			frozen: func(_ *testing.T, fx t7dFixture) string {
-				return fx.t7dInfos(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, t7dCity))
+				return fx.t7dInfos(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, city))
 			},
 			live: func(_ *testing.T, fx t7dFixture) string {
-				return fx.t7dInfos(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, t7dCity))
+				return fx.t7dInfos(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, city))
 			},
 		},
 	)
-	for _, ref := range []string{"city:" + t7dCity, "graph:" + t7dCity, "orders:" + t7dCity, "rig:alpha", "rig:beta", "rig:" + t7dCity, " rig : alpha ", "city:other", "graph:other", "rig:missing", "rig:", "alpha", ""} {
+	for _, ref := range []string{"city:" + city, "graph:" + city, "orders:" + city, "rig:alpha", "rig:beta", "rig:" + city, " rig : alpha ", "city:other", "graph:other", "rig:missing", "rig:", "alpha", ""} {
 		ops = append(ops, t7dOp{
 			name:   "workflowStoreByRef " + ref,
 			frozen: func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfo(frozenWorkflowStoreByRef(fx.state, ref)) },
 			live:   func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfo(workflowStoreByRef(fx.state, ref)) },
 		})
 	}
-	for _, id := range []string{"tc1-wf", "gcg1-wf", "al9-wf", "be5-wf", "tx7-wf", "tc3-wf", "al-cv1", "co-1", "co-2", "missing"} {
+	for _, id := range []string{"tc1-wf", "gcg1-wf", "al9-wf", "be5-wf", "tx7-wf", "tc3-wf", "tw-wf", "al-cv1", "co-1", "co-2", "missing"} {
 		ops = append(ops, t7dOp{
 			name:   "isGraphConvoyID " + id,
 			frozen: func(_ *testing.T, fx t7dFixture) string { return fmt.Sprint(frozenIsGraphConvoyID(New(fx.state), id)) },
@@ -530,8 +559,8 @@ func t7dOps() []t7dOp {
 			},
 		})
 	}
-	for _, root := range []string{"tc1-wf", "gcg1-wf", "al9-wf", "be5-wf", "tx7-wf", "tc3-wf", "co-1", "co-2", "missing"} {
-		for _, hint := range []string{"", "city:" + t7dCity, "rig:alpha", "rig:beta", "rig:" + t7dCity, "graph:" + t7dCity, " rig : alpha ", "orders:" + t7dCity} {
+	for _, root := range []string{"tc1-wf", "gcg1-wf", "al9-wf", "be5-wf", "tx7-wf", "tc3-wf", "tw-wf", "co-1", "co-2", "missing"} {
+		for _, hint := range []string{"", "city:" + city, "rig:alpha", "rig:beta", "rig:" + city, "graph:" + city, " rig : alpha ", "orders:" + city} {
 			op := t7dOp{
 				name: "workflowEventRoot " + root + " hint=" + hint,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
@@ -551,8 +580,8 @@ func t7dOps() []t7dOp {
 			ops = append(ops, op)
 		}
 	}
-	for _, wid := range []string{"run-1", "run-9", "run-5", "run-7", "run-3", "tc1-wf", "gcg1-wf", "al9-wf", "co-1", "co-2", "missing"} {
-		for _, scope := range [][2]string{{"", ""}, {beadmeta.ScopeKindRig, "alpha"}, {beadmeta.ScopeKindCity, t7dCity}} {
+	for _, wid := range []string{"run-1", "run-9", "run-5", "run-7", "run-3", "run-tw", "tc1-wf", "gcg1-wf", "al9-wf", "tw-wf", "co-1", "co-2", "missing"} {
+		for _, scope := range [][2]string{{"", ""}, {beadmeta.ScopeKindRig, "alpha"}, {beadmeta.ScopeKindCity, city}} {
 			ops = append(ops, t7dOp{
 				name: "buildWorkflowSnapshot " + wid + " " + scope[0] + ":" + scope[1],
 				frozen: func(_ *testing.T, fx t7dFixture) string {
@@ -569,7 +598,7 @@ func t7dOps() []t7dOp {
 			})
 		}
 	}
-	for _, scope := range [][2]string{{beadmeta.ScopeKindCity, t7dCity}, {beadmeta.ScopeKindRig, "alpha"}, {beadmeta.ScopeKindRig, "beta"}} {
+	for _, scope := range [][2]string{{beadmeta.ScopeKindCity, city}, {beadmeta.ScopeKindRig, "alpha"}, {beadmeta.ScopeKindRig, "beta"}} {
 		ops = append(ops,
 			t7dOp{
 				name: "buildWorkflowRunProjections " + scope[1],
@@ -601,7 +630,7 @@ func t7dOps() []t7dOp {
 		)
 	}
 	for _, id := range []string{"tc-or1", "gcg-or1", "al-or1", "missing"} {
-		for _, ref := range []string{"", "city:" + t7dCity, "rig:alpha", "orders:" + t7dCity, "graph:" + t7dCity} {
+		for _, ref := range []string{"", "city:" + city, "rig:alpha", "orders:" + city, "graph:" + city} {
 			// The order history detail's store list (humaHandleOrderHistoryDetail),
 			// frozen and live, read by the order reader T7d leaves as it is.
 			detail := func(infos []workflowStoreInfo, byRef func(State, string) (workflowStoreInfo, bool), state State) string {
@@ -618,15 +647,17 @@ func t7dOps() []t7dOp {
 			ops = append(ops, t7dOp{
 				name: "orderHistoryDetail " + id + " ref=" + ref, keepsMarkers: true,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
-					return detail(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, t7dCity), frozenWorkflowStoreByRef, fx.state)
+					return detail(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, city), frozenWorkflowStoreByRef, fx.state)
 				},
 				live: func(_ *testing.T, fx t7dFixture) string {
-					return detail(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, t7dCity), workflowStoreByRef, fx.state)
+					return detail(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, city), workflowStoreByRef, fx.state)
 				},
 			})
 		}
 	}
-	for _, wid := range []string{"run-1", "run-9", "run-5", "run-3", "missing"} {
+	// The teardowns, on every run and on the co-resident ids and the twin:
+	// each writes on every leg that holds a matching root.
+	for _, wid := range []string{"run-1", "run-9", "run-5", "run-7", "run-3", "run-tw", "tw-wf", "co-1", "co-2", "missing"} {
 		ops = append(ops,
 			t7dOp{
 				name: "humaDeleteWorkflow " + wid, writes: true,
@@ -651,7 +682,7 @@ func t7dOps() []t7dOp {
 			{WorkflowID: wid},
 			{WorkflowID: wid, Delete: true},
 			{WorkflowID: wid, Delete: true, ScopeKind: beadmeta.ScopeKindRig, ScopeRef: "alpha"},
-			{WorkflowID: wid, ScopeKind: beadmeta.ScopeKindCity, ScopeRef: t7dCity},
+			{WorkflowID: wid, ScopeKind: beadmeta.ScopeKindCity, ScopeRef: city},
 		} {
 			ops = append(ops, t7dOp{
 				name: fmt.Sprintf("humaHandleWorkflowDelete %+v", in), writes: true,
@@ -725,7 +756,7 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 				shape := t7dShapes[shapeName]
 				t.Run(shapeName, func(t *testing.T) {
 					fixture := shape.fixtures(t)
-					for _, op := range t7dOps() {
+					for _, op := range t7dOps(shape.cityName()) {
 						ffx, lfx := fixture(), fixture()
 						want, got := t7dCanonical(op.frozen(t, ffx)), t7dCanonical(op.live(t, lfx))
 						if strings.Contains(want+got, "<unknown>") {
@@ -742,8 +773,11 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 						if !op.keepsMarkers {
 							w, g = t7dMovedVerdicts(ffx, w, g)
 						}
-						if shape.cached && op.writes {
+						switch {
+						case shape.cached && op.writes:
 							w, g = t7dOpSet(w), t7dOpSet(g)
+						case shape.cached:
+							w, g = t7dSortOpRuns(w), t7dSortOpRuns(g)
 						}
 						if !slices.Equal(w, g) {
 							t.Errorf("%s: the live reader's reads and writes differ from the frozen one's%s", op.name, t7dFirstDiff(w, g))
@@ -836,4 +870,25 @@ func t7dOpSet(log []string) []string {
 			}
 		}
 	})
+}
+
+// t7dSortOpRuns sorts each run of consecutive entries that read one store
+// with one operation and one verdict: a CachingStore lists in map order, so
+// a reader that reads per listed row (each root's children) reads them in an
+// order that is not the run's to compare. Such a run is compared as a set.
+func t7dSortOpRuns(log []string) []string {
+	out := slices.Clone(log)
+	key := func(entry string) string {
+		fields := strings.Fields(entry)
+		return fields[0] + " " + fields[1] + " " + fields[len(fields)-1]
+	}
+	for i := 0; i < len(out); {
+		j := i + 1
+		for j < len(out) && key(out[j]) == key(out[i]) {
+			j++
+		}
+		sort.Strings(out[i:j])
+		i = j
+	}
+	return out
 }

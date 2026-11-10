@@ -139,6 +139,24 @@ func TestWorkflowLegsSkipARigNamedLikeTheCity(t *testing.T) {
 	}
 }
 
+// TestIsGraphConvoyIDReadsNoCityBehindARelicFreeRigNamedLikeIt pins
+// BeadStores()' shadow: a rig named like the city replaces the city in the
+// map isGraphConvoyID walked, so once that rig is relic-free (its leg
+// retired) neither store is read there. A graph run stranded in the city
+// store is then not a graph convoy here: the convoy GET and DELETE answer
+// 404, as before, rather than serving or tearing down its tree.
+func TestIsGraphConvoyIDReadsNoCityBehindARelicFreeRigNamedLikeIt(t *testing.T) {
+	t7dGateOff(t)
+	fx := t7dShapes["stranded, relic-free rig named like city"].fixtures(t)()
+	s := New(fx.state)
+	if isGraphConvoyID(s, "tc3-wf") || frozenIsGraphConvoyID(s, "tc3-wf") {
+		t.Errorf("isGraphConvoyID(tc3-wf) = %v, frozen %v; want false: the city sits behind a retired rig named like it", isGraphConvoyID(s, "tc3-wf"), frozenIsGraphConvoyID(s, "tc3-wf"))
+	}
+	if !isGraphConvoyID(s, "gcg1-wf") {
+		t.Error("the binding's graph convoy is no longer recognized")
+	}
+}
+
 // TestWorkflowLegsReadASuspendedRig pins the suspended-rig choice every
 // workflow reader states (storeref.WorkflowReadsSuspendedRigs): each read
 // BeadStores(), which lists a suspended rig, so a suspended rig's roots are
@@ -183,5 +201,26 @@ func TestWorkflowLegsReadARigOverTheCityStoreOnce(t *testing.T) {
 	info, ok := workflowStoreByRef(state, "rig:alpha")
 	if !ok || info.ref != "rig:alpha" || info.scopeKind != beadmeta.ScopeKindRig || info.scopeRef != "alpha" || !beads.SameStore(info.leg.Reader, city) || !beads.SameStore(info.store, city) {
 		t.Errorf("workflowStoreByRef(rig:alpha) = %v, %+v; want the shared leg under rig:alpha", ok, info)
+	}
+}
+
+// TestWorkflowLegsMintTheHandleOnTheEntrysOwnStore pins how workflowLegs'
+// resident picks its leg: by the entry's store, never by position. Each
+// entry's handle writes to the store its leg reads, a rig named like the
+// city (a leg the scan skips, sorting first here) included; an entry with no
+// leg (an order entry, a zero entry) gets the zero handle rather than the
+// plan's first leg, the graph binding.
+func TestWorkflowLegsMintTheHandleOnTheEntrysOwnStore(t *testing.T) {
+	t7dGateOff(t)
+	fx := t7dShapes["skipped rig sorts first, split"].fixtures(t)()
+	legs, resident := workflowLegs(fx.state, workflowLegQuery{keepRigNamedLikeCity: true})
+	scanned, _ := workflowLegs(fx.state, workflowLegQuery{})
+	for _, info := range append(legs, scanned...) {
+		if got, want := fx.name(resident(info)), fx.name(info.leg.Reader); got != want {
+			t.Errorf("%s: the writable handle writes to %s, its leg reads %s", info.ref, got, want)
+		}
+	}
+	if zero := resident(workflowStoreInfo{}); !beads.IsNilStore(zero) {
+		t.Errorf("an entry with no leg got a handle on %s, want none", fx.name(zero))
 	}
 }

@@ -13,18 +13,35 @@ package api
 // that T7d edits or deletes (sortedRigNames, the relic-free and graph-store
 // helpers of rig_graph_legs.go, collectWorkflowDeps and its
 // prefetchedDepStore, findWorkflowRoots, cancelWorkflowRoot,
-// listActiveWorkflowProjectionBeads). The pure bead helpers T7d leaves
-// byte-identical are called live: isWorkflowRoot, matchesWorkflowID,
-// selectWorkflowRootMatch and the scope helpers, workflowBeadResponseFromBead,
-// prefetchedDepsForWorkflowBeads, the projection and feed formatters,
-// inProgressAssignees, sourceworkflow and molecule. They read no store, so
-// they cannot hide a change of which store a read touched.
+// listActiveWorkflowProjectionBeads). Everything else they call is live code
+// T7d leaves byte-identical, of two kinds:
+//
+//   - pure bead helpers, which read no store: isWorkflowRoot,
+//     matchesWorkflowID, selectWorkflowRootMatch and the scope helpers,
+//     workflowBeadResponseFromBead, prefetchedDepsForWorkflowBeads, the
+//     projection and feed formatters, inProgressAssignees;
+//   - readers and writers that act only on the store the copy hands them:
+//     sourceworkflow (WorkflowTree, CloseWorkflowSubtreeAsExcept), molecule
+//     (TeardownTailExclusion), orders.Store (ListTracking, LatestOpenRun) and
+//     orderHistoryBeadAcrossStoreInfos. The copy chooses that store, and the
+//     table logs every read and write they make on it.
+//
+// Neither kind can hide a change of which store a read or write touched.
 //
 // The SQL fast paths are left out: no fixture here has a Dolt server, so the
 // live code takes the store scan too (the table asserts it).
 //
 // The copies keep main's code, read markers included: markers in test files
 // are neither linted (storeclass) nor ledgered (reviewedMarkers).
+//
+// The copies reach two api split-strict keys nothing else does: the frozen
+// order detail and order feed read through the order readers T7d leaves
+// marked, from a test, so their caller is "-"
+// (internal/api/testdata/split_strict_baseline.tsv:
+// api.orderHistoryBeadAcrossStoreInfos get relic:work orders -, and
+// orders.(*Store).ListTracking list relic:work orders -). Deleting this file
+// (with the T7f conversion of those readers, or once T7j retires the markers)
+// leaves both rows unreached: regenerate the api inputs in the same change.
 
 import (
 	"context"

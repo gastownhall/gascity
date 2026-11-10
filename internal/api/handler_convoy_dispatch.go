@@ -56,13 +56,13 @@ type workflowStoreInfo struct {
 	// leg reads a workflow leg: Reader in the plan leg's gate role, Strict
 	// for a read that carried no marker. Zero on an order read's entry.
 	leg storeref.TypedLeg
-	// legIndex is the leg's position in its plan, which workflowLegs' resident
-	// mints the writable handle at.
-	legIndex int
 	// store is what an order read reads: the store itself on an order entry,
 	// the leg's strict writable handle on a workflow leg an order read takes
-	// (workflowWritableStores, workflowStoreByRef). T7f gives the order reads
-	// legs; until then this is the raw field they read.
+	// (workflowWritableStores, workflowStoreByRef). It is nil on the entries
+	// workflowStores and workflowStoresIncludingRetiredRigs hand out, which
+	// no order read takes; every order read skips an entry with no store.
+	// T7f gives the order reads legs; until then this is the raw field they
+	// read.
 	store beads.Store
 }
 
@@ -632,6 +632,9 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 	}
 }
 
+// workflowStores is the workflow legs (workflowLegs) the workflow readers
+// read. Its entries carry no store (workflowStoreInfo.store); an order read
+// takes workflowWritableStores.
 func workflowStores(state State) []workflowStoreInfo {
 	infos, _ := workflowLegs(state, workflowLegQuery{})
 	return infos
@@ -680,8 +683,10 @@ type workflowLegQuery struct {
 // Each entry's leg reads through the plan leg's gate role (Reader) or
 // strictly (Strict), for a read that carried no marker. resident is the
 // writable handle on an entry's leg, minted only for the legs a caller writes
-// to: storeref.WalkOwner stopped on that leg, so its reads are strict
-// (OD-T7-3), as the raw store's were.
+// to: storeref.WalkOwner stopped on the plan leg over the entry's store (by
+// identity; a plan reads each store once), so its reads are strict
+// (OD-T7-3), as the raw store's were. An entry with no leg (an order entry,
+// a zero entry) matches no plan leg and gets the zero handle.
 //
 // A plan the epoch cannot make (no store at all) is no legs, as the hand
 // list was empty.
@@ -691,10 +696,8 @@ func workflowLegs(state State, q workflowLegQuery) ([]workflowStoreInfo, func(wo
 		SuspendedRigs:      storeref.WorkflowReadsSuspendedRigs,
 	})
 	resident := func(info workflowStoreInfo) beads.ResidentStore {
-		visited := 0
-		owner, _, _ := storeref.WalkOwner(plan, func(storeref.TypedLeg) (bool, error) {
-			visited++
-			return visited > info.legIndex, nil
+		owner, _, _ := storeref.WalkOwner(plan, func(leg storeref.TypedLeg) (bool, error) {
+			return beads.SameStore(leg.Reader, info.leg.Reader), nil
 		})
 		return owner
 	}
@@ -703,10 +706,8 @@ func workflowLegs(state State, q workflowLegQuery) ([]workflowStoreInfo, func(wo
 	}
 	cityName := workflowCityScopeRef(state.CityName())
 	infos := make([]workflowStoreInfo, 0, len(plan.Legs))
-	index := 0
 	storeref.EachTypedLeg(plan, func(leg storeref.TypedLeg) {
-		info := workflowStoreInfo{scopeKind: beadmeta.ScopeKindCity, scopeRef: cityName, leg: leg, legIndex: index}
-		index++
+		info := workflowStoreInfo{scopeKind: beadmeta.ScopeKindCity, scopeRef: cityName, leg: leg}
 		switch rig, _ := storeref.ScopeRigContext(string(leg.Ref)); {
 		case leg.Role == storeref.RoleAuthority:
 			info.ref = workflowGraphStoreRefPrefix + ":" + cityName
@@ -778,6 +779,13 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 // leg already reads (rigs sharing one store, a rig over the city store) has no
 // leg of its own, since a plan reads a store once; it names that leg, under
 // its own ref and scope, as BeadStore(name) named the shared store.
+//
+// One corner of that fallback reads more than before: in workflowEventRoot's
+// hint lookup, whose legs drop relic-free rigs, a relic-free rig sharing a
+// store with a rig that is not relic-free resolves to the other rig's leg, so
+// the hint is probed there, where the hand path skipped the retired rig. The
+// probe reads a store the scan beside it reads anyway, and the S4 bit is per
+// rig while the rows are per store, so no city that splits serves the shape.
 func workflowLegNamed(state State, infos []workflowStoreInfo, ref string) (workflowStoreInfo, bool) {
 	for _, info := range infos {
 		if info.ref == ref {
