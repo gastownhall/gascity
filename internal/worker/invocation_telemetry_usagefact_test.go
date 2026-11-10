@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -49,7 +50,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -734,7 +735,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},

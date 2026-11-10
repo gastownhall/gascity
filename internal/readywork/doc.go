@@ -27,8 +27,9 @@
 //
 // # Every read is live
 //
-// Each leg is read through its live handle (beads.HandlesFor(store).Live), never
-// through a read cache. A row that becomes ready before a read starts is in that
+// Each leg is read through its live handle (beads.LiveFor(store), which sees
+// through a class handle to the store's own live reader), never through a read
+// cache. A row that becomes ready before a read starts is in that
 // read's answer, whichever process wrote it. That is the guarantee the work
 // queries a seat claims through depend on, and it is why a CachingStore handed
 // in as a leg is read through to its backing store rather than answered from

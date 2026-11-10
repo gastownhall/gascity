@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -509,31 +510,6 @@ func TestDiscoverPoolInstancesUnlimitedFailsClosedOnPartialResults(t *testing.T)
 	}
 }
 
-func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
-	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: -1}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-}
-
-func TestCountRunningPoolInstancesUsesPartialListResults(t *testing.T) {
-	sp := &partialListPoolProvider{
-		Fake:    runtime.NewFake(),
-		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
-	}
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2 from per-session fallback", count)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // poolInstanceName tests
 // ---------------------------------------------------------------------------
@@ -858,39 +834,6 @@ func TestExpandSessionSetup_ConfigDir(t *testing.T) {
 	want := "/home/user/city/packs/gastown/assets/scripts/status-line.sh mayor"
 	if got[0] != want {
 		t.Errorf("got %q, want %q", got[0], want)
-	}
-}
-
-func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
-	sp := runtime.NewFake()
-	// Start 3 out of 5 pool instances.
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-5", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 5}, nil, "city", "", sp)
-	if count != 3 {
-		t.Errorf("count = %d, want 3", count)
-	}
-}
-
-func TestCountRunningPoolInstancesWithDir(t *testing.T) {
-	sp := runtime.NewFake()
-	// Rig-scoped pool: dir/name pattern.
-	_ = sp.Start(context.Background(), "myrig--worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "myrig--worker-2", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "myrig", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-}
-
-func TestCountRunningPoolInstancesNoneRunning(t *testing.T) {
-	sp := runtime.NewFake()
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 10}, nil, "city", "", sp)
-	if count != 0 {
-		t.Errorf("count = %d, want 0", count)
 	}
 }
 
@@ -1677,5 +1620,87 @@ func TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch(t *testing.T)
 		&config.Agent{Name: "mayor", Scope: "city"}, rigs)
 	if cityScoped.DefaultBranch != "" {
 		t.Errorf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
+	}
+}
+
+// TestShellCommandSurfacesStderrOnFailure pins that a failed controller-run
+// shell command keeps the reason it failed. cmd.Output() already collects the
+// stderr of a failed command on its *exec.ExitError, but that error renders as
+// only "exit status N", so the controller log never said why a pool probe or
+// recovery hook failed.
+func TestShellCommandSurfacesStderrOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		command    string
+		wantErr    string // exact error text; "" means substring checks only
+		wantInErr  []string
+		wantExit   int
+		wantStdout string
+	}{
+		{
+			// The stderr text is assembled by the shell so the literal never
+			// appears in the command, which the error text quotes.
+			name:      "stderr and exit 3",
+			command:   "printf 'bd: schema version mis%s\\n' match >&2; exit 3",
+			wantInErr: []string{"exit status 3: bd: schema version mismatch"},
+			wantExit:  3,
+		},
+		{
+			name:      "stderr is trimmed",
+			command:   "printf '\\n  bo%s  \\n\\n' om >&2; exit 3",
+			wantInErr: []string{"exit status 3: boom"},
+			wantExit:  3,
+		},
+		{
+			name:     "no stderr leaves the text unchanged",
+			command:  "exit 3",
+			wantErr:  `running command "exit 3": exit status 3`,
+			wantExit: 3,
+		},
+		{
+			name:     "whitespace-only stderr leaves the text unchanged",
+			command:  "printf ' \\n' >&2; exit 3",
+			wantErr:  `running command "printf ' \\n' >&2; exit 3": exit status 3`,
+			wantExit: 3,
+		},
+		{
+			name:       "success ignores stderr noise",
+			command:    "echo noise >&2; echo out",
+			wantStdout: "out\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, err := shellCommand(tc.command, "", 30*time.Second, nil)
+			if tc.wantStdout != "" || tc.wantExit == 0 {
+				if err != nil {
+					t.Fatalf("shellCommand(%q) error = %v, want nil", tc.command, err)
+				}
+				if stdout != tc.wantStdout {
+					t.Errorf("stdout = %q, want %q", stdout, tc.wantStdout)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("shellCommand(%q) succeeded, want an error", tc.command)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q on failure, want empty", stdout)
+			}
+			if tc.wantErr != "" && err.Error() != tc.wantErr {
+				t.Errorf("error = %q, want exactly %q", err.Error(), tc.wantErr)
+			}
+			for _, want := range tc.wantInErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("error %v does not wrap an *exec.ExitError", err)
+			}
+			if exitErr.ExitCode() != tc.wantExit {
+				t.Errorf("ExitCode() = %d, want %d", exitErr.ExitCode(), tc.wantExit)
+			}
+		})
 	}
 }

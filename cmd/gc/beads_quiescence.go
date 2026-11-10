@@ -106,11 +106,23 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 		return false
 	}
 	// Store work dispatched before the city went quiescent (an autoclose run
-	// for a drained session's wisp) may still be reading; work dispatched
-	// from now on defers itself. The pairs go once none has been in flight
-	// for a whole tick, so no straggler read restarts them.
-	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.cs.storeWorkInFlight() })
+	// for a drained session's wisp) may still be reading, and so may a
+	// session start or stop the tick handed to its own goroutine; work
+	// dispatched from now on defers itself. The pairs go once none has been
+	// in flight for a whole tick, so no straggler read or write restarts them.
+	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.offTickStoreWorkInFlight() })
 	return true
+}
+
+// offTickStoreWorkInFlight reports whether the controller has store work running
+// outside its tick: dispatched store work (autoclose runs, completion facts), or
+// an async session start or drain-ack stop. Those last two hold a runtime lease
+// from dispatch until they return, and a drain-ack stop confirms its runtime
+// dead, which empties the provider's session list, before its lease release
+// writes the session store; so a city can read quiescent while either still has
+// a write to make.
+func (cr *CityRuntime) offTickStoreWorkInFlight() bool {
+	return cr.cs.storeWorkInFlight() || cr.asyncStarts.busy() || cr.asyncStops.busy()
 }
 
 // resumeRepairBlockedFlags and resumeRepairCandidates are the resume path's

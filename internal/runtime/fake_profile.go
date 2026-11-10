@@ -55,12 +55,14 @@ type ProfileBackend interface {
 	FencedInteractionProvider
 	FreshActivityProvider
 	FreshLivenessObserver
+	HeldFileProvider
 	IdleSnapshotProvider
 	IdleWaitProvider
 	ImmediateNudgeProvider
 	InputClearProvider
 	InteractionProvider
 	InterruptBoundaryWaitProvider
+	InterruptNoteProvider
 	InterruptedTurnResetProvider
 	InventoryProvider
 	KeyedNudgeProvider
@@ -69,6 +71,7 @@ type ProfileBackend interface {
 	LivenessObserverWithError
 	ProcessTableScanner
 	ProgramCaptureHealer
+	ProgramStatusHoldProvider
 	ProgramStatusProvider
 	ProgramStatusShadowProvider
 	RelaunchProvider
@@ -78,6 +81,7 @@ type ProfileBackend interface {
 	SessionBindingProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	StartupNudgeHandbackProvider
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
@@ -105,12 +109,14 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			FencedInteractionProvider:     b,
 			FreshActivityProvider:         b,
 			FreshLivenessObserver:         b,
+			HeldFileProvider:              b,
 			IdleSnapshotProvider:          b,
 			IdleWaitProvider:              b,
 			ImmediateNudgeProvider:        b,
 			InputClearProvider:            b,
 			InteractionProvider:           b,
 			InterruptBoundaryWaitProvider: b,
+			InterruptNoteProvider:         b,
 			InterruptedTurnResetProvider:  b,
 			InventoryProvider:             b,
 			ListingAttestation:            b,
@@ -118,6 +124,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			LivenessObserverWithError:     b,
 			ProcessTableScanner:           b,
 			ProgramCaptureHealer:          b,
+			ProgramStatusHoldProvider:     b,
 			ProgramStatusProvider:         b,
 			ProgramStatusShadowProvider:   b,
 			RelaunchProvider:              b,
@@ -125,6 +132,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			ServerLifecycleProvider:       b,
 			SessionObjectKiller:           b,
 			SessionRosterProvider:         b,
+			StartupNudgeHandbackProvider:  b,
 			TurnRunningProvider:           b,
 			UnattendedSessionStopper:      b,
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
@@ -138,9 +146,9 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed}
+		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
-		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
+		return execProfile{core, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -155,12 +163,18 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
+	sharedListingTrait struct{}                  // k8s lists every gc-agent pod in its namespace
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	steerTrait         struct{ m SteerMode }
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
+	// execHostFSTrait is exec's local-transcript answer and its
+	// process-table scanner, both of which its pack's handshake decides
+	// (fs.host with locality local): the profiled pack declares neither, so
+	// its transcripts are not local and it cannot scan.
+	execHostFSTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
@@ -175,9 +189,27 @@ func (freshTrait) LivenessReadsFresh() bool { return true }
 
 func (localTranscriptTrait) LocalTranscripts() bool { return true }
 
+func (execHostFSTrait) LocalTranscripts() bool { return false }
+
+// CanScanProcessTable is the profiled pack's answer: it does not share the
+// host, so [AsProcessTableScanner] reads it as having no scanner.
+func (execHostFSTrait) CanScanProcessTable() bool { return false }
+
+// FindRuntimesBySessionID finds nothing, as exec's scanner does for a pack
+// that cannot scan.
+func (execHostFSTrait) FindRuntimesBySessionID(string) ([]LiveRuntime, error) { return nil, nil }
+
+// TerminateRuntime refuses, as exec's scanner does for a pack that cannot
+// scan.
+func (execHostFSTrait) TerminateRuntime(r LiveRuntime) error {
+	return fmt.Errorf("exec profile: refusing to terminate PID %d for session %s: the pack's boxes do not share this host", r.PID, r.SessionID)
+}
+
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
+
+func (sharedListingTrait) ListRunningShared() bool { return true }
 
 // profileCapabilities are each backend's static capabilities; subprocess
 // has none. exec's come from its script's handshake: the profile is a pack
@@ -215,12 +247,14 @@ type (
 		FencedInteractionProvider
 		FreshActivityProvider
 		FreshLivenessObserver
+		HeldFileProvider
 		IdleSnapshotProvider
 		IdleWaitProvider
 		ImmediateNudgeProvider
 		InputClearProvider
 		InteractionProvider
 		InterruptBoundaryWaitProvider
+		InterruptNoteProvider
 		InterruptedTurnResetProvider
 		InventoryProvider
 		ListingAttestation
@@ -228,6 +262,7 @@ type (
 		LivenessObserverWithError
 		ProcessTableScanner
 		ProgramCaptureHealer
+		ProgramStatusHoldProvider
 		ProgramStatusProvider
 		ProgramStatusShadowProvider
 		RelaunchProvider
@@ -235,6 +270,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		StartupNudgeHandbackProvider
 		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait
@@ -285,6 +321,7 @@ type (
 		ListingAttestation
 		RelaunchProvider
 		sleepTrait
+		sharedListingTrait
 	}
 	execProfile struct {
 		Provider
@@ -293,9 +330,11 @@ type (
 		FencedInputProvider
 		IdleWaitProvider
 		RelaunchProvider
+		ServerLifecycleProvider
 		sleepTrait
 		probeBudgetTrait
 		execObserveTrait
+		execHostFSTrait
 	}
 	sshProfile struct {
 		Provider
@@ -347,13 +386,14 @@ func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 }
 
 // execObserveTrait is exec's observe.v1 surface, gated as the exec provider
-// gates it on its handshake. Ready (ProfileExecV2), the reads and kills are
-// the backend's, and the identity is its GetMeta of the identity keys for a
-// name its liveness read shows present, a corpse included, as exec's
-// `observe` reports a dead box's identity.
+// gates it on its handshake. Ready (ProfileExecV2), the reads, kills,
+// listing and inventory are the backend's, and the identity is its GetMeta
+// of the identity keys for a name its liveness read shows present, a
+// corpse included, as exec's `observe` reports a dead box's identity.
 // Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
 // with a nil error, nothing reads fresh or observes identity, nothing is
-// killed, and readiness names both missing capabilities.
+// killed, no inventory is served or listing attested, and readiness names
+// both missing capabilities.
 type execObserveTrait struct {
 	core  Provider
 	b     ProfileBackend
@@ -368,6 +408,32 @@ func (t execObserveTrait) ObserveLivenessWithError(name string, processNames []s
 }
 
 func (t execObserveTrait) LivenessReadsFresh() bool { return t.ready }
+
+func (t execObserveTrait) InventoryAvailable() bool { return t.ready }
+
+func (t execObserveTrait) ListRunningComplete() bool { return t.ready }
+
+func (t execObserveTrait) ListInventory(prefix string) ([]string, map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, nil, ErrRuntimeUnavailable
+	}
+	names, err := t.core.ListRunning(prefix)
+	if err != nil && !IsPartialListError(err) {
+		return nil, nil, err
+	}
+	inv, invErr := t.b.RuntimeInventory(context.Background())
+	if invErr != nil {
+		return nil, nil, invErr
+	}
+	return names, inv, err
+}
+
+func (t execObserveTrait) RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, ErrRuntimeUnavailable
+	}
+	return t.b.RuntimeInventory(ctx)
+}
 
 func (t execObserveTrait) IdentityObservable() bool { return t.ready }
 
@@ -611,6 +677,21 @@ func (f FullFake) TurnRunning(name string) (bool, error) {
 	return f.ScreenTurnRunning[name], nil
 }
 
+// HeldFiles implements [HeldFileProvider]: a running session's
+// [Fake.HeldOpen]; a read fails as [Fake.HeldOpenErrors] says, and a session
+// that is not running cannot be read.
+func (f FullFake) HeldFiles(name string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, running := f.sessions[name]; !running {
+		return nil, fmt.Errorf("held files of %q: %w", name, ErrSessionNotFound)
+	}
+	if err := f.HeldOpenErrors[name]; err != nil {
+		return nil, err
+	}
+	return slices.Clone(f.HeldOpen[name]), nil
+}
+
 // FreshActivity implements [FreshActivityProvider]: a running session's
 // [Fake.PaneActivity], else its Activity; a read fails as
 // [Fake.PaneActivityErrors] says, and a session that is not running cannot be
@@ -666,9 +747,29 @@ func (f FullFake) ConfigureServer() error {
 	return nil
 }
 
-// TeardownServer implements [ServerLifecycleProvider].
+// TeardownServer implements [ServerLifecycleProvider]: every session ends
+// with the server, as a real server's do, but one whose Stop is configured
+// to fail or to leave it running, which the teardown reports as a survivor.
+// A broken fake cannot reach its server.
 func (f FullFake) TeardownServer() error {
-	f.record("TeardownServer", "")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TeardownServer"})
+	if f.broken {
+		return fmt.Errorf("teardown server: %w", ErrRuntimeUnavailable)
+	}
+	var survivors []string
+	for name := range f.sessions {
+		if f.StopErrors[name] != nil || f.StopLeavesRunning[name] {
+			survivors = append(survivors, name)
+			continue
+		}
+		delete(f.sessions, name)
+	}
+	if len(survivors) > 0 {
+		slices.Sort(survivors)
+		return fmt.Errorf("teardown server: session(s) %v may survive", survivors)
+	}
 	return nil
 }
 

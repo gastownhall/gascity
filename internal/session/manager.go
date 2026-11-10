@@ -458,6 +458,11 @@ type Info struct {
 	// / _key), the same shape as the named pair above but for the attached path.
 	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
 	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt is the RAW config_drift_escalated_at metadata, the
+	// marker that the deferral episode named by ConfigDriftDeferredKey has
+	// emitted its single past-horizon escalation. It is valid only while its
+	// timestamp lies between ConfigDriftDeferredAt and now.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
@@ -635,7 +640,7 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store                   beads.Store
+	store                   beads.SessionStore
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
@@ -805,13 +810,11 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
-		// failed listing missed. It is not an orphan, and a replacement would
-		// race it for the session's work, so the start refuses and terminates
-		// nothing. The reconciler defers a refused start without recording a
-		// failure, so the refusal is logged here.
+		// failed listing missed, or a root its failed listing cannot rule
+		// out. It is not an orphan, and a replacement would race it for the
+		// session's work, so the start refuses and terminates nothing.
 		if live.LiveUnlisted {
-			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
-			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+			return refuseLiveUnlisted(sessionID, live, err)
 		}
 		orphans = append(orphans, live)
 	}
@@ -826,6 +829,22 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
 	}
 	return nil
+}
+
+// refuseLiveUnlisted logs and returns killExistingOrphans' refusal to start
+// sessionID over live, a root its provider claims as a live runtime it does
+// not list. When the scan's tracking failed (scanErr holds a whole-scan
+// failure), the claim rests on a listing that could not rule the root out,
+// so the refusal names that failure rather than say the root is the
+// provider's. The reconciler defers a refused start without recording a
+// failure, so the refusal is logged here.
+func refuseLiveUnlisted(sessionID string, live runtime.LiveRuntime, scanErr error) error {
+	claim := "belongs to the provider but is not listed by it"
+	if proctable.HasWholeScanFailure(scanErr) {
+		claim = "may belong to the provider, whose listing could not rule it out (" + proctable.SummarizeScanError(scanErr) + ")"
+	}
+	log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d %s", sessionID, live.PID, live.PPID, claim)
+	return fmt.Errorf("live runtime pid=%d ppid=%d for session %s %s: %w", live.PID, live.PPID, sessionID, claim, runtime.ErrRuntimeUnavailable)
 }
 
 func (m *Manager) now() time.Time {
@@ -914,7 +933,7 @@ func WithClock(clk clock.Clock) ManagerOption {
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
-func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
+func NewManagerWithOptions(store beads.SessionStore, sp runtime.Provider, opts ...ManagerOption) *Manager {
 	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
@@ -1156,6 +1175,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its
@@ -1815,7 +1835,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
 		}
@@ -1832,7 +1852,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
+		res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
@@ -2226,7 +2246,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(b.ID, time.Now().UTC())
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
 		}
@@ -2392,7 +2412,7 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 // persisted read half of the read model — pair it with EnrichInfo for the live
 // overlay (the worker catalog's Get composes exactly that).
 func (m *Manager) PersistedStore() *Store {
-	return NewStore(beads.SessionStore{Store: m.store})
+	return NewStore(m.store)
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template

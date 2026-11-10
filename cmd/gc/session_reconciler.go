@@ -4148,7 +4148,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// assigned work and drain naturally. The same shape
 							// of protection is already applied to the
 							// orphan/suspended drain at line 754.
-							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
+							heldBy, hasAssignedWork, assignedErr := firstOpenAssignedWorkBeadForReachableStore(sw, infoByID[id])
 							if assignedErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
 								continue
@@ -4166,6 +4166,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
+								recordConfigDriftHeldWorkEpisode(infoByID[id], sessFront, tick, rec, driftDeferralHorizon(cfg), driftKey, driftedFields, heldBy.ID, clk.Now(), stderr)
 								continue
 							}
 							if launchOnlyDrift {
@@ -5284,7 +5285,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				tick.markClosed(target.info.ID)
 				// Pool worktrees are transient by design — reclaim disk
 				// when the session bead is retired. Skipped under safety
-				// gates (uncommitted, unpushed, stashed) and overridable
+				// gates (uncommitted, unpushed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
@@ -5555,6 +5556,13 @@ func (c *healAliveConfirmer) alive(info sessionpkg.Info, name string, processNam
 // (gc-ft31x: retain rather than reap).
 func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	return sw.has(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
+}
+
+// firstOpenAssignedWorkBeadForReachableStore is
+// sessionHasOpenAssignedWorkForReachableStore's query answering with the
+// first open or in-progress bead it finds.
+func firstOpenAssignedWorkBeadForReachableStore(sw *SeatWork, info sessionpkg.Info) (beads.Bead, bool, error) {
+	return sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
 }
 
 // sessionHasOpenAssignedWorkForReachableStoreForCloseGate is the drain-ack
@@ -6559,6 +6567,24 @@ func recordNamedSessionConfigDriftDeferredAt(info sessionpkg.Info, sessFront *se
 	})
 }
 
+// recordConfigDriftHeldWorkEpisode is legacy's held-work drift episode
+// (#8345): an observation that writes (its first, or its one escalation
+// past horizon) folds the write into the tick and records
+// session.config_drift_deferred; a failed write is logged and records
+// nothing, for a later pass to retry. The write is driftEpisodePatch's, the
+// registered builder step.Patch comes from, so its keys resolve as advisory.
+func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, horizon time.Duration, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
+	step := driftEpisode(info, driftKey, now, horizon)
+	if step.Patch == nil || sessFront == nil || info.ID == "" {
+		return
+	}
+	if err := sessFront.ApplyPatch(info.ID, driftEpisodePatch(driftKey, now, step.Escalated)); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", info.ID, err) //nolint:errcheck
+		return
+	}
+	rec.Record(configDriftDeferredEvent(tick.apply(info.ID, step.Patch), fields, workBeadID, step.Since, now, step.Escalated))
+}
+
 func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store) error {
 	if sessFront == nil || info.ID == "" {
 		return nil
@@ -6566,7 +6592,8 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 	if info.ConfigDriftDeferredAt == "" &&
 		info.ConfigDriftDeferredKey == "" &&
 		info.AttachedConfigDriftDeferredAt == "" &&
-		info.AttachedConfigDriftDeferredKey == "" {
+		info.AttachedConfigDriftDeferredKey == "" &&
+		info.ConfigDriftEscalatedAt == "" {
 		return nil
 	}
 	return sessFront.ApplyPatch(info.ID, map[string]string{
@@ -6574,6 +6601,7 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 		namedSessionConfigDriftDeferredKeyMetadata:    "",
 		sessionAttachedConfigDriftDeferredAtMetadata:  "",
 		sessionAttachedConfigDriftDeferredKeyMetadata: "",
+		configDriftEscalatedAtMetadata:                "",
 	})
 }
 
@@ -6650,7 +6678,7 @@ func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath stri
 		// (ErrSessionNotFound is tolerated). ResolveSessionRecordByExactID is the
 		// front-door typed twin of the raw ResolveSessionBeadByExactID — identical
 		// error contract, no bead escapes.
-		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(beads.SessionStore{Store: store}, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return false, err
 		}
 	}
@@ -6954,6 +6982,7 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
+	batch[configDriftEscalatedAtMetadata] = ""
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return nil
@@ -7903,7 +7932,13 @@ func relaunchAgentForLaunchDrift(
 		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
-	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
+	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, relaunchErr == nil, time.Now()); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v\n", name, err) //nolint:errcheck
+	}
+	if err := relaunchErr; err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
 		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
 		// back to the full restart so the launch change is still applied.

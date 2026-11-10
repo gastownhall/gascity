@@ -389,7 +389,10 @@ func TestReviewExecProviderRefusesBeforeAnyWrite(t *testing.T) {
 	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
 	rigImportHashConfigOpener = defaultRigImportHashConfigOpener
-	if err := os.WriteFile(filepath.Join(f.request.CityPath, "city.toml"), []byte("[workspace]\nname = \"s4b\"\n\n[beads]\nprovider = \"exec:/bin/true\"\n"), 0o644); err != nil {
+	// A no-op provider script: /bin/true does not exist on macOS.
+	provider := filepath.Join(t.TempDir(), "noop-provider")
+	writeExecutable(t, provider, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(f.request.CityPath, "city.toml"), []byte("[workspace]\nname = \"s4b\"\n\n[beads]\nprovider = \"exec:"+provider+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, stderr := f.importRigs()
@@ -729,10 +732,13 @@ func TestReviewTwoRigsOnOneDatabaseRefuse(t *testing.T) {
 
 // Re-review should-fix: openPhysicalScopeStore (through openStorageScopeStore)
 // reads rows of every class, past the split-strict work view, so its callers
-// are pinned: only the rig importer's opener, which the census and gc rig
-// add's census share.
+// are pinned: the rig importer's opener, which the census and gc rig add's
+// census share, `gc storage snapshot --rigs`, whose JSONL must hold every row
+// of a rig's ledger, infrastructure rows included (S5-E), and the binding
+// restore's content check, which reads a rig's restored store for the
+// infrastructure rows its import carried out of it.
 func TestReviewPhysicalScopeOpenerCallersArePinned(t *testing.T) {
-	want := map[string]int{"rig_import.go": 1}
+	want := map[string]int{"rig_import.go": 1, "storage_snapshot.go": 1, "storage_snapshot_restore.go": 1}
 	got := map[string]int{}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -44,6 +45,7 @@ var waitIdleReadings = []waitIdleReading{
 		err:     fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate),
 		pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"},
 	},
+	{name: "a pending choice", err: fmt.Errorf("scan: %w", runtime.ErrIdlePendingChoice)},
 	{name: "at the boundary", idle: true, delivered: true},
 	{name: "indeterminate with nothing pending", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), delivered: true},
 }
@@ -96,7 +98,7 @@ func waitIdleOutOfReachResult(t *testing.T) Result {
 		return Fail(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce, strings.Join(violations, "; "))
 	}
 	return Pass(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce,
-		"busy and pending pre-reads queue at once on both handles; a boundary or indeterminate pre-read waits and delivers")
+		"busy, pending and pending-choice pre-reads queue at once on both handles; a boundary or indeterminate pre-read waits and delivers")
 }
 
 // sessionHandleWaitIdleNudge sends a wait-idle nudge through a claude
@@ -105,7 +107,7 @@ func sessionHandleWaitIdleNudge(t *testing.T, reading waitIdleReading) (worker.N
 	t.Helper()
 	fake := runtime.NewFake()
 	sp := &idleSnapshotProvider{Fake: fake, idle: reading.idle, err: reading.err}
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager: manager,
 		Session: worker.SessionSpec{

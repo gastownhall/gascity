@@ -234,7 +234,7 @@ func storageVerbSessionRefusal(request storageOperatorRequest, scope storageVerb
 		return names, fmt.Errorf("the session runtime could not list every session of this city, so it cannot prove none is running. Resolve it, or attest --%s=%s if they run where this host cannot list them", storageForceFlag, storageHazardRemoteRuntime)
 	}
 	if scope.Splits && !attested {
-		if name, remote := cityRunsRemoteSessions(request.Cfg); remote {
+		if name, remote := cityRunsRemoteSessions(request.Cfg, request.CityPath); remote {
 			return names, fmt.Errorf("this city runs sessions on a remote runtime ([session] provider %q). After the split those sessions refuse infrastructure-class commands (mail, nudges, session lookups) until worker-site transport (CN-2) exists, and an older gc on a remote host could still write infrastructure beads to the work store. Attest that with --%s=%s, or stay unsplit", name, storageForceFlag, storageHazardRemoteRuntime)
 		}
 	}
@@ -285,50 +285,52 @@ var storageVerbSessionInventory = func(cfg *config.City, cityPath string) ([]str
 
 // cityRunsRemoteSessions reports whether the city's session runtime runs its
 // sessions on other hosts: k8s, hybrid (whose remote leg is k8s), ssh:, or an
-// exec: runtime that does not declare itself local (sessionRuntimeIsRemote).
+// exec: or pack runtime whose handshake does not declare itself local
+// (sessionRuntimeIsRemote).
 //
 // The city's own [session] provider decides, not the operator's shell: a
 // GC_SESSION override in the shell running this command (a developer's
 // "fake") must not hide that the city's sessions run in pods. An override
-// that names a remote runtime counts too. Pack-declared runtimes declare no
-// remoteness, so they are not presumed remote; a remote one that cannot list
-// its sessions completely still refuses through the inventory check.
-func cityRunsRemoteSessions(cfg *config.City) (string, bool) {
+// that names a remote runtime counts too.
+func cityRunsRemoteSessions(cfg *config.City, cityPath string) (string, bool) {
 	if cfg == nil {
 		return "", false
 	}
 	configured := strings.TrimSpace(cfg.Session.Provider)
-	if sessionRuntimeIsRemote(configured) {
+	if sessionRuntimeIsRemote(cfg, cityPath, configured) {
 		return configured, true
 	}
-	if override := strings.TrimSpace(os.Getenv("GC_SESSION")); sessionRuntimeIsRemote(override) {
+	if override := strings.TrimSpace(os.Getenv("GC_SESSION")); sessionRuntimeIsRemote(cfg, cityPath, override) {
 		return override, true
 	}
 	return configured, false
 }
 
 // sessionRuntimeIsRemote reports whether a session-runtime selection name runs
-// sessions on another host. k8s, hybrid and ssh: always do. An exec: runtime
-// is remote unless its handshake declares locality=local (owner decision D4):
-// execRuntimeDeclaresLocal is where PAR-EXEC will consult that.
-func sessionRuntimeIsRemote(name string) bool {
+// sessions on another host. k8s, hybrid and ssh: always do. An exec runtime,
+// `exec:<script>` or a pack's [runtimes.<name>], is remote unless its
+// handshake declares locality=local (owner decision D4,
+// execRuntimeDeclaresLocal).
+func sessionRuntimeIsRemote(cfg *config.City, cityPath, name string) bool {
 	switch {
 	case name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:"):
 		return true
 	case strings.HasPrefix(name, "exec:"):
-		return !execRuntimeDeclaresLocal(strings.TrimPrefix(name, "exec:"))
+		return !execRuntimeDeclaresLocal(strings.TrimPrefix(name, "exec:"), cfg.EffectiveCityName(), cityPath)
+	}
+	if rt, isPack := cfg.Runtimes[name]; isPack {
+		return !execRuntimeDeclaresLocal(rt.Command, cfg.EffectiveCityName(), cityPath)
 	}
 	return false
 }
 
-// execRuntimeDeclaresLocal reports whether an exec: session runtime's
-// handshake declares locality=local. The handshake carries no locality yet
-// (PAR-EXEC adds it), so no exec runtime is local today: every one counts as
-// remote. PAR-EXEC replaces this body with the handshake read; it is a
-// variable so tests can stand in a local one.
-var execRuntimeDeclaresLocal = func(script string) bool {
-	_ = script
-	return false
+// execRuntimeDeclaresLocal reports whether an exec session runtime's
+// handshake declares locality=local, read by the admission probe
+// (execReadiness, remembered per version of the script and city). A
+// handshake that cannot be read, or that says nothing or anything else, is
+// remote. It is a variable so tests can stand in a local one.
+var execRuntimeDeclaresLocal = func(script, cityName, cityPath string) bool {
+	return execReadiness(script, cityName, cityPath).info.DeclaresLocal()
 }
 
 // sharedWorkStoreLabel names this city's work store in the shared-store

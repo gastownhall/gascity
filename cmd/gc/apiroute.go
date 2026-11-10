@@ -59,8 +59,9 @@ func apiClient(cityPath string) *api.Client {
 // expensive: maintenance commands have no local fallback at all, and
 // `gc status`'s local fallback re-opens the full local bead/dolt store and
 // rescans event archives to rebuild store health — far more expensive than
-// the supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
-// ~0.35s warm API). Where apiClient returns nil for its caller's local
+// the supervisor's answer from its warm caches (ra-r9hm6v: ~9.5s local CPU
+// vs ~0.35s for a saved response, and ~3.65s for the build `gc status`
+// waits for, #5028). Where apiClient returns nil for its caller's local
 // fallback, it routes to the supervisor-managed client instead in two shapes:
 // a supervisor-hosted city whose supervisor requires grants (these callers
 // handle a refusal as they handle any other API error), and a live controller
@@ -92,21 +93,15 @@ func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, strin
 	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisorMutation)
 }
 
-// localWhenSupervisorHostedAPIClient resolves an API client the way apiClient
-// does, for a read whose local path renders the command's own JSON contract
-// from on-disk state, except that a supervisor-hosted city gets nil with
-// reason "supervisor-hosted", so its caller reads locally. `gc session list`
-// is that read: its local rows carry the fields
-// schemas/session/list/result.schema.json defines (agent_name, closed, the
-// summary), which the API's session rows do not, and the API fills each active
-// session's active bead by reading every rig store, a suspended rig's
-// included. Pool-slot lookups parse agent_name, and the core orphan-sweep
-// order lists sessions in cities whose rigs may be suspended.
-func localWhenSupervisorHostedAPIClient(cityPath string) (*api.Client, string) {
-	if c := routeAPIClient(cityPath, apiRouteLocalWhenSupervisorHosted); c != nil {
-		return c, ""
-	}
-	return nil, routeFallbackReason(cityPath, apiRouteLocalWhenSupervisorHosted)
+// standaloneAPIClient resolves the API client only where a standalone
+// controller serves the city on its own [api] port, as apiClient does there. It
+// returns nil, without resolving the supervisor-managed client, for a
+// supervisor-hosted city and for a city with no live controller. It serves a
+// caller whose API call is an optional probe ahead of a local path that answers
+// either way, where reaching the supervisor costs more than the probe saves: the
+// per-turn `gc mail check --inject` hook (mailCheckClient).
+func standaloneAPIClient(cityPath string) *api.Client {
+	return routeAPIClient(cityPath, apiRouteStandaloneOnly)
 }
 
 // apiRoute selects how routeAPIClient routes the shapes in which its callers
@@ -120,14 +115,15 @@ const (
 	// supervisor-managed client in the shapes where apiClient returns nil for
 	// its caller's local fallback.
 	apiRoutePreferSupervisor
-	// apiRouteLocalWhenSupervisorHosted is localWhenSupervisorHostedAPIClient's
-	// routing: nil for a supervisor-hosted city.
-	apiRouteLocalWhenSupervisorHosted
 	// apiRoutePreferSupervisorMutation is
 	// supervisorFallthroughMutationAPIClient's routing: apiRoutePreferSupervisor,
 	// except nil for a supervisor-hosted city whose supervisor requires write
 	// grants.
 	apiRoutePreferSupervisorMutation
+	// apiRouteStandaloneOnly is standaloneAPIClient's routing: a standalone
+	// controller's [api] endpoint, and nil wherever apiClient would hand back
+	// the supervisor-managed client.
+	apiRouteStandaloneOnly
 )
 
 // supervisorRequiresGrantFor reports whether a supervisor hosting the city
@@ -147,9 +143,8 @@ func supervisorRequiresGrantFor(route apiRoute) bool {
 }
 
 // routeAPIClient is the routing ladder apiClient,
-// supervisorFallthroughAPIClient, supervisorFallthroughMutationAPIClient and
-// localWhenSupervisorHostedAPIClient share; route selects which of them it
-// resolves for.
+// supervisorFallthroughAPIClient and supervisorFallthroughMutationAPIClient
+// share; route selects which of them it resolves for.
 func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -173,11 +168,14 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	case identity.PID == 0:
 		// No controller socket: the supervisor-managed client, nil unless the
 		// supervisor runs the city.
+		if route == apiRouteStandaloneOnly {
+			return nil
+		}
 		return apiRouteSupervisorClientHook(cityPath)
 	case identity.HostingMode == controllerHostingSupervisor:
 		// The supervisor hosts the city in-process and serves it on its own
 		// port via city-scoped routes, ignoring [api] port.
-		if route == apiRouteLocalWhenSupervisorHosted || supervisorRequiresGrantFor(route) {
+		if route == apiRouteStandaloneOnly || supervisorRequiresGrantFor(route) {
 			return nil
 		}
 		return apiRouteSupervisorClientHook(cityPath)
@@ -200,21 +198,57 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 func standaloneControllerClient(cityPath string) *api.Client {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
-	if err != nil || cfg.API.Port <= 0 {
+	if err != nil {
 		return nil
 	}
-	// Non-localhost bind means API runs read-only — skip API routing
-	// (unless allow_mutations is set).
-	bind := cfg.API.BindOrDefault()
-	if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+	baseURL, ok := standaloneControllerBaseURL(cfg)
+	if !ok {
 		return nil
 	}
-	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
 	// Standalone controller serves /v0/city/{cityName}/... routes via
 	// api.NewSupervisorMux, so per-city method calls need a city-scoped
 	// client. Derive the city name from config; the controller only
 	// serves one city in standalone mode.
 	return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
+}
+
+// standaloneControllerBaseURL returns the base URL standaloneControllerClient
+// dials for a standalone controller serving cfg's [api] section, and false when
+// that section names no usable endpoint: [api] port is unset, or the listener
+// binds a non-loopback address without allow_mutations (the API then runs
+// read-only, so the CLI does not route through it).
+func standaloneControllerBaseURL(cfg *config.City) (string, bool) {
+	if cfg == nil || cfg.API.Port <= 0 {
+		return "", false
+	}
+	bind := cfg.API.BindOrDefault()
+	if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+		return "", false
+	}
+	return fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))), true
+}
+
+// cityStatusAPIURL returns the base URL of the HTTP API that serves the city,
+// derived from configuration rather than probed, for the api_url field of
+// `gc status --json`. It follows routeAPIClient's choice of endpoint: a city
+// the supervisor hosts (ctrl.Mode "supervisor": registered with it, or a live
+// controller identifying as supervisor-hosted) is served on the supervisor's
+// port from supervisor.toml, which ignores [api] port; any other city is served
+// on its standalone [api] endpoint (standaloneControllerBaseURL). It returns ""
+// when configuration names no usable endpoint; a supervisor.toml that cannot be
+// read is reported on stderr. Whether anything listens there is the controller
+// block's business, not this field's.
+func cityStatusAPIURL(cfg *config.City, ctrl ControllerJSON, stderr io.Writer) string {
+	if ctrl.Mode == string(controllerHostingSupervisor) {
+		baseURL, err := supervisorAPIBaseURL()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc status: warning: resolving supervisor API URL: %v\n", err) //nolint:errcheck // best-effort stderr
+			return ""
+		}
+		return baseURL
+	}
+	baseURL, _ := standaloneControllerBaseURL(cfg)
+	return baseURL
 }
 
 // standaloneControllerCityName resolves the effective city name for a
@@ -239,10 +273,8 @@ func apiClientFallbackReason(cityPath string) string {
 }
 
 // routeFallbackReason returns the apiClientFallbackReason code for a nil from
-// routeAPIClient with the same route, or "supervisor-hosted" for a
-// supervisor-hosted city on localWhenSupervisorHostedAPIClient's route. A
-// supervisor-hosted city's [api] bind is never the reason: the supervisor
-// ignores that port.
+// routeAPIClient with the same route. A supervisor-hosted city's [api] bind is
+// never the reason: the supervisor ignores that port.
 func routeFallbackReason(cityPath string, route apiRoute) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
@@ -252,9 +284,6 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 	case identity.PID == 0:
 		// No controller socket, and no supervisor-managed client either.
 	case identity.HostingMode == controllerHostingSupervisor:
-		if route == apiRouteLocalWhenSupervisorHosted {
-			return "supervisor-hosted"
-		}
 		if supervisorRequiresGrantFor(route) {
 			return "grant-required"
 		}

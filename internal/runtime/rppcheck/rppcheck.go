@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // Status is the outcome of a single conformance check.
@@ -129,6 +132,7 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	c := &checker{path: path, opts: opts}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
+	c.checkServerLifecycle(ctx)
 	return c.result, nil
 }
 
@@ -156,10 +160,23 @@ func (c *checker) runOp(ctx context.Context, stdin []byte, args ...string) opRes
 }
 
 func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) opResult {
+	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
+}
+
+// runOpEnv is runOpTimeout with env added to the executable's environment
+// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
+	var cmdEnv []string
+	if env != nil {
+		// Read before the op's deadline: execenv.Environ waits out an
+		// in-flight native store open, and that wait is not the op's.
+		cmdEnv = append(execenv.Environ(), env...)
+	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, c.path, args...)
+	cmd.Env = cmdEnv
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open; a conformance run should report a hang,
 	// not inherit it.
@@ -196,11 +213,41 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 
 // knownCapabilities maps declared capability strings to the op each one
 // promises. Unknown declared strings are ignored (forward compatibility,
-// RUNTIME-RPP-008).
+// RUNTIME-RPP-008). The conformance-only tokens (conformance-faults,
+// city-scoped) promise no op of their own, so they map to "": they are
+// listed only so the handshake check does not report them as unknown, and
+// `gc runtime conformance` checks the behavior they claim. idle-boundary is
+// a claim about the box's tmux, read over exec, not an op of its own, so it
+// maps to "" too (RPP-CONN-002 checks it), and so does proc.exec, whose exec
+// op `gc runtime conformance` checks (RPP-CONN-001) and which the
+// idle-boundary migration warning names.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
+	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	runtime.ProtocolCapabilityConnectionExec:   "",
+	runtime.ProtocolCapabilityIdleBoundary:     "",
+	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
+	"conformance-faults":                       "",
+	"city-scoped":                              "",
 }
+
+// The observe.v1 smoke checks (`gc runtime conformance` gates the profile
+// in full; see internal/runtime/runtimecontract).
+const (
+	observeCheck       = "capability observe.v1: observe"
+	inventoryCheck     = "capability observe.v1: inventory"
+	killObjectCheck    = "capability observe.v1: kill-object"
+	observeAbsentCheck = "capability observe.v1: observe after stop"
+	observeBogusObject = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
+)
+
+// The server-lifecycle smoke checks (`gc runtime conformance` gates the
+// token in full as the server group).
+const (
+	serverStopCheck           = "capability server-lifecycle: server-stop"
+	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
+)
 
 const handshakeCheck = "protocol handshake"
 
@@ -238,7 +285,27 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if len(unknown) > 0 {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
+	if missingIdleBoundary(info) {
+		detail += "; " + idleBoundaryMigrationWarning
+	}
 	c.record(handshakeCheck, StatusPass, detail)
+}
+
+// idleBoundaryMigrationWarning names the migration state a pack is in when it
+// declares the three capabilities that once gave it an idle boundary but not
+// idle-boundary, which it now also needs: it passes, but gc gives it no idle
+// wait and its interactive sessions do not sleep.
+const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; that is expected for a runtime whose box runs no tmux, otherwise declare idle-boundary (the agent runs in the box's tmux session main)"
+
+// missingIdleBoundary reports whether the handshake declares proc.exec,
+// report-activity and report-attachment but not idle-boundary: the set the exec
+// provider's idleBoundaryDeclared requires, less the token. Change them
+// together.
+func missingIdleBoundary(info runtime.ProtocolInfo) bool {
+	return info.Has(runtime.ProtocolCapabilityConnectionExec) &&
+		info.Has(runtime.ProtocolCapabilityReportActivity) &&
+		info.Has(runtime.ProtocolCapabilityReportAttachment) &&
+		!info.Has(runtime.ProtocolCapabilityIdleBoundary)
 }
 
 // checkLifecycle runs the required round-trip — start → is-running true
@@ -297,6 +364,9 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	}
 
 	c.checkRequiredBool(ctx, "lifecycle: is-running after stop", name, "false")
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeAbsentCheck, name, "absent")
+	}
 
 	again := c.runOp(ctx, nil, "stop", name)
 	switch {
@@ -315,6 +385,81 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// Post-stop it exercises the documented missing-session contract:
 	// best-effort, exit 0.
 	c.checkOptional(ctx, "optional: interrupt", nil, "interrupt", name)
+}
+
+// checkServerLifecycle runs the server-stop a script declaring
+// server-lifecycle owes, under a session of its own: server-stop exits 0 and
+// leaves that session not running, and a second server-stop exits 0 too. A
+// script that does not declare the token is not sent server-stop.
+//
+// server-stop names no session: it ends every session of the city it runs
+// in. So every op here runs in a private city (privateCity), never in the
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
+// run from a city leaves that city's sessions running.
+func (c *checker) checkServerLifecycle(ctx context.Context) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		return
+	}
+	city, removeCity, err := privateCity()
+	if err != nil {
+		c.record(serverStopCheck, StatusFail, err.Error())
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no private city to run server-stop in")
+		return
+	}
+	defer removeCity()
+	name := c.opts.SessionName + "-server"
+	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
+	if err != nil {
+		c.record(serverStopCheck, StatusFail, fmt.Sprintf("marshaling start config: %v", err))
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no session to stop")
+		return
+	}
+	start := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "start", name)
+	// Whatever server-stop does, the session is stopped, on a
+	// cancellation-detached context so an interrupted run does not leak it.
+	defer c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "stop", name)
+	if start.unsupported || start.err != nil {
+		c.record(serverStopCheck, StatusSkip, "skipped: start failed")
+		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: start failed")
+		return
+	}
+
+	switch stop := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "server-stop"); {
+	case stop.unsupported:
+		c.record(serverStopCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
+	case stop.err != nil:
+		c.record(serverStopCheck, StatusFail, stop.err.Error())
+	default:
+		res := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name)
+		switch {
+		case res.unsupported || res.err != nil:
+			c.record(serverStopCheck, StatusFail, "is-running after server-stop did not answer")
+		case res.stdout != "false":
+			c.record(serverStopCheck, StatusFail, fmt.Sprintf("is-running after server-stop exited 0 = %q, want \"false\": exit 0 means no session remains", res.stdout))
+		default:
+			c.record(serverStopCheck, StatusPass, "")
+		}
+	}
+
+	switch again := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "server-stop"); {
+	case again.unsupported:
+		c.record(serverStopIdempotentCheck, StatusFail, "server-lifecycle declared but server-stop not implemented (exit 2)")
+	case again.err != nil:
+		c.record(serverStopIdempotentCheck, StatusFail, fmt.Sprintf("second server-stop must succeed with no server running: %s", again.err))
+	default:
+		c.record(serverStopIdempotentCheck, StatusPass, "")
+	}
+}
+
+// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
+// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
+func privateCity() (env []string, remove func(), err error) {
+	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+	}
+	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
+	return env, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // checkRequiredBool asserts is-running prints exactly the wanted value
@@ -347,17 +492,22 @@ func (c *checker) remainingCheckNames() []string {
 			names = append(names, "optional: "+knownCapabilities[capability])
 		}
 	}
-	return append(names,
+	names = append(names,
 		"optional: process-alive",
 		c.nudgeCheckName(),
 		"optional: metadata round-trip",
 		"optional: peek",
 		"optional: list-running",
-		"lifecycle: stop",
-		"lifecycle: is-running after stop",
-		"lifecycle: stop idempotent",
-		"optional: interrupt",
 	)
+	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
+	if observe {
+		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
+	}
+	names = append(names, "lifecycle: stop", "lifecycle: is-running after stop")
+	if observe {
+		names = append(names, observeAbsentCheck)
+	}
+	return append(names, "lifecycle: stop idempotent", "optional: interrupt")
 }
 
 func (c *checker) skipRemainingChecks(detail string) {
@@ -380,6 +530,80 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkMetadataRoundTrip(ctx, name)
 	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
 	c.checkListRunning(ctx, name)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeCheck, name, "running")
+		c.checkInventory(ctx, name)
+		c.checkKillObjectBogus(ctx, name)
+	}
+}
+
+// checkObserve runs `observe <name>` and requires the answer gc accepts
+// (exec.ParseObserve) in state want, with the box's object when present.
+func (c *checker) checkObserve(ctx context.Context, check, name, want string) {
+	res := c.runOp(ctx, nil, "observe", name)
+	switch {
+	case res.unsupported:
+		c.record(check, StatusFail, "observe.v1 declared but observe not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+		return
+	}
+	o, err := sessionexec.ParseObserve([]byte(res.stdout))
+	switch {
+	case err != nil:
+		c.record(check, StatusFail, fmt.Sprintf("observe answer gc would read as unknown: %v", err))
+	case o.State != want:
+		c.record(check, StatusFail, fmt.Sprintf("observe state %q, want %q", o.State, want))
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// checkInventory runs `inventory` and requires the answer gc accepts
+// (exec.ParseInventory), complete, listing the running session.
+func (c *checker) checkInventory(ctx context.Context, name string) {
+	res := c.runOp(ctx, nil, "inventory")
+	switch {
+	case res.unsupported:
+		c.record(inventoryCheck, StatusFail, "observe.v1 declared but inventory not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(inventoryCheck, StatusFail, res.err.Error())
+		return
+	}
+	inv, err := sessionexec.ParseInventory([]byte(res.stdout))
+	switch {
+	case err != nil:
+		c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory answer gc would refuse: %v", err))
+		return
+	case !inv.Complete:
+		c.record(inventoryCheck, StatusFail, "inventory answered complete:false with every box readable")
+		return
+	}
+	for _, n := range inv.Names {
+		if n == name {
+			c.record(inventoryCheck, StatusPass, "")
+			return
+		}
+	}
+	c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory does not list the running %s", name))
+}
+
+// checkKillObjectBogus runs `kill-object` for an object that names no box,
+// which must answer gone and kill nothing.
+func (c *checker) checkKillObjectBogus(ctx context.Context, name string) {
+	res := c.runOp(ctx, []byte(observeBogusObject), "kill-object", name)
+	switch {
+	case res.unsupported:
+		c.record(killObjectCheck, StatusFail, "observe.v1 declared but kill-object not implemented (exit 2)")
+	case res.err != nil:
+		c.record(killObjectCheck, StatusFail, res.err.Error())
+	case res.stdout != "gone":
+		c.record(killObjectCheck, StatusFail, fmt.Sprintf("kill-object for an object that names no box = %q, want gone", res.stdout))
+	default:
+		c.record(killObjectCheck, StatusPass, "")
+	}
 }
 
 // checkCapabilityOp runs the op a capability promises. Declared: exit 2

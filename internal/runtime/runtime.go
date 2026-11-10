@@ -79,6 +79,11 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
 const ExitCodeTempFail = 75
 
+// ExitCodeNoScreen is sysexits.h EX_NOINPUT: an observe.v1 exec script's
+// `peek` of a name whose box has no screen to read (no box, or a dead box
+// whose screen is gone). It is an answer, not a failure: an empty screen.
+const ExitCodeNoScreen = 66
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -720,6 +725,15 @@ type IdleSnapshotProvider interface {
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
+// ErrIdlePendingChoice reports an [IdleSnapshotProvider] observation that saw
+// a menu waiting for a choice: its highlighted option is drawn where the
+// ready prompt would be, so text sent now would pick an option instead of
+// reaching the composer. It wraps [ErrIdleIndeterminate], which is what every
+// caller that does not ask for it by name reads; the wait-idle pre-read
+// ([IdleBoundaryNow]) reads it as pending, since a menu does not close by
+// itself within a short wait.
+var ErrIdlePendingChoice = fmt.Errorf("%w: a menu awaits a choice", ErrIdleIndeterminate)
+
 // ErrWaitUnobserved reports that an idle or interrupt-boundary wait
 // ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
 // without one reading that showed the session busy: every read failed, or
@@ -860,6 +874,11 @@ type InventoryEntry struct {
 	// Incarnation identifies this runtime instance of the session. A new
 	// runtime under the same name, or a respawn of the session's first pane,
 	// gets a different value. Empty when the provider cannot report one.
+	// A provider whose fresh reads name the session's object
+	// (Liveness.ObjectID and ObjectCreated) leads it with
+	// "<ObjectID>:<ObjectCreated>", as tmux's
+	// "#{session_id}:#{session_created}:#{pane_pid}" does, so a probe's
+	// answer can be matched to this incarnation.
 	//
 	// On tmux it can also change without a restart: swap-pane,
 	// split-window -b, rotate-window, or killing pane 0.0 moves a different
@@ -889,6 +908,66 @@ type InventoryEntry struct {
 	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
 	// runtime reads program status for this session.
 	Program ProgramStatus
+	// ProcessKnown and ProcessAlive report whether the agent process (the
+	// GT_PROCESS_NAMES the session was started with) runs in the session's
+	// live box, as the batched read sees it (an exec pack's `inventory`),
+	// so no per-name process probe is needed. ProcessAlive is meaningless
+	// unless ProcessKnown.
+	ProcessKnown, ProcessAlive bool
+	// IdentityKnown and Identity report the session's identity env
+	// (GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN, GT_PROCESS_NAMES;
+	// a missing key is unset) for this Incarnation, read in the same batch.
+	// An empty Identity is a box with no gc identity. Identity is
+	// meaningless unless IdentityKnown.
+	IdentityKnown bool
+	Identity      map[string]string
+}
+
+// InventoryGate is implemented by providers whose [InventoryProvider] is
+// static on the type but served only when their backend says so (an exec
+// pack that is not v2-ready has none). Read it through [InventoryFor].
+type InventoryGate interface {
+	InventoryAvailable() bool
+}
+
+// InventoryLister is implemented by providers whose listing is their
+// batched inventory (an exec pack's `inventory`): ListInventory answers
+// ListRunning(prefix), and the inventory of the names it lists, from one
+// read, so a caller wanting both makes one call, under one bound. Read it
+// through [ListInventoryWithAttestation], which serves it only where
+// [InventoryFor] does.
+type InventoryLister interface {
+	ListInventory(prefix string) ([]string, map[string]InventoryEntry, error)
+}
+
+// ListInventoryWithAttestation is [ListRunningWithAttestation], plus the
+// inventory of the listed names when sp serves both from one read
+// ([InventoryLister], gated as [InventoryFor]); otherwise the inventory is
+// nil and the caller reads it separately, if at all.
+func ListInventoryWithAttestation(sp Provider, prefix string) (names []string, inventory map[string]InventoryEntry, attested bool, err error) {
+	lister, ok := sp.(InventoryLister)
+	if _, served := InventoryFor(sp); !ok || !served {
+		names, attested, err = ListRunningWithAttestation(sp, prefix)
+		return names, nil, attested, err
+	}
+	before := ListRunningAttested(sp)
+	names, inventory, err = lister.ListInventory(prefix)
+	return names, inventory, before && ListRunningAttested(sp), err
+}
+
+// InventoryFor returns p's batched inventory when p has one it serves now:
+// an [InventoryProvider] that is not an [InventoryGate] reporting it
+// unavailable. Every caller deciding whether to take a batched inventory
+// asks it, so a gated-off provider takes the no-inventory path exactly.
+func InventoryFor(p Provider) (InventoryProvider, bool) {
+	inv, ok := p.(InventoryProvider)
+	if !ok {
+		return nil, false
+	}
+	if gate, gated := p.(InventoryGate); gated && !gate.InventoryAvailable() {
+		return nil, false
+	}
+	return inv, true
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -1169,7 +1248,8 @@ type LiveRuntime struct {
 // artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
-// interface. Callers must use a type assertion and continue safely when the
+// interface, or report false through [ConditionalProcessTableScanner].
+// Callers must use [AsProcessTableScanner] and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying

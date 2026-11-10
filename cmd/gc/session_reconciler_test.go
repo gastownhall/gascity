@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -14778,7 +14779,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantomHoldingAssignedWork(t *te
 
 	// The runtime name is now free: a fresh canonical bead for the same identity
 	// can claim it — the collision that previously wedged respawn is gone.
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14890,7 +14891,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_DefaultTemplateWorkKeeps
 	if gotWork.Assignee != identity {
 		t.Fatalf("work assignee = %q, want %q (the recycle must not release the configured identity's work)", gotWork.Assignee, identity)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14929,7 +14930,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_RuntimeNameAssigneeSurvi
 	if gotWork.Assignee != runtimeName {
 		t.Fatalf("work assignee = %q, want %q (runtime-name claims belong to the configured identity too)", gotWork.Assignee, runtimeName)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14965,7 +14966,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_AliasRecognizedPhantomKe
 	if gotWork.Assignee != identity {
 		t.Fatalf("work assignee = %q, want %q", gotWork.Assignee, identity)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // legacyResolveClassStore is resolveClassStore as it stood before the router
@@ -140,13 +142,13 @@ func TestCityStoresAgreeWithTheLegacyResolver(t *testing.T) {
 }
 
 // TestControllerStoresFollowTheSwappedStores pins the epoch: a reload that
-// swaps the city store is visible to the next accessor read, and an unchanged
-// state hands back the same minted Stores. The expected stores go through the
+// swaps the city store, or only the rig stores, is visible to the next
+// accessor read, and an unchanged state hands back the same minted Stores. The expected stores go through the
 // split-strict views, which are identity outside the gate.
 func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	first := beads.NewMemStore()
 	cs := &controllerState{cityName: "c", cityBeadStore: first}
-	if got := cs.sessionsBeadStore().Store; got != splitStrictClassView(first) {
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(first) {
 		t.Fatalf("sessions = %p, want the city store %p", got, first)
 	}
 	epoch := cs.stores.current.Load()
@@ -159,8 +161,31 @@ func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	cs.mu.Lock()
 	cs.cityBeadStore = second
 	cs.mu.Unlock()
-	if got := cs.GraphBeadStore().Store; got != splitStrictClassView(second) {
+	if got := cs.Stores().Graph().Store; got != splitStrictClassView(second) {
 		t.Errorf("graph after the swap = %p, want the new city store %p", got, second)
+	}
+
+	// A reload that swaps only the rig stores is visible too: the epoch keys
+	// on the rig set's generation, not just the city store.
+	rig := beads.NewMemStore()
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{"r": rig}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(rig) {
+		t.Errorf("rig r after the rig swap = %v, %v; want the new rig store %p", got.Store, ok, rig)
+	}
+	epoch = cs.stores.current.Load()
+	_ = cs.Stores()
+	if cs.stores.current.Load() != epoch {
+		t.Error("an unchanged rig set re-minted its Stores")
+	}
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if _, ok := cs.Stores().Rig("r"); ok {
+		t.Error("a rig the reload dropped is still served")
 	}
 }
 
@@ -221,7 +246,7 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 	engine := beads.NewMemStore()
 	routes := messagingSplitRoutes(engine)
 	cs := &controllerState{cityName: "c", storageRoutes: routes, cityBeadStore: beads.NewMemStore()}
-	if got := cs.SessionsBeadStore().Store; got != beads.Store(engine) {
+	if got := cs.Stores().Sessions().Store; got != beads.Store(engine) {
 		t.Fatalf("pre-cache sessions = %T, want the engine", got)
 	}
 	routes.withControllerCache(t.Context(), nil)
@@ -230,21 +255,21 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 		t.Fatalf("withControllerCache left sessions on %T", cached)
 	}
 	t.Cleanup(func() { _ = routes.close() })
-	if got := cs.SessionsBeadStore().Store; got != cached {
+	if got := cs.Stores().Sessions().Store; got != cached {
 		t.Errorf("sessions after withControllerCache = %T, want the controller's cache", got)
 	}
 }
 
 // TestStoresReadersSeeTheFinalEpoch (review probe P1): readers race reload
-// swaps under -race; once the swaps stop, every accessor answers the final
-// stores.
+// swaps of the city and rig stores under -race; once the swaps stop, every
+// accessor answers the final stores.
 func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	binding := beads.NewMemStore()
 	graphOnly := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: binding}, binding: "infra"}
 	cs := &controllerState{cityName: "c", cityBeadStore: beads.NewMemStore(), storageRoutes: graphOnly}
 	// Mint the first epoch before any swap, so a key that missed the work
 	// store would keep it deterministically rather than by scheduling.
-	_ = cs.SessionsBeadStore()
+	_ = cs.Stores().Sessions()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -257,26 +282,35 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 					return
 				default:
 				}
-				_ = cs.SessionsBeadStore()
-				_ = cs.GraphBeadStore()
+				_ = cs.Stores().Sessions()
+				_ = cs.Stores().Graph()
 				_ = cs.cityWorkStore()
+				_, _ = cs.Stores().Rig("r")
 			}
 		}()
 	}
-	var last beads.Store
-	for range 3000 {
+	var last, lastRig beads.Store
+	for i := range 3000 {
 		city := beads.NewMemStore()
 		cs.mu.Lock()
 		cs.cityBeadStore = city
+		if i%3 == 0 {
+			lastRig = beads.NewMemStore()
+			cs.beadStores = map[string]beads.Store{"r": lastRig}
+			cs.rigStoresGen++
+		}
 		cs.mu.Unlock()
 		last = city
 	}
 	close(stop)
 	wg.Wait()
-	if got := cs.SessionsBeadStore().Store; got != splitStrictClassView(last) {
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(lastRig) {
+		t.Errorf("rig after the swaps = %v, %v; want the final rig store %p", got.Store, ok, lastRig)
+	}
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(last) {
 		t.Errorf("sessions after the swaps = %p, want the final city store %p", got, last)
 	}
-	if got := cs.GraphBeadStore().Store; got != beads.Store(binding) {
+	if got := cs.Stores().Graph().Store; got != beads.Store(binding) {
 		t.Errorf("graph after the swaps = %p, want the binding", got)
 	}
 	if got := cs.cityWorkStore().Store; got != splitStrictWorkView(last) {
@@ -404,7 +438,126 @@ func BenchmarkResolveClassStore(b *testing.B) {
 	b.Run("cs-accessor-cached-epoch", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_ = cs.SessionsBeadStore()
+			_ = cs.Stores().Sessions()
 		}
 	})
+}
+
+// TestCLIMailStoreIsTheResolvedMessagingStore pins the session-start mail
+// injection's reroute (typed-store T3): cliMailStore hands out the store
+// resolveMailMessagesStore did, the binding on a split one-shot city and the
+// scope store on an unsplit one.
+func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"split":   messagingSplitRoutes,
+		"unsplit": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := splittest.NewBindingStore(t)
+			work := splittest.NewWorkStore(t, "mc")
+			seedCLIStorageRoutes(t, cityPath, routes(binding))
+			want := resolveMailMessagesStore(cliStorageRoutes(cityPath), work, nil, cityPath, nil)
+			if got := cliMailStore(work, nil, cityPath).Store; resolvedKey(got) != resolvedKey(want) {
+				t.Errorf("cliMailStore wraps %v, resolveMailMessagesStore %v", resolvedKey(got), resolvedKey(want))
+			}
+			// Unsplit, the messaging class falls to the scope store: the
+			// store itself in production, its class view under the
+			// split-strict gate (identity when the gate is off).
+			wantStore := splitStrictClassView(work)
+			if name == "split" {
+				wantStore = binding
+			}
+			if !beads.SameStore(want, wantStore) {
+				t.Errorf("the messaging store is %v, want %v", resolvedKey(want), resolvedKey(wantStore))
+			}
+		})
+	}
+}
+
+// TestControllerMessagingStoreIsTheSessionsStore pins the premise the API's
+// named-session hand-off rests on (typed-stores T6b, R13): it reassigns a
+// retired session's external-message bindings and participants through the
+// city's messaging handle, where they always went through its sessions
+// store. On both topologies the controller serves, a single store and the
+// whole split, the two handles are one store.
+func TestControllerMessagingStoreIsTheSessionsStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"whole split":  messagingSplitRoutes,
+		"single store": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			binding := splittest.NewBindingStore(t)
+			cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: splittest.NewWorkStore(t, "mc"), storageRoutes: routes(binding)}
+			st := cs.Stores()
+			if !beads.SameStore(st.Mail(), st.Sessions()) {
+				t.Errorf("Mail() wraps %v, Sessions() %v: the hand-off would move bindings in a store other than the sessions store", resolvedKey(st.Mail().Store), resolvedKey(st.Sessions().Store))
+			}
+			if name == "whole split" && !beads.SameStore(st.Mail(), binding) {
+				t.Errorf("Mail() wraps %v, want the binding", resolvedKey(st.Mail().Store))
+			}
+		})
+	}
+}
+
+// TestSessionStartMailReadsTheMessagingBindingOnASplitCity pins
+// sessionStartMailInjection's messaging route end to end: on a split one-shot
+// city the auto-handoff mail lives in the binding, the hook is handed the
+// work store, and the injection still finds the handoff.
+func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := splittest.NewBindingStore(t)
+	work := splittest.NewWorkStore(t, "mc")
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	sessionBead, err := binding.Create(beads.Bead{
+		Title:    "session worker",
+		Type:     sessionpkg.BeadType,
+		Labels:   []string{sessionpkg.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "alias": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_MAIL", "")
+	var stderr bytes.Buffer
+	if code := doHandoffAuto(binding, binding, events.Discard, "worker", []string{"context cycle"}, "", io.Discard, &stderr); code != 0 {
+		t.Fatalf("doHandoffAuto = %d; stderr=%s", code, stderr.String())
+	}
+	live := sessionpkg.Info{ID: sessionBead.ID, Alias: "worker", SessionName: "worker"}
+
+	startMail := sessionStartMailInjection(work, &live, cityPath, &stderr)
+
+	if len(startMail.autoHandoffIDs) != 1 {
+		t.Fatalf("the injection found %d auto-handoffs, want the one in the messaging binding (stderr %q)", len(startMail.autoHandoffIDs), stderr.String())
+	}
+	for id := range startMail.autoHandoffIDs {
+		if _, err := binding.Get(id); err != nil {
+			t.Errorf("auto-handoff %s is not the binding's: %v", id, err)
+		}
+	}
+}
+
+// TestControllerNudgeQueueShadowsLiveInTheNudgesStore pins the API nudge
+// queue's shadow store to the nudges class (typed-stores T6c: it reads
+// Stores() since the exported accessor went), on routes that relocate every
+// class to its own store.
+func TestControllerNudgeQueueShadowsLiveInTheNudgesStore(t *testing.T) {
+	work := beads.NewMemStore()
+	graph, sessions, orders, nudges, mail := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:     graph,
+		coordclass.ClassSessions:  sessions,
+		coordclass.ClassOrders:    orders,
+		coordclass.ClassNudges:    nudges,
+		coordclass.ClassMessaging: mail,
+	}, binding: "infra"}
+	cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: work, storageRoutes: routes}
+	q, ok := cs.NudgeQueue().(*fileNudgeQueue)
+	if !ok {
+		t.Fatalf("NudgeQueue = %T, want the file queue", cs.NudgeQueue())
+	}
+	if q.store.Store != beads.Store(nudges) {
+		t.Errorf("the API nudge queue's shadows live in %p, want the nudges store %p", q.store.Store, nudges)
+	}
 }

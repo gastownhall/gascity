@@ -744,6 +744,15 @@ export type ContextAdvisoryTier = {
     Threshold: number | null;
 };
 
+export type ControlCheckUnlaunchablePayload = {
+    bead_id: string;
+    check_path: string;
+    error: string;
+    kind?: string;
+    root_bead_id?: string;
+    store_path?: string;
+};
+
 export type ControlDispatcherScopeGapPayload = {
     rig_context?: string;
     sample_bead_id?: string;
@@ -1220,6 +1229,10 @@ export type ConvoyAddInputBody = {
 
 export type ConvoyCheckResponse = {
     /**
+     * IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+     */
+    child_ids?: Array<string> | null;
+    /**
      * Closed child bead count.
      */
     closed: number;
@@ -1231,6 +1244,10 @@ export type ConvoyCheckResponse = {
      * Convoy ID.
      */
     convoy_id: string;
+    /**
+     * Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+     */
+    dangling_tracks?: number;
     /**
      * Total child bead count.
      */
@@ -1382,7 +1399,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3816,6 +3833,33 @@ export type SessionBindingRecord = {
     Status: BindingStatus;
 };
 
+export type SessionClosedPayload = {
+    /**
+     * The concrete agent identity the session ran as. Empty when the session records none.
+     */
+    agent_name?: string;
+    /**
+     * Session alias, when set.
+     */
+    alias?: string;
+    /**
+     * The close reason the session bead records (its close_reason), when it records one.
+     */
+    reason?: string;
+    /**
+     * Session bead ID.
+     */
+    session_id: string;
+    /**
+     * Session template, when known.
+     */
+    template?: string;
+    /**
+     * Session title.
+     */
+    title?: string;
+};
+
 export type SessionCommandStatusBody = {
     /**
      * The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of acting again.
@@ -3833,6 +3877,41 @@ export type SessionCommandStatusBody = {
      * Operation result.
      */
     status: string;
+};
+
+export type SessionConfigDriftDeferredPayload = {
+    /**
+     * RFC3339 timestamp the deferral episode was first recorded; the escalation clock counts from here.
+     */
+    deferred_since: string;
+    /**
+     * Names of the configuration fields whose fingerprint changed. Never null; empty when the stored fingerprint breakdown is unavailable.
+     */
+    drifted_fields: Array<string>;
+    /**
+     * False on the first observation; true on the single emission after the episode outlives [daemon] drift_deferral_escalate_after.
+     */
+    escalated: boolean;
+    /**
+     * Whole seconds the episode had been deferred when the event fired.
+     */
+    pending_seconds: number;
+    /**
+     * Canonical session bead ID of the deferred seat (also the envelope Subject).
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Template of the seat.
+     */
+    template: string;
+    /**
+     * ID of the assigned work bead observed holding the restart back.
+     */
+    work_bead_id: string;
 };
 
 export type SessionCreateBody = {
@@ -3891,6 +3970,29 @@ export type SessionCreateSucceededPayload = {
      * Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands.
      */
     session: SessionResponse;
+};
+
+export type SessionCreatedPayload = {
+    /**
+     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.
+     */
+    agent_name?: string;
+    /**
+     * Session alias, when set.
+     */
+    alias?: string;
+    /**
+     * Session bead ID.
+     */
+    session_id: string;
+    /**
+     * Session template, when known.
+     */
+    template?: string;
+    /**
+     * Session title.
+     */
+    title?: string;
 };
 
 export type SessionDemandClaimDivergencePayload = {
@@ -4165,7 +4267,7 @@ export type SessionProgramStatusShadowPayload = {
     /**
      * The decision point.
      */
-    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation';
+    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation' | 'starved_bypass';
     /**
      * What the program-status record would decide.
      */
@@ -4273,6 +4375,10 @@ export type SessionResponse = {
      */
     activity_source?: 'program' | 'transcript';
     agent_kind?: string;
+    /**
+     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
+     */
+    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -4310,10 +4416,22 @@ export type SessionResponse = {
     template: string;
     title: string;
     /**
+     * How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+     */
+    transport?: string;
+    /**
      * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row.
      */
     turn?: SessionTurn;
+    /**
+     * Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.
+     */
+    wake_reasons?: Array<string> | null;
     work_dir?: string;
+    /**
+     * The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+     */
+    worker_dir?: string;
 };
 
 export type SessionStopBody = {
@@ -5977,6 +6095,10 @@ export type StatusAgentDetail = {
      */
     scope: string;
     /**
+     * Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+     */
+    session_id?: string;
+    /**
      * tmux session name CLI drain-ops key on.
      */
     session_name?: string;
@@ -6286,10 +6408,20 @@ export type StatusWorkCounts = {
 export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
+    held_different?: Array<string> | null;
+    held_different_count?: number;
     invariant: string;
     lost_cross_edges?: Array<string> | null;
     outcome: string;
+    presumed_reused?: Array<string> | null;
+    presumed_reused_count?: number;
     proven_beads: number;
+    recheck?: boolean;
+    retained?: Array<string> | null;
+    retained_count?: number;
+    serving?: boolean;
+    stranded?: Array<string> | null;
+    stranded_count?: number;
 };
 
 export type StorageRigPayload = {
@@ -6589,6 +6721,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.check_unlaunchable';
+} & TypedEventStreamEnvelopeControlCheckUnlaunchable) | ({
     type: 'control.dispatcher_scope_gap';
 } & TypedEventStreamEnvelopeControlDispatcherScopeGap) | ({
     type: 'control.root_settle_failed';
@@ -6705,12 +6839,18 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'session.closed';
+} & TypedEventStreamEnvelopeSessionClosed) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.config_drift_deferred';
+} & TypedEventStreamEnvelopeSessionConfigDriftDeferred) | ({
     type: 'session.conversation_reset';
 } & TypedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.created';
+} & TypedEventStreamEnvelopeSessionCreated) | ({
     type: 'session.demand_claim_divergence';
 } & TypedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -6763,6 +6903,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
     type: 'storage.binding.not_configured';
 } & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
+    type: 'storage.binding.stranded';
+} & TypedEventStreamEnvelopeStorageBindingStranded) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -7161,6 +7303,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope control.check_unlaunchable
+ */
+export type TypedEventStreamEnvelopeControlCheckUnlaunchable = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlCheckUnlaunchablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.check_unlaunchable';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8227,6 +8387,24 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.closed
+ */
+export type TypedEventStreamEnvelopeSessionClosed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionClosedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.closed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
@@ -8241,6 +8419,24 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
     subject?: string;
     ts: string;
     type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.config_drift_deferred
+ */
+export type TypedEventStreamEnvelopeSessionConfigDriftDeferred = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionConfigDriftDeferredPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.config_drift_deferred';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8277,6 +8473,24 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.created
+ */
+export type TypedEventStreamEnvelopeSessionCreated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionCreatedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.created';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8749,6 +8963,24 @@ export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.binding.stranded
+ */
+export type TypedEventStreamEnvelopeStorageBindingStranded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.stranded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope storage.binding.uncheckable
  */
 export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
@@ -9136,6 +9368,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.check_unlaunchable';
+} & TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable) | ({
     type: 'control.dispatcher_scope_gap';
 } & TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) | ({
     type: 'control.root_settle_failed';
@@ -9252,12 +9486,18 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'session.closed';
+} & TypedTaggedEventStreamEnvelopeSessionClosed) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.config_drift_deferred';
+} & TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred) | ({
     type: 'session.conversation_reset';
 } & TypedTaggedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.created';
+} & TypedTaggedEventStreamEnvelopeSessionCreated) | ({
     type: 'session.demand_claim_divergence';
 } & TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -9310,6 +9550,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
     type: 'storage.binding.not_configured';
 } & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
+    type: 'storage.binding.stranded';
+} & TypedTaggedEventStreamEnvelopeStorageBindingStranded) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -9728,6 +9970,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope control.check_unlaunchable
+ */
+export type TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlCheckUnlaunchablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.check_unlaunchable';
     workflow?: WorkflowEventProjection;
 };
 
@@ -10853,6 +11114,25 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.closed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionClosed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionClosedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.closed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.cold_start_timeout
  */
 export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
@@ -10868,6 +11148,25 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
     subject?: string;
     ts: string;
     type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.config_drift_deferred
+ */
+export type TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionConfigDriftDeferredPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.config_drift_deferred';
     workflow?: WorkflowEventProjection;
 };
 
@@ -10906,6 +11205,25 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.created
+ */
+export type TypedTaggedEventStreamEnvelopeSessionCreated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionCreatedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.created';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11400,6 +11718,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
     subject?: string;
     ts: string;
     type: 'storage.binding.not_configured';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.stranded
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingStranded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.stranded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -19782,13 +20119,17 @@ export type GetV0CityByCityNameSessionByIdData = {
     };
     query?: {
         /**
-         * Include last output preview.
+         * Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
          */
         peek?: boolean;
         /**
-         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
          */
         peek_lines?: number;
+        /**
+         * Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+         */
+        peek_strict?: boolean;
         /**
          * Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
          */
@@ -21528,6 +21869,10 @@ export type GetV0CityByCityNameSessionsData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
+         */
+        wake_reasons?: boolean;
     };
     url: '/v0/city/{cityName}/sessions';
 };
@@ -21715,6 +22060,10 @@ export type GetV0CityByCityNameStatusData = {
          * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
          */
         lite?: boolean;
+        /**
+         * When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+         */
+        fresh?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };
