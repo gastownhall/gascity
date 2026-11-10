@@ -266,14 +266,14 @@ func TestResolveAgentTranscriptReadsSessionKeyFromSessionsClass(t *testing.T) {
 // TestSessionClassRoutingIsIdentityOnSingleStoreCity is the byte-identity proof
 // for a city that relocates nothing: every accessor the fixes moved to resolves
 // to the exact store value CityBeadStore() returns, so each substitution is a
-// no-op there. A regression that made SessionsBeadStore() diverge at the default
+// no-op there. A regression that made Stores().Sessions() diverge at the default
 // backend would fail here rather than in production.
 func TestSessionClassRoutingIsIdentityOnSingleStoreCity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	if fs.sessionsBeadStore != nil {
 		t.Fatal("fixture must not relocate the sessions class")
 	}
-	if got := fs.SessionsBeadStore().Store; got != fs.CityBeadStore() {
-		t.Fatal("default backend: SessionsBeadStore().Store must be the identical value CityBeadStore() returns")
+	if got := fs.Stores().Sessions().Store; got != fs.CityBeadStore() {
+		t.Fatal("default backend: Stores().Sessions().Store must be the identical value CityBeadStore() returns")
 	}
 }

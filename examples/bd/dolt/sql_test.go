@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package dolt_test validates that the dolt pack's sql.sh script
 // forwards extra arguments to the underlying `dolt sql` invocation.
 // Without forwarding, `gc dolt sql -q "QUERY"` is silently dropped:

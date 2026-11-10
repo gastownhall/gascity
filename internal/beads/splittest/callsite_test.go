@@ -42,6 +42,25 @@ func TestFactsFromFramesSkipsRegisteredPlumbingFiles(t *testing.T) {
 	}
 }
 
+// TestFactsFromFramesSkipsStorerefAndLegFrames: a read a storeref executor
+// makes through a leg layer is charged to the caller that planned it.
+func TestFactsFromFramesSkipsStorerefAndLegFrames(t *testing.T) {
+	stack := []frameInfo{
+		{file: "internal/beads/leg.go", line: 9, function: "github.com/gastownhall/gascity/internal/beads.(*relicLeg).Get"},
+		{file: "internal/storeref/resolve.go", line: 700, function: "github.com/gastownhall/gascity/internal/storeref.resolveByID"},
+		{file: "internal/storeref/resolve.go", line: 610, function: "github.com/gastownhall/gascity/internal/storeref.ResolveOwnerRow"},
+		{file: "internal/storeref/storereftest/binding_wins.go", line: 3, function: "github.com/gastownhall/gascity/internal/storeref/storereftest.helper"},
+		{file: "cmd/gc/by_id_residency.go", line: 153, function: "main.classRoutedOwner"},
+	}
+	want := Site{File: "internal/storeref/storereftest/binding_wins.go", Line: 3, Func: "storereftest.helper"}
+	if got := factsFromFrames(stack).site; got != want {
+		t.Fatalf("site = %+v, want %+v: storeref is plumbing, its test helpers are not", got, want)
+	}
+	if got := factsFromFrames(append(stack[:3:3], stack[4])).site; got.File != "cmd/gc/by_id_residency.go" {
+		t.Fatalf("site = %+v, want the cmd/gc caller", got)
+	}
+}
+
 func TestFactsFromFramesWithOnlyTestFramesHasNoSite(t *testing.T) {
 	stack := []frameInfo{
 		{file: "internal/beads/splittest/projection.go", line: 10, function: "github.com/gastownhall/gascity/internal/beads/splittest.(*view).Get"},

@@ -125,6 +125,16 @@ func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 			want:     map[string]string{"actions": "read", "contents": "read", "security-events": "write"},
 		},
 		{
+			file:     "security-scan.yml",
+			writeJob: "osv-scanner",
+			want:     map[string]string{"contents": "read", "security-events": "write"},
+		},
+		{
+			file:     "security-scan.yml",
+			writeJob: "govulncheck",
+			want:     map[string]string{"contents": "read", "security-events": "write"},
+		},
+		{
 			file:     "dispatch-labeled-pr-suite.yml",
 			writeJob: "dispatch-suite",
 			want:     map[string]string{"actions": "write", "contents": "read", "pull-requests": "read"},

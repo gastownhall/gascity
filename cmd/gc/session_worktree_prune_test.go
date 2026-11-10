@@ -11,14 +11,19 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
 // probe; WorktreeRemoveErr controls the destructive call, and removed
 // records the (path, force) of every WorktreeRemove invocation so tests
-// can assert which directory the removal targeted.
+// can assert which directory the removal targeted. gitDir is the private
+// git directory the prune reads worktree provenance from.
 type fakeGitProbe struct {
 	isRepo           bool
+	gitDir           string
+	gitDirErr        error
 	currentBranch    string
 	currentBranchErr error
 	hasUncommitted   bool
@@ -31,6 +36,10 @@ type fakeGitProbe struct {
 }
 
 func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
+func (f *fakeGitProbe) GitDir() (string, error) {
+	return f.gitDir, f.gitDirErr
+}
+
 func (f *fakeGitProbe) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
 }
@@ -81,12 +90,15 @@ func assertNoWorktreeStaleMarker(t *testing.T, workerDir string) {
 // pruneTestFixture wires a temp city directory, a writable worker_dir
 // under .gc/worktrees with a .git marker, and a config with a rig that
 // points at a separate "rig root" directory the prune call uses as the
-// git -C target.
+// git -C target. gitDir is the worker_dir's private git directory: it
+// holds no worktree provenance, so the worker_dir is an unmanaged
+// worktree unless a test says otherwise.
 type pruneTestFixture struct {
 	t          *testing.T
 	cityPath   string
 	rigRoot    string
 	workerDir  string
+	gitDir     string
 	cfg        *config.City
 	probesByWD map[string]*fakeGitProbe
 }
@@ -96,12 +108,16 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(cityPath, "repos", "demo")
 	workerDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecats", "polecat-3")
+	gitDir := filepath.Join(rigRoot, ".git", "worktrees", "polecat-3")
 
 	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
 		t.Fatalf("mkdir rigRoot: %v", err)
 	}
 	if err := os.MkdirAll(workerDir, 0o755); err != nil {
 		t.Fatalf("mkdir workerDir: %v", err)
+	}
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatalf("mkdir gitDir: %v", err)
 	}
 	// .git marker so the existence check passes; contents don't matter
 	// because gitProbe is faked.
@@ -120,6 +136,7 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		cityPath:   cityPath,
 		rigRoot:    rigRoot,
 		workerDir:  workerDir,
+		gitDir:     gitDir,
 		cfg:        cfg,
 		probesByWD: make(map[string]*fakeGitProbe),
 	}
@@ -131,7 +148,7 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		if !ok {
 			// Default: a healthy probe. The WorktreeRemove call goes
 			// through this default for the rig-root invocation.
-			probe = &fakeGitProbe{isRepo: true}
+			probe = &fakeGitProbe{isRepo: true, gitDir: fx.gitDir}
 			fx.probesByWD[workDir] = probe
 		}
 		return probe
@@ -140,8 +157,68 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 	return fx
 }
 
+// setProbe installs probe for workDir. A probe that names no git dir and
+// no git dir error reads the fixture's provenance-free gitDir.
 func (fx *pruneTestFixture) setProbe(workDir string, probe *fakeGitProbe) {
+	if probe.gitDir == "" && probe.gitDirErr == nil {
+		probe.gitDir = fx.gitDir
+	}
 	fx.probesByWD[workDir] = probe
+}
+
+// managedPruneWorktree publishes a real managed worktree under cityPath's
+// worktrees root for rig "demo", as `gc worktree ensure` does for a
+// provisioner that is not the session: its provenance names owner
+// "provisioner" and bead gc-work. Its checkout is clean and its HEAD is
+// pushed, so every git safety gate of the prune passes and only its
+// ownership can keep it. It returns the rig root and the spec the owner
+// holds, BaseSHA included, which worktree.Verify accepts while the
+// worktree is intact.
+func managedPruneWorktree(t *testing.T, cityPath string) (string, worktree.Spec) {
+	t.Helper()
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	rigRoot := t.TempDir()
+	runGit(t, rigRoot, "clone", bare, ".")
+	runGit(t, rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, rigRoot, "config", "user.name", "Test")
+	runGit(t, rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, rigRoot, "push", "origin", "HEAD")
+	base := strings.TrimSpace(runGit(t, rigRoot, "rev-parse", "--abbrev-ref", "HEAD"))
+
+	root := filepath.Join(cityPath, ".gc", "worktrees", "demo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir worktree root: %v", err)
+	}
+	spec := worktree.Spec{
+		RepoDir: rigRoot, Root: root, Path: filepath.Join(root, "gc-work-g1"),
+		Branch: "work/gc-work-g1", Base: base,
+		BeadID: "gc-work", StoreRef: "rig:demo", Creator: "provisioner", Owner: "provisioner",
+		Generation: "g1", Lifecycle: worktree.LifecycleActive,
+	}
+	report, err := worktree.Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure managed worktree: %v", err)
+	}
+	spec.BaseSHA = report.Provenance.BaseSHA
+	if hasUnpushed, err := git.New(spec.Path).HasUnpushedCommitsResult(); err != nil || hasUnpushed {
+		t.Fatalf("test setup invalid: managed worktree must probe pushed so only ownership keeps it; unpushed=%v err=%v", hasUnpushed, err)
+	}
+	return rigRoot, spec
+}
+
+// assertManagedWorktreeIntact fails the test unless the owner's worktree
+// still verifies against the spec the owner holds: present, registered,
+// on its branch, and carrying its provenance.
+func assertManagedWorktreeIntact(t *testing.T, spec worktree.Spec, stderr string) {
+	t.Helper()
+	if _, err := worktree.Verify(spec); err != nil {
+		t.Fatalf("closing session's prune removed or damaged a worktree another owner holds: %v; stderr=%q", err, stderr)
+	}
+	if strings.Contains(stderr, "pruned worker_dir") {
+		t.Fatalf("prune reported removing a worktree another owner holds; stderr=%q", stderr)
+	}
 }
 
 func (fx *pruneTestFixture) sessionBead() beads.Bead {
@@ -460,6 +537,35 @@ func TestPruneAgentHomeWorktreeIfSafe_StashInsideWorktreeSurvivesPrune(t *testin
 	}
 	if out := runGit(t, rigRoot, "stash", "show", "-p"); !strings.Contains(out, stashedLine) {
 		t.Fatalf("stashed content unrecoverable after prune; `git stash show -p` =\n%s", out)
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafe_LeavesManagedWorktreeOfAnotherOwner is
+// the raw form of the managed-worktree ownership gate (ga-tlus3e.22): a
+// pool seat the controller started inside a work bead's verified managed
+// worktree records that worktree as its work dir, and closing the seat must
+// not remove a worktree whose provenance names another owner.
+func TestPruneAgentHomeWorktreeIfSafe_LeavesManagedWorktreeOfAnotherOwner(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot, spec := managedPruneWorktree(t, cityPath)
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+	session := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"work_dir":     spec.Path,
+			"gc.work_dir":  spec.Path,
+			"template":     "demo/worker",
+			"session_name": "demo/worker-1",
+		},
+	}
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(session, cityPath, cfg, &stderr) {
+		t.Fatalf("prune returned true for a managed worktree owned by %q; stderr=%s", spec.Owner, stderr.String())
+	}
+	assertManagedWorktreeIntact(t, spec, stderr.String())
+	if !strings.Contains(stderr.String(), "managed worktree") {
+		t.Errorf("expected managed-worktree refusal log; got %q", stderr.String())
 	}
 }
 

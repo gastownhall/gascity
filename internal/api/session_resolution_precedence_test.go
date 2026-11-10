@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -52,7 +53,7 @@ func TestResolveSessionTargetID_ExactIDBeatsSessionNameMatch(t *testing.T) {
 		"state":        "active",
 	})
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, target.ID)
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), target.ID)
 	if err != nil {
 		t.Fatalf("resolve by exact ID: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestResolveSessionTargetID_SessionNameBeatsAlias(t *testing.T) {
 		"state":        "active",
 	})
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "shared-token")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "shared-token")
 	if err != nil {
 		t.Fatalf("resolve shared token: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestResolveSessionTargetID_LiveMatchBeatsPathAliasTitle(t *testing.T) {
 		"state":        "active",
 	})
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "contested")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "contested")
 	if err != nil {
 		t.Fatalf("resolve contested token: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestResolveSessionTargetID_AllowClosedPrefersOpenAlias(t *testing.T) {
 		"state":        "active",
 	})
 
-	id, err := srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, "reused-token")
+	id, err := srv.resolveSessionIDAllowClosedWithConfig(beadstest.Sessions(fs.cityBeadStore), "reused-token")
 	if err != nil {
 		t.Fatalf("allow-closed resolve: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestResolveSessionTargetID_ClosedSessionNameBeatsClosedAlias(t *testing.T) 
 		}
 	}
 
-	id, err := srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, "gone-token")
+	id, err := srv.resolveSessionIDAllowClosedWithConfig(beadstest.Sessions(fs.cityBeadStore), "gone-token")
 	if err != nil {
 		t.Fatalf("allow-closed resolve: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestResolveSessionTargetID_AllowClosedRejectsConfiguredNamedTargets(t *test
 	}
 
 	for _, target := range []string{"myrig/worker", runtimeName} {
-		_, err := srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, target)
+		_, err := srv.resolveSessionIDAllowClosedWithConfig(beadstest.Sessions(fs.cityBeadStore), target)
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			t.Fatalf("allow-closed resolve(%q) = %v, want ErrSessionNotFound (named-spec rejection precedes closed lookup)", target, err)
 		}
@@ -216,10 +217,10 @@ func TestResolveSessionTargetID_ClosedLookupRequiresAllowClosedSurface(t *testin
 		t.Fatalf("close bead: %v", err)
 	}
 
-	if id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "gone-token"); !errors.Is(err, session.ErrSessionNotFound) {
+	if id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "gone-token"); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("live-only resolve(gone-token) = %q, %v; want ErrSessionNotFound", id, err)
 	}
-	id, err := srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, "gone-token")
+	id, err := srv.resolveSessionIDAllowClosedWithConfig(beadstest.Sessions(fs.cityBeadStore), "gone-token")
 	if err != nil {
 		t.Fatalf("allow-closed resolve(gone-token): %v", err)
 	}
@@ -235,7 +236,7 @@ func TestResolveSessionTargetID_ConfiguredNameConflictBlocksLiveFallthrough(t *t
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil || !ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = %v, %v; want spec", ok, err)
 	}
@@ -250,7 +251,7 @@ func TestResolveSessionTargetID_ConfiguredNameConflictBlocksLiveFallthrough(t *t
 		"state":        "active",
 	})
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if !errors.Is(err, errConfiguredNamedSessionConflict) {
 		t.Fatalf("resolve(worker) = %q, %v; want errConfiguredNamedSessionConflict, not fallthrough to %q", id, err, live.ID)
 	}
@@ -266,7 +267,7 @@ func TestResolveSessionTargetID_TemplateFormBeatsSessionNameSquatter(t *testing.
 		"state":        "active",
 	})
 
-	if id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "template:worker"); !errors.Is(err, session.ErrSessionNotFound) {
+	if id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "template:worker"); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolve(template:worker) = %q, %v; want ErrSessionNotFound", id, err)
 	}
 }
@@ -290,10 +291,10 @@ func TestResolveSessionTargetID_AllowClosedStillRejectsConfigOrphan(t *testing.T
 		fn   func(target string) (string, error)
 	}{
 		{"live-only", func(target string) (string, error) {
-			return srv.resolveSessionIDWithConfig(fs.cityBeadStore, target)
+			return srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), target)
 		}},
 		{"allow-closed", func(target string) (string, error) {
-			return srv.resolveSessionIDAllowClosedWithConfig(fs.cityBeadStore, target)
+			return srv.resolveSessionIDAllowClosedWithConfig(beadstest.Sessions(fs.cityBeadStore), target)
 		}},
 	} {
 		id, err := resolve.fn("ghost-runtime")

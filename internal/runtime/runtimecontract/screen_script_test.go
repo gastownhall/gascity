@@ -19,8 +19,10 @@ import (
 // table are tested deterministically, without a terminal or real agents.
 
 // fakeBackend is a directory of fake screen and ps executables. screen -ls
-// prints the file ls (or fails when ls.fail exists) and logs every other
-// invocation to calls; ps prints ps.procs as its snapshot (or fails it when
+// prints the file ls (or fails when ls.fail exists), first running the
+// script ls.then once if it exists (an op that runs after the listing is
+// read, before its reader acts on it), and logs every other invocation to
+// calls; ps prints ps.procs as its snapshot (or fails it when
 // ps.fail exists), cut to COLUMNS without -ww as procps cuts it even into a
 // pipe, and for -o lstart= a fixed start time (lstart.<pid> when it exists,
 // none for a pid in gone); kill logs to calls and adds the pid to gone unless
@@ -63,6 +65,7 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 if [ "$1" = -ls ]; then
   if [ -f "$F/ls.fail" ]; then echo "Cannot open your terminal"; exit 1; fi
   rows=$(cat "$F/ls" "$L" 2>/dev/null)
+  if [ -f "$F/ls.then" ]; then mv -f "$F/ls.then" "$F/ls.then.ran"; sh "$F/ls.then.ran"; fi
   if [ -n "$rows" ]; then printf 'There are screens on:\n%s\n%s Sockets in /x.\n' "$rows" 1; exit 1; fi
   echo "No Sockets found in /x."; exit 1
 fi
@@ -71,6 +74,16 @@ printf '%s\n' "$*" >> "$F/calls"
 case "$1" in
   -dmS) [ -f "$F/nobox" ] || printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" >> "$L" ;;
   -wipe | -S)
+    # hardcopy, as real screen: -X exits 0 once the command is sent, and
+    # SCREEN writes the capture (a blank screen's empty lines included)
+    # unless it cannot (hardcopy.fail: nothing written, still exit 0).
+    # hardcopy.slow: SCREEN writes a long capture in two parts; the fake
+    # sleep appends the second during the reader's second pause, after it
+    # first measured the capture.
+    if [ "$4" = hardcopy ] && [ -f "$F/hardcopy.slow" ]; then
+      printf 'head of %s\n' "$2" > "$6"; printf '%s' "$6" > "$F/hardcopy.path"; : > "$F/hardcopy.pauses"; exit 0
+    fi
+    if [ "$4" = hardcopy ]; then [ -f "$F/hardcopy.fail" ] || printf 'screen of %s\n\n' "$2" > "$6"; exit 0; fi
     if [ "$1" = -wipe ] || [ "$4" = quit ]; then
       if [ ! -f "$F/sticky" ]; then
         for f in "$F/ls" "$L"; do
@@ -85,7 +98,8 @@ esac
 `)
 	// The snapshot is ps.procs, one "<pid> <ppid> <comm> <args...>" per
 	// line, printed in the fixed columns the script asks for.
-	write("ps", `for last; do :; done
+	write("ps", `printf 'ps %s\n' "$*" >> "$F/ps.calls"
+for last; do :; done
 case "$*" in
   *lstart*)
     grep -qx "$last" "$F/gone" 2>/dev/null && exit 1
@@ -107,6 +121,19 @@ esac
 	write("kill", `printf 'kill %s\n' "$*" >> "$F/calls"
 for last; do :; done
 [ -f "$F/unkillable" ] || echo "$last" >> "$F/gone"
+`)
+	// sleep sleeps as sleep does; under hardcopy.slow, the second pause
+	// after a hardcopy appends the capture's second part (SCREEN still
+	// writing it).
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not installed")
+	}
+	write("sleep", `if [ -f "$F/hardcopy.slow" ] && [ -f "$F/hardcopy.pauses" ]; then
+  echo x >> "$F/hardcopy.pauses"
+  if [ "$(wc -l < "$F/hardcopy.pauses")" -eq 2 ]; then printf 'tail of the capture\n' >> "$(cat "$F/hardcopy.path")"; fi
+fi
+exec `+fmt.Sprintf("%q", sleepBin)+` "$@"
 `)
 	write("uname", `if [ "$1" = -n ] && [ -f "$F/host" ]; then cat "$F/host"; exit 0; fi
 exec `+fmt.Sprintf("%q", uname)+` "$@"
@@ -946,4 +973,149 @@ func tmpDirOfLength(t *testing.T, n int) string {
 	}
 	t.Fatalf("no free %d-byte directory under /tmp", n)
 	return ""
+}
+
+// Kills (F-1, PR-3b) a peek that answers what it cannot read as an empty
+// screen: no box and a dead box answer exit 66, no screen; a listing that
+// cannot be read, a session screen cannot read and a failed hardcopy fail;
+// a running box's screen is the exact session's hardcopy.
+func TestScreenScriptPeekAnswersNoScreen(t *testing.T) {
+	f := newFakeBackend(t)
+	f.rows("4194001.mc-a\tDetached", "4194002.mc-d\tDead ???", "4194003.mc-p\tPrivate")
+	for name, want := range map[string]int{"mc-none": 66, "mc-d": 66, "mc-p": 1, "mc-a": 0} {
+		if _, code := f.run("", "peek", name, "10"); code != want {
+			t.Errorf("peek %s: exit %d, want %d", name, code, want)
+		}
+	}
+	if calls := f.calls(); strings.Count(calls, "hardcopy") != 1 || !strings.Contains(calls, "-S 4194001.mc-a -X hardcopy -h ") {
+		t.Errorf("screen calls %q, want one hardcopy of 4194001.mc-a", calls)
+	}
+	if out, code := f.run("", "peek", "mc-a", "10"); code != 0 || !strings.Contains(out, "screen of 4194001.mc-a") {
+		t.Errorf("peek of a running box = %q (%d), want its capture", out, code)
+	}
+	// A capture SCREEN is still writing is read once its size settles, never
+	// as its partial head.
+	f.file("hardcopy.slow", "")
+	if out, code := f.run("", "peek", "mc-a", "10"); code != 0 || !strings.Contains(out, "head of") || !strings.Contains(out, "tail of the capture") {
+		t.Errorf("peek of a capture written in two parts = %q (%d), want both parts", out, code)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "hardcopy.slow")); err != nil {
+		t.Fatal(err)
+	}
+	// screen exits 0 for a hardcopy SCREEN never writes: the empty capture
+	// is a failure, never an empty screen.
+	f.file("hardcopy.fail", "")
+	if out, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
+		t.Errorf("a hardcopy that wrote nothing: %q, exit %d; want a failure", out, code)
+	}
+	f.file("ls.fail", "")
+	if _, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
+		t.Errorf("an unreadable listing: exit %d, want a failure", code)
+	}
+}
+
+// Kills (PR-3a audit MUST) an inventory that slows without bound: each
+// name's last window record is read on every call, and a pool session name
+// is never reused, so records pile up. With procfs mounted, a recorded pid
+// with no /proc entry is gone with no fork (no ps per record), and a gone
+// record whose name no box lists is forgotten, its lock kept: with 60 stale
+// records the first inventory asks ps nothing and forgets them all, so the
+// next reads none. A record whose window still runs stays listed unknown.
+func TestScreenScriptInventoryForgetsStaleRecords(t *testing.T) {
+	f := newFakeBackend(t)
+	f.procFile("self/stat", "1 (self) S 0\n") // procfs is mounted
+	f.procFile("sys/kernel/random/boot_id", "boot-a\n")
+	f.run("", "inventory") // the state directories
+	meta := f.metaDir()
+	for i := range 60 {
+		name := fmt.Sprintf("worker-gcg-session-%032d", i)
+		f.file(filepath.Join(meta, name+".window"), fmt.Sprintf("boot-a %d 12345", 4100000+i))
+		f.file(filepath.Join(meta, name+".wrapper.sh"), "export GC_INSTANCE_TOKEN=tok\n")
+		f.file(filepath.Join(meta, name+".lock"), "")
+	}
+	f.procFile("4194990/stat", "4194990 (claude) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0\n")
+	f.file(filepath.Join(meta, "mc-live.window"), "boot-a 4194990 777")
+	// A stale name whose session gc acked a drain: gc reads the ack after
+	// the box is gone, so the keys gc set outlive the start's record.
+	f.file(filepath.Join(meta, "mc-acked.window"), "boot-a 4100100 12345")
+	f.file(filepath.Join(meta, "mc-acked.meta.GC_INSTANCE_TOKEN"), "tok")
+	f.file(filepath.Join(meta, "mc-acked.meta.GC_DRAIN_ACK"), "1")
+	if out, code := f.run("", "inventory"); code != 0 || out != `{"complete":true,"sessions":[{"name":"mc-live","state":"unknown"}]}` {
+		t.Fatalf("inventory = %q (%d), want only the live window's name, unknown", out, code)
+	}
+	if out, _ := f.run("", "get-meta", "mc-acked", "GC_DRAIN_ACK"); out != "1" {
+		t.Fatalf("drain ack after the stale record was forgotten = %q, want 1", out)
+	}
+	for _, gone := range []string{"mc-acked.window", "mc-acked.meta.GC_INSTANCE_TOKEN"} {
+		if _, err := os.Stat(filepath.Join(meta, gone)); !os.IsNotExist(err) {
+			t.Fatalf("the stale record's %s was kept (%v)", gone, err)
+		}
+	}
+	if data, _ := os.ReadFile(filepath.Join(f.dir, "ps.calls")); strings.Contains(string(data), "lstart") {
+		t.Fatalf("inventory asked ps for a start time with procfs mounted: %q", data)
+	}
+	left, _ := filepath.Glob(filepath.Join(meta, "worker-gcg-session-*"))
+	for _, p := range left {
+		if !strings.HasSuffix(p, ".lock") {
+			t.Fatalf("a stale record's metadata %s was kept", p)
+		}
+	}
+	if len(left) != 60 {
+		t.Fatalf("%d lock files left, want the 60 locks kept", len(left))
+	}
+	if _, err := os.Stat(filepath.Join(meta, "mc-live.window")); err != nil {
+		t.Fatalf("the live window's record was forgotten: %v", err)
+	}
+
+	// An empty record proves nothing (a start may have removed the record
+	// the inventory read, and be seeding the name now): nothing is forgotten.
+	f.file(filepath.Join(meta, "mc-new.window"), "")
+	f.file(filepath.Join(meta, "mc-new.meta.GC_SESSION_ID"), "sid-new")
+	f.run("", "inventory")
+	if _, err := os.Stat(filepath.Join(meta, "mc-new.meta.GC_SESSION_ID")); err != nil {
+		t.Fatalf("an empty record's name lost its metadata: %v", err)
+	}
+}
+
+// Kills (PR-3b adoption review) a cleanup that acts on inventory's listing
+// once it is stale: a start can run between the listing and the cleanup,
+// and its box die with its window. The name's window record is then
+// unchanged under the lock and names a process that is gone, but the dead
+// box holds the name, and forgetting its box record would leave that box
+// unknown for good. Under the lock the name is listed again: a row keeps
+// the record, so the dead box keeps its object and identity, and the next
+// inventory lists it dead.
+func TestScreenScriptInventoryKeepsABoxStartedSinceItsListing(t *testing.T) {
+	f := newFakeBackend(t)
+	f.file("ps.procs", "4194998 4194999 claude /usr/bin/claude\n")
+	// Once inventory has read its listing, mc-x starts, and then its box and
+	// window die.
+	f.file("start.json", `{"command":"claude","env":{"GC_SESSION_ID":"sid-x"}}`)
+	f.file("ls.then", fmt.Sprintf(`%q start mc-x < %q || echo "exit $?" > %q
+printf '\t4194999.mc-x\t(11/02/2026 01:00:00 PM)\t(Dead ???)\n' > %q
+: > "$SCREENDIR/fake-ls"
+echo 4194998 >> %q
+`, f.script, filepath.Join(f.dir, "start.json"), filepath.Join(f.dir, "ls.then.err"), filepath.Join(f.dir, "ls"), filepath.Join(f.dir, "gone")))
+	if out, code := f.run("", "inventory"); code != 0 || out != `{"complete":true,"sessions":[]}` {
+		t.Fatalf("inventory over a listing read before mc-x started = %q (%d), want its listing's answer", out, code)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "ls.then.ran")); err != nil {
+		t.Fatalf("mc-x never started between the listing and the cleanup: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.dir, "ls.then.err")); err == nil {
+		t.Fatalf("mc-x's start failed: %s", data)
+	}
+	var o struct {
+		State  string
+		Object struct{ ID, Created string }
+	}
+	if out, _ := f.run("", "observe", "mc-x"); json.Unmarshal([]byte(out), &o) != nil || o.State != "dead" || o.Object.ID != "4194999" || o.Object.Created == "" {
+		t.Fatalf("observe of the dead box = %q, want dead with its recorded object", out)
+	}
+	if out, _ := f.run("", "get-meta", "mc-x", "GC_SESSION_ID"); out != "sid-x" {
+		t.Fatalf("identity of the dead box = %q, want sid-x kept", out)
+	}
+	if out, _ := f.run("", "inventory"); !strings.Contains(out, `{"name":"mc-x","state":"dead","object":{"id":"4194999"`) {
+		t.Fatalf("next inventory = %q, want mc-x listed dead with its object", out)
+	}
 }

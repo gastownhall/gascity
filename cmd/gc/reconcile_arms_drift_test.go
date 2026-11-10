@@ -13,10 +13,11 @@ import (
 
 // Kills A14 out of legacy's order or reaching past it (SESS-550..562, 565,
 // 566/568): an attached (or attach-unknown) drift stamps its deferral,
-// throttled; a recent attached deferral, a pending interaction and open work
-// wait; a pinned named row stamps and never restarts; another named row, a
-// launch-only drift a provider can relaunch, a live drift and an asleep
-// named drift are C7b2's, which A14 leaves alone; otherwise the drain
+// throttled; a recent attached deferral and a pending interaction wait;
+// open work stamps its episode (#8345), then waits; a pinned named row
+// stamps and never restarts; another named row, a launch-only drift a
+// provider can relaunch, a live drift and an asleep named drift are
+// C7b2's, which A14 leaves alone; otherwise the drain
 // begins, once no stop request is active. A resolved drift clears its
 // deferral keys, and a missing stored hash or an undesired row never
 // drifts.
@@ -74,9 +75,10 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a named row in use restarts, its effect deferring", meta: append([]string{"started_config_hash", stale}, named...), alive: true, pending: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
 		{name: "a named launch-only drift relaunches", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
 		{name: "a pending interaction waits", meta: []string{"started_config_hash", stale}, alive: true, pending: true},
-		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
+		{name: "open work stamps its episode", meta: []string{"started_config_hash", stale}, alive: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
 		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
-		{name: "a launch-only drift with open work waits", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true},
+		{name: "a launch-only drift with open work stamps its episode", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+		{name: "a stamped held-work episode waits", meta: []string{"started_config_hash", stale, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, work: true},
 		{name: "a provision hash without a launch hash drains", meta: []string{"started_config_hash", stale, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", ""}, alive: true, relaunch: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds a launch-only drift", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, intentAt(drainIdle, "3")), alive: true, relaunch: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
@@ -86,6 +88,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "an acked drift is A11's", meta: append([]string{"started_config_hash", stale}, ackMeta("3")...), alive: true, wantKind: intentSignalAck, wantReason: decideDrainSignal},
 		{name: "an acked attached drift is A11's", meta: append([]string{"started_config_hash", stale}, ackMeta("3")...), alive: true, attached: true, wantKind: intentSignalAck, wantReason: decideDrainSignal},
 		{name: "a resolved drift clears its deferral keys", meta: []string{"started_config_hash", core, "started_live_hash", live, "attached_config_drift_deferred_key", key}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
+		{name: "a resolved drift clears an escalation marker alone", meta: []string{"started_config_hash", core, "started_live_hash", live, "config_drift_escalated_at", rowAt(-time.Hour)}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
 		{name: "a converged row", meta: []string{"started_config_hash", core, "started_live_hash", live}, alive: true},
 		{name: "a live drift runs session_live again", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true, wantKind: intentLiveApply, wantReason: decideLiveApply},
 		{name: "another version's live hash is A8's", meta: []string{"started_config_hash", core, "started_live_hash", "v5:other"}, alive: true},
@@ -118,7 +121,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftHeldWork, decideDriftEscalated, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
@@ -127,13 +130,17 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				if it.Patch["attached_config_drift_deferred_key"] != key || it.Patch["attached_config_drift_deferred_at"] != gatherNow.UTC().Format(time.RFC3339) {
 					t.Fatalf("stamp %v, want key %q at the pass", it.Patch, key)
 				}
-			case decideDriftPinned:
+			case decideDriftPinned, decideDriftHeldWork:
 				if it.Patch["config_drift_deferred_key"] != key {
 					t.Fatalf("stamp %v, want key %q", it.Patch, key)
 				}
 			case decideDriftResolved:
-				if len(it.Patch) != 4 {
-					t.Fatalf("clear %v, want the four deferral keys", it.Patch)
+				if _, ok := it.Patch["config_drift_escalated_at"]; len(it.Patch) != 5 || !ok {
+					t.Fatalf("clear %v, want the four deferral keys and the escalation marker", it.Patch)
+				}
+			case decideDriftRepair:
+				if marker, ok := it.Patch["config_drift_escalated_at"]; !ok || marker != "" {
+					t.Fatalf("repair %v, want the escalation marker cleared", it.Patch)
 				}
 			case decideDrainBegin + drainConfigDrift:
 				if it.Patch[session.DrainIntentReasonKey] != drainConfigDrift || it.Event == nil || it.Event.Type != "session.draining" {
@@ -174,6 +181,49 @@ func TestDecideRowExecutionStalled(t *testing.T) {
 			got := it.Kind == intentDrainBegin && it.Reason == decideDrainBegin+executionStalledDrainReason && it.Patch[session.DrainIntentReasonKey] == executionStalledDrainReason
 			if got != tc.want {
 				t.Fatalf("decideRow = (%q, %q) %v, want the execution-stalled begin %v", it.Kind, it.Reason, it.Patch, tc.want)
+			}
+		})
+	}
+}
+
+// TestHeldWorkDriftDoesNotStarveExecutionStalled kills a held-work episode
+// starving A16 (#8345): the episode's repeated notification evaluation — a
+// stamped episode waiting for its horizon, or one already escalated — decides
+// nothing on its own, so the execution backstop's drain request still runs
+// behind it the same pass; only the ticks that stamp or escalate the episode
+// are A14's own.
+func TestHeldWorkDriftDoesNotStarveExecutionStalled(t *testing.T) {
+	withoutA7(t)
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	base := censusRowOf(t, drainRow()).Info
+	cfg := sessionCoreConfigForHashInfo(tp, base)
+	core, live := runtime.CoreFingerprint(cfg), runtime.LiveFingerprint(cfg)
+	stale := runtime.FingerprintVersion + ":stale"
+	key := stale + ":" + core
+	stalled := []func(*World){func(w *World) {
+		info := w.Census.Rows[rowKeyOf("gc-1")].Info
+		w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: runtime.NewFake()}
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+		w.ExecutionStalled = map[string]executionStalledRequest{"gc-1": {ID: "gc-1", Generation: "3"}}
+	}}
+	for _, tc := range []struct {
+		name       string
+		meta       []string
+		wantKind   string
+		wantReason string
+	}{
+		{name: "a waiting episode leaves the backstop its turn", meta: []string{"started_config_hash", stale, "started_live_hash", live, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Minute)}, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "an escalated episode leaves the backstop its turn", meta: []string{"started_config_hash", stale, "started_live_hash", live, "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Hour), "config_drift_escalated_at", rowAt(-time.Minute)}, wantKind: intentDrainBegin, wantReason: decideDrainBegin + executionStalledDrainReason},
+		{name: "the first observation is the stamp's own tick", meta: []string{"started_config_hash", stale, "started_live_hash", live}, wantKind: intentRowHeal, wantReason: decideDriftHeldWork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it, _ := decideDrain(t, tc.meta, func(e *selectionEntry) {
+				e.InDesired, e.Desired, e.Liveness = true, desireKeep, livenessAlive
+				e.AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+			}, stalled...)
+			if it.Kind != tc.wantKind || it.Reason != tc.wantReason {
+				t.Fatalf("decideRow = (%q, %q), want (%q, %q): the held-work episode must not starve the execution-stalled handling", it.Kind, it.Reason, tc.wantKind, tc.wantReason)
 			}
 		})
 	}

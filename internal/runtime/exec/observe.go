@@ -217,6 +217,28 @@ func (p *Provider) ObserveIdentity(name string) (map[string]string, error) {
 	return o.identity, nil
 }
 
+// peekBox is a v2-ready script's Peek of whatever box holds name. A fresh
+// `observe` picks the read: a running box's screen as Peek reads it (over
+// the carrier, or the `peek` op); a dead box's from the `peek` op itself,
+// whose exit 66 ([runtime.ExitCodeNoScreen]) answers "no screen", an empty
+// screen with no error, as peekOp answers it for every caller (v2's
+// dead-box classification reads an empty screen as nothing to classify); no
+// box, nothing, as the seams answer a name no box runs. Any other failure,
+// the observe's included, is an error: never an empty screen.
+func (p *Provider) peekBox(name string, lines int) (string, error) {
+	o, err := p.observe(context.Background(), name, nil)
+	if err != nil {
+		return "", err
+	}
+	switch o.state {
+	case stateRunning:
+		return p.Peek(name, lines)
+	case stateAbsent:
+		return "", nil
+	}
+	return p.peekOp(name, lines)
+}
+
 // killObjectRequest is `kill-object`'s stdin.
 type killObjectRequest struct {
 	Object   observeObject `json:"object"`
@@ -303,22 +325,28 @@ func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Conf
 
 // createFresh creates the box and launches the agent: `provision` then a
 // fresh launchAgent for a separable pack, otherwise the welded `start` op
-// followed by finishStart, as Start runs it.
+// followed by finishStart, as Start runs it. For a pack sharing the host
+// filesystem the host work comes first and session_setup last, as in Start.
 func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Config) error {
-	data, err := marshalStartConfig(cfg)
+	hostWork := p.sharesHostFS()
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
+		return err
 	}
 	if p.supportsSeparableLaunch() {
 		if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
 			return err
 		}
-		return p.launchAgent(ctx, name, cfg)
+		err = p.launchAgent(ctx, name, cfg)
+	} else {
+		if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+			return err
+		}
+		_, err = p.finishStart(ctx, name, cfg)
 	}
-	if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-		return err
+	if err == nil && hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
 	}
-	_, err = p.finishStart(ctx, name, cfg)
 	return err
 }
 

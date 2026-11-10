@@ -99,7 +99,16 @@ runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
 has a work directory, and the family has an exact by-key transcript lookup
 (`session.HasKeyedTranscriptLookup`). The read resolves only the file the
 session key finds and that records that conversation, never the work-directory
-fallback `Manager.TranscriptPath` serves for history. A session without a key
+fallback `Manager.TranscriptPath` serves for history. The key is looked up
+under the transcript search roots first; where they find none, among the files
+the session's own agent process holds open (`runtime.HeldFileProvider`, via
+`session.Manager.RuntimeHeldFiles`; only regular files the current user owns,
+and a process in the tree whose open files that user may not read, such as a
+root-owned sandbox wrapper above the agent or a zombie, is skipped), each tried
+by the family's own keyed lookup rooted at the file's ancestors
+(`session.ResolveHeldTranscriptPath`), so a provider home outside the search
+roots still has turns. A held-file read that fails is
+`runtime.ErrRuntimeUnavailable`, never a gone session. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
 `TurnCapabilities.Replace` is internal/session's answer
@@ -119,11 +128,12 @@ watch read, protocol or transcript and whatever woke it, reloads the session
 first, so a session whose row closes reads as not found from the next read on,
 even while its runtime still answers or its transcript is still written. A
 read's session reload and runtime probes (the protocol history, the idle
-snapshot) run within `turnWatchReadBound` and through `ObserveShared`, so a
-stalled store or runtime probe reads as unavailable and never holds a watch
-past its context. A transcript read's file I/O (resolving the transcript,
-`os.Stat`, the follower's read) takes no context: a hung filesystem holds a
-transcript watch, and its close on cancel, until that I/O returns.
+snapshot, the held-file read) run within `turnWatchReadBound` and through
+`ObserveShared`, so a stalled store or runtime probe reads as unavailable and
+never holds a watch past its context. A transcript read's file I/O (resolving
+the transcript, `os.Stat`, the follower's read) takes no context: a hung
+filesystem holds a transcript watch, and its close on cancel, until that I/O
+returns.
 
 The transcript tier is never `Lossless`: a read reports at most
 `sessionlog.MaxRecentTurns` ended turns from a bounded window, so turns that

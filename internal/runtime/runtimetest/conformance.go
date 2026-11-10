@@ -820,8 +820,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("SendKeys_MissingSession", func(t *testing.T) {
-		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil {
-			t.Errorf("SendKeys on missing session should not error: %v", err)
+		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("SendKeys on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 

@@ -3,7 +3,6 @@ package storeclass
 import (
 	"fmt"
 	"path"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,7 +62,7 @@ func ParseBaseline(text string) (map[Key]int, error) {
 			return nil, fmt.Errorf("baseline line %d: want path<TAB>func<TAB>rule<TAB>count, got %q", i+1, line)
 		}
 		k := Key{Path: f[0], Func: f[1], Rule: Rule(f[2])}
-		if !slices.Contains(Rules, k.Rule) {
+		if !knownRule(k.Rule) {
 			return nil, fmt.Errorf("baseline line %d: unknown rule %q", i+1, f[2])
 		}
 		n, err := strconv.Atoi(f[3])
@@ -148,7 +147,7 @@ func ParseCeiling(text string) (map[CeilingKey]int, error) {
 			return nil, fmt.Errorf("ceiling line %d: want package<TAB>rule<TAB>count, got %q", i+1, line)
 		}
 		k := CeilingKey{Package: f[0], Rule: Rule(f[1])}
-		if !slices.Contains(Rules, k.Rule) {
+		if !knownRule(k.Rule) {
 			return nil, fmt.Errorf("ceiling line %d: unknown rule %q", i+1, f[1])
 		}
 		n, err := strconv.Atoi(f[2])
