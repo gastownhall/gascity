@@ -1914,7 +1914,7 @@ func TestLedgerFeedOverEmbeddedDoltSlowStore(t *testing.T) {
 	var slow atomic.Bool
 	hooks := ledgerFeedHooks{work: func() func() {
 		if slow.Load() {
-			time.Sleep(3 * time.Second)
+			<-time.After(3 * time.Second) // injected store latency, not a wait for a condition
 		}
 		return func() {}
 	}}
