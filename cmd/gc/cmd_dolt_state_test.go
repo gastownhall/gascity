@@ -2139,63 +2139,80 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 func startTCPListenerProcessInDir(t *testing.T, port int, dir string) *exec.Cmd {
 	t.Helper()
 	skipSlowCmdGCTest(t, "spawns a TCP listener process to emulate managed dolt; run make test-cmd-gc-process for full coverage")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", dir, err)
+	cmd, err := launchTCPListenerProcessInDir(t.TempDir(), port, dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	cmd := exec.Command("python3", "-c", `
-import os
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd
+}
+
+func startLockedDelayedTCPListenerProcessInDir(t *testing.T, lockFile string, port int, dir string, delay time.Duration) *exec.Cmd {
+	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a delayed TCP listener process to emulate managed dolt recovery; run make test-cmd-gc-process for full coverage")
+	cmd, err := launchLockedDelayedTCPListenerProcessInDir(t.TempDir(), lockFile, port, dir, delay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+func startUnixSocketProcess(t *testing.T, socketPath string) *exec.Cmd {
+	t.Helper()
+	proc, err := launchUnixSocketProcess(t.TempDir(), socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proc
+}
+
+func startOpenFileProcess(t *testing.T, path string) *exec.Cmd {
+	t.Helper()
+	proc, err := launchOpenFileProcess(t.TempDir(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proc
+}
+
+// The python3 children behind the listener fixtures print one stdout line when
+// they are ready, and keep stderr in a file under the launcher's scratch
+// directory. A child that dies first closes stdout, which ends the launcher's
+// wait at once, and the launcher's error carries the child's exit status and
+// stderr (listenerChildFailure). The launchers return errors instead of failing
+// a test so a test can pin those reports.
+
+// listenerChildReadyTimeout bounds how long a listener fixture's child may take
+// to print its ready line.
+const listenerChildReadyTimeout = 5 * time.Second
+
+// tcpListenerScript binds argv[1] on 127.0.0.1 with SO_REUSEADDR, listens and
+// then prints its ready line.
+const tcpListenerScript = `
 import signal
 import socket
 import sys
 import time
 port = int(sys.argv[1])
-os.chdir(sys.argv[2])
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", port))
 sock.listen(5)
+print("ready", flush=True)
 def _stop(*_args):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, strconv.Itoa(port), dir)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start listener process in %s: %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
-	})
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return cmd
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
-	t.Fatalf("listener process on %d in %s did not become ready", port, dir)
-	return nil
-}
+`
 
-func startLockedDelayedTCPListenerProcessInDir(t *testing.T, lockFile string, port int, dir string, delay time.Duration) *exec.Cmd {
-	t.Helper()
-	skipSlowCmdGCTest(t, "spawns a delayed TCP listener process to emulate managed dolt recovery; run make test-cmd-gc-process for full coverage")
-	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(lockFile), err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", dir, err)
-	}
-	readyFile := filepath.Join(t.TempDir(), "lock-held.ready")
-	cmd := exec.Command("python3", "-c", `
+// lockedDelayedTCPListenerScript takes an exclusive flock on argv[1], prints its
+// ready line, waits argv[3] seconds and only then listens on argv[2].
+const lockedDelayedTCPListenerScript = `
 import fcntl
 import os
 import signal
@@ -2204,18 +2221,13 @@ import sys
 import time
 
 lock_file = sys.argv[1]
-ready_file = sys.argv[2]
-port = int(sys.argv[3])
-data_dir = sys.argv[4]
-delay_s = float(sys.argv[5])
+port = int(sys.argv[2])
+delay_s = float(sys.argv[3])
 
 os.makedirs(os.path.dirname(lock_file), exist_ok=True)
-os.makedirs(data_dir, exist_ok=True)
 lock = open(lock_file, "a+")
 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-with open(ready_file, "w", encoding="utf-8") as f:
-    f.write("locked\n")
-os.chdir(data_dir)
+print("locked", flush=True)
 time.sleep(delay_s)
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2227,99 +2239,142 @@ signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, lockFile, readyFile, strconv.Itoa(port), dir, strconv.FormatFloat(delay.Seconds(), 'f', 3, 64))
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start locked delayed listener process in %s: %v", dir, err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(readyFile); err == nil {
-			return cmd
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
-	t.Fatalf("locked delayed listener process on %d in %s did not acquire lifecycle lock", port, dir)
-	return nil
-}
+`
 
-func startUnixSocketProcess(t *testing.T, socketPath string) *exec.Cmd {
-	t.Helper()
-	readyPath := filepath.Join(t.TempDir(), "ready")
-	proc := exec.Command("python3", "-c", `
+// unixSocketScript listens on the unix socket path argv[1], then prints its
+// ready line.
+const unixSocketScript = `
 import os
 import socket
 import sys
 import time
 path = sys.argv[1]
-ready_path = sys.argv[2]
 if os.path.exists(path):
     os.remove(path)
 sock = socket.socket(socket.AF_UNIX)
 sock.bind(path)
 sock.listen(1)
-with open(ready_path, "w") as f:
-    f.write("ready\n")
+print("ready", flush=True)
 while True:
     time.sleep(1)
-`, socketPath, readyPath)
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start unix socket process: %v", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			if _, readyErr := os.Stat(readyPath); readyErr == nil {
-				return proc
-			}
-		}
-		if time.Now().After(deadline) {
-			_ = proc.Process.Kill()
-			_ = proc.Wait()
-			t.Fatalf("unix socket %s did not become visible to lsof", socketPath)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-}
+`
 
-func startOpenFileProcess(t *testing.T, path string) *exec.Cmd {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	readyPath := filepath.Join(t.TempDir(), "ready")
-	proc := exec.Command("python3", "-c", `
-import os
+// openFileScript holds argv[1] open for append, then prints its ready line.
+const openFileScript = `
 import sys
 import time
-path = sys.argv[1]
-ready_path = sys.argv[2]
-f = open(path, "a+")
+f = open(sys.argv[1], "a+")
 f.write("held")
 f.flush()
-with open(ready_path, "w") as f_ready:
-    f_ready.write("ready\n")
+print("ready", flush=True)
 while True:
     time.sleep(1)
-`, path, readyPath)
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start open-file process: %v", err)
+`
+
+// listenerChildFailure formats the failure every listener fixture reports when
+// its child did not become ready: the subject, why the wait ended, how the child
+// exited and what it wrote to stderr. Both errors stay reachable through
+// errors.Is.
+func listenerChildFailure(what string, readyErr, exitErr error, stderr []byte) error {
+	if exitErr == nil {
+		exitErr = errors.New("exit status 0")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(path); err == nil {
-			if _, readyErr := os.Stat(readyPath); readyErr == nil {
-				return proc
-			}
-		}
-		if time.Now().After(deadline) {
-			_ = proc.Process.Kill()
-			_ = proc.Wait()
-			t.Fatalf("open file %s did not become visible to lsof", path)
-		}
-		time.Sleep(25 * time.Millisecond)
+	return fmt.Errorf("%s did not become ready: %w (child exit: %w); child stderr:\n%s", what, readyErr, exitErr, stderr)
+}
+
+// startListenerChild runs `python3 -c script args...` (in dir when set) with its
+// stderr in stderrPath and returns once the child has printed its first stdout
+// line, which is returned without its newline. A child that exits first closes
+// stdout, which ends the wait at once. what names the child in a failure and
+// readyWhat names the line it was expected to print. On failure the child is
+// killed and reaped before its stderr is read, so no tail is lost.
+func startListenerChild(what, readyWhat, stderrPath, dir, script string, args ...string) (*exec.Cmd, string, error) {
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("create %s stderr: %w", what, err)
 	}
+	defer stderrFile.Close() //nolint:errcheck // the child writes through its own descriptor
+	lineR, lineW, err := os.Pipe()
+	if err != nil {
+		return nil, "", fmt.Errorf("create %s ready pipe: %w", what, err)
+	}
+	defer lineR.Close() //nolint:errcheck // read end of the ready pipe
+	proc := exec.Command("python3", append([]string{"-c", script}, args...)...)
+	proc.Stdout = lineW
+	proc.Stderr = stderrFile
+	proc.Dir = dir
+	err = proc.Start()
+	_ = lineW.Close()
+	if err != nil {
+		return nil, "", fmt.Errorf("start %s: %w", what, err)
+	}
+	type readyLine struct {
+		text string
+		err  error
+	}
+	lines := make(chan readyLine, 1)
+	go func() {
+		text, err := bufio.NewReader(lineR).ReadString('\n')
+		lines <- readyLine{text: text, err: err}
+	}()
+	var readyErr error
+	select {
+	case line := <-lines:
+		if line.err == nil {
+			return proc, strings.TrimSpace(line.text), nil
+		}
+		readyErr = fmt.Errorf("child closed stdout before printing %s: %w", readyWhat, line.err)
+	case <-time.After(listenerChildReadyTimeout):
+		readyErr = fmt.Errorf("child printed no %s within %v", readyWhat, listenerChildReadyTimeout)
+	}
+	_ = proc.Process.Kill()
+	waitErr := proc.Wait()
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		stderr = []byte(err.Error())
+	}
+	return nil, "", listenerChildFailure(what, readyErr, waitErr, stderr)
+}
+
+// launchListenerChild is startListenerChild for children that print a ready
+// line, with the child's stderr in a file under scratchDir.
+func launchListenerChild(scratchDir, what, dir, script string, args ...string) (*exec.Cmd, error) {
+	proc, _, err := startListenerChild(what, "ready", filepath.Join(scratchDir, "listener-child.stderr"), dir, script, args...)
+	return proc, err
+}
+
+func launchTCPListenerProcess(scratchDir string, port int) (*exec.Cmd, error) {
+	return launchListenerChild(scratchDir, fmt.Sprintf("listener process on %d", port), "", tcpListenerScript, strconv.Itoa(port))
+}
+
+func launchTCPListenerProcessInDir(scratchDir string, port int, dir string) (*exec.Cmd, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("MkdirAll(%s): %w", dir, err)
+	}
+	return launchListenerChild(scratchDir, fmt.Sprintf("listener process on %d in %s", port, dir), dir, tcpListenerScript, strconv.Itoa(port))
+}
+
+// launchLockedDelayedTCPListenerProcessInDir returns once the child holds
+// lockFile; it listens on port only after delay.
+func launchLockedDelayedTCPListenerProcessInDir(scratchDir, lockFile string, port int, dir string, delay time.Duration) (*exec.Cmd, error) {
+	for _, d := range []string{filepath.Dir(lockFile), dir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, fmt.Errorf("MkdirAll(%s): %w", d, err)
+		}
+	}
+	return launchListenerChild(scratchDir, fmt.Sprintf("locked delayed listener process on %d in %s", port, dir), dir, lockedDelayedTCPListenerScript,
+		lockFile, strconv.Itoa(port), strconv.FormatFloat(delay.Seconds(), 'f', 3, 64))
+}
+
+func launchUnixSocketProcess(scratchDir, socketPath string) (*exec.Cmd, error) {
+	return launchListenerChild(scratchDir, "unix socket process on "+socketPath, "", unixSocketScript, socketPath)
+}
+
+func launchOpenFileProcess(scratchDir, path string) (*exec.Cmd, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return launchListenerChild(scratchDir, "open-file process on "+path, "", openFileScript, path)
 }
 
 // startOpenFileAndTCPListenerProcess starts a python3 child that holds path
@@ -2337,6 +2392,57 @@ func startOpenFileAndTCPListenerProcess(t *testing.T, path string, dir string) (
 	return proc, port
 }
 
+// openFileAndTCPListenerScript holds argv[1] open for append and binds a
+// loopback port 0 itself: 127.0.0.1:P and, when the host has it, the v6-only
+// [::1]:P twin, so a listener a concurrent test action owns on [::1]:P cannot
+// be mistaken for this child's. It retries the pair while a foreign listener
+// owns the twin, and prints P only once both are bound and the v4 socket
+// listens. The twin stays bound but never listens.
+const openFileAndTCPListenerScript = `
+import errno
+import signal
+import socket
+import sys
+import time
+f = open(sys.argv[1], "a+")
+f.write("held")
+f.flush()
+def bound_pair():
+    spare = []
+    try:
+        for _ in range(64):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            try:
+                twin = socket.socket(socket.AF_INET6)
+                twin.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                twin.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                twin.bind(("::1", port))
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    spare.append(sock)
+                    continue
+                if e.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):
+                    return sock, None
+                raise
+            return sock, twin
+        raise SystemExit("no port free on both loopback families in 64 tries")
+    finally:
+        for s in spare:
+            s.close()
+sock, twin = bound_pair()
+sock.listen(5)
+print(sock.getsockname()[1], flush=True)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`
+
 // startOpenFileAndTCPListener starts the child for
 // startOpenFileAndTCPListenerProcess with its stderr in stderrPath. The child
 // prints its port on stdout once it listens. A child that exits first closes
@@ -2346,76 +2452,17 @@ func startOpenFileAndTCPListener(path, dir, stderrPath string) (*exec.Cmd, int, 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, 0, err
 	}
-	stderrFile, err := os.Create(stderrPath)
+	proc, line, err := startListenerChild("open file listener "+path, "its port", stderrPath, strings.TrimSpace(dir), openFileAndTCPListenerScript, path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("create open-file listener stderr: %w", err)
+		return nil, 0, err
 	}
-	defer stderrFile.Close() //nolint:errcheck // the child writes through its own descriptor
-	portR, portW, err := os.Pipe()
+	port, err := strconv.Atoi(line)
 	if err != nil {
-		return nil, 0, fmt.Errorf("create open-file listener port pipe: %w", err)
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+		return nil, 0, fmt.Errorf("parse port line %q: %w", line, err)
 	}
-	defer portR.Close() //nolint:errcheck // read end of the port pipe
-	proc := exec.Command("python3", "-c", `
-import signal
-import socket
-import sys
-import time
-path = sys.argv[1]
-f = open(path, "a+")
-f.write("held")
-f.flush()
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", 0))
-sock.listen(5)
-print(sock.getsockname()[1], flush=True)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-`, path)
-	proc.Stdout = portW
-	proc.Stderr = stderrFile
-	if strings.TrimSpace(dir) != "" {
-		proc.Dir = dir
-	}
-	err = proc.Start()
-	_ = portW.Close()
-	if err != nil {
-		return nil, 0, fmt.Errorf("start open-file listener process: %w", err)
-	}
-	type portLine struct {
-		text string
-		err  error
-	}
-	lines := make(chan portLine, 1)
-	go func() {
-		text, err := bufio.NewReader(portR).ReadString('\n')
-		lines <- portLine{text: text, err: err}
-	}()
-	var readyErr error
-	select {
-	case line := <-lines:
-		if line.err != nil {
-			readyErr = fmt.Errorf("child closed stdout before printing its port: %w", line.err)
-		} else if port, err := strconv.Atoi(strings.TrimSpace(line.text)); err != nil {
-			readyErr = fmt.Errorf("parse port line %q: %w", line.text, err)
-		} else {
-			return proc, port, nil
-		}
-	case <-time.After(5 * time.Second):
-		readyErr = errors.New("child printed no port within 5s")
-	}
-	_ = proc.Process.Kill()
-	waitErr := proc.Wait()
-	stderr, err := os.ReadFile(stderrPath)
-	if err != nil {
-		stderr = []byte(err.Error())
-	}
-	return nil, 0, fmt.Errorf("open file listener %s did not become ready: %w (child exit: %w); child stderr:\n%s", path, readyErr, waitErr, stderr)
+	return proc, port, nil
 }
 
 // TestStartOpenFileAndTCPListenerReportsChildStderrWhenChildExits pins the

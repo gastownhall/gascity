@@ -51,7 +51,9 @@ func TestListenerFixturesReportChildStderrAndExitStatus(t *testing.T) {
 			return launchLockedDelayedTCPListenerProcessInDir(scratch, lockDir, occupiedLoopbackPort(t), filepath.Join(scratch, "data"), 0)
 		}},
 		{"startUnixSocketProcess", "FileNotFoundError", func(_ *testing.T, scratch string) (*exec.Cmd, error) {
-			return launchUnixSocketProcess(scratch, filepath.Join(scratch, "missing-dir", "sock"))
+			// A short path under a directory that does not exist: a t.TempDir path
+			// can exceed the AF_UNIX length limit and fail with a different error.
+			return launchUnixSocketProcess(scratch, "/gc-listener-test-missing-dir/sock")
 		}},
 		{"startOpenFileProcess", "IsADirectoryError", func(t *testing.T, scratch string) (*exec.Cmd, error) {
 			dir := filepath.Join(scratch, "held-dir")
