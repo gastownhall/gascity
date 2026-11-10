@@ -125,6 +125,24 @@ func (c *City) InitNoStart(provider string) {
 	})
 }
 
+// InitNoStartSingleStore is InitNoStart with --storage=single, for tests
+// whose subject is single-store behavior.
+func (c *City) InitNoStartSingleStore(provider string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness", "--no-start", "--storage=single"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	args = append(args, c.Dir)
+	out, err := c.runInit(args...)
+	if err != nil {
+		c.t.Fatalf("gc init --no-start --storage=single failed: %v\n%s", err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
+	})
+}
+
 // InitFrom runs gc init --from to copy an example city directory, retrying
 // once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitFrom(srcDir string) {
