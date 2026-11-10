@@ -33,6 +33,7 @@ go_test(
         "pidutil_test.go",
         "procargs2_test.go",
         "starttime_portable_test.go",
+        "starttime_unix_test.go",
         "subreaper_test.go",
         "testenv_import_test.go",
         "vanish_linux_test.go",

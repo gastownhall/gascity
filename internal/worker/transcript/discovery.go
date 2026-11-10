@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -180,6 +181,31 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 		return false, false
 	}
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
+}
+
+// KeyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: configured search paths are Claude roots, and pi
+// walks every root it is given recursively.
+func KeyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return sessionlog.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot returns the transcript root an absolute
+// CLAUDE_CONFIG_DIR in env names, <dir>/projects. A relative or ~ value is
+// resolved by the provider against its own working dir and home, which a
+// probe cannot reproduce, so it names no root (ok false), as does an empty one.
+func ClaudeConfigProjectsRoot(env map[string]string) (root string, ok bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // ProviderHasKeyedTranscript reports whether the provider family can use keyed

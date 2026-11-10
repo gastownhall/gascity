@@ -21,8 +21,8 @@ var responseCacheTTL = 2 * time.Second
 // advances each tick — so O(store-size) bodies were rebuilt per request.
 // These are coarse views where a few seconds of staleness is acceptable
 // (responses report X-GC-Cache-Age-S where a CachingStore backs them);
-// strict-freshness callers (blocking ?index=&wait= requests) bypass the time
-// cache at each handler.
+// strict-freshness callers (blocking ?index=&wait= requests, and /status's
+// ?fresh=true reads) bypass the time cache at each handler.
 var timeBucketResponseCacheTTL = 2 * time.Second
 
 // responseCacheTimeBucket returns a monotonically increasing generation that

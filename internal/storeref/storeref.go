@@ -93,7 +93,7 @@ type HasIDPrefix interface {
 // which is the conservative answer — a false mint bit only keeps the residence
 // probe, while a wrong true one retires it over beads it cannot recognize.
 func MintsInsideNamespace(store beads.Store, prefixes []string) bool {
-	declaring, ok := store.(HasIDPrefix)
+	declaring, ok := beads.As[HasIDPrefix](store)
 	if !ok {
 		return false
 	}
@@ -124,7 +124,7 @@ func PrefixOwner(id string, stores []beads.Store) beads.Store {
 		if s == nil {
 			continue
 		}
-		if p, ok := s.(HasIDPrefix); ok {
+		if p, ok := beads.As[HasIDPrefix](s); ok {
 			if pfx := p.IDPrefix(); pfx != "" && strings.HasPrefix(id, pfx+"-") {
 				return s
 			}

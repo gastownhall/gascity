@@ -3155,9 +3155,7 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.Ready(query)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -3421,9 +3419,7 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store, leg string) 
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return c.liveSnapshot(store, leg)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -4594,7 +4590,16 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, err
 	}
 	patch := poolSeatBindingPatch(info, request, workDir)
-	if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
+	cityPath := ""
+	if bp != nil {
+		cityPath = bp.cityPath
+	}
+	if sameTriggerWorkDirStale(cityPath, info, request, workDir) && !poolSeatAlive(bp, cfgAgent, info) {
+		if bp != nil && bp.stderr != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: trigger bead %s runs in its managed worktree %s, not the recorded work dir %s; binding the worktree\n", qualifiedName, info.ID, request.WorkBeadID, workDir, preparedStartSessionWorkDir(info)) //nolint:errcheck // best-effort stderr
+		}
+		patch = withRederivedWorkDir(patch, info, workDir)
+	} else if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
 		if err := parkedWorkDirUsable(bp.city, bp.cityPath, cfgAgent, kept, workDir); err != nil {
 			if bp.stderr != nil {
 				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: not resuming in its recorded work dir: %v; binding %s, where it starts fresh\n", qualifiedName, info.ID, err, workDir) //nolint:errcheck // best-effort stderr
@@ -5597,11 +5602,12 @@ func selectOrPlanPoolSessionBeadAvoiding(
 		}
 	}
 	// Reuse an existing active/creating session bead. Skip drained and
-	// closed. Asleep is skipped too, with one carve-out: a
-	// lifecycle=one_shot session whose sleep reason is freeable and which
-	// holds no assigned work is reused through the wake path — see
-	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
-	// asleep beads; an earlier version of this comment claimed it did.
+	// closed. Asleep is skipped too, with two carve-outs, each only when the
+	// row holds no assigned work: a lifecycle=one_shot session whose sleep
+	// reason is freeable, and a restart handoff still waiting for its fresh
+	// start, are reused through the wake path — see reusablePoolSessionInfo.
+	// Nothing in the reconciler closes orphaned asleep beads; an earlier
+	// version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			if at, runsElsewhere := elsewhere[candidate.ID]; runsElsewhere {

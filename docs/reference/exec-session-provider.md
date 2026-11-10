@@ -18,6 +18,12 @@ export GC_SESSION=exec:/path/to/gc-session-screen
 export GC_SESSION=exec:gc-session-screen
 ```
 
+Prefer an absolute path. A PATH lookup resolves in each gc process's own
+environment, so the supervisor, `gc start` and a cron job can run different
+files under one name, and reconciler v2's admission (see
+[observe.v1](#observev1-reconciler-v2)) reads the handshake of the file the
+deciding process resolves.
+
 ## Pack-Declared Runtimes
 
 A pack can ship (or install) a runtime executable and bind it to a
@@ -75,6 +81,7 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
+| 66 | `peek` only, from a v2-ready script (one that declares `observe.v1` and `report-attachment`): no screen. Nothing holds a screen for the name (no box, or a dead box whose screen is gone). See [`peek` under observe.v1](#peek-name-lines-under-observev1). On any other operation, or from a script that is not v2-ready, 66 is an ordinary failure. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
@@ -83,8 +90,9 @@ it as a no-op success. Scripts only need to implement the operations they
 care about. An operation a script declares in its
 [handshake](#protocol-handshake-protocol) cannot be unknown, so declared
 operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
-as the command's own exit code, and under `proc.provision` and
-`report-attachment`, `provision` and `is-attached` report it as a failure.
+as the command's own exit code, and under `proc.provision`,
+`report-attachment` and `server-lifecycle`, `provision`, `is-attached` and
+`server-stop` report it as a failure.
 `start` cannot be unknown either, so its exit 2 (for example a helper's
 `grep` or `jq` exit status escaping a `set -e` script) is a failed start.
 
@@ -144,6 +152,10 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
+| `observe` | `script observe <name>` | process names (1/line) | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
+| `inventory` | `script inventory` | — | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
+| `kill-object` | `script kill-object <name>` | JSON request | `killed`, `gone`, `renamed`, `live` or `changed` |
+| `server-stop` | `script server-stop` | — | — (see [Server teardown](#server-teardown-server-lifecycle)) |
 
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
 launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
@@ -178,8 +190,13 @@ The `protocol` operation declares which Runtime Provider Protocol version
 the script speaks and which optional capabilities it implements:
 
 ```json
-{"version": 0, "capabilities": ["report-attachment", "report-activity"]}
+{"version": 0, "capabilities": ["report-attachment", "report-activity"], "locality": "local"}
 ```
+
+`locality` is optional: `"local"` says the script's boxes run on gc's own
+host. Absent, or any other value, reads as remote. A container on gc's host
+is local too; that its boxes also share gc's filesystem and user is what
+`fs.host` adds (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)).
 
 Scripts that do not implement `protocol` (exit 2) are treated as version 0
 with no optional capabilities — every pre-handshake script remains valid.
@@ -196,12 +213,20 @@ Capabilities:
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
+| `idle-boundary` | With `proc.exec`, `report-activity` and `report-attachment`, declares that the agent runs in the in-box tmux session `main`, so gc may read its idle boundary with `capture-pane` over `exec` (see [Idle sleep](#idle-sleep)). Without it, gc runs no idle wait for the pack and its interactive sessions do not sleep. A runtime whose box runs no tmux does not declare it. `gc runtime conformance` checks the declaration (`RPP-CONN-002`): in a started box, `tmux has-session -t main` and the idle capture must succeed over `exec`. |
 | `input-fence` | With `proc.exec`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
+| `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
+| `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
+| `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, on a v2-ready script reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
+| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
+| `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
-The handshake runs once per provider instance and is cached.
+A successful handshake is cached for the provider's life. A failed one is
+cached for 30 seconds, then retried, so a transient failure does not leave
+the script on the no-capability floor until gc restarts.
 
 ### Idle sleep
 
@@ -213,11 +238,11 @@ depends on its handshake:
 
 | Handshake declares | `sleep_capability` | What sleeps |
 |---|---|---|
-| `report-activity`, `report-attachment` **and** `proc.exec` | `full` | Every session class, interactive ones included. |
+| `report-activity`, `report-attachment`, `proc.exec` **and** `idle-boundary` | `full` | Every session class, interactive ones included. |
 | anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
 
 `full` needs a safe idle boundary, so an interactive session is never stopped
-in the middle of a turn. A runtime that declares all three must:
+in the middle of a turn. A runtime that declares all four must:
 
 - **Run the agent in the in-box tmux session `main`.** The orchestrator reads
   the pane over `exec` (`tmux capture-pane -t main -p -S -120`). It treats the
@@ -260,8 +285,17 @@ stays awake, and every wait for its idle boundary runs to its timeout:
 interrupting it (`interrupt_now`) can restart the session, and stopping a turn
 reports an error.
 
+A script written before `idle-boundary` existed, which declares only the
+first three, gets `timed_only` until it adds `idle-boundary`: its interactive
+sessions stop sleeping, and gc stops waiting for its idle boundary. A
+wait-idle nudge is queued instead of delivered at the boundary, and
+`interrupt_now` and stopping a turn get no idle wait. Non-interactive sleep,
+attachment and `exec` are unchanged. gc no longer reads the first three as
+proof that the box runs tmux, because a runtime without tmux declares them
+too. `gc runtime check` warns about a script in this state.
+
 The `is-attached` rule above applies to every runtime that declares
-`report-attachment`, even without the other two capabilities. gc runs the op
+`report-attachment`, even without the other capabilities. gc runs the op
 directly and treats any non-zero exit, including 2, as "attached": the session
 stays awake and destructive actions on it are held.
 
@@ -314,6 +348,47 @@ delivered. An `exec` op that is [canceled](#cancellation) or cannot be run at
 all is an outage too, without asking `is-running`, and it does not say
 whether part of the input went in before it stopped. A pane started before gc
 published fences takes no fenced input until its agent is relaunched.
+
+### Server teardown (`server-lifecycle`)
+
+A script whose boxes run under a server of its own (a terminal multiplexer, a
+daemon its `start` brings up) declares `server-lifecycle` so that server does
+not outlive the city. gc then runs `script server-stop` after it stops the
+city's sessions:
+
+| Stop | When gc runs `server-stop` |
+|------|----------------------------|
+| `gc stop` of a city no orchestrator runs | After its own stops, even when the stop is not confirmed. |
+| The orchestrator's shutdown, `gc stop` of a city it runs included | After it stopped every session it listed. It runs none when it could not list them all, or when it leaves the sessions running for the next orchestrator to adopt. |
+
+`server-stop` is a backstop as well as a teardown: a session gc's own stops
+could not see ends with the server.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | The server for this city is gone and no session the script started for the city remains. With no server running, `server-stop` has nothing to do and exits 0, so a second call exits 0. |
+| 1 | A session the script started for the city may still be running. Name it on stderr: `gc stop` prints the message as a teardown warning. |
+
+Stderr on exit 0 is never shown, so do not exit 0 with a warning there. Exit 2
+is a failure, because the script declared the op. gc reads the token from the
+handshake: if the handshake fails at teardown, gc runs it once more, and if
+that fails too it runs no `server-stop` and prints a teardown warning, since
+the server may survive. gc does not configure the server at startup: the
+script brings it up when an op first needs it. If other cities or users share
+the server, end only the sessions the script started for this city
+(`GC_EXEC_CITY_PATH`) and leave the server running while anything else uses
+it.
+
+`gc runtime conformance` checks the op as the `server` group
+(`RPP-SERVER-001` to `RPP-SERVER-004`; `RPP-SERVER-004`, that `server-stop`
+in one city leaves another city's sessions running, only for a script that
+also declares `city-scoped`). `gc runtime check` runs it twice, the second
+time to check that it is idempotent. Both commands run the op, and the
+sessions they check it against, in a private city: `GC_EXEC_CITY_NAME` and
+`GC_EXEC_CITY_PATH` name a fresh temporary directory, never the city you run
+them from. A script that does not scope its server by `GC_EXEC_CITY_PATH`
+ends every session the server holds, so check it only against a backend that
+no live city uses.
 
 ### Start Config (JSON on stdin)
 
@@ -421,9 +496,11 @@ when `is-running` printed `true` before the attempt, or when `start` exited
 non-zero on its own with stderr saying the name is taken (it contains
 `already exists` or `already running`). The stderr check does not apply to a
 `start` that gc canceled at its deadline. A runtime that declares both
-`proc.provision` and `proc.exec` gets `provision` in place of that
-`is-running` and `start`: no `stop` follows a failed `provision`, and one
-always follows a failed agent launch after it.
+`proc.provision` and `proc.exec` gets `provision` in place of that `start`:
+no `stop` follows a failed `provision`, and one always follows a failed agent
+launch after it. It gets that `is-running` (`observe` on a v2-ready
+script) only when it also declares `fs.host`, because gc needs the answer
+before it does any [host work](#host-filesystem-fshost).
 
 Scripts may handle these hints or ignore them:
 
@@ -448,8 +525,10 @@ Scripts may handle these hints or ignore them:
   filesystem **before** the session is created. Used for directory
   preparation, worktree creation, or other setup that must exist before
   the agent starts. Scripts should execute each command in the target
-  environment before creating the tmux session. Non-fatal: warn on
-  stderr if a command fails, but don't abort start.
+  environment before creating the tmux session. Fatal: if a command
+  fails, fail `start` (exit 1) without creating the session. An agent
+  must never launch into an unprepared work dir, and gc delivers
+  skills and MCP for worktree agents as a `pre_start` command.
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
@@ -475,7 +554,91 @@ for the agent to show the prompt, or wait out the delay, before it counts
 the start done. A script that must reach a ready agent before it returns
 (to type `nudge`, say) waits itself; otherwise it may ignore them. Session setup
 commands are the *script's* responsibility — they run on the target
-filesystem, not the orchestrator.
+filesystem, not the orchestrator — unless the script declares `fs.host`, in
+which case gc runs them on the host and leaves them out of the start config
+of a start into a vacant name (see
+[Host filesystem (`fs.host`)](#host-filesystem-fshost)).
+
+### Host filesystem (`fs.host`)
+
+A script whose handshake declares `fs.host` together with
+`"locality": "local"` promises that its boxes run on gc's host, as gc's user,
+with gc's view of the filesystem. `locality` alone does not promise that: a
+container on gc's host is local but sees its own filesystem and may run as
+another user, and it must not declare `fs.host`. gc reads the two together;
+`fs.host` without `"locality": "local"` is ignored.
+
+For such a script gc does the session's host work itself, around `start` (or
+`provision`):
+
+1. It stages the work dir: `pack_overlay_dirs` (including the
+   `per-provider/<provider>/` subdirectories that match the session's
+   provider), `overlay_dir` and `copy_files`.
+2. It runs `pre_start` on the host, each command under the `[session]`
+   `setup_timeout` (and `setup_max_timeout`, when set). A failing command
+   fails the start before `start` runs; the error carries the command's
+   output tail with secrets redacted.
+3. It runs `start` (or `provision`) with a config that leaves out what it
+   did: `pack_overlay_dirs`, `overlay_dir`, `copy_files`, `pre_start`,
+   `session_setup` and `session_setup_script` are absent.
+4. Once the agent is up, it runs `session_setup` and then
+   `session_setup_script` on the host with `GC_SESSION` set. A failure is a
+   warning; the session keeps running.
+
+gc runs no `session_live` for an exec runtime; the field stays in the start
+config. gc does this host work only into a name the script reports vacant:
+`is-running` prints `false` or, on a v2-ready script, `observe` reads it
+absent. Into a name a box already holds, or one whose read fails, it does
+none of it and sends the full config.
+
+There is no flag in the start config that says gc did the work. A script
+does exactly what its start config carries: a gc that did the host work
+left those fields out, and an older gc (or one whose cached handshake
+predates the script declaring `fs.host`) sends them, and the script does
+them, as before.
+
+With `fs.host`, gc also reads the agent's transcript on its own host for
+turn tracking, and the runtime passes the skill and MCP materialization
+gates, so an agent with MCP configured resolves at its scope root and in a
+worktree.
+
+On a v2-ready script with `fs.host`, gc also scans its host's process table
+for a session's leftover processes, as it does for tmux and subprocess
+sessions: a process that left the agent's process group and outlived its
+terminal, carrying the session's `GC_SESSION_ID` and `GC_CITY_PATH`. The
+orphan sweep ends such a process once its session is closed, or stopped with
+no live box under its name, and a session's start ends its own stopped
+incarnation's leftovers first. A leftover counts as live while a box the
+script's [`inventory`](#inventory) lists carries its `GC_SESSION_ID`; for a
+listed box whose `GC_SESSION_ID` reads empty, the leftover's
+`GC_SESSION_NAME` decides. gc does not scan for the sessions of a script
+that is not v2-ready: its `list-running` cannot prove a box gone (an exit 2,
+or an empty answer from a backend it could not read, lists nothing), so a
+live box's process would read as a leftover. Without `fs.host` gc does not
+scan either.
+
+The inventory runs only when the scan found such a process. For the orphan
+sweep it is bounded at 5 seconds, because the sweep scans on every
+orchestrator tick; for a session's start it may take as long as a listing
+call. An inventory that fails, is partial or runs past its bound leaves
+tracking unknown: the sweep then reaps only the leftovers of closed
+sessions, and a session's start refuses rather than end a leftover the
+inventory could have shown. gc signals a process only while it still
+carries the session's `GC_SESSION_ID` and the start time the scan read.
+
+Start a process that serves several boxes, such as a multiplexer or a daemon
+the boxes run under, from the operation's own environment, never after
+applying a start config's `env`. A process that carries a session's
+`GC_SESSION_ID` and outlives that session's box is that session's leftover:
+gc ends it with its process group, and every box it serves goes down with
+it.
+
+`gc runtime conformance` checks the promise in its `fshost` group: a box's
+command copies a file the runner wrote and records its `id -u`, which the
+runner reads back on its own host; a `start` config's `overlay_dir` and
+`pre_start` are carried out, and a failing `pre_start` fails `start` with no
+box; and, with `observe.v1`, `observe`'s `agent_pid` is a live host process
+of the caller's user.
 
 ### Work-dir export exclusions
 
@@ -630,6 +793,245 @@ then stays open in `creating` until `get-meta` answers, or until an operator
 runs `gc session close`. A script that runs its backend's CLI under
 `set -e` should catch the "no such session" case and print nothing.
 
+## observe.v1 (reconciler v2)
+
+Reconciler v2 starts, stops and recycles sessions only on fresh, exact
+answers: "this box is absent", "this is the box, and this is whose", "kill
+exactly that box". A script opts into giving them by declaring `observe.v1`
+in its handshake. A script that declares `observe.v1` **and**
+`report-attachment` is v2-ready: gc reads it through observe.v1 on the
+handshake alone. `gc runtime conformance` reports `v2-ready: yes` only for a
+script that also passes every requirement; otherwise it names the
+capabilities the script lacks and the requirements it failed. A script that
+declares neither keeps today's behavior exactly.
+
+Reconciler v2 runs on a v2-ready script, and refuses any other exec
+runtime, naming what its handshake lacks. Admission asks the script's
+`protocol` once per version of the file (its path, size, modification time
+and inode), within 10 seconds, and remembers the answer; at boot the
+controller checks that the provider it built reads the same. With
+`session_reconciler` unset, a v2-ready script switches the city to v2
+unless the city falls back to legacy for another reason, and the boot log
+and `gc doctor` say which. `input-fence` is not required, but
+without it (with `proc.exec`) input gc fences to one incarnation is refused
+on the box, and `gc doctor` warns. The handshake's `locality` decides
+whether gc's storage verbs treat the runtime as remote (absent: remote).
+
+Declaring `observe.v1` obliges the script to:
+
+1. Implement `observe`, `inventory` and `kill-object` (below).
+2. Honor `fresh_only` on `start` (and `provision`, if declared).
+3. Treat exit 2 from every op it implements as a failure: `stop` exit 2 is
+   a stop that stopped nothing, a metadata op's exit 2 is a missing store,
+   and the observe.v1 ops' exit 2 is an unknown answer.
+4. Keep one identity: `get-meta <name> GC_SESSION_ID | GC_RUNTIME_EPOCH |
+   GC_INSTANCE_TOKEN | GT_PROCESS_NAMES` answers what the session started
+   with, or what `set-meta` set since, and `observe` and `inventory` report
+   the same values. For boxes started before the script declared
+   `observe.v1`, derive them from the box's own configuration.
+5. Seed identity before the box is visible: persist it before creating the
+   box (or create the box with it, atomically). Until it is readable, answer
+   `"identity": null`.
+6. Read the backend on every `observe`; never answer from a cache older than
+   the call.
+7. Answer `absent` (or omit a name from a complete `inventory`) only when the
+   backend proves nothing holds the name, live, dead, starting or stopping.
+   If the backend's view is partial or stale, answer `unknown` (or set
+   `complete: false`).
+8. Answer `is-attached` `true` when any interactive client is attached by any
+   means, not only through gc (screen's multiuser `Multi, attached`
+   included); exit non-zero when it cannot tell, including when the backend
+   cannot be read. Only `true` or `false` is an answer.
+9. Serialize ops per name (for example with `flock`): `start`, `stop`,
+   `observe` and `kill-object` for one name may race. A `fresh_only` start
+   checks and creates under the lock.
+10. Never print `GC_INSTANCE_TOKEN` on stderr. gc never echoes `observe` or
+    `inventory` stdout into an error or a log.
+11. Answer `observe` and `is-attached` within 4 seconds: gc stops the call
+    there (`SIGTERM`, then `SIGKILL` 2 seconds later) and reads it unknown.
+12. With more than one city on one backend, scope boxes by
+    `GC_EXEC_CITY_PATH` / `GC_EXEC_CITY_NAME`, which gc sets on every op.
+13. Implement `peek` for every box the name holds, live or dead (below).
+
+### `peek <name> <lines>` under observe.v1
+
+Before v2 recycles a box that died, it reads the box's screen to tell why:
+a provider's terminal error parks the session, and a rate-limit screen
+quarantines it, instead of relaunching it into the same failure. For a
+v2-ready script, gc runs `peek` whatever `is-running` says. A running box
+is read as before (over `exec` when the runtime implements it); for a dead
+box gc runs `peek` itself. The script must:
+
+- print the box's last `<lines>` lines of screen and exit 0, dead box
+  included, when it can read them (a blank screen prints its empty lines;
+  a capture that wrote nothing is a failure, not a blank screen);
+- exit **66** (no screen) when nothing holds a screen for the name: no box,
+  or a dead box whose screen is gone. gc reads it as a known-empty screen
+  wherever it reads one: v2 recycles the box, and a start whose agent
+  exited while its startup dialogs were read goes on as over a blank
+  screen;
+- exit non-zero otherwise (the backend cannot be read, the screen cannot be
+  captured). gc never reads a failed `peek` as an empty screen: v2 refuses
+  the recycle (`peek-error`) and retries it on the row's backoff (10s,
+  doubling, at most every 5 minutes) until `peek` answers, the box goes
+  away, or the session is stopped, which removes a dead box by its object
+  without reading its screen. The hold has no deadline of its own; once
+  its refusals reach the backoff's cap with the latest a peek failure, gc
+  raises a `peek-held` alert naming the session, the error and that
+  remedy, and repeats it about every 30 minutes while it lasts.
+
+Its exit 2 is a failure, not the unknown-op no-op.
+
+### `observe <name>`
+
+Stdin carries zero or more agent process names, one per line. Stdout is
+exactly one JSON object:
+
+```json
+{"state":"running",
+ "object":{"id":"c0ffee12","created":"2026-10-30T01:02:03Z"},
+ "agent":"alive",
+ "agent_pid":"4242",
+ "identity":{"GC_SESSION_ID":"mc-abc","GC_RUNTIME_EPOCH":"7","GC_INSTANCE_TOKEN":"…","GT_PROCESS_NAMES":"claude,node"}}
+```
+
+| Field | Values | Rules |
+|---|---|---|
+| `state` | `running`, `dead`, `absent`, `unknown` | `dead`: the name is held but nothing runs in the box (an exited container, a kept pane). `absent`: rule 7. |
+| `object` | `{id, created}`, non-empty strings | Required for `running` and `dead`. Byte-identical across calls for one box; a new `id` for every new box under the name. |
+| `agent` | `alive`, `dead`, `unknown` | For `running` with process names on stdin; see [Agent liveness](#agent-liveness). Omitted or `unknown` reads alive. A `dead` box with an `alive` agent is a contradiction, read as unknown. |
+| `agent_pid` | string, optional | The agent's pid, when the backend knows it. |
+| `identity` | object of the identity keys, or `null` | `{}` is a box with no gc identity (one an operator made); `null` is identity not yet readable (rule 5). |
+
+#### Agent liveness
+
+`agent: dead` is a verdict gc acts on: a running box whose agent is dead is a
+zombie, and v2 recycles it with `kill-object`. Answer `dead` only when sure:
+
+- Look at every descendant of the box's root process, not only its direct
+  children: the agent often runs under a shell wrapper.
+- Match a process the way gc's own process table does: its command name's
+  base name, or argv[0]'s base name, is one of the names; or argv[0] is an
+  interpreter (`node`, `bun`, `npx`, `deno`) and the first argument that is
+  not a flag or a runner subcommand (`run`, `exec`, `x`) has one of the
+  names as its base name, with or without its extension. The command name
+  alone is not enough: the kernel truncates it to 15 characters, and Node 25
+  names its main thread `node-MainThread`.
+- Apply gc's name aliases: `kimi` also matches `kimi-code` (the kimi entry
+  point's command and argv[0]), and `gc` also matches the base name of the
+  gc binary the session runs (its `GC_BIN`, which differs when gc is
+  renamed or wrapped, for example `.gc-wrapped`).
+- Read one process snapshot (for example `ps -ww -eo pid=,ppid=,args=` and
+  `ps -eo pid=,comm=`) for every box, not one probe per box. Without `-ww`,
+  procps cuts each line to `COLUMNS` even into a pipe, and an agent with a
+  long command line reads dead.
+- When the snapshot cannot be read, or the box has no process names, omit
+  `agent` (unknown): gc then does not recycle the box, and `kill-object`'s
+  zombie mode re-checks the agent before it kills.
+
+A non-zero exit, a timeout, malformed or oversized output (over 1 MiB),
+`unknown`, or a present state without its object all read as unknown, never
+as absent.
+
+### `inventory`
+
+No name and no stdin. Stdout is one JSON object of at most 8 MiB, listing
+every name the backend holds for this city, live or dead:
+
+```json
+{"complete":true,
+ "sessions":[{"name":"mc-mayor","state":"running",
+              "object":{"id":"…","created":"…"},
+              "agent":"alive","attached":false,
+              "last_activity":"2026-10-30T01:05:00Z",
+              "restart_requested":false,
+              "identity":{"GC_SESSION_ID":"…"}}]}
+```
+
+- `complete: false` lists names that are present and proves nothing else
+  absent. Any failure is a non-zero exit.
+- `attached`, `last_activity`, `restart_requested` and `identity` may be
+  `null` (not read). `attached` is not `null` for a script declaring
+  `report-attachment` unless it genuinely could not tell, and
+  `last_activity` is not `null` for a running session of a script declaring
+  `report-activity`.
+- An entry whose `name` cannot be read fails the whole answer; an entry with
+  a readable name and malformed attributes is listed with them unknown.
+- A name listed twice fails the whole answer: gc cannot tell which box is
+  the name's, so it cannot prove the listing complete.
+- **Keep `inventory` cheap.** On a v2-ready script every listing call runs
+  `inventory`: gc's inventory pass (every patrol interval, 15-30 seconds on
+  a typical city, and on every wake), `gc stop`, status and the API; gc does
+  not call `list-running` there. The inventory pass gives it at most 10
+  seconds, a listing call 30. Answer from one backend query and one process
+  snapshot for the whole city, with no per-box round trip. `list-running`
+  stays for older gc.
+
+### `kill-object <name>`
+
+Stdin: `{"object":{"id":"…","created":"…"},"mode":"corpse"|"zombie","agent_pid":"…"}`.
+Re-check, then kill the exact object, as one backend operation where the
+backend allows it (`docker rm -f <id>`, a Kubernetes delete with a UID
+precondition, `screen -S <pid>.<name> -X quit`). Never kill by name.
+
+| `mode` | Kill only while | Otherwise answer |
+|---|---|---|
+| `corpse` | the object still holds the name, no client is attached, and nothing runs in it | `gone` (the id names no box, or one created at another time), or `live` (something runs, or a client is attached) |
+| `zombie` | the object still holds the name, no client is attached, the box runs, and its agent is still dead (and `agent_pid` is unchanged when given) | `changed` (the agent lives again, its pid changed, or a client is attached), or `gone` |
+
+Stdout is exactly one of `killed`, `gone`, `renamed`, `live` or `changed`.
+
+### `fresh_only` starts
+
+gc sends `"fresh_only": true` in the start config to a v2-ready script. If any
+box, live or dead, holds the name, exit **73** (or exit 1 with `already
+exists` / `already running` on stderr) and touch nothing; otherwise create a
+new box, never recycling, killing, reusing or respawning one. gc sets
+`GT_PROCESS_NAMES` and `GC_INSTANCE_TOKEN` in `env`, and after a failed start
+stops a box only when a fresh `observe` shows it carrying that start's token.
+
+### Conformance
+
+`gc runtime conformance <script>` gates every promise above as the `observe`
+group (`RPP-OBSERVE-001` to `RPP-OBSERVE-016`), except `peek` of a dead box:
+the kit has no way to leave one, so `RPP-OBSERVE-016` reads only a running
+box (exit 0) and a name no box holds (exit 66). `gc runtime check` runs a
+smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
+the reference implementation.
+
+The same command checks the bookkeeping ops every script may implement, each
+skipped when its op answers exit 2 and failed when it answers wrongly:
+
+| Group | Codes | Checks |
+|---|---|---|
+| `meta` | `RPP-META-001` to `006` | `get-meta` answers what `set-meta` stored; an unset or removed key reads empty; an empty value overwrites; keys are independent. Under `observe.v1` a metadata op's exit 2 fails. |
+| `discovery` | `RPP-DISCOVERY-001` to `005` | `list-running` lists running sessions under the prefix and omits stopped ones. With `conformance-faults`, a listing the backend cannot read must fail (non-zero, not 2), never answer an empty list. |
+| `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
+| `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
+| `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+
+### Switching an existing exec city to v2
+
+Upgrading gc alone changes nothing for a script that does not declare the
+profile: the city stays legacy. Declaring `observe.v1` and
+`report-attachment` makes an unset `session_reconciler` resolve to v2 at the
+next controller start, unless the city falls back to legacy for another
+reason (pin `session_reconciler = "legacy"` to stay). It
+also changes what the script's legacy city sees: a failed `observe` reads
+unknown rather than not running, listings are attested (so `gc stop` skips
+its per-name sweep), and a declared op's exit 2 is a failure. Before
+switching a city with running sessions:
+
+1. Run `gc runtime conformance <script>`.
+2. Run `gc doctor`: `exec-runtime-identity` judges each running box under
+   an open session row as v2 does, on its batched identity or, when that is
+   null, its observed one, and names the boxes v2 would hold instead of
+   adopting them: Ownerless (no `GC_SESSION_ID` and no `GC_INSTANCE_TOKEN`)
+   or Unknown (no token that matches the row, and no proof the box is the
+   row's own). Make the script report the identity of boxes it started
+   before the upgrade (observe.v1 item 4).
+3. Otherwise stop those sessions first.
+
 ## Writing Your Own Script
 
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
@@ -659,15 +1061,51 @@ esac
 ## Environment Variables
 
 Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
-state files (metadata, wrappers). If not set, scripts should use a
-reasonable default under `$TMPDIR` or `/tmp`.
+state files (metadata, wrappers). gc does not set it. A script's default
+must not depend on the caller's session environment: the supervisor, a
+cron job and a sudo shell differ in `XDG_RUNTIME_DIR`, `TMPDIR` and even
+`HOME`, and a box one of them cannot find reads absent, so a v2 start
+creates a twin. Derive the default from something fixed per user (the home
+directory in the password database, for example). An operator who sets
+`GC_EXEC_STATE_DIR` must set the same value for every gc process of the
+city. A home can be shared between hosts (NFS), so a script whose boxes
+live on one host keys that state by host as well, or one host reads the
+other's boxes as dead and removes them.
 
-A script runs with gc's own environment. The session's environment arrives
-in the start config's `env` (see [Session environment](#session-environment)).
+gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
+the city the provider serves, the admission probe's `protocol` (see
+[observe.v1](#observev1-reconciler-v2)) included. A script shared by
+several cities on one backend scopes its boxes and listings by them. A
+handshake should still read no state and answer the same for every city:
+`gc start`, the orchestrator and `gc doctor` each probe it in their own
+process and remember the answer per version of the file.
+
+gc sets `GC_EXEC_DEADLINE_MS` on every operation it runs under a deadline
+— all of them but `attach`, and `watch-startup` when its start has none —
+whether or not the provider serves a city. It is the whole milliseconds left,
+rounded down and never negative, until the operation is killed: the earlier
+of the operation's own timeout and any deadline gc's caller already set. A
+script can budget its own inner calls by it. gc counts it from just before
+the spawn, so it is an upper bound; an operation whose deadline has passed
+before it is spawned is not run at all. It is informational: no handshake
+capability declares or gates it.
+
+A script runs with gc's own environment, without the session identity a gc
+command run from an agent's shell carries (`GC_SESSION_ID`,
+`GC_SESSION_NAME`, `GC_RUNTIME_EPOCH`, `GC_INSTANCE_TOKEN`, `GC_AGENT`,
+`GC_ALIAS`, `BEADS_ACTOR` and the rest of the list gc's managed Dolt server
+is started without): an operation belongs to no session. A server an
+operation starts therefore never reads as that session's leftover process,
+and never carries its instance token.
+The session's environment arrives in the start config's `env` (see
+[Session environment](#session-environment)).
 
 ## Shipped Scripts
 
 See `contrib/session-scripts/` for maintained implementations:
 
-- **gc-session-screen** — GNU screen backend. Dependencies: `screen`,
-  `jq`, `bash`.
+- **gc-session-screen** — GNU screen backend, v2-ready (`observe.v1`,
+  `report-attachment`, `city-scoped`, locality `local`). Each city gets a
+  private screen socket directory under the script's state directory.
+  Dependencies: `bash`, `screen`, `jq`, `flock`, procps `ps` and `kill`,
+  `awk`, `cksum`, `uname`.

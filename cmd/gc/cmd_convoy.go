@@ -239,7 +239,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 	// Ensure metadata is persisted on all backends. MemStore carries Metadata
 	// through Create, but BdStore/exec.Store may not. setConvoyFields uses
 	// SetMetadata which works across all backends.
-	if err := setConvoyFields(store, convoy.ID, opts.Fields); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, convoy.ID, opts.Fields); err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: warning: setting fields: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: convoy already created and event will be emitted.
 	}
@@ -260,7 +260,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := convoycore.TrackItem(childStore, convoy.ID, id); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: childStore}}, convoy.ID, id); err != nil {
 			fmt.Fprintf(stderr, "gc convoy create: tracking %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -990,12 +990,9 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 // suspended rig is a question about that rig's bead, so that rig's store is
 // still read.
 func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) func(string) (beads.Store, error) {
-	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	asleep := byIDSuspendedStoreRoots(cfg, cityPath, beadID)
 	if len(asleep) == 0 {
 		return openStore
-	}
-	if rd := rigDirForBead(cfg, beadID); rd != "" {
-		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
 	}
 	return func(dir string) (beads.Store, error) {
 		if len(asleep[normalizePathForCompare(dir)]) > 0 {
@@ -1003,6 +1000,20 @@ func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(s
 		}
 		return openStore(dir)
 	}
+}
+
+// byIDSuspendedStoreRoots is suspendedRigStoreRoots less the store root of the
+// rig beadID's prefix routes to: the suspended stores a by-id probe of beadID
+// leaves unopened.
+func byIDSuspendedStoreRoots(cfg *config.City, cityPath, beadID string) map[string][]string {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return asleep
+	}
+	if rd := rigDirForBead(cfg, beadID); rd != "" {
+		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
+	}
+	return asleep
 }
 
 // refuseBindingRigCollision restores the uniqueness contract to the one case
@@ -1395,7 +1406,7 @@ func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
 }
 
 func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
-	return convoycore.Members(store, convoyID, includeClosed)
+	return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, includeClosed)
 }
 
 func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, stdout, stderr io.Writer) int {
@@ -1753,7 +1764,7 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 		fmt.Fprintf(stderr, "gc convoy target: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, id, ConvoyFields{Target: target}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1840,7 +1851,7 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, issueID); err != nil {
 		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2062,7 +2073,7 @@ type explicitReasonCloser interface {
 // behavior lives in the convoy domain package so the sling reap path and this
 // CLI projection share one implementation.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	return convoycore.CloseWithReason(store, id, reason)
+	return convoycore.CloseWithReason(beads.WorkStore{Store: store}, id, reason)
 }
 
 // doConvoyCheck auto-closes convoys where all children are closed.
@@ -2613,7 +2624,10 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 		}
 	}
 
-	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
+	// store is the closed bead's store, which the autoclose callers hand over
+	// as the graph store: convoys are work class, so this read can miss them
+	// (typed-store design misroute #3; T9(d)).
+	trackingConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, beadID)
 	if err != nil {
 		run.note(err)
 		return run

@@ -458,6 +458,11 @@ type Info struct {
 	// / _key), the same shape as the named pair above but for the attached path.
 	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
 	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt is the RAW config_drift_escalated_at metadata, the
+	// marker that the deferral episode named by ConfigDriftDeferredKey has
+	// emitted its single past-horizon escalation. It is valid only while its
+	// timestamp lies between ConfigDriftDeferredAt and now.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
@@ -805,13 +810,11 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
-		// failed listing missed. It is not an orphan, and a replacement would
-		// race it for the session's work, so the start refuses and terminates
-		// nothing. The reconciler defers a refused start without recording a
-		// failure, so the refusal is logged here.
+		// failed listing missed, or a root its failed listing cannot rule
+		// out. It is not an orphan, and a replacement would race it for the
+		// session's work, so the start refuses and terminates nothing.
 		if live.LiveUnlisted {
-			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
-			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+			return refuseLiveUnlisted(sessionID, live, err)
 		}
 		orphans = append(orphans, live)
 	}
@@ -826,6 +829,22 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
 	}
 	return nil
+}
+
+// refuseLiveUnlisted logs and returns killExistingOrphans' refusal to start
+// sessionID over live, a root its provider claims as a live runtime it does
+// not list. When the scan's tracking failed (scanErr holds a whole-scan
+// failure), the claim rests on a listing that could not rule the root out,
+// so the refusal names that failure rather than say the root is the
+// provider's. The reconciler defers a refused start without recording a
+// failure, so the refusal is logged here.
+func refuseLiveUnlisted(sessionID string, live runtime.LiveRuntime, scanErr error) error {
+	claim := "belongs to the provider but is not listed by it"
+	if proctable.HasWholeScanFailure(scanErr) {
+		claim = "may belong to the provider, whose listing could not rule it out (" + proctable.SummarizeScanError(scanErr) + ")"
+	}
+	log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d %s", sessionID, live.PID, live.PPID, claim)
+	return fmt.Errorf("live runtime pid=%d ppid=%d for session %s %s: %w", live.PID, live.PPID, sessionID, claim, runtime.ErrRuntimeUnavailable)
 }
 
 func (m *Manager) now() time.Time {
@@ -1156,6 +1175,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its
