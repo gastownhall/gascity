@@ -58,6 +58,16 @@ func newInfraScope() *userscope.Wrapper {
 // their sessions. Tests replace it.
 var infraLingerDir = "/var/lib/systemd/linger"
 
+// infraCurrentUsername resolves this process's username for the linger
+// marker. Tests replace it.
+var infraCurrentUsername = func() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
+}
+
 // infraProcCgroupPath is this process's cgroup membership. Tests replace it.
 var infraProcCgroupPath = "/proc/self/cgroup"
 
@@ -78,23 +88,36 @@ func infraScopeProbe(slice string) error {
 // the caller sits in a login-session scope that can survive logout
 // (KillUserProcesses=no) while a user-manager scope stops at logout.
 func infraScopeKeepsLifetime() error {
-	u, err := user.Current()
-	if err != nil {
-		return fmt.Errorf("resolving current user: %w", err)
-	}
-	marker := filepath.Join(infraLingerDir, u.Username)
-	if _, err := os.Stat(marker); err == nil {
+	// Checked first: it needs only the uid, so a uid without a passwd entry
+	// (containers, sandboxes) still qualifies.
+	unit := "user@" + strconv.Itoa(os.Getuid()) + ".service"
+	under, cgroupErr := cgroupUnder(infraProcCgroupPath, unit)
+	if cgroupErr == nil && under {
 		return nil
 	}
-	unit := "user@" + strconv.Itoa(os.Getuid()) + ".service"
-	under, err := cgroupUnder(infraProcCgroupPath, unit)
+	lingers, lingerNote := infraUserLingers()
+	if lingers {
+		return nil
+	}
+	if cgroupErr != nil {
+		return fmt.Errorf("%s and reading %s: %w", lingerNote, infraProcCgroupPath, cgroupErr)
+	}
+	return fmt.Errorf("%s and gc runs outside %s: a user scope would stop at logout", lingerNote, unit)
+}
+
+// infraUserLingers reports whether logind's linger marker exists for the
+// current user, with a note describing the outcome. A username that cannot
+// be resolved counts as not lingering.
+func infraUserLingers() (bool, string) {
+	username, err := infraCurrentUsername()
 	if err != nil {
-		return fmt.Errorf("user %q does not linger (%s) and reading %s: %w", u.Username, marker, infraProcCgroupPath, err)
+		return false, fmt.Sprintf("current user does not linger (username unresolvable: %v)", err)
 	}
-	if !under {
-		return fmt.Errorf("user %q does not linger (%s) and gc runs outside %s: a user scope would stop at logout", u.Username, marker, unit)
+	marker := filepath.Join(infraLingerDir, username)
+	if _, err := os.Stat(marker); err != nil {
+		return false, fmt.Sprintf("user %q does not linger (%s)", username, marker)
 	}
-	return nil
+	return true, ""
 }
 
 // cgroupUnder reports whether any cgroup path in the /proc/<pid>/cgroup
@@ -139,8 +162,13 @@ func infraArgv(argv []string) []string {
 }
 
 // infraCommand is exec.Command for a city infrastructure process; see
-// infraArgv.
+// infraArgv. A name that does not resolve stays unwrapped: wrapped, exec
+// would resolve systemd-run instead and the missing executable would surface
+// only as a later readiness timeout rather than at Start.
 func infraCommand(name string, args ...string) *exec.Cmd {
+	if _, err := exec.LookPath(name); err != nil {
+		return exec.Command(name, args...)
+	}
 	argv := infraArgv(append([]string{name}, args...))
 	return exec.Command(argv[0], argv[1:]...)
 }

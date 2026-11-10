@@ -100,8 +100,8 @@ gc wraps a spawn only when both hold:
    (`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger
    <user>`), or the gc process already runs under `user@<uid>.service` (for
    example in a `GC_AGENT_SLICE` pane scope). Scopes live under
-   `user@<uid>.service`, which systemd stops, with every scope in it, when
-   the user's last session ends. Without lingering, a caller in a login
+   `user@<uid>.service`, which, unless the user lingers, systemd stops,
+   with every scope in it, when the user's last session ends. Without lingering, a caller in a login
    session's scope can outlive logout (`KillUserProcesses=no`) while a user
    scope would not, so gc leaves its spawn where it is. A caller already
    under the user manager dies with it anyway.
@@ -121,8 +121,9 @@ cgroup of their own (tmux with `GC_AGENT_SLICE` does), so limits an operator
 sets on the infra slice apply to them.
 
 Unlike `GC_AGENT_SLICE`, scoping is on by default: `GC_INFRA_SLICE` only
-names the slice. When it cannot be used (neither condition 2 holds, no
-`systemd-run`, no user bus, macOS) gc checks once per process (the
+names the slice. When it cannot be used (condition 2 does not hold (no
+lingering and the caller is outside `user@<uid>.service`); no
+`systemd-run`; no user bus; macOS) gc checks once per process (the
 `systemd-run` probe is bounded at 5 seconds) and starts infrastructure
 unwrapped exactly as before, warning only when `GC_INFRA_SLICE` is set.
 

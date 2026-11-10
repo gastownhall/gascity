@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -486,6 +487,100 @@ func TestAgentScopeKillSparesAgentStartedManagedDolt(t *testing.T) {
 			alive := !died
 			if alive != tc.wantAlive {
 				t.Fatalf("managed Dolt alive after the agent's cgroup kill = %t, want %t", alive, tc.wantAlive)
+			}
+		})
+	}
+}
+
+// withInfraUsernameLookupFailing makes the current-user lookup fail, as it
+// does for a uid with no passwd entry (containers, sandboxes).
+func withInfraUsernameLookupFailing(t *testing.T) {
+	t.Helper()
+	old := infraCurrentUsername
+	infraCurrentUsername = func() (string, error) { return "", errors.New("user: unknown userid") }
+	t.Cleanup(func() { infraCurrentUsername = old })
+}
+
+// TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry: being under
+// user@<uid>.service suffices on its own, so a failed username lookup must
+// not keep the spawn unwrapped.
+func TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry(t *testing.T) {
+	installInfraScopeHost(t, infraScopeHost{session: true, underUserMgr: true})
+	withInfraUsernameLookupFailing(t)
+	if err := infraScopeKeepsLifetime(); err != nil {
+		t.Fatalf("infraScopeKeepsLifetime = %v, want nil under user@<uid>.service", err)
+	}
+	argv := []string{"dolt", "sql-server"}
+	if got, want := infraArgv(argv), userscope.Argv(defaultInfraSlice, argv); !slices.Equal(got, want) {
+		t.Fatalf("infraArgv = %q, want %q", got, want)
+	}
+}
+
+// TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering: outside the
+// user manager, a uid whose username cannot be resolved is not lingering.
+func TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering(t *testing.T) {
+	installInfraScopeHost(t, infraScopeHost{session: true, linger: true})
+	withInfraUsernameLookupFailing(t)
+	err := infraScopeKeepsLifetime()
+	if err == nil {
+		t.Fatal("infraScopeKeepsLifetime = nil, want a not-lingering error outside user@<uid>.service")
+	}
+	if !strings.Contains(err.Error(), "does not linger") {
+		t.Fatalf("infraScopeKeepsLifetime = %v, want a not-lingering error", err)
+	}
+	argv := []string{"dolt", "sql-server"}
+	if got := infraArgv(argv); !slices.Equal(got, argv) {
+		t.Fatalf("infraArgv = %q, want unwrapped %q", got, argv)
+	}
+}
+
+// TestInfraCommandKeepsImmediateErrorForMissingExecutable: wrapping would
+// make exec resolve systemd-run, hiding a missing executable until a
+// readiness timeout. A name that does not resolve stays unwrapped so Start
+// fails at once.
+func TestInfraCommandKeepsImmediateErrorForMissingExecutable(t *testing.T) {
+	logPath := installInfraScopeHost(t, wrappableFromSession)
+	cmd := infraCommand("gc-infra-scope-test-no-such-binary", "sql-server")
+	if want := []string{"gc-infra-scope-test-no-such-binary", "sql-server"}; !slices.Equal(cmd.Args, want) {
+		t.Fatalf("infraCommand args = %q, want unwrapped %q", cmd.Args, want)
+	}
+	err := cmd.Start()
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("Start = %v, want exec.ErrNotFound", err)
+	}
+	assertNoSystemdRun(t, logPath)
+}
+
+// TestInfraCommandWrapsResolvableExecutable pins the other side: a name on
+// PATH is wrapped from a session.
+func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
+	installInfraScopeHost(t, wrappableFromSession)
+	cmd := infraCommand("sh", "-c", "true")
+	if want := userscope.Argv(defaultInfraSlice, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
+		t.Fatalf("infraCommand args = %q, want %q", cmd.Args, want)
+	}
+}
+
+// TestProviderLifecycleEnvCarriesSessionIdentity: an agent's gc autostarts
+// the store through the provider script (gc-beads-bd.sh start → gc
+// dolt-state start-managed). That inner gc scopes the Dolt server only if
+// the provider env passes GC_SESSION_ID through, and must not invent one.
+func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
+	for _, session := range []bool{true, false} {
+		t.Run(fmt.Sprintf("session=%t", session), func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if session {
+				want = "gc-test-session"
+			}
+			// An empty value is no session identity to infraArgv.
+			t.Setenv(infraSessionIdentityEnv, want)
+			env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
+			if got := env[infraSessionIdentityEnv]; got != want {
+				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
 			}
 		})
 	}
