@@ -74,7 +74,11 @@ disposable; the work they did survives them, because work lives in beads.
 A **bead** is *what* the work is — one unit with an ID, title, status, and type,
 moving `open` → `in_progress` → `closed`. Beads are also the universal store:
 tasks, inter-agent mail, running sessions, and convoys are all beads that differ
-only by `type`, sharing one query interface. A **convoy** is a container bead
+only by `type`. A city keeps them in two stores: the **work ledger** holds the
+work people and agents reason about (tasks, bugs, convoys), and a local
+infrastructure store under `.gc/store` holds what the city runs on (sessions,
+mail, workflow steps, order runs, queued nudges). `gc` commands read both; raw
+`bd` reads the work ledger. A **convoy** is a container bead
 that groups related work so you track a batch as a unit. **Dependencies** are
 blocking `needs` edges: a bead with an open blocker is invisible to agents until
 that blocker closes — which is how ordering happens with no central scheduler.

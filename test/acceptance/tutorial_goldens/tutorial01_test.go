@@ -113,6 +113,9 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 			for _, want := range []string{
 				`provider = "claude"`,
+				// gc init writes a born-split city.
+				`[storage.classes]`,
+				`provider = "sqlite-beads"`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("city.toml missing %q:\n%s", want, out)

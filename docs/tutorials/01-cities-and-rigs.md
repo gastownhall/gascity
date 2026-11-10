@@ -131,6 +131,19 @@ ready_delay_ms = 0
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
 version = "sha:<pinned commit>"
 
+[storage]
+[storage.classes]               # where each kind of state lives
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+[storage.bindings]
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+
 # [mail]                        # commented-out mail retention settings follow
 # ...
 ```
@@ -161,7 +174,10 @@ mode = "always"
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
 the provider. The `[providers.claude]` table registers your chosen provider
 against the builtin `claude` preset. The `[defaults.rig.imports]` table lists
-packs that every rig you add imports automatically. The v2 formula compiler is
+packs that every rig you add imports automatically. The `[storage]` section
+keeps your work in the city's bead store and puts everything the city runs on
+(sessions, mail, workflow steps, orders, and queued nudges) in a separate local
+store under `.gc/store`, created the first time the city starts. The v2 formula compiler is
 on by default, so nothing is written for it (you'll meet formulas in
 [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.

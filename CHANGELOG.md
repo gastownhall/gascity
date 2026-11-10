@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **New cities are born split.** `gc init` now writes a `[storage]` section
+  that keeps work in the work ledger and puts the five infrastructure classes
+  (graph, sessions, messaging, orders, nudges) in one SQLite store under
+  `.gc/store`, created on first start; nothing is migrated. Existing cities do
+  not change. For a new city:
+  - It runs conversation lanes and, unless a v2 gap is configured
+    (`depends_on`, `max_session_age`, `[chat_sessions] idle_timeout`, a
+    session provider other than tmux, acp or subprocess), the v2 session
+    reconciler.
+  - Its mail, session, workflow, order and nudge rows live in the
+    infrastructure store, with ids that start `gcg-`. Work beads keep the
+    city prefix.
+  - Raw `bd` shows only the work ledger. Use `gc session list`, `gc mail`,
+    `gc formula` and `gc ready` for the rest; `gc bd ready` refuses.
+  - Its bd must be one a split city's `gc bd` runs: bd 1.3.2, 1.3.3 or 1.3.4,
+    or the pinned Enterprise 1.3.0 build, reached directly rather than
+    through a shim or wrapper script. With OSS bd 1.3.0 or 1.3.1, or a bd gc
+    cannot match to a pinned command tree, `gc init` starts the city
+    single-store and says why.
+  - A city name that derives a reserved prefix (`gcg`, `gcm`, `gcs`, `gco`,
+    `gcn`; for example `gas-city-ops`) is refused; pass `--prefix`.
+
+  How each path behaves:
+  - `gc init --storage=single` opts out; `--storage=split` asks for the split
+    explicitly. `gc init --json` reports `"storage": "split"` or `"single"`.
+  - A city with a remote session runtime (k8s, hybrid, `ssh:`, or an exec
+    runtime that does not declare `locality=local`) starts single-store with a
+    notice until worker-site transport exists; `--storage=split` is refused
+    there.
+  - `gc init --from` and `gc init --file` copy their source's `[storage]` as
+    it is. The `gastown`, `swarm`, `lifecycle` and `t3bridge-gastown` examples
+    now carry the split; `hyperscale` (k8s) stays single-store.
+  - The HTTP city create shares `gc init`'s default, so API-created cities are
+    born split.
+
+  A pre-1.5 `gc` on an agent's `PATH` writes infrastructure rows into a
+  born-split city's work store; keep every `gc` a city's agents run current.
+  To split an existing city, see
+  `docs/runbooks/split-storage-classes.md`.
 - **A stranded split-store city serves degraded instead of refusing.** A
   converged city whose work store holds infrastructure beads the binding
   does not serve (for example ordinary work that a plain `bd create`

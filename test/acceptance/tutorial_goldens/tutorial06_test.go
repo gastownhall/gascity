@@ -97,10 +97,10 @@ func TestTutorial06Beads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd list: %v\n%s", err, out)
 		}
-		for _, want := range []string{"pancakes", "Status:", "Finalize workflow"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("bd list missing %q:\n%s", want, out)
-			}
+		// A born-split city keeps the cooked workflow in its infrastructure
+		// store, which raw bd does not read.
+		if strings.Contains(out, "Finalize workflow") {
+			t.Fatalf("bd list shows the cooked workflow's steps; on a born-split city they live in the infrastructure store:\n%s", out)
 		}
 	})
 
@@ -168,14 +168,14 @@ func TestTutorial06Beads(t *testing.T) {
 		}
 	})
 
-	t.Run("bd list --type session --flat --include-infra", func(t *testing.T) {
+	t.Run("gc session list", func(t *testing.T) {
 		// The mayor's session bead appears once the supervisor materializes
 		// the always-on named session, so wait for it rather than assert once.
 		var out string
 		if !waitForCondition(t, 90*time.Second, 3*time.Second, func() bool {
 			var err error
-			out, err = ws.runShell("bd list --type session --flat --include-infra", "")
-			return err == nil && strings.Contains(out, "[session]") && strings.Contains(out, "mayor")
+			out, err = ws.runShell("gc session list", "")
+			return err == nil && strings.Contains(out, "gcg-") && strings.Contains(out, "mayor")
 		}) {
 			t.Fatalf("session listing should show the mayor's session bead:\n%s", out)
 		}
@@ -348,10 +348,13 @@ func TestTutorial06Beads(t *testing.T) {
 		}
 	})
 
-	t.Run("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", func(t *testing.T) {
-		out, err := ws.runShell("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", "")
+	t.Run("gc ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", func(t *testing.T) {
+		out, err := ws.runShell("gc ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", "")
 		if err != nil {
-			t.Fatalf("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1: %v\n%s", err, out)
+			t.Fatalf("gc ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1: %v\n%s", err, out)
+		}
+		if updateAPIID != "" && strings.Contains(out, updateAPIID) {
+			t.Fatalf("blocked %s should not be ready:\n%s", updateAPIID, out)
 		}
 	})
 

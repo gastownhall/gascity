@@ -317,6 +317,41 @@ bd version
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
 
+## `gc init` Created a Single-Store City
+
+A new city is born split unless something keeps it single-store, and `gc init`
+prints the reason on stderr:
+
+| Notice names | Why | To get the split |
+|---|---|---|
+| bd older than v1.3.2, or a bd tree that matches no pinned inventory | A split city's `gc bd` runs only a bd whose command tree gc pins | Upgrade bd, put the real binary (not a shim or wrapper script) on `PATH`, then split with `gc storage migrate` |
+| a session runtime that runs sessions on remote hosts | A split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport exists | Keep the city single-store for now |
+
+`gc init --storage=single` creates a single-store city on purpose and prints
+nothing. To split a single-store city later, see
+[Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes).
+
+## `gc init` Refuses a Reserved Bead Prefix
+
+A split city's infrastructure store mints IDs under the reserved prefixes
+`gcg`, `gcm`, `gcs`, `gco` and `gcn`, so a city whose bead prefix falls in one
+is refused. The prefix derives from the city name's initials, so
+`gas-city-ops` derives `gco`. Pass a prefix of your own:
+
+```bash
+gc init --prefix gops ~/gas-city-ops
+```
+
+## `gc bd` Refuses a Command on a Split City
+
+On a split city, `gc bd` forwards only the commands and flags it has vetted,
+and only to a bd whose command tree matches a pinned inventory. A refusal
+names the command and the `gc` alternative; nothing is written. `gc bd ready`
+is refused on purpose: use `gc ready`, which also reads the infrastructure
+store. `gc doctor`'s `bd-command-inventory` check shows why a bd binary does
+not match. The full list is in
+[gc bd on split cities](/runbooks/split-storage-classes#gc-bd-on-split-cities).
+
 ## Native Store Falls Back Because Hooks Are Installed
 
 Native `bd` store selection intentionally falls back to the subprocess-backed

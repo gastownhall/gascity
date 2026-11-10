@@ -46,7 +46,7 @@ func TestTutorialContinuity_SessionLookupFlowIsExplicit(t *testing.T) {
 		"cat pack.toml",
 		"cat agents/reviewer/agent.toml",
 		"gc session list --template my-project/reviewer",
-		"gc session peek mc-8sfd",
+		"gc session peek gcg-14",
 	} {
 		if !strings.Contains(page03Text, want) {
 			t.Fatalf("tutorial 03 is missing %q", want)
