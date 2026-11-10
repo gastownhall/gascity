@@ -312,6 +312,7 @@ go_test(
         "update_reporting_test.go",
         "updated_at_store_test.go",
         "verbatim_import_test.go",
+        "zz_lost_dolt_port_integration_test.go",
     ],
     data = glob(
         ["**"],
