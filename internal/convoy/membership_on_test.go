@@ -103,6 +103,25 @@ func TestMembersOnAgreesWithMembersIn(t *testing.T) {
 	}
 }
 
+// TestMembersOnListsLegacyAndTrackedMembers pins MembersOn's answer on its
+// own (MembersIn shares the walk, so agreeing with it alone proves nothing
+// about the walk): the legacy child and both tracked items, the closed one
+// only with includeClosed, and not the non-tracks edge's target.
+func TestMembersOnListsLegacyAndTrackedMembers(t *testing.T) {
+	mem, convoyID, _ := membershipFixture(t)
+	for includeClosed, want := range map[bool]int{true: 3, false: 2} {
+		got, err := MembersOn(beadstest.FederatedLeg(mem), convoyID, includeClosed)
+		if err != nil || len(got) != want {
+			t.Errorf("includeClosed=%v: MembersOn = %v, %v; want %d members", includeClosed, ids(got), err, want)
+		}
+		for _, b := range got {
+			if b.Type == "convoy" {
+				t.Errorf("includeClosed=%v: the non-tracks edge's target %s is a member", includeClosed, b.ID)
+			}
+		}
+	}
+}
+
 // TestMembersOnRefusesAZeroLeg: a zero reader is the missing convoy class,
 // as a zero handle is to MembersIn.
 func TestMembersOnRefusesAZeroLeg(t *testing.T) {
