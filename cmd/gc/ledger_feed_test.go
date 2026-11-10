@@ -1896,6 +1896,28 @@ func waitForLedgerFeed(t *testing.T, timeout time.Duration, cond func() bool, wh
 // (under -race it outlasts the first re-scan's 30s cadence). Writes through
 // the cache neither notify as cache-reconcile nor wake.
 func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
+	runLedgerFeedOverEmbeddedDolt(t, ledgerFeedHooks{}, nil)
+}
+
+// TestLedgerFeedOverEmbeddedDoltSlowStore holds each feed page up for 3s once
+// the out-of-band writes start, as a starved host does: the feed still
+// delivers them without a re-scan, only later than a quiet host's. The
+// delivery wait must outlast that (ga-1ki1ibba).
+func TestLedgerFeedOverEmbeddedDoltSlowStore(t *testing.T) {
+	var slow atomic.Bool
+	hooks := ledgerFeedHooks{work: func() func() {
+		if slow.Load() {
+			time.Sleep(3 * time.Second)
+		}
+		return func() {}
+	}}
+	runLedgerFeedOverEmbeddedDolt(t, hooks, &slow)
+}
+
+// runLedgerFeedOverEmbeddedDolt is the body of the two tests above. slow, when
+// non-nil, is set just before the out-of-band writes.
+func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *atomic.Bool) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("BD_EVENTS_JOURNAL", "")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1925,7 +1947,7 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	}
 
 	pokeCh, ctrlCh := make(chan struct{}, 1), make(chan struct{}, 1)
-	set := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{})
+	set := newLedgerFeedSet(t.TempDir(), hooks)
 	set.setWake(newLegacyWake(pokeCh, ctrlCh))
 	ep := events.NewFake()
 	req := &ledgerFeedRequest{set: set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
@@ -1986,6 +2008,9 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 		}
 	}
 
+	if slow != nil {
+		slow.Store(true)
+	}
 	row, err := native.Create(beads.Bead{Title: "out of band"})
 	if err != nil {
 		t.Fatalf("backing Create: %v", err)
