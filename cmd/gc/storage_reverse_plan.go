@@ -9,7 +9,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 
@@ -642,14 +641,36 @@ func reverseClosedGates(in reverseInput, closed, refused map[string]bool, destOf
 			}
 		}
 	}
+	kept := map[string]bool{}
+	if in.Mode == reverseToRigs {
+		kept = reverseKeptGates(in.Down, closed, func(id string) bool { return !refused[id] && destOf[id] == "" })
+	}
 	var gone []string
 	for _, id := range sortedMapKeys(closed) {
-		kept := in.Mode == reverseToRigs && slices.ContainsFunc(waits[id], func(d beads.Dep) bool { return destOf[d.IssueID] == "" })
-		if !kept {
+		if !kept[id] {
 			gone = append(gone, id)
 		}
 	}
 	return waits, gone
+}
+
+// reverseKeptGates is each of gates that a row staying in the binding (stays)
+// waits on, from down: a to-rigs reverse keeps such a gate with that row. The
+// plan (reverseClosedGates) and the clear (reverseWaitedGates) both judge
+// with it, so the gates the plan leaves are the gates the clear removes.
+func reverseKeptGates(down map[string][]beads.Dep, gates map[string]bool, stays func(string) bool) map[string]bool {
+	kept := map[string]bool{}
+	for id, deps := range down {
+		if gates[id] || !stays(id) {
+			continue
+		}
+		for _, d := range deps {
+			if gates[d.DependsOnID] {
+				kept[d.DependsOnID] = true
+			}
+		}
+	}
+	return kept
 }
 
 // reverseGateEdge is the edge a closed cross-store gate stood for, for one

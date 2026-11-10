@@ -1571,7 +1571,7 @@ func returnedRowGates(t *reverseTarget, returned map[string]string, gates map[st
 
 // reverseWaitedGates is each of gates, the closed gates the clear judges,
 // that a row the binding keeps (one going does not name) still waits on: it
-// stays in the binding with that row, as planReverse plans it.
+// stays in the binding with that row, by the plan's rule (reverseKeptGates).
 func reverseWaitedGates(t *reverseTarget, going, gates map[string]bool) (map[string]bool, error) {
 	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
@@ -1587,15 +1587,7 @@ func reverseWaitedGates(t *reverseTarget, going, gates map[string]bool) (map[str
 	if err != nil {
 		return nil, err
 	}
-	waited := map[string]bool{}
-	for _, deps := range down {
-		for _, d := range deps {
-			if gates[d.DependsOnID] {
-				waited[d.DependsOnID] = true
-			}
-		}
-	}
-	return waited, nil
+	return reverseKeptGates(down, gates, func(id string) bool { return !going[id] }), nil
 }
 
 // reverseClearBinding keys the binding's edges in ClearEdges.
