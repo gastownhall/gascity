@@ -485,7 +485,8 @@ func TestWindowChurnNeverLeaksAProjectionToReaders(t *testing.T) {
 		_ = os.Unsetenv(ambientKey)
 		_ = os.Setenv(projected, "projected")
 		if i%16 == 0 {
-			time.Sleep(time.Millisecond)
+			// Hand the processor to the readers while the window is open.
+			runtime.Gosched()
 		}
 		_ = os.Unsetenv(projected)
 		_ = os.Setenv(ambientKey, "ambient")
