@@ -9,16 +9,17 @@ import (
 
 // v2DefaultFallbacks lists why an unset [daemon] session_reconciler resolves
 // to legacy rather than v2 (mc-dpo2b), in a fixed order, or nil when v2 is the
-// default. Like v2LatchRefusals it reads only cfg, lookupEnv and the builtin
-// runtime registry, never a store, so the controller latch, gc start and
+// default. Like v2LatchRefusals it reads cfg, lookupEnv, the builtin runtime
+// registry and, outside config, only the remembered exec admission probe
+// (execReadiness), never a store, so the controller latch, gc start and
 // doctor resolve the same mode. Beyond the latch refusals it mirrors C0.7
 // (v2CapabilityRefusal) from config: conditional writes must resolve on, and
 // the sessions and graph class stores must be a kind that fences and whose
 // list reads carry revisions. Store-state refusals (the boot census) are not
 // config: they stay hard boot refusals, which doctor reports ahead of time.
-func v2DefaultFallbacks(cfg *config.City, lookupEnv func(string) (string, bool)) []string {
+func v2DefaultFallbacks(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) []string {
 	var out []string
-	for _, r := range v2LatchRefusals(cfg, lookupEnv) {
+	for _, r := range v2LatchRefusals(cfg, cityPath, lookupEnv) {
 		out = append(out, r.String())
 	}
 	if reason := v2DefaultConditionalWritesFallback(cfg, lookupEnv); reason != "" {

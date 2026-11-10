@@ -398,7 +398,7 @@ type serverOps struct {
 
 	mu   sync.Mutex
 	st   *opjournal.Store
-	over beads.Store
+	over beads.SessionStore
 }
 
 // newServerOps builds s's op state over its boot-latched gates and city, the
@@ -510,7 +510,7 @@ func (s *Server) liveServer() *Server {
 // restart closed.
 func (s *Server) openOpStore() (*opjournal.Store, error) {
 	live := s.liveServer()
-	return live.ops.store(live.state.SessionsBeadStore())
+	return live.ops.store(live.state.Stores().Sessions())
 }
 
 // openDefaultOpStore is openOpStore for a gate that is auto only by its
@@ -518,7 +518,7 @@ func (s *Server) openOpStore() (*opjournal.Store, error) {
 // opening anything, when the live sessions store is not SQLite-backed.
 func (s *Server) openDefaultOpStore() (*opjournal.Store, error) {
 	live := s.liveServer()
-	over := live.state.SessionsBeadStore()
+	over := live.state.Stores().Sessions()
 	if err := opjournal.CheckRecordsByDefault(over); err != nil {
 		return nil, err
 	}
@@ -538,19 +538,22 @@ func (o *serverOps) healthyGate(gateKey string, stages ...string) {
 }
 
 // store returns the cached op store, opening it over over when none is cached
-// or the sessions-class store was replaced (a reload).
+// or the sessions-class store was replaced (a reload). SameStore compares the
+// stores below the handles, so a handle re-minted over the same store keeps
+// the cached op store, and a store whose type is not comparable reads as
+// replaced, so the op store reopens.
 func (o *serverOps) store(over beads.SessionStore) (*opjournal.Store, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.st != nil && sameStoreValue(o.over, over.Store) {
+	if o.st != nil && beads.SameStore(o.over, over) {
 		return o.st, nil
 	}
 	st, err := o.openStore(over, o.clk)
 	if err != nil {
-		o.st, o.over = nil, nil
+		o.st, o.over = nil, beads.SessionStore{}
 		return nil, err
 	}
-	o.st, o.over = st, over.Store
+	o.st, o.over = st, over
 	return st, nil
 }
 
@@ -559,17 +562,6 @@ func (o *serverOps) cached() *opjournal.Store {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.st
-}
-
-// sameStoreValue reports whether a and b are the same store value; a store
-// type that is not comparable reads as different, so the op store reopens.
-func sameStoreValue(a, b beads.Store) (same bool) {
-	defer func() {
-		if recover() != nil {
-			same = false
-		}
-	}()
-	return a == b
 }
 
 // messageOpRequest is one /submit or /messages request to record.
@@ -608,7 +600,7 @@ type inflightAnswer struct {
 // a replay with (DES-O0API §6.2), or a refusal mapped to the wire. cursor is
 // the event cursor captured before admission: a stored replay re-emits its
 // terminal event after it.
-func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *messageOpRequest, cursor string) (*legacyop.Admission, *asyncAcceptedBody, error) {
+func (s *Server) admitMessageOp(ctx context.Context, store beads.SessionStore, req *messageOpRequest, cursor string) (*legacyop.Admission, *asyncAcceptedBody, error) {
 	rec := s.ops.content
 	oreq := legacyop.Request{
 		Conversation: req.conv,

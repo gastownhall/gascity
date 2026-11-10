@@ -195,6 +195,14 @@ omitted. Remote-runtime skill delivery (k8s/ACP) is tracked as a follow-up
 and will likely use a different mechanism (content-copy into the pod's
 workdir, or a sidecar init step).
 
+As implemented, the gate is keyed on what the runtime guarantees, not on its
+name: a runtime declares `runtime.HostCapabilities` (`SharesHostFilesystem`,
+`RunsHostPreStart`) where its selection name is registered
+(`cmd/gc/runtime_registry.go`), and stage 1 requires the first while stage 2
+requires both (`cmd/gc/skill_integration.go`). The `subprocess` runtime does
+not execute PreStart, so it is stage-1 only; exec and pack runtimes declare
+nothing until the runtime protocol handshake can say so.
+
 ### Vendor mapping
 
 | Provider   | Skill sink           | v0.15.1 status    |

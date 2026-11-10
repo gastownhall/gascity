@@ -1563,6 +1563,21 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 				func() bool { return base.ProgramStatus.Relay != nil },
 				func() { result.ProgramStatus.Relay = cloneBoolPtr(frag.ProgramStatus.Relay) },
 			},
+			{
+				"hold_mid_turn",
+				func() bool { return base.ProgramStatus.HoldMidTurn != nil },
+				func() { result.ProgramStatus.HoldMidTurn = cloneBoolPtr(frag.ProgramStatus.HoldMidTurn) },
+			},
+			{
+				"decide_startup",
+				func() bool { return base.ProgramStatus.DecideStartup != nil },
+				func() { result.ProgramStatus.DecideStartup = cloneBoolPtr(frag.ProgramStatus.DecideStartup) },
+			},
+			{
+				"decide_settle",
+				func() bool { return base.ProgramStatus.DecideSettle != nil },
+				func() { result.ProgramStatus.DecideSettle = cloneBoolPtr(frag.ProgramStatus.DecideSettle) },
+			},
 		}
 		for _, bf := range bindingFields {
 			if fragMeta.IsDefined("providers", name, "program_status", bf.key) {

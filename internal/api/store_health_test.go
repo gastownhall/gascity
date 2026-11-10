@@ -819,7 +819,13 @@ type recoveringCounterStore struct {
 	calls    atomic.Int32
 }
 
-func (s *recoveringCounterStore) Count(context.Context, beads.ListQuery, ...string) (int, error) {
+// Count fails store health's retained-row count (IncludeClosed) the first
+// failures times. The /status work buckets count the city store too, since
+// BeadStores carries it; they are answered and not counted as calls.
+func (s *recoveringCounterStore) Count(_ context.Context, q beads.ListQuery, _ ...string) (int, error) {
+	if !q.IncludeClosed {
+		return s.count, nil
+	}
 	if s.calls.Add(1) <= s.failures {
 		return 0, errors.New("dolt: connection refused (transient)")
 	}

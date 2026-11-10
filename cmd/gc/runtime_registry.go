@@ -40,6 +40,17 @@ func buildRuntimeRegistry() *registry.Registry {
 			panic("building runtime registry: " + err.Error())
 		}
 	}
+	// Host capabilities each runtime guarantees (runtime.HostCapabilities).
+	// They key skill/MCP materialization (canStage1Materialize,
+	// isStage2EligibleSession): a runtime passes those gates by declaring
+	// what it guarantees here, never by being named there.
+	hostFilesystem := registry.WithHostCapabilities(registry.StaticHostCapabilities(runtime.HostCapabilities{
+		SharesHostFilesystem: true,
+	}))
+	hostFilesystemAndPreStart := registry.WithHostCapabilities(registry.StaticHostCapabilities(runtime.HostCapabilities{
+		SharesHostFilesystem: true,
+		RunsHostPreStart:     true,
+	}))
 
 	must(r.Register("fake", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		return runtime.NewFake(), nil
@@ -47,6 +58,8 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("fail", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		return runtime.NewFailFake(), nil
 	}))
+	// subprocess children read the host filesystem, but the runtime stages
+	// CopyFiles and overlays without executing cfg.PreStart.
 	must(r.Register("subprocess", func(_ string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		// Cut-over: the subprocess provider is served through the de-conflated
 		// seams (runtime.NewProviderFromSeams), validated by the full Provider
@@ -55,7 +68,7 @@ func buildRuntimeRegistry() *registry.Registry {
 			return sessionsubprocess.NewSeamBackedWithDir(providerStateDir("subprocess", cityPath)), nil
 		}
 		return sessionsubprocess.NewSeamBacked(), nil
-	}))
+	}, hostFilesystem))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
@@ -80,24 +93,31 @@ func buildRuntimeRegistry() *registry.Registry {
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
 	// tmux stays the default; select "herdr" per-agent/city to pilot it. See
-	// internal/runtime/herdr-provider-design.md.
+	// internal/runtime/herdr-provider-design.md. Agents run on the host, and
+	// runPreStart executes cfg.PreStart there before the agent is created.
 	must(r.Register("herdr", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		session := cityName
 		if session == "" {
 			session = "default"
 		}
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
-	}))
+	}, hostFilesystemAndPreStart))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
-	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	must(r.RegisterPrefix("exec:", func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
 			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath), nil
-	}))
+		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath, execSetupTimeouts(sc)), nil
+	}, registry.WithHostCapabilities(func(name, cityName, cityPath string) runtime.HostCapabilities {
+		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return runtime.HostCapabilities{}
+		}
+		return execRuntimeHostCapabilities(script, cityName, cityPath)
+	})))
 	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
 	// endpoint (the anonymous form; the named, structured form with explicit
 	// key/known_hosts is a [runtimes.<name>] ssh declaration). Key + known_hosts
@@ -112,12 +132,40 @@ func buildRuntimeRegistry() *registry.Registry {
 	// tmux registers both as an exact name and as the fallback: the exact
 	// registration makes a pack-declared runtime named "tmux" a collision
 	// error instead of a silent shadow of the default provider.
+	// tmux runs cfg.PreStart on the host before creating the session
+	// (tmux/adapter.go runPreStart), and its panes read the host filesystem.
 	tmuxFactory := func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
-	must(r.Register("tmux", tmuxFactory))
-	r.SetFallback(tmuxFactory)
+	must(r.Register("tmux", tmuxFactory, hostFilesystemAndPreStart))
+	r.SetFallback(tmuxFactory, hostFilesystemAndPreStart)
 	return r
+}
+
+// execSetupTimeouts hands an exec provider the [session] setup budget for
+// the host pre_start and session_setup it runs for a pack sharing the host
+// filesystem.
+func execSetupTimeouts(sc config.SessionConfig) sessionexec.Option {
+	return sessionexec.WithSetupTimeouts(sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration())
+}
+
+// execRuntimeHostCapabilities reports what an exec session runtime — an
+// exec:<script> selection or a pack's [runtimes.<name>] — guarantees about
+// the controller's host: its handshake, read through the admission probe
+// (execReadiness, remembered per version of the script and city) and mapped
+// by sessionexec.HostCapabilities, which reads it only through
+// ProtocolInfo.SharesHostFS, the predicate the exec provider acts on. So a
+// pack declaring locality=local with fs.host reports both capabilities (gc
+// stages and runs pre_start on the host for it), and every other pack — a
+// container on the host included, or one whose handshake cannot be read —
+// reports none. It is a variable so tests can stand in a runtime that
+// reports.
+var execRuntimeHostCapabilities = func(script, cityName, cityPath string) runtime.HostCapabilities {
+	h := execReadiness(script, cityName, cityPath)
+	if h.err != nil {
+		return runtime.HostCapabilities{}
+	}
+	return sessionexec.HostCapabilities(h.info)
 }
 
 // validatePackRuntimeRegistrations fails city config loading when a
@@ -150,9 +198,11 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
-		if err := r.Register(name, func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath), nil
-		}); err != nil {
+		if err := r.Register(name, func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath, execSetupTimeouts(sc)), nil
+		}, registry.WithHostCapabilities(func(_, cityName, cityPath string) runtime.HostCapabilities {
+			return execRuntimeHostCapabilities(rt.Command, cityName, cityPath)
+		})); err != nil {
 			return nil, fmt.Errorf("pack %q: %w", rt.PackName, err)
 		}
 	}

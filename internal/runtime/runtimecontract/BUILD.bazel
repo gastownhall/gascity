@@ -4,10 +4,13 @@ go_library(
     name = "runtimecontract",
     srcs = [
         "catalog.go",
+        "fshost.go",
         "observe.go",
+        "ported.go",
         "probes.go",
         "report.go",
         "runner.go",
+        "server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecontract",
     visibility = ["//:__subpackages__"],
@@ -15,6 +18,8 @@ go_library(
         "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
+        "//internal/runtime/tmux",
+        "//internal/shellquote",
     ],
 )
 
@@ -38,6 +43,8 @@ go_test(
     embed = [":runtimecontract"],
     deps = [
         "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/runtime/exec",
         "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],

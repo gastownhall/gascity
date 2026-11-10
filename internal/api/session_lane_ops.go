@@ -135,7 +135,7 @@ func laneOpInFlight(op opjournal.Op) error {
 // (stopTurnLane), and without one the op is session(generation)-scoped
 // under the request's key, or a minted one, and the executor reads the turn
 // itself.
-func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key, named string) (syncAnswer, error) {
+func (s *Server) stopSessionLane(ctx context.Context, store beads.SessionStore, id, key, named string) (syncAnswer, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return syncAnswer{}, err
@@ -184,8 +184,8 @@ func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key
 // closes the op provider_unavailable. A runtime session that is gone runs
 // none. Run cancel's legacy guard, holderHasNoTurn, reads the provider's
 // IsRunning instead, which answers false when the runtime cannot be read.
-func (s *Server) sessionHasNoTurn(ctx context.Context, store beads.Store, id string) (bool, error) {
-	info, err := s.sessionManager(beads.SessionStore{Store: store}).Get(id)
+func (s *Server) sessionHasNoTurn(ctx context.Context, store beads.SessionStore, id string) (bool, error) {
+	info, err := s.sessionManager(store).Get(id)
 	if err != nil {
 		return false, err
 	}
@@ -211,7 +211,7 @@ func (s *Server) sessionHasNoTurn(ctx context.Context, store beads.Store, id str
 // liveRunHolders is the sessions among ids with a turn to interrupt, or that
 // may have one, as the lane's probe reads them (sessionHasNoTurn); one that
 // cannot be read is a failure.
-func (s *Server) liveRunHolders(ctx context.Context, store beads.Store, ids []string, fail func(string, error)) []string {
+func (s *Server) liveRunHolders(ctx context.Context, store beads.SessionStore, ids []string, fail func(string, error)) []string {
 	live := make([]string, 0, len(ids))
 	for _, id := range ids {
 		noTurn, err := s.sessionHasNoTurn(ctx, store, id)
@@ -230,7 +230,7 @@ func (s *Server) liveRunHolders(ctx context.Context, store beads.Store, ids []st
 // OJ-4 answers a stop that finds none, recorded under req's key
 // (recordNoTurnStop), which a same-key retry replays. A row the key came to
 // name meanwhile answers as a retry's would.
-func (s *Server) stopFoundNoTurn(ctx context.Context, st *opjournal.Store, store beads.Store, id string, req opjournal.Request) (syncAnswer, error) {
+func (s *Server) stopFoundNoTurn(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, req opjournal.Request) (syncAnswer, error) {
 	row, created, err := recordNoTurnStop(st, req)
 	if err != nil {
 		return syncAnswer{}, err
@@ -297,7 +297,7 @@ func finishNoTurnStopRecord(st *opjournal.Store, row opjournal.Op) (opjournal.Op
 // found no turn is finished (answerLegacyStop). A retry that names a turn
 // prior did not stop, a session-scoped stop's included, is
 // idempotency_mismatch, as OJ-4's is (stopOpRequest).
-func (s *Server) retryLaneStop(ctx context.Context, st *opjournal.Store, store beads.Store, id string, prior opjournal.Op, named string) (syncAnswer, error) {
+func (s *Server) retryLaneStop(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, prior opjournal.Op, named string) (syncAnswer, error) {
 	if named != "" && prior.Scope.Turn != named {
 		return syncAnswer{}, apierr.IdempotencyMismatch.Msg(fmt.Sprintf("idempotency_mismatch: Idempotency-Key reused with a different request: it names a stop of turn %q, not turn %q", prior.Scope.Turn, named))
 	}
@@ -369,7 +369,7 @@ func closedPastFinishBy(op opjournal.Op) bool {
 // lane authority: session(generation)-scoped, under key, or a minted key
 // when the request carries none. A session whose generation cannot be read
 // is 503 op_journal_unavailable, nothing done.
-func laneStopRequest(store beads.Store, id, key string) (opjournal.Request, error) {
+func laneStopRequest(store beads.SessionStore, id, key string) (opjournal.Request, error) {
 	scope, why, whyErr := sessionOpScope(store, id)
 	if why != "" {
 		cause := why
@@ -404,7 +404,7 @@ func laneStopRequest(store beads.Store, id, key string) (opjournal.Request, erro
 // into it (recordLaneStopUnderKey). A turn-keyed op that does not answer the
 // stop (turnStopAnswers) never uses the turn up: this request stops the turn
 // under its own key.
-func (s *Server) stopTurnLane(ctx context.Context, st *opjournal.Store, store beads.Store, id string, req opjournal.Request, turn string) (syncAnswer, error) {
+func (s *Server) stopTurnLane(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, req opjournal.Request, turn string) (syncAnswer, error) {
 	req.Scope.Turn = turn
 	targetKey, err := opjournal.InterruptKey(req.Scope.Generation, turn)
 	if err != nil {
@@ -478,7 +478,7 @@ func laneStopSucceeded(op opjournal.Op) bool {
 // laneControlAnswerBound (awaitLaneStop): an API-executed op as
 // answerLegacyStop answers it, and a lane op from its outcome
 // (laneStopOutcome), or 409 in_flight while it is still open at the bound.
-func (s *Server) answerLaneStop(ctx context.Context, st *opjournal.Store, store beads.Store, id string, op opjournal.Op, replayed bool) (syncAnswer, error) {
+func (s *Server) answerLaneStop(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, op opjournal.Op, replayed bool) (syncAnswer, error) {
 	op, replayed, err := s.awaitLaneStop(ctx, st, store, id, op, replayed)
 	switch {
 	case err != nil:
@@ -527,7 +527,7 @@ func answerLegacyStop(st *opjournal.Store, id string, op opjournal.Op, replayed 
 // finish_by. An op the lane ran is answered as it closed, and a carry-on,
 // once made, is followed, so a retry never stops a turn that began after the
 // stop answered.
-func (s *Server) awaitLaneStop(ctx context.Context, st *opjournal.Store, store beads.Store, id string, op opjournal.Op, replayed bool) (opjournal.Op, bool, error) {
+func (s *Server) awaitLaneStop(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, op opjournal.Op, replayed bool) (opjournal.Op, bool, error) {
 	actx, cancel := context.WithTimeout(ctx, laneControlAnswerBound)
 	defer cancel()
 	for op.Executor == opjournal.ExecutorLane {
@@ -570,7 +570,7 @@ func restartedStopKey(stale string) string {
 // op_already_failed, nothing proposed, as is a carry-on the journal refuses
 // because that finish_by passed meanwhile, so a stale key never stops the
 // turn running when it comes back. created says this request wrote the op.
-func (s *Server) carryOnStop(ctx context.Context, st *opjournal.Store, store beads.Store, id string, op opjournal.Op) (opjournal.Op, bool, error) {
+func (s *Server) carryOnStop(ctx context.Context, st *opjournal.Store, store beads.SessionStore, id string, op opjournal.Op) (opjournal.Op, bool, error) {
 	key := restartedStopKey(op.ID)
 	carried, found, err := keyedLaneOp(st, opjournal.KindInterrupt, id, key)
 	if err != nil || found {
@@ -695,7 +695,7 @@ func runCancelRetryKey(runID string, gen int64, prev string) string {
 // closed succeeded is interrupted; one whose op failed, or is still open at
 // the bound, is a failure; one whose op closed skipped (nothing to stop) is
 // neither.
-func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store, runID string, ids []string, fail func(string, error)) []string {
+func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.SessionStore, runID string, ids []string, fail func(string, error)) []string {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		for _, id := range ids {
@@ -757,7 +757,7 @@ func (s *Server) interruptRunHoldersLane(ctx context.Context, store beads.Store,
 // turn to stop (sessionHasNoTurn), by that incarnation's interrupt, keyed by
 // its generation, no earlier than the one that fenced the op off
 // (proposeRunCancelInterrupt), awaited until ctx ends too.
-func (s *Server) awaitRunCancelInterrupt(ctx context.Context, st *opjournal.Store, store beads.Store, runID, id string, op opjournal.Op) (opjournal.Op, error) {
+func (s *Server) awaitRunCancelInterrupt(ctx context.Context, st *opjournal.Store, store beads.SessionStore, runID, id string, op opjournal.Op) (opjournal.Op, error) {
 	for {
 		got, err := s.awaitLaneOp(ctx, id, op.ID)
 		if err != nil || !opjournal.FencedOff(got) {
@@ -786,7 +786,7 @@ func (s *Server) awaitRunCancelInterrupt(ctx context.Context, st *opjournal.Stor
 // later cancel interrupts the holder again, as legacy's StopTurn of every
 // live holder on every cancel does: the holder may have started another turn
 // since.
-func (s *Server) proposeRunCancelInterrupt(st *opjournal.Store, store beads.Store, runID, id string, fencedAt int64) (opjournal.Op, error) {
+func (s *Server) proposeRunCancelInterrupt(st *opjournal.Store, store beads.SessionStore, runID, id string, fencedAt int64) (opjournal.Op, error) {
 	scope, why, whyErr := sessionOpScope(store, id)
 	if why != "" {
 		return opjournal.Op{}, fmt.Errorf("the operation journal cannot record its interrupt (%s): %w", why, errors.Join(whyErr, errors.New("nothing sent")))
@@ -849,7 +849,7 @@ const refusedKeyReuse = "key_reuse"
 // send its answer to the prompt pending now, and would take the id of the
 // operator's op answering the raising the key names, so every answer to that
 // raising would be 409 key_reuse.
-func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, store beads.Store, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, store beads.SessionStore, id, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return syncAnswer{}, err
@@ -897,7 +897,7 @@ func (s *Server) respondSessionLane(ctx context.Context, mgr *session.Manager, s
 // (Store.RecordRaising). scope is that generation's session scope, naming
 // requestID. A generation that does not read, or a raising that cannot be
 // recorded, is 503 op_journal_unavailable, nothing done.
-func laneRespondOccurrence(st *opjournal.Store, store beads.Store, id, requestID string, resp runtime.InteractionResponse) (scope opjournal.Scope, req opjournal.Request, err error) {
+func laneRespondOccurrence(st *opjournal.Store, store beads.SessionStore, id, requestID string, resp runtime.InteractionResponse) (scope opjournal.Scope, req opjournal.Request, err error) {
 	scope, why, whyErr := sessionOpScope(store, id)
 	if why != "" {
 		cause := why
@@ -976,7 +976,7 @@ func laneRespondPending(mgr *session.Manager, id string, resp runtime.Interactio
 // answers from that op; any other op the key names (OJ-4's own, closed) is
 // answered as OJ-4 replays it. One that asks anything else is 422
 // idempotency_mismatch, nothing written, as OJ-4 answers it.
-func (s *Server) retryLaneRespond(ctx context.Context, mgr *session.Manager, store beads.Store, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
+func (s *Server) retryLaneRespond(ctx context.Context, mgr *session.Manager, store beads.SessionStore, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
 	same, err := sameRespondRequest(st, prior, resp)
 	if err != nil {
 		return syncAnswer{}, err
@@ -1027,7 +1027,7 @@ func (s *Server) retryLaneRespond(ctx context.Context, mgr *session.Manager, sto
 // failed{refused:key_reuse}, and a write that fails before the lane op
 // exists, the occurrence's name included, leaves it open for a retry to
 // adopt again.
-func (s *Server) adoptLegacyRespond(ctx context.Context, mgr *session.Manager, store beads.Store, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
+func (s *Server) adoptLegacyRespond(ctx context.Context, mgr *session.Manager, store beads.SessionStore, st *opjournal.Store, id, key string, prior opjournal.Op, resp runtime.InteractionResponse) (syncAnswer, error) {
 	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
 		return syncAnswer{}, err
@@ -1482,12 +1482,12 @@ func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 // a closed op replays (OJ-2b's path), an open legacy op is 409 in_flight,
 // and an open lane op is accepted again once its resume runs again. The
 // request's terminal event follows laneSubmitSettle after its acceptance.
-func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *messageOpRequest, ep events.Recorder, cursor string) (asyncAcceptedBody, error) {
+func (s *Server) acceptMessageLane(ctx context.Context, store beads.SessionStore, req *messageOpRequest, ep events.Recorder, cursor string) (asyncAcceptedBody, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
-	acc, err := lanesubmit.Accept(ctx, st, session.NewStore(beads.SessionStore{Store: store}), lanesubmit.Request{
+	acc, err := lanesubmit.Accept(ctx, st, session.NewStore(store), lanesubmit.Request{
 		Key:    req.key,
 		Text:   req.text,
 		Intent: req.intent,
@@ -1614,7 +1614,7 @@ func laneMessageProposeError(err error) error {
 // refused is canceled before the lane host is rung, so it
 // delivers nothing unless the lane host's scan took it first: then the
 // cancel is only requested, and a same-key retry reports what became of it.
-func (s *Server) answerLaneMessage(store beads.Store, st *opjournal.Store, op opjournal.Op, owned bool, req *messageOpRequest, ep events.Recorder, key, cursor string) (asyncAcceptedBody, error) {
+func (s *Server) answerLaneMessage(store beads.SessionStore, st *opjournal.Store, op opjournal.Op, owned bool, req *messageOpRequest, ep events.Recorder, key, cursor string) (asyncAcceptedBody, error) {
 	switch {
 	case op.Status == opjournal.StatusClosed:
 		body, err := s.storedReplayAnswer(op, key, req.operation, cursor)
@@ -1679,7 +1679,7 @@ func (s *Server) logLaneCancel(id, why string, res opjournal.CancelResult, err e
 // nothing would leave the client waiting on its request_id. Its later
 // fate, a close the read missed included, is op.changed's
 // (laneSubmitSettle).
-func (s *Server) emitLaneMessageResult(store beads.Store, op opjournal.Op, operation string) {
+func (s *Server) emitLaneMessageResult(store beads.SessionStore, op opjournal.Op, operation string) {
 	ctx, cancel := context.WithTimeout(context.Background(), laneSubmitSettle)
 	defer cancel()
 	cur, err := s.awaitLaneOp(ctx, op.Conversation, op.ID)
@@ -1795,8 +1795,8 @@ func laneWakeVerdict(info session.Info, persisted session.PersistedResponse, liv
 // message waits for its boundary, has neither; nor has one that is
 // starting, closed, or unreadable (logged), or that the controller may
 // start only for demand.
-func (s *Server) laneWillStart(store beads.Store, id string, proposed time.Time) (*bool, string) {
-	info, persisted, err := session.NewStore(beads.SessionStore{Store: store}).GetPersistedResponse(id)
+func (s *Server) laneWillStart(store beads.SessionStore, id string, proposed time.Time) (*bool, string) {
+	info, persisted, err := session.NewStore(store).GetPersistedResponse(id)
 	if err != nil {
 		s.ops.logf("api: reading session %s for a queued message's will_start: %v", id, err)
 		return nil, ""
@@ -1852,7 +1852,7 @@ func (s *Server) checkInitialMessage(message string) error {
 // turn, delivered once the interaction is answered
 // (worker.MessageRequest.QueueBehindPending), and the create stands. An
 // error means the message was neither proposed, delivered nor queued.
-func (s *Server) deliverInitialMessage(ctx context.Context, store beads.Store, id, message string) error {
+func (s *Server) deliverInitialMessage(ctx context.Context, store beads.SessionStore, id, message string) error {
 	if s.laneExecutes(opjournal.KindMessage) {
 		return s.proposeInitialMessage(id, message)
 	}

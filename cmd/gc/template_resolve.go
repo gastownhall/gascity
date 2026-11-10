@@ -164,7 +164,8 @@ type TemplateParams struct {
 	// without ACP support.
 	ACPLaunch *TemplateACPLaunch
 	// ProgramStatusArm is the OSC 7501 capture arm for the template's
-	// resolved transport (config.ProgramStatusArmFor). It stays out of Hints:
+	// resolved transport (config.ProgramStatusLaunchFor): the provider's
+	// declaration, armed by the leaf only under its live switch. It stays out of Hints:
 	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
 	// launch whose transport is not ACP, so a session kept on its ACP launch
 	// (templateParamsForSession) starts disarmed.
@@ -484,6 +485,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
+	// The session runtime as the skill/MCP materialization gates read it
+	// (steps 9b, 11b, 11c).
+	materializationRT := materializationRuntimeFor(p.city, p.cityName, p.cityPath, p.sessionProvider)
+
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
 	// delivers the skills to the session workdir. The appendix claims
@@ -511,8 +516,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
@@ -604,12 +609,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
-	// Step 10c: program status (OSC 7501). Empty unless the switch is shadow
-	// or on, the transport is not ACP, and the provider declares the protocol.
-	// The arm and the forced env stay out of hints and env:
+	// Step 10c: program status (OSC 7501). The arm is the provider's
+	// switch-independent declaration (empty for ACP or an undeclared
+	// provider), which the leaf arms only under its live switch, so a cached
+	// resolution follows a flip either way; the forced env is empty unless the
+	// switch is shadow or on. The arm and the forced env stay out of hints and env:
 	// templateParamsToConfig applies them to a launch whose transport is not
 	// ACP, so a session kept on its ACP launch starts disarmed with this env.
-	programStatusArm, programStatusEnv := config.ProgramStatusArmFor(p.city, resolved, sessionTransport)
+	programStatusArm, programStatusEnv := config.ProgramStatusLaunchFor(p.city, resolved, sessionTransport)
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -670,7 +677,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
-	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+	if isStage2EligibleSession(materializationRT, cfgAgent) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 		wsProvider := ""
@@ -763,8 +770,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+		stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
 		case stage1Delivers || stage2Delivers:
 			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)

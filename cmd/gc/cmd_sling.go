@@ -13,11 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -32,7 +35,6 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
-	"github.com/spf13/cobra"
 )
 
 func init() {
@@ -506,9 +508,38 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	// openSourceWorkflowViews opens every candidate source-workflow store
+	// through its authoritative provider. It tolerates a store that fails to
+	// open: the views that opened come back, and each store that did not is
+	// listed as a skip for its caller to judge.
+	openSourceWorkflowViews := func() ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		return openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+			return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
+		}, func(dir string) (beads.Store, error) {
+			return openAuthoritativeStoreAtForCity(dir, cityPath)
+		})
+	}
 	var eventRecorder events.Recorder
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
+	}
+	// The sling's scope stores: store as the work store, and the graph class
+	// at that scope, the binding on a city that relocates it.
+	cs := cliStores(cityPath, store)
+	// Session beads live in the city's sessions store, never in a rig store.
+	// That is the scope's sessions handle at city scope and on a city that
+	// relocates the sessions class (the binding); a rig-scope sling on a city
+	// that does not opens the city store to read them. A city store that does
+	// not open leaves the sling reading sessions in its rig store, as it did
+	// before, with a warning: the sling's own work is in the rig ledger.
+	sessions := cs.Sessions()
+	if _, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions); !relocated && !samePath(storeDir, cityPath) { // residency:allow — asks only whether the sessions class is relocated, to decide whether the scope's handle already is the city's
+		if cityStore, err := openCityStoreAtWithConfig(cityPath, cfg); err != nil {
+			fmt.Fprintf(stderr, "warning: gc sling: opening the city store for session lookups: %v; reading sessions in the rig store\n", err) //nolint:errcheck // best-effort stderr
+		} else if cityStore != nil {
+			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
+			sessions = cliStores(cityPath, cityStore).Sessions()
+		}
 	}
 	deps := slingDeps{
 		CityName:           cityName,
@@ -516,17 +547,14 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Cfg:                cfg,
 		SP:                 sp,
 		Runner:             runner,
-		Store:              store,
-		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Store:              cs.Work(),
+		GraphStore:         cs.Graph(),
+		Sessions:           sessions,
 		Events:             eventRecorder,
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
-				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
-			}, func(dir string) (beads.Store, error) {
-				return openAuthoritativeStoreAtForCity(dir, cityPath)
-			})
+			stores, skips, err := openSourceWorkflowViews()
 			unscannedSkips, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, storeRef, skips)
 			if err != nil && !selectedRecovered {
 				return nil, err
@@ -553,7 +581,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		},
 	}
 
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	inheritSlingInitiator(&opts, slingClaimStoresFor(cfg, cityPath, cityName, openSourceWorkflowViews), os.Getenv, stderr)
+	nudge := func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, cityName, cityPath, cfg, sp, store, beadID, stdout, stderr)
+	}
+	return doSlingBatchWithJSON(opts, deps, deps.Store, nudge, jsonOutput, humanStdout, stdout, stderr)
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
@@ -831,11 +863,13 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	// The core names the store that holds the bead when it is not the work
 	// store (a --formula wisp root lives in the graph binding, #6054).
-	store := req.Store
-	if store == nil {
+	var store beads.Writer
+	switch {
+	case !req.Store.Absent():
+		store = req.Store
+	case r.deps.Store != (beads.WorkStore{}):
 		store = r.deps.Store
-	}
-	if store == nil {
+	default:
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
@@ -1038,10 +1072,23 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 
 // doSlingBatch creates a Sling instance and dispatches batch or single.
 func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdout, stderr io.Writer) int {
-	return doSlingBatchWithJSON(opts, deps, querier, false, stdout, stdout, stderr)
+	return doSlingBatchWithJSON(opts, deps, querier, depsSlingNudge(deps), false, stdout, stdout, stderr)
 }
 
-func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
+// slingNudge nudges the agent a sling routed beadID to (doSlingNudge).
+type slingNudge func(a *config.Agent, beadID string, stdout, stderr io.Writer)
+
+// depsSlingNudge is the slingNudge over deps' own work store. `gc sling`
+// nudges over the raw scope store it opened instead: the nudge's session
+// lookups go through cliSessionStore, whose emission wrap reads the store's
+// own type, which a class handle over it hides.
+func depsSlingNudge(deps slingDeps) slingNudge {
+	return func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, beadID, stdout, stderr)
+	}
+}
+
+func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, nudge slingNudge, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
 	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
@@ -1115,7 +1162,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return dryRunSingle(opts, deps, querier, humanStdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, result.BeadID, humanStdout, stderr)
+		nudge(result.NudgeAgent, result.BeadID, humanStdout, stderr)
 	}
 	// Success only (never dry-run or error): surface a dashboard deep link
 	// when one resolves. Resolution failure degrades silently to no link.
@@ -2350,11 +2397,7 @@ func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName st
 	if formulaName == "" {
 		return 0, true
 	}
-	graphStore := deps.GraphStore
-	if graphStore == nil {
-		graphStore = deps.Store
-	}
-	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName)
+	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, opts.BeadOrFormula, formulaName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: pre-check inconclusive: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0, false

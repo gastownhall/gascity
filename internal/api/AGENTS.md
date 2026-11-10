@@ -623,3 +623,9 @@ and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are p
 payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
 set only on the op routes and `op.changed`; a session command's answer keeps
 `conversationOpWire`.
+
+`session.created` and `session.closed` are the controller's too: its bead
+event watcher derives them from session beads' `bead.*` notifications
+(SESSION-OBSERVE-LIST-EVENTS in `internal/session/REQUIREMENTS.md`), and
+`POST /v0/events` and `gc event emit` refuse them
+(`events.IsSessionListDerived`).

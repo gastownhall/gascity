@@ -33,9 +33,34 @@ func TestWaitForCommandWrappedPaneReadsProcessTableOncePerLook(t *testing.T) {
 	readsSince := shimProcessTableTools(t, false)
 
 	// The pane root stands in for the relay. The agent ("sleep") runs five
-	// levels below it, as claude does under maintainer-city's launch chain;
-	// each level is a shell that cannot exec its command away.
+	// levels below it, as claude does under maintainer-city's launch chain.
 	const depth = 5
+	pid := startWrappedChain(t, depth)
+
+	// Linux reads only the pane's own subtree from /proc, never the whole
+	// table; elsewhere a look takes one full snapshot.
+	want := 0
+	if !paneSubtreeSupported {
+		want = snapshotReads(t, readsSince)
+	}
+	readsSince()
+
+	tm := NewTmux()
+	tm.exec = &wrappedWaitExecutor{paneCommand: programstatus.CompanionName, deadPID: pid, livePID: pid}
+	if err := tm.WaitForCommand(context.Background(), "gc-test-relay-deep", supportedShells, 10*time.Second); err != nil {
+		t.Fatalf("WaitForCommand: %v (the agent ran %d levels below the wrapper)", err, depth)
+	}
+	if got := readsSince(); len(got) != want {
+		t.Fatalf("one wrapped look ran ps/pgrep %d times %q; want %d, at most one process-table snapshot, at any depth", len(got), got, want)
+	}
+}
+
+// startWrappedChain starts a process tree standing in for a wrapped pane: a
+// root, then depth levels of shells that cannot exec their command away, the
+// last running "sleep" (the agent). It returns the root's pid once the agent
+// runs depth levels below it, and kills the tree at cleanup.
+func startWrappedChain(t *testing.T, depth int) string {
+	t.Helper()
 	command := "exec sleep 60"
 	for i := 0; i < depth; i++ {
 		command = "sh -c " + shellquote.Join([]string{command}) + "; :"
@@ -55,23 +80,12 @@ func TestWaitForCommandWrappedPaneReadsProcessTableOncePerLook(t *testing.T) {
 	for {
 		snapshot, err := fetchProcessSnapshot(context.Background())
 		if err == nil && agentLevel(snapshot, pid, names) == depth {
-			break
+			return pid
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the agent never ran %d levels below the pane root", depth)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-
-	want := snapshotReads(t, readsSince)
-
-	tm := NewTmux()
-	tm.exec = &wrappedWaitExecutor{paneCommand: programstatus.CompanionName, deadPID: pid, livePID: pid}
-	if err := tm.WaitForCommand(context.Background(), "gc-test-relay-deep", supportedShells, 10*time.Second); err != nil {
-		t.Fatalf("WaitForCommand: %v (the agent ran %d levels below the wrapper)", err, depth)
-	}
-	if got := readsSince(); len(got) != want {
-		t.Fatalf("one wrapped look ran ps/pgrep %d times %q; want %d, one process-table snapshot, at any depth", len(got), got, want)
 	}
 }
 

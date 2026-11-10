@@ -3,9 +3,9 @@ package api
 // The API plane's residency topology.
 //
 // The API holds no storageRoutes: it sees the split only as STORE IDENTITY,
-// through the per-class State accessors. That is the same gate
-// relocatedGraphStore already applies — on a default city GraphBeadStore()
-// returns the city store itself, so there is nothing to federate — generalized
+// through the class handles State.Stores() hands out. That is the same gate
+// relocatedGraphStore already applies — on a default city Stores().Graph()
+// wraps the city store itself, so there is nothing to federate — generalized
 // from the graph class to all five.
 //
 // Building from the opened accessors rather than from [storage] is deliberate
@@ -84,11 +84,12 @@ type classStoreAccessor struct {
 // keeps that blind spot from producing a different StoreRef for the same
 // physical binding than the CLI and controller planes produce.
 func (s *Server) classStoreAccessors() []classStoreAccessor {
+	st := s.state.Stores()
 	return []classStoreAccessor{
-		{coordclass.ClassGraph, s.state.GraphBeadStore().Store},
-		{coordclass.ClassSessions, s.state.SessionsBeadStore().Store},
-		{coordclass.ClassOrders, s.state.OrdersBeadStore().Store},
-		{coordclass.ClassNudges, s.state.NudgesBeadStore().Store},
+		{coordclass.ClassGraph, st.Graph().Store},
+		{coordclass.ClassSessions, st.Sessions().Store},
+		{coordclass.ClassOrders, st.Orders().Store},
+		{coordclass.ClassNudges, st.Nudges().Store},
 	}
 }
 
@@ -153,4 +154,20 @@ func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordcl
 		Relics:          relics,
 		CompleteClasses: completeObservedClasses,
 	})
+}
+
+// configuredPrefixes is the work leg's and each rig leg's configured id prefix
+// from cfg, keyed by rig ref: the prefixes residencyTopology reads, which a
+// State's holder completes the topology it mints its Stores from with, so
+// Stores().Topology() and residencyTopology agree (seededState, and the test
+// fakes).
+func configuredPrefixes(cfg *config.City) (hq string, rigs map[storeref.StoreRef]string) {
+	if cfg == nil {
+		return "", nil
+	}
+	rigs = make(map[storeref.StoreRef]string, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		rigs[storeref.RigRef(rig.Name)] = strings.TrimSpace(rig.EffectivePrefix())
+	}
+	return strings.TrimSpace(config.EffectiveHQPrefix(cfg)), rigs
 }
