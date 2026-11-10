@@ -33,6 +33,10 @@ const (
 	// to retain the existing shared prompt-resolution threshold.
 	agentCommandChunkSize = 32 * 1024
 	agentCommandArg0      = "gc-agent-command"
+
+	// agentLaunchFileWrite writes the decoded $CMD to a launcher script in the
+	// launching user's home directory and leaves its path in $f.
+	agentLaunchFileWrite = `f="${HOME:-/tmp}/.gc-agent-launch.sh" && printf 'exec %s\n' "$CMD" > "$f" && chmod 0700 "$f"`
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -123,8 +127,11 @@ func agentCommandShellArgs(script string, cfg runtime.Config) []string {
 
 // buildAgentLaunchCommand builds the static shell transport shared by Start and
 // Relaunch. Dynamic-user launches stream the encoded command through stdin to a
-// static su -c script; the inner script decodes it before passing the command
-// to tmux as one quoted argument. suExports carries the main-container's
+// static su -c script. After decoding, the command is written to a launcher
+// script in $HOME and tmux receives only the short fixed "sh <file>" command:
+// tmux caps a client-to-server message at about 16 KiB, so a startup prompt on
+// the agent argv cannot travel as a tmux argument. The launcher execs the
+// command so the pane process is the agent. suExports carries the main-container's
 // remote-stage identity through a login shell; Relaunch relies on the durable
 // record it writes before respawn. tmuxCommand is a fixed command selected by
 // the caller.
@@ -136,8 +143,8 @@ func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive b
 
 	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
 		userScript := fmt.Sprintf(
-			`%sCMD=$(base64 -d) && cd %s && %s "$CMD"%s`,
-			suExports, shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
+			`%sCMD=$(base64 -d) && %s && cd %s && %s "sh $f"%s`,
+			suExports, agentLaunchFileWrite, shellquote.Quote(projectedPodWorkDir(cfg)), tmuxCommand, keepAliveSuffix,
 		)
 		return fmt.Sprintf(
 			`printf '%%s' "$@" | su - %s -c %s`,
@@ -146,8 +153,8 @@ func buildAgentLaunchCommand(cfg runtime.Config, tmuxCommand string, keepAlive b
 	}
 
 	return fmt.Sprintf(
-		`CMD=$(printf '%%s' "$@" | base64 -d) && %s "$CMD"%s`,
-		tmuxCommand, keepAliveSuffix,
+		`CMD=$(printf '%%s' "$@" | base64 -d) && %s && %s "sh $f"%s`,
+		agentLaunchFileWrite, tmuxCommand, keepAliveSuffix,
 	)
 }
 

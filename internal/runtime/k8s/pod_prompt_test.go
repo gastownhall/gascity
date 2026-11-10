@@ -269,23 +269,28 @@ func TestDynamicUserPromptMetacharactersStayInChunkPayload(t *testing.T) {
 		if !strings.Contains(userScript, `cd `+shellquote.Quote(projectedPodWorkDir(cfg))+` &&`) {
 			t.Errorf("%s inner su script does not shell-quote the projected work directory", name)
 		}
-		if !strings.Contains(userScript, `"$CMD"`) {
-			t.Errorf("%s does not pass the decoded command as one quoted tmux argument", name)
+		if !strings.Contains(userScript, `printf 'exec %s\n' "$CMD" > "$f"`) {
+			t.Errorf("%s does not write the decoded command to a launcher script", name)
+		}
+		if !strings.Contains(userScript, `"sh $f"`) || strings.Contains(userScript, `tmux new-session -d -s main "$CMD"`) || strings.Contains(userScript, `-t main "$CMD"`) {
+			t.Errorf("%s does not hand tmux the short launcher invocation", name)
 		}
 	}
 }
 
+// TestDynamicUserWrapperPreservesCommand runs the generated Start and Relaunch
+// wrappers, dynamic-user and default, under a real shell with a startup prompt
+// larger than tmux's ~16 KiB client message cap. The fake tmux rejects an argv
+// over 16 KiB, so the command must reach tmux as a short launcher invocation
+// whose script reproduces the agent argv exactly.
 func TestDynamicUserWrapperPreservesCommand(t *testing.T) {
-	cfg := runtime.Config{
-		Command: "codex --quiet",
-		WorkDir: "/workspace",
-		Env: map[string]string{
-			"LINUX_USERNAME": "gcagent",
-		},
+	hostile := "single ' quote; double \" quote; $HOME; $(printf substituted); `printf backtick`; % percent; backslash \\; newline\nsecond line\n"
+	var b strings.Builder
+	for b.Len() < 50*1024 {
+		b.WriteString(hostile)
 	}
+	prompt := b.String()
 	binDir := t.TempDir()
-	commandFile := filepath.Join(t.TempDir(), "tmux-command")
-	argcFile := filepath.Join(t.TempDir(), "tmux-argc")
 	writeExecutable := func(name, body string) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o755); err != nil {
@@ -302,45 +307,71 @@ eval "$4"
 `)
 	writeExecutable("tmux", `#!/bin/sh
 set -eu
-printf '%s' "$#" > "$TMUX_ARGC_FILE"
+total=0
+for arg do total=$((total + ${#arg} + 1)); done
+if [ "$total" -gt 16384 ]; then
+	echo "tmux: command too long ($total bytes)" >&2
+	exit 1
+fi
 last=
 for arg do last=$arg; done
 printf '%s' "$last" > "$TMUX_COMMAND_FILE"
 `)
 
-	for _, tc := range []struct {
-		name        string
-		tmuxCommand string
-	}{
-		{name: "Start", tmuxCommand: "tmux new-session -d -s main"},
-		{name: "Relaunch", tmuxCommand: "tmux respawn-pane -k -t main"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			script := buildAgentLaunchCommand(cfg, tc.tmuxCommand, false, "")
-			shellArgs := agentCommandShellArgs(script, cfg)
-			cmd := exec.Command("/bin/sh", append([]string{"-c"}, shellArgs...)...)
-			cmd.Env = []string{
-				"PATH=" + binDir + ":/usr/bin:/bin",
-				"TMUX_ARGC_FILE=" + argcFile,
-				"TMUX_COMMAND_FILE=" + commandFile,
-			}
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("run generated dynamic-user wrapper: %v\n%s", err, output)
-			}
-			gotCommand, err := os.ReadFile(commandFile)
-			if err != nil {
-				t.Fatalf("read tmux command: %v", err)
-			}
-			if got, want := string(gotCommand), "codex --quiet"; got != want {
-				t.Fatalf("tmux command = %q, want %q", got, want)
-			}
-			gotArgc, err := os.ReadFile(argcFile)
-			if err != nil {
-				t.Fatalf("read tmux argument count: %v", err)
-			}
-			if got, want := string(gotArgc), "5"; got != want {
-				t.Fatalf("tmux argument count = %q, want %q (command stays one argument)", got, want)
-			}
-		})
+	for _, user := range []string{"gcagent", ""} {
+		cfg := runtime.Config{
+			Command:      "codex --quiet",
+			PromptSuffix: shellquote.Quote(prompt),
+			WorkDir:      "/workspace",
+			Env:          map[string]string{},
+		}
+		branch := "default"
+		if user != "" {
+			cfg.Env["LINUX_USERNAME"] = user
+			branch = "dynamic-user"
+		}
+		for _, tc := range []struct {
+			name        string
+			tmuxCommand string
+		}{
+			{name: "Start", tmuxCommand: "tmux new-session -d -s main"},
+			{name: "Relaunch", tmuxCommand: "tmux respawn-pane -k -t main"},
+		} {
+			t.Run(branch+"/"+tc.name, func(t *testing.T) {
+				home := t.TempDir()
+				commandFile := filepath.Join(t.TempDir(), "tmux-command")
+				script := buildAgentLaunchCommand(cfg, tc.tmuxCommand, false, "")
+				shellArgs := agentCommandShellArgs(script, cfg)
+				cmd := exec.Command("/bin/sh", append([]string{"-c"}, shellArgs...)...)
+				cmd.Env = []string{
+					"PATH=" + binDir + ":/usr/bin:/bin",
+					"HOME=" + home,
+					"TMUX_COMMAND_FILE=" + commandFile,
+				}
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("run generated %s wrapper: %v\n%s", branch, err, output)
+				}
+				gotCommand, err := os.ReadFile(commandFile)
+				if err != nil {
+					t.Fatalf("read tmux command: %v", err)
+				}
+				launcher := filepath.Join(home, ".gc-agent-launch.sh")
+				if got, want := string(gotCommand), "sh "+launcher; got != want {
+					t.Fatalf("tmux command = %q, want %q", got, want)
+				}
+				contents, err := os.ReadFile(launcher)
+				if err != nil {
+					t.Fatalf("read launcher script: %v", err)
+				}
+				body, ok := strings.CutPrefix(string(contents), "exec ")
+				if !ok {
+					t.Fatalf("launcher script does not exec the agent: %.80q", contents)
+				}
+				want := []string{"codex", "--quiet", prompt}
+				if got := shellquote.Split(body); !reflect.DeepEqual(got, want) {
+					t.Fatalf("launcher argv differs from %#v (got %d args)", want[:2], len(got))
+				}
+			})
+		}
 	}
 }

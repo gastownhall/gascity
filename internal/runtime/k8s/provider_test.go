@@ -2350,6 +2350,9 @@ func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
 	if !strings.Contains(body, `CMD=$(printf '%s' "$@" | base64 -d)`) {
 		t.Errorf("respawn body = %q, want it to reconstruct its command from positional chunks", body)
 	}
+	if !strings.Contains(body, `"sh $f"`) {
+		t.Errorf("respawn body = %q, want tmux to run the short launcher invocation", body)
+	}
 	// The command is base64-shipped in bounded positional chunks, not inlined.
 	wantB64 := base64.StdEncoding.EncodeToString([]byte("agent --resume"))
 	if got := strings.Join(respawn[4:], ""); got != wantB64 {
@@ -2413,6 +2416,9 @@ func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
 	}
 	if !strings.Contains(script, "CMD=$(base64 -d)") {
 		t.Errorf("respawn body = %q, want the static su script to decode stdin", script)
+	}
+	if !strings.Contains(script, `"sh $f"`) {
+		t.Errorf("respawn body = %q, want tmux to run the short launcher invocation", script)
 	}
 }
 

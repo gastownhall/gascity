@@ -474,9 +474,14 @@ func runUnderEnvClearingSu(t *testing.T, command []string, podEnv map[string]str
 			t.Fatal(err)
 		}
 	}
-	// su - <user> -c <cmd>: a login shell with a cleared environment. cd is
-	// stubbed: the pod's /workspace does not exist on the test host.
-	write("su", "#!/bin/sh\nexec env -i PATH=\"$PATH\" /bin/sh -c \"cd() { :; }; $4\"\n")
+	// su - <user> -c <cmd>: a login shell with a cleared environment whose
+	// HOME is the user's home, where the launch writes its launcher script. cd
+	// is stubbed: the pod's /workspace does not exist on the test host.
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write("su", "#!/bin/sh\nexec env -i PATH=\"$PATH\" HOME=\""+home+"\" /bin/sh -c \"cd() { :; }; $4\"\n")
 	write("tmux", "#!/bin/sh\nenv > "+envOut+"\n")
 	write("sleep", "#!/bin/sh\nexit 0\n")
 	env := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
