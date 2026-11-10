@@ -636,7 +636,7 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 // read. Its entries carry no store (workflowStoreInfo.store); an order read
 // takes workflowWritableStores.
 func workflowStores(state State) []workflowStoreInfo {
-	infos, _ := workflowLegs(state, workflowLegQuery{})
+	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
 	return infos
 }
 
@@ -644,7 +644,7 @@ func workflowStores(state State) []workflowStoreInfo {
 // relic-free or not, for a reader that may be looking for rig WORK (an event
 // subject), which a relic-free rig still holds.
 func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
-	infos, _ := workflowLegs(state, workflowLegQuery{includeRetiredRigs: true})
+	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{includeRetiredRigs: true})
 	return infos
 }
 
@@ -653,7 +653,7 @@ func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
 // each entry's store is the strict writable handle on its leg, so those reads
 // see what they saw over the raw store.
 func workflowWritableStores(state State) []workflowStoreInfo {
-	infos, resident := workflowLegs(state, workflowLegQuery{})
+	infos, resident := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
 	for i := range infos {
 		infos[i].store = resident(infos[i])
 	}
@@ -673,7 +673,10 @@ type workflowLegQuery struct {
 }
 
 // workflowLegs is the workflow-root federation, storeref's Workflow plan over
-// the state's epoch (Stores().Plan), as the API names its legs: the
+// one epoch, st (Stores().Plan), for the city named cityName, as the API
+// names its legs. A request that reads the epoch again (a rig lookup beside
+// the legs) takes one st and passes it to both, so the two never see two rig
+// sets. The legs: the
 // relocated graph binding graph:<city>, the city work store city:<city>, then
 // each rig rig:<name> ascending. On a relocated city the city and rig legs
 // are relic legs, and a rig proven relic-free is dropped unless q keeps it;
@@ -690,8 +693,8 @@ type workflowLegQuery struct {
 //
 // A plan the epoch cannot make (no store at all) is no legs, as the hand
 // list was empty.
-func workflowLegs(state State, q workflowLegQuery) ([]workflowStoreInfo, func(workflowStoreInfo) beads.ResidentStore) {
-	plan, err := state.Stores().Plan(storeref.Workflow{
+func workflowLegs(st storeref.Stores, cityName string, q workflowLegQuery) ([]workflowStoreInfo, func(workflowStoreInfo) beads.ResidentStore) {
+	plan, err := st.Plan(storeref.Workflow{
 		IncludeRetiredRigs: q.includeRetiredRigs,
 		SuspendedRigs:      storeref.WorkflowReadsSuspendedRigs,
 	})
@@ -704,7 +707,7 @@ func workflowLegs(state State, q workflowLegQuery) ([]workflowStoreInfo, func(wo
 	if err != nil {
 		return nil, resident
 	}
-	cityName := workflowCityScopeRef(state.CityName())
+	cityName = workflowCityScopeRef(cityName)
 	infos := make([]workflowStoreInfo, 0, len(plan.Legs))
 	storeref.EachTypedLeg(plan, func(leg storeref.TypedLeg) {
 		info := workflowStoreInfo{scopeKind: beadmeta.ScopeKindCity, scopeRef: cityName, leg: leg}
@@ -747,8 +750,11 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		// graph is relocated; on a default city it names nothing, and callers
 		// fall back to the store scan. A rig resolves retired, suspended or
 		// named like the city, as BeadStore(name) did.
-		infos, resident := workflowLegs(state, workflowLegQuery{includeRetiredRigs: true, keepRigNamedLikeCity: true})
-		info, ok := workflowLegNamed(state, infos, kind+":"+scopeRef)
+		// One epoch for the request: the legs and the shared-store fallback
+		// read the same rig set.
+		st := state.Stores()
+		infos, resident := workflowLegs(st, state.CityName(), workflowLegQuery{includeRetiredRigs: true, keepRigNamedLikeCity: true})
+		info, ok := workflowLegNamed(st, infos, kind+":"+scopeRef)
 		if !ok {
 			return workflowStoreInfo{}, false
 		}
@@ -786,7 +792,7 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 // the hint is probed there, where the hand path skipped the retired rig. The
 // probe reads a store the scan beside it reads anyway, and the S4 bit is per
 // rig while the rows are per store, so no city that splits serves the shape.
-func workflowLegNamed(state State, infos []workflowStoreInfo, ref string) (workflowStoreInfo, bool) {
+func workflowLegNamed(st storeref.Stores, infos []workflowStoreInfo, ref string) (workflowStoreInfo, bool) {
 	for _, info := range infos {
 		if info.ref == ref {
 			return info, true
@@ -796,7 +802,7 @@ func workflowLegNamed(state State, infos []workflowStoreInfo, ref string) (workf
 	if !ok {
 		return workflowStoreInfo{}, false
 	}
-	work, ok := state.Stores().Rig(rig)
+	work, ok := st.Rig(rig)
 	if !ok {
 		return workflowStoreInfo{}, false
 	}

@@ -487,7 +487,7 @@ type runCancelTarget struct {
 func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (cancelRunResult, error) {
 	var res cancelRunResult
 	var targets []runCancelTarget
-	legs, resident := workflowLegs(s.state, workflowLegQuery{})
+	legs, resident := workflowLegs(s.state.Stores(), s.state.CityName(), workflowLegQuery{})
 	for _, info := range legs {
 		// One leg of the workflowStores federation (graph, city, rigs), read
 		// in its plan role (a scope leg of a split city is a relic leg, S4

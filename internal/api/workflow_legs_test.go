@@ -213,8 +213,8 @@ func TestWorkflowLegsReadARigOverTheCityStoreOnce(t *testing.T) {
 func TestWorkflowLegsMintTheHandleOnTheEntrysOwnStore(t *testing.T) {
 	t7dGateOff(t)
 	fx := t7dShapes["skipped rig sorts first, split"].fixtures(t)()
-	legs, resident := workflowLegs(fx.state, workflowLegQuery{keepRigNamedLikeCity: true})
-	scanned, _ := workflowLegs(fx.state, workflowLegQuery{})
+	legs, resident := workflowLegs(fx.state.Stores(), fx.state.CityName(), workflowLegQuery{keepRigNamedLikeCity: true})
+	scanned, _ := workflowLegs(fx.state.Stores(), fx.state.CityName(), workflowLegQuery{})
 	for _, info := range append(legs, scanned...) {
 		if got, want := fx.name(resident(info)), fx.name(info.leg.Reader); got != want {
 			t.Errorf("%s: the writable handle writes to %s, its leg reads %s", info.ref, got, want)
@@ -222,5 +222,67 @@ func TestWorkflowLegsMintTheHandleOnTheEntrysOwnStore(t *testing.T) {
 	}
 	if zero := resident(workflowStoreInfo{}); !beads.IsNilStore(zero) {
 		t.Errorf("an entry with no leg got a handle on %s, want none", fx.name(zero))
+	}
+}
+
+// t7dEpochSwapState hands out its first epoch to the first Stores() call of
+// a request and its second to every later one, counting the calls: a request
+// that reads the epoch twice would see two rig sets.
+type t7dEpochSwapState struct {
+	*fakeState
+	first, later storeref.Stores
+	calls        int
+}
+
+func (s *t7dEpochSwapState) Stores() storeref.Stores {
+	s.calls++
+	if s.calls == 1 {
+		return s.first
+	}
+	return s.later
+}
+
+// TestWorkflowRequestsReadOneEpoch pins that each workflow request plans on
+// one Stores value. The epoch is swapped after the first read, from a split
+// city with a relic-free rig named like the city and a rig sharing another's
+// store, to one with neither rig. A request that read the epoch twice would
+// read the city leg the first epoch's rig shadows (and call a graph run
+// stranded there a graph convoy), or fail to resolve the shared rig's ref;
+// one that reads it once answers as the first epoch alone does.
+func TestWorkflowRequestsReadOneEpoch(t *testing.T) {
+	t7dGateOff(t)
+	city, binding, named, alpha := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+	stranded, err := city.Create(beads.Bead{Title: "graph", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := func(rigs map[string]beads.Store) relicReportingState {
+		f := newFakeState(t)
+		f.cityName = t7dCity
+		f.cityBeadStore = city
+		f.graphBeadStore = binding
+		f.stores = rigs
+		return relicReportingState{fakeState: f, relicFree: map[string]bool{t7dCity: true}}
+	}
+	before := epoch(map[string]beads.Store{t7dCity: named, "alpha": alpha, "beta": alpha})
+	after := epoch(map[string]beads.Store{"alpha": alpha})
+	swap := func() *t7dEpochSwapState {
+		return &t7dEpochSwapState{fakeState: before.fakeState, first: before.Stores(), later: after.Stores()}
+	}
+
+	state := swap()
+	if got := isGraphConvoyID(New(state), stranded.ID); got || state.calls != 1 {
+		t.Errorf("isGraphConvoyID(%s) over a swapped epoch = %v after %d Stores() reads; want false (the first epoch's relic-free rig named like the city shadows the city) after one", stranded.ID, got, state.calls)
+	}
+
+	state = swap()
+	if info, ok := workflowStoreByRef(state, "rig:beta"); !ok || info.ref != "rig:beta" || state.calls != 1 {
+		t.Errorf("workflowStoreByRef(rig:beta) over a swapped epoch = %v, %q after %d Stores() reads; want the shared leg under rig:beta after one", ok, info.ref, state.calls)
+	}
+
+	state = swap()
+	step := beads.Bead{ID: "evt", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: stranded.ID, beadmeta.RootStoreRefMetadataKey: "rig:beta"}}
+	if _, _, ok := workflowEventRoot(state, step); !ok || state.calls != 1 {
+		t.Errorf("workflowEventRoot over a swapped epoch = %v after %d Stores() reads; want the city's root after one", ok, state.calls)
 	}
 }

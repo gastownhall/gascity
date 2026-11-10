@@ -11,7 +11,8 @@ package api
 //
 // Copied with every helper in this package that reads or writes a store, or
 // that T7d edits or deletes (sortedRigNames, the relic-free and graph-store
-// helpers of rig_graph_legs.go, collectWorkflowDeps and its
+// helpers of rig_graph_legs.go, the order history detail handler (whose
+// store list now comes from the workflow legs), collectWorkflowDeps and its
 // prefetchedDepStore, findWorkflowRoots, cancelWorkflowRoot,
 // listActiveWorkflowProjectionBeads). Everything else they call is live code
 // T7d leaves byte-identical, of two kinds:
@@ -55,6 +56,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -1561,4 +1563,47 @@ func frozenAppendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, ci
 		scopeRef:  cityName,
 		store:     ordersStore,
 	})
+}
+
+// humaHandleOrderHistoryDetail is the Huma-typed handler for GET /v0/order/history/{bead_id}.
+func frozenHumaHandleOrderHistoryDetail(_ context.Context, s *Server, input *OrderHistoryDetailInput) (*struct {
+	Body orderHistoryDetailResponse
+}, error,
+) {
+	// The bead this reads is an order-tracking bead, which on a split city lives in
+	// the orders binding. workflowStores leads with the GRAPH binding, so without
+	// the orders leg this only finds one because the shape this build serves
+	// happens to serve both classes from one store — the co-residency the feed
+	// already refuses to rely on.
+	storeInfos := frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
+	if input.StoreRef != "" {
+		info, ok := frozenWorkflowStoreByRef(s.state, input.StoreRef)
+		if !ok {
+			return nil, apierr.ScopeNotFound.Msg("store_ref does not resolve to a known scope")
+		}
+		storeInfos = []workflowStoreInfo{info}
+	}
+	result, err := orderHistoryBeadAcrossStoreInfos(storeInfos, input.BeadID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.BeadNotFound.Msg("bead not found")
+		}
+		if errors.Is(err, errNoOrderStores) {
+			return nil, apierr.ServiceUnavailable.Msg(err.Error())
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	b := result.bead
+
+	output := convergence.GateOutputFromMetadata(b.Metadata).CombinedOutput()
+
+	return &struct {
+		Body orderHistoryDetailResponse
+	}{Body: orderHistoryDetailResponse{
+		BeadID:    b.ID,
+		StoreRef:  result.storeRef,
+		CreatedAt: b.CreatedAt.Format(time.RFC3339Nano),
+		Labels:    b.Labels,
+		Output:    output,
+	}}, nil
 }

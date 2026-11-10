@@ -569,7 +569,7 @@ func (s *Server) humaHandleConvoyDelete(_ context.Context, input *ConvoyDeleteIn
 
 // humaDeleteWorkflow handles workflow convoy deletion through the Huma handler.
 func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
-	stores, resident := workflowLegs(s.state, workflowLegQuery{})
+	stores, resident := workflowLegs(s.state.Stores(), s.state.CityName(), workflowLegQuery{})
 	found := false
 
 	for _, info := range stores {
@@ -707,7 +707,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	scopeRef := strings.TrimSpace(input.ScopeRef)
 	deleteFromStore := input.Delete
 
-	stores, resident := workflowLegs(s.state, workflowLegQuery{})
+	stores, resident := workflowLegs(s.state.Stores(), s.state.CityName(), workflowLegQuery{})
 
 	closed := 0
 	deleted := 0

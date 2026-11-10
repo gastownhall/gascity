@@ -167,6 +167,7 @@ type t7dShape struct {
 	refused          bool   // a worker site refusing every relocated class
 	stranded         bool   // a graph root stranded in the city work store, served degraded
 	cached           bool   // the city and rig stores behind a CachingStore
+	ordersApart      bool   // the orders class in a binding of its own, apart from the graph binding
 }
 
 // cityName is the shape's city name.
@@ -200,6 +201,10 @@ var t7dShapes = map[string]t7dShape{
 	// skips, sorts before every other rig.
 	"skipped rig sorts first, split":   {city: "aaa", split: true, rigNamedLikeCity: true},
 	"skipped rig sorts first, unsplit": {city: "aaa", rigNamedLikeCity: true},
+	// Order tracking in an orders binding apart from the graph binding (a
+	// per-class split no serving city has): the one shape where the order
+	// reads' orders leg is not already a workflow leg.
+	"orders binding apart": {split: true, ordersApart: true},
 }
 
 // t7dFixture is one built shape.
@@ -364,6 +369,10 @@ func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	// Order runs: the live history where tracking is born, pre-split history
 	// in a rig.
 	t7dBead(t, home, beads.Bead{ID: home.IDPrefix + "-or1", Title: "order:nightly", Type: "task", Status: "closed", Labels: []string{"order-run:nightly", "order-tracking"}})
+	if sh.ordersApart {
+		ordersMem := mem("orders", "or")
+		t7dBead(t, ordersMem, beads.Bead{ID: "or-or1", Title: "order:nightly", Type: "task", Status: "closed", Labels: []string{"order-run:nightly", "order-tracking"}})
+	}
 	t7dBead(t, alpha, beads.Bead{ID: "al-or1", Title: "order:nightly", Type: "task", Status: "closed", Labels: []string{"order-run:nightly", "order-tracking"}})
 
 	return func() t7dFixture { return sh.fixture(t, templates) }
@@ -423,6 +432,9 @@ func (sh t7dShape) fixture(t *testing.T, templates map[string]*beads.MemStore) t
 	if binding != nil {
 		b := top("binding", binding)
 		fs.graphBeadStore, fs.ordersBeadStore, fs.sessionsBeadStore, fs.nudgesBeadStore = b, b, b, b
+	}
+	if orders := fx.mems["orders"]; orders != nil {
+		fs.ordersBeadStore = top("orders", orders)
 	}
 	if sh.refused {
 		refusal := t7dRefusingStore{&t7dRecordingStore{Store: beads.NewMemStore(), name: "refused", log: log}}
@@ -629,28 +641,18 @@ func t7dOps(city string) []t7dOp {
 			},
 		)
 	}
-	for _, id := range []string{"tc-or1", "gcg-or1", "al-or1", "missing"} {
+	for _, id := range []string{"tc-or1", "gcg-or1", "al-or1", "or-or1", "missing"} {
 		for _, ref := range []string{"", "city:" + city, "rig:alpha", "orders:" + city, "graph:" + city} {
-			// The order history detail's store list (humaHandleOrderHistoryDetail),
-			// frozen and live, read by the order reader T7d leaves as it is.
-			detail := func(infos []workflowStoreInfo, byRef func(State, string) (workflowStoreInfo, bool), state State) string {
-				if ref != "" {
-					info, ok := byRef(state, ref)
-					if !ok {
-						return "no ref"
-					}
-					infos = []workflowStoreInfo{info}
-				}
-				got, err := orderHistoryBeadAcrossStoreInfos(infos, id)
-				return fmt.Sprintf("%s %s %v", got.storeRef, got.bead.ID, err)
-			}
+			// The order history detail handler, frozen and live: its store
+			// list now comes from the workflow legs, and the order reader it
+			// calls is the one T7d leaves as it is.
 			ops = append(ops, t7dOp{
-				name: "orderHistoryDetail " + id + " ref=" + ref, keepsMarkers: true,
+				name: "humaHandleOrderHistoryDetail " + id + " ref=" + ref, keepsMarkers: true,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
-					return detail(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, city), frozenWorkflowStoreByRef, fx.state)
+					return t7dJSON(frozenHumaHandleOrderHistoryDetail(context.Background(), New(fx.state), &OrderHistoryDetailInput{BeadID: id, StoreRef: ref}))
 				},
 				live: func(_ *testing.T, fx t7dFixture) string {
-					return detail(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, city), workflowStoreByRef, fx.state)
+					return t7dJSON(New(fx.state).humaHandleOrderHistoryDetail(context.Background(), &OrderHistoryDetailInput{BeadID: id, StoreRef: ref}))
 				},
 			})
 		}

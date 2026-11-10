@@ -478,13 +478,14 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 	// relic leg — a pre-S4 rig tree — unless that rig is proven relic-free.
 	// Both probes name one store each and read it strictly, as they always
 	// have; the scan after them is the federation's.
-	legs, _ := workflowLegs(state, workflowLegQuery{keepRigNamedLikeCity: true})
+	st := state.Stores() // one epoch for the legs and the hint's lookup
+	legs, _ := workflowLegs(st, state.CityName(), workflowLegQuery{keepRigNamedLikeCity: true})
 	if info, ok := workflowGraphLeg(legs); ok {
 		if root, ok := workflowRootInStore(info.leg.Strict, rootID); ok {
 			return info, root, true
 		}
 	}
-	if info, ok := workflowLegNamed(state, legs, workflowRefFromMetadata(bead.Metadata[beadmeta.RootStoreRefMetadataKey])); ok {
+	if info, ok := workflowLegNamed(st, legs, workflowRefFromMetadata(bead.Metadata[beadmeta.RootStoreRefMetadataKey])); ok {
 		root, ok := workflowRootInStore(info.leg.Strict, rootID)
 		if ok {
 			return info, root, true

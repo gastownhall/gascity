@@ -20,12 +20,15 @@ import (
 // convoys are never graph convoys, is not read; a rig that may still hold
 // pre-S4 graph rows is read as a relic leg until it is imported.
 func isGraphConvoyID(s *Server, id string) bool {
-	legs, _ := workflowLegs(s.state, workflowLegQuery{keepRigNamedLikeCity: true})
+	// One epoch for the request: the legs and the shadow below read the
+	// same rig set.
+	st := s.state.Stores()
 	cityName := s.state.CityName()
+	legs, _ := workflowLegs(st, cityName, workflowLegQuery{keepRigNamedLikeCity: true})
 	// A rig named like the city replaces the city in BeadStores(), retired
 	// or not: the city is then not read here at all, and the rig only while
 	// its leg stands.
-	_, rigShadowsCity := s.state.Stores().Rig(cityName)
+	_, rigShadowsCity := st.Rig(cityName)
 	byName := make(map[string]workflowStoreInfo, len(legs))
 	names := make([]string, 0, len(legs))
 	for _, info := range legs {
