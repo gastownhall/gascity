@@ -131,7 +131,7 @@ func TestProductMetricsTesthookProfileIsFocusedAndRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const owners = "TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow"
+	const owners = "TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow|TestProductMetricsControlPTYPeer"
 	focusedRecipe := regexp.MustCompile(`(?m)^test-productmetrics-testhook:\n\t([^\n]+)$`).FindStringSubmatch(string(makefile))
 	if len(focusedRecipe) != 2 {
 		t.Fatal("Makefile has no single-command test-productmetrics-testhook target")

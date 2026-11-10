@@ -2760,7 +2760,7 @@ go_variant_test(
 # hooks, running only the tests that need them.
 go_variant_test(
     name = "gc_productmetrics_testhook_test",
-    args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$"],
+    args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow|TestProductMetricsControlPTYPeer)$$"],
     gotags = ["productmetrics_testhook"],
     test = ":gc_test",
 )
