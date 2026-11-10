@@ -181,3 +181,57 @@ func TestStartSQLServerWithoutSocketTablesStillRejectsALostPort(t *testing.T) {
 	requireAccepting(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(srv.Port)), "the started server")
 	requireAccepting(t, held.Addr().String(), "the other process's listener")
 }
+
+// holdPortWithClientSocket takes a free loopback port with an established
+// client socket whose local end is that port, the way a loopback connect()
+// draws its source port. Nothing listens on the port, so dolt's own pre-bind
+// check passes and its bind then fails with "bind: address already in use".
+// It returns the port and the client connection, which stays open until the
+// test ends.
+func holdPortWithClientSocket(t *testing.T) (client net.Conn, port int) {
+	t.Helper()
+	sink, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for the sink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	go func() {
+		for {
+			conn, err := sink.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+	port, err = probePort("127.0.0.1")
+	if err != nil {
+		t.Fatalf("probing a port to hold: %v", err)
+	}
+	dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}}
+	client, err = dialer.Dial("tcp", sink.Addr().String())
+	if err != nil {
+		t.Fatalf("holding port %d with a client socket: %v", port, err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client, port
+}
+
+func TestStartSQLServerRetriesWhenAClientSocketHoldsTheProbedPort(t *testing.T) {
+	doltPath := requireDolt(t)
+	client, heldPort := holdPortWithClientSocket(t)
+	var picks []int
+
+	srv := StartSQLServer(t, SQLServerSpec{
+		Dolt:     doltPath,
+		Args:     serverArgs(t.TempDir()),
+		Env:      isolatedDoltEnv(t),
+		PickPort: heldThenFresh(heldPort, &picks),
+	})
+
+	requireRetriedOnto(t, srv, heldPort, picks)
+	requireOwnsPort(t, srv)
+	if _, err := client.Write([]byte("x")); err != nil {
+		t.Fatalf("the client socket that held port %d was disturbed: %v", heldPort, err)
+	}
+}

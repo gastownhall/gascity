@@ -93,6 +93,35 @@ func TestStartSQLServerGivesUpWhenEveryProbedPortIsLost(t *testing.T) {
 	}
 }
 
+func TestStartSQLServerRetriesWhenDoltCannotBindTheProbedPort(t *testing.T) {
+	// A socket that is not a listener (a connect()'s source port) holds the
+	// port: dolt's own pre-bind dial is refused, so it goes on to bind and
+	// prints the OS's bind error instead of its "port N already in use".
+	dolt := fakeDolt(t, `echo "listen tcp 127.0.0.1:$1: bind: address already in use" >&2; exit 1`)
+	picks, attempts := 0, 0
+
+	failure := failureOf(t, func(tb testing.TB) {
+		StartSQLServer(tb, SQLServerSpec{
+			Dolt: dolt,
+			Args: func(port int) []string {
+				attempts++
+				return []string{strconv.Itoa(port)}
+			},
+			PickPort: func() (int, error) {
+				picks++
+				return 40000 + picks, nil
+			},
+		})
+	})
+
+	if !strings.Contains(failure, "lost its probed port") {
+		t.Fatalf("failure %q does not say the probed port was lost", failure)
+	}
+	if picks != sqlServerMaxAttempts || attempts != sqlServerMaxAttempts {
+		t.Fatalf("picked %d ports and started dolt %d times, want %d of each", picks, attempts, sqlServerMaxAttempts)
+	}
+}
+
 func TestStartSQLServerDoesNotTakeASocketInUseForALostPort(t *testing.T) {
 	// Dolt's unix-socket warning shares "already in use" with its lost-port
 	// error; a server that logs it and exits did not lose its port.
