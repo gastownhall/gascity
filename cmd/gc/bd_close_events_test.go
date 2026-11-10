@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // closingFakeBdScript is a bd whose one step, demo-abc, is open until a
@@ -180,5 +185,79 @@ func TestGcBdCloseOfAnAlreadyClosedBeadAnnouncesNothing(t *testing.T) {
 	}
 	if len(closes) != 0 {
 		t.Fatalf("bead.closed events = %d, want 0 for a bead that was already closed", len(closes))
+	}
+}
+
+// TestGcBdCloseConfirmsEdgesWhileItReadsTheRowBack pins that a close's
+// announcement reads an edgeless bead's edges at the same time as it reads the
+// closed row back. Each read is its own bd subprocess on a bd-backed store, and
+// a close does not change a bead's edges, so the edge read does not depend on
+// the read-back. Read one after the other they put two serial bd round trips
+// after every close of an edgeless bead, which doubled a gc bd close's cost and
+// pushed it past TestGcBdLatencyBudget's 1 s under full remote integration load
+// (ga-b5kq9js).
+func TestGcBdCloseConfirmsEdgesWhileItReadsTheRowBack(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	showArrived, depArrived := make(chan struct{}), make(chan struct{})
+	var showOnce, depOnce sync.Once
+	// Each read waits, bounded, for the other to arrive: reads made at once
+	// both arrive, reads made in series never do.
+	awaitOther := func(other <-chan struct{}, self string) error {
+		select {
+		case <-other:
+			return nil
+		case <-time.After(testutil.GoroutineRaceTimeout):
+			return fmt.Errorf("%s ran alone: the other read had not started", self)
+		}
+	}
+	var mu sync.Mutex
+	var alone []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(full, "bd show --json demo-abc"):
+			showOnce.Do(func() { close(showArrived) })
+			if err := awaitOther(depArrived, "the read-back"); err != nil {
+				mu.Lock()
+				alone = append(alone, err.Error())
+				mu.Unlock()
+			}
+			return []byte(`[{"id":"demo-abc","title":"implement","status":"closed","issue_type":"task","close_reason":"Done: implemented","metadata":{"gc.root_bead_id":"demo-root"}}]`), nil
+		case strings.HasPrefix(full, "bd dep list demo-abc"):
+			depOnce.Do(func() { close(depArrived) })
+			if err := awaitOther(showArrived, "the edge read"); err != nil {
+				mu.Lock()
+				alone = append(alone, err.Error())
+				mu.Unlock()
+			}
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected: " + full)
+	}
+	store := beads.NewBdStore(cityDir, runner)
+	// The exact-ID guard's pre-read: open, and no edges inline.
+	before := map[string]beads.Bead{"demo-abc": {ID: "demo-abc", Title: "implement", Status: "in_progress", Type: "task"}}
+
+	announceBdPassthroughCloses(cityDir, store, before, []string{"close", "demo-abc", "--reason", "Done: implemented"})
+
+	if len(alone) > 0 {
+		t.Fatalf("the close's read-back and edge read ran one after the other: %s", strings.Join(alone, "; "))
+	}
+	closes, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.BeadClosed, Subject: "demo-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 1 {
+		t.Fatalf("bead.closed events for demo-abc = %d, want 1", len(closes))
+	}
+	b, ok := beads.DecodeBeadEventPayload(closes[0].Payload)
+	if !ok || b.Status != "closed" || b.CloseReason != "Done: implemented" {
+		t.Fatalf("bead.closed payload %s, want the closed row read back", closes[0].Payload)
+	}
+	if !strings.Contains(string(closes[0].Payload), `"dependencies":[]`) {
+		t.Fatalf("bead.closed payload %s, want an explicit confirmed-empty edge set", closes[0].Payload)
 	}
 }
