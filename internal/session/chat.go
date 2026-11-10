@@ -1014,7 +1014,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				// fresh read finds it running, the resume converged on it: the
 				// mint is withdrawn, and active state is persisted below with
 				// the binding of that runtime.
-				if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
+				if convErr := m.convergedOnRunning(err, sessName, unroute, resumeCommand, b.Metadata); convErr != nil {
 					return convErr
 				}
 				if !m.unmintStart(*inc, &b) {
@@ -1234,10 +1234,10 @@ func (m *Manager) runningOrUnroute(sessName string, unroute func()) (bool, error
 // convergedOnRunning handles a failed Start (startErr) and returns nil only
 // when the start converged: Start refused because sessName's runtime already
 // exists and is running, as when another caller resumed it first. Otherwise it
-// releases the ACP route and returns the error to surface: startErr wrapped as
-// a failed resume or, when the runtime cannot be read, an error matching both
-// startErr and the read's failure.
-func (m *Manager) convergedOnRunning(startErr error, sessName string, unroute func()) error {
+// releases the ACP route and returns the error to surface: startErr labeled
+// by startFailure for cmd and meta (a failed resume or a failed start) or, when
+// the runtime cannot be read, that error also matching the read's failure.
+func (m *Manager) convergedOnRunning(startErr error, sessName string, unroute func(), cmd string, meta map[string]string) error {
 	var err error
 	if errors.Is(startErr, runtime.ErrSessionExists) {
 		var running bool
@@ -1249,9 +1249,9 @@ func (m *Manager) convergedOnRunning(startErr error, sessName string, unroute fu
 		unroute()
 	}
 	if err != nil {
-		return fmt.Errorf("resuming session: %w: %w", startErr, err)
+		return fmt.Errorf("%w: %w", startFailure(cmd, meta, startErr), err)
 	}
-	return fmt.Errorf("resuming session: %w", startErr)
+	return startFailure(cmd, meta, startErr)
 }
 
 // leasedLiveness is the fresh read (freshLiveness) a start of row id decides
@@ -1359,7 +1359,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists):
-			if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
+			if convErr := m.convergedOnRunning(err, sessName, unroute, resumeCommand, b.Metadata); convErr != nil {
 				return convErr
 			}
 			return err
