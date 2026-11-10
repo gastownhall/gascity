@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -574,6 +575,75 @@ func TestBdVouchCommand(t *testing.T) {
 	}
 	if _, err := vouchBdTarget(c.city, cfg, "no-such-rig"); err == nil {
 		t.Fatal("vouching an unknown rig was accepted")
+	}
+}
+
+// TestBdVouchInheritedManagedRigUsesWorkspacePin exercises command selection,
+// real inventory matching, and an allowlisted rig read with an unrelated bd
+// wrapper first on PATH. Both scopes must vouch and execute the workspace pin.
+func TestBdVouchInheritedManagedRigUsesWorkspacePin(t *testing.T) {
+	c := newBdParityCity(t, bdParityOpts{storage: bdSQLRefusalSplitStorage})
+	pinBdBuildInfoForTest(t)
+	// The fixture's fake inventory is for routing tests. This proof keeps the
+	// real resolver and structural inventory walk.
+	bdSplitInventoryResolver = bdInventoryForScope
+	inv := bdflags.InventoryByName("bd-1.3.2")
+	bin := filepath.Join(c.bin, "bd")
+	logPath := filepath.Join(c.scratch, "pin.log")
+	writeFakeTreeBd(t, bin, filepath.Join(c.scratch, "help"), logPath, inv.HelpTree())
+	script, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = []byte(strings.Replace(string(script), "key=\"\"\n", "if [ \"$1\" = list ] && [ \"$2\" != --help ]; then printf '[]\\n'; exit 0; fi\nkey=\"\"\n", 1))
+	if err := os.WriteFile(bin, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML, err := os.ReadFile(filepath.Join(c.city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityTOML = []byte(strings.Replace(string(cityTOML), "[workspace.env]\n", "[workspace.env]\nBD_BIN = "+strconv.Quote(bin)+"\n", 1))
+	if err := os.WriteFile(filepath.Join(c.city, "city.toml"), cityTOML, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{c.city, c.rig} {
+		if err := os.WriteFile(scopeMetadataJSONPath(scope), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.rig, ".beads", "config.yaml"), []byte("issue_prefix: fe\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	wrapperLog := filepath.Join(c.scratch, "wrapper.log")
+	writeScriptBd(t, filepath.Join(wrapperDir, "bd"), fmt.Sprintf("printf 'wrapper\\n' >> %q\nexit 99\n", wrapperLog))
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, args := range [][]string{{"vouch-bd"}, {"vouch-bd", "--rig", "frontend"}} {
+		var stdout, stderr bytes.Buffer
+		cmd := newStorageCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("gc storage %v: %v\nstderr: %s", args, err, &stderr)
+		}
+		if !strings.Contains(stdout.String(), bin) || !strings.Contains(stdout.String(), inv.Name) {
+			t.Fatalf("gc storage %v = %q, want pinned binary %q and inventory %q", args, &stdout, bin, inv.Name)
+		}
+	}
+	vouches, err := loadBdVouches(c.city)
+	if err != nil || len(vouches) != 1 || vouches[0].BinaryPath != bin || vouches[0].Inventory != inv.Name {
+		t.Fatalf("city and inherited rig must share one pinned vouch: %+v, %v", vouches, err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"--rig", "frontend", "list", "--json"}, &stdout, &stderr); code != 0 || strings.TrimSpace(stdout.String()) != "[]" {
+		t.Fatalf("gc bd --rig frontend list --json: code=%d stdout=%q stderr=%q", code, &stdout, &stderr)
+	}
+	if calls, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(calls), "list --json\n") {
+		t.Fatalf("allowlisted rig read did not execute the vetted pin: calls=%q error=%v", calls, err)
+	}
+	if _, err := os.Stat(wrapperLog); !os.IsNotExist(err) {
+		t.Fatalf("ambient wrapper was walked or executed: stat error=%v", err)
 	}
 }
 

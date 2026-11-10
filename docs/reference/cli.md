@@ -1655,7 +1655,7 @@ error is reported on stderr and the command still exits 0, so bead hooks never
 fail on it. JSON summaries report whether submission to the configured provider
 was attempted; the event bus does not acknowledge durable persistence.
 
-Four requests are refused with exit 1 and nothing is recorded. In --json mode
+Five requests are refused with exit 1 and nothing is recorded. In --json mode
 the failure object carries the code.
 
 - reserved_actor: --actor starts with "cache-", or the default actor is one
@@ -1665,6 +1665,9 @@ the failure object carries the code.
   gc reads it from the store.
 - journal_derived_refused: op.changed or fact.recorded, which the
   controller derives from operation-journal rows; no command records one.
+- session_list_derived_refused: session.created or session.closed, which
+  the controller derives from session beads' bead events; no command
+  records one.
 - bead_payload_not_found: --bead-payload names a bead the store it resolves
   to does not hold (bead.deleted excepted: the event is recorded with its
   subject alone). Any other failure to read it is reported on stderr and the
@@ -4210,6 +4213,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in, twice. The check runs it,
+and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
+and GC_EXEC_CITY_PATH name a fresh temporary directory, never the city you
+run the check from. A runtime that does not scope its server by
+GC_EXEC_CITY_PATH ends every session the server holds, so check it only
+against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -4238,12 +4249,22 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in (the server group). The
+suite runs it, and the sessions it checks it against, in a private city:
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
+never the city you run the suite from. A runtime that does not scope its
+server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
+only against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
 arguments are always the executable itself.
 
-Use --json for a machine-readable report (CI artifacts). Exits non-zero if
-any required requirement fails.
+Use --json for a machine-readable report (CI artifacts): one JSON document
+with ok:true, or ok:false and an error object when a requirement fails; the
+report fields are present either way, and --env adds the capability report
+under "environment". Exits non-zero if any required requirement fails.
 
 ```
 gc runtime conformance <name|executable> [flags]
@@ -4570,8 +4591,21 @@ gc session
 Attach to a running session or resume a suspended one.
 
 If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
-using the provider's resume mechanism (if supported) or restarts.
+If the session is not running while the city's controller runs,
+asks the controller to start it (as "gc session wake" does), waits
+up to --wait-timeout for it to run, then attaches; the runtime is
+never started from this process. When the controller will not
+start it (its agent, rig or city is suspended, for one), attach
+exits non-zero with the reason. A session no configured agent runs
+(a provider session) is one the controller never starts, so it is
+resumed here. With no controller running, a suspended session or
+one whose tmux session died is resumed here using the provider's
+resume mechanism (if supported) or restarted.
+
+With --no-start, attach only to a running session: a session that
+is not running is neither woken nor started, a configured named
+session with no open session is not created, and attach exits
+non-zero.
 
 A session still waiting for the reconciler to start it, in a city
 registered with the supervisor while neither the supervisor nor the
@@ -4581,8 +4615,13 @@ then attach once the session runs.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session attach <session-id-or-alias>
+gc session attach <session-id-or-alias> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-start` | bool |  | attach only if the session is running; never create, start or wake it |
+| `--wait-timeout` | duration | `2m0s` | max time to wait for the controller to start a stopped session before attaching |
 
 ## gc session close
 
@@ -5433,6 +5472,21 @@ what the binding does.
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
+A stranded row that only its metadata makes infrastructure (typically
+gc.root_bead_id on a task or bug: a work-shaped row) is NOT moved by
+default, --dry-run included: carrying ordinary work into the binding hands
+it to a workflow's ownership, out of every work reader's sight. Such rows
+are listed apart, each with its in-place repair, for example
+`gc bd update &lt;id&gt; --unset-metadata gc.root_bead_id`. If the row is
+ordinary work that names its workflow as a reference, run that on the running
+city; if it really is a workflow step an unfenced writer created, run this
+again with --move &lt;id&gt; (repeatable) to copy it into the binding. A run that
+leaves one behind exits 1: the city is still stranded. --move naming a
+stranded row that is not work-shaped (it moves anyway) or an id that is not
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
+
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
 bounds the entry, the row carries no created_at, or the row is younger than
@@ -5493,7 +5547,7 @@ gc storage recover-stranded [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
-| `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
+| `--move` | stringSlice |  | copy this stranded row into the binding: a work-shaped row (only its metadata makes it infrastructure; not moved by default), or a work-store row the manifest lists by id alone and the binding no longer holds (required for one that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded that are also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |

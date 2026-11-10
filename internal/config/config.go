@@ -2528,6 +2528,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 
@@ -3705,7 +3719,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.

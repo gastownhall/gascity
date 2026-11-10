@@ -1248,7 +1248,8 @@ type LiveRuntime struct {
 // artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
-// interface. Callers must use a type assertion and continue safely when the
+// interface, or report false through [ConditionalProcessTableScanner].
+// Callers must use [AsProcessTableScanner] and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying

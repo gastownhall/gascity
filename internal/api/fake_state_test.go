@@ -61,7 +61,10 @@ type fakeState struct {
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
-	bindingRelics     map[beads.Store]bool
+	bindingRelics map[beads.Store]bool
+	// classRefusals is a plane's per-class refusal (cmd/gc's worker site):
+	// the class's handle refuses, while the topology keeps the binding.
+	classRefusals     map[coordclass.Class]storeref.RefusingClassStore
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -203,7 +206,7 @@ func (f *fakeState) NudgeQueue() NudgeQueue {
 // are the projection, so the work and rig handles wrap exactly the stores
 // CityBeadStore and BeadStore return (TestFakeStateStoresWrapTheResidueAccessors).
 func (f *fakeState) Stores() storeref.Stores {
-	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), gateProjection{})
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents)
 }
 
 // relocatedClasses is every class a test relocated off the city store.
@@ -231,21 +234,39 @@ func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
 }
 
 // mintFakeStores mints a fake city's handles: city is the work store, rigs
-// the rig scopes, and each class in relocated a one-class binding over its
-// store; a nil store there is a binding that failed to open, whose handle is
-// zero. proj is the split-strict gate's projection, or nil for stores that
-// already carry it.
-func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, proj storeref.Projection) storeref.Stores {
-	var bindings []storeref.ClassBinding
-	for class, store := range relocated {
-		classes := []coordclass.Class{class}
-		bindings = append(bindings, storeref.ClassBinding{Classes: classes, Leg: storeref.Leg{Ref: storeref.ClassRef(classes), Store: store}})
+// the rig scopes, and the classes in relocated are grouped by store into
+// bindings, as a production plane groups its routes (storeref.BuildBindings);
+// a nil store there is a binding that failed to open, whose handle is zero.
+// opts carries the split-strict gate's projection (none for stores that
+// already carry it) and any per-class refusal. cfg supplies the configured prefixes and relics the census a test
+// recorded (nil: none), so the handles' Topology is the one the API plane
+// derives from the same fake (TestFakeStateTopologyMatchesProduction).
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, opts storeref.StoresOptions, cfg *config.City, relics func(beads.Store) bool) storeref.Stores {
+	var order []beads.Store
+	byStore := map[beads.Store][]coordclass.Class{}
+	for _, class := range coordclass.Classes() {
+		store, ok := relocated[class]
+		if !ok {
+			continue
+		}
+		if _, seen := byStore[store]; !seen {
+			order = append(order, store)
+		}
+		byStore[store] = append(byStore[store], class)
 	}
-	return storeref.NewStores(storeref.Topology{
+	bindings, refused := storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
+	topo := storeref.Topology{
 		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: city},
 		Rigs:     storeref.RigLegs(rigs),
 		Bindings: bindings,
-	}, storeref.StoresOptions{Projection: proj})
+		Refused:  refused,
+	}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+	}
+	return storeref.NewStores(topo, opts)
 }
 
 // gateProjection is the split-strict gate's views as the router's projection:

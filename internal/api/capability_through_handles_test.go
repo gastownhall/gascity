@@ -59,7 +59,7 @@ func (s asHandedState) BeadStores() map[string]beads.Store { return s.stores }
 // Stores mints the handles over the stores as the test put them in, with no
 // projection, as BeadStore and BeadStores hand them out.
 func (s asHandedState) Stores() storeref.Stores {
-	return mintFakeStores(s.cityBeadStore, s.stores, s.relocatedClasses(), nil)
+	return mintFakeStores(s.cityBeadStore, s.stores, s.relocatedClasses(), storeref.StoresOptions{}, s.cfg, s.ClassBindingHasLegacyResidents)
 }
 
 // apiHandleWraps are the shapes T6 hands the API's store helpers: the raw

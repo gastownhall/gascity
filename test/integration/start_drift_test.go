@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package integration
 
@@ -123,7 +123,7 @@ func TestStartDrift_SystemdManaged_RestartsToNewBuildID(t *testing.T) {
 	requireUserSystemd(t)
 	tc := setupDriftSystemdScenario(t)
 
-	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
+	out, exitCode, _ := runDriftCommandWithin(t, driftSystemdCommandTimeout, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
 	if exitCode != 0 {
 		t.Fatalf("gc start exit = %d, want 0\noutput:\n%s", exitCode, out)
 	}
@@ -848,13 +848,31 @@ func bootstrapDriftCity(t *testing.T, binary string, env []string, gcHome string
 	return cityDir
 }
 
+// driftCommandTimeout bounds one `gc start` invocation in the drift
+// scenarios. It is generous enough for the restart-loop guard test
+// (which runs four `gc start` cycles).
+const driftCommandTimeout = 60 * time.Second
+
+// driftSystemdCommandTimeout bounds `gc start` in the systemd-managed
+// scenario. The systemd restart alone took 31.1s on a loaded gate host, so
+// the default bound left no room for registration after it; a real hang
+// still fails at this limit.
+const driftSystemdCommandTimeout = 3 * time.Minute
+
 // runDriftCommand runs `binary args...` capturing combined output,
-// exit code, and wall-clock duration. The default timeout is 60s,
-// generous enough for the restart-loop guard test (which runs four
-// `gc start` cycles).
+// exit code, and wall-clock duration, bounded by driftCommandTimeout.
 func runDriftCommand(t *testing.T, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return runDriftCommandWithin(t, driftCommandTimeout, binary, env, cwd, args...)
+}
+
+// runDriftCommandWithin is runDriftCommand with an explicit bound. When the
+// command exits non-zero it appends one line to the output naming the exit
+// code, the elapsed time, whether the deadline fired, and the error text, so
+// a -1 (killed by the deadline) is told apart from any other failure.
+func runDriftCommandWithin(t *testing.T, timeout time.Duration, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = env
@@ -870,6 +888,12 @@ func runDriftCommand(t *testing.T, binary string, env []string, cwd string, args
 		} else {
 			exitCode = -1
 		}
+		deadline := "deadline not exceeded"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			deadline = "context deadline exceeded"
+		}
+		return fmt.Sprintf("%s\n[runDriftCommand] exit=%d after %s (timeout %s): %s: %v\n",
+			out, exitCode, elapsed.Round(time.Millisecond), timeout, deadline, err), exitCode, elapsed
 	}
 	return string(out), exitCode, elapsed
 }

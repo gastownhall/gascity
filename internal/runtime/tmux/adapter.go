@@ -1711,15 +1711,15 @@ func (o *tmuxStartOps) shadowStartupLadder(name string, send func() error, busy 
 // back to the start's caller; ops that do not implement it decide with the
 // scan alone.
 type startupLadderDecider interface {
-	programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
+	programStartupLadder(name string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
 	handBackStartupNudge(name, nudge string)
 }
 
 // programStartupLadder wraps send and busy to decide with the program's
-// record under the switch on (Tmux.programStartupLadder). Off on, both are
-// returned as they are.
-func (o *tmuxStartOps) programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
-	return o.tm.programStartupLadder(name, send, busy)
+// record under the switch on, for a start whose arm opts into it
+// (Tmux.programStartupLadder). Otherwise both are returned as they are.
+func (o *tmuxStartOps) programStartupLadder(name string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.programStartupLadder(name, arm, send, busy)
 }
 
 // handBackStartupNudge keeps nudge for the start's caller to take
@@ -2346,7 +2346,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		}
 		decider, decides := ops.(startupLadderDecider)
 		if decides {
-			send, busy = decider.programStartupLadder(name, send, busy)
+			send, busy = decider.programStartupLadder(name, cfg.ProgramStatus, send, busy)
 		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			send,

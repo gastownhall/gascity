@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1067,6 +1068,36 @@ func buildRuntimeRegistry() {
 	_, err := DiscoverRuntimeCatalog(source)
 	if err == nil || !strings.Contains(err.Error(), "fallback constructor set") {
 		t.Fatalf("DiscoverRuntimeCatalog() error = %v, want unledgered-fallback error", err)
+	}
+}
+
+func TestDiscoverRuntimeCatalogFallbackFactoryPrecedesOptions(t *testing.T) {
+	const prefix = `package main
+import (
+	registryalias "github.com/gastownhall/gascity/internal/runtime/registry"
+	tmuxalias "github.com/gastownhall/gascity/internal/runtime/tmux"
+)
+func buildRuntimeRegistry() {
+	r := registryalias.New()
+	tmuxFactory := func() { return tmuxalias.NewSeamBackedWithConfig(), nil }
+	host := registryalias.WithHostCapabilities(nil)
+	must(r.Register("tmux", tmuxFactory, host))
+`
+	withOptions, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory, host)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback with options) error = %v", err)
+	}
+	bare, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(bare SetFallback) error = %v", err)
+	}
+	if !reflect.DeepEqual(withOptions, bare) {
+		t.Fatalf("registration options changed the discovered catalog:\nwith options: %+v\nbare:         %+v", withOptions, bare)
+	}
+
+	_, err = DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback()\nreturn r\n}"))
+	if err == nil || !strings.Contains(err.Error(), "must have a factory") {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback without a factory) error = %v, want missing-factory error", err)
 	}
 }
 

@@ -28,7 +28,8 @@ const programReadSanitizer = "[^-+A-Za-z0-9=_.|%]"
 // programPaneFormat is a pane's capture fields, appended to a list-panes -a
 // row only while the switch is not off: the agent-pane marker, the pane id,
 // whether a pipe-pane reader is attached, the sanitized tap nonce and
-// record, and the sanitized hold declaration (programHoldOption). The row's
+// record, the sanitized hold declaration (programHoldOption) and the
+// sanitized settle declaration (programSettleOption). The row's
 // own pane_dead field completes the agent-pane read. An
 // option set at no scope expands empty; one set at window, session or global
 // scope is inherited, which the judgement's pane-bound nonce compare tells
@@ -36,10 +37,11 @@ const programReadSanitizer = "[^-+A-Za-z0-9=_.|%]"
 const programPaneFormat = agentPaneMarkerFormat + "\t#{pane_id}\t#{pane_pipe}\t" +
 	"#{s/" + programReadSanitizer + "//:" + programTapOption + "}\t" +
 	"#{s/" + programReadSanitizer + "//:" + programStatusOption + "}\t" +
-	"#{s/" + programReadSanitizer + "//:" + programHoldOption + "}"
+	"#{s/" + programReadSanitizer + "//:" + programHoldOption + "}\t" +
+	"#{s/" + programReadSanitizer + "//:" + programSettleOption + "}"
 
 // programPaneFields is the field count of programPaneFormat.
-const programPaneFields = 6
+const programPaneFields = 7
 
 // programPane is one pane's capture fields as list-panes printed them.
 type programPane struct {
@@ -50,12 +52,17 @@ type programPane struct {
 	tap    string // the tap nonce as the pane reads it, inherited values included
 	record string // the published record, sanitized
 	hold   string // the hold declaration as the pane reads it: its own id when declared
+	settle string // the settle declaration as the pane reads it: its own id when declared
 }
 
 // holdDeclared reports whether the pane's hold declaration names the pane
 // itself, as a hold-declaring arm binds it: a value set at window, session
 // or global scope names another pane, or none.
 func (p programPane) holdDeclared() bool { return p.hold != "" && p.hold == p.id }
+
+// settleDeclared reports whether the pane's settle declaration names the
+// pane itself, as a settle-declaring arm binds it (see holdDeclared).
+func (p programPane) settleDeclared() bool { return p.settle != "" && p.settle == p.id }
 
 // parseProgramPane parses programPaneFields fields of a row whose pane_dead
 // field read dead. It reports false for a field tmux would never print: an
@@ -64,7 +71,7 @@ func parseProgramPane(fields []string, dead bool) (programPane, bool) {
 	if len(fields) != programPaneFields {
 		return programPane{}, false
 	}
-	pane := programPane{mark: fields[0], id: fields[1], dead: dead, tap: fields[3], record: fields[4], hold: fields[5]}
+	pane := programPane{mark: fields[0], id: fields[1], dead: dead, tap: fields[3], record: fields[4], hold: fields[5], settle: fields[6]}
 	switch pane.mark {
 	case runtime.TmuxAgentPaneMarked, runtime.TmuxAgentPaneOrphan, "pane":
 	default:
@@ -178,6 +185,7 @@ func judgeProgramPane(mode runtime.ProgramStatusMode, gate bool, pane programPan
 		row.PaneID, row.PaneDead, row.PanePipe, row.Tap = pane.id, pane.dead, pane.pipe, pane.tap
 		row.TapLiveness = taps.liveness(pane.tap)
 		row.HoldDeclared = pane.holdDeclared()
+		row.SettleDeclared = pane.settleDeclared()
 		record, err := programstatus.Decode(pane.record)
 		row.RecordForm, row.Record = programstatus.RecordForm(err), record
 	}

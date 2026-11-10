@@ -121,7 +121,15 @@ func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
 func (c *storageSplitCheck) split(f *storageSplitFindings) string {
 	var out, errOut bytes.Buffer
 	if doStorageStatusCity(storageOperatorRequest{CityPath: c.cityPath, Cfg: c.cfg}, &out, &errOut) != 0 {
-		f.errs = append(f.errs, fmt.Sprintf("the city binding is not serving: `%s` exits non-zero", storageStatusInstruction()))
+		// A stranded city whose binding names no id twice serves degraded
+		// (infraMigrationReport.servesDegraded) rather than refusing, and the
+		// error says so: nothing stops it any more, so this is where an
+		// operator who does not watch the event stream finds out.
+		if serving := storageStatusServingLine(out.String()); strings.HasPrefix(serving, "degraded") {
+			f.errs = append(f.errs, fmt.Sprintf("the city serves %s: `%s` exits non-zero and names the repair", serving, storageStatusInstruction()))
+		} else {
+			f.errs = append(f.errs, fmt.Sprintf("the city binding is not serving: `%s` exits non-zero", storageStatusInstruction()))
+		}
 		f.details = append(f.details, storageSplitLines(out.String(), errOut.String())...)
 		return ""
 	}
@@ -187,6 +195,17 @@ func storageAttestationRecorded(cityPath, hazard string) bool {
 		}
 	}
 	return false
+}
+
+// storageStatusServingLine is the value of the "serving:" line a stranded
+// city's `gc storage status` prints (infraStrandedServingLine), or "".
+func storageStatusServingLine(stdout string) string {
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "serving:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
 }
 
 // storageSplitLines is a report's non-empty lines, stdout then stderr.
