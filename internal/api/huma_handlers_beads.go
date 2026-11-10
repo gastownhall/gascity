@@ -1246,8 +1246,8 @@ func beadUpdateMutation(body beadUpdateBody) coordclass.Mutation {
 // beads and a class binding only its classes, so a write that changes a bead's
 // class in place — a work bead given gc.root_bead_id, a wisp label or gc:rt; a
 // graph step whose only graph marker is blanked — strands it in a store its
-// class is never read from. One stranded row makes every later routed gc
-// command refuse. It is refused here with 422 and nothing is written.
+// class is never read from, and the city serves degraded until the row is
+// repaired. It is refused here with 422 and nothing is written.
 //
 // A single-store city holds every class in its one store, so storeClassHolds
 // answers nil there and the guard is silent: no behavior change.

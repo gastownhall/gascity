@@ -1085,6 +1085,7 @@ func TestEnsureInfraClassMigratedRefusesWhileAnotherControllerIsLive(t *testing.
 	if !strings.Contains(log.String(), "is live on this city") {
 		t.Fatalf("the refusal did not name the live controller; log: %s", log.String())
 	}
+	assertLiveControllerMessageClaimsNoWrites(t, log.String())
 	// Nothing may claim convergence, and nothing may have been written.
 	target := mustResolveInfraTarget(t, cityPath, cfg)
 	if _, err := os.Stat(target.MarkerPath()); !os.IsNotExist(err) {
@@ -1492,14 +1493,21 @@ func infraRevertSentence() string {
 // decided. An outcome may now suppress the advice entirely — a converged or
 // unconfigured city has nothing to say — but no outcome can produce the revert
 // on its own.
+//
+// A stranded report that names ids, with nothing beside them that refuses the
+// city, serves degraded (servesDegraded). Its advice ends on that rather than
+// on "start again", and the decision is still the evidence's: a genesis city a
+// raw bd write stranded before anything wrote to the binding loses nothing to
+// the revert.
 func TestInfraMigrationRevertAdviceIsDecidedByEvidenceNotByOutcome(t *testing.T) {
 	revert := infraRevertSentence()
-	outcomes := []infraMigrationOutcome{
-		infraMigrationNotConfigured,
-		infraMigrationConverged,
-		infraMigrationUnconverged,
-		infraMigrationStranded,
-		infraMigrationUncheckable,
+	reports := []infraMigrationReport{
+		{Outcome: infraMigrationNotConfigured},
+		{Outcome: infraMigrationConverged},
+		{Outcome: infraMigrationUnconverged},
+		{Outcome: infraMigrationStranded},
+		{Outcome: infraMigrationStranded, Stranded: []string{"gc-1"}},
+		{Outcome: infraMigrationUncheckable},
 	}
 	// Outcomes that describe a city with nothing wrong say nothing at all;
 	// every other outcome must end with a revert decision, one way or the other.
@@ -1507,14 +1515,22 @@ func TestInfraMigrationRevertAdviceIsDecidedByEvidenceNotByOutcome(t *testing.T)
 		infraMigrationNotConfigured: true,
 		infraMigrationConverged:     true,
 	}
-	for _, outcome := range outcomes {
+	for _, base := range reports {
+		outcome := base.Outcome
 		for _, empty := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%v/binding-proven-empty=%v", outcome, empty), func(t *testing.T) {
-				report := infraMigrationReport{Outcome: outcome, BindingProvenEmpty: empty}
+			t.Run(fmt.Sprintf("%v/stranded=%d/binding-proven-empty=%v", outcome, len(base.Stranded), empty), func(t *testing.T) {
+				report := base
+				report.BindingProvenEmpty = empty
 				if !empty {
 					report.BindingProbe = fmt.Errorf("listing the infra binding: database is locked")
 				}
+				if len(report.Stranded) > 0 && !report.servesDegraded() {
+					t.Fatalf("precondition: %+v does not serve degraded, so the degraded advice is never rendered", report)
+				}
 				advice := infraMigrationOperatorAdvice(report, "gc start")
+				if report.servesDegraded() && !strings.HasSuffix(advice, " The rest of the city serves degraded meanwhile.") {
+					t.Fatalf("the advice for a city that serves degraded does not end on that: %q", advice)
+				}
 				if silent[outcome] {
 					if advice != "" {
 						t.Fatalf("a %v city was given boot advice it has no use for: %q", outcome, advice)
