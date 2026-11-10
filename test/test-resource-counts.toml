@@ -2413,6 +2413,11 @@ calls = 1
 medium = 1
 
 [[count]]
+path = "internal/runtime/exec/process_scan_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/fake_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2550,6 +2555,11 @@ calls = 1
 
 [[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimetest/process_table_test.go"
 resource = "subprocess"
 calls = 1
 

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -731,6 +732,47 @@ func TestStartRefusesLiveUnlistedRoot(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "pid=1234") {
 				t.Fatalf("%s error = %v, want it to name pid=1234", tc.name, err)
+			}
+			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want no terminate and no start", sp.events)
+			}
+		})
+	}
+}
+
+// AC-7: a LiveUnlisted claim the provider makes on a listing that failed
+// (the scan returns a whole-scan failure: its tracking is unknown) refuses
+// the start like any claim, and the refusal names that failure, since the
+// provider could only not rule the root out. Without a scan error, or with
+// only unreadable entries, which leave tracking known, it says the root is
+// the provider's.
+func TestStartRefusalNamesAFailedListing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		findErr error
+		want    []string
+		notWant string
+	}{
+		{"no scan error", nil, []string{"belongs to the provider but is not listed by it"}, "could not rule it out"},
+		{"unreadable entry", &proctable.EntryError{PID: 77, Err: errors.New("reading environ of pid 77: permission denied")}, []string{"belongs to the provider but is not listed by it"}, "could not rule it out"},
+		{"failed listing", errors.New("exec provider pack: tracking: exec provider pack inventory: context deadline exceeded"), []string{"could not rule it out", "inventory: context deadline exceeded"}, "belongs to the provider but"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{{PID: 1234, PPID: 1, LiveUnlisted: true}}
+			sp.findErr = tc.findErr
+
+			err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Start error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+			for _, want := range append([]string{"pid=1234"}, tc.want...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Start error = %v, want it to contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("Start error = %v, want no %q", err, tc.notWant)
 			}
 			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
 				t.Fatalf("events = %v, want no terminate and no start", sp.events)
