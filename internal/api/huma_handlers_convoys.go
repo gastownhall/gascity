@@ -569,14 +569,10 @@ func (s *Server) humaHandleConvoyDelete(_ context.Context, input *ConvoyDeleteIn
 
 // humaDeleteWorkflow handles workflow convoy deletion through the Huma handler.
 func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
-	stores := s.workflowStores()
+	stores, resident := workflowLegs(s.state, workflowLegQuery{})
 	found := false
 
 	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
-
 		// open is the subset the close may stamp: the tree is listed with
 		// IncludeClosed, and a store that batches the close without reading each
 		// status first writes the skip onto every id it is handed, rewriting the
@@ -608,39 +604,29 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			rootIDs = append(rootIDs, root.ID)
 			addBead(root)
 		}
-		// Relic leg (S4 debt): a scope store holds graph roots and their
-		// steps only as rows written before the split; beads.RelicGet and
-		// beads.RelicRead count each read as debt, as humaHandleWorkflowDelete
-		// does.
-		if root, err := beads.RelicGet(info.store, workflowID); err == nil {
+		// The tree is read in the leg's plan role: a scope leg of a split
+		// city holds graph roots and their steps only as rows written before
+		// the split (a relic leg, S4 debt), as in humaHandleWorkflowDelete.
+		if root, err := info.leg.Reader.Get(workflowID); err == nil {
 			addRoot(root)
 		}
-		var roots []beads.Bead
-		if err := beads.RelicRead(func() error {
-			var listErr error
-			roots, listErr = info.store.List(beads.ListQuery{
-				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-					beadmeta.WorkflowIDMetadataKey: workflowID,
-				},
-				IncludeClosed: true,
-			})
-			return listErr
+		if roots, err := info.leg.Reader.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+				beadmeta.WorkflowIDMetadataKey: workflowID,
+			},
+			IncludeClosed: true,
 		}); err == nil {
 			for _, root := range roots {
 				addRoot(root)
 			}
 		}
 		for _, rootID := range rootIDs {
-			var all []beads.Bead
-			if err := beads.RelicRead(func() error {
-				var listErr error
-				all, listErr = info.store.List(beads.ListQuery{
-					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-					IncludeClosed: true,
-				})
-				return listErr
-			}); err != nil {
+			all, err := info.leg.Reader.List(beads.ListQuery{
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+				IncludeClosed: true,
+			})
+			if err != nil {
 				continue
 			}
 			for _, b := range all {
@@ -654,7 +640,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		if len(open) == 0 {
 			continue
 		}
-		info.store.CloseAll(open, map[string]string{ //nolint:errcheck
+		resident(info).CloseAll(open, map[string]string{ //nolint:errcheck
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
@@ -721,7 +707,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	scopeRef := strings.TrimSpace(input.ScopeRef)
 	deleteFromStore := input.Delete
 
-	stores := s.workflowStores()
+	stores, resident := workflowLegs(s.state, workflowLegQuery{})
 
 	closed := 0
 	deleted := 0
@@ -729,9 +715,6 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	var pa partialAggregator
 
 	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
 		if scopeKind != "" && info.scopeKind != scopeKind {
 			continue
 		}
@@ -772,27 +755,21 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			rootIDs = append(rootIDs, root.ID)
 			addBead(root)
 		}
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// One leg of the workflowStores federation (graph, city, rigs): a
-		// miss on either root probe is covered by the leg that owns the root.
-		if root, err := beads.RelicGet(info.store, workflowID); err == nil {
+		// One leg of the workflowStores federation (graph, city, rigs), read
+		// in its plan role: a scope leg of a split city holds these rows only
+		// as pre-split copies (a relic leg, S4 debt). A miss on either root
+		// probe is covered by the leg that owns the root.
+		if root, err := info.leg.Reader.Get(workflowID); err == nil {
 			addRoot(root)
 		} else if !errors.Is(err, beads.ErrNotFound) {
 			pa.record("store "+info.scopeRef+" get root", err)
 		}
-		var roots []beads.Bead
-		if err := beads.RelicRead(func() error {
-			var listErr error
-			roots, listErr = info.store.List(beads.ListQuery{
-				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-					beadmeta.WorkflowIDMetadataKey: workflowID,
-				},
-				IncludeClosed: true,
-			})
-			return listErr
+		if roots, err := info.leg.Reader.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+				beadmeta.WorkflowIDMetadataKey: workflowID,
+			},
+			IncludeClosed: true,
 		}); err == nil {
 			for _, root := range roots {
 				addRoot(root)
@@ -801,15 +778,11 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			pa.record("store "+info.scopeRef+" list roots", err)
 		}
 		for _, rootID := range rootIDs {
-			var all []beads.Bead
-			if err := beads.RelicRead(func() error {
-				var listErr error
-				all, listErr = info.store.List(beads.ListQuery{
-					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-					IncludeClosed: true,
-				})
-				return listErr
-			}); err != nil {
+			all, err := info.leg.Reader.List(beads.ListQuery{
+				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+				IncludeClosed: true,
+			})
+			if err != nil {
 				pa.record("store "+info.scopeRef+" list descendants", err)
 				continue
 			}
@@ -821,10 +794,13 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			continue
 		}
 		found = true
+		// The tree's writes, and the dep reads that pick what to unlink, go
+		// through the leg's writable handle, strict as the store was.
+		store := resident(info)
 
 		// Phase 1: Batch close all open beads.
 		if len(open) > 0 {
-			n, closeErr := info.store.CloseAll(open, map[string]string{
+			n, closeErr := store.CloseAll(open, map[string]string{
 				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 			})
@@ -837,25 +813,25 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		// Phase 2: Delete if requested.
 		if deleteFromStore {
 			for _, id := range ids {
-				if deps, err := info.store.DepList(id, "down"); err == nil {
+				if deps, err := store.DepList(id, "down"); err == nil {
 					for _, dep := range deps {
-						if err := info.store.DepRemove(id, dep.DependsOnID); err != nil {
+						if err := store.DepRemove(id, dep.DependsOnID); err != nil {
 							pa.record("store "+info.scopeRef+" dep-remove "+id+"→"+dep.DependsOnID, err)
 						}
 					}
 				} else {
 					pa.record("store "+info.scopeRef+" dep-list down "+id, err)
 				}
-				if deps, err := info.store.DepList(id, "up"); err == nil {
+				if deps, err := store.DepList(id, "up"); err == nil {
 					for _, dep := range deps {
-						if err := info.store.DepRemove(dep.IssueID, id); err != nil {
+						if err := store.DepRemove(dep.IssueID, id); err != nil {
 							pa.record("store "+info.scopeRef+" dep-remove "+dep.IssueID+"→"+id, err)
 						}
 					}
 				} else {
 					pa.record("store "+info.scopeRef+" dep-list up "+id, err)
 				}
-				if err := info.store.Delete(id); err != nil {
+				if err := store.Delete(id); err != nil {
 					pa.record("store "+info.scopeRef+" delete "+id, err)
 					continue
 				}

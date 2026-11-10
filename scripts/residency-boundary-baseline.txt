@@ -217,8 +217,6 @@ cmd/gc/residency_topology.go	cliSoleClassBinding	c:plan-leg-store-access	1
 cmd/gc/residency_topology.go	residencyBindingsFromRoutesWithProof	b:routes.storeFor	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
-internal/api/handler_convoy_dispatch.go	workflowStoresWith	a:BeadStores	1
-internal/api/handler_convoys.go	isGraphConvoyID	a:BeadStores	1
 internal/api/handler_sling.go	sourceWorkflowStores	a:BeadStores	2
 internal/api/handler_status.go	statusWorkCounts	a:BeadStores	1
 internal/api/huma_handlers_beads.go	humaHandleBeadList	a:BeadStores	1

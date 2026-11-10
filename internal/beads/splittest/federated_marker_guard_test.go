@@ -52,10 +52,6 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"tracking convoys are probed on the work store and the graph store; a convoy minted single-store-era can sit on the graph side",
 	},
 
-	"internal/api/handler_convoys.go isGraphConvoyID": {
-		"federated", 1,
-		"graph-first probe of a convoy id; a plain (work) convoy misses there and the rig legs answer it",
-	},
 	"cmd/gc/cmd_order.go bdCursor": {
 		"federated", 1,
 		"one leg of bdCursorAcrossStores (S3a): order-run records live in the orders binding and, as v1 poured roots, on the work legs",
@@ -110,23 +106,14 @@ var reviewedMarkers = map[string]reviewedMarker{
 	},
 
 	// Relic legs: graph rows read from city and rig scope stores (S4).
-	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep in workflow teardown"},
-	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                  {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
-	"cmd/gc/graph_placement.go graphResidenceForTree":                          {"relic", 1, "the S4 rule's relic leg: a pre-S4 rig tree read from the rig ledger until the rig is imported (S4b)"},
-	"cmd/gc/convergence_store.go (*convergenceStoreAdapter).list":              {"relic", 1, "pre-S4a rig convergence loops in the rig's own store, read until the rig is imported (S4b)"},
-	"cmd/gc/formula_cook_attach_class.go attachGraftClassRefusal":              {"relic", 1, "cook --attach onto a pre-S4 rig tree reads the attach bead where it lives, until the rig is imported (S4b)"},
-	"internal/api/handler_convoys.go rigLegConvoyGet":                          {"relic", 1, "isGraphConvoyID's rig leg: a pre-S4 graph convoy in a rig ledger, until the rig is imported (S4b)"},
-	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                          {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
-	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore":  {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
-	"cmd/gc/cmd_convoy_dispatch.go assessZeroMatchSourceWorkflowScan":          {"relic", 1, "zero-match re-scan over the same views"},
-	"internal/api/convoy_event_stream.go workflowEventBeadFromSubject":         {"relic", 1, "workflowStores residence probe (graph, city, rigs)"},
-	"internal/api/convoy_event_stream.go workflowEventRoot":                    {"relic", 1, "workflowStores root scan (graph, city, rigs)"},
-	"internal/api/handler_convoy_dispatch.go (*Server).buildWorkflowSnapshot":  {"relic", 2, "workflowStores root probe and metadata sweep"},
-	"internal/api/huma_handlers_convoys.go (*Server).humaHandleWorkflowDelete": {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep"},
-	"internal/api/huma_handlers_runs.go (*Server).cancelRun":                   {"relic", 1, "workflowStores root scan for a run"},
-	"internal/api/orders_feed.go buildWorkflowRunProjections":                  {"relic", 1, "workflowStores closed-root list"},
-	"internal/api/orders_feed.go buildWorkflowRunProjectionsRootOnly":          {"relic", 1, "workflowStores closed-root list (root-only projection)"},
-	"internal/sling/sling_core.go (*sourceWorkflowRootCollector).scanStore":    {"relic", 1, "source-workflow root scan over SourceWorkflowStores"},
+	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                 {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
+	"cmd/gc/graph_placement.go graphResidenceForTree":                         {"relic", 1, "the S4 rule's relic leg: a pre-S4 rig tree read from the rig ledger until the rig is imported (S4b)"},
+	"cmd/gc/convergence_store.go (*convergenceStoreAdapter).list":             {"relic", 1, "pre-S4a rig convergence loops in the rig's own store, read until the rig is imported (S4b)"},
+	"cmd/gc/formula_cook_attach_class.go attachGraftClassRefusal":             {"relic", 1, "cook --attach onto a pre-S4 rig tree reads the attach bead where it lives, until the rig is imported (S4b)"},
+	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                         {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
+	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore": {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
+	"cmd/gc/cmd_convoy_dispatch.go assessZeroMatchSourceWorkflowScan":         {"relic", 1, "zero-match re-scan over the same views"},
+	"internal/sling/sling_core.go (*sourceWorkflowRootCollector).scanStore":   {"relic", 1, "source-workflow root scan over SourceWorkflowStores"},
 
 	// Relic legs: session beads read from a scope store unioned beside the
 	// sessions store.
