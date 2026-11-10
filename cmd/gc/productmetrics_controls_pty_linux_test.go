@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 func openProductMetricsControlPTY() (output, terminal *os.File, returnErr error) {
@@ -33,9 +34,9 @@ func openProductMetricsControlPTY() (output, terminal *os.File, returnErr error)
 	if err := productMetricsControlPTYIoctl(output, "TIOCSPTLCK", syscall.TIOCSPTLCK, uintptr(unsafe.Pointer(&locked))); err != nil {
 		return nil, nil, err
 	}
-	terminal, err = os.OpenFile("/dev/pts/"+strconv.FormatUint(uint64(number), 10), os.O_RDWR|syscall.O_NOCTTY, 0)
+	terminal, err = openProductMetricsControlPTYPeer(output, number)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open PTY terminal: %w", err)
+		return nil, nil, err
 	}
 	return output, terminal, nil
 }
@@ -50,13 +51,28 @@ func productMetricsControlPTYIoctl(file *os.File, name string, command, pointer 
 
 // productMetricsControlPTYPeerUnsupported reports whether a TIOCGPTPEER errno
 // means the kernel lacks the ioctl, so the path-based open is the fallback.
-func productMetricsControlPTYPeerUnsupported(_ syscall.Errno) bool {
-	return false
+func productMetricsControlPTYPeerUnsupported(errno syscall.Errno) bool {
+	return errno == syscall.ENOTTY || errno == syscall.EINVAL
 }
 
-// openProductMetricsControlPTYPeer returns the slave of master's pty.
-func openProductMetricsControlPTYPeer(_ *os.File, _ uint32) (*os.File, error) {
-	return nil, errors.New("not implemented")
+// openProductMetricsControlPTYPeer returns the slave of master's pty. It asks
+// the master for the slave with TIOCGPTPEER, which needs no /dev/pts path and
+// so works where that path is not openable (nested sandboxes). Only a kernel
+// without the ioctl falls back to opening /dev/pts/<number>.
+func openProductMetricsControlPTYPeer(master *os.File, number uint32) (*os.File, error) {
+	name := "/dev/pts/" + strconv.FormatUint(uint64(number), 10)
+	fd, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), unix.TIOCGPTPEER, uintptr(syscall.O_RDWR|syscall.O_NOCTTY))
+	if errno == 0 {
+		return os.NewFile(fd, name), nil
+	}
+	if !productMetricsControlPTYPeerUnsupported(errno) {
+		return nil, fmt.Errorf("open PTY terminal: TIOCGPTPEER ioctl: %w", errno)
+	}
+	terminal, err := os.OpenFile(name, os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open PTY terminal: %w", err)
+	}
+	return terminal, nil
 }
 
 func TestProductMetricsControlPTYPeer(t *testing.T) {
