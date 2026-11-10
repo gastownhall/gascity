@@ -767,6 +767,64 @@ func TestGoTestObservableHousekeepingFailureKeepsProductResult(t *testing.T) { /
 	}
 }
 
+func TestGoTestObservablePruneKeepsNewlineFilenamesInsideOwnedDir(t *testing.T) {
+	f := newObservableLogFixture(t, "", 0)
+	d := observableOwnedDir(f.root)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(f.root, "outside-victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A filename cannot contain '/', so a newline split yields a path that is
+	// relative to the wrapper's working directory; run the wrapper from the
+	// victim's directory so a split would resolve to the victim.
+	planted := filepath.Join(d, "x\n"+filepath.Base(victim))
+	if err := os.WriteFile(planted, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageObservableFile(t, planted, 4321)
+	cmd := f.command(t, nil)
+	cmd.Dir = f.root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrapper: %v\n%s", err, out)
+	}
+	if data, err := os.ReadFile(victim); err != nil || string(data) != "keep" {
+		t.Errorf("outside victim changed: %q, %v", data, err)
+	}
+	if _, err := os.Lstat(planted); !os.IsNotExist(err) {
+		t.Errorf("planted expired file remains: %v", err)
+	}
+}
+
+func TestGoTestObservableDeleteFailureWarnsAndKeepsProductResult(t *testing.T) {
+	for _, productStatus := range []int{0, 17} {
+		t.Run(fmt.Sprintf("status-%d", productStatus), func(t *testing.T) {
+			f := newObservableLogFixture(t, `{"Action":"pass","Package":"example","Elapsed":0.1}`+"\n", productStatus)
+			d := observableOwnedDir(f.root)
+			if err := os.Mkdir(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(d, "expired.jsonl")
+			if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ageObservableFile(t, old, 4321)
+			if err := os.WriteFile(filepath.Join(f.bin, "rm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path, output := f.run(t, nil, productStatus)
+			if got := strings.Count(output, "observable go test: warning: log housekeeping failed"); got != 1 {
+				t.Errorf("housekeeping warning count = %d:\n%s", got, output)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("log missing after delete failure: %v", err)
+			}
+		})
+	}
+}
+
 func TestGoTestObservableRejectsUnownedDirectory(t *testing.T) { // T12
 	for _, kind := range []string{"regular-file", "symlink"} {
 		t.Run(kind, func(t *testing.T) {

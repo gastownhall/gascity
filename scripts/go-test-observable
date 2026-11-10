@@ -85,19 +85,16 @@ establish_log_dir() {
 }
 
 # prune_expired_logs removes direct regular files older than the retention
-# window from log_dir and reports how many it removed on stdout.
+# window from log_dir and reports how many it removed on stdout. A find or
+# deletion failure returns non-zero, which is reported as a housekeeping
+# failure.
 prune_expired_logs() {
-  local expired removed=0 path
-  expired="$(find "$log_dir" -maxdepth 1 -type f -mmin +"$log_retention_minutes")" || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if rm -f "$path"; then
-      removed=$((removed + 1))
-    fi
-  done <<EOF_EXPIRED
-$expired
-EOF_EXPIRED
-  printf '%s\n' "$removed"
+  local removed_marks
+  # find hands each path to the helper as its own argument, so a filename
+  # containing a newline can never be split into a second, outside path.
+  removed_marks="$(find "$log_dir" -maxdepth 1 -type f -mmin +"$log_retention_minutes" \
+    -exec sh -c 'rc=0; for p; do if rm -f -- "$p"; then printf x; else rc=1; fi; done; exit "$rc"' sh {} +)" || return 1
+  printf '%s\n' "${#removed_marks}"
 }
 
 # housekeep_log_dir prunes expired logs and prints the prune line when any
