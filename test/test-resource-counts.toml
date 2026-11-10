@@ -957,6 +957,12 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/infra_scope_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2183,7 +2189,7 @@ calls = 2
 [[count]]
 path = "internal/doctor/checks_test.go"
 resource = "net_listen"
-calls = 8
+calls = 9
 
 [[count]]
 path = "internal/doctor/checks_test.go"
