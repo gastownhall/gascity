@@ -296,7 +296,7 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 }
 
 // nameConfirmedFree is a reopen's fresh runtime read of name (readRuntime,
-// the effects' standard read, with the template's process names), under the
+// the effects' standard read, its agent judged by its launch names), under the
 // identifier locks the reopen holds: a plan read the name free from an
 // observation the inventory's lag can leave behind a runtime started since,
 // and a reopen writes the row stopped. Only a read that finds the name

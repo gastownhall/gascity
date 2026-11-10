@@ -585,3 +585,33 @@ func TestStartRecycleRemembersItsClassification(t *testing.T) {
 		}
 	}
 }
+
+// resolvesProcessNames resolves the kit's template to names, as a reload
+// that moved the row to another provider does.
+func (k *txKit) resolvesProcessNames(names ...string) {
+	for key, res := range k.p.World.Templates.entries {
+		res.TP.Hints.ProcessNames = names
+		k.p.World.Templates.entries[key] = res
+	}
+}
+
+// Kills a recycle judging the row's own runtime by its current template
+// (ga-2xkdf5): a reload moved the template to "new-agent" while the runtime
+// still runs the "agent" it was launched with, its pane showing crash-like
+// output. The start finds it alive and settles the already-running no-op
+// without a kill, a crash or a launch.
+func TestStartSparesAnAgentAliveUnderItsLaunchNames(t *testing.T) {
+	k, _, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+	k.mutate(func(r *simRuntime) { r.zombie = false; launchedAs([]string{"agent"}, "agent")(r) })
+	k.resolvesProcessNames("new-agent")
+	s := k.runKind()
+	if s.Outcome != settledNoop || s.Cause != causeAlreadyRunning {
+		t.Fatalf("settlement %+v, want the already-running no-op", s)
+	}
+	if len(k.sp.kills) != 0 || len(k.starts()) != 0 || crashes(rec) != 0 || crashFacts(s) != 0 {
+		t.Fatalf("settlement %+v: kills %d starts %d crashes %d, want the runtime spared, nothing started", s, len(k.sp.kills), len(k.starts()), crashes(rec))
+	}
+	if s.Outcome == settledFailed || s.Facts.Classified != nil {
+		t.Fatalf("settlement %+v, want the live runtime settled unclassified", s)
+	}
+}

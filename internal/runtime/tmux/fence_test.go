@@ -347,7 +347,7 @@ func TestStartPublishesInputFence(t *testing.T) {
 func TestRelaunchRepublishesFromSessionEnv(t *testing.T) {
 	m := newFenceModel(nil, fenceEnv(testFence))
 	tm := fenceModelProvider(m).tm
-	if err := (&tmuxStartOps{tm: tm}).respawnAgent(fenceModelSession, "", "claude", nil); err != nil {
+	if err := (&tmuxStartOps{tm: tm}).respawnAgent(fenceModelSession, "", "claude", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if want := testFence.Digest() + ".%1"; m.own != want {

@@ -154,7 +154,7 @@ func TestRespawnAgentRejectsUnsafeWithheldBeadsKey(t *testing.T) {
 
 	err := ops.respawnAgent("gc-test-invalid-env-key", "", "claude", map[string]string{
 		"BEADS_BAD;touch /tmp/pwned": "",
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 		t.Fatalf("respawnAgent error = %v, want an environment-name validation error", err)
 	}
@@ -502,7 +502,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		"GC_CITY":             "/tmp/city",
 		"GC_CONTROLLER_TOKEN": "",
 	}
-	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
+	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env, nil); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
 	if len(exec.calls) != 5 {
@@ -537,7 +537,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 			"BEADS_FUTURE_AUTHORITY": "",
 			"GC_CITY":                "/tmp/city",
 		}
-		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
+		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env, nil); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
 		if len(exec.calls) != 6 {
@@ -574,11 +574,77 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 		"CODEX_THREAD_ID":        "",
 		"CODEX_CI":               "",
 	}
-	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
+	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env, nil); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
 	if len(exec.calls) != 4 {
 		t.Fatalf("tmux calls = %d (%v), want 4 (adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	}
+}
+
+// Kills a relaunch that leaves the identity naming the box's first launch
+// (the #8923 review): respawn-pane keeps the session environment, and no
+// fingerprint hashes ProcessNames, so a launch-only change can move the box
+// to a program its first launch's GT_PROCESS_NAMES do not match, and the
+// relaunched agent then reads dead. The respawn's own command list records
+// the names a start records (the caller's own GT_PROCESS_NAMES, else the
+// trimmed process names), or drops the entry when there are none, as a start
+// with none leaves it unset, ahead of respawn-pane. Kills, too, a record
+// that outlives a respawn that never ran (the iteration-2 review): a pane
+// lookup that fails sends no record, so the first launch's agent, still
+// running, keeps the names it runs under instead of reading dead under the
+// relaunched agent's.
+func TestRespawnAgentRecordsTheRelaunchedAgentsProcessNames(t *testing.T) {
+	record := func(args ...string) []string {
+		return append([]string{"set-environment", "-t", "=gc-test-names"}, args...)
+	}
+	names := func(call []string) bool { return slices.Contains(call, "GT_PROCESS_NAMES") }
+	for _, c := range []struct {
+		name  string
+		env   map[string]string
+		names []string
+		want  []string
+	}{
+		{"the relaunched agent's names", nil, []string{"tail", " ", "node"}, record("GT_PROCESS_NAMES", "tail,node")},
+		{"the caller's own", map[string]string{"GT_PROCESS_NAMES": "wrapper"}, []string{"tail"}, record("GT_PROCESS_NAMES", "wrapper")},
+		{"none", map[string]string{"GT_PROCESS_NAMES": " "}, nil, record("-u", "GT_PROCESS_NAMES")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			exec := &fakeExecutor{out: "agent\t@1.%0"}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-names", "/proj", "tail", c.env, c.names); err != nil {
+				t.Fatalf("respawnAgent: %v", err)
+			}
+			want := slices.Concat([]string{"-u"}, c.want, []string{";", "respawn-pane"})
+			recorded := slices.IndexFunc(exec.calls, names)
+			if recorded < 0 || len(exec.calls[recorded]) < len(want) || !slices.Equal(exec.calls[recorded][:len(want)], want) {
+				t.Fatalf("tmux calls %q, want the respawn's list to lead with %q", exec.calls, c.want)
+			}
+			if slices.ContainsFunc(exec.calls[recorded+1:], names) {
+				t.Fatalf("tmux calls %q, want the names recorded once, in the respawn's list", exec.calls)
+			}
+		})
+	}
+	for _, c := range []struct {
+		name   string
+		exec   *fakeExecutor
+		wantIs error
+	}{
+		{"a busy server", &fakeExecutor{err: errors.New("tmux list-panes: server busy")}, nil},
+		{"two agent panes", &fakeExecutor{out: "agent\t@1.%3\nagent\t@2.%4"}, errAgentPaneAmbiguous},
+	} {
+		t.Run("a failed pane lookup records nothing: "+c.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = c.exec
+			err := (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-names", "/proj", "tail", nil, []string{"tail"})
+			if err == nil || c.wantIs != nil && !errors.Is(err, c.wantIs) {
+				t.Fatalf("respawnAgent = %v, want the lookup's failure", err)
+			}
+			if slices.ContainsFunc(c.exec.calls, func(call []string) bool { return names(call) || slices.Contains(call, "respawn-pane") }) {
+				t.Fatalf("tmux calls %q, want no names recorded and nothing respawned", c.exec.calls)
+			}
+		})
 	}
 }
 
@@ -592,15 +658,19 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 // names that one target throughout.
 func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	lookup := []string{"list-panes", "-s", "-t", "=gc-test-agent-pane:", "-F", agentPaneMarkerFormat + "\t#{window_id}.#{pane_id}"}
-	// respawnAgent first checks for a lone unmarked pane to adopt.
+	// respawnAgent first checks for a lone unmarked pane to adopt, and its
+	// respawn list leads with the relaunched agent's process names (none
+	// here).
 	adopt := []string{"list-panes", "-s", "-t", "=gc-test-agent-pane:", "-F", agentPaneMarkerFormat + "\t#{pane_id}"}
-	// respawn is the switch-off respawn list of command on target.
-	respawn := func(target string, command ...string) []string {
-		return tmuxArgvList([][]string{
+	names := []string{"set-environment", "-t", "=gc-test-agent-pane", "-u", "GT_PROCESS_NAMES"}
+	// respawn is the switch-off respawn list of command on target, led by
+	// lead.
+	respawn := func(lead [][]string, target string, command ...string) []string {
+		return tmuxArgvList(append(lead,
 			append([]string{"respawn-pane", "-k", "-t", target}, command...),
-			{"display-message", "-p", "-t", target, "#{pane_id}"},
-			{"if-shell", "-F", "-t", target, "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine(target)},
-		})
+			[]string{"display-message", "-p", "-t", target, "#{pane_id}"},
+			[]string{"if-shell", "-F", "-t", target, "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine(target)},
+		))
 	}
 	cases := []struct {
 		name string
@@ -609,14 +679,14 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 		want [][]string // each call's argv after runCtx's "-u"
 	}{
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
-			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{adopt, lookup, respawn("=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
+			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil, nil)
+		}, [][]string{adopt, lookup, respawn([][]string{names}, "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
-		}, [][]string{lookup, respawn("=gc-test-agent-pane:@3.%7", "claude")}},
+		}, [][]string{lookup, respawn(nil, "=gc-test-agent-pane:@3.%7", "claude")}},
 		{"pane id", "", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("%3", "", "claude")
-		}, [][]string{respawn("%3", "claude")}},
+		}, [][]string{respawn(nil, "%3", "claude")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -883,7 +953,7 @@ func TestRespawnAgentAdoptsLoneUnmarkedPane(t *testing.T) {
 			}
 			tm := NewTmux()
 			tm.exec = exec
-			if err := (&tmuxStartOps{tm: tm}).respawnAgent("w", "", "claude", nil); err != nil {
+			if err := (&tmuxStartOps{tm: tm}).respawnAgent("w", "", "claude", nil, nil); err != nil {
 				t.Fatalf("respawnAgent: %v", err)
 			}
 			marked := slices.ContainsFunc(exec.calls, func(c []string) bool { return slices.Contains(c, agentPaneOption) })
@@ -1340,7 +1410,7 @@ func TestDemandSpawnKeysMarkedRemovedOnCreateAndRespawn(t *testing.T) {
 			return tm.NewSessionWithCommandAndEnv("gc-test-demand-pin", "", "claude", env)
 		}},
 		{"respawn", func(tm *Tmux, env map[string]string) error {
-			return (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-demand-pin", "/proj", "claude", env)
+			return (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-demand-pin", "/proj", "claude", env, nil)
 		}},
 	}
 	for _, path := range paths {
