@@ -223,6 +223,64 @@ func TestRun_UnknownDeclaredCapabilityIgnored(t *testing.T) {
 	}
 }
 
+// idle-boundary is a capability gc honors, so the handshake check must not
+// call it unknown; it promises no op of its own, so it adds no capability
+// check (gc runtime conformance checks it as RPP-CONN-002).
+// Kills: a token gc acts on reported as ignored.
+func TestRun_IdleBoundaryCapabilityIsKnown(t *testing.T) {
+	state := t.TempDir()
+	const from = `["report-attachment","report-activity"]`
+	script := conformantScript(state)
+	if !strings.Contains(script, from) {
+		t.Fatalf("conformant script declares no %s to extend", from)
+	}
+	body := strings.Replace(script, from, `["report-attachment","report-activity","idle-boundary"]`, 1)
+	res := runScript(t, body, Options{})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true with idle-boundary declared: %+v", res.Checks)
+	}
+	if c := findCheck(t, res, "protocol handshake"); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail = %q, want idle-boundary not reported as unknown", c.Detail)
+	}
+	if hasCheck(res, "capability idle-boundary") {
+		t.Error("idle-boundary produced a capability check")
+	}
+}
+
+// A pack declaring proc.exec, report-activity and report-attachment without
+// idle-boundary is in a recognizable migration state: it passes, but is told
+// gc gives it no idle wait. Declaring idle-boundary, or not declaring all
+// three, silences the warning.
+// Kills: a pack that silently drops to timed_only sleep (gh#8903).
+func TestRun_WarnsOnTheTripleWithoutIdleBoundary(t *testing.T) {
+	const from = `["report-attachment","report-activity"]`
+	for _, tc := range []struct {
+		caps string
+		warn bool
+	}{
+		{`["report-attachment","report-activity","proc.exec"]`, true},
+		{`["report-attachment","report-activity","proc.exec","idle-boundary"]`, false},
+		{`["report-attachment","report-activity"]`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.caps, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.caps, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, idleBoundaryMigrationWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want migration warning %v", tc.caps, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.caps, detail)
+		}
+	}
+}
+
 func TestRun_DeclaredCapabilityNotImplementedFails(t *testing.T) {
 	state := t.TempDir()
 	// Declares report-attachment but the is-attached op falls through to

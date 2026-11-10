@@ -216,11 +216,17 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // RUNTIME-RPP-008). The conformance-only tokens (conformance-faults,
 // city-scoped) promise no op of their own, so they map to "": they are
 // listed only so the handshake check does not report them as unknown, and
-// `gc runtime conformance` checks the behavior they claim.
+// `gc runtime conformance` checks the behavior they claim. idle-boundary is
+// a claim about the box's tmux, read over exec, not an op of its own, so it
+// maps to "" too (RPP-CONN-002 checks it), and so does proc.exec, whose exec
+// op `gc runtime conformance` checks (RPP-CONN-001) and which the
+// idle-boundary migration warning names.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
 	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	runtime.ProtocolCapabilityConnectionExec:   "",
+	runtime.ProtocolCapabilityIdleBoundary:     "",
 	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
@@ -279,7 +285,27 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if len(unknown) > 0 {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
+	if missingIdleBoundary(info) {
+		detail += "; " + idleBoundaryMigrationWarning
+	}
 	c.record(handshakeCheck, StatusPass, detail)
+}
+
+// idleBoundaryMigrationWarning names the migration state a pack is in when it
+// declares the three capabilities that once gave it an idle boundary but not
+// idle-boundary, which it now also needs: it passes, but gc gives it no idle
+// wait and its interactive sessions do not sleep.
+const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; that is expected for a runtime whose box runs no tmux, otherwise declare idle-boundary (the agent runs in the box's tmux session main)"
+
+// missingIdleBoundary reports whether the handshake declares proc.exec,
+// report-activity and report-attachment but not idle-boundary: the set the exec
+// provider's idleBoundaryDeclared requires, less the token. Change them
+// together.
+func missingIdleBoundary(info runtime.ProtocolInfo) bool {
+	return info.Has(runtime.ProtocolCapabilityConnectionExec) &&
+		info.Has(runtime.ProtocolCapabilityReportActivity) &&
+		info.Has(runtime.ProtocolCapabilityReportAttachment) &&
+		!info.Has(runtime.ProtocolCapabilityIdleBoundary)
 }
 
 // checkLifecycle runs the required round-trip — start → is-running true

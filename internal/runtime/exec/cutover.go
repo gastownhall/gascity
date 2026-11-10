@@ -23,6 +23,10 @@ import (
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
 //
+// The process-table scanner, which only a v2-ready pack sharing the host
+// can use (process_scan.go), and the local-transcript trait (hoststage.go)
+// are passed through from the files that define them.
+//
 // ExecProvider is deliberately NOT passed through: exec's Exec op is the
 // connection the carrier drives over INTERNALLY (no production caller
 // type-asserts it), so seam-backed driving reaches it through the provider's own
@@ -58,14 +62,14 @@ var (
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
 // through the seams.
-func NewSeamBacked(script string) runtime.Provider {
-	return seamBacked(NewProvider(script))
+func NewSeamBacked(script string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProvider(script, opts...))
 }
 
 // NewSeamBackedForCity is NewSeamBacked for a provider serving one city: every
 // op carries GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH (NewProviderForCity).
-func NewSeamBackedForCity(script, cityName, cityPath string) runtime.Provider {
-	return seamBacked(NewProviderForCity(script, cityName, cityPath))
+func NewSeamBackedForCity(script, cityName, cityPath string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProviderForCity(script, cityName, cityPath, opts...))
 }
 
 func seamBacked(raw *Provider) *seamBackedProvider {

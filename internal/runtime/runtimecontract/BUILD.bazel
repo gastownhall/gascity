@@ -4,6 +4,7 @@ go_library(
     name = "runtimecontract",
     srcs = [
         "catalog.go",
+        "fshost.go",
         "observe.go",
         "ported.go",
         "probes.go",
@@ -17,6 +18,8 @@ go_library(
         "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
+        "//internal/runtime/tmux",
+        "//internal/shellquote",
     ],
 )
 
@@ -41,6 +44,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/exec",
         "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],

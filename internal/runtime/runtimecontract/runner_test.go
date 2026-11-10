@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -23,10 +24,13 @@ func writeScript(t *testing.T, stateDir string, bodies map[string]string) string
 	return path
 }
 
+// writeGolden writes the full golden reference: the host-filesystem
+// variant, which declares every token the catalog gates, so it exercises
+// every requirement.
 func writeGolden(t *testing.T) string {
 	t.Helper()
 	state := t.TempDir()
-	return writeScript(t, state, reference.Bodies())
+	return writeScript(t, state, reference.HostFSBodies())
 }
 
 func runGolden(t *testing.T, path string) Report {
@@ -109,11 +113,21 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		return map[string]string{op: strings.Replace(g[op], from, to, 1)}
 	}
 	set := func(op, body string) map[string]string { return map[string]string{op: body} }
-	mutants := []struct {
+	// hedit is edit over the host-filesystem golden, the base of the fshost
+	// group's mutants.
+	h := reference.HostFSBodies()
+	hedit := func(op, from, to string) map[string]string {
+		if !strings.Contains(h[op], from) {
+			t.Fatalf("mutant of %s: %q is not in the host-filesystem golden body", op, from)
+		}
+		return map[string]string{op: strings.Replace(h[op], from, to, 1)}
+	}
+	type mutant struct {
 		target       Code
 		bodies       map[string]string
 		whatItBreaks string
-	}{
+	}
+	mutants := []mutant{
 		{ReqProtocolHandshake, set("protocol", `echo 'not json at all'`), "malformed handshake"},
 		{ReqLifecycleStartRunning, set("is-running", `echo false`), "session never reports running"},
 		{ReqLifecycleDuplicateErr, set("start", `cat >/dev/null; mkdir -p "$box"; for f in id created cmd0 procs; do : > "$box/$f"; done`), "duplicate start silently succeeds"},
@@ -121,6 +135,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleStopIdempotent, set("stop", `if [ -d "$box" ]; then rm -rf "$box"; else exit 1; fi`), "stop errors on a missing session"},
 		{ReqLifecycleUnknownNotRunning, set("is-running", `echo true`), "unknown session reports running"},
 		{ReqConnectionExec, set("exec", `cat >/dev/null; echo wrong`), "exec ignores the command and emits fixed output"},
+		{ReqConnectionIdleBoundary, edit("exec", `has-session) [ -d "$box" ] ;;`, `has-session) return 1 ;;`), "idle-boundary declared but the box has no tmux session main"},
+		{ReqConnectionIdleBoundary, edit("exec", `capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;;`, `capture-pane) return 1 ;;`), "idle-boundary declared but the pane cannot be captured"},
+		{ReqConnectionIdleBoundary, set("exec", `exit 2`), "idle-boundary declared but exec is unimplemented"},
 		{ReqProvisionBoxWithoutAgent, set("provision", `cat >/dev/null; mkdir -p "$box"`), "provision launches the agent (is-running true) instead of just the box"},
 
 		{ReqObserveDeclaredOpsRespond, set("observe", `exit 2`), "observe exits 2"},
@@ -207,10 +224,34 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqServerStopEndsSession, set("server-stop", `rm -rf "$(ls -d "$B"/* | head -n 1)"`), "server-stop ends only one box and exits 0"},
 		{ReqServerStopSparesOtherCities, edit("server-stop", `rm -rf "$B"`, `rm -rf "$S"/city*`), "server-stop ends every city's sessions"},
 	}
+	// hostFSMutants edit HostFSBodies, the base of the fshost group.
+	hostFSMutants := []mutant{
+		{ReqFSHostSharedView, hedit("start", `if [ -n "$cmd" ]; then`, `if [ -n "$cmd" ]; then mkdir -p "$S/private"; cp -R "$wd"/. "$S/private"/; cmd=$(printf %s "$cmd" | sed "s|$wd|$S/private|g"); `), "runs the command in a private copy of the work dir"},
+		{ReqFSHostSharedView, hedit("start", `if [ -n "$cmd" ]; then`, `if false; then`), "never runs the command"},
+		{ReqFSHostSameUser, hedit("start", `if [ -n "$cmd" ]; then`, `if [ -n "$cmd" ]; then cmd=$(printf %s "$cmd" | sed 's/id -u/echo 4242/'); `), "records another uid"},
+		{ReqFSHostLocal, set("protocol", `echo '{"version":0,"capabilities":["observe.v1","report-attachment","fs.host"],"locality":"remote"}'`), "declares fs.host with a remote locality"},
+		{ReqFSHostLocal, set("protocol", `echo '{"version":0,"capabilities":["observe.v1","report-attachment","fs.host"]}'`), "declares fs.host with no locality"},
+		{ReqFSHostRunsWhatItCarries, hedit("start", `if [ -n "$od" ] && [ -n "$wd" ]; then`, `if false; then`), "skips the overlay_dir its config carries"},
+		{ReqFSHostRunsWhatItCarries, hedit("start", `if [ -n "$ps" ]; then`, `if false; then`), "skips the pre_start its config carries"},
+		{ReqFSHostRunsWhatItCarries, hedit("start", `|| { rm -rf "$box.tmp"; echo "pre_start failed" >&2; exit 1; }`, `|| true`), "swallows a failing pre_start"},
+		{ReqFSHostAgentPIDOnHost, hedit("observe", `"$(cat "$box/pid")"`, `999999999`), "reports a pid absent on the host (another pid namespace)"},
+		{ReqFSHostAgentPIDOnHost, hedit("observe", `if [ -f "$box/pid" ]; then printf ',"agent_pid"`, `if false; then printf ',"agent_pid"`), "reports no agent_pid"},
+	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
-	covered := map[Code]bool{}
+	type gated struct {
+		mutant
+		hostFS bool
+	}
+	var all []gated
 	for _, m := range mutants {
+		all = append(all, gated{m, false})
+	}
+	for _, m := range hostFSMutants {
+		all = append(all, gated{m, true})
+	}
+	covered := map[Code]bool{}
+	for _, m := range all {
 		covered[m.target] = true
 	}
 	for _, req := range catalog {
@@ -219,9 +260,12 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		}
 	}
 
-	for _, m := range mutants {
+	for _, m := range all {
 		t.Run(string(m.target)+"/"+m.whatItBreaks, func(t *testing.T) {
 			bodies := reference.Bodies()
+			if m.hostFS {
+				bodies = reference.HostFSBodies()
+			}
 			for op, body := range m.bodies {
 				if _, ok := bodies[op]; !ok {
 					t.Fatalf("mutant op %q is not a golden op", op)
@@ -330,6 +374,88 @@ func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
 			if (res.Status == StatusSkip) != skip {
 				t.Errorf("handshake %s: %s = %s (%s), want skip %v", protocol, res.Code, res.Status, res.Detail, skip)
 			}
+		}
+	}
+}
+
+// RPP-CONN-002 gates on the declaration: a script that does not declare
+// idle-boundary SKIPs even when its box has no tmux session, and one that
+// declares it without the capabilities it takes effect with still has its
+// box checked, and is told the declaration has no effect.
+// Kills: a probe gated on behavior (a failing box read as undeclared), and a
+// declared idle-boundary passed without reading the box.
+func TestIdleBoundaryGatesOnTheDeclaration(t *testing.T) {
+	noSession := func(bodies map[string]string) {
+		const from = `has-session) [ -d "$box" ] ;;`
+		if !strings.Contains(bodies["exec"], from) {
+			t.Fatalf("golden exec body has no %q to break", from)
+		}
+		bodies["exec"] = strings.Replace(bodies["exec"], from, `has-session) return 1 ;;`, 1)
+	}
+
+	bodies := reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped"]}'`
+	report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusSkip {
+		t.Errorf("undeclared idle-boundary over a box with no tmux session: %s (%s), want SKIP", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resultFor(t, report, ReqConnectionIdleBoundary)
+	if res.Status != StatusPass || !strings.Contains(res.Detail, "takes effect only with proc.exec") {
+		t.Errorf("golden (idle-boundary without proc.exec): %s (%s), want PASS naming the missing proc.exec", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["idle-boundary"]}'`
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusFail {
+		t.Errorf("idle-boundary alone over a box with no tmux session: %s (%s), want FAIL", res.Status, res.Detail)
+	}
+}
+
+// The idle-boundary probe sends each command exactly as the exec provider
+// sends it on the exec op's stdin, so a pack that handles gc's own commands
+// is the one that passes.
+// Kills: a probe quoting that drifts from the exec provider's.
+func TestIdleBoundaryCommandsMatchTheExecProvider(t *testing.T) {
+	dir := t.TempDir()
+	got := filepath.Join(dir, "stdin")
+	script := filepath.Join(dir, "pack")
+	body := "#!/bin/sh\ncase \"$1\" in\n  protocol) echo '{\"version\":0,\"capabilities\":[\"proc.exec\"]}' ;;\n  exec) cat > '" + got + "' ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvs := [][]string{
+		{"tmux", "has-session", "-t", "main"},
+		{"tmux", "capture-pane", "-t", "main", "-p", "-S", "-120"},
+	}
+	if len(argvs) != len(idleBoundaryCommands) {
+		t.Fatalf("%d idle-boundary commands, want %d", len(idleBoundaryCommands), len(argvs))
+	}
+	p := sessionexec.NewProvider(script)
+	for i, argv := range argvs {
+		if _, _, err := p.Exec(context.Background(), "s", argv); err != nil {
+			t.Fatalf("Exec(%q): %v", argv, err)
+		}
+		sent, err := os.ReadFile(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(sent) != idleBoundaryCommands[i] {
+			t.Errorf("probe command %d = %q, exec provider sends %q", i, idleBoundaryCommands[i], sent)
 		}
 	}
 }
@@ -531,6 +657,46 @@ func TestV2ReadinessInTheReport(t *testing.T) {
 		}
 		if report.V2Ready != tc.ready || strings.Join(report.V2Missing, ",") != strings.Join(tc.missing, ",") || len(report.V2Failed) != 0 {
 			t.Errorf("%s: v2-ready %v, missing %v, failed %v; want %v, %v, none", tc.name, report.V2Ready, report.V2Missing, report.V2Failed, tc.ready, tc.missing)
+		}
+	}
+}
+
+// Kills an fshost group that runs for a script not declaring fs.host, or an
+// agent_pid check that runs without observe.v1: the host-filesystem golden's
+// ops are all there, so only the gates can make these skip.
+func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
+	for protocol, wantSkip := range map[string]map[Code]bool{
+		`{"version":0,"capabilities":["observe.v1","report-attachment"],"locality":"local"}`: nil,
+		`{"version":0,"capabilities":["fs.host"],"locality":"local"}`:                        {ReqFSHostAgentPIDOnHost: true},
+	} {
+		bodies := reference.HostFSBodies()
+		bodies["protocol"] = `echo '` + protocol + `'`
+		report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, res := range report.Results {
+			if res.Group != GroupFSHost {
+				continue
+			}
+			skip := wantSkip == nil || wantSkip[res.Code]
+			if (res.Status == StatusSkip) != skip {
+				t.Errorf("handshake %s: %s = %s (%s), want skip %v", protocol, res.Code, res.Status, res.Detail, skip)
+			}
+		}
+	}
+}
+
+// The base golden, which does not declare fs.host, fails nothing and skips
+// exactly the fshost group: fs.host adds a promise, it changes no other.
+func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
+	report := runGolden(t, writeScript(t, t.TempDir(), reference.Bodies()))
+	for _, res := range report.Results {
+		switch {
+		case res.Status == StatusFail:
+			t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
+		case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
+			t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
 		}
 	}
 }

@@ -1655,7 +1655,7 @@ error is reported on stderr and the command still exits 0, so bead hooks never
 fail on it. JSON summaries report whether submission to the configured provider
 was attempted; the event bus does not acknowledge durable persistence.
 
-Four requests are refused with exit 1 and nothing is recorded. In --json mode
+Five requests are refused with exit 1 and nothing is recorded. In --json mode
 the failure object carries the code.
 
 - reserved_actor: --actor starts with "cache-", or the default actor is one
@@ -1665,6 +1665,9 @@ the failure object carries the code.
   gc reads it from the store.
 - journal_derived_refused: op.changed or fact.recorded, which the
   controller derives from operation-journal rows; no command records one.
+- session_list_derived_refused: session.created or session.closed, which
+  the controller derives from session beads' bead events; no command
+  records one.
 - bead_payload_not_found: --bead-payload names a bead the store it resolves
   to does not hold (bead.deleted excepted: the event is recorded with its
   subject alone). Any other failure to read it is reported on stderr and the
@@ -5469,6 +5472,21 @@ what the binding does.
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
+A stranded row that only its metadata makes infrastructure (typically
+gc.root_bead_id on a task or bug: a work-shaped row) is NOT moved by
+default, --dry-run included: carrying ordinary work into the binding hands
+it to a workflow's ownership, out of every work reader's sight. Such rows
+are listed apart, each with its in-place repair, for example
+`gc bd update &lt;id&gt; --unset-metadata gc.root_bead_id`. If the row is
+ordinary work that names its workflow as a reference, run that on the running
+city; if it really is a workflow step an unfenced writer created, run this
+again with --move &lt;id&gt; (repeatable) to copy it into the binding. A run that
+leaves one behind exits 1: the city is still stranded. --move naming a
+stranded row that is not work-shaped (it moves anyway) or an id that is not
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
+
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
 bounds the entry, the row carries no created_at, or the row is younger than
@@ -5529,7 +5547,7 @@ gc storage recover-stranded [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
-| `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
+| `--move` | stringSlice |  | copy this stranded row into the binding: a work-shaped row (only its metadata makes it infrastructure; not moved by default), or a work-store row the manifest lists by id alone and the binding no longer holds (required for one that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded that are also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |

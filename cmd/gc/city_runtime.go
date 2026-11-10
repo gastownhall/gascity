@@ -566,6 +566,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	warnDegradedServing(routes, p.Stderr, logPrefix)
 	// NOTE: the routes are NOT registered as this city's residency answer here.
 	// Construction happens before the supervisor knows whether it can take the
 	// controller lock, and a replacement that loses it would have repointed the
@@ -740,6 +741,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// after its import are named once, here, and never in a CLI process. A
 	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
+
+	// The containment check the boot gate ran, again every
+	// strandRecheckInterval, read-only and report-only: a write that strands
+	// rows after boot becomes a storage.binding.stranded event.
+	stopStrandRecheck := cr.startStrandRecheck(ctx)
+	defer stopStrandRecheck()
 
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)

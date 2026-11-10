@@ -22,9 +22,10 @@ const (
 // (internal/runtime/registry), so config-time decisions — skill and MCP
 // materialization — can read them without constructing a provider.
 type HostCapabilities struct {
-	// SharesHostFilesystem is true when session processes read the
-	// controller host's filesystem at the same paths, so files the
-	// controller writes under an agent's scope root are what the agent reads.
+	// SharesHostFilesystem is true when session processes run on the
+	// controller's host as the controller's user and read its filesystem at
+	// the same paths, so files the controller writes under an agent's scope
+	// root are what the agent reads.
 	SharesHostFilesystem bool
 	// RunsHostPreStart is true when the runtime executes the start config's
 	// PreStart commands on the controller host before launching the agent,

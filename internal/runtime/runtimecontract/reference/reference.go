@@ -39,7 +39,12 @@ const (
 		`agent=""; if [ -n "$names" ]; then agent=dead; for p in $names; do if [ "$p" = "$(cat "$box/cmd0")" ]; then agent=alive; fi; done; fi; ` +
 		`printf '{"state":"running","object":{"id":"%s","created":"%s"}' "$(cat "$box/id")" "$(cat "$box/created")"; ` +
 		`if [ -n "$agent" ]; then printf ',"agent":"%s"' "$agent"; fi; ` +
+		goldenObserveAgentPID +
 		`printf ',"identity":'; ` + goldenObserveIdentity + `; echo '}'`
+
+	// goldenObserveAgentPID reports the host pid of a box whose command the
+	// reference runs (HostFSBodies); other boxes run no process.
+	goldenObserveAgentPID = `if [ -f "$box/pid" ]; then printf ',"agent_pid":"%s"' "$(cat "$box/pid")"; fi; `
 
 	goldenInventory = faultGuard + `printf '{"complete":true,"sessions":['; sep=''; ` +
 		`for box in "$B"/*; do [ -d "$box" ] || continue; case "$box" in *.tmp) continue ;; esac; ` +
@@ -56,6 +61,18 @@ const (
 // goldenPeek prints a box's screen, its agent's command, and answers exit
 // 66 (no screen) when no box holds the name.
 const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box/cmd0"; echo`
+
+// goldenExec runs the piped command in the box. Its tmux is the box's own:
+// the session `main` exists while the box does (has-session) and its pane
+// shows the agent's command (capture-pane), as the idle-boundary declaration
+// promises; any other tmux command goes to the host's tmux unchanged. eval,
+// not sh -c, so the command sees the box's tmux. The golden does not declare
+// proc.exec, so gc's own idle reads (tmux -u set-environment and
+// show-environment, whose first argument is -u) never reach this model;
+// declaring proc.exec here would need them modeled too.
+const goldenExec = `cmd=$(cat); ` +
+	`tmux() { case "$1" in has-session) [ -d "$box" ] ;; capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;; *) command tmux "$@" ;; esac; }; ` +
+	`eval "$cmd"`
 
 // goldenListRunning lists the city's boxes whose name starts with the
 // prefix ($name holds it), and fails, never lists nothing, when the backend
@@ -75,6 +92,7 @@ const goldenPrelude = `C=$(printf %s "${GC_EXEC_CITY_PATH:-}" | tr '/' '_'); B="
 be() { if [ "${GC_RPP_FAULT:-}" = unavailable ]; then echo "backend unavailable" >&2; return 1; fi; }
 ident() { printf '{'; sep=''; for k in GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES; do if [ -f "$box/meta.$k" ]; then printf '%s"%s":"%s"' "$sep" "$k" "$(cat "$box/meta.$k")"; sep=','; fi; done; printf '}'; }
 alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")" ]; then return 0; fi; done; return 1; }
+reap() { if [ -f "$1/pid" ]; then p=$(cat "$1/pid"); pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; fi; return 0; }
 `
 
 // Bodies returns the op bodies of the golden reference: a
@@ -86,7 +104,7 @@ alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")"
 // behavior.
 func Bodies() map[string]string {
 	return map[string]string{
-		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle"]}'`,
+		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle"]}'`,
 		"start":             goldenStart,
 		"stop":              `rm -rf "$box"`,
 		"is-running":        `if [ -d "$box" ]; then echo true; else echo false; fi`,
@@ -101,7 +119,7 @@ func Bodies() map[string]string {
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
-		"exec":              `sh -c "$(cat)"`,
+		"exec":              goldenExec,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).
@@ -110,6 +128,56 @@ func Bodies() map[string]string {
 		// city ends with it, and with no box left it has nothing to do.
 		"server-stop": goldenServerStop,
 	}
+}
+
+// The host-filesystem additions to the golden start (HostFSBodies). Each
+// reads one field of the start config with sed, which holds for the configs
+// the conformance kits send (no escaped quotes in these fields, and at most
+// one pre_start entry); a real pack decodes the JSON.
+const (
+	// goldenHostFSStage keeps the config the start received, stages its
+	// overlay_dir into its work_dir and runs its pre_start there, failing the
+	// start, with no box, when the pre_start fails.
+	goldenHostFSStage = `printf %s "$cfg" > "$box.tmp/start.json"; ` +
+		`wd=$(printf %s "$cfg" | sed -n 's/.*"work_dir":"\([^"]*\)".*/\1/p'); ` +
+		`od=$(printf %s "$cfg" | sed -n 's/.*"overlay_dir":"\([^"]*\)".*/\1/p'); ` +
+		`if [ -n "$od" ] && [ -n "$wd" ]; then cp -R "$od"/. "$wd"/ || { rm -rf "$box.tmp"; exit 1; }; fi; ` +
+		`ps=$(printf %s "$cfg" | sed -n 's/.*"pre_start":\["\([^"]*\)"\].*/\1/p'); ` +
+		`if [ -n "$ps" ]; then (cd "${wd:-.}" && sh -c "$ps") </dev/null >/dev/null 2>&1 || { rm -rf "$box.tmp"; echo "pre_start failed" >&2; exit 1; }; fi; `
+
+	// goldenHostFSLaunch runs the start's command in its work_dir as a
+	// background host process of the caller's user, with the session's
+	// identity env from the config's env (goldenLaunchEnv), and records its
+	// pid.
+	goldenHostFSLaunch = `cmd=$(printf %s "$cfg" | sed -n 's/.*"command":"\([^"]*\)".*/\1/p'); ` +
+		`if [ -n "$cmd" ]; then (cd "${wd:-.}" && ` +
+		`for k in ` + goldenLaunchEnv + `; do v=$(printf %s "$cfg" | sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p"); if [ -n "$v" ]; then export "$k=$v"; fi; done; ` +
+		`exec sh -c "$cmd") </dev/null >/dev/null 2>&1 & echo $! > "$box.tmp/pid"; fi; `
+
+	// goldenLaunchEnv are the env keys of the start config the host
+	// command runs with: the session's identity and city, so its processes
+	// carry them as an agent's do.
+	goldenLaunchEnv = `GC_SESSION_ID GC_SESSION_NAME GC_CITY_PATH GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN`
+)
+
+// HostFSBodies returns Bodies for a reference whose boxes share the
+// controller's host filesystem and user: it declares locality local and
+// fs.host, stages the overlay_dir and runs the pre_start its start config
+// carries (exactly what the config carries: gc leaves out what it did
+// itself), runs the start's command in work_dir as a host process carrying
+// the session's identity env, whose pid observe reports as agent_pid, and
+// stops that process with the box. Each box keeps the start config it
+// received as start.json.
+func HostFSBodies() map[string]string {
+	b := Bodies()
+	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","fs.host"],"locality":"local"}'`
+	b["start"] = strings.Replace(strings.Replace(b["start"],
+		`mkdir -p "$box.tmp"; `, `mkdir -p "$box.tmp"; `+goldenHostFSStage, 1),
+		`mv "$box.tmp" "$box"`, goldenHostFSLaunch+`mv "$box.tmp" "$box"`, 1)
+	b["stop"] = `reap "$box"; ` + b["stop"]
+	b["kill-object"] = strings.Replace(b["kill-object"], `rm -rf "$box"; echo killed`, `reap "$box"; rm -rf "$box"; echo killed`, 1)
+	b["server-stop"] = strings.Replace(b["server-stop"], `rm -rf "$B"`, `for x in "$B"/*; do reap "$x"; done; rm -rf "$B"`, 1)
+	return b
 }
 
 // Script renders bodies (Bodies, or a variant) as an

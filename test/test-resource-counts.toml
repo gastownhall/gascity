@@ -62,6 +62,31 @@ resource = "net_listen"
 calls = 8
 
 [[count]]
+path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_lifecycle_processgroup_unix_test.go"
+resource = "subprocess"
+calls = 3
+
+[[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "cwd"
 calls = 2
@@ -74,7 +99,7 @@ calls = 14
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "fixed_sleep"
-calls = 6
+calls = 4
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
@@ -84,13 +109,13 @@ calls = 2
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "slow_process_gate"
-calls = 12
+calls = 10
 medium = 1
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "subprocess"
-calls = 56
+calls = 51
 medium = 8
 
 [[count]]
@@ -578,6 +603,11 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/cmd_supervisor_processgroup_unix_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -631,11 +661,6 @@ calls = 11
 path = "cmd/gc/cmd_supervisor_test.go"
 resource = "net_listen"
 calls = 7
-
-[[count]]
-path = "cmd/gc/cmd_supervisor_test.go"
-resource = "subprocess"
-calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
@@ -790,12 +815,12 @@ resource = "subprocess"
 calls = 5
 
 [[count]]
-path = "cmd/gc/dolt_standalone_conflict_test.go"
+path = "cmd/gc/dolt_standalone_conflict_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
 
 [[count]]
-path = "cmd/gc/dolt_standalone_conflict_test.go"
+path = "cmd/gc/dolt_standalone_conflict_unix_test.go"
 resource = "subprocess"
 calls = 1
 
@@ -815,14 +840,24 @@ resource = "net_listen"
 calls = 2
 
 [[count]]
+path = "cmd/gc/dolt_start_managed_processgroup_unix_test.go"
+resource = "fixed_sleep"
+calls = 4
+
+[[count]]
+path = "cmd/gc/dolt_start_managed_processgroup_unix_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "cmd/gc/dolt_start_managed_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 5
 
 [[count]]
 path = "cmd/gc/dolt_start_managed_test.go"
 resource = "subprocess"
-calls = 12
+calls = 10
 
 [[count]]
 path = "cmd/gc/drain_ack_row_test.go"
@@ -871,11 +906,6 @@ calls = 2
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_force_reinit_guard_test.go"
-resource = "subprocess"
-calls = 1
-
-[[count]]
-path = "cmd/gc/gc_beads_bd_identity_test.go"
 resource = "subprocess"
 calls = 1
 
@@ -1419,6 +1449,11 @@ calls = 2
 path = "cmd/gc/worker_handle_test.go"
 resource = "slow_process_gate"
 calls = 2
+
+[[count]]
+path = "cmd/gc/writeexecutable_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "examples/bd/dolt/backup_order_test.go"
@@ -2378,6 +2413,11 @@ calls = 1
 medium = 1
 
 [[count]]
+path = "internal/runtime/exec/process_scan_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/fake_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2515,6 +2555,11 @@ calls = 1
 
 [[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimetest/process_table_test.go"
 resource = "subprocess"
 calls = 1
 
@@ -2885,9 +2930,21 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/workspacesvc/proxy_process_pdeathsig_linux_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_pdeathsig_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
 resource = "fixed_sleep"
-calls = 7
+calls = 6
 
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
@@ -2897,7 +2954,7 @@ calls = 1
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
 resource = "subprocess"
-calls = 2
+calls = 1
 
 [[count]]
 path = "pkg/eventexport/exporter_test.go"
@@ -3197,7 +3254,7 @@ tagged = true
 [[count]]
 path = "test/acceptance/tier_b/split_storage_migrated_formula_test.go"
 resource = "subprocess"
-calls = 6
+calls = 7
 tagged = true
 
 [[count]]

@@ -40,13 +40,17 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		t.Errorf("not v2-ready: missing %v", report.V2Missing)
 	}
 	skip := map[runtimecontract.Code]bool{
-		runtimecontract.ReqConnectionExec: true, runtimecontract.ReqProvisionBoxWithoutAgent: true,
+		runtimecontract.ReqConnectionExec: true, runtimecontract.ReqConnectionIdleBoundary: true,
+		runtimecontract.ReqProvisionBoxWithoutAgent: true,
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
 		// No server of its own: server-lifecycle is not declared.
 		runtimecontract.ReqServerStopIdempotent: true, runtimecontract.ReqServerStartAfterStop: true,
 		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,
+		// The profile does not declare fs.host.
+		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
+		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true,
 	}
 	for _, res := range report.Results {
 		switch {

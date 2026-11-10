@@ -39,6 +39,23 @@ const (
 	// the pack reports InputFencingNone, and starts and launches touch no
 	// fence.
 	ProtocolCapabilityInputFence = "input-fence"
+	// ProtocolCapabilityIdleBoundary declares that gc may read the agent's
+	// idle boundary from the box's tmux: the agent runs in the in-box tmux
+	// session `main`, readable with `capture-pane` over the exec connection.
+	// Declared with proc.exec, report-activity and report-attachment, it gives
+	// the pack an idle boundary (WaitForIdle, the ready-prompt publication and
+	// the idle-proof budget) and full idle sleep; without it those three alone
+	// report timed-only sleep, because nothing else proves the box runs tmux.
+	//
+	// The name states the guarantee gc relies on (it may read the agent's idle
+	// boundary), not the mechanism, so it keeps its meaning once carriers other
+	// than tmux exist. When a pack can select its carrier (gh#8903), this
+	// definition widens from
+	// "tmux in the box" to "the carrier the pack declares can answer a Peek",
+	// and RPP-CONN-002 checks the declared carrier's liveness and read; tmux's
+	// check stays the one it runs today. A non-tmux carrier reuses this token
+	// rather than adding one.
+	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain
@@ -76,6 +93,17 @@ const (
 	// exec provider's TeardownServer runs `server-stop`; without it,
 	// TeardownServer sends nothing.
 	ProtocolCapabilityServerLifecycle = "server-lifecycle"
+	// ProtocolCapabilityFSHost declares that the executable's boxes share the
+	// controller's host filesystem: they run on the controller's host, as the
+	// controller's user, with the controller's view of the filesystem, so the
+	// work_dir, HOME and transcript paths gc holds name the same files inside
+	// the box. It narrows [ProtocolLocalityLocal], which says only that boxes
+	// run on the controller's host (a container on that host is local too, and
+	// must not declare fs.host unless it shares that view and user). It is
+	// read only through [ProtocolInfo.SharesHostFS], never on its own: with
+	// it, gc stages the work dir and runs pre_start and session_setup on the
+	// host itself and leaves that work out of the start config.
+	ProtocolCapabilityFSHost = "fs.host"
 )
 
 // ProtocolLocalityLocal is the handshake locality of an executable whose
@@ -98,6 +126,15 @@ type ProtocolInfo struct {
 // the controller's host. An absent or unknown locality is remote.
 func (pi ProtocolInfo) DeclaresLocal() bool {
 	return pi.Locality == ProtocolLocalityLocal
+}
+
+// SharesHostFS reports whether the handshake declared that its boxes share
+// the controller's host filesystem and user: locality=local narrowed by
+// [ProtocolCapabilityFSHost]. It is the one reader of that token, so
+// locality and the token are never checked apart; fs.host without
+// locality=local reads as undeclared.
+func (pi ProtocolInfo) SharesHostFS() bool {
+	return pi.DeclaresLocal() && pi.Has(ProtocolCapabilityFSHost)
 }
 
 // Has reports whether the handshake declared the given capability.

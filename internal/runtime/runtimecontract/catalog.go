@@ -37,6 +37,10 @@
 //     `kill-object` wire shapes, the attach answer, the fault and city-scope
 //     tokens and the probe latency have no runtime.Provider method of their
 //     own to contract-test.
+//   - fshost (the fs.host token) — a promise about where a box runs (the
+//     controller's filesystem view and user) that no runtime.Provider method
+//     states; gc's side of it, host staging, is runtimetest's
+//     RunHostStagingContract.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -65,6 +69,7 @@ const (
 	GroupProvision  Group = "provision"
 	GroupObserve    Group = "observe"
 	GroupServer     Group = "server"
+	GroupFSHost     Group = "fshost"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -113,6 +118,14 @@ const (
 	// to required in the slice that moves gc's own driving over exec. See
 	// REQUIREMENTS.md (RUNTIME-RPP-013).
 	ReqConnectionExec Code = "RPP-CONN-001"
+
+	// ReqConnectionIdleBoundary is the idle-boundary capability's fidelity
+	// check: a script that declares idle-boundary says its agent runs in the
+	// in-box tmux session `main`, which gc reads over exec for the idle
+	// boundary and full idle sleep. The declaration must hold: `tmux
+	// has-session -t main` and the idle capture succeed over exec in a started
+	// box. Optional (undeclared = SKIP). See REQUIREMENTS.md (RUNTIME-RPP-016).
+	ReqConnectionIdleBoundary Code = "RPP-CONN-002"
 
 	// ReqProvisionBoxWithoutAgent is the runtime/transport un-weld's RPP wire
 	// half: an optional `provision` op (advertised via the proc.provision
@@ -202,6 +215,19 @@ const (
 	ReqServerStartAfterStop        Code = "RPP-SERVER-002"
 	ReqServerStopEndsSession       Code = "RPP-SERVER-003"
 	ReqServerStopSparesOtherCities Code = "RPP-SERVER-004"
+
+	// The fshost group checks the fs.host token (RUNTIME-RPP-032): a script
+	// declaring it promises that its boxes share the controller's host
+	// filesystem and user, which narrows locality=local. It is a
+	// control-plane group, checked through start and observe, not the env
+	// plane (runtimecapability), whose probes run through the exec op that a
+	// pack without tmux in the box does not implement. Every requirement is
+	// Optional: SKIP when fs.host is not declared.
+	ReqFSHostSharedView        Code = "RPP-FSHOST-001"
+	ReqFSHostSameUser          Code = "RPP-FSHOST-002"
+	ReqFSHostLocal             Code = "RPP-FSHOST-003"
+	ReqFSHostRunsWhatItCarries Code = "RPP-FSHOST-004"
+	ReqFSHostAgentPIDOnHost    Code = "RPP-FSHOST-005"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -217,6 +243,7 @@ var catalog = []Requirement{
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
+	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, a started box's tmux session main answers has-session and the idle capture over exec, so gc can read the agent's idle boundary (undeclared = SKIP)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
 
@@ -265,6 +292,12 @@ var catalog = []Requirement{
 	{ReqServerStartAfterStop, GroupServer, "after server-stop, a new start succeeds and is-running reports it: the server comes back for the next session", true},
 	{ReqServerStopEndsSession, GroupServer, "after server-stop exits 0, is-running reports false for every session started before it: exit 0 means no session the runtime started remains", true},
 	{ReqServerStopSparesOtherCities, GroupServer, "server-stop under one GC_EXEC_CITY_PATH leaves a session started under another running (declared city-scoped only)", true},
+
+	{ReqFSHostSharedView, GroupFSHost, "a box's command reads a file the caller wrote into work_dir and writes its copy where the caller reads it back, at the same paths (declared fs.host only)", true},
+	{ReqFSHostSameUser, GroupFSHost, "a box's command runs as the caller's user: its id -u equals the caller's uid (declared fs.host only)", true},
+	{ReqFSHostLocal, GroupFSHost, "a handshake declaring fs.host also declares locality local, which fs.host narrows (declared fs.host only)", true},
+	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, and a failing pre_start fails start and leaves no box (declared fs.host only)", true},
+	{ReqFSHostAgentPIDOnHost, GroupFSHost, "observe reports a running box's agent_pid as a live host process the caller's user may signal (declared fs.host with observe.v1 only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

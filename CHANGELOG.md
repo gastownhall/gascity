@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **A stranded split-store city serves degraded instead of refusing.** A
+  converged city whose work store holds infrastructure beads the binding
+  does not serve (for example ordinary work that a plain `bd create`
+  stamped with `gc.root_bead_id`) used to refuse every infrastructure class
+  in every `gc` process until it was repaired. It now serves degraded: the
+  stranded rows stay invisible to their class readers, every process prints
+  one `WARNING: serving degraded` line, `gc storage status` still exits 1
+  and prints `serving: degraded`, `gc doctor` reports an error, and the
+  controller publishes the new `storage.binding.stranded` event at boot and
+  from a read-only recheck every 10 minutes. A stranded id the binding holds
+  for a different bead, or retained copies of binding-owned beads (or an
+  unfinished clear) beside the strand, still refuse the city. Alerting that
+  relied on a refused boot must subscribe to `storage.binding.stranded`; the
+  `stranded` outcome no longer arrives as `storage.binding.unconverged`. A
+  boot gate's `storage.binding.*` event now carries `serving` (absent on
+  operator-command and recheck events, and on older events); recheck events
+  carry `recheck: true`.
+- **`gc storage recover-stranded` no longer carries work-shaped rows into the
+  binding by default.** A stranded row whose only class key is
+  `gc.root_bead_id` (no `gc.step_id`, no class-deciding type or label; typically
+  a task or bug) is listed apart with its in-place repair, `gc bd update <id>
+  --unset-metadata gc.root_bead_id`, and left in the work store; the command
+  exits 1 while any is left. Name one with `--move <id>` to copy it into the
+  binding as before. A row an older build's copy manifest lists by id alone
+  keeps its earlier handling whatever its metadata: a closed one is moved.
+- **`gc bd comment`, `comments`, `comments add` and the other by-id verbs
+  that fell through to bd now route through the binding check.** On a bead
+  the infrastructure binding holds they are refused with a routing message
+  (the binding stores no comments; record a note under a new metadata key
+  with `gc bd update <id> --set-metadata <new-key>=<text>`, never with
+  `--description`, which replaces the description) instead of bd's "no issue
+  found". For work-prefixed ids these verbs (`comment`, `comments`,
+  `comments add`, `note`, `assign`, `priority`, `promote`, `unclaim`,
+  `defer`, `undefer`, `dep remove` (source id only), `dep unrelate`,
+  `gate resolve`, `label add|remove|list|propagate`, `tag`, `state`,
+  `state list`, `history`, `children`) now read the binding first unless the
+  per-id census shows it holds no copy, and a failed binding read now fails
+  the command (exit 1) instead of running bd.
+
 - **Read commands print one JSON document whichever route serves them
   (#8453).** In 1.5.1 a supervisor-hosted city (the default shape, with no
   `[api]` port) read these commands locally, except `gc status`, which has
@@ -894,6 +933,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Events: `session.created` and `session.closed`.** The city event
+  stream announces each session joining or leaving the open set, with
+  typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a
+  client can follow the session list without polling. See "Session List
+  Changes" in the API reference.
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:

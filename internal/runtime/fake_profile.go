@@ -148,7 +148,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
-		return execProfile{core, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
+		return execProfile{core, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
@@ -170,6 +170,11 @@ type (
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
+	// execHostFSTrait is exec's local-transcript answer and its
+	// process-table scanner, both of which its pack's handshake decides
+	// (fs.host with locality local): the profiled pack declares neither, so
+	// its transcripts are not local and it cannot scan.
+	execHostFSTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
@@ -183,6 +188,22 @@ func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
 func (localTranscriptTrait) LocalTranscripts() bool { return true }
+
+func (execHostFSTrait) LocalTranscripts() bool { return false }
+
+// CanScanProcessTable is the profiled pack's answer: it does not share the
+// host, so [AsProcessTableScanner] reads it as having no scanner.
+func (execHostFSTrait) CanScanProcessTable() bool { return false }
+
+// FindRuntimesBySessionID finds nothing, as exec's scanner does for a pack
+// that cannot scan.
+func (execHostFSTrait) FindRuntimesBySessionID(string) ([]LiveRuntime, error) { return nil, nil }
+
+// TerminateRuntime refuses, as exec's scanner does for a pack that cannot
+// scan.
+func (execHostFSTrait) TerminateRuntime(r LiveRuntime) error {
+	return fmt.Errorf("exec profile: refusing to terminate PID %d for session %s: the pack's boxes do not share this host", r.PID, r.SessionID)
+}
 
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
@@ -313,6 +334,7 @@ type (
 		sleepTrait
 		probeBudgetTrait
 		execObserveTrait
+		execHostFSTrait
 	}
 	sshProfile struct {
 		Provider
