@@ -56,6 +56,7 @@ go_test(
         "rundetail_stream_test.go",
         "rundetailtailer_test.go",
         "runtailer_test.go",
+        "samplers_bd_unix_test.go",
         "samplers_test.go",
         "testenv_import_test.go",
         "wire_contract_test.go",

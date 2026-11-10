@@ -133,6 +133,56 @@ func checkStopDeadServer(sp runtime.Provider) error {
 	return nil
 }
 
+// missingInputSessionName is the session the RUNTIME-CONTRACT-019 cases
+// drive. No fixture ever starts it, so on a responsive provider it is a
+// session the runtime can tell is absent.
+const missingInputSessionName = "never-started-input-contract-session"
+
+// missingSessionInput is one driving call RUNTIME-CONTRACT-019 covers.
+type missingSessionInput struct {
+	name string
+	send func(runtime.Provider, string) error
+}
+
+// missingSessionInputs are the driving calls whose nil answer a caller
+// reads as delivered.
+var missingSessionInputs = []missingSessionInput{
+	{"Nudge", func(sp runtime.Provider, name string) error { return sp.Nudge(name, runtime.TextContent("hello")) }},
+	{"SendKeys", func(sp runtime.Provider, name string) error { return sp.SendKeys(name, "Enter") }},
+	{"Interrupt", func(sp runtime.Provider, name string) error { return sp.Interrupt(name) }},
+}
+
+// RunMissingSessionInputContract runs the RUNTIME-CONTRACT-019 cases against
+// providers from newProvider, each responsive and holding no session named
+// missingInputSessionName: Nudge, SendKeys and Interrupt to that session
+// return an error wrapping [runtime.ErrSessionNotFound], never the nil a
+// caller reads as delivered. The contract is scoped to the exec (RPP)
+// provider: the generic seam adapter still answers nil for the other
+// providers, which RunSessionTests allows.
+func RunMissingSessionInputContract(t *testing.T, newProvider func(t *testing.T) runtime.Provider) {
+	t.Helper()
+	for _, in := range missingSessionInputs {
+		t.Run("MissingSessionInput_"+in.name+"IsNotDelivered", func(t *testing.T) {
+			if err := checkMissingSessionInput(newProvider(t), in); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// checkMissingSessionInput reports how sp breaks RUNTIME-CONTRACT-019 for
+// in, or nil when it keeps the contract.
+func checkMissingSessionInput(sp runtime.Provider, in missingSessionInput) error {
+	err := in.send(sp, missingInputSessionName)
+	if err == nil {
+		return fmt.Errorf("runtime contract 019: %s to a missing session of a responsive provider = nil, want runtime.ErrSessionNotFound: nil reads as delivered", in.name)
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		return fmt.Errorf("runtime contract 019: %s to a missing session of a responsive provider = %w, want an error wrapping runtime.ErrSessionNotFound", in.name, err)
+	}
+	return nil
+}
+
 // RunIdleWaitContractTests runs the RUNTIME-CONTRACT-016 cases: a wait is
 // bounded by its timeout, a timeout after a busy reading is the timeout alone,
 // and a timeout with no busy reading wraps [runtime.ErrWaitUnobserved].
@@ -255,6 +305,191 @@ func checkIdleWaitCanceled(sp runtime.Provider, name string, timeout time.Durati
 	}
 	if !errors.Is(waitErr, context.Canceled) {
 		return fmt.Errorf("runtime contract 016: WaitForIdle(%q) under a canceled context = %w, want context.Canceled", name, waitErr)
+	}
+	return nil
+}
+
+// serverTeardownSessions are the sessions the RUNTIME-CONTRACT-023 cases
+// start before a teardown.
+var serverTeardownSessions = []string{"server-teardown-contract-a", "server-teardown-contract-b"}
+
+// ServerTeardownFixtures supplies providers for the RUNTIME-CONTRACT-023 cases
+// of a runtime that implements [runtime.ServerLifecycleProvider]. A nil field
+// skips its cases.
+type ServerTeardownFixtures struct {
+	// Serving returns a provider that holds no session yet and whose
+	// server, if any, can be torn down: every session it starts ends with
+	// it.
+	Serving func(t *testing.T) runtime.Provider
+	// Unstoppable returns a provider and a running session its teardown
+	// cannot end, so a session of the city may survive the teardown.
+	Unstoppable func(t *testing.T) (runtime.Provider, string)
+	// StartConfig is the config the cases start their sessions with; nil
+	// starts `sleep 300` in a fresh work dir.
+	StartConfig func(t *testing.T) runtime.Config
+}
+
+// startConfig is the config f's cases start a session with.
+func (f ServerTeardownFixtures) startConfig(t *testing.T) runtime.Config {
+	if f.StartConfig != nil {
+		return f.StartConfig(t)
+	}
+	return runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300"}
+}
+
+// RunServerTeardownContract runs the RUNTIME-CONTRACT-023 cases, the
+// [runtime.ServerLifecycleProvider] contract: TeardownServer, which gc calls
+// once every session is drained, leaves no session the provider started
+// running when it returns nil; it returns nil when the server is already
+// gone, so a second teardown is nil; it returns an error when a session may
+// survive it; and ConfigureServer is idempotent, so calling it again on a
+// serving provider ends no session.
+func RunServerTeardownContract(t *testing.T, f ServerTeardownFixtures) {
+	t.Helper()
+
+	t.Run("ServerTeardown_EndsEverySession", func(t *testing.T) {
+		if f.Serving == nil {
+			t.Skip("no serving-provider fixture")
+		}
+		if err := checkServerTeardownEndsSessions(t, f.Serving(t), f.startConfig); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ServerTeardown_SecondTeardownIsNil", func(t *testing.T) {
+		if f.Serving == nil {
+			t.Skip("no serving-provider fixture")
+		}
+		if err := checkSecondTeardownIsNil(t, f.Serving(t), f.startConfig); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ServerTeardown_SurvivorIsError", func(t *testing.T) {
+		if f.Unstoppable == nil {
+			t.Skip("no unstoppable-session fixture")
+		}
+		sp, name := f.Unstoppable(t)
+		if err := checkServerTeardownSurvivor(sp, name); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ServerTeardown_ConfigureServerIsIdempotent", func(t *testing.T) {
+		if f.Serving == nil {
+			t.Skip("no serving-provider fixture")
+		}
+		if err := checkConfigureServerIdempotent(t, f.Serving(t), f.startConfig); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// serverLifecycle returns sp's server lifecycle, or an error naming the
+// contract sp cannot keep without one.
+func serverLifecycle(sp runtime.Provider) (runtime.ServerLifecycleProvider, error) {
+	l, ok := sp.(runtime.ServerLifecycleProvider)
+	if !ok {
+		return nil, fmt.Errorf("runtime contract 023: %T does not implement runtime.ServerLifecycleProvider", sp)
+	}
+	return l, nil
+}
+
+// startServerTeardownSessions starts every serverTeardownSessions session on
+// sp, and stops each at the end of the test.
+func startServerTeardownSessions(t *testing.T, sp runtime.Provider, cfg func(*testing.T) runtime.Config) error {
+	t.Helper()
+	for _, name := range serverTeardownSessions {
+		if err := sp.Start(context.Background(), name, cfg(t)); err != nil {
+			return fmt.Errorf("runtime contract 023: starting %s before the teardown: %w", name, err)
+		}
+		t.Cleanup(func() { _ = sp.Stop(name) })
+	}
+	return nil
+}
+
+// checkServerTeardownEndsSessions reports how sp breaks RUNTIME-CONTRACT-023
+// when it tears its server down under running sessions, or nil when it keeps
+// the contract.
+func checkServerTeardownEndsSessions(t *testing.T, sp runtime.Provider, cfg func(*testing.T) runtime.Config) error {
+	t.Helper()
+	l, err := serverLifecycle(sp)
+	if err != nil {
+		return err
+	}
+	if err := startServerTeardownSessions(t, sp, cfg); err != nil {
+		return err
+	}
+	if err := l.TeardownServer(); err != nil {
+		return fmt.Errorf("runtime contract 023: TeardownServer with sessions it can stop = %w, want nil", err)
+	}
+	for _, name := range serverTeardownSessions {
+		if sp.IsRunning(name) {
+			return fmt.Errorf("runtime contract 023: %s is still running after TeardownServer returned nil: nil means no session the runtime started remains", name)
+		}
+	}
+	return nil
+}
+
+// checkSecondTeardownIsNil reports how sp breaks RUNTIME-CONTRACT-023 when
+// its server is already gone, or nil when it keeps the contract.
+func checkSecondTeardownIsNil(t *testing.T, sp runtime.Provider, cfg func(*testing.T) runtime.Config) error {
+	t.Helper()
+	l, err := serverLifecycle(sp)
+	if err != nil {
+		return err
+	}
+	if err := l.TeardownServer(); err != nil {
+		return fmt.Errorf("runtime contract 023: TeardownServer with no session started = %w, want nil: a server that is not running is already torn down", err)
+	}
+	if err := startServerTeardownSessions(t, sp, cfg); err != nil {
+		return err
+	}
+	if err := l.TeardownServer(); err != nil {
+		return fmt.Errorf("runtime contract 023: first TeardownServer = %w, want nil", err)
+	}
+	if err := l.TeardownServer(); err != nil {
+		return fmt.Errorf("runtime contract 023: second TeardownServer = %w, want nil: the server is already gone", err)
+	}
+	return nil
+}
+
+// checkServerTeardownSurvivor reports how sp breaks RUNTIME-CONTRACT-023 when
+// its teardown cannot end the running session name, or nil when it keeps the
+// contract.
+func checkServerTeardownSurvivor(sp runtime.Provider, name string) error {
+	l, err := serverLifecycle(sp)
+	if err != nil {
+		return err
+	}
+	if err := l.TeardownServer(); err == nil {
+		return fmt.Errorf("runtime contract 023: TeardownServer = nil while %s may survive it, want an error: nil tells gc stop no session remains", name)
+	}
+	return nil
+}
+
+// checkConfigureServerIdempotent reports how sp breaks RUNTIME-CONTRACT-023
+// when ConfigureServer runs again on a serving provider, or nil when it keeps
+// the contract. Callers treat its errors as best-effort warnings, so only its
+// repeatability is checked: a second call answers as the first did, and
+// neither ends a running session.
+func checkConfigureServerIdempotent(t *testing.T, sp runtime.Provider, cfg func(*testing.T) runtime.Config) error {
+	t.Helper()
+	l, err := serverLifecycle(sp)
+	if err != nil {
+		return err
+	}
+	if err := startServerTeardownSessions(t, sp, cfg); err != nil {
+		return err
+	}
+	first, second := l.ConfigureServer(), l.ConfigureServer()
+	if (first == nil) != (second == nil) {
+		return fmt.Errorf("runtime contract 023: ConfigureServer answered %q, then %q: it must be idempotent", fmt.Sprint(first), fmt.Sprint(second))
+	}
+	for _, name := range serverTeardownSessions {
+		if !sp.IsRunning(name) {
+			return fmt.Errorf("runtime contract 023: %s stopped running after ConfigureServer ran twice: configuring the server must not end its sessions", name)
+		}
 	}
 	return nil
 }

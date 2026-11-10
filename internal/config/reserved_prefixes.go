@@ -113,7 +113,7 @@ var (
 		patch: "choose another prefix",
 	}
 	reservedPrefixFixesForNewCity = reservedPrefixFixes{
-		hq:    `name the city differently, or set an explicit non-reserved prefix in the [workspace] of the config it is created from`,
+		hq:    `name the city differently, pass a non-reserved --prefix to gc init, or set an explicit non-reserved prefix in the [workspace] of the config it is created from`,
 		rig:   `set an explicit non-reserved prefix on that rig in the config the city is created from`,
 		patch: "change that patch's prefix in the config the city is created from",
 	}

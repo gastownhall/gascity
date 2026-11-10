@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource asserts that a
@@ -46,7 +47,7 @@ func TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource(t *testing.T) {
 	mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	if _, err := ProcessControl(store, finalizer, ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
 	sourceAfter, err := store.Get(source.ID)

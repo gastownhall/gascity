@@ -52,7 +52,7 @@ func ApplyConvoyFields(b *beads.Bead, fields ConvoyFields) {
 
 // SetConvoyFields writes non-empty ConvoyFields to the bead store as metadata.
 // Used for post-creation updates (e.g., adding fields to an existing convoy).
-func SetConvoyFields(store beads.Store, id string, fields ConvoyFields) error {
+func SetConvoyFields(store beads.WorkStore, id string, fields ConvoyFields) error {
 	for _, kv := range convoyFieldKeys {
 		v := kv.getter(&fields)
 		if v == "" {

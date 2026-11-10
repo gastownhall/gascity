@@ -14,14 +14,14 @@ import (
 // backing's own clock; any other is a window a simulator cannot move.
 func TestCachingStoreWallClockReadsCensus(t *testing.T) {
 	allowed := map[string]map[string]bool{
-		"clockNow":                {"return time.Now()": true},
-		"runReconciliation":       {"start := time.Now()": true, "bdStart := time.Now()": true, "projectStart := time.Now()": true},
-		"cachedReadyCompleteOnly": {"now := time.Now().UTC()": true}, // defer_until, the backing's clock
-		"cachedReadyLocked":       {"now := time.Now().UTC()": true},
-		"readyFromCache":          {"now := time.Now().UTC()": true}, // Ready and ReadyPreferCache share it
-		"CachedReady":             {"now := time.Now().UTC()": true},
-		"ReleaseIfCurrent":        {"b.UpdatedAt = time.Now()": true}, // a patched row mirrors the backing
-		"TransferIfCurrent":       {"b.UpdatedAt = time.Now()": true},
+		"clockNow":            {"return time.Now()": true},
+		"runReconciliation":   {"start := time.Now()": true, "bdStart := time.Now()": true, "projectStart := time.Now()": true},
+		"cachedReadyJudgment": {"now := time.Now().UTC()": true}, // defer_until, the backing's clock
+		"cachedReadyLocked":   {"now := time.Now().UTC()": true},
+		"readyFromCache":      {"now := time.Now().UTC()": true}, // Ready and ReadyPreferCache share it
+		"CachedReady":         {"now := time.Now().UTC()": true},
+		"ReleaseIfCurrent":    {"b.UpdatedAt = time.Now()": true}, // a patched row mirrors the backing
+		"TransferIfCurrent":   {"b.UpdatedAt = time.Now()": true},
 	}
 	measured := map[string]bool{"runReconciliation": true} // time.Since: real latencies
 	wall := regexp.MustCompile(`time\.(Now|Since|Until)\(`)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
@@ -30,7 +31,7 @@ func TestRunCancelClosesACrossStoreGateAsTheController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cancelWorkflowRoot(store, root.ID); err != nil {
+	if _, err := cancelWorkflowRoot(beadstest.GraphMolecule(store), root.ID); err != nil {
 		t.Fatalf("cancelWorkflowRoot: %v", err)
 	}
 	got, err := store.Get(gate.ID)

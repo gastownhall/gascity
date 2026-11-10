@@ -198,8 +198,8 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	}
 	index := s.latestIndex()
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -218,7 +218,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	freshness := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 
 	switch status {
 	case "", "unread":
@@ -343,8 +343,8 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 // humaHandleMailGet is the Huma-typed handler for GET /v0/mail/{id}.
 func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*IndexOutput[mail.Message], error) {
 	index := s.latestIndex()
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	id := input.ID
@@ -373,7 +373,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	result.Message.Rig = result.Rig
-	freshness := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 	return &IndexOutput[mail.Message]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -430,13 +430,13 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 
 // humaHandleMailCount is the Huma-typed handler for GET /v0/mail/count.
 func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput) (*MailCountOutput, error) {
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	rig := input.Rig
-	freshness := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
