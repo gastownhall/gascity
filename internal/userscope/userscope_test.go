@@ -79,3 +79,35 @@ func TestProbeFailsWithoutSystemdRun(t *testing.T) {
 		t.Fatal("Probe succeeded with no systemd-run on PATH, want error")
 	}
 }
+
+func TestScopeArgvNamesUnitAndDescription(t *testing.T) {
+	got := ScopeArgv(Scope{
+		Slice:       "gascity-infra.slice",
+		Unit:        "gascity-infra-0123456789abcdef.scope",
+		Description: "gascity infra: managed dolt for city /c",
+	}, []string{"dolt", "sql-server"})
+	want := []string{
+		"systemd-run", "--user", "--scope", "--slice=gascity-infra.slice", "--collect", "--quiet",
+		"--unit=gascity-infra-0123456789abcdef.scope", "--description=gascity infra: managed dolt for city /c",
+		"--", "dolt", "sql-server",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ScopeArgv = %q, want %q", got, want)
+	}
+	if got, want := ScopeArgv(Scope{Slice: "s.slice"}, []string{"x"}), Argv("s.slice", []string{"x"}); !slices.Equal(got, want) {
+		t.Fatalf("ScopeArgv without unit or description = %q, want Argv's %q", got, want)
+	}
+}
+
+func TestWrapScopeReportsWhetherItWrapped(t *testing.T) {
+	scope := Scope{Slice: "s.slice", Unit: "u.scope"}
+	argv := []string{"dolt"}
+	ok := &Wrapper{Probe: func(string) error { return nil }}
+	if got, wrapped := ok.WrapScope(scope, argv); !wrapped || !slices.Equal(got, ScopeArgv(scope, argv)) {
+		t.Fatalf("WrapScope = %q, %t; want %q, true", got, wrapped, ScopeArgv(scope, argv))
+	}
+	down := &Wrapper{Probe: func(string) error { return errors.New("no bus") }}
+	if got, wrapped := down.WrapScope(scope, argv); wrapped || !slices.Equal(got, argv) {
+		t.Fatalf("WrapScope without a user manager = %q, %t; want %q, false", got, wrapped, argv)
+	}
+}

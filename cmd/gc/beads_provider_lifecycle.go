@@ -2653,6 +2653,9 @@ type doltRuntimeState struct {
 	Port      int    `json:"port"`
 	DataDir   string `json:"data_dir"`
 	StartedAt string `json:"started_at"`
+	// InfraScope names the transient systemd user scope unit the server was
+	// started in (see infraArgv); empty when it was started unscoped.
+	InfraScope string `json:"infra_scope,omitempty"`
 }
 
 // currentDoltPort returns the controller-managed Dolt port for the city.

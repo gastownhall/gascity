@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -15,15 +17,15 @@ import (
 	"github.com/gastownhall/gascity/internal/userscope"
 )
 
-// City infrastructure (the managed Dolt server, its scope watchdog, and a
-// forked supervisor) that a gc command run from inside an agent session
-// spawns would otherwise inherit that session's cgroup: a GC_AGENT_SLICE
-// pane scope or a runtime launcher's scope. A cgroup-wide kill of the agent
-// then takes the city's store, or its supervisor, down with it. Such spawns
-// get a transient systemd user scope of their own instead, when that scope
-// cannot shorten the infrastructure's life. Every other caller (the
-// supervisor, a CLI run from a login shell, a provider script the supervisor
-// launched) spawns exactly as before.
+// The managed Dolt server (directly or through its scope watchdog) that a gc
+// command run from inside an agent session spawns would otherwise inherit
+// that session's cgroup: a GC_AGENT_SLICE pane scope or a runtime launcher's
+// scope. A cgroup-wide kill of the agent then takes the city's store down
+// with it. Such spawns get a transient systemd user scope of their own
+// instead, when that scope cannot shorten the server's life. Every other
+// caller (the supervisor, a CLI run from a login shell, a provider script
+// the supervisor launched) spawns exactly as before. The supervisor itself
+// is never scoped: every session it starts would follow it into the slice.
 const (
 	// infraSliceEnv names the systemd user slice infrastructure scopes are
 	// created under; empty means defaultInfraSlice.
@@ -151,24 +153,55 @@ func infraSlice() string {
 	return defaultInfraSlice
 }
 
-// infraArgv returns argv wrapped in a transient user scope under the infra
-// slice when this gc process runs inside an agent session and scoping
-// cannot shorten the spawn's life; otherwise argv unchanged.
-func infraArgv(argv []string) []string {
-	if strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
-		return argv
-	}
-	return infraScope.Wrap(infraSlice(), argv)
+// infraUnitPrefix starts the name of every transient scope unit city
+// infrastructure is spawned in, so its journal records stay recognizable
+// after --collect removes the unit.
+const infraUnitPrefix = "gascity-infra-"
+
+// infraUnitName returns a fresh scope unit name. It is unique per spawn: a
+// fixed name would collide with a previous spawn's scope that is still
+// active.
+func infraUnitName() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
+	return infraUnitPrefix + hex.EncodeToString(b[:]) + ".scope"
 }
 
-// infraCommand is exec.Command for a city infrastructure process; see
-// infraArgv. A name that does not resolve stays unwrapped: wrapped, exec
-// would resolve systemd-run instead and the missing executable would surface
-// only as a later readiness timeout rather than at Start.
-func infraCommand(name string, args ...string) *exec.Cmd {
-	if _, err := exec.LookPath(name); err != nil {
-		return exec.Command(name, args...)
+// infraArgv returns argv wrapped in a transient user scope under the infra
+// slice, described by description, when this gc process runs inside an
+// agent session and scoping cannot shorten the spawn's life, with the scope
+// unit's name; otherwise argv unchanged and "".
+func infraArgv(description string, argv []string) ([]string, string) {
+	if strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
+		return argv, ""
 	}
-	argv := infraArgv(append([]string{name}, args...))
-	return exec.Command(argv[0], argv[1:]...)
+	scope := userscope.Scope{Slice: infraSlice(), Unit: infraUnitName(), Description: description}
+	wrapped, ok := infraScope.WrapScope(scope, argv)
+	if !ok {
+		return argv, ""
+	}
+	return wrapped, scope.Unit
+}
+
+// infraCommand is exec.Command for a city infrastructure process, with the
+// name of the scope unit it runs in ("" when unscoped); see infraArgv. A
+// name that does not resolve stays unwrapped: wrapped, exec would resolve
+// systemd-run instead and the missing executable would surface only as a
+// later readiness timeout rather than at Start.
+func infraCommand(description, name string, args ...string) (*exec.Cmd, string) {
+	if _, err := exec.LookPath(name); err != nil {
+		return exec.Command(name, args...), ""
+	}
+	argv, unit := infraArgv(description, append([]string{name}, args...))
+	return exec.Command(argv[0], argv[1:]...), unit
+}
+
+// managedDoltInfraDescription is the scope description of a managed Dolt
+// spawn; the user manager's journal records repeat it.
+func managedDoltInfraDescription(cityPath string) string {
+	const base = "gascity infra: managed dolt"
+	if strings.TrimSpace(cityPath) == "" {
+		return base
+	}
+	return base + " for city " + cityPath
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -104,6 +105,15 @@ func installInfraScopeHost(t *testing.T, h infraScopeHost) string {
 	return logPath
 }
 
+// infraTestDescription is the scope description the infraArgv tests pass.
+const infraTestDescription = "gascity infra: test"
+
+// infraTestScopeArgv is argv as infraArgv scopes it under the default slice
+// with infraTestDescription; unit is the name infraArgv returned.
+func infraTestScopeArgv(unit string, argv []string) []string {
+	return userscope.ScopeArgv(userscope.Scope{Slice: defaultInfraSlice, Unit: unit, Description: infraTestDescription}, argv)
+}
+
 // wrappableFromSession is a host on which a spawn from a session is scoped.
 var wrappableFromSession = infraScopeHost{session: true, linger: true}
 
@@ -175,7 +185,24 @@ func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	return dir, marker
 }
 
-const infraScopePrefix = "--user --scope --slice=gascity-infra.slice --collect --quiet -- "
+const infraScopePrefix = "--user --scope --slice=gascity-infra.slice --collect --quiet "
+
+// infraUnitPattern is the transient scope unit name gc gives a scoped spawn.
+var infraUnitPattern = regexp.MustCompile(`^gascity-infra-[0-9a-f]{16}\.scope$`)
+
+// assertScopedInvocation checks that the scoped spawn named its scope unit,
+// recorded as unit, and the description journald keeps after collection.
+func assertScopedInvocation(t *testing.T, logPath, unit, description string) {
+	t.Helper()
+	if !infraUnitPattern.MatchString(unit) {
+		t.Fatalf("recorded infra scope unit = %q, want %s", unit, infraUnitPattern)
+	}
+	data, _ := os.ReadFile(logPath)
+	want := infraScopePrefix + "--unit=" + unit + " --description=" + description + " -- "
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("no systemd-run invocation containing %q; log:\n%s", want, data)
+	}
+}
 
 func killInfraScopeTestPID(t *testing.T, pid int) {
 	t.Helper()
@@ -215,14 +242,49 @@ func startDirectManagedDolt(t *testing.T) (managedDoltStartedProcess, string) {
 func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
 	t.Run("from a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, wrappableFromSession)
-		_, configPath := startDirectManagedDolt(t)
-		waitForSystemdRunInvocation(t, logPath, infraScopePrefix+"dolt sql-server --config "+configPath)
+		started, configPath := startDirectManagedDolt(t)
+		waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
 	})
 	t.Run("outside a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
-		startDirectManagedDolt(t)
+		started, _ := startDirectManagedDolt(t)
 		assertNoSystemdRun(t, logPath)
+		if started.InfraScope != "" {
+			t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+		}
 	})
+}
+
+// TestManagedDoltStateRecordsInfraScope: the scope a managed Dolt server was
+// started in is recorded with its PID in the provider state, so gc doctor can
+// point at the scope's journal records after --collect removed the unit.
+func TestManagedDoltStateRecordsInfraScope(t *testing.T) {
+	const unit = "gascity-infra-0123456789abcdef.scope"
+	cityPath := installStartManagedDoltLoopStubs(t, startManagedDoltLoopStubs{
+		startFn: func(cityPath, _, _ string, _ *os.File) (managedDoltStartedProcess, error) {
+			return managedDoltStartedProcess{CityPath: cityPath, PID: 4242, InfraScope: unit}, nil
+		},
+		waitReadyFn: func(_, _, _, _ string, _ int, _ time.Duration, _ bool) (managedDoltWaitReadyReport, error) {
+			return managedDoltWaitReadyReport{Ready: true, PIDAlive: true}, nil
+		},
+		logSuffixFn:     func(string, int64) (string, error) { return "", nil },
+		portAvailableFn: func(string, int) bool { return true },
+	})
+	if _, err := startManagedDoltProcessWithOptions(cityPath, "127.0.0.1", "17778", "root", "warning", -1, time.Second, false); err != nil {
+		t.Fatalf("startManagedDoltProcessWithOptions: %v", err)
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("layout: %v", err)
+	}
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read provider state: %v", err)
+	}
+	if state.PID != 4242 || state.InfraScope != unit {
+		t.Fatalf("provider state pid=%d infra_scope=%q, want 4242 and %q", state.PID, state.InfraScope, unit)
+	}
 }
 
 // The bd provider script the supervisor launches runs `gc dolt-state
@@ -237,7 +299,8 @@ func TestSupervisorLaunchedProviderSpawnStaysUnwrapped(t *testing.T) {
 }
 
 func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
-	start := func(t *testing.T) string {
+	cityPath := t.TempDir()
+	start := func(t *testing.T) (string, managedDoltStartedProcess) {
 		t.Helper()
 		binDir, marker := writeMarkingFakeDolt(t)
 		dir := t.TempDir()
@@ -254,24 +317,25 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 		parentEnv := removeEnvKey(os.Environ(), "PATH")
 		parentEnv = append(parentEnv, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-		started, err := startManagedDoltSQLServerWithScopeWatchdogEnv("", configPath, logFilePath, logFile, parentEnv)
+		started, err := startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configPath, logFilePath, logFile, parentEnv)
 		if err != nil {
 			t.Fatalf("start managed dolt with scope watchdog: %v", err)
 		}
 		killInfraScopeTestPID(t, started.PID)
 		killInfraScopeTestPID(t, started.WatchdogPID)
 		waitForFile(t, marker)
-		return configPath
+		return configPath, started
 	}
 
 	t.Run("from a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, wrappableFromSession)
-		configPath := start(t)
+		configPath, started := start(t)
 		exe, err := managedDoltWatchdogExecutable()
 		if err != nil {
 			t.Fatalf("watchdog executable: %v", err)
 		}
-		waitForSystemdRunInvocation(t, logPath, infraScopePrefix+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
+		waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
+		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
 		// The dolt server is the watchdog's child and inherits its scope;
 		// it is not wrapped a second time. (The other line is the probe.)
 		data, _ := os.ReadFile(logPath)
@@ -284,12 +348,18 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 	})
 	t.Run("outside a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
-		start(t)
+		_, started := start(t)
 		assertNoSystemdRun(t, logPath)
+		if started.InfraScope != "" {
+			t.Fatalf("unwrapped watchdog recorded infra scope %q, want none", started.InfraScope)
+		}
 	})
 }
 
-func TestBareSupervisorForkWrappedInInfraScope(t *testing.T) {
+// The supervisor is never moved into an infrastructure scope, not even when
+// forked from a session: every session it starts would follow it into that
+// one unbounded slice.
+func TestBareSupervisorForkNotWrappedInInfraScope(t *testing.T) {
 	fork := func(t *testing.T) {
 		t.Helper()
 		pinRealHome(t)
@@ -316,11 +386,7 @@ func TestBareSupervisorForkWrappedInInfraScope(t *testing.T) {
 	t.Run("from a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, wrappableFromSession)
 		fork(t)
-		gcPath, err := os.Executable()
-		if err != nil {
-			t.Fatalf("executable: %v", err)
-		}
-		waitForSystemdRunInvocation(t, logPath, infraScopePrefix+gcPath+" supervisor run")
+		assertNoSystemdRun(t, logPath)
 	})
 	t.Run("outside a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
@@ -329,7 +395,9 @@ func TestBareSupervisorForkWrappedInInfraScope(t *testing.T) {
 	})
 }
 
-func TestDriftSupervisorRespawnWrappedInInfraScope(t *testing.T) {
+// The drift respawn replaces the supervisor; like the bare fork it is never
+// scoped.
+func TestDriftSupervisorRespawnNotWrappedInInfraScope(t *testing.T) {
 	respawn := func(t *testing.T) {
 		t.Helper()
 		t.Setenv("GC_HOME", t.TempDir())
@@ -342,10 +410,8 @@ func TestDriftSupervisorRespawnWrappedInInfraScope(t *testing.T) {
 
 	t.Run("from a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, wrappableFromSession)
-		t.Setenv(infraSliceEnv, "custom-infra.slice")
 		respawn(t)
-		waitForSystemdRunInvocation(t, logPath,
-			"--user --scope --slice=custom-infra.slice --collect --quiet -- /bin/sh -c")
+		assertNoSystemdRun(t, logPath)
 	})
 	t.Run("outside a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
@@ -367,11 +433,12 @@ func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
 				name := fmt.Sprintf("session=%t/linger=%t/under_user_manager=%t", session, linger, underUserMgr)
 				t.Run(name, func(t *testing.T) {
 					logPath := installInfraScopeHost(t, h)
+					got, unit := infraArgv(infraTestDescription, argv)
 					want := argv
 					if session && (linger || underUserMgr) {
-						want = userscope.Argv(defaultInfraSlice, argv)
+						want = infraTestScopeArgv(unit, argv)
 					}
-					if got := infraArgv(argv); !slices.Equal(got, want) {
+					if !slices.Equal(got, want) {
 						t.Fatalf("infraArgv = %q, want %q", got, want)
 					}
 					if !session {
@@ -388,8 +455,8 @@ func TestInfraArgvWithoutUserManagerLeavesSpawnUnwrapped(t *testing.T) {
 	installInfraScopeHost(t, wrappableFromSession)
 	infraScope = &userscope.Wrapper{Probe: func(string) error { return os.ErrNotExist }}
 	argv := []string{"dolt", "sql-server"}
-	if got := infraArgv(argv); !slices.Equal(got, argv) {
-		t.Fatalf("infraArgv = %q, want unwrapped %q", got, argv)
+	if got, unit := infraArgv(infraTestDescription, argv); !slices.Equal(got, argv) || unit != "" {
+		t.Fatalf("infraArgv = %q, %q; want unwrapped %q and no unit", got, unit, argv)
 	}
 }
 
@@ -511,7 +578,8 @@ func TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry(t *testing.T)
 		t.Fatalf("infraScopeKeepsLifetime = %v, want nil under user@<uid>.service", err)
 	}
 	argv := []string{"dolt", "sql-server"}
-	if got, want := infraArgv(argv), userscope.Argv(defaultInfraSlice, argv); !slices.Equal(got, want) {
+	got, unit := infraArgv(infraTestDescription, argv)
+	if want := infraTestScopeArgv(unit, argv); !slices.Equal(got, want) {
 		t.Fatalf("infraArgv = %q, want %q", got, want)
 	}
 }
@@ -529,8 +597,8 @@ func TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering(t *testing.T) {
 		t.Fatalf("infraScopeKeepsLifetime = %v, want a not-lingering error", err)
 	}
 	argv := []string{"dolt", "sql-server"}
-	if got := infraArgv(argv); !slices.Equal(got, argv) {
-		t.Fatalf("infraArgv = %q, want unwrapped %q", got, argv)
+	if got, unit := infraArgv(infraTestDescription, argv); !slices.Equal(got, argv) || unit != "" {
+		t.Fatalf("infraArgv = %q, %q; want unwrapped %q and no unit", got, unit, argv)
 	}
 }
 
@@ -540,7 +608,10 @@ func TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering(t *testing.T) {
 // fails at once.
 func TestInfraCommandKeepsImmediateErrorForMissingExecutable(t *testing.T) {
 	logPath := installInfraScopeHost(t, wrappableFromSession)
-	cmd := infraCommand("gc-infra-scope-test-no-such-binary", "sql-server")
+	cmd, unit := infraCommand(infraTestDescription, "gc-infra-scope-test-no-such-binary", "sql-server")
+	if unit != "" {
+		t.Fatalf("unresolvable executable recorded infra scope %q, want none", unit)
+	}
 	if want := []string{"gc-infra-scope-test-no-such-binary", "sql-server"}; !slices.Equal(cmd.Args, want) {
 		t.Fatalf("infraCommand args = %q, want unwrapped %q", cmd.Args, want)
 	}
@@ -555,8 +626,8 @@ func TestInfraCommandKeepsImmediateErrorForMissingExecutable(t *testing.T) {
 // PATH is wrapped from a session.
 func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
 	installInfraScopeHost(t, wrappableFromSession)
-	cmd := infraCommand("sh", "-c", "true")
-	if want := userscope.Argv(defaultInfraSlice, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
+	cmd, unit := infraCommand(infraTestDescription, "sh", "-c", "true")
+	if want := infraTestScopeArgv(unit, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
 		t.Fatalf("infraCommand args = %q, want %q", cmd.Args, want)
 	}
 }
@@ -583,5 +654,34 @@ func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
 				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
 			}
 		})
+	}
+}
+
+// TestInfraArgvHonorsInfraSliceEnv: GC_INFRA_SLICE names the slice scopes are
+// created under.
+func TestInfraArgvHonorsInfraSliceEnv(t *testing.T) {
+	installInfraScopeHost(t, wrappableFromSession)
+	t.Setenv(infraSliceEnv, "custom-infra.slice")
+	argv := []string{"dolt", "sql-server"}
+	got, unit := infraArgv(infraTestDescription, argv)
+	want := userscope.ScopeArgv(userscope.Scope{Slice: "custom-infra.slice", Unit: unit, Description: infraTestDescription}, argv)
+	if !slices.Equal(got, want) {
+		t.Fatalf("infraArgv = %q, want %q", got, want)
+	}
+}
+
+// TestInfraUnitNamesAreUniquePerSpawn: a fixed unit name would collide with
+// a previous spawn's scope that is still active (or not yet collected).
+func TestInfraUnitNamesAreUniquePerSpawn(t *testing.T) {
+	installInfraScopeHost(t, wrappableFromSession)
+	_, first := infraArgv(infraTestDescription, []string{"dolt"})
+	_, second := infraArgv(infraTestDescription, []string{"dolt"})
+	for _, unit := range []string{first, second} {
+		if !infraUnitPattern.MatchString(unit) {
+			t.Fatalf("unit %q does not match %s", unit, infraUnitPattern)
+		}
+	}
+	if first == second {
+		t.Fatalf("two spawns got the same scope unit %q", first)
 	}
 }

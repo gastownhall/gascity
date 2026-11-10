@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -634,7 +635,7 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 		return fmt.Errorf("opening log: %w", err)
 	}
 	defer logFile.Close() //nolint:errcheck // best-effort cleanup
-	child := infraCommand(exe, argv...)
+	child := exec.Command(exe, argv...)
 	child.SysProcAttr = backgroundSysProcAttr()
 	child.Stdin = nil
 	child.Stdout = logFile

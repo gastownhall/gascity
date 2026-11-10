@@ -147,7 +147,7 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 		return managedDoltStartedProcess{}, err
 	}
 	// The watchdog's dolt child inherits the watchdog's infrastructure scope.
-	cmd := infraCommand(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
@@ -181,6 +181,7 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 		StartIdentity:          startIdentity,
 		WatchdogStartTimeTicks: watchdogTicks,
 		WatchdogStartIdentity:  watchdogIdentity,
+		InfraScope:             infraScopeUnit,
 	}, nil
 }
 

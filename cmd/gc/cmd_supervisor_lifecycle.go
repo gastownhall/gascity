@@ -742,7 +742,7 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 	}
 	defer logFile.Close() //nolint:errcheck // best-effort cleanup
 
-	child := infraCommand(gcPath, "supervisor", "run")
+	child := exec.Command(gcPath, "supervisor", "run")
 	child.SysProcAttr = backgroundSysProcAttr()
 	child.Stdin = nil
 	child.Stdout = logFile

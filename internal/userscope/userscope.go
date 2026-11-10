@@ -26,12 +26,38 @@ import (
 // probeTimeout bounds the availability probe. Test-overridable.
 var probeTimeout = 5 * time.Second
 
+// Scope describes the transient user scope a command is wrapped in.
+type Scope struct {
+	// Slice is the systemd user slice the scope is created under.
+	Slice string
+	// Unit, when set, names the scope unit (systemd-run --unit). A named
+	// scope's journal records can be found by that name after the unit
+	// itself is collected. It must not collide with a live unit.
+	Unit string
+	// Description, when set, is the scope's description (systemd-run
+	// --description), which the user manager's journal records repeat.
+	Description string
+}
+
 // Argv returns argv prefixed with the systemd-run invocation that places it
 // in a transient user scope under slice. It does not probe availability;
 // use [Wrapper.Wrap] for the guarded form.
 func Argv(slice string, argv []string) []string {
-	out := make([]string, 0, 7+len(argv))
-	out = append(out, "systemd-run", "--user", "--scope", "--slice="+slice, "--collect", "--quiet", "--")
+	return ScopeArgv(Scope{Slice: slice}, argv)
+}
+
+// ScopeArgv is [Argv] for a scope that may also carry a unit name and a
+// description.
+func ScopeArgv(s Scope, argv []string) []string {
+	out := make([]string, 0, 9+len(argv))
+	out = append(out, "systemd-run", "--user", "--scope", "--slice="+s.Slice, "--collect", "--quiet")
+	if s.Unit != "" {
+		out = append(out, "--unit="+s.Unit)
+	}
+	if s.Description != "" {
+		out = append(out, "--description="+s.Description)
+	}
+	out = append(out, "--")
 	return append(out, argv...)
 }
 
@@ -98,8 +124,15 @@ func (w *Wrapper) Active(slice string) bool {
 // Wrap returns argv wrapped in a transient user scope under slice, or argv
 // unchanged when argv or slice is empty or user scopes are unavailable.
 func (w *Wrapper) Wrap(slice string, argv []string) []string {
-	if len(argv) == 0 || !w.Active(slice) {
-		return argv
+	wrapped, _ := w.WrapScope(Scope{Slice: slice}, argv)
+	return wrapped
+}
+
+// WrapScope is [Wrapper.Wrap] for a scope that may carry a unit name and a
+// description. It also reports whether argv was wrapped.
+func (w *Wrapper) WrapScope(s Scope, argv []string) ([]string, bool) {
+	if len(argv) == 0 || !w.Active(s.Slice) {
+		return argv, false
 	}
-	return Argv(slice, argv)
+	return ScopeArgv(s, argv), true
 }

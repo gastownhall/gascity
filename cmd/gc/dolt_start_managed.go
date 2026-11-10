@@ -56,6 +56,9 @@ type managedDoltStartedProcess struct {
 	// these before signaling WatchdogPID. Zero/empty when there is no watchdog.
 	WatchdogStartTimeTicks uint64
 	WatchdogStartIdentity  string
+	// InfraScope names the transient systemd user scope unit the spawn runs
+	// in (see infraArgv); empty when it was spawned unscoped.
+	InfraScope string
 }
 
 // defaultManagedDoltBindHost is the listener host a managed dolt sql-server
@@ -239,11 +242,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-			Running:   true,
-			PID:       started.PID,
-			Port:      currentPort,
-			DataDir:   layout.DataDir,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Running:    true,
+			PID:        started.PID,
+			Port:       currentPort,
+			DataDir:    layout.DataDir,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+			InfraScope: started.InfraScope,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
@@ -446,7 +450,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltScopeWatchdogEnabled() {
 		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
-	cmd := infraCommand("dolt", "sql-server", "--config", configFile)
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), "dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -470,6 +474,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 		PID:            pid,
 		StartTimeTicks: startTimeTicks,
 		StartIdentity:  startIdentity,
+		InfraScope:     infraScopeUnit,
 	}
 	// Reap the child when it exits so it does not linger as a zombie under a
 	// non-reaping PID-1 controller. This server is managed out-of-band by PID

@@ -1375,7 +1375,7 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
-		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
+		r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath))
 		return r
 	}
 	if target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
@@ -1388,6 +1388,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
 		r.FixHint = doltServerFixHint(target)
+		if target.EndpointOrigin == contract.EndpointOriginManagedCity {
+			r.FixHint = withManagedDoltInfraScopeHint(c.cityPath, r.FixHint)
+		}
 		return r
 	}
 	conn.Close() //nolint:errcheck // best-effort close
@@ -1945,6 +1948,47 @@ type managedDoltDoctorRuntimeState struct {
 	PID     int    `json:"pid"`
 	Port    int    `json:"port"`
 	DataDir string `json:"data_dir"`
+	// InfraScope names the transient systemd user scope unit gc started the
+	// server in; empty when it was started unscoped.
+	InfraScope string `json:"infra_scope"`
+}
+
+// managedDoltInfraScopeHint tells the operator where to look when a managed
+// Dolt server gc started in a transient systemd user scope is not running:
+// the scope is collected once its processes exit, but the user manager's
+// journal records for it remain. It reads the published runtime state, then
+// the provider state, and returns "" when neither records a scope.
+func managedDoltInfraScopeHint(cityPath string) string {
+	for _, name := range []string{"dolt-state.json", "dolt-provider-state.json"} {
+		data, err := os.ReadFile(filepath.Join(doctorDoltPackStateDir(cityPath), name)) //nolint:gosec // path is derived from managed city layout
+		if err != nil {
+			continue
+		}
+		var state managedDoltDoctorRuntimeState
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		unit := strings.TrimSpace(state.InfraScope)
+		if unit == "" {
+			continue
+		}
+		return fmt.Sprintf("the managed Dolt server (pid %d) was started in systemd user scope %s, which is removed once it exits; "+
+			"its journal records remain: journalctl --user-unit=%s (all such scopes: journalctl -g 'gascity infra:'), and its own output is in the managed dolt.log",
+			state.PID, unit, unit)
+	}
+	return ""
+}
+
+// withManagedDoltInfraScopeHint appends managedDoltInfraScopeHint to hint.
+func withManagedDoltInfraScopeHint(cityPath, hint string) string {
+	scopeHint := managedDoltInfraScopeHint(cityPath)
+	if scopeHint == "" {
+		return hint
+	}
+	if hint == "" {
+		return scopeHint
+	}
+	return hint + "; " + scopeHint
 }
 
 func publishedManagedDoltDataDir(cityPath string) string {
