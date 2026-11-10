@@ -164,7 +164,9 @@ type Convoy struct {
 // Relic, the binding the residence probe proved holds the id, unless the
 // route already holds it. First owner, every leg Fatal and federated: the
 // reader (ResolveOwnerPreferring) takes the first row that reads closed, and
-// any failed read before one leaves the close unconfirmed. Route refs name a
+// any failed read before one leaves the close unconfirmed. An empty route
+// with a relic is the relic alone (the event's prefix names a rig this epoch
+// did not open); neither is a plan error. Route refs name a
 // rig whatever its suspension (the event routed there); a ref this epoch
 // holds no store for is a plan error.
 type CloseOwner struct {

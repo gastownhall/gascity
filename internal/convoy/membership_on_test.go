@@ -68,6 +68,7 @@ func membershipFixture(t *testing.T) (*beads.MemStore, string, string) {
 		{other.ID, open.ID, TrackingDepType},
 		{notConvoy.ID, open.ID, TrackingDepType},
 		{convoy.ID, other.ID, "blocks"},
+		{convoy.ID, "gone-1", TrackingDepType},
 	} {
 		if err := mem.DepAdd(d.from, d.to, d.typ); err != nil {
 			t.Fatal(err)
@@ -108,16 +109,39 @@ func TestMembersOnAgreesWithMembersIn(t *testing.T) {
 // about the walk): the legacy child and both tracked items, the closed one
 // only with includeClosed, and not the non-tracks edge's target.
 func TestMembersOnListsLegacyAndTrackedMembers(t *testing.T) {
-	mem, convoyID, _ := membershipFixture(t)
-	for includeClosed, want := range map[bool]int{true: 3, false: 2} {
+	mem, convoyID, itemID := membershipFixture(t)
+	if _, err := mem.Get("gone-1"); err == nil {
+		t.Fatal("precondition: the dangling tracked member exists")
+	}
+	// The legacy child, both tracked items and the dangling edge's
+	// placeholder (unknown status, so it survives includeClosed=false).
+	for includeClosed, want := range map[bool]int{true: 4, false: 3} {
 		got, err := MembersOn(beadstest.FederatedLeg(mem), convoyID, includeClosed)
 		if err != nil || len(got) != want {
 			t.Errorf("includeClosed=%v: MembersOn = %v, %v; want %d members", includeClosed, ids(got), err, want)
 		}
+		placeholder := false
 		for _, b := range got {
 			if b.Type == "convoy" {
 				t.Errorf("includeClosed=%v: the non-tracks edge's target %s is a member", includeClosed, b.ID)
 			}
+			if b.ID == "gone-1" {
+				placeholder = b.Status == trackedStatusUnknown
+			}
+		}
+		if !placeholder {
+			t.Errorf("includeClosed=%v: the dangling tracked edge is not kept as an unknown-status placeholder: %v", includeClosed, ids(got))
+		}
+	}
+	// TrackingConvoysOn answers convoys only: the task that tracks the item
+	// through a tracks edge is not one.
+	convoys, err := TrackingConvoysOn(beadstest.FederatedLeg(mem), itemID)
+	if err != nil || len(convoys) != 2 {
+		t.Fatalf("TrackingConvoysOn = %v, %v; want the two convoys", ids(convoys), err)
+	}
+	for _, c := range convoys {
+		if c.Type != "convoy" {
+			t.Errorf("TrackingConvoysOn answered %s of type %s", c.ID, c.Type)
 		}
 	}
 }

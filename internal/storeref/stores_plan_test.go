@@ -26,6 +26,8 @@ import (
 //	T3    refused                   T3k   refused, relic-proven binding
 //	T5    per-class split           Ts    sessions relocated alone
 //	T5o   graph and orders on two different bindings
+//	T2gp  T2 (a physical binding) under the gate's projection: the work
+//	      handles are views, the binding is read as it is
 //	T2d   T2 stranded and served degraded (#9025): the gate serves the split
 //	      though the work ledger holds stranded class rows, so the binding's
 //	      census reports legacy residents and no rig is relic-free; it plans
@@ -69,6 +71,7 @@ func storesTopologies() map[string]func() (topoFixture, StoresOptions) {
 			}
 			return newT2(), StoresOptions{ClassRefusals: refusals}
 		},
+		"T2gp": func() (topoFixture, StoresOptions) { return newT2(), gate },
 		"T2d": func() (topoFixture, StoresOptions) {
 			spec := wholeSplit()
 			spec.relics = true
@@ -159,6 +162,7 @@ func storesIntents(f topoFixture) []struct {
 		{"CloseOwner(relic)", CloseOwner{ID: "ga-1", Route: []StoreRef{WorkRef}, Relic: bindingRef}},
 		{"CloseOwner(fallback,relic)", CloseOwner{ID: "zz-1", Route: []StoreRef{alphaRef, bravoRef, WorkRef}, Relic: bindingRef}},
 		{"CloseOwner(no route)", CloseOwner{ID: "ga-1"}},
+		{"CloseOwner(no route,relic)", CloseOwner{ID: "ra-1", Relic: bindingRef}},
 	}
 }
 
@@ -192,7 +196,8 @@ func storesIntents(f topoFixture) []struct {
 var storesCorpus = map[string]string{
 	"CloseOwner x T0":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T0":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T0":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T0":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T0":                    `error: storeref: a CloseOwner plan for "ra-1" needs the event's route or its relic`,
 	"CloseOwner(relic) x T0":                             `FirstOwner: ""[Authority,Fatal,federated]`,
 	"Convoy(Children) x T0":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T0": `error: storeref: a Convoy(Children) plan needs its Near store`,
@@ -234,7 +239,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T0g":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T0g":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T0g":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T0g":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T0g":                    `error: storeref: a CloseOwner plan for "ra-1" needs the event's route or its relic`,
 	"CloseOwner(relic) x T0g":                             `FirstOwner: ""[Authority,Fatal,federated]`,
 	"Convoy(Children) x T0g":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T0g": `error: storeref: a Convoy(Children) plan needs its Near store`,
@@ -276,7 +282,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2u":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2u":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated]`,
-	"CloseOwner(no route) x T2u":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2u":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2u":                    `error: storeref: a CloseOwner plan for "ra-1" needs the event's route or its relic`,
 	"CloseOwner(relic) x T2u":                             `FirstOwner: ""[Authority,Fatal,federated]`,
 	"Convoy(Children) x T2u":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2u": `error: storeref: a Convoy(Children) plan needs its Near store`,
@@ -318,7 +325,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -360,7 +368,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2g":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2g":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated]`,
-	"CloseOwner(no route) x T2g":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2g":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2g":                    `error: storeref: a CloseOwner plan for "ra-1" needs the event's route or its relic`,
 	"CloseOwner(relic) x T2g":                             `FirstOwner: ""[Authority,Fatal,federated]`,
 	"Convoy(Children) x T2g":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2g": `error: storeref: a Convoy(Children) plan needs its Near store`,
@@ -400,9 +409,53 @@ var storesCorpus = map[string]string{
 	"Workflow(suspended) x T2g":                           `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:alpha[Relic,Fatal,relic] > rig:bravo[Relic,Fatal,relic]`,
 	"Workflow(unset) x T2g":                               `error: storeref: a Workflow plan needs the reader's choice about suspended rigs (WorkflowReadsSuspendedRigs or WorkflowSkipsSuspendedRigs), got 0`,
 
+	"CloseOwner x T2gp":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
+	"CloseOwner(fallback,relic) x T2gp":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
+	"CloseOwner(no route) x T2gp":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2gp":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
+	"CloseOwner(relic) x T2gp":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
+	"Convoy(Children) x T2gp":                              `Union(first-leg-wins): ""[Near,Fatal]`,
+	"Convoy(Children,binding near,elsewhere alpha) x T2gp": `Union(first-leg-wins): near[Near,Fatal,federated] > elsewhere[FederationTail,Fatal,federated]`,
+	"Convoy(Children,elsewhere binding) x T2gp":            `Union(first-leg-wins): ""[Near,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
+	"Convoy(Children,elsewhere itself) x T2gp":             `Union(first-leg-wins): ""[Near,Fatal]`,
+	"Convoy(Parent,alpha near) x T2gp":                     `FirstOwner: rig:alpha[Near,Fatal,federated] > rig:bravo[FederationTail,Fatal,federated]`,
+	"Convoy(Parent,binding near,city id) x T2gp":           `FirstOwner: near[Near,Fatal,federated] > ""[FederationTail,Fatal,federated]`,
+	"Convoy(Parent,binding near,reserved id) x T2gp":       `FirstOwner: near[Near,Fatal,federated]`,
+	"Convoy(Parent,binding near,rig id) x T2gp":            `FirstOwner: near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
+	"Convoy(Parent,no id) x T2gp":                          `error: storeref: a Convoy(Parent) plan needs the parent's id`,
+	"Convoy(Parent,no near) x T2gp":                        `error: storeref: a Convoy(Parent) plan needs its Near store`,
+	"Convoy(Parent,work near) x T2gp":                      `FirstOwner: ""[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
+	"Convoy(Tracking) x T2gp":                              `Union(first-leg-wins): ""[Near,Fatal] > class:gmnos[FederationTail,Fatal,federated]`,
+	"Convoy(Tracking,alpha) x T2gp":                        `Union(first-leg-wins): rig:alpha[Near,Fatal] > class:gmnos[FederationTail,Fatal,federated]`,
+	"Convoy(Tracking,binding near) x T2gp":                 `Union(first-leg-wins): near[Near,Fatal]`,
+	"Molecule(Active) x T2gp":                              `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,Fatal,federated]`,
+	"Molecule(Active,alpha) x T2gp":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > rig:alpha[V1,Fatal,federated]`,
+	"Molecule(Attachment) x T2gp":                          `FirstOwner: class:gmnos[Authority,FatalUnlessResolved,federated] > ""[V1,FatalUnlessResolved,federated]`,
+	"Molecule(Attachment,alpha) x T2gp":                    `FirstOwner: class:gmnos[Authority,FatalUnlessResolved,federated] > rig:alpha[V1,FatalUnlessResolved,federated]`,
+	"Molecule(Attachment,no near) x T2gp":                  `FirstOwner: class:gmnos[Authority,FatalUnlessResolved,federated]`,
+	"Molecule(ParentNear) x T2gp":                          `FirstOwner: ""[Near,Fatal,federated] > class:gmnos[Authority,Fatal,federated]`,
+	"Molecule(ParentNear,near binding) x T2gp":             `FirstOwner: near[Near,Fatal,federated]`,
+	"Molecule(RootNear) x T2gp":                            `FirstOwner: class:gmnos[Authority,Fatal,federated] > ""[Near,Fatal,federated]`,
+	"Molecule(RootNear,no near) x T2gp":                    `FirstOwner: class:gmnos[Authority,Fatal,federated]`,
+	"Molecule(RootNear,zero near) x T2gp":                  `FirstOwner: class:gmnos[Authority,Fatal,federated]`,
+	"Molecule(Roots) x T2gp":                               `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
+	"Molecule(Roots,binding ref) x T2gp":                   `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated]`,
+	"Molecule(Roots,census) x T2gp":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated] > rig:alpha[V1,PartialDegrade,federated] > rig:bravo[V1,PartialDegrade,federated]`,
+	"Molecule(Roots,city) x T2gp":                          `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated]`,
+	"OrderRuns x T2gp":                                     `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
+	"OrderRuns(alpha) x T2gp":                              `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
+	"OrderRuns(alpha,legacy) x T2gp":                       `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
+	"OrderRuns(alpha,pours,legacy) x T2gp":                 `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > rig:alpha[V1,Fatal,federated]`,
+	"OrderRuns(pours) x T2gp":                              `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,Fatal,federated]`,
+	"Workflow x T2gp":                                      `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:alpha[Relic,Fatal,relic] > rig:bravo[Relic,Fatal,relic]`,
+	"Workflow(retired) x T2gp":                             `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:alpha[Relic,Fatal,relic] > rig:bravo[Relic,Fatal,relic]`,
+	"Workflow(suspended) x T2gp":                           `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[Relic,Fatal,relic] > rig:alpha[Relic,Fatal,relic] > rig:bravo[Relic,Fatal,relic]`,
+	"Workflow(unset) x T2gp":                               `error: storeref: a Workflow plan needs the reader's choice about suspended rigs (WorkflowReadsSuspendedRigs or WorkflowSkipsSuspendedRigs), got 0`,
+
 	"CloseOwner x T2rf":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2rf":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2rf":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2rf":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2rf":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2rf":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2rf":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2rf": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -444,7 +497,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2s":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2s":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2s":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2s":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2s":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2s":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2s":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2s": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -486,7 +540,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2wrf":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2wrf":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2wrf":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2wrf":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2wrf":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2wrf":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2wrf":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2wrf": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -528,7 +583,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2cr":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2cr":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2cr":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2cr":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2cr":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2cr":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2cr":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2cr": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -570,11 +626,12 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2wr":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2wr":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2wr":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2wr":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2wr":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2wr":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2wr":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2wr": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
-	"Convoy(Children,elsewhere binding) x T2wr":            `Union(first-leg-wins): ""[Near,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
+	"Convoy(Children,elsewhere binding) x T2wr":            `Union(first-leg-wins): ""[Near,Fatal,federated] > elsewhere[FederationTail,Fatal,federated]`,
 	"Convoy(Children,elsewhere itself) x T2wr":             `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Parent,alpha near) x T2wr":                     `FirstOwner: rig:alpha[Near,Fatal,federated]`,
 	"Convoy(Parent,binding near,city id) x T2wr":           `FirstOwner: near[Near,Fatal,federated] > ""[FederationTail,Fatal,federated]`,
@@ -597,7 +654,7 @@ var storesCorpus = map[string]string{
 	"Molecule(RootNear,no near) x T2wr":                    `FirstOwner: class:gmnos[Authority,Fatal,federated]`,
 	"Molecule(RootNear,zero near) x T2wr":                  `FirstOwner: class:gmnos[Authority,Fatal,federated]`,
 	"Molecule(Roots) x T2wr":                               `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
-	"Molecule(Roots,binding ref) x T2wr":                   `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated] > class:gmnos[V1,PartialDegrade,federated]`,
+	"Molecule(Roots,binding ref) x T2wr":                   `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated]`,
 	"Molecule(Roots,census) x T2wr":                        `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated] > rig:alpha[V1,PartialDegrade,federated] > rig:bravo[V1,PartialDegrade,federated]`,
 	"Molecule(Roots,city) x T2wr":                          `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated]`,
 	"OrderRuns x T2wr":                                     `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated]`,
@@ -612,7 +669,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T2d":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T2d":                    `FirstOwner: rig:alpha[Authority,Fatal,federated] > rig:bravo[Authority,Fatal,federated] > ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
-	"CloseOwner(no route) x T2d":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T2d":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T2d":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T2d":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T2d":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T2d": `Union(first-leg-wins): near[Near,Fatal,federated] > rig:alpha[FederationTail,Fatal,federated]`,
@@ -654,7 +712,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T3":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T3":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T3":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T3":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T3":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T3":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T3":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T3": `Union(first-leg-wins): near[Near,Fatal]`,
@@ -696,7 +755,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T3k":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T3k":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T3k":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T3k":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T3k":                    `FirstOwner: class:gmnos[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T3k":                             `FirstOwner: ""[Authority,Fatal,federated] > class:gmnos[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T3k":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T3k": `Union(first-leg-wins): near[Near,Fatal]`,
@@ -738,7 +798,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T5":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T5":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T5":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T5":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T5":                    `FirstOwner: class:s[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T5":                             `FirstOwner: ""[Authority,Fatal,federated] > class:s[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T5":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T5": `Union(first-leg-wins): near[Near,Fatal]`,
@@ -780,7 +841,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x T5o":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x T5o":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x T5o":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x T5o":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x T5o":                    `FirstOwner: class:o[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x T5o":                             `FirstOwner: ""[Authority,Fatal,federated] > class:o[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x T5o":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x T5o": `Union(first-leg-wins): near[Near,Fatal]`,
@@ -822,7 +884,8 @@ var storesCorpus = map[string]string{
 
 	"CloseOwner x Ts":                                    `FirstOwner: ""[Authority,Fatal,federated]`,
 	"CloseOwner(fallback,relic) x Ts":                    `error: storeref: CloseOwner("zz-1"): storeref: this epoch holds no store for "rig:alpha"`,
-	"CloseOwner(no route) x Ts":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route`,
+	"CloseOwner(no route) x Ts":                          `error: storeref: a CloseOwner plan for "ga-1" needs the event's route or its relic`,
+	"CloseOwner(no route,relic) x Ts":                    `FirstOwner: class:s[FederationTail,Fatal,federated]`,
 	"CloseOwner(relic) x Ts":                             `FirstOwner: ""[Authority,Fatal,federated] > class:s[FederationTail,Fatal,federated]`,
 	"Convoy(Children) x Ts":                              `Union(first-leg-wins): ""[Near,Fatal]`,
 	"Convoy(Children,binding near,elsewhere alpha) x Ts": `Union(first-leg-wins): near[Near,Fatal]`,

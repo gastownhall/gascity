@@ -552,12 +552,9 @@ func (s Stores) planConvoy(in Convoy) (ResolvedPlan, error) {
 		if err != nil {
 			return ResolvedPlan{}, err
 		}
+		// Plan dedupes the graph leg when it is Near: one strict read.
 		near.Gate = beads.NoLegRole
-		plan := ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{near}}
-		if !beads.SameStore(graph, in.Near) {
-			plan.Legs = append(plan.Legs, s.leg(coordclass.ClassGraph, graph, in.Scope, RoleFederationTail, PolicyFatal))
-		}
-		return plan, nil
+		return ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{near, s.leg(coordclass.ClassGraph, graph, in.Scope, RoleFederationTail, PolicyFatal)}}, nil
 	case ConvoyChildren:
 		if beads.IsNilStore(in.Elsewhere) || beads.SameStore(in.Elsewhere, in.Near) {
 			near.Gate = beads.NoLegRole
@@ -577,8 +574,11 @@ func (s Stores) planCloseOwner(in CloseOwner) (ResolvedPlan, error) {
 	if id == "" {
 		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan needs the event's bead id")
 	}
-	if len(in.Route) == 0 {
-		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan for %q needs the event's route", id)
+	if len(in.Route) == 0 && in.Relic == "" {
+		// A relic alone is a plan: the event's prefix names a store this
+		// epoch did not open (an unbound rig), and the binding the residence
+		// probe proved holds the id is the one place left to confirm it.
+		return ResolvedPlan{}, fmt.Errorf("storeref: a CloseOwner plan for %q needs the event's route or its relic", id)
 	}
 	plan := ResolvedPlan{Mode: ModeFirstOwner, ID: id}
 	add := func(ref StoreRef, role Role) error {
