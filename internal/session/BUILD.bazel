@@ -103,6 +103,8 @@ go_library(
         "//internal/nudgequeue",
         "//internal/pathutil",
         "//internal/pidutil",
+        "//internal/platform/filelock",
+        "//internal/processgroup",
         "//internal/promptsafe",
         "//internal/runtime",
         "//internal/runtime/proctable",

@@ -121,7 +121,11 @@ func liveCityNudgePollers(cityPath string) (int, error) {
 		if n, parseErr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); parseErr != nil || n != 1 || pid <= 0 {
 			continue
 		}
-		if pidutil.AliveWithCmdline(pid, nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(entry.Name(), ".pid"))) {
+		alive, err := pidutil.AliveWithCmdline(pid, nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(entry.Name(), ".pid")))
+		if err != nil {
+			return live, fmt.Errorf("checking nudge poller pid %d (%s): %w", pid, entry.Name(), err)
+		}
+		if alive {
 			live++
 		}
 	}
@@ -148,7 +152,8 @@ func stopCityNudgePoller(cityPath, pidPath string) error {
 			return nil
 		}
 		isPoller := nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(filepath.Base(pidPath), ".pid"))
-		if !pidutil.AliveWithCmdline(pid, isPoller) {
+		// An unreadable identity is not proof this is the poller: leave it.
+		if alive, _ := pidutil.AliveWithCmdline(pid, isPoller); !alive {
 			return nil
 		}
 		if err := signalNudgePollerAndWait(pid, isPoller); err != nil {
@@ -164,21 +169,24 @@ func stopCityNudgePoller(cityPath, pidPath string) error {
 // signalNudgePollerAndWait sends SIGTERM, escalating to SIGKILL after
 // nudgePollerStopGrace. Identity is re-checked right before the SIGKILL: if
 // the poller exited and its PID was reused during the grace period, the
-// forced kill would land on an unrelated process.
+// forced kill would land on an unrelated process. Where SIGTERM cannot be
+// delivered (Windows), it goes straight to the identity check and SIGKILL.
 func signalNudgePollerAndWait(pid int, isPoller func([]string) bool) error {
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+	err := platformKill(pid, syscall.SIGTERM)
+	switch {
+	case err == nil:
+		if waitForNudgePollerExit(pid) {
 			return nil
 		}
+	case errors.Is(err, syscall.ESRCH):
+		return nil
+	case !errors.Is(err, errSignalUnsupported):
 		return fmt.Errorf("SIGTERM: %w", err)
 	}
-	if waitForNudgePollerExit(pid) {
+	if alive, _ := pidutil.AliveWithCmdline(pid, isPoller); !alive {
 		return nil
 	}
-	if !pidutil.AliveWithCmdline(pid, isPoller) {
-		return nil
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	if err := platformKill(pid, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}

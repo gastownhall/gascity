@@ -2289,12 +2289,17 @@ calls = 1
 [[count]]
 path = "internal/pidutil/cmdline_portable_test.go"
 resource = "fixed_sleep"
-calls = 2
+calls = 1
 
 [[count]]
-path = "internal/pidutil/cmdline_portable_test.go"
+path = "internal/pidutil/cmdline_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/pidutil/cmdline_unix_test.go"
 resource = "subprocess"
-calls = 2
+calls = 1
 
 [[count]]
 path = "internal/pidutil/environ_darwin_test.go"
@@ -2310,7 +2315,12 @@ calls = 2
 [[count]]
 path = "internal/pidutil/pidutil_test.go"
 resource = "subprocess"
-calls = 4
+calls = 2
+
+[[count]]
+path = "internal/pidutil/testcmd_unix_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "internal/processgroup/processgroup_unix_test.go"

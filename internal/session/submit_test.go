@@ -940,7 +940,7 @@ func waitForSubmitPollerCmdline(t *testing.T, pid int, cityPath, sessionName, ag
 	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if pidutil.AliveWithCmdline(pid, matches) {
+		if matched, err := pidutil.AliveWithCmdline(pid, matches); err == nil && matched {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
