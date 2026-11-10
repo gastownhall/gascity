@@ -637,21 +637,26 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	route.readLeg = base.ReadWorkMeta
 	ops.ClassRoute = route
 
-	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-		if route.knownResident(beadID) {
-			return route.claim(beadID, assignee)
-		}
-		// The work-scope claim is the first leg of the escalation: a
-		// not-found here is the signal to probe the binding, so the call is
-		// marked federated.
+	// claimWorkFirst is the work-first escalation every claim seam runs: the
+	// work-scope attempt is the first leg, marked federated because a not-found
+	// from it is the signal to probe the binding, and the call moves to the
+	// binding only on a proven absence.
+	//
+	// ONE marked site serves the generic claim and the exact claim on purpose,
+	// rather than one mark each: they are the same leg of the same fan-out and
+	// differ only in which work-store primitive performs the attempt, so a mark
+	// per spelling would record one federation leg twice (D9 freezes the marker
+	// count). attempt and onBinding are closures so a caller can keep its own
+	// primitive's arguments, and the binding half runs only after route.routes
+	// has proved the work leg absent.
+	claimWorkFirst := func(ctx context.Context, dir string, env []string, beadID, assignee string, attempt, onBinding func() (beads.Bead, bool, error)) (beads.Bead, bool, error) {
 		var claimed beads.Bead
 		var ok bool
 		err := beads.FederatedRead(func() error {
-			var claimErr error
-			claimed, ok, claimErr = base.Claim(ctx, dir, env, beadID, assignee)
-			return claimErr
+			var attemptErr error
+			claimed, ok, attemptErr = attempt()
+			return attemptErr
 		})
-		leg := hookStore{dir: dir, env: env}
 		if ok {
 			// The work store's CAS COMMITTED. Its error, if any, is the
 			// canonical readback failing on a bead this session now owns HERE —
@@ -661,50 +666,40 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			// the work store's answer is returned exactly as it came back.
 			return claimed, ok, err
 		}
-		routed, probeErr := route.routes(ctx, leg, beadID, assignee, err)
+		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
 			return beads.Bead{}, false, probeErr
 		case routed:
-			return route.claim(beadID, assignee)
+			return onBinding()
 		default:
 			return claimed, ok, err
 		}
 	}
+
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		if route.knownResident(beadID) {
+			return route.claim(beadID, assignee)
+		}
+		return claimWorkFirst(ctx, dir, env, beadID, assignee,
+			func() (beads.Bead, bool, error) { return base.Claim(ctx, dir, env, beadID, assignee) },
+			func() (beads.Bead, bool, error) { return route.claim(beadID, assignee) })
+	}
+
+	// The exact claim is a claim, so it escalates on the same terms as ops.Claim
+	// through the same marked leg. Without it a graph step resident in a
+	// relocated binding that is not yet memoized resident was answered
+	// ErrNotFound by the work store and never reached the binding the reader
+	// served it from.
 	ops.ClaimExact = func(ctx context.Context, dir string, env []string, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
 		if route.knownResident(candidate.ID) {
 			return route.claimExact(candidate, assignee, sessionID)
 		}
-		// The exact claim is a claim, so it escalates on the same terms as
-		// ops.Claim: the work-scope attempt is the first leg, and only a
-		// proven absence from it opens the binding. Without this a graph step
-		// resident in a relocated binding that is not yet memoized resident was
-		// answered ErrNotFound by the work store and never reached the binding
-		// the reader served it from.
-		var claimed beads.Bead
-		var ok bool
-		err := beads.FederatedRead(func() error {
-			var claimErr error
-			claimed, ok, claimErr = base.ClaimExact(ctx, dir, env, candidate, assignee, sessionID)
-			return claimErr
-		})
-		leg := hookStore{dir: dir, env: env}
-		if ok {
-			// The work store's CAS committed (its error, if any, is the canonical
-			// readback failing). Same refusal as ops.Claim, same reason: escalating
-			// it would claim one logical bead in two ledgers and erase the signal
-			// both call sites stop on.
-			return claimed, ok, err
-		}
-		routed, probeErr := route.routes(ctx, leg, candidate.ID, assignee, err)
-		switch {
-		case probeErr != nil:
-			return beads.Bead{}, false, probeErr
-		case routed:
-			return route.claimExact(candidate, assignee, sessionID)
-		default:
-			return claimed, ok, err
-		}
+		return claimWorkFirst(ctx, dir, env, candidate.ID, assignee,
+			func() (beads.Bead, bool, error) {
+				return base.ClaimExact(ctx, dir, env, candidate, assignee, sessionID)
+			},
+			func() (beads.Bead, bool, error) { return route.claimExact(candidate, assignee, sessionID) })
 	}
 
 	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
