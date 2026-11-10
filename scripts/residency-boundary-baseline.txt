@@ -41,9 +41,10 @@
 #
 # A row here is a CENSUS entry, not a verdict. Some are genuine blind readers
 # awaiting a migration slice; others are sanctioned shapes whose growth is still
-# worth reviewing — internal/api/residency_by_id.go's three []storeref.Leg
-# returners are the WorkAxisRouter the resolver itself declares, and
-# c:storeref.EachLeg's two entries are the enumeration seam's only consumers.
+# worth reviewing — internal/api/residency_by_id.go's c:WorkAxisRouter row is
+# the router the resolver itself declares (it answers refs since T7c, so it
+# returns no store list), and c:storeref.EachLeg's two entries are the
+# enumeration seam's only consumers.
 #
 # The single c:WorkAxisRouter row is the census of storeref.ByID.WorkAxis
 # implementations. It is deliberately HERE and not in the shell guard's
@@ -216,18 +217,12 @@ cmd/gc/residency_topology.go	cliSoleClassBinding	c:plan-leg-store-access	1
 cmd/gc/residency_topology.go	residencyBindingsFromRoutesWithProof	b:routes.storeFor	1
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
-internal/api/handler_beads.go	findStore	a:BeadStores	1
-internal/api/handler_beads.go	resolveStoreByPrefix	a:BeadStores	1
 internal/api/handler_convoy_dispatch.go	workflowStoresWith	a:BeadStores	1
 internal/api/handler_convoys.go	isGraphConvoyID	a:BeadStores	1
 internal/api/handler_sling.go	sourceWorkflowStores	a:BeadStores	2
 internal/api/handler_status.go	statusWorkCounts	a:BeadStores	1
 internal/api/huma_handlers_beads.go	humaHandleBeadList	a:BeadStores	1
 internal/api/huma_handlers_beads.go	humaHandleBeadReady	a:BeadStores	1
-internal/api/residency_by_id.go	WorkLegsForID	ast:returns-store-list	1
 internal/api/residency_by_id.go	WorkLegsForID	c:WorkAxisRouter	1
-internal/api/residency_by_id.go	configuredPrefixLegs	ast:returns-store-list	1
 internal/api/residency_by_id.go	resolveLegByConfiguredIDPrefix	d:IDInNamespace	1
-internal/api/residency_by_id.go	unroutedWorkLegs	a:BeadStores	1
-internal/api/residency_by_id.go	unroutedWorkLegs	ast:returns-store-list	1
 internal/api/state.go	(file-scope)	a:BeadStores	1

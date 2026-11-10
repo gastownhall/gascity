@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package tmux
 
@@ -1067,20 +1067,13 @@ func TestIsAgentRunning(t *testing.T) {
 	// Clean up any existing session
 	_ = tm.KillSession(sessionName)
 
-	// Create session (will run default shell)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
+	// A plain sh pane runs no startup files, so the pane command is the shell
+	// and never changes. A login shell's foreground startup jobs (clear, sh,
+	// tput) would otherwise be sampled as the setup command.
+	newPlainShellSession(t, tm, sessionName)
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Wait for the shell to be fully initialized before querying pane command.
-	// Without this, GetPaneCommand can return a transient value during shell
-	// startup (e.g., login or profile-sourced commands), causing flaky matches.
-	if err := tm.WaitForShellReady(sessionName, 2*time.Second); err != nil {
-		t.Fatalf("WaitForShellReady: %v", err)
-	}
-
-	// Get the current pane command (should be bash/zsh/etc)
+	// Get the current pane command (the settled sh)
 	cmd, err := tm.GetPaneCommand(sessionName)
 	if err != nil {
 		t.Fatalf("GetPaneCommand: %v", err)

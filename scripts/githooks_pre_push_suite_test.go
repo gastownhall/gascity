@@ -61,7 +61,8 @@ const (
 // withFakeBazel puts a `bazel` on the fixture's PATH. `bazel info` (the mode
 // probe) prints BAZEL_ANNOUNCE to stderr, exits BAZEL_INFO_EXIT (default 0)
 // and is recorded in the returned probe record; anything else is recorded
-// in the returned run record and exits BAZEL_EXIT (default 0).
+// in the returned run record and exits BAZEL_EXIT (default 0; "sigpipe"
+// kills it with SIGPIPE).
 func (f *prePushFixture) withFakeBazel(t *testing.T, announce string) (runs, probes string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -74,6 +75,7 @@ if [ "$1" = info ]; then
   exit "${BAZEL_INFO_EXIT:-0}"
 fi
 printf '%s\n' "$*" >> "$BAZEL_RECORD"
+[ "${BAZEL_EXIT:-}" = sigpipe ] && kill -PIPE $$
 exit "${BAZEL_EXIT:-0}"
 `)
 	f.env = append(f.env, "BAZEL_RECORD="+runs, "BAZEL_PROBE_RECORD="+probes, "BAZEL_ANNOUNCE="+announce)
@@ -222,6 +224,62 @@ func TestPrePushSuitePropagatesBazelFailure(t *testing.T) {
 	}
 	if got := f.read(t, f.makeRuns); got != "" {
 		t.Errorf("make ran after a bazel failure: %q", got)
+	}
+}
+
+// TestPrePushSuiteFailsClosedOnSIGPIPE: a suite that dies of SIGPIPE (141)
+// fails the push with a named error under both engines, including the go
+// suite auto picks when the local-runtime probe rules out bazel. Exit 141 is
+// "a writer hit a closed pipe", not a test verdict: it arrives after a
+// passing suite as readily as after a failing one, so it must never pass
+// through as the hook's only signal.
+func TestPrePushSuiteFailsClosedOnSIGPIPE(t *testing.T) {
+	sigpipeMake := func(t *testing.T, f *prePushFixture) {
+		writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$MAKE_RECORD"
+kill -PIPE $$
+`)
+	}
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		setup func(t *testing.T, f *prePushFixture)
+	}{
+		{
+			name: "bazel",
+			mode: "",
+			setup: func(t *testing.T, f *prePushFixture) {
+				f.withFakeBazel(t, announceHome)
+				// A real SIGPIPE death, not a plain `exit 141`.
+				f.env = append(f.env, "BAZEL_EXIT=sigpipe")
+			},
+		},
+		{name: "go", mode: "go", setup: sigpipeMake},
+		{
+			name: "auto go after a failed local-runtime probe",
+			mode: "",
+			setup: func(t *testing.T, f *prePushFixture) {
+				installLocalRuntimeProbe(t, repoRoot(t), f.repo, "missing libicuuc.so.74", filepath.Join(t.TempDir(), "runtime-probes"))
+				f.withFakeBazel(t, announceNone)
+				sigpipeMake(t, f)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			tc.setup(t, f)
+			f.env = append(f.env, "GC_PREPUSH_SUITE="+tc.mode)
+
+			code, out := f.run(t, f.pushRefLine())
+			if code != 1 {
+				t.Fatalf("pre-push exit = %d, want 1 (SIGPIPE fails closed)\n%s", code, out)
+			}
+			for _, want := range []string{"exited 141 (SIGPIPE)", "fail closed"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("pre-push output lacks %q\n%s", want, out)
+				}
+			}
+		})
 	}
 }
 

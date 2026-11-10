@@ -199,9 +199,13 @@ periodic read would keep a suspended scope warm for good.
   - A config change made while it is quiescent is applied on the first tick
     after resume.
 - **Retire on suspend, converging on live state.** Once a suspended scope's
-  sessions have been drained for a whole tick, the controller stops its pair
-  with the lifecycle `stop` op (`bd dolt stop`), the same op gc stop runs
-  last.
+  sessions have been drained, and none of the controller's off-tick store work
+  (autoclose runs, completion facts, the async session starts and drain-ack
+  stops it dispatched) has been in flight for a whole tick, the controller
+  stops its pair with the lifecycle `stop` op (`bd dolt stop`), the same op gc
+  stop runs last. A drain-ack stop empties the provider's session list before
+  it releases its runtime lease in the session store, so the empty list alone
+  does not mean the last write has landed.
   - A rig is stopped when its own sessions are gone; the city and every rig
     when nothing runs at all.
   - The check reads the proxy record and the process table, never a store.

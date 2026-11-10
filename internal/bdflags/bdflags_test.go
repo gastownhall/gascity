@@ -88,7 +88,7 @@ func TestBoolFlagsIncorporatesDiscovered(t *testing.T) {
 
 func TestSubcommandsListsAllKnownKeys(t *testing.T) {
 	want := []string{
-		"close", "create", "delete", "dep add", "dep list", "dep remove",
+		"close", "comment", "comments", "comments add", "create", "delete", "dep add", "dep list", "dep remove",
 		"gate check", "gate list", "list", "mol burn", "mol current",
 		"mol pour", "mol wisp", "ready", "reopen", "show", "update",
 	}
@@ -236,6 +236,41 @@ func TestCompoundSubcommandFlagSets(t *testing.T) {
 	}
 	if ValueFlags("gate check") == nil {
 		t.Fatal(`ValueFlags("gate check") = nil, want non-nil`)
+	}
+}
+
+// TestCommentFlagSetsMatchThePinnedInventories: the comment verbs' manifests
+// are transcribed from the pinned inventories, and must stay equal to every
+// one of them (help aside, which the global set carries), so the by-id door's
+// argv walks cannot step over a value differently from bd.
+func TestCommentFlagSetsMatchThePinnedInventories(t *testing.T) {
+	for _, sub := range []string{"comment", "comments", "comments add"} {
+		for _, inv := range Inventories() {
+			wantValue, wantBool := map[string]bool{}, map[string]bool{}
+			c := inv.Command(sub)
+			if c == nil {
+				t.Fatalf("%s: inventory %s has no %q", sub, inv.Name, sub)
+			}
+			for _, f := range append(append([]InventoryFlag(nil), c.Local...), c.Persistent...) {
+				if f.Name == "help" {
+					continue
+				}
+				dst := wantBool
+				if f.TakesValue() {
+					dst = wantValue
+				}
+				dst["--"+f.Name] = true
+				if f.Shorthand != "" {
+					dst["-"+f.Shorthand] = true
+				}
+			}
+			if got := valueFlagsBySub[sub]; !reflect.DeepEqual(got, wantValue) {
+				t.Errorf("%s value flags = %v, inventory %s says %v", sub, got, inv.Name, wantValue)
+			}
+			if got := boolFlagsBySub[sub]; !reflect.DeepEqual(got, wantBool) {
+				t.Errorf("%s bool flags = %v, inventory %s says %v", sub, got, inv.Name, wantBool)
+			}
+		}
 	}
 }
 
