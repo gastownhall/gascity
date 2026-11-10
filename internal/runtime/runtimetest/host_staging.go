@@ -89,7 +89,10 @@ func (c hostStagingCase) has(rel string) bool {
 // session exists, a failing pre_start failing the start with no session; it
 // leaves every field it handled out of the start request; it runs
 // session_setup on the host after the start, a failure there only a
-// warning; and it runs no session_live.
+// warning; it runs no session_live; it does none of that host work into a
+// name a live session already holds; and a relaunch of a session (when the
+// provider implements [runtime.RelaunchProvider]) runs its session_setup on
+// the host again.
 func RunHostStagingContract(t *testing.T, f HostStagingFixture) {
 	t.Helper()
 	t.Run("HostStaging_StagesAndRunsPreStartOnTheHost", func(t *testing.T) {
@@ -117,6 +120,30 @@ func RunHostStagingContract(t *testing.T, f HostStagingFixture) {
 			t.Error(err)
 		}
 	})
+	t.Run("HostStaging_NoHostWorkIntoALiveSession", func(t *testing.T) {
+		if err := checkHostStagingNotIntoALiveSession(newHostStagingCase(t, f, "host-staging-occupied")); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("HostStaging_RelaunchRerunsSessionSetup", func(t *testing.T) {
+		if err := checkHostStagingRelaunchSetup(newHostStagingCase(t, f, "host-staging-relaunch")); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// hostWorkMarkers are the work-dir files the case's host work leaves.
+var hostWorkMarkers = []string{"gc-provider-file", "gc-agent-file", "gc-copied", "gc-pre-start", "gc-session-setup"}
+
+// clearHostWork removes every file the case's host work left in its work
+// dir, so a later start shows whether it did that work again.
+func (c hostStagingCase) clearHostWork() error {
+	for _, rel := range hostWorkMarkers {
+		if err := os.Remove(filepath.Join(c.workDir, rel)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c hostStagingCase) start() error {
@@ -207,6 +234,51 @@ func checkHostStagingNoSessionLive(c hostStagingCase) error {
 	}
 	if c.has("gc-session-live") {
 		return errors.New("runtime contract 022: session_live ran on the host; the provider runs no session_live")
+	}
+	return nil
+}
+
+// checkHostStagingNotIntoALiveSession reports how the provider breaks
+// RUNTIME-CONTRACT-022 for a start into a name a live session holds: it
+// stages nothing and runs no pre_start or session_setup on the host, which
+// would redo them in that live session's work dir. Whether the start itself
+// fails is the backend's to say.
+func checkHostStagingNotIntoALiveSession(c hostStagingCase) error {
+	if err := c.start(); err != nil {
+		return fmt.Errorf("runtime contract 022: Start = %w, want nil", err)
+	}
+	if err := c.clearHostWork(); err != nil {
+		return fmt.Errorf("runtime contract 022: clearing the first start's host work: %w", err)
+	}
+	_ = c.start() // the backend may refuse the name; the host work is the check
+	for _, rel := range hostWorkMarkers {
+		if c.has(rel) {
+			return fmt.Errorf("runtime contract 022: a start into a name a live session holds did host work (%s); host work goes only into a vacant name", rel)
+		}
+	}
+	return nil
+}
+
+// checkHostStagingRelaunchSetup reports how the provider breaks
+// RUNTIME-CONTRACT-022 on a relaunch: a provider implementing
+// [runtime.RelaunchProvider] runs the session's session_setup on the host
+// again, as a fresh start would. A provider without a relaunch passes.
+func checkHostStagingRelaunchSetup(c hostStagingCase) error {
+	rp, ok := c.sp.(runtime.RelaunchProvider)
+	if !ok {
+		return nil
+	}
+	if err := c.start(); err != nil {
+		return fmt.Errorf("runtime contract 022: Start = %w, want nil", err)
+	}
+	if err := c.clearHostWork(); err != nil {
+		return fmt.Errorf("runtime contract 022: clearing the start's host work: %w", err)
+	}
+	if err := rp.Relaunch(context.Background(), c.name, c.cfg); err != nil {
+		return fmt.Errorf("runtime contract 022: Relaunch = %w, want nil", err)
+	}
+	if !c.has("gc-session-setup") {
+		return errors.New("runtime contract 022: Relaunch did not run session_setup on the host again")
 	}
 	return nil
 }
