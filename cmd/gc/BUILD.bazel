@@ -1664,6 +1664,7 @@ go_test(
         "fast_loop_helpers_test.go",
         "fingerprint_change_policy_test.go",
         "fleet_breaker_control_test.go",
+        "fleet_breaker_review_fixes_test.go",
         "fleet_operator_reset_test.go",
         "fleet_probe_rotation_test.go",
         "fleet_probe_rotation_unit_test.go",
