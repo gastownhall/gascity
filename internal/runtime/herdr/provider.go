@@ -133,7 +133,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
 	// tab's root shell pane — created here with the agent's cwd and env — IS
 	// the agent's pane.
-	wsLabel, tabLabel := placementFor(name, cfg.Env)
+	wsLabel, tabLabel := placementFor(name, p.c.session, cfg.Env)
 	p.mu.Lock()
 	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, cfg.Env)
 	p.mu.Unlock()
@@ -1213,7 +1213,7 @@ func (p *Provider) paneID(ctx context.Context, name string) (string, error) {
 // "<town>__<agent>" (town-level). Workspace = the rig when present, else the
 // town; tab = the agent (the segment after the last "__"). Falls back to the
 // whole name when those separators are absent (defensive for non-gc names).
-func workspaceTabFor(name string) (workspace, tab string) {
+func workspaceTabFor(name, _ string) (workspace, tab string) {
 	rest := name
 	if i := strings.Index(name, "--"); i >= 0 {
 		workspace, rest = name[:i], name[i+2:]
@@ -1250,8 +1250,8 @@ func workspaceTabFor(name string) (workspace, tab string) {
 // the themed instance name, yielding e.g. workspace "webapp", tab
 // "polecat-furiosa". Persistent and town-level sessions are unaffected: they
 // either carry no GC_RIG (town agents) or already resolve to the same labels.
-func placementFor(name string, env map[string]string) (workspace, tab string) {
-	workspace, tab = workspaceTabFor(name)
+func placementFor(name, town string, env map[string]string) (workspace, tab string) {
+	workspace, tab = workspaceTabFor(name, town)
 	if len(env) == 0 {
 		return workspace, tab
 	}
