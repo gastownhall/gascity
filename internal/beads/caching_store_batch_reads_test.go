@@ -276,29 +276,83 @@ func TestBdStoreDepListBatchReportsAnUnsupportedBackend(t *testing.T) {
 	}
 }
 
-// TestBdStoreDepListBatchOneIDReadsBdsRowShape pins the one-id batch. A one-id
-// `bd dep list <id> --json` prints the depended-on beads' rows (with
-// dependency_type), not the dependency records a multi-id call prints, so a
-// one-id batch parsed as records keyed every edge under "" and reported the
-// anchor as edge-free.
-func TestBdStoreDepListBatchOneIDReadsBdsRowShape(t *testing.T) {
+// TestBdStoreDepListBatchOneIDReadsTheRawRecords pins the one-id batch. bd
+// picks its dep list shape by how many ids it is handed: one id prints the
+// depended-on beads' rows, a join that drops every edge whose target has no
+// row, and several print the raw dependency records. A lone anchor is asked
+// as a repeated pair, so it gets the records a multi-id batch gives it — the
+// edge to a bead no store holds included — in one bd command.
+func TestBdStoreDepListBatchOneIDReadsTheRawRecords(t *testing.T) {
 	fake := newCountingFakeBd()
 	a := seedFake(t, fake, beads.Bead{Title: "a"})
 	b := seedFake(t, fake, beads.Bead{Title: "b"})
-	if err := fake.SeedDep(b.ID, a.ID, "blocks"); err != nil {
-		t.Fatal(err)
+	const dangling = "discovered-from:gc-404"
+	for _, target := range []string{a.ID, dangling} {
+		if err := fake.SeedDep(b.ID, target, "blocks"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	store := fake.store()
+	if rows, err := store.DepList(b.ID, "down"); err != nil || len(rows) != 1 {
+		t.Fatalf("DepList(%s) = (%v, %v); the fixture's one-id dep list must drop the edge to %s, as bd's does", b.ID, rows, err, dangling)
+	}
+	fake.calls = nil
 	got, err := store.DepListBatch([]string{b.ID})
 	if err != nil {
 		t.Fatalf("DepListBatch: %v", err)
 	}
-	want := map[string][]beads.Dep{b.ID: {{IssueID: b.ID, DependsOnID: a.ID, Type: "blocks"}}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DepListBatch(%s) = %#v, want %#v", b.ID, got, want)
+	want := []beads.Dep{{IssueID: b.ID, DependsOnID: a.ID, Type: "blocks"}, {IssueID: b.ID, DependsOnID: dangling, Type: "blocks"}}
+	if len(got) != 1 || !slices.Equal(sortedDeps(got[b.ID]), sortedDeps(want)) {
+		t.Fatalf("DepListBatch(%s) = %#v, want the raw records %v", b.ID, got, want)
 	}
-	if len(fake.calls) != 1 {
-		t.Fatalf("a one-id batch ran %d bd commands %v, want 1", len(fake.calls), fake.calls)
+	if wantCall := "dep list " + b.ID + " " + b.ID + " --json"; len(fake.calls) != 1 || strings.Join(fake.calls[0], " ") != wantCall {
+		t.Fatalf("a one-id batch ran %v, want the one command `bd %s`", fake.calls, wantCall)
+	}
+}
+
+// TestBdStoreDepListBatchKeepsEachRecordOnce: a bd that prints an anchor's
+// records once per time the anchor is named (bd before v1.3, and the proxied
+// path, which hands the ids to its edge read as typed) answers the repeated
+// one-id pair, and a caller's own repeated id, with every record twice. Each
+// edge is kept once.
+func TestBdStoreDepListBatchKeepsEachRecordOnce(t *testing.T) {
+	const twice = `[` +
+		`{"issue_id":"gc-2","depends_on_id":"gc-1","type":"blocks"},` +
+		`{"issue_id":"gc-2","depends_on_id":"discovered-from:gc-404","type":"blocks"},` +
+		`{"issue_id":"gc-2","depends_on_id":"gc-1","type":"blocks"},` +
+		`{"issue_id":"gc-2","depends_on_id":"discovered-from:gc-404","type":"blocks"}]`
+	store := beads.NewBdStore("/fake-bd", func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(twice), nil
+	})
+	want := map[string][]beads.Dep{"gc-2": {
+		{IssueID: "gc-2", DependsOnID: "gc-1", Type: "blocks"},
+		{IssueID: "gc-2", DependsOnID: "discovered-from:gc-404", Type: "blocks"},
+	}}
+	for _, ids := range [][]string{{"gc-2"}, {"gc-2", "gc-2"}} {
+		got, err := store.DepListBatch(ids)
+		if err != nil {
+			t.Fatalf("DepListBatch(%v): %v", ids, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("DepListBatch(%v) = %#v, want each edge once %#v", ids, got, want)
+		}
+	}
+}
+
+// TestBdStoreDepListBatchRefusesRowsThatAreNotRecords: bd before v1.3 answers a
+// multi-id `bd dep list` with the depended-on beads' rows when its batched read
+// fails or an anchor does not resolve. Read as records those rows carry no
+// anchor, so every edge would be filed under "" and every anchor read as
+// edge-free. The batch fails instead.
+func TestBdStoreDepListBatchRefusesRowsThatAreNotRecords(t *testing.T) {
+	const rows = `[{"id":"gc-1","title":"blocker","status":"open","issue_type":"task","dependency_type":"blocks"}]`
+	store := beads.NewBdStore("/fake-bd", func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(rows), nil
+	})
+	for _, ids := range [][]string{{"gc-2"}, {"gc-2", "gc-3"}} {
+		if got, err := store.DepListBatch(ids); err == nil || got != nil {
+			t.Errorf("DepListBatch(%v) over issue rows = (%v, %v), want an error and no map", ids, got, err)
+		}
 	}
 }
 

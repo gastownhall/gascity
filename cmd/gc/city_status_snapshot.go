@@ -62,6 +62,7 @@ type cityStatusSnapshot struct {
 	CityName        string
 	CityPath        string
 	EffectiveAPIURL string
+	APIURL          string // config-derived api_url for --json (cityStatusAPIURL)
 	Controller      ControllerJSON
 	// FleetBreaker is the fleet start breaker's one-line state while it is
 	// open or half-open; empty otherwise, and when the controller cannot be
@@ -184,6 +185,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		Suspended:       suspended,
 	}
 	snapshot.FleetBreaker = fleetBreakerNote(snapshot.Controller, cityPath)
+	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
@@ -499,6 +501,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		CityName:          snapshot.CityName,
 		Workspace:         WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
 		CityPath:          snapshot.CityPath,
+		APIURL:            snapshot.APIURL,
 		Controller:        snapshot.Controller,
 		Running:           running,
 		Suspended:         snapshot.Suspended,

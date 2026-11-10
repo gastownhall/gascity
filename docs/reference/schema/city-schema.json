@@ -51,7 +51,7 @@
         },
         "write_auth_verify_key": {
           "type": "string",
-          "description": "WriteAuthVerifyKey, when set, requires every mutating request to an\nalready-registered city — the per-city routes under /v0/city/{cityName} —\nto carry a signed write grant from a configured trusted authority. It\ngates all per-city writes (beads, mail, sessions, agents, and config), not\nonly config edits. City registry creation (POST /v0/city) is not covered:\na grant binds a path-resident city name, which a not-yet-created city\nlacks, so creation stays governed by the supervisor-registry guards.\nBuilt-in callers (the bundled gc API client and dashboard SPA) send only\nthe CSRF header and mint no grant, so enabling this gate turns their direct\ncity mutations away with a clear 401; such deployments front mutations\nthrough the trusted authority that mints grants instead. The value is one\nor more \"kid:base64-ed25519-pubkey\" entries, comma separated.\nThe GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an\nepoch floor is an ops-plane control set only through the\nGC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted\nmulti-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,\nno config field) additionally binds the gate to the controller's own\ncity id: every grant must then carry that exact cid claim, failing\nclosed on a mismatching or missing cid."
+          "description": "WriteAuthVerifyKey, when set, requires every mutating request to an\nalready-registered city — the per-city routes under /v0/city/{cityName} —\nto carry a signed write grant from a configured trusted authority. It\ngates all per-city writes (beads, mail, sessions, agents, and config), not\nonly config edits. City registry creation (POST /v0/city) is not covered:\na grant binds a path-resident city name, which a not-yet-created city\nlacks, so creation stays governed by the supervisor-registry guards.\nThe in-city gc client and the dashboard SPA mint no grant and send only\nthe CSRF header, so enabling this gate turns their direct city mutations\naway with a clear 401; a remote gc context with a grant_command does mint\none per mutation. The value is one or more \"kid:base64-ed25519-pubkey\"\nentries, comma separated, read once at startup.\nThe GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an\nepoch floor is an ops-plane control set only through the\nGC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted\nmulti-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only,\nno config field) additionally binds the gate to the controller's own\ncity id: every grant must then carry that exact cid claim, failing\nclosed on a mismatching or missing cid."
         },
         "write_auth_required": {
           "type": "boolean",
@@ -113,7 +113,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers, and on gc's host for an exec runtime\nwhose handshake declares fs.host with locality local. Template variables\nsame as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",
@@ -1455,6 +1455,11 @@
           "description": "DriftDrainTimeout is the maximum time to wait for an agent to acknowledge\na drain signal during a config-drift restart. If the agent doesn't ack\nwithin this window, the controller force-kills and restarts it.\nDuration string (e.g., \"2m\", \"5m\"). Defaults to \"2m\".",
           "default": "2m"
         },
+        "drift_deferral_escalate_after": {
+          "type": "string",
+          "description": "DriftDeferralEscalateAfter is how long a config-drift restart may stay\ndeferred behind a seat's held work before the controller emits one\nescalated session.config_drift_deferred event for the episode. The\nescalation is a signal only: it never drains, restarts or kills the\nsession. Positive Go duration string (e.g., \"30m\", \"4h\"). Defaults to\n\"1h\".",
+          "default": "1h"
+        },
         "observe_paths": {
           "items": {
             "type": "string"
@@ -1498,7 +1503,7 @@
             "on",
             "off"
           ],
-          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge. \"off\" runs the three backstops it replaced (idle-claim,\ncontinuation, execution) instead: the rollback. Read on every pass, so a\nconfig reload applies. Legacy ignores it.",
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). A claim whose metadata\ngc.awaiting_human names its seat (the seat asked a person and waits on\ntheir decision) is never recycled or released. While the seat's turns\nshow its newest turn completed, it is nudged only daily, which takes\nup an answer that started no turn; any other reading (a turn open, a\nfailed, canceled or status-less newest turn, no turn, turns that cannot\nbe read) keeps it nudged hourly, so an answer whose turn died is\nredriven.\nA seat whose provider refuses its turns with a rate limit (two in a\nrow, as its own transcript records them, the newest after a nudge it\ntook) is paced as on a degraded provider, and once a nudge it took\nsince is refused too, 10 minutes or more after the first refusal, it\nis restarted on a fresh conversation once, keeping its claims, at most\none seat per provider per 30 minutes and once per seat per hour. While\na person is attached or its work awaits a person, the restart waits and\none alert says so. If the fresh conversation is refused too (or the\nrefusal is a spent usage quota), one alert names the provider and the\nseat stays paced until its provider serves it. Every move is a\nwork.rate_limited event, on which a pack may hold the provider through\nprovider-health.json. Seats whose turns cannot be read are judged on\ntheir activity alone. \"off\" runs the three backstops it replaced\n(idle-claim, continuation, execution) instead: the rollback. Read on\nevery pass, so a config reload applies. Legacy ignores it.",
           "default": "on"
         },
         "auto_restart_on_drift": {
@@ -1513,7 +1518,7 @@
         },
         "auto_reap_closed_bead_worktrees": {
           "type": "boolean",
-          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no stashes, and no commits that removal would orphan — commits\nreachable from no branch, tag, or remote-tracking ref — are removed;\npush state is deliberately not the test, since `git worktree remove`\ndeletes the checkout and not refs/heads. Unsafe worktrees are logged\nas warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
+          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree and no commits that removal would orphan — commits\nreachable from no branch, tag, or remote-tracking ref — are removed;\npush state is deliberately not the test, since `git worktree remove`\ndeletes the checkout and not refs/heads. Unsafe worktrees are logged\nas warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
           "default": false
         },
         "auto_reap_closed_bead_worktrees_dry_run": {
@@ -1537,7 +1542,7 @@
         },
         "auto_prune_worker_dir": {
           "type": "boolean",
-          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, not a managed worktree (one gc worktree ensure\nprovisioned, which only its owner removes), clean working tree, no\nunpushed commits. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
         }
       },
@@ -1639,17 +1644,17 @@
         },
         "alert_to": {
           "type": "string",
-          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail. It has no effect while\nthe loop is observe-only: an observe-only cycle cannot fail, so no\nalert mail is sent."
         },
         "gc_timeout": {
           "type": "string",
-          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "description": "GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration\nstring. Defaults to 10m. It has no effect while the loop is\nobserve-only.",
           "default": "10m"
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only: each cycle runs the disk-space pre-flight and records run history and events — it takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted."
     },
     "EventsConfig": {
       "properties": {
@@ -2048,7 +2053,7 @@
       "properties": {
         "dolt": {
           "$ref": "#/$defs/DoltMaintenance",
-          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+          "description": "Dolt configures the periodic Dolt store maintenance loop. The loop\nis observe-only for now: it takes no backup snapshot and runs no\nCALL DOLT_GC."
         }
       },
       "additionalProperties": false,
@@ -2158,7 +2163,7 @@
             "auto",
             "require"
           ],
-          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates: it\nrecords where the store can and runs unrecorded where it cannot, loudly\nwhen set and quietly when only the default. A store served through bd\ncan record once that bd supports --if-revision, which no released bd\ndoes yet. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start.",
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates.\nLeft unset, it records only over a SQLite sessions store and runs\nunrecorded, quietly, over any other (a Dolt-served one included). Set\nto \"auto\", it records where the store can and warns where it cannot; a\nstore served through bd can record once that bd supports --if-revision,\nwhich no released bd does yet. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start. With message listed in authoritative, a surface that\nproposes lane message ops (the API's submit and messages, a provider\nsession create's initial message, extmsg member notices, gc session\nnudge, gc session submit, planner notices) is not governed by this\ngate.",
           "default": "auto"
         },
         "control": {
@@ -2168,7 +2173,7 @@
             "auto",
             "require"
           ],
-          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault: it records where the store can and runs unrecorded where it\ncannot, loudly when set and quietly when only the default. A store\nserved through bd can record once that bd supports --if-revision, which\nno released bd does yet. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start.",
+          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault. Left unset, it records only over a SQLite sessions store and\nruns unrecorded, quietly, over any other (a Dolt-served one included).\nSet to \"auto\", it records where the store can and warns where it\ncannot; a store served through bd can record once that bd supports\n--if-revision, which no released bd does yet. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start. A kind [ops] authoritative lists is\na lane op instead, which this gate does not govern.",
           "default": "auto"
         },
         "lifecycle": {
@@ -2178,7 +2183,7 @@
             "auto",
             "require"
           ],
-          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default: it records where the store can and runs\nunrecorded where it cannot, loudly when set and quietly when only the\ndefault. A store served through bd can record once that bd supports\n--if-revision, which no released bd does yet. \"off\" records nothing.\n\"require\" (opt-in) refuses a request it cannot record before any\neffect. A change takes effect at the next process start.",
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default. Left unset, it records only over a SQLite\nsessions store and runs unrecorded, quietly, over any other (a\nDolt-served one included). Set to \"auto\", it records where the store\ncan and warns where it cannot; a store served through bd can record\nonce that bd supports --if-revision, which no released bd does yet.\n\"off\" records nothing.\n\"require\" (opt-in) refuses a request it cannot record before any\neffect. A change takes effect at the next process start.",
           "default": "auto"
         },
         "authoritative": {
@@ -2186,11 +2191,12 @@
             "type": "string",
             "enum": [
               "message",
+              "interrupt",
               "respond"
             ]
           },
           "type": "array",
-          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message and respond.\nExperimental: listing message switches on the producers that write lane\nops, whose messages the lane host then delivers: the API's POST\n/v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an\noperator proposing a message) and, for sessions a lane host can type\ninto (a keystroke-mode runtime, or one a box host serves), the\ncontroller's planner notices (drain reminders, the nudge backstop) and\ngc session nudge. gc session nudge delivers inline what its delivery\nmode allows now, where it can type into the session: wait-idle only at\nan idle boundary; immediate there too, or into a running turn when the\nruntime can steer it, else at the next boundary. It leaves the rest to\nthe controller's lane host, and the content gate no longer governs it.\nThe API's submit and messages, gc session submit, mail --notify, sling\n--nudge and wait nudges keep their legacy delivery in this build. No\nrequest surface writes respond ops yet, so listing respond changes no\nrequest's delivery in this build.\nThe city's controller, standalone or supervisor-hosted, runs the lane\nhost that delivers lane ops, and gc doctor reports a listed kind as an\nerror when no lane host serves the city. A keystroke-mode runtime (tmux)\ntakes a boundary delivery at an idle boundary, a protocol-mode runtime\n(t3bridge) at its turn boundary. A message the ops route proposes with\nwhen now, or the legacy interrupt, runs as one deliver-now unit: the\nlane host interrupts the session's running turn, then delivers the\nmessage at the boundary the interrupt leaves.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the controller's next start; gc session nudge reads it\nat once."
+          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. This build accepts message, interrupt and respond.\nLeft unset, a city whose sessions store is SQLite and applies guarded\nbatches (a SQLite storage split) runs all three on the lane; any other\ncity keeps their legacy delivery until it splits its storage (gc\nstorage migrate). An explicit list, the empty list included, always\nwins: authoritative = [] on such a city keeps legacy delivery, and is\nwarned, since legacy delivery (the nudge queue, its pollers and the\nsupervisor's dispatcher) is removed in a future release.\nListing message switches on the producers that write lane\nops, whose messages the lane host then delivers: the API's POST\n/v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an\noperator proposing a message) and, for sessions a lane host can type\ninto (a keystroke-mode runtime, a protocol-mode one whose runtime\nrecords its turn starts, such as t3bridge, or one a box host serves), the\ncontroller's planner notices (the work ladder's nudges, drain reminders,\nthe nudge backstop) and\ngc session nudge. gc session nudge delivers inline what its delivery\nmode allows now, where it can type into the session: wait-idle only at\nan idle boundary; immediate there too, or into a running turn when the\nruntime can steer it, else at the next boundary. It leaves the rest to\nthe controller's lane host, and the content gate no longer governs it.\nThe API's POST .../session/{id}/submit and .../messages propose lane\nmessage ops too (interrupt_now as a deliver-now unit, which never\nrestarts the session), answer 202 once the op is committed, and emit\nthe request's result after a 5 s settle window (queued while the op\nstill waits); their resume: true, once the message's op is proposed,\nconsumes an operator's hold on the session and records its wake. A\nprovider session create (POST /v0/city/{cityName}/sessions, kind\nprovider) proposes its initial message as a lane op as well; an agent\ncreate's initial message rides its first start's prompt and is no lane\nop. A message over 16 KiB, the op journal's inline payload limit, is\nrefused 422 payload_too_large, a provider create's before the session\nis created. extmsg member notices are lane notices, their inbound text\ncut to fit that limit. mail --notify, sling --nudge and the hook-claim\ncontinuation propose one lane notice per event (a mail, a sling, a\nclaim), each under a minted key, to a session a lane host can type\ninto; the session's row is read in the city's sessions store, and a\nrow that cannot be read refuses the notice, which is then neither\ndelivered nor queued. A session with no row, or one no lane serves,\nkeeps their legacy delivery. A mail notice is withdrawn, best effort,\nwhen gc mail or the API reads, marks read, archives or deletes its\nmessage, or SessionStart archives a handoff; a message consumed any\nother way can leave its notice open. A ready wait's nudge is a lane\nnotice from gc:wait to a session a lane host can type into, and its\noutcome finalizes the wait; for a session no lane serves, or a note the\nop store refuses, it keeps its legacy delivery. gc session submit sends\nthe API its key whatever the content gate says; when the API call\nfails, it accepts the message as the API does, for every session the\nAPI accepts. It delivers inline only at an idle boundary of a\nkeystroke-mode runtime, and never an interrupt_now, so a submit to a\nprotocol-mode session waits for the controller.\nListing interrupt switches the API's POST\n/v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:\neach proposes interrupt ops the controller's lane host runs, and\nanswers from their outcomes. A stop still running after 45 s answers\n409 in_flight, naming the op; run cancel lists a holder whose interrupt\nis still running then, or failed, in its interrupt_failures. The ops\nroute proposes interrupt ops too, and the control gate no longer\ngoverns them. gc stop's graceful interrupt wave is lifecycle and keeps\nits path.\ngc session nudge's inline pass never runs an interrupt, a respond or a\ndeliver-now unit: it leaves them, and content queued behind them, to\nthe controller's lane host. Listing respond switches the API's POST\n/v0/city/{cityName}/session/{id}/respond onto the lane: it proposes a\nrespond op keyed by the interaction occurrence it answers, which the\nlane host runs at most once, and answers from its outcome (202 with\nthe op still open after 20 s).\nThe city's controller, standalone or supervisor-hosted, runs the lane\nhost that delivers lane ops, and gc doctor reports a listed kind as an\nerror when no lane host serves the city. A keystroke-mode runtime (tmux)\ntakes a boundary delivery at an idle boundary, a protocol-mode runtime\n(t3bridge) at its turn boundary. A message the ops route proposes with\nwhen now, or the legacy interrupt, runs as one deliver-now unit: the\nlane host interrupts the session's running turn, then delivers the\nmessage at the boundary the interrupt leaves.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the controller's next start; gc session nudge and gc\nsession submit read it at once."
         }
       },
       "additionalProperties": false,
@@ -2430,6 +2436,48 @@
       "additionalProperties": false,
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
+    },
+    "ProgramStatusBinding": {
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "osc7501",
+            "none"
+          ],
+          "description": "Protocol declares the status protocol: \"osc7501\" declares, \"none\"\nexplicitly undeclares an inherited declaration, and \"\" inherits."
+        },
+        "app": {
+          "type": "string",
+          "description": "App is the program name the capture reader accepts reports from; reports\nnaming another program are dropped. Empty accepts any program name."
+        },
+        "relay": {
+          "type": "boolean",
+          "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
+        },
+        "hold_mid_turn": {
+          "type": "boolean",
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs the conversation lane's\nkeystroke boundary and the bypass of the quiescence gate that a\ndelivery starved on a never-quiet session takes. Under the [session]\nprogram_status switch on, the lane's quiescence boundary stays closed,\nand a delivery at it is held right before it is typed, while a fresh\nread of the program's own record shows a live working record; the lane\ntakes the starved bypass only on such a read that decides and shows no\nlive working record. Under off and shadow the lane never takes the\nstarved bypass. Legacy delivery defers the bypass under on while such a\nread shows a live working record, and otherwise takes it as without\nthe declaration. Every other delivery is unchanged. It reaches a pane\nwhen its capture is armed (create, respawn, heal), and heal keeps it\ncurrent. Unset inherits."
+        },
+        "decide_startup": {
+          "type": "boolean",
+          "description": "DecideStartup opts the startup ladder into deciding with the program's\nown record under the [session] program_status switch on: a turn start\npast the record read before the first send confirms the startup nudge,\nand a live blocked record holds the send (nothing is typed into the\ndialog) and, once the ladder runs out, hands the nudge back to be\nqueued for the session. Without it the ladder decides from the screen\nalone, exactly as under off. Declare it only for a program whose\nrecords were shown to agree with the ladder's outcomes. Unset inherits."
+        },
+        "decide_settle": {
+          "type": "boolean",
+          "description": "DecideSettle opts the interrupt settle into deciding with the program's\nown record under the [session] program_status switch on: the idle wait\nthat follows an interrupt gc sent returns at the first root boundary\npast the pre-interrupt record, and a dialog the program reports since\nends it as a pending interaction, so no further keys are sent. Without\nit the wait decides from the screen alone, exactly as under off. It\nreaches a pane when its capture is armed (create, respawn, heal), and\nheal keeps it current. Declare it only for a program whose records were\nshown to agree with the settle's outcomes. Unset inherits."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents: keys gc\nsets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per\nlayer; an empty value withholds the variable."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProgramStatusBinding is a provider's program-status declaration: whether its program reports state over OSC 7501 and how gc captures those reports."
     },
     "ProviderOption": {
       "properties": {
@@ -2712,6 +2760,10 @@
           "$ref": "#/$defs/UpstreamEnvBinding",
           "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
         },
+        "program_status": {
+          "$ref": "#/$defs/ProgramStatusBinding",
+          "description": "ProgramStatus declares whether this harness's program reports its own\nstate over the OSC 7501 Program Status Protocol and how gc captures the\nreports. Inert unless [session] program_status is \"shadow\" or \"on\"."
+        },
         "print_args": {
           "items": {
             "type": "string"
@@ -2732,7 +2784,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports. When any layer\nsets acp_args, args and args_append reach only the CLI launch, except\nschema-managed flags such as a curated model, which become option\ndefaults that both launches carry: when a layer more specific than the\nacp_args layer declares args that reach the CLI launch, the CLI\ntransport is the default, and an explicit ACP session that still drops\nargs prints a warning."
         }
       },
       "additionalProperties": false,
@@ -2815,6 +2867,22 @@
           },
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
+        },
+        "federation": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Federation selects which of this city's agents may act on the rig's bead\nstore. \"city\" (the default) keeps today's behavior: city-scoped agents\nread every rig, and any agent whose identity matches a row may serve,\nclaim or release it. \"rig\" restricts this city to identities inside the\nrig's namespace (\"\u003cname\u003e/...\", compared under the bead store's actor\nfold) and to this city's own pool sessions of the rig's agents; rows\nowned by anything else are left alone. Set it on a rig whose bead store\nanother city also attaches. It is deliberately not patchable. NOT YET\nENFORCED: this build validates the setting and warns at start and\nreload, but still acts on every row of the rig's store, so a rig with\nfederation = \"rig\" is not protected yet."
+        },
+        "namespace": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "exclusive"
+          ],
+          "description": "Namespace declares whether another city may serve this rig's namespace\non the same bead store: \"shared\" (the default) or \"exclusive\".\n\"exclusive\" requires federation = \"rig\". It is a declaration that\ncross-city checks read; it changes nothing in this city on its own."
         },
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",
@@ -3063,11 +3131,21 @@
         },
         "socket": {
           "type": "string",
-          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
+          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, tmux commands connect to a dedicated server: \"tmux -L\n\u003csocket\u003e\" normally, or \"tmux -S \u003cpath\u003e\" with the path pinned from\n$TMUX when gc runs in a pane of that same server, so a pane whose\nTMUX_TMPDIR differs from the controller's still reaches the server\nhosting it. When empty, defaults to the city name (workspace.name) —\ngiving every city its own tmux server automatically. Set explicitly\nto override."
         },
         "remote_match": {
           "type": "string",
           "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote (K8s) backend. Sessions whose names contain\nthis pattern go to K8s; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+        },
+        "program_status": {
+          "type": "string",
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ],
+          "description": "ProgramStatus is the city switch for OSC 7501 program status. \"off\"\n(the default) changes nothing. \"shadow\" arms capture on declared\nproviders ([providers.\u003cp\u003e.program_status]) and compares readings\nwithout changing any decision. \"on\" lets valid readings decide.",
+          "default": "off"
         }
       },
       "additionalProperties": false,

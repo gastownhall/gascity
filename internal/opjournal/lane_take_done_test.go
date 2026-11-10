@@ -864,8 +864,9 @@ func TestLaneGenerationAdvanceSkipsStaleOps(t *testing.T) {
 	v := view()
 	v.Generation = 2
 	res := mustPass(t, h.lane(t, "ctl"), v, exec)
-	if got := h.get(t, old.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
-		t.Fatalf("old %+v", got)
+	if got := h.get(t, old.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale ||
+		got.Outcome.Result.Generation != 2 || !FencedOff(got) {
+		t.Fatalf("old %+v, want skipped{stale} fenced off by generation 2", got)
 	}
 	if res.Took != TakeContent || res.Taken[0] != conv.ID {
 		t.Fatalf("pass %+v", res)

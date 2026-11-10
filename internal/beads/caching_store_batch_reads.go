@@ -27,6 +27,7 @@ var (
 // names none of the requested parents is returned as the backing answered it
 // and not installed, since no per-parent List would have read it.
 func (c *CachingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	opts = c.optsTier(opts)
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}

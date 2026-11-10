@@ -445,6 +445,7 @@ func TestDegradeStoreCannotRecord(t *testing.T) {
 	}{
 		{StageOpen, DegradeConditionalWritesUnsupported, true},
 		{StageOpen, DegradeNoNamespace, true},
+		{StageOpen, DegradeNotRecordedByDefault, true},
 		{StageOpen, DegradeStoreError, false},
 		{StageOpen, DegradeContention, false},
 		{StageOpen, DegradeTypeUnregistered, false},
@@ -475,6 +476,7 @@ func TestQuietCannotRecordDegrade(t *testing.T) {
 	}{
 		{"no conditional writes", unsupported, true, true},
 		{"no namespace", fmt.Errorf("opening op store: %w", opjournal.ErrNoNamespace), true, true},
+		{"not recorded by default", &opjournal.NotRecordedByDefaultError{Backend: beads.ConditionalWritesBackend{Kind: "NativeDoltStore", DoltServed: true}}, true, true},
 		{"store fault", errors.New("transport: refused"), true, false},
 		{"no conditional writes without the flag", unsupported, false, false},
 	} {
@@ -505,5 +507,21 @@ func TestQuietCannotRecordDegrade(t *testing.T) {
 				t.Fatalf("hook heard %d, log levels %v; want %d and [%v]", hooked, levels, wantHooked, wantLevel)
 			}
 		})
+	}
+}
+
+// A NotRecordedByDefaultError classifies as its own degrade reason, which
+// CannotRecord treats as a store the default records nothing on, and counts
+// its unrecorded request under its own reason.
+func TestNotRecordedByDefaultClassifies(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", &opjournal.NotRecordedByDefaultError{Backend: beads.ConditionalWritesBackend{Kind: "BdStore", DoltServed: true}})
+	if got := DegradeReason(err); got != DegradeNotRecordedByDefault {
+		t.Fatalf("DegradeReason = %q, want %q", got, DegradeNotRecordedByDefault)
+	}
+	if !CannotRecord(DegradeNotRecordedByDefault) {
+		t.Fatal("CannotRecord(not_recorded_by_default) = false")
+	}
+	if got := openReason(err); got != ReasonNotRecordedByDefault {
+		t.Fatalf("openReason = %q, want %q", got, ReasonNotRecordedByDefault)
 	}
 }

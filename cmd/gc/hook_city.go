@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"sync"
 
@@ -75,8 +76,10 @@ func (h *hookCity) recorder() events.Recorder {
 // claimOps returns claim ops whose session seams (the drain-pending probe, the
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
-// session front door, whose claim store refs are read off its loaded config, and whose events and continuation
-// nudge reach the invocation's city without resolving it again. Every other
+// session front door, whose claim store refs are read off its loaded config, whose
+// workflow input absence proof reads the stores of its city that could hold the
+// input (proveInputAbsentAcrossCity), and whose events
+// and continuation nudge reach the invocation's city without resolving it again. Every other
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
@@ -107,8 +110,8 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitExecutionStepStarted = func(step beads.Bead, dir string, env []string, assignee string) {
 		emitExecutionStepStarted(h.recorder(), step, dir, env, assignee)
 	}
-	ops.EnqueueContinuationNudge = func(assignee string) {
-		continuationNudgeEnqueueAt(h.path, assignee)
+	ops.EnqueueContinuationNudge = func(assignee, rootID string, stderr io.Writer) {
+		continuationNudgeEnqueueAt(h.path, assignee, rootID, stderr)
 	}
 	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
 		return recordWorkStartedVia(h.sessionFront, sessionID, fence, key, via)
@@ -119,11 +122,17 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.ReadWorkStarted = func(sessionID string) (string, error) {
 		return sessionWorkStartedVia(h.sessionFront, sessionID)
 	}
+	ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+		return sessionTriggerBeadVia(h.sessionFront, sessionID)
+	}
 	ops.StoreRef = func(dir string) string {
 		return claimStoreRefAt(h.path, h.cfg, dir)
 	}
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)
+	}
+	ops.ProveInputAbsent = func(ctx context.Context, ids []string) (bool, error) {
+		return proveInputAbsentAcrossCity(ctx, h.path, h.cfg, ids)
 	}
 	return ops
 }

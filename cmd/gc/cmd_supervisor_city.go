@@ -178,6 +178,42 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+// sessionStartOwnedByReconciler reports whether starting a session in cityPath
+// belongs to a controller rather than to this CLI process: a worker site, a
+// city whose controller answers, or a city registered with the supervisor,
+// whether or not the supervisor is running now. A registry that cannot be read
+// or parsed is an error, never "unregistered".
+func sessionStartOwnedByReconciler(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) {
+		return true, nil
+	}
+	if controllerAlive(cityPath) != 0 {
+		return true, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered, nil
+}
+
+// sessionStartAwaitsSupervisor reports whether starting a session in cityPath
+// belongs to a controller that does not run now: the city is registered with
+// the supervisor while neither its controller nor the supervisor answers, so
+// sessionStartOwnedByReconciler owns the start and cityUsesManagedReconciler
+// sees no one to make it. A registry that cannot be read or parsed is an
+// error, as for sessionStartOwnedByReconciler.
+func sessionStartAwaitsSupervisor(cityPath string) (bool, error) {
+	if onWorkerSite(cityPath) || controllerAlive(cityPath) != 0 {
+		return false, nil
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading supervisor registry %s: %w", supervisor.RegistryPath(), err)
+	}
+	return registered && supervisorAlive() == 0, nil
+}
+
 // justRestartedSupervisorPID records the PID of a supervisor we just
 // auto-restarted in this invocation. Set by runStartDriftCheck after a
 // successful restart so that ensureNoStandaloneController can recognize
@@ -352,6 +388,22 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 	return known && running
 }
 
+// supervisorInitializingCity reports that the supervisor lists the city as one
+// it is still bringing up (loading config, starting the bead store, building
+// the runtime, starting agents): listed, not running, not failed, and past
+// queued. Since S5-A the supervisor holds the city's controller lock through
+// that whole init and opens the controller socket only at its end, so a held
+// lock with no controller answering is the supervisor's own in that window. A
+// queued city is listed before the supervisor takes its lock (it publishes
+// its first init phase only once it holds it), so a lock held while the city
+// is queued is someone else's: gc stop, a storage verb, or a booting
+// foreground controller.
+func supervisorInitializingCity(cityPath string) bool {
+	running, status, known := supervisorCityRunningHook(cityPath)
+	status = strings.TrimSpace(status)
+	return known && !running && status != "" && status != "init_failed" && status != cityInitStatusQueued
+}
+
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
 	// Registering hands the city to a local supervisor, which would build its
@@ -371,7 +423,13 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		return 1
 	}
 	if !supervisorAlreadyManagesCity(cityPath) {
-		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
+		pid, err := ensureNoStandaloneController(cityPath)
+		if errors.Is(err, errControllerHostingUnknown) && pid == 0 && supervisorInitializingCity(cityPath) {
+			// The lock is held and no controller answers: the supervisor
+			// that lists this city as initializing holds it.
+			err = nil
+		}
+		if err != nil {
 			switch {
 			case errors.Is(err, errControllerAlreadyRunning):
 				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
@@ -946,6 +1004,44 @@ func supervisorCityAPIClient(cityPath string) *api.Client {
 		return nil
 	}
 	return api.NewCityScopedClient(baseURL, entry.EffectiveName())
+}
+
+// supervisorRequiresCityGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city routes, for a write or
+// for a read (supervisorCityGrantRequirements).
+func supervisorRequiresCityGrants() bool {
+	write, read := supervisorCityGrantRequirements()
+	return write || read
+}
+
+// supervisorRequiresCityWriteGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city mutations
+// (supervisorCityGrantRequirements). A supervisor that requires only read
+// grants accepts a mutation without one: its read gate passes every
+// non-GET/HEAD request through.
+func supervisorRequiresCityWriteGrants() bool {
+	write, _ := supervisorCityGrantRequirements()
+	return write
+}
+
+// supervisorCityGrantRequirements reports whether supervisor.toml makes the
+// supervisor require a signed write grant and a signed read grant on its
+// per-city routes: a write-auth or read-auth verify key, or
+// write_auth_required/read_auth_required, under which the supervisor either
+// gates those routes with a key from its environment or refuses to boot. A key
+// set only through the supervisor's GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY
+// environment is invisible here. An unreadable supervisor.toml reports neither:
+// supervisorCityAPIClient cannot resolve the supervisor's address from it
+// either.
+func supervisorCityGrantRequirements() (write, read bool) {
+	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		return false, false
+	}
+	s := cfg.Supervisor
+	write = strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired
+	read = strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
+	return write, read
 }
 
 func supervisorCityRunning(cityPath string) (running bool, status string, known bool) {
