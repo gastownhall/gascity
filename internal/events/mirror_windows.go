@@ -17,12 +17,25 @@ var errMirrorSymlink = errors.New("the path is a symbolic link or other reparse 
 
 // openMirrorPath opens path, refusing a symbolic link or other reparse point
 // at it. Windows has no O_NOFOLLOW, so the path is checked just before the
-// open; checkOpened then refuses anything but a regular file.
+// open and again after it: the second check refuses the handle unless the
+// path is still not a reparse point and names the very file the handle
+// opened, so a link swapped in between the first check and the open is
+// caught. checkOpened then refuses anything but a regular file.
 func openMirrorPath(path string, flag int, perm os.FileMode) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 		return nil, &os.PathError{Op: "open", Path: path, Err: errMirrorSymlink}
 	}
-	return livefile.OpenFile(path, flag, perm)
+	f, err := livefile.OpenFile(path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	linfo, lerr := os.Lstat(path)
+	hinfo, herr := f.Stat()
+	if lerr != nil || herr != nil || linfo.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(linfo, hinfo) {
+		_ = f.Close()
+		return nil, &os.PathError{Op: "open", Path: path, Err: errMirrorSymlink}
+	}
+	return f, nil
 }
 
 // isMirrorSymlinkRefusal reports whether err is openMirrorPath refusing a
@@ -48,7 +61,7 @@ func tryLockMirror(path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	held, err := filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true})
+	held, err := filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path})
 	if err != nil {
 		_ = lock.Close()
 		if errors.Is(err, filelock.ErrBusy) {
