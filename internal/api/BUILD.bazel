@@ -472,6 +472,7 @@ go_test(
         "relic_census_state_test.go",
         "request_id_test.go",
         "request_outcome_test.go",
+        "residency_by_id_exec_test.go",
         "residency_by_id_handles_test.go",
         "residency_by_id_test.go",
         "residency_create_guard_test.go",

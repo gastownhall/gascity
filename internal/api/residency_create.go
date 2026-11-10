@@ -86,36 +86,53 @@ func (s *Server) createStoreForBead(b beads.Bead, rig string) (beadCreator, erro
 	if !plan.TouchesBinding() {
 		return s.storeOrRigRequired(st, rig)
 	}
+	store, err := classCreator(st, class)
+	if err != nil {
+		return nil, err
+	}
 	if rig != "" {
 		return nil, apierr.InvalidRequest.Msg("rig must be empty for a " + class.String() + " bead: this city serves that class from a city-scoped store, not from any rig")
-	}
-	if _, err := storeref.ResolvePlacement(plan); err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
-	}
-	store, ok := classCreator(st, class)
-	if !ok {
-		return nil, apierr.Internal.Msg(fmt.Sprintf("no class handle serves %q", class.String()))
 	}
 	return store, nil
 }
 
-// classCreator is the handle st serves infrastructure class c from, and false
-// for a class with no handle.
-func classCreator(st storeref.Stores, c coordclass.Class) (beadCreator, bool) {
+// classCreator is the handle st serves infrastructure class c from.
+//
+// A handle this site refuses (a worker site's per-class refusal) is refused
+// here, as the standing refusal it carries, so the create is the 400 a refused
+// city's plan gives rather than the 500 of a failed write.
+//
+// Only the graph and sessions classes reach here from POST /v0/beads: every
+// other infrastructure class's rows are owned, and refuseGenericWrite refuses
+// a generic create of one before the store is chosen. The other arms keep the
+// map total.
+func classCreator(st storeref.Stores, c coordclass.Class) (beadCreator, error) {
 	switch c {
 	case coordclass.ClassGraph:
-		return st.Graph(), true
+		return unlessRefused(st.Graph())
 	case coordclass.ClassSessions:
-		return st.Sessions(), true
+		return unlessRefused(st.Sessions())
 	case coordclass.ClassMessaging:
-		return st.Mail(), true
+		return unlessRefused(st.Mail())
 	case coordclass.ClassOrders:
-		return st.Orders(), true
+		return unlessRefused(st.Orders())
 	case coordclass.ClassNudges:
-		return st.Nudges(), true
+		return unlessRefused(st.Nudges())
 	default:
-		return nil, false
+		return nil, apierr.Internal.Msg(fmt.Sprintf("no class handle serves %q", c.String()))
 	}
+}
+
+// unlessRefused is handle as the store a create is made in, or the 400 of the
+// standing refusal it carries.
+func unlessRefused[H interface {
+	apiClassStore
+	beadCreator
+}](handle H) (beadCreator, error) {
+	if refusing, ok := classAs[storeref.RefusingStore](handle); ok {
+		return nil, apierr.InvalidRequest.Msg(refusing.StorageRefusal().Error())
+	}
+	return handle, nil
 }
 
 // storeOrRigRequired is findWorkStore with its miss spelled as the refusal

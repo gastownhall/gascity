@@ -1,14 +1,20 @@
 package api
 
 // The API plane's by-id residency and residency topology as they stood before
-// typed-stores T7c, frozen (plan §2.3, S5-D's rig_import_plan_reference_test.go
-// precedent): residencyTopology derived the topology from the identity of the
-// class handles, and the work axis routed by-id reads to raw stores. The
-// equivalence tests run them beside Stores().Topology() and the ref-routed
-// work axis that replaced them. Do not edit them to follow production.
+// typed-stores T7c, frozen (plan §2.3; S5-D's rig_import_plan_reference_test.go
+// precedent), with every helper they call: residencyTopology derived the
+// topology from the identity of the class handles, and the work axis routed
+// by-id reads to raw stores. Each declaration is copied, doc comment and all,
+// from 9aaf324499, renamed to its reference form; methods take the Server as
+// their first argument. The equivalence tests run them beside
+// Stores().Topology() and the ref-routed work axis that replaced them. Do not
+// edit them to follow production.
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -17,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
+// referenceResidencyTopology builds the API's view of which stores answer which
 // questions.
 //
 // A class accessor that returns the city store, or nil, relocates nothing and
@@ -69,7 +76,7 @@ type classStoreAccessor struct {
 	store beads.Store
 }
 
-// classStoreAccessors is every coordination class the State surface can
+// referenceClassStoreAccessors is every coordination class the State surface can
 // OBSERVE a store for.
 //
 // Messaging is absent, and deliberately so: State exposes no messaging
@@ -87,7 +94,7 @@ func referenceClassStoreAccessors(s *Server) []classStoreAccessor {
 	}
 }
 
-// observableInfraClasses is the set classStoreAccessors covers.
+// observableInfraClasses is the set referenceClassStoreAccessors covers.
 func observableInfraClasses() []coordclass.Class {
 	return []coordclass.Class{coordclass.ClassGraph, coordclass.ClassSessions, coordclass.ClassOrders, coordclass.ClassNudges}
 }
@@ -132,7 +139,7 @@ func containsClass(classes []coordclass.Class, want coordclass.Class) bool {
 	return false
 }
 
-// apiResidencyBindings groups the relocated classes by the store serving them.
+// referenceAPIResidencyBindings groups the relocated classes by the store serving them.
 //
 // The body is storeref.BuildBindings, shared with the CLI plane. What survives
 // here is the only thing that is this plane's own: it observes four of the five
@@ -150,9 +157,8 @@ func referenceAPIResidencyBindings(order []beads.Store, byStore map[beads.Store]
 	})
 }
 
-// configuredPrefixes is the work leg's and each rig leg's configured id prefix
-// from cfg, keyed by rig ref: the prefixes residencyTopology reads, which a
-
+// referenceWorkAxis is this plane's by-id work-axis router, declared to the resolver.
+//
 // It is consulted for one arm only — an id no binding's reserved namespace
 // claims — and that is what makes it correct as well as cheap. Inside a
 // namespace the binding is the authority and the work stores are a probe list
@@ -161,7 +167,7 @@ func referenceAPIResidencyBindings(order []beads.Store, byStore map[beads.Store]
 // routes.jsonl disk read on every molecule-id read of a relocated city.
 type referenceWorkAxis struct{ s *Server }
 
-// WorkLegsForID returns the work stores that can hold id, in this plane's own
+// WorkLegs returns the work stores that can hold id, in this plane's own
 // order: the store whose configured prefix owns the id, else the store its
 // routes.jsonl entry names, else the full scan — the city/HQ store ahead of
 // every rig work store.
@@ -174,7 +180,7 @@ func (a referenceWorkAxis) WorkLegs(id string) []storeref.Leg {
 	if leg, ok := referenceLegByConfiguredIDPrefix(id, configured); ok {
 		return []storeref.Leg{leg}
 	}
-	if prefix := beadPrefix(id); prefix != "" {
+	if prefix := referenceBeadPrefix(id); prefix != "" {
 		if store := referenceStoreByPrefix(a.s, prefix); store != nil {
 			return []storeref.Leg{referenceWorkLegFor(a.s, store)}
 		}
@@ -182,7 +188,7 @@ func (a referenceWorkAxis) WorkLegs(id string) []storeref.Leg {
 	return referenceUnroutedWorkLegs(a.s)
 }
 
-// unroutedWorkLegs is the legacy scan: the city/HQ store first, then every rig
+// referenceUnroutedWorkLegs is the legacy scan: the city/HQ store first, then every rig
 // work store in rig-name order.
 //
 // It is reached by an id that matches no configured prefix and no routes.jsonl
@@ -193,7 +199,7 @@ func (a referenceWorkAxis) WorkLegs(id string) []storeref.Leg {
 // prefix covers the id and would keep none of these.
 func referenceUnroutedWorkLegs(s *Server) []storeref.Leg {
 	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	rigNames := referenceSortedRigNames(stores)
 	legs := make([]storeref.Leg, 0, len(rigNames)+1)
 	if cityStore := s.state.CityBeadStore(); cityStore != nil {
 		legs = append(legs, storeref.Leg{Ref: storeref.WorkRef, Store: cityStore})
@@ -204,7 +210,7 @@ func referenceUnroutedWorkLegs(s *Server) []storeref.Leg {
 	return legs
 }
 
-// workLegFor names a work store this plane resolved by route. The ref is for
+// referenceWorkLegFor names a work store this plane resolved by route. The ref is for
 // diagnostics — a leg that fails is reported by name — so an unrecognized store
 // yields an unnamed leg rather than a failure: the store still answers.
 func referenceWorkLegFor(s *Server, store beads.Store) storeref.Leg {
@@ -216,7 +222,7 @@ func referenceWorkLegFor(s *Server, store beads.Store) storeref.Leg {
 	return storeref.Leg{Store: store}
 }
 
-// configuredPrefixLegs returns the loaded work stores paired with the id
+// referenceConfiguredPrefixLegs returns the loaded work stores paired with the id
 // prefixes they were CONFIGURED with — the city/HQ prefix first, then each rig
 // in config order.
 //
@@ -255,7 +261,7 @@ func referenceConfiguredPrefixLegs(s *Server) []storeref.Leg {
 	return legs
 }
 
-// resolveLegByConfiguredIDPrefix routes an id on the configured (rig/HQ)
+// referenceLegByConfiguredIDPrefix routes an id on the configured (rig/HQ)
 // prefixes with a longest-prefix, exact-or-hyphen match
 // (storeref.IDInNamespace). It resolves against the configured prefixes, not
 // each store's own IDPrefix, and requires the longest configured prefix to win
@@ -278,7 +284,7 @@ func referenceLegByConfiguredIDPrefix(id string, configured []storeref.Leg) (sto
 	return best, bestLen >= 0
 }
 
-// resolveStoreByPrefix finds the store that owns a bead prefix by checking
+// referenceStoreByPrefix finds the store that owns a bead prefix by checking
 // routes.jsonl files in the city and each rig's .beads/ directory, then
 // mapping the resolved store path back to the correct store.
 func referenceStoreByPrefix(s *Server, prefix string) beads.Store {
@@ -320,7 +326,7 @@ func referenceStoreByPrefix(s *Server, prefix string) beads.Store {
 
 	// Check city-level routes first.
 	if cityPath != "" {
-		if storePath, ok := resolveRoutePrefix(cityPath, prefix); ok {
+		if storePath, ok := referenceRoutePrefix(cityPath, prefix); ok {
 			cleanPath := filepath.Clean(storePath)
 			// Route may point to a rig directory — resolve to the rig store.
 			if rigName, found := rigPathToName[cleanPath]; found {
@@ -346,7 +352,7 @@ func referenceStoreByPrefix(s *Server, prefix string) beads.Store {
 		if !filepath.IsAbs(rigPath) && cityPath != "" {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		storePath, ok := resolveRoutePrefix(rigPath, prefix)
+		storePath, ok := referenceRoutePrefix(rigPath, prefix)
 		if !ok {
 			continue
 		}
@@ -372,17 +378,76 @@ func referenceStoreByPrefix(s *Server, prefix string) beads.Store {
 	return nil
 }
 
-// sortedRigNames returns rig names from the store map in deterministic sorted order,
+// referenceSortedRigNames returns rig names from the store map in deterministic sorted order,
+// deduplicating rigs that share the same underlying store (e.g. file provider mode).
+func referenceSortedRigNames(stores map[string]beads.Store) []string {
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// Deduplicate by store identity — when multiple rigs share the same
+	// store instance (file provider), only keep the first rig name to
+	// prevent duplicate results in aggregate queries.
+	seen := make(map[beads.Store]bool, len(names))
+	deduped := names[:0]
+	for _, name := range names {
+		s := stores[name]
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		deduped = append(deduped, name)
+	}
+	return deduped
+}
 
-// referenceStoreClassHolds is the PATCH door's holds rule before T7c, asked
-// of the owner's store by identity.
+// referenceBeadPrefix extracts the config-free heuristic prefix from a bead ID.
+func referenceBeadPrefix(id string) string {
+	return referenceBeadPrefixHeuristic(id)
+}
+
+// referenceRoutePrefix reads routes.jsonl from a rig's .beads/ directory and
+// resolves the given prefix to an absolute store path.
+func referenceRoutePrefix(rigPath, prefix string) (string, bool) {
+	routesPath := filepath.Join(rigPath, ".beads", "routes.jsonl")
+	data, err := os.ReadFile(routesPath)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Prefix string `json:"prefix"`
+			Path   string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Prefix == prefix {
+			resolved := entry.Path
+			if !filepath.IsAbs(resolved) {
+				resolved = filepath.Join(rigPath, resolved)
+			}
+			return resolved, true
+		}
+	}
+	return "", false
+}
+
+// referenceStoreClassHolds returns the classes store holds on this city, or nil on a
+// single-store city (where the one store holds every class). A class binding
+// holds the classes it serves; a work store — the city's or a rig's — holds
+// work plus every class no binding serves.
 func referenceStoreClassHolds(s *Server, store beads.Store) []coordclass.Class {
 	topo := referenceResidencyTopology(s)
 	if topo.IsSingleStore() {
 		return nil
 	}
 	for _, binding := range topo.Bindings {
-		if binding.Leg.Store == store {
+		if binding.Leg.Store == store { // residency:allow — identifies which binding the already-resolved owner store is, to read its classes; resolves no bead
 			return binding.Classes
 		}
 	}
@@ -395,14 +460,75 @@ func referenceStoreClassHolds(s *Server, store beads.Store) []coordclass.Class {
 	return holds
 }
 
-// referenceBindingReservedPrefixes is the ready leg's reserved namespaces
-// before T7c: those of every binding over the graph store, by identity.
+// referenceBindingReservedPrefixes is the reserved id namespaces store holds as a class
+// binding: the prefixes of every binding the residency topology serves from it,
+// as cmd/gc's readyLegReservedPrefixes reads them for `gc ready`. The
+// cross-store ready rule takes the binding's own verdict on a blocker in one of
+// them, which no other store can hold, and reads every copy of any other.
 func referenceBindingReservedPrefixes(s *Server, store beads.Store) []string {
 	var prefixes []string
 	for _, binding := range referenceResidencyTopology(s).Bindings {
-		if binding.Leg.Store == store {
+		if binding.Leg.Store == store { // residency:allow — matches the already-resolved graph store to its binding, to read its namespaces; no store is ordered, opened or read
 			prefixes = append(prefixes, binding.Prefixes...)
 		}
 	}
 	return prefixes
+}
+
+func referenceBeadPrefixHeuristic(beadID string) string {
+	beadID = strings.TrimSpace(beadID)
+	lastIdx := strings.LastIndex(beadID, "-")
+	if lastIdx <= 0 {
+		return ""
+	}
+	suffix := beadID[lastIdx+1:]
+	if suffix == "" {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if referenceIsBeadNumeric(base) || referenceIsBeadHash(base) {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	firstIdx := strings.Index(beadID, "-")
+	if firstIdx <= 0 {
+		return ""
+	}
+	return strings.ToLower(beadID[:firstIdx])
+}
+
+func referenceIsBeadNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// referenceIsBeadHash is only the config-free BeadPrefix heuristic's suffix gate. It
+// intentionally rejects longer all-letter words so prose like
+// "code-review-please" falls back to the first dash instead of being treated
+// as a hyphenated rig prefix. Config-aware routing must use BeadPrefixForCity
+// and the configured-prefix matchers instead.
+func referenceIsBeadHash(s string) bool {
+	if len(s) < 3 || len(s) > 8 {
+		return false
+	}
+	hasDigit := len(s) == 3
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return hasDigit
 }

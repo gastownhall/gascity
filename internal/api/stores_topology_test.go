@@ -3,9 +3,12 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -207,12 +210,26 @@ func (refusingFakeStore) StorageRefusal() error {
 
 // TestWorkerSiteTopologyFailsClosedOnBothSides: a worker site whose every
 // relocated class's handle refuses. The minted topology fails closed and keeps
-// the binding's ref, and the API plane, which reads the one refusing store
-// behind every class handle as the whole split's binding, is refused too: the
-// two agree, so T7c's switch to Stores().Topology() served nothing new there.
+// the binding's ref, and the API plane, which read the one refusing store
+// behind every class handle as the whole split's binding, was refused too: the
+// two agree on every plan, and, executed, on every by-id read. A render
+// compares refs only, so the reads are run: an id inside the binding's
+// namespace and a co-resident id (in the binding and the city) reach the
+// minted binding leg, which is the refusing store (storeref's
+// bindingRefusal), exactly as they reached the plane's.
 func TestWorkerSiteTopologyFailsClosedOnBothSides(t *testing.T) {
 	st := fakeTopologyShapes(t)["whole split"]
-	refusal := refusingFakeStore{Store: beads.NewMemStore()}
+	city := beads.NewMemStore()
+	seedPinned(t, city, "tc-co")
+	st.cityBeadStore = city
+	binding, ok := st.graphBeadStore.(prefixDeclaringStore)
+	if !ok {
+		t.Fatalf("fixture: the binding is %T", st.graphBeadStore)
+	}
+	const inside = "gcg-1"
+	seedPinned(t, binding.Store.(*beads.MemStore), inside, "tc-co")
+
+	refusal := standingRefusingStore{Store: beads.NewMemStore()}
 	st.classRefusals = map[coordclass.Class]storeref.RefusingClassStore{}
 	for _, c := range coordclass.Classes() {
 		if c.IsInfrastructure() {
@@ -224,6 +241,28 @@ func TestWorkerSiteTopologyFailsClosedOnBothSides(t *testing.T) {
 		t.Errorf("minted topology: refused %v, claim refs %v; want refused, [ class:gmnos]", minted.Refused, minted.ClaimRefs())
 	}
 	assertAPITopologyAgrees(t, "worker site", st)
+
+	plane := referenceResidencyTopology(New(st))
+	resolve := func(topo storeref.Topology, id string) string {
+		plan, err := storeref.Plan(storeref.ByID{ID: id}, topo)
+		if err != nil {
+			return "plan error: " + err.Error()
+		}
+		owner, err := storeref.ResolveOwnerRow(plan, id)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return fmt.Sprintf("%q read=%t", owner.Ref, owner.Read)
+	}
+	for _, id := range []string{inside, "tc-co"} {
+		got, want := resolve(minted, id), resolve(plane, id)
+		if got != want {
+			t.Errorf("%s: minted resolves %s, the API plane %s", id, got, want)
+		}
+		if id == inside && !strings.Contains(got, standingTestRefusal{}.Error()) {
+			t.Errorf("%s inside the refused binding's namespace resolves %s, want the refusal", id, got)
+		}
+	}
 }
 
 // TestAPIPlaneTurnsAPerClassRefusalCityWide pins the one known divergence a
@@ -271,8 +310,8 @@ func (s refusingOpsStore) Get(string) (beads.Bead, error) { return beads.Bead{},
 // infrastructure create that touched a binding failed. Now the topology
 // follows the routes and is not refused: a by-id read of a binding resident
 // resolves through the binding's leg, a create of the refused class is refused
-// by that class's handle, and a create of a class the site still serves lands
-// in the binding.
+// by that class's handle (the same 400, with or without a rig), and a create
+// of a class the site still serves lands in the binding.
 func TestPerClassRefusalRefusesOnlyThatClassAfterT7c(t *testing.T) {
 	st := fakeTopologyShapes(t)["whole split"]
 	binding := st.graphBeadStore
@@ -298,12 +337,13 @@ func TestPerClassRefusalRefusesOnlyThatClassAfterT7c(t *testing.T) {
 		t.Fatalf("by-id read of a binding resident = %v, %q, %v; want the binding's row", owner, got.ID, err)
 	}
 
-	graphStore, err := srv.createStoreForBead(beads.Bead{Title: "step", Metadata: map[string]string{"gc.root_bead_id": "gcg-0"}}, "")
-	if err != nil {
-		t.Fatalf("placing a graph create: %v", err)
-	}
-	if _, err := graphStore.Create(beads.Bead{Title: "step"}); err == nil {
-		t.Fatal("a graph create on a site that refuses graph was served")
+	// Refused at placement, as the 400 the frozen plane's refused plan gave,
+	// rig or no rig.
+	for _, rig := range []string{"", "myrig"} {
+		_, err := srv.createStoreForBead(beads.Bead{Title: "step", Metadata: map[string]string{"gc.root_bead_id": "gcg-0"}}, rig)
+		if status := apiStatus(err); status != http.StatusBadRequest || !strings.Contains(err.Error(), "refused: this worker site serves no binding") {
+			t.Fatalf("rig %q: a graph create on a site that refuses graph = %v (status %d), want its refusal as a 400", rig, err, status)
+		}
 	}
 
 	session := beads.Bead{Title: "s", Type: "session"}
@@ -342,13 +382,27 @@ func TestCreatePlacesEachClassThroughItsOwnHandle(t *testing.T) {
 		srv := New(st)
 		for class, body := range bodies {
 			store, err := srv.createStoreForBead(body, "")
+			if class == refused {
+				if apiStatus(err) != http.StatusBadRequest {
+					t.Errorf("refusing %s: placing a %s create = %v, want the refusal as a 400", refused, class, err)
+				}
+				continue
+			}
 			if err != nil {
 				t.Fatalf("refusing %s: placing a %s create: %v", refused, class, err)
 			}
-			_, err = store.Create(body)
-			if (class == refused) != (err != nil) {
+			if _, err := store.Create(body); err != nil {
 				t.Errorf("refusing %s: a %s create returned %v", refused, class, err)
 			}
 		}
 	}
+}
+
+// apiStatus is err's HTTP status, or 0 for none.
+func apiStatus(err error) int {
+	var status huma.StatusError
+	if errors.As(err, &status) {
+		return status.GetStatus()
+	}
+	return 0
 }

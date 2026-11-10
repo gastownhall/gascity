@@ -373,6 +373,31 @@ func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
 	}
 }
 
+// TestResolveRefByPrefixStopsAtAnUnloadedOwner pins the rig arm's stop: a
+// prefix a configured rig owns belongs to that rig, so when its store is not
+// loaded there is no route, and a routes.jsonl entry naming another store for
+// the prefix is not consulted (the id is left to the scan), as the frozen
+// resolveStoreByPrefix stopped.
+func TestResolveRefByPrefixStopsAtAnUnloadedOwner(t *testing.T) {
+	state, _, _ := configureBeadRouteState(t)
+	delete(state.stores, "alpha")
+	cityRoutes := filepath.Join(state.cityPath, ".beads")
+	if err := os.MkdirAll(cityRoutes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityRoutes, "routes.jsonl"), []byte(`{"prefix":"ga","path":"rigs/beta"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state.cfg.Rigs[0].Prefix = "ga"
+	s := New(state)
+	if ref, ok := s.resolveRefByPrefix("ga", loadedWorkLegs(state.Stores())); ok {
+		t.Fatalf("resolveRefByPrefix(ga) = %q with alpha, the prefix's owner, unloaded; want no route", ref)
+	}
+	if got := referenceStoreByPrefix(s, "ga"); got != nil {
+		t.Fatalf("fixture: the frozen resolver routed ga to %v", got)
+	}
+}
+
 // TestResolveStoreByPrefixDoesNotCaptureForeignRoute pins that a rig route
 // resolving to a path which is NOT a registered rig no longer answers with that
 // rig's store. The route says the prefix lives elsewhere, so resolution falls
