@@ -77,6 +77,55 @@ lingering so the user manager (and the agents) survive logout:
 loginctl enable-linger <user>
 ```
 
+## City infrastructure (GC_INFRA_SLICE)
+
+A cgroup-wide kill of an agent's scope kills everything in it. If that agent
+started the city's managed Dolt server (a `gc` or `bd` call that autostarts
+it) or the supervisor (`gc start`), the store or the supervisor would go down
+with the agent. So a gc command run from inside an agent session starts city
+infrastructure in a transient scope of its own:
+
+```
+systemd-run --user --scope --slice=${GC_INFRA_SLICE:-gascity-infra.slice} --collect --quiet -- <command>
+```
+
+gc wraps a spawn only when both hold:
+
+1. **The gc process runs inside an agent session**: it carries the
+   `GC_SESSION_ID` gc gives every session. Other gc processes (the
+   supervisor, whether a bare fork or a systemd/launchd service; a CLI run
+   from a login shell; the bd provider script the supervisor launches) have
+   no session cgroup to escape, so their spawns stay exactly as before.
+2. **A user scope cannot shorten the spawn's life**: the user lingers
+   (`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger
+   <user>`), or the gc process already runs under `user@<uid>.service` (for
+   example in a `GC_AGENT_SLICE` pane scope). Scopes live under
+   `user@<uid>.service`, which systemd stops, with every scope in it, when
+   the user's last session ends. Without lingering, a caller in a login
+   session's scope can outlive logout (`KillUserProcesses=no`) while a user
+   scope would not, so gc leaves its spawn where it is. A caller already
+   under the user manager dies with it anyway.
+
+| Spawn | Wrapped from a session |
+|---|---|
+| Managed Dolt server (or its scope watchdog, whose server inherits its scope) | yes |
+| `gc supervisor start` fork, and the fork `gc start` falls back to | yes |
+| Supervisor respawn after `gc start` detects drift | yes |
+| The nudge poller and bd's db-proxy child | no |
+| The bd pack's shell-native Dolt fallback (`gc-beads-bd.sh` with no `gc` helper resolved) | no: out of scope |
+
+The supervisor is never told apart from other callers: it simply carries no
+session identity. A supervisor forked from a session runs in an infra scope,
+and the sessions it starts live there too unless their runtime gives them a
+cgroup of their own (tmux with `GC_AGENT_SLICE` does), so limits an operator
+sets on the infra slice apply to them.
+
+Unlike `GC_AGENT_SLICE`, scoping is on by default: `GC_INFRA_SLICE` only
+names the slice. When it cannot be used (neither condition 2 holds, no
+`systemd-run`, no user bus, macOS) gc checks once per process (the
+`systemd-run` probe is bounded at 5 seconds) and starts infrastructure
+unwrapped exactly as before, warning only when `GC_INFRA_SLICE` is set.
+
 ## Resource attribution
 
 Scopes are created with systemd auto-generated names (`run-rNNNNNNNN.scope`),

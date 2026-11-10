@@ -245,6 +245,9 @@ func TestMain(m *testing.M) {
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
 	maybeRunControlDispatchSigtermChild()
+	// Infrastructure spawns never probe the host's systemd user manager from
+	// tests; tests that exercise scoping install a fake (infra_scope_test.go).
+	disableInfraScopeForTests()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent

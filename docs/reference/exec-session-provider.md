@@ -1126,6 +1126,14 @@ the spawn, so it is an upper bound; an operation whose deadline has passed
 before it is spawned is not run at all. It is informational: no handshake
 capability declares or gates it.
 
+A session a script starts may live in a cgroup of its own that the script
+kills whole when it stops the session. City infrastructure a gc command in
+the session starts is not caught in it: gc starts its managed Dolt server and
+its supervisor in a transient user scope under `GC_INFRA_SLICE` (default
+`gascity-infra.slice`) when the user lingers or the session already runs
+under the user's systemd manager. See
+[City infrastructure](/reference/tmux-agent-slice#city-infrastructure-gc_infra_slice).
+
 A script runs with gc's own environment, without the session identity a gc
 command run from an agent's shell carries (`GC_SESSION_ID`,
 `GC_SESSION_NAME`, `GC_RUNTIME_EPOCH`, `GC_INSTANCE_TOKEN`, `GC_AGENT`,
