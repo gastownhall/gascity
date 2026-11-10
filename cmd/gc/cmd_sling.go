@@ -312,6 +312,39 @@ func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead
 	return storeDir, store, "", ""
 }
 
+// slingCoordinationBeadRefusal refuses a sling of id when the city's class
+// binding holds it and work, the store the sling acts on, does not: a bead in
+// the reserved coordination-class namespace, such as the workflow root a v2
+// gc formula cook mints on a split city. gc sling routes work-ledger beads and
+// cannot route one the binding holds (#5974); without this the sling reports
+// the bead missing and points at --force, which cannot route it either. When
+// work holds the id (the prefix is only advisory on work stores) the bead
+// routes as before, and an id no store holds keeps the missing-bead path. A
+// work store that cannot be read is left to the sling's own read of it, which
+// reports the failure.
+func slingCoordinationBeadRefusal(cityPath, id string, work sling.BeadQuerier) error {
+	if _, reserved := reservedClassPrefixForID(id); !reserved || !isBeadIDCandidate(id) {
+		return nil
+	}
+	binding := slingResidenceBinding(cityPath)
+	if binding == nil {
+		return nil
+	}
+	if work != nil {
+		if held, err := sling.ProbeBeadInStore(work, id); err != nil || held {
+			return nil
+		}
+	}
+	held, err := sling.ProbeBeadInStore(binding, id)
+	if err != nil {
+		return fmt.Errorf("%s is not in the work ledger, and the city's infrastructure store, which mints ids like it, could not be read: %w", id, err)
+	}
+	if !held {
+		return nil
+	}
+	return fmt.Errorf("%s is in this city's infrastructure store (workflow roots and steps, sessions, mail, order runs, queued nudges), and gc sling routes only work-ledger beads. To run a formula, launch it with gc sling <target> <formula> --formula, or with --on <formula> against a work bead; gc formula cook only creates a workflow's beads", id)
+}
+
 // applySlingInlineBead resolves inline-text mode: when the sling argument is prose
 // rather than a bead ID (and not a formula), it creates a task bead from the text
 // and returns the new bead ID, or under --dry-run marks it preview-only. It is the
@@ -464,6 +497,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	storeDir, store, errCode, errMsg := openSlingStore(cfg, cityPath, beadOrFormula, sourceBead, a)
 	if errCode != "" {
 		return fail(errCode, errMsg)
+	}
+	if !isFormula && !fromStdin && !sourceBead.exists {
+		if err := slingCoordinationBeadRefusal(cityPath, beadOrFormula, store); err != nil {
+			return fail("bead_not_slingable", fmt.Sprintf("gc sling: %v", err))
+		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
