@@ -817,7 +817,6 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	// relocating graph adds none, in either direction.
 	hookAgent := &config.Agent{Name: splitEnvPoolAgent}
 	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
-		hookAgent.QualifiedName(),
 		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
 		mergeRuntimeEnv(nil, hookEnv), hookEnv, nil)
 	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {

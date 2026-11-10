@@ -1261,6 +1261,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unaliased rig pool session's `gc hook` sees work routed to its pool in
+  the city store.** The hook added the rig store and the city store for a
+  rig-scoped agent only when the session's runtime identity had a `<rig>/`
+  prefix. An unaliased pool session's identity is its session bead id, so its
+  hook read only its rig store, while the controller's demand probe counted
+  the city-store work and kept starting sessions that found nothing (the
+  symptom `gc doctor`'s `pool-idle-routed-work` check reports). The hook now
+  takes the rig from the agent's configuration, as the demand probe does.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

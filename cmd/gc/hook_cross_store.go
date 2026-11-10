@@ -132,20 +132,20 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // this leg's workspace. This function is the seam that pins it
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
-func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
+func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
 
 // hookWorkQueryPrimaryStore is the first entry of hookWorkQueryStores, built
 // without building any other: what a federated claim reads (see
 // scopeFederatedHookStores).
-func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
-	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
+func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, workDir, queryEnv, identityOverrides, nil, true)[0]
 }
 
 // hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
 // entry when primaryOnly.
-func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
+func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(a) {
 		if primaryOnly {
@@ -153,7 +153,13 @@ func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent
 		}
 		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides, suspendedRigs)
 	}
-	rig := rigScopedHookRig(cfg, agentForQuery)
+	// The rig comes from the configured agent, not the runtime identity: an
+	// unaliased pool session's identity is its session bead id, with no
+	// "<rig>/" prefix (clearPoolTemplateRuntimeIdentity).
+	rig := ""
+	if a != nil {
+		rig = rigScopedHookRig(cfg, a.QualifiedName())
+	}
 	if rig == "" {
 		return stores
 	}
@@ -284,8 +290,8 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 }
 
 // rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO
-// query, or "" if none applies. A rig-scoped agent's identity is "<rig>/<name>"
-// (its GC_AGENT) and its routed work lives in the <rig> store, which the agent's
+// query, or "" if none applies. A rig-scoped agent's qualified name is
+// "<rig>/<name>" and its routed work lives in the <rig> store, which the agent's
 // own (city-scoped) work-query env never reaches — so without this the hook
 // returns empty, the session spawns, finds nothing, and exits (churn).
 // Returns "" for a city-scoped identity (no "/") or an unknown rig, so a caller

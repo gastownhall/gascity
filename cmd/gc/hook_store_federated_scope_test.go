@@ -275,7 +275,7 @@ func TestHookWorkQueryPrimaryStoreIsTheScopedStore(t *testing.T) {
 	}{
 		{name: "city-scoped agent federates every rig", agent: config.Agent{Name: "worker"}, agentForQuery: "worker"},
 		{name: "rig-scoped identity puts its rig first", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: rig + "/worker"},
-		{name: "unknown rig keeps the own store first", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: "no-such-rig/worker"},
+		{name: "identity naming an unknown rig still puts the configured rig first", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: "no-such-rig/worker"},
 		{name: "bare session identity", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: "gc-session-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,7 +287,7 @@ func TestHookWorkQueryPrimaryStoreIsTheScopedStore(t *testing.T) {
 			overrides["GC_AGENT"] = tc.agentForQuery
 			workDir := agentCommandDir(cityDir, &a, cfg.Rigs)
 			queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
-			full := hookWorkQueryStores(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides, nil)
+			full := hookWorkQueryStores(cityDir, cfg, &a, workDir, queryEnv, overrides, nil)
 
 			var builds atomic.Int64
 			prev := hookStoreQueryEnv
@@ -297,7 +297,7 @@ func TestHookWorkQueryPrimaryStoreIsTheScopedStore(t *testing.T) {
 			}
 			t.Cleanup(func() { hookStoreQueryEnv = prev })
 
-			primary := hookWorkQueryPrimaryStore(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides)
+			primary := hookWorkQueryPrimaryStore(cityDir, cfg, &a, workDir, queryEnv, overrides)
 			if !reflect.DeepEqual(primary, full[0]) {
 				t.Fatalf("primary store = %+v, want the full fan-out's first leg %+v", primary, full[0])
 			}
