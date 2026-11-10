@@ -93,6 +93,29 @@ Rules:
 
 ## The accepted residual: reread-then-write is not atomic
 
+### Pending-create controller transitions
+
+Pending-create rollback is destructive and cannot accept the reread/write
+residual against an asynchronous completion. `Store.WithPendingCreateRollback`
+holds `WithSessionMutationLock` across the current lease read and rollback
+transaction. `Store.CommitStartedIfCurrent` holds the same lock across its
+lease read and completion write; controller incarnation allocation already
+uses it. Rollback requires both generation and token to match and refuses a
+completed creation. Advisory awake state with a current claim is not completion
+and remains rollback-eligible. Completion retains the existing token-authoritative
+lease verdict. A partial failed-create close remains retryable. If the final
+commit rejects a stale result after async refresh, the provider-aware caller
+cleans up the attempted runtime identity outside the lock; a persistence error
+alone does not authorize that cleanup.
+
+This is a per-session, process-local fence for controller writers, not a
+cross-process lock or store CAS. Provider probes and cleanup run outside it.
+Direct external bead writes remain outside its guarantee. Tests:
+`internal/session/store_start_fence_test.go` and
+`cmd/gc/session_pending_create_fence_test.go`.
+
+### Other token-precondition writers
+
 Between the precondition reread and the write, another writer can still
 interleave. With no store CAS this window cannot be closed by the client;
 flock closes it only where both writers honor the same lock.

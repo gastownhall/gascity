@@ -26,6 +26,13 @@
     },
     "draining": {
       "type": "boolean"
+    },
+    "source": {
+      "enum": [
+        "session_row",
+        "runtime_meta",
+        "session_row+runtime_meta"
+      ]
     }
   },
   "additionalProperties": true

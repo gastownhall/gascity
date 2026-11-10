@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
@@ -566,11 +568,6 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	aa := []orders.Order{{
 		Name:         "release-watch",
@@ -591,6 +588,13 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 		rec:     &rec,
 		stderr:  &stderr,
 		cfg:     cfg,
+	}
+
+	startEventOrdersAtTheHead(t, m)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -638,11 +642,6 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -658,6 +657,13 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	}}, store, eventLog, execRun, events.Discard)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
+	}
+
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -692,11 +698,6 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -712,6 +713,13 @@ func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	}}, store, eventLog, execRun, events.Discard)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
+	}
+
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -816,11 +824,6 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-	headSeq, err := eventLog.LatestSeq()
-	if err != nil {
-		t.Fatalf("LatestSeq(): %v", err)
-	}
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -840,6 +843,12 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	}
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
 
 	logs := captureCmdOrderLogs(t, func() {
 		ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -884,7 +893,6 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 func TestOrderDispatchEventExecCursorLabelFailureMarksExecFailed(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 
 	var calls int
 	execRun := func(context.Context, string, string, []string) ([]byte, error) {
@@ -904,6 +912,8 @@ func TestOrderDispatchEventExecCursorLabelFailureMarksExecFailed(t *testing.T) {
 	}
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
+	startEventOrdersAtTheHead(t, ad)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 
 	logs := captureCmdOrderLogs(t, func() {
 		ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -1590,6 +1600,77 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+// cooldownEventFallbackOrders returns the single city-level cooldown order the
+// event-fallback dispatcher tests share. Pool and FormulaLayer are set so a due
+// order genuinely materializes beads — otherwise the "cooldown held" assertion
+// below would pass for the wrong reason.
+func cooldownEventFallbackOrders() []orders.Order {
+	return []orders.Order{{
+		Name:         "test-order",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+}
+
+// TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune pins the wiring
+// in memoryOrderDispatcher.dispatch that hands m.ep to
+// orders.LastRunFuncWithEventFallback: with every order-run tracking bead
+// compacted away, a recent order.fired event must still hold the cooldown
+// closed.
+func TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order", // city-level order: ScopedName() == Name
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) != 0 {
+		t.Fatalf("expected no dispatch (event fallback should hold the cooldown), got %d bead(s)", len(all))
+	}
+}
+
+// TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale is the negative
+// half of the test above: same pruned store and same order, but the only
+// order.fired event is older than the interval, so the order must dispatch.
+// Without this, a dispatch broken for any unrelated reason would let the
+// cooldown-held assertion pass vacuously.
+func TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order",
+		Ts:      time.Now().Add(-48 * time.Hour),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) == 0 {
+		t.Fatal("expected dispatch (last order.fired is older than the interval), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
@@ -1709,15 +1790,24 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders pins the rotation: a
+// budget smaller than the due set must hand every order a turn across
+// consecutive ticks rather than replaying the head of the list.
+//
+// The orders are cooldown, not condition. Condition orders no longer consult
+// the budget at all (see TestDispatchFiresDueConditionOrderOutsideTheRotation-
+// Budget), so building the corpus out of them would make this pass on the
+// first tick and stop measuring the cursor. A 1ms interval against ticks a
+// second apart is the always-due shape on the budgeted path.
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order
 	for i := 0; i < 5; i++ {
 		aa = append(aa, orders.Order{
-			Name:    fmt.Sprintf("condition-%d", i),
-			Trigger: "condition",
-			Check:   "true",
-			Exec:    "true",
+			Name:     fmt.Sprintf("cooldown-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1ms",
+			Exec:     "true",
 		})
 	}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
@@ -1729,14 +1819,17 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	m := ad.(*memoryOrderDispatcher)
 	m.maxDispatchesPerTick = 2
 
-	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// fixed fake 'now' in the past would leave every fired order's cooldown
+	// clock reading negative and never due again.
+	now := time.Now()
 	for i := 0; i < 3; i++ {
 		ad.dispatch(context.Background(), t.TempDir(), now.Add(time.Duration(i)*time.Second))
 		ad.drain(context.Background())
 	}
 
 	for i := 0; i < 5; i++ {
-		label := fmt.Sprintf("order-run:condition-%d", i)
+		label := fmt.Sprintf("order-run:cooldown-%d", i)
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}
@@ -1763,6 +1856,7 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:  "recent run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:test-order"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1805,6 +1899,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:     "recent run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(-30 * time.Minute),
 	}); err != nil {
@@ -1831,6 +1926,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	store.reset()
 	if _, err := store.Create(beads.Bead{
 		Title:     "manual run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(20 * time.Minute),
 	}); err != nil {
@@ -2605,6 +2701,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	// Seed a recent exec run.
 	_, err := store.Create(beads.Bead{
 		Title:  "order:wasteland-poll",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:wasteland-poll"},
 	})
 	if err != nil {
@@ -3408,6 +3505,182 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	}
 }
 
+// A run its order timeout stopped used to fail with the runner's error alone:
+// "context deadline exceeded" from a runner that reports the deadline (the
+// production one does), "signal: killed" from one that reports the kill.
+// Neither says the order timed out, or after how long. The order.failed event
+// and the log now name the timeout, and keep the runner's own error.
+func TestOrderDispatchExecTimeoutFailureNamesTheTimeout(t *testing.T) {
+	const wantTimeout = "order timeout of 100ms exceeded"
+	tests := []struct {
+		name string
+		// runErr is what the runner returns once the timeout has stopped it.
+		runErr  func(ctx context.Context) error
+		wantMsg func(t *testing.T, msg string)
+	}{
+		{
+			name:   "runner returns the context error",
+			runErr: func(ctx context.Context) error { return ctx.Err() },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "context deadline exceeded") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner reports the kill signal",
+			runErr: func(context.Context) error { return errors.New("signal: killed") },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "signal: killed") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner returns the context cause",
+			runErr: context.Cause,
+			wantMsg: func(t *testing.T, msg string) {
+				if msg != wantTimeout {
+					t.Fatalf("order.failed message = %q, want exactly %q (named once)", msg, wantTimeout)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{
+				aa: []orders.Order{{
+					Name:     "slow-exec",
+					Trigger:  "cooldown",
+					Interval: "1m",
+					Exec:     "scripts/slow.sh",
+					Timeout:  "100ms",
+				}},
+				storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+					<-ctx.Done()
+					return nil, tt.runErr(ctx)
+				},
+				rec:    &rec,
+				stderr: lockedStderr(&stderr),
+				cfg:    &config.City{},
+			}
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			m.drain(context.Background())
+
+			tt.wantMsg(t, orderFailedMessage(t, &rec, "slow-exec"))
+			if !strings.Contains(stderr.String(), wantTimeout) {
+				t.Fatalf("dispatch log = %q, want the timeout named", stderr.String())
+			}
+		})
+	}
+}
+
+// Only the order's own timeout is reported as one: a run the controller
+// cancels (shutdown, config reload) keeps reporting the cancellation.
+func TestOrderDispatchExecCanceledFailureDoesNotClaimATimeout(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	started := make(chan struct{})
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "long-exec",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "scripts/long.sh",
+			Timeout:  "1h",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		rec:            &rec,
+		stderr:         lockedStderr(&bytes.Buffer{}),
+		cfg:            &config.City{},
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	awaitClose(t, started, "exec runner start")
+	m.cancel()
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "long-exec")
+	if strings.Contains(msg, "order timeout") {
+		t.Fatalf("order.failed message = %q, a canceled run must not be reported as a timeout", msg)
+	}
+	if !strings.Contains(msg, context.Canceled.Error()) {
+		t.Fatalf("order.failed message = %q, want the cancellation reported", msg)
+	}
+}
+
+// stalledGraphApplyStore is a MemStore whose graph apply runs until the
+// caller's context ends, as a graph apply against a wedged server does.
+type stalledGraphApplyStore struct {
+	*beads.MemStore
+}
+
+func (s stalledGraphApplyStore) ApplyGraphPlan(ctx context.Context, _ *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) { //nolint:unparam // interface compliance; a stalled apply never produces a result
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A formula order's timeout bounds the wisp it writes, and a wisp the timeout
+// stops fails the order with the timeout named, the same as an exec order.
+func TestOrderDispatchWispTimeoutFailureNamesTheTimeout(t *testing.T) {
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	store := stalledGraphApplyStore{MemStore: beads.NewMemStore()}
+	var rec memRecorder
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-wisp",
+			Trigger:      "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			FormulaLayer: sharedTestFormulaDir,
+			Timeout:      "100ms",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		rec:     &rec,
+		stderr:  lockedStderr(&bytes.Buffer{}),
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "slow-wisp")
+	if !strings.Contains(msg, "order timeout of 100ms exceeded") {
+		t.Fatalf("order.failed message = %q, want the order timeout named", msg)
+	}
+}
+
+// orderFailedMessage returns the message of the last order.failed event rec
+// holds for subject, failing the test when there is none.
+func orderFailedMessage(t *testing.T, rec *memRecorder, subject string) string {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	msg, found := "", false
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == subject {
+			msg, found = e.Message, true
+		}
+	}
+	if !found {
+		t.Fatalf("no order.failed event for %s; events = %+v", subject, rec.events)
+	}
+	return msg
+}
+
 func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
 	workDir := t.TempDir()
 	markerPath := filepath.Join(workDir, "started")
@@ -3441,6 +3714,39 @@ func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
 
 	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath)
 	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerStopsDescendantsThatLeftItsProcessGroup(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// GNU timeout makes itself the leader of a new process group, so what it
+	// bounds runs outside the group the runner signals on cancel.
+	command := fmt.Sprintf("command -v timeout >/dev/null 2>&1 || { echo no-timeout; exit 0; }; timeout 60 sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done'", childPIDPath, heartbeatPath)
+	out, err := shellExecRunner(ctx, command, workDir, nil)
+	if strings.Contains(string(out), "no-timeout") {
+		t.Skip("needs a coreutils timeout on PATH")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
 	}
@@ -3862,7 +4168,7 @@ func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T)
 		t.Fatalf("n = %d, want 2", n)
 	}
 	if fs.listCalls != 1 {
-		t.Fatalf("ListByLabel calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
 	}
 }
 
@@ -6491,7 +6797,7 @@ func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
 		t.Fatalf("closed = %d, want 1", closed)
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6512,7 +6818,7 @@ func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
 		t.Fatal("expected error when retries exhausted")
 	}
 	if fs.calls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+		t.Fatalf("order-tracking list calls = %d, want 3", fs.calls)
 	}
 }
 
@@ -6544,23 +6850,28 @@ func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
 		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
 	}
 	if fs.listCalls != 3 {
-		t.Fatalf("ListByLabel calls = %d, want 3 (retry on partial close)", fs.listCalls)
+		t.Fatalf("order-tracking list calls = %d, want 3 (retry on partial close)", fs.listCalls)
 	}
 }
 
-// countFailStore wraps a Store and fails the first N ListByLabel calls.
+// countFailStore wraps a Store and fails the first N order-tracking list
+// reads. The fault sits on List because the sweep reads through
+// beads.HandlesFor(store).Live.List; an override on ListByLabel never fires.
 type countFailStore struct {
 	beads.Store
 	failCount int
 	calls     int
 }
 
-func (f *countFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+func (f *countFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label != labelOrderTracking {
+		return f.Store.List(query)
+	}
 	f.calls++
 	if f.calls <= f.failCount {
 		return nil, fmt.Errorf("connection refused")
 	}
-	return f.Store.ListByLabel(label, limit, opts...)
+	return f.Store.List(query)
 }
 
 // closeFailStore wraps a Store and always fails CloseAll with a
@@ -6571,9 +6882,13 @@ type closeFailStore struct {
 	closeN    int // number of beads "closed" before error
 }
 
-func (f *closeFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	f.listCalls++
-	return f.Store.ListByLabel(label, limit, opts...)
+// List counts the sweep's order-tracking reads, which go through
+// beads.HandlesFor(store).Live.List.
+func (f *closeFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == labelOrderTracking {
+		f.listCalls++
+	}
+	return f.Store.List(query)
 }
 
 func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) {
@@ -6648,7 +6963,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		execRun = shellExecRunner
 	}
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
-	return &memoryOrderDispatcher{
+	m := &memoryOrderDispatcher{
 		aa: auto,
 		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
@@ -6662,6 +6977,8 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
+	m.watchEventOrders()
+	return m
 }
 
 func slicesContain(values []string, want string) bool {
@@ -6773,6 +7090,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	// Seed a recent run for rig-A's order (scoped name).
 	_, err := store.Create(beads.Bead{
 		Title:  "order run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:db-health:rig:rig-a"},
 	})
 	if err != nil {
@@ -7221,6 +7539,7 @@ pool = "worker"
 	}
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:rig-digest:rig:frontend"},
 	}); err != nil {
 		t.Fatalf("Create(legacy city run): %v", err)
@@ -7307,7 +7626,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:release-watch:rig:frontend",
+		failLabel: "order-run:release-watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -7529,6 +7848,7 @@ pool = "worker"
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "existing work",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:file-order"},
 	}); err != nil {
 		t.Fatalf("Create(existing work): %v", err)
@@ -7998,6 +8318,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	// Seed an open wisp (non-tracking bead) for this order.
 	_, err := store.Create(beads.Bead{
 		Title:  "mol-do-work", // not "order:my-auto" → counts as real work
+		Type:   "molecule",    // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:my-auto"},
 	})
 	if err != nil {
@@ -9559,20 +9880,32 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
-	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
-	for _, key := range githubTokenExecEnvKeys {
+	// bdPinExecEnvKeys are the other deliberately-overridable keys. BD_BIN
+	// carries the workspace bd pin and, since ga-weekw, is projected even when
+	// empty so a stale inherited value is masked. It has never been reserved:
+	// [order.env] BD_BIN already overrode a configured pin before ga-weekw,
+	// and that fix deliberately does not change what an order may override.
+	bdPinExecEnvKeys := []string{"BD_BIN"}
+	deliberatelyOverridable := append(append([]string{}, githubTokenExecEnvKeys...), bdPinExecEnvKeys...)
+	overridable := make(map[string]bool, len(deliberatelyOverridable))
+	for _, key := range deliberatelyOverridable {
 		overridable[key] = true
 	}
 
 	var unreserved []string
 	projectedOverridable := 0
+	projectedBdPin := false
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		if overridable[key] {
-			projectedOverridable++
+			if slices.Contains(bdPinExecEnvKeys, key) {
+				projectedBdPin = true
+			} else {
+				projectedOverridable++
+			}
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9593,6 +9926,11 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	if projectedOverridable != len(githubTokenExecEnvKeys) {
 		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
 			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
+	}
+	// Same soundness check for the bd pin: with no workspace pin configured
+	// here, BD_BIN must still be projected (empty) to mask an inherited value.
+	if !projectedBdPin {
+		t.Fatalf("BD_BIN not projected into order exec env; the empty pin must mask an inherited BD_BIN (ga-weekw). env=%v", envSlice)
 	}
 }
 
@@ -9880,6 +10218,31 @@ func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
 
 	if out := stderr.String(); strings.Contains(out, "raise check_timeout") {
 		t.Fatalf("a normal false condition must not log the timeout diagnostic:\n%s", out)
+	}
+}
+
+func TestOrderDispatchConditionFailureMentioningTimedOutStaysQuiet(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "failed-check",
+			Trigger: "condition",
+			Check:   "echo 'connection timed out' >&2; exit 1",
+			Exec:    "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+
+	if out := stderr.String(); strings.Contains(out, "raise check_timeout") {
+		t.Fatalf("ordinary stderr mentioning timed out must not log the timeout diagnostic:\n%s", out)
 	}
 }
 
@@ -10785,4 +11148,435 @@ title = "Do work"
 		titles = append(titles, b.Title)
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
+}
+
+// TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel (architecture B v2,
+// mc-v8g4p): a plain task carrying an order's order-run label, even with an
+// open child, is no run of the order (orders.IsRunRecord) and holds no
+// single-flight, through the per-tick index and its live fallback alike; the
+// real molecule root of the same shape still does
+// (TestHasOpenWorkStrictBlocksOnWispWithOpenChildren).
+func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	forged, err := store.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "step", ParentID: forged.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ad := &memoryOrderDispatcher{}
+	if has, err := ad.hasOpenWorkStrict(store, "digest"); err != nil || has {
+		t.Fatalf("hasOpenWorkStrict = %t (%v), want no open work from a plain task", has, err)
+	}
+	idx := newOrderDispatchTrackingIndex(io.Discard)
+	entries, err := idx.entriesForStore(store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := entries["digest"]; summary.openWorkTracking || len(summary.openRoots) != 0 {
+		t.Fatalf("index summary %+v, want no run of digest", summary)
+	}
+}
+
+func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "gc-seat-123")
+	t.Setenv("GC_ALIAS", "some-seat")
+	t.Setenv("GC_AGENT", "some-seat")
+
+	out, err := shellExecRunner(context.Background(),
+		`printf 'sid=%s alias=%s agent=%s' "${GC_SESSION_ID:-unset}" "${GC_ALIAS:-unset}" "${GC_AGENT:-unset}"`,
+		t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	if got, want := string(out), "sid=unset alias=unset agent=unset"; got != want {
+		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
+	}
+}
+
+// TestShellExecRunnerScrubsSessionScopedEnv drives the scrub from
+// managedDoltSessionScopedEnvKeys so a session-scoped key added to that list
+// later is covered for exec orders too.
+func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "leak-"+key)
+	}
+
+	out, err := shellExecRunner(context.Background(), "env", t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, _, ok := strings.Cut(line, "=")
+		if ok && containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Errorf("order exec env carries session-scoped %q", line)
+		}
+	}
+}
+
+func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=seat",
+		"BEADS_ACTOR=seat",
+	}
+	env := []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"}
+
+	merged := mergeOrderExecEnv(environ, env)
+
+	counts := map[string]int{}
+	for _, entry := range merged {
+		counts[entry]++
+		if key, _, _ := strings.Cut(entry, "="); key == "GC_SESSION_ID" {
+			t.Errorf("seat identity survived merge: %q in %v", entry, merged)
+		}
+	}
+	for _, want := range []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"} {
+		if counts[want] != 1 {
+			t.Errorf("%q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+	for _, unwanted := range []string{"GC_ALIAS=seat", "BEADS_ACTOR=seat"} {
+		if counts[unwanted] != 0 {
+			t.Errorf("inherited %q survived alongside the explicit value: %v", unwanted, merged)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/h", "FOO=bar"} {
+		if counts[want] != 1 {
+			t.Errorf("unrelated %q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+}
+
+func TestOrderExecEnvMergeDropsSeatIdentityKeepsCuratedValues(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("BEADS_ACTOR", "some-seat")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "digest", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	merged := mergeOrderExecEnv([]string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=some-seat",
+		"GC_AGENT=some-seat",
+		"BEADS_ACTOR=some-seat",
+	}, envSlice)
+
+	got := map[string][]string{}
+	for _, entry := range merged {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = append(got[key], value)
+		}
+	}
+	for key, want := range map[string]string{
+		"PATH":          "/usr/bin",
+		"HOME":          "/h",
+		"FOO":           "bar",
+		"BEADS_ACTOR":   "order:digest",
+		"GC_STORE_ROOT": cityDir,
+		"GC_RIG":        "",
+	} {
+		if values := got[key]; len(values) != 1 || values[0] != want {
+			t.Errorf("%s = %q, want exactly [%q]", key, values, want)
+		}
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_ALIAS", "GC_AGENT"} {
+		if values, present := got[key]; present {
+			t.Errorf("seat identity %s=%q reached the order env", key, values)
+		}
+	}
+}
+
+// writeOrderRoutingVarsCity writes a city that imports pack ops (which ships
+// a worker agent, a manual city order "sweep", and a graph.v2 formula whose
+// step targets {{binding_prefix}}worker) once per binding, plus an unrelated
+// pack tools that also exports a worker so the bare name is ambiguous.
+func writeOrderRoutingVarsCity(t *testing.T, cityDir string, bindings []string) {
+	t.Helper()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), "\n[workspace]\nname = \"test-city\"\n")
+	packDir := filepath.Join(cityDir, "packs", "ops")
+	for _, d := range []string{filepath.Join(packDir, "orders"), filepath.Join(packDir, "formulas"), filepath.Join(cityDir, "packs", "tools")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "ops"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile(t, filepath.Join(packDir, "orders", "sweep.toml"), `
+[order]
+formula = "routed-sweep"
+trigger = "manual"
+scope = "city"
+`)
+	writeFile(t, filepath.Join(packDir, "formulas", "routed-sweep.toml"), `
+formula = "routed-sweep"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Sweep"
+metadata = { "gc.run_target" = "{{binding_prefix}}worker" }
+`)
+	writeFile(t, filepath.Join(cityDir, "packs", "tools", "pack.toml"), `
+[pack]
+name = "tools"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	var packToml strings.Builder
+	packToml.WriteString("\n[pack]\nname = \"test-city\"\nschema = 1\n")
+	for _, b := range bindings {
+		packToml.WriteString("\n[imports." + b + "]\nsource = \"./packs/ops\"\n")
+	}
+	packToml.WriteString("\n[imports.tools]\nsource = \"./packs/tools\"\n")
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), packToml.String())
+}
+
+// findScannedOrder scans a city's orders and returns the named one.
+func findScannedOrder(t *testing.T, cityDir string, cfg *config.City, name string) (orders.Order, []orders.Order) {
+	t.Helper()
+	var scanErr bytes.Buffer
+	aa, err := scanAllOrders(cityDir, cfg, &scanErr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v (%s)", err, scanErr.String())
+	}
+	for _, a := range aa {
+		if a.Name == name {
+			return a, aa
+		}
+	}
+	t.Fatalf("order %q not discovered: %+v", name, aa)
+	return orders.Order{}, nil
+}
+
+func dispatchRoutingVarsSweep(t *testing.T, bindings []string) (*memRecorder, *bytes.Buffer, beads.Store) {
+	t.Helper()
+	formulatest.EnableV2ForTest(t)
+	cityDir := t.TempDir()
+	writeOrderRoutingVarsCity(t, cityDir, bindings)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	addTestControlDispatcherAgents(cfg, "")
+	order, _ := findScannedOrder(t, cityDir, cfg, "sweep")
+	target, err := resolveOrderStoreTarget(cityDir, cfg, order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{Title: "order:sweep", Labels: []string{"order-run:sweep", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &memRecorder{}
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{cfg: cfg, cityName: "test-city", rec: rec, stderr: stderr}
+	m.dispatchWisp(context.Background(), store, target, order, cityDir, tracking.ID, nil)
+	return rec, stderr, store
+}
+
+func TestOrderDispatchV2BindingPrefixTargetRoutesToOrderPackBinding(t *testing.T) {
+	rec, stderr, store := dispatchRoutingVarsSweep(t, []string{"ops"})
+	if !rec.hasType(events.OrderCompleted) {
+		t.Fatalf("want order.completed; stderr=%s events=%+v", stderr.String(), rec.events)
+	}
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.Title == "Sweep" {
+			if got := b.Metadata["gc.routed_to"]; got != "ops.worker" {
+				t.Fatalf("step gc.routed_to = %q, want ops.worker", got)
+			}
+			return
+		}
+	}
+	t.Fatalf("step bead %q not poured; beads=%+v", "Sweep", all)
+}
+
+func TestOrderDispatchPackImportedTwiceGetsNoBindingVars(t *testing.T) {
+	rec, stderr, _ := dispatchRoutingVarsSweep(t, []string{"ops", "ops2"})
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatalf("want order.failed for a pack with two bindings; events=%+v", rec.events)
+	}
+	if !strings.Contains(stderr.String(), `{{binding_prefix}}worker`) {
+		t.Fatalf("stderr = %q, want the unresolved binding_prefix target", stderr.String())
+	}
+}
+
+// writeRigSweepFormula writes a v1 formula rig-sweep whose step title is
+// title and whose cmd var defaults to default-cmd.
+func writeRigSweepFormula(t *testing.T, formulaDir, title string) {
+	t.Helper()
+	writeFile(t, filepath.Join(formulaDir, "rig-sweep.toml"), `
+formula = "rig-sweep"
+description = "root {{cmd}}"
+
+[vars.cmd]
+default = "default-cmd"
+
+[[steps]]
+id = "work"
+title = "`+title+`"
+`)
+}
+
+func requireBeadTitled(t *testing.T, store beads.Store, want string) {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range all {
+		if b.Title == want {
+			return
+		}
+	}
+	titles := make([]string, 0, len(all))
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("no bead titled %q; titles=%q", want, titles)
+}
+
+func TestOrderDispatchRigOrderGetsRigNameAndFormulaVars(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+		args  map[string]string
+		want  string
+	}{
+		{name: "rig formula_vars beat formula default", title: "Run {{cmd}}", want: "Run rig-cmd"},
+		{name: "rig_name renders", title: "Sweep {{rig_name}}", want: "Sweep frontend"},
+		{name: "dispatch args win", title: "Run {{cmd}} in {{rig_name}}", args: map[string]string{"cmd": "arg-cmd", "rig_name": "other"}, want: "Run arg-cmd in other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "frontend")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			formulaDir := t.TempDir()
+			writeRigSweepFormula(t, formulaDir, tc.title)
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, FormulaVars: map[string]string{"cmd": "rig-cmd"}}},
+				Agents:    []config.Agent{{Name: "worker", Dir: "frontend"}},
+			}
+			a := orders.Order{Name: "rig-sweep", Rig: "frontend", Formula: "rig-sweep", Trigger: "manual", FormulaLayer: formulaDir}
+			target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NewMemStore()
+			tracking, err := store.Create(beads.Bead{Title: "order:rig-sweep", Labels: []string{"order-run:rig-sweep:rig:frontend", labelOrderTracking}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{cfg: cfg, cityName: "test-city", rec: &rec, stderr: &stderr}
+			m.dispatchWisp(context.Background(), store, target, a, cityPath, tracking.ID, tc.args)
+			if !rec.hasType(events.OrderCompleted) {
+				t.Fatalf("want order.completed; events=%+v stderr=%s", rec.events, stderr.String())
+			}
+			requireBeadTitled(t, store, tc.want)
+		})
+	}
+}
+
+func TestOrderFormulaVars(t *testing.T) {
+	packDir := filepath.Join("/city", "packs", "ops")
+	order := orders.Order{Name: "sweep", Rig: "frontend", FormulaLayer: filepath.Join(packDir, "formulas")}
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "frontend", FormulaVars: map[string]string{"cmd": "rig-cmd", "rig_name": "rig-var"}},
+			{Name: "backend", FormulaVars: map[string]string{"cmd": "backend-cmd"}},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", BindingName: "ops", SourceDir: packDir},
+			{Name: "worker", Dir: "frontend", BindingName: "tools", SourceDir: filepath.Join("/city", "packs", "tools")},
+		},
+	}
+
+	t.Run("precedence", func(t *testing.T) {
+		args := map[string]string{"cmd": "arg-cmd"}
+		got := orderFormulaVars(cfg, order, args)
+		want := map[string]string{"cmd": "arg-cmd", "rig_name": "rig-var", "binding_name": "ops", "binding_prefix": "ops."}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+		if len(args) != 1 {
+			t.Fatalf("args mutated: %v", args)
+		}
+	})
+
+	t.Run("rig order without formula_vars gets rig_name", func(t *testing.T) {
+		got := orderFormulaVars(&config.City{Rigs: []config.Rig{{Name: "frontend"}}}, orders.Order{Name: "sweep", Rig: "frontend"}, nil)
+		want := map[string]string{"rig_name": "frontend"}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("nil cfg copies args", func(t *testing.T) {
+		args := map[string]string{"cmd": "arg-cmd"}
+		got := orderFormulaVars(nil, order, args)
+		got["extra"] = "x"
+		if fmt.Sprint(got) != fmt.Sprint(map[string]string{"cmd": "arg-cmd", "extra": "x"}) || len(args) != 1 {
+			t.Fatalf("orderFormulaVars(nil) = %v (args %v), want an independent copy", got, args)
+		}
+	})
+
+	t.Run("city order gets empty rig_name and root binding", func(t *testing.T) {
+		rootDir := "/city"
+		cityCfg := &config.City{Agents: []config.Agent{{Name: "worker", SourceDir: rootDir}}}
+		got := orderFormulaVars(cityCfg, orders.Order{Name: "sweep", FormulaLayer: filepath.Join(rootDir, "formulas")}, nil)
+		want := map[string]string{"rig_name": "", "binding_name": "", "binding_prefix": ""}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("orderFormulaVars = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ambiguous binding leaves binding vars unset", func(t *testing.T) {
+		twice := &config.City{Agents: []config.Agent{
+			{Name: "worker", BindingName: "ops", SourceDir: packDir},
+			{Name: "worker", BindingName: "ops2", SourceDir: packDir},
+		}}
+		got := orderFormulaVars(twice, orders.Order{Name: "sweep", FormulaLayer: filepath.Join(packDir, "formulas")}, nil)
+		if _, ok := got["binding_name"]; ok {
+			t.Fatalf("binding_name set for a pack with two bindings: %v", got)
+		}
+		if _, ok := got["binding_prefix"]; ok {
+			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
+		}
+	})
 }

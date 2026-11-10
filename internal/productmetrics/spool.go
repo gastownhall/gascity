@@ -212,7 +212,7 @@ func (service *Service) RecordOnce(permit RecordingPermit, commandID CommandID) 
 	if !ok {
 		return RecordDropped
 	}
-	lockContext, cancel := context.WithTimeout(context.Background(), remaining)
+	lockContext, cancel := service.deps.withDeadline(context.Background(), remaining)
 	defer cancel()
 	lock, err := root.acquireLock(lockContext, stateLockName)
 	if err != nil {

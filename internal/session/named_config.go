@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -19,11 +20,21 @@ const (
 
 // NamedSessionSpec is the resolved runtime view of a configured named session.
 type NamedSessionSpec struct {
-	Named       *config.NamedSession
-	Agent       *config.Agent
-	Identity    string
-	SessionName string
-	Mode        string
+	Named *config.NamedSession
+	Agent *config.Agent
+	// Identity is the identity the spec resolves under: the qualified name
+	// for a spec built from QualifiedName(), the bare leaf for one built
+	// from a pre-requalification bare identity.
+	Identity string
+	// BareIdentity is the spec's bare, pre-requalification form: the leaf a
+	// row stamped before a `gc rig add --adopt` bound the named session to
+	// its rig still carries under configured_named_identity. It is set only
+	// when it differs from Identity (config.NamedSessionBareIdentity's
+	// unique-candidate rule), and the spec-to-row resolvers use it as a
+	// strictly-last pass to find that row and rename it in place.
+	BareIdentity string
+	SessionName  string
+	Mode         string
 }
 
 // NormalizeNamedSessionTarget trims whitespace and trailing separators from a named session target.
@@ -56,13 +67,17 @@ func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSes
 	if agentCfg == nil {
 		return NamedSessionSpec{}, false
 	}
-	return NamedSessionSpec{
+	spec := NamedSessionSpec{
 		Named:       named,
 		Agent:       agentCfg,
 		Identity:    identity,
 		SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
 		Mode:        named.ModeOrDefault(),
-	}, true
+	}
+	if bare := config.NamedSessionBareIdentity(cfg, named); bare != "" && bare != identity {
+		spec.BareIdentity = bare
+	}
+	return spec, true
 }
 
 // NamedSessionBackingTemplate returns the resolved backing agent template for a named session spec.
@@ -74,6 +89,131 @@ func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 		return spec.Named.TemplateQualifiedName()
 	}
 	return ""
+}
+
+// IsDemandOnlySingletonTemplate reports whether agentCfg is a canonical
+// singleton pool template (max_active_sessions = 1, no namepool) with an
+// effective min_active_sessions of 0 that no configured [[named_session]]
+// backs. A minimum of one keeps the session running without demand, so that
+// template is not demand-only. The controller owns such a template's
+// only session: it starts it while the pool has work for it and drains it when
+// the pool has none. Nothing else can start it or keep it running: not an API
+// create, not pin_awake, not an explicit wake request (#6858). This is the
+// shape `gc config show --validate` warns about.
+func IsDemandOnlySingletonTemplate(cfg *config.City, agentCfg *config.Agent) bool {
+	if cfg == nil || agentCfg == nil || !agentCfg.UsesCanonicalSingletonPoolIdentity() ||
+		agentCfg.EffectiveMinActiveSessions() != 0 {
+		return false
+	}
+	template := agentCfg.QualifiedName()
+	cityName := cfg.EffectiveCityName()
+	for i := range cfg.NamedSessions {
+		spec, ok := FindNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if ok && NamedSessionBackingTemplate(spec) == template {
+			return false
+		}
+	}
+	return true
+}
+
+// IsDemandOnlySingletonSession reports whether info is the controller-owned
+// pool capacity of a demand-only singleton template (see
+// IsDemandOnlySingletonTemplate); agentCfg is the agent that owns info's
+// template. The controller keeps such a session only while the pool has work
+// for it, so neither pin_awake nor an explicit wake request can start it or
+// keep it running (#6858). Named and manual sessions of the same template
+// start on their own terms and are excluded. CLI and API refusals share this
+// classification.
+//
+// A singleton template supports neither multiple sessions nor instance
+// expansion, so the session's own origin markers decide it: an explicit
+// session_origin, else the pool markers the controller stamps (pool_managed,
+// pool_slot, dependency_only) or a legacy slot-suffixed name.
+func IsDemandOnlySingletonSession(cfg *config.City, agentCfg *config.Agent, info Info) bool {
+	if !IsDemandOnlySingletonTemplate(cfg, agentCfg) {
+		return false
+	}
+	if info.ConfiguredNamedSession || isManualSessionInfo(info) {
+		return false
+	}
+	if origin := strings.TrimSpace(info.SessionOrigin); origin != "" {
+		return origin == "ephemeral"
+	}
+	if info.PoolManaged || strings.TrimSpace(info.PoolSlot) != "" || info.DependencyOnly {
+		return true
+	}
+	template := strings.TrimSpace(info.Template)
+	if template == "" {
+		return false
+	}
+	return PoolSlotFromName(strings.TrimSpace(AgentNameInfo(info)), template) > 0 ||
+		PoolSlotFromName(strings.TrimSpace(info.SessionNameMetadata), template) > 0
+}
+
+// DemandOnlySingletonWakeRefused reports whether an explicit wake of info
+// cannot start it: info is demand-only singleton pool capacity (see
+// IsDemandOnlySingletonSession) whose runtime is neither up nor already
+// starting (a provider Start in flight). Waking one that is running or starting
+// only clears its blockers, so that wake is not refused. A start-pending one is
+// refused: no Start is in flight, and only pool demand, never the wake, decides
+// whether the controller starts it (an API-created one can sit start-pending
+// forever, #6858).
+func DemandOnlySingletonWakeRefused(cfg *config.City, agentCfg *config.Agent, info Info) bool {
+	if !IsDemandOnlySingletonSession(cfg, agentCfg, info) {
+		return false
+	}
+	switch State(strings.TrimSpace(info.MetadataState)) {
+	case StateActive, StateAwake, StateCreating:
+		return false
+	}
+	return true
+}
+
+// isManualSessionInfo reports whether info was created as a manual session.
+func isManualSessionInfo(info Info) bool {
+	return strings.TrimSpace(info.SessionOrigin) == "manual" || info.ManualSessionMetadata == "true"
+}
+
+// AgentNameInfo returns the session's agent name: the agent_name metadata,
+// else the value of its "agent:" label.
+func AgentNameInfo(info Info) string {
+	if info.AgentName != "" {
+		return info.AgentName
+	}
+	for _, label := range info.Labels {
+		if strings.HasPrefix(label, "agent:") {
+			return strings.TrimPrefix(label, "agent:")
+		}
+	}
+	return ""
+}
+
+// PoolSlotFromName returns the pool slot encoded in a pool member name of
+// template ("<template>-<n>", or the legacy "<template>-gc-<n>"), or 0 when
+// name is not such a member.
+func PoolSlotFromName(name, template string) int {
+	if !strings.HasPrefix(name, template+"-") {
+		return 0
+	}
+	suffix := name[len(template)+1:]
+	if slot, err := strconv.Atoi(suffix); err == nil {
+		return slot
+	}
+	if strings.HasPrefix(suffix, "gc-") {
+		slot, _ := strconv.Atoi(suffix[3:])
+		return slot
+	}
+	return 0
+}
+
+// DemandOnlySingletonExplanation says why a session of the demand-only
+// singleton template cannot be started or kept running on request, and what
+// to do instead. API and CLI refusals share it so they read the same.
+func DemandOnlySingletonExplanation(template string) string {
+	return fmt.Sprintf("agent %q is a pool agent with max_active_sessions = 1 and no [[named_session]]: "+
+		"the controller starts its one session only while there is work for it and drains it when there is none; "+
+		"sling work to %q to start it, or declare a [[named_session]] for it to keep a session running",
+		template, template)
 }
 
 // ResolveNamedSessionSpecForConfigTarget resolves a config-facing token to a named session spec when possible.
@@ -220,6 +360,79 @@ func configuredNamedIdentitySignalsMatch(b beads.Bead, owner string) bool {
 	return false
 }
 
+// RecyclableDeadConfiguredNamePhantom reports whether a session bead is a
+// process-dead phantom squatting a configured named-session runtime name
+// without being that identity's recognized canonical owner, returning the
+// squatted identity when so. The caller must independently confirm the backing
+// process is gone — process-absence alone is not a trigger (a healthy asleep
+// on_demand session is also process-absent), which is why this predicate keys
+// on the registry-vs-config name collision instead.
+//
+// This is the residual ga-n2d Gap B deadlock: such a phantom is registry-asleep
+// with its backing process gone, still holds the configured runtime name (so a
+// fresh canonical bead collides with ErrSessionNameExists on materialization),
+// and still holds work assigned to the configured identity (so the reconciler's
+// standard close guard, which refuses to close a bead with assigned work, keeps
+// it open). Closing it anyway is safe: the work is assigned to the stable
+// configured identity — not to this dead bead's ephemeral ID — so a freshly
+// materialized canonical bead re-adopts it; only the dead bead is discarded.
+// A closed configured-named bead also releases its reserved runtime name (see
+// ensureSessionNameAvailableForSelfAndOwner), unblocking respawn.
+//
+// Healthy asleep canonical sessions never qualify: they carry a
+// configured_named_identity, so preserveConfiguredNamedSessionBead keeps them
+// open upstream and the non-empty recorded identity short-circuits here. Only
+// the empty-identity legacy phantom (the documented Gap B class) is recyclable.
+// Recognition is gated on wasConfiguredNamedSession OR
+// configuredNamedIdentitySignalsMatch — the same recognition the closed-bead
+// name release uses (ga-841 / Gap A) — so that closing actually frees the name.
+func RecyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentity(b) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, identity) {
+		return identity, true
+	}
+	return "", false
+}
+
+// configuredIdentityForRuntimeName returns the configured named-session identity
+// whose resolved runtime session name equals sessionName, if any.
+func configuredIdentityForRuntimeName(cfg *config.City, cityName, sessionName string) (string, bool) {
+	sessionName = strings.TrimSpace(sessionName)
+	if cfg == nil || sessionName == "" {
+		return "", false
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = config.EffectiveCityName(cfg, "")
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) == sessionName {
+			return identity, true
+		}
+	}
+	return "", false
+}
+
 // NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
@@ -244,6 +457,64 @@ func IsNamedSessionInfo(i Info) bool {
 // value).
 func NamedSessionIdentityInfo(i Info) string {
 	return strings.TrimSpace(i.ConfiguredNamedIdentity)
+}
+
+// wasConfiguredNamedSessionInfo is the session.Info mirror of
+// wasConfiguredNamedSession.
+func wasConfiguredNamedSessionInfo(i Info) bool {
+	return IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != ""
+}
+
+// configuredNamedIdentitySignalsMatchInfo is the session.Info mirror of
+// configuredNamedIdentitySignalsMatch, reading the same four identity signals
+// off their Info projections.
+func configuredNamedIdentitySignalsMatchInfo(i Info, owner string) bool {
+	owner = NormalizeNamedSessionTarget(owner)
+	if owner == "" {
+		return false
+	}
+	for _, signal := range []string{
+		i.ConfiguredNamedIdentity,
+		i.Alias,
+		i.AgentName,
+		i.Template,
+	} {
+		if NormalizeNamedSessionTarget(strings.TrimSpace(signal)) == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// RecyclableDeadConfiguredNamePhantomInfo is the session.Info mirror of
+// RecyclableDeadConfiguredNamePhantom.
+//
+// It reads Info.SessionNameMetadata — the RAW session_name metadata — and not
+// Info.SessionName, which applies a sessionNameFor(ID) fallback that would make
+// every bead appear to squat a runtime name and defeat the empty-name guard.
+func RecyclableDeadConfiguredNamePhantomInfo(i Info, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(i.SessionNameMetadata)
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentityInfo(i) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSessionInfo(i) || configuredNamedIdentitySignalsMatchInfo(i, identity) {
+		return identity, true
+	}
+	return "", false
 }
 
 // NamedSessionInfoMatchesSpec is the session.Info mirror of
@@ -342,7 +613,7 @@ type ConfiguredNamedSessionLookup struct {
 
 // FindCanonicalConfiguredNamedSessionBead finds the live bead that owns a
 // configured named session using exact metadata-filtered store queries.
-func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessionSpec) (beads.Bead, bool, error) {
+func FindCanonicalConfiguredNamedSessionBead(store beads.SessionStore, spec NamedSessionSpec) (beads.Bead, bool, error) {
 	lookup, err := lookupConfiguredNamedSession(store, spec, false)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -355,12 +626,12 @@ func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessio
 // The result is stitched from several sequential store reads; downstream
 // uniqueness and claim serialization remain the authority under concurrent
 // bead mutation.
-func LookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
+func LookupConfiguredNamedSession(store beads.SessionStore, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
 	return lookupConfiguredNamedSession(store, spec, true)
 }
 
-func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, includeConflict bool) (ConfiguredNamedSessionLookup, error) {
-	if store == nil {
+func lookupConfiguredNamedSession(store beads.SessionStore, spec NamedSessionSpec, includeConflict bool) (ConfiguredNamedSessionLookup, error) {
+	if store == (beads.SessionStore{}) {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 	spec.Identity = NormalizeNamedSessionTarget(spec.Identity)
@@ -415,6 +686,37 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 		aliasMatches = matches
 		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		// findCanonicalNamedSessionBeadForLookup, not FindCanonicalNamedSessionBead:
+		// this stage's own query is keyed on `alias`, so a bare alias-only bead
+		// (no session_name, no configured_named_session flag, and no
+		// corroborating spec identity) is exactly the input
+		// FindCanonicalNamedSessionBead's unconditional alias-only-uniqueness
+		// fallback would promote to canonical here -- the case ga-t3a0fv round 2
+		// established must fall through to conflict detection instead. See
+		// findCanonicalNamedSessionBeadForLookup's doc comment.
+		if bead, ok := findCanonicalNamedSessionBeadForLookup(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
+	// The requalified prior form (gastownhall/gascity#5957): when spec carries
+	// a BareIdentity, the live row still stamped with it is this session
+	// awaiting its in-place rename. The pass resolves only a unique bare row.
+	// Two or more resolve no canonical, and the conflict detection below does
+	// not report them either: it reads only the runtime-name and alias
+	// matches, and a bare row's session_name and alias match neither of the
+	// qualified spec's. The lookup then answers neither canonical nor
+	// conflict, as the reconciler's FindCanonicalNamedSessionInfo and
+	// FindNamedSessionConflictInfo pair does for the same rows, so a caller
+	// that creates on that answer mints the born-qualified row the reconciler
+	// mints. The bare rows stay open and keep the work claimed under their own
+	// bare identity.
+	if bare := strings.TrimSpace(spec.BareIdentity); bare != "" && bare != spec.Identity {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, bare)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing named session candidates by requalified prior identity: %w", err)
+		}
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
 		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
 			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
 		}
@@ -426,13 +728,84 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
 	conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
+	for _, candidate := range conflictCandidates {
+		if namedSessionCandidateIsSelf(candidate, spec) {
+			return ConfiguredNamedSessionLookup{Canonical: candidate, HasCanonical: true}, nil
+		}
+	}
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
 	}
 	return ConfiguredNamedSessionLookup{}, nil
 }
 
-func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
+// namedSessionCandidateIsSelf reports whether a bead reached only through
+// conflict-scoped queries (session_name/alias) actually denotes spec's own
+// identity rather than a foreign claimant. It trusts only the two
+// highest-confidence signals FindCanonicalNamedSessionBead itself checks
+// first: an exact configured_named_session identity match, or an exact
+// session_name match corroborated by NamedSessionBeadMatchesSpec.
+//
+// It deliberately does NOT fall through to that function's third signal —
+// its alias-only-uniqueness fallback, added by #5487 / ga-4of1nc after this
+// function was first authored on a divergent branch. Discovered during the
+// ga-e3o1dq rebase (main and this PR's branch never had both changes
+// present at once until this rebase forced them together): that fallback is
+// unsafe for THIS caller specifically. (a) NamedSessionBeadMatchesSpec
+// degrades to an unconditional match when spec.Agent/spec.Named are both
+// nil — NamedSessionBackingTemplate then returns "", which trivially equals
+// an alias-only bead's own unset template metadata — so the "corroborating
+// template/agent_name" gate the alias fallback relies on can be vacuous.
+// (b) the uniqueness count that fallback uses to reject a genuine collision
+// is always 1 when reached this way, because namedSessionCandidateIsSelf is
+// invoked once per candidate with a single-element slice: the exact
+// protection TestFindCanonicalNamedSessionBead_AliasMatchNotPromotedWithSecondLiveCandidate
+// checks for FindCanonicalNamedSessionBead's own (whole-candidate-set)
+// caller can never trigger here. FindCanonicalNamedSessionBead's alias
+// branch and its own tests are untouched by this fix and remain correct for
+// that direct, full-candidate-set caller; this function simply stops
+// reaching the branch that was never safe for a per-candidate self-check.
+//
+// This previously also trusted a narrower fallback: a live,
+// continuity-eligible session bead whose alias exactly equals spec.Identity
+// and whose session_name is empty, even with no
+// configured_named_session/configured_named_identity flag and no
+// corroborating template/agent_name match (ga-t3a0fv round 1). Review
+// (ga-t3a0fv round 2) showed that fallback is unsafe: on (bead, spec) alone,
+// a genuine not-yet-named self bead is byte-for-byte indistinguishable from
+// an unrelated bead that merely claims the same alias with nothing else set
+// — see TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf.
+// A bead with empty session_name costs nothing to create, so trusting bare
+// alias+empty-session_name let a decoy silently resolve as canonical self
+// instead of surfacing as a conflict: a fail-safe-to-fail-unsafe regression.
+// The fallback was removed rather than narrowed further, because every
+// signal tried (template/agent_name match, creation recency, city/rig
+// scope) either broke existing intentionally-bare test fixtures or failed
+// to actually distinguish the two cases the reviewer's PoC turned on. The
+// same reasoning is why this function does not resurrect an equivalent
+// fallback via FindCanonicalNamedSessionBead's alias branch above.
+//
+// The underlying problem the fallback was trying to solve is real and still
+// open (ga-1ycmli): a live singleton named-session bead that never got
+// configured_named_identity stamped at creation is unmailable while
+// running, because canonical detection can't see it and conflict detection
+// is all that's left. The fix needs either eager identity-metadata stamping
+// at bead-creation time in the wisp/molecule dispatch path, or a
+// caller-supplied runtime-liveness assertion threaded in from the worker
+// boundary — internal/session may not import internal/worker directly (see
+// AGENTS.md layering invariants), so that check can only be injected from a
+// caller that already has worker.Handle access. Both directions need
+// scoping beyond this function; see the follow-up bead linked from
+// ga-t3a0fv's notes.
+func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
+	if spec.Identity == "" {
+		return false
+	}
+	_, ok := findCanonicalNamedSessionBeadStrict([]beads.Bead{b}, spec)
+	return ok
+}
+
+func listConfiguredNamedSessionBeadsByMetadata(store beads.SessionStore, key, value string) ([]beads.Bead, error) {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	if key == "" || value == "" {
@@ -486,8 +859,8 @@ func appendUniqueNamedSessionCandidates(dst []beads.Bead, seen map[string]bool, 
 // session count, which is small. Measured under 20-parallel load on a
 // representative city: 5.2s → 1.3s. Interactive session-targeting paths
 // that must avoid label-wide scans use LookupConfiguredNamedSession instead.
-func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) ([]beads.Bead, error) {
-	if store == nil {
+func NamedSessionResolutionCandidates(store beads.SessionStore, spec NamedSessionSpec) ([]beads.Bead, error) {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	identity := NormalizeNamedSessionTarget(spec.Identity)
@@ -504,7 +877,7 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName) {
+		if !beadMatchesNamedSessionResolutionFilter(b, identity, sessionName, strings.TrimSpace(spec.BareIdentity)) {
 			continue
 		}
 		RepairEmptyType(store, &b)
@@ -517,9 +890,12 @@ func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) 
 // of the metadata predicates that NamedSessionResolutionCandidates folds
 // in process: configured-named-identity, session_name against the runtime
 // name, session_name against the bare identity, or alias against the bare
-// identity. Empty arguments disable their respective predicates so the
+// identity. bare is the spec's requalified prior form (empty unless a bare
+// leaf uniquely maps to the spec's identity — gastownhall/gascity#5957); a
+// row stamped with it is admitted so the canonical pickers can rename it in
+// place. Empty arguments disable their respective predicates so the
 // behavior matches ExactMetadataSessionCandidates' empty-filter handling.
-func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName string) bool {
+func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName, bare string) bool {
 	if identity != "" {
 		if strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == identity {
 			return true
@@ -532,6 +908,9 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 		}
 	}
 	if sessionName != "" && strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+		return true
+	}
+	if bare != "" && bare != identity && strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata]) == bare {
 		return true
 	}
 	return false
@@ -622,22 +1001,84 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 			return aliasCanonical, true
 		}
 	}
+	return bareIdentityCanonicalInfo(candidates, spec)
+}
+
+// NamedSessionIdentityIsPriorForm reports whether stored, a row's
+// configured_named_identity, is a prior form of the identity spec resolves
+// under — the in-place rename a `gc rig add --adopt` requalification
+// performs. The bare pre-requalification form counts (spec.BareIdentity, the
+// same config-level unique-candidate rule that resolved the spec); a row
+// still stamped with it is the spec's own row awaiting its rename, not a
+// foreign claimant.
+func NamedSessionIdentityIsPriorForm(spec NamedSessionSpec, stored string) bool {
+	stored = strings.TrimSpace(stored)
+	return spec.Named != nil && stored != "" && stored != spec.Identity && stored == spec.BareIdentity
+}
+
+// bareIdentityCanonicalInfo is the strictly-last unique-bare pass the
+// spec-to-row resolvers share: when spec carries a BareIdentity (a bound
+// named session whose pre-requalification form was the bare leaf), the one
+// open, continuity-eligible, configured-named candidate whose
+// configured_named_identity equals that bare form is the row the spec
+// requalified from — a `gc rig add --adopt` renamed the config, not the
+// row, and the row's stored identity has not caught up yet. There is no
+// template gate: the backing template is exactly what requalification
+// changes, and config-level uniqueness (the same rule FindNamedSession
+// resolves the forward direction with) is the guard — two eligible bare
+// rows, or a config whose leaf maps to two bindings (which leaves
+// BareIdentity empty), both return nothing. Exact identity still beats
+// bare: this pass runs only after every exact pass has found nothing.
+func bareIdentityCanonicalInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
+	bare := strings.TrimSpace(spec.BareIdentity)
+	if bare == "" || bare == NormalizeNamedSessionTarget(spec.Identity) {
+		return Info{}, false
+	}
+	var canonical Info
+	matches := 0
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+			continue
+		}
+		if !IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != bare {
+			continue
+		}
+		matches++
+		if matches == 1 {
+			canonical = i
+		}
+	}
+	if matches == 1 {
+		return canonical, true
+	}
 	return Info{}, false
 }
 
 // FindClosedNamedSessionBead finds the newest closed bead for a named session identity.
-func FindClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool, error) {
+func FindClosedNamedSessionBead(store beads.SessionStore, identity string) (beads.Bead, bool, error) {
 	return FindClosedNamedSessionBeadForSessionName(store, identity, "")
 }
 
 // FindClosedNamedSessionBeadForSessionName finds a closed bead for a named session identity.
-func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool, error) {
-	if store == nil {
+func FindClosedNamedSessionBeadForSessionName(store beads.SessionStore, identity, sessionName string) (beads.Bead, bool, error) {
+	if store == (beads.SessionStore{}) {
 		return beads.Bead{}, false, nil
 	}
+	candidates, err := NamedSessionIdentityRows(store, identity)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	b, ok := ClosedNamedSessionBeadIn(candidates, sessionName)
+	return b, ok, nil
+}
+
+// NamedSessionIdentityRows lists every bead, open or closed, that records
+// identity as its configured named session identity, newest first. It reads
+// store as given: a cached store answers from its cache, so a caller that
+// must see another process's writes passes a live view.
+func NamedSessionIdentityRows(store beads.SessionStore, identity string) ([]beads.Bead, error) {
 	identity = NormalizeNamedSessionTarget(identity)
-	sessionName = strings.TrimSpace(sessionName)
-	candidates, err := store.List(beads.ListQuery{
+	rows, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			NamedSessionIdentityMetadata: identity,
 		},
@@ -645,8 +1086,17 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		Sort:          beads.SortCreatedDesc,
 	})
 	if err != nil {
-		return beads.Bead{}, false, fmt.Errorf("listing closed named session beads for %q: %w", identity, err)
+		return nil, fmt.Errorf("listing closed named session beads for %q: %w", identity, err)
 	}
+	return rows, nil
+}
+
+// ClosedNamedSessionBeadIn picks the closed bead to reopen from an identity's
+// rows (NamedSessionIdentityRows): the newest reopen-eligible closed bead
+// whose session_name is sessionName, or, with sessionName empty, the newest
+// one with any session_name, else the newest eligible one.
+func ClosedNamedSessionBeadIn(candidates []beads.Bead, sessionName string) (beads.Bead, bool) {
+	sessionName = strings.TrimSpace(sessionName)
 	var fallback beads.Bead
 	hasFallback := false
 	for _, b := range candidates {
@@ -658,12 +1108,12 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		}
 		if sessionName != "" {
 			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
-				return b, true, nil
+				return b, true
 			}
 			continue
 		}
 		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-			return b, true, nil
+			return b, true
 		}
 		if !hasFallback {
 			fallback = b
@@ -671,9 +1121,9 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		}
 	}
 	if hasFallback {
-		return fallback, true, nil
+		return fallback, true
 	}
-	return beads.Bead{}, false, nil
+	return beads.Bead{}, false
 }
 
 func closedNamedSessionReopenEligible(b beads.Bead) bool {
@@ -691,8 +1141,199 @@ func closedNamedSessionReopenEligible(b beads.Bead) bool {
 	return true
 }
 
-// FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
-func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+// ClosedNamedSessionBeadIndex is a batched, in-memory index of the closed
+// beads FindClosedNamedSessionBeadForSessionName would find, keyed by
+// configured named session identity. BuildClosedNamedSessionBeadIndex issues
+// two bounded store reads up front; Find then answers each identity in O(1)
+// instead of repeating a per-identity store.List — the fix for ga-0t7qjl,
+// where readyAssignedWorkAssignees called the per-identity lookup once per
+// configured named session (109 serial bd calls, +155s, on this city's
+// named-session count).
+//
+// The batched read is exactly ListAllSessionBeads's own shape — two indexed
+// store.List calls, {Type: BeadType, IncludeClosed: true, Sort:
+// SortCreatedDesc} and {Label: LabelSession, IncludeClosed: true, Sort:
+// SortCreatedDesc} — unioned by bead ID and re-sorted globally with
+// beads.SortBeads. Reusing that shape (rather than a single unfiltered scan)
+// is deliberate and load-bearing for the fix's own performance goal: both
+// legs are indexed, bounded reads (measured on this city at ~0.5s, 53 rows,
+// 77KB total — see ga-0t7qjl's exit contract), whereas a single
+// AllowScan-unfiltered store.List would return every bead of every type in
+// the whole store, not just session-shaped ones, and on a production store
+// with thousands of task/mail/molecule beads that scan could cost as much as
+// — or more than — the 109 serial per-identity calls this fix replaces. The
+// first cut of this fix used exactly that single unfiltered AllowScan query;
+// it passed every test here but would have regressed the very performance
+// property ga-0t7qjl exists to fix, so it was replaced with the two-query
+// union below before being considered done.
+//
+// Unlike ListAllSessionBeads, the union here is deliberately NOT filtered
+// through IsSessionBeadOrRepairable afterward. That filter accepts only
+// Type == BeadType or (Type == "" AND carrying LabelSession); it rejects a
+// bead whose Type is some other non-empty value even when the bead carries
+// LabelSession — exactly the shape
+// TestNamedSessionDemand_OpenReadyWorkUnderRuntimeName_SurvivesPhantomClose's
+// phantom fixture has (Type: "gc:session", Labels: ["gc:session"]) and
+// exactly the shape ga-uvwxp8 needs recovered. FindClosedNamedSessionBeadForSessionName
+// has no type/label filter at all — only a per-identity Metadata match — so
+// it finds that bead; an IsSessionBeadOrRepairable-filtered union would not,
+// which is why ListAllSessionBeads itself was tried here first and rejected:
+// its filter is narrower than the reference function it would have been
+// batching. The plain Type-OR-Label union (no further filter) still finds
+// it, via the label leg, regardless of Type.
+//
+// One deliberate, documented gap remains versus the true per-identity
+// function: a closed bead carrying NamedSessionIdentityMetadata under
+// NEITHER Type == BeadType NOR LabelSession is invisible to this index even
+// though the per-identity Metadata-only query would find it. This is
+// accepted rather than fixed with a wider (unbounded) query because every
+// real closed session bead — canonical or crash/migration-damaged — carries
+// LabelSession; that invariant is exactly what IsSessionBeadOrRepairable's
+// own "Type == "" AND carrying LabelSession" branch already assumes
+// elsewhere in this package, and ga-0t7qjl's own fix spec prescribes exactly
+// two queries (Type, Label) for the same reason. It is not a case the
+// exit contract's table test asks for.
+// TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup is the equivalence
+// oracle pinning the two lookups together across eligible/ineligible,
+// with/without session_name, and the repairable/mismatched-Type scenarios
+// the contract does specify.
+//
+// Find replicates FindClosedNamedSessionBeadForSessionName(store, identity,
+// "")'s selection rule exactly: among identity's closedNamedSessionReopenEligible
+// closed beads, the newest one with a non-empty session_name wins; if none
+// has a non-empty session_name, the newest eligible bead wins as a fallback.
+// The merged rows are sorted newest-first (SortCreatedDesc) before the scan,
+// so a single forward pass recording the first (newest) winner and first
+// (newest) fallback per identity reproduces that rule without a per-identity
+// rescan.
+//
+// Index keys are read via NamedSessionIdentity (trimmed, not normalized) to
+// match the raw metadata value FindClosedNamedSessionBeadForSessionName's
+// store query compares against; Find normalizes its identity argument with
+// NormalizeNamedSessionTarget, exactly as that function normalizes its own
+// identity parameter before querying. The two agree because every identity
+// value in the store is written from an already-normalized
+// NamedSessionSpec.Identity.
+type ClosedNamedSessionBeadIndex struct {
+	byIdentity map[string]beads.Bead
+}
+
+// BuildClosedNamedSessionBeadIndex performs the two batched store reads
+// described on ClosedNamedSessionBeadIndex and builds the identity -> bead
+// index from their union.
+//
+// Error contract mirrors ListAllSessionBeads: a hard failure on either leg
+// short-circuits and returns a zero-value index (Find then reports no match
+// for every identity, the same fail-open result the discarded error at
+// existing per-identity call sites — e.g. cmd/gc's findClosedNamedSessionBead
+// wrapper — already produces) along with the wrapped error naming which leg
+// failed. A PartialResultError on either leg still folds that leg's partial
+// rows into the union and returns an index built from them, paired with the
+// first such error encountered, so a caller that checks it can surface a
+// degraded read instead of silently under-matching — a strictly more
+// graceful fallback than the per-identity function's own all-or-nothing
+// error handling, which the batched caller doesn't need to match since it
+// has many identities' worth of rows to salvage from a single partial read.
+func BuildClosedNamedSessionBeadIndex(store beads.SessionStore) (ClosedNamedSessionBeadIndex, error) {
+	if store == (beads.SessionStore{}) {
+		return ClosedNamedSessionBeadIndex{}, nil
+	}
+
+	byTypeQuery := beads.ListQuery{Type: BeadType, IncludeClosed: true, Sort: beads.SortCreatedDesc}
+	byType, typeErr := store.List(byTypeQuery)
+	if typeErr != nil && !beads.IsPartialResult(typeErr) {
+		return ClosedNamedSessionBeadIndex{}, fmt.Errorf("listing closed named session beads by type: %w", typeErr)
+	}
+
+	byLabelQuery := beads.ListQuery{Label: LabelSession, IncludeClosed: true, Sort: beads.SortCreatedDesc}
+	byLabel, labelErr := store.List(byLabelQuery)
+	if labelErr != nil && !beads.IsPartialResult(labelErr) {
+		return ClosedNamedSessionBeadIndex{}, fmt.Errorf("listing closed named session beads by label: %w", labelErr)
+	}
+
+	seen := make(map[string]struct{}, len(byType)+len(byLabel))
+	candidates := make([]beads.Bead, 0, len(byType)+len(byLabel))
+	for _, group := range [][]beads.Bead{byType, byLabel} {
+		for _, b := range group {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			candidates = append(candidates, b)
+		}
+	}
+
+	// Each leg honored SortCreatedDesc within itself, but the union
+	// concatenates them — sort globally so the newest-first scan below sees
+	// a correct total order across both legs, mirroring ListAllSessionBeads's
+	// own re-sort for the identical reason.
+	beads.SortBeads(candidates, beads.SortCreatedDesc)
+
+	winners := make(map[string]beads.Bead)
+	fallback := make(map[string]beads.Bead)
+	decided := make(map[string]bool)
+	for _, b := range candidates {
+		if b.Status != "closed" {
+			continue
+		}
+		identity := NamedSessionIdentity(b)
+		if identity == "" || decided[identity] {
+			continue
+		}
+		if !closedNamedSessionReopenEligible(b) {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
+			winners[identity] = b
+			decided[identity] = true
+			continue
+		}
+		if _, ok := fallback[identity]; !ok {
+			fallback[identity] = b
+		}
+	}
+	for identity, b := range fallback {
+		if _, ok := winners[identity]; !ok {
+			winners[identity] = b
+		}
+	}
+
+	// Surface the first partial-result error encountered, same precedence as
+	// ListAllSessionBeads: either leg being partial means the merged set may
+	// be missing rows.
+	var err error
+	if typeErr != nil {
+		err = typeErr
+	} else if labelErr != nil {
+		err = labelErr
+	}
+	return ClosedNamedSessionBeadIndex{byIdentity: winners}, err
+}
+
+// Find returns the indexed closed bead for identity, matching
+// FindClosedNamedSessionBeadForSessionName(store, identity, "")'s result
+// against the same store snapshot the index was built from.
+func (idx ClosedNamedSessionBeadIndex) Find(identity string) (beads.Bead, bool) {
+	if idx.byIdentity == nil {
+		return beads.Bead{}, false
+	}
+	b, ok := idx.byIdentity[NormalizeNamedSessionTarget(identity)]
+	return b, ok
+}
+
+// findCanonicalNamedSessionBeadStrict checks only the two highest-confidence
+// canonical signals: an exact configured_named_session identity match
+// (IsNamedSessionBead + NamedSessionIdentity), or an exact session_name match
+// corroborated by NamedSessionBeadMatchesSpec. It deliberately excludes
+// FindCanonicalNamedSessionBead's third signal, the alias-only-uniqueness
+// fallback (#5487 / ga-4of1nc) -- see namedSessionCandidateIsSelf's doc
+// comment for why that fallback is unsafe for callers reached through
+// conflict-scoped alias queries. lookupConfiguredNamedSession's own
+// alias-metadata candidate stage has the identical shape (a store query
+// keyed on `alias`, whose results would otherwise flow into
+// FindCanonicalNamedSessionBead's unsafe branch) and uses this strict
+// version for the same reason.
+func findCanonicalNamedSessionBeadStrict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	for _, b := range candidates {
 		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
@@ -714,6 +1355,14 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 			return b, true
 		}
 	}
+	return beads.Bead{}, false
+}
+
+// FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
+func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	if bead, ok := findCanonicalNamedSessionBeadStrict(candidates, spec); ok {
+		return bead, true
+	}
 	// A bead whose only configured-named-session signal is `alias == identity`
 	// (no exact configured_named_identity/session_name metadata) is its own
 	// canonical session when it is the sole live, eligible, template-matching
@@ -727,29 +1376,122 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 	// count -- keeps a true collision (two distinct live beads that both
 	// genuinely match the backing template) falling through to conflict
 	// detection instead of one silently winning as first-match.
-	if identity != "" {
-		var aliasCanonical beads.Bead
-		aliasMatchCount := 0
-		for _, b := range candidates {
-			if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
-				continue
-			}
-			if !NamedSessionBeadMatchesSpec(b, spec) {
-				continue
-			}
-			if strings.TrimSpace(b.Metadata["alias"]) != identity {
-				continue
-			}
-			aliasMatchCount++
-			if aliasMatchCount == 1 {
-				aliasCanonical = b
-			}
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	// The requalified prior form is the last, weakest signal, exactly as in
+	// FindCanonicalNamedSessionInfo (gastownhall/gascity#5957).
+	return bareIdentityCanonicalBead(candidates, spec)
+}
+
+// aliasOnlyCanonicalNamedSessionBead implements FindCanonicalNamedSessionBead's
+// alias-only-uniqueness fallback (#5487 / ga-4of1nc), factored out so
+// findCanonicalNamedSessionBeadForLookup can reuse it under an extra gate.
+// See FindCanonicalNamedSessionBead's call site for the fallback's rationale.
+func aliasOnlyCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	identity := NormalizeNamedSessionTarget(spec.Identity)
+	if identity == "" {
+		return beads.Bead{}, false
+	}
+	var aliasCanonical beads.Bead
+	aliasMatchCount := 0
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+			continue
 		}
+		if !NamedSessionBeadMatchesSpec(b, spec) {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["alias"]) != identity {
+			continue
+		}
+		aliasMatchCount++
 		if aliasMatchCount == 1 {
-			return aliasCanonical, true
+			aliasCanonical = b
 		}
 	}
+	if aliasMatchCount == 1 {
+		return aliasCanonical, true
+	}
 	return beads.Bead{}, false
+}
+
+// bareIdentityCanonicalBead is the bead mirror of bareIdentityCanonicalInfo:
+// the strictly-last unique-bare pass the spec-to-row resolvers share, for
+// callers that hold beads.Bead candidates instead of session.Info. See
+// bareIdentityCanonicalInfo's doc comment for the pass's rationale and its
+// guards (uniqueness, open and continuity-eligible only, exact passes
+// first).
+func bareIdentityCanonicalBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	bare := strings.TrimSpace(spec.BareIdentity)
+	if bare == "" || bare == NormalizeNamedSessionTarget(spec.Identity) {
+		return beads.Bead{}, false
+	}
+	var canonical beads.Bead
+	matches := 0
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+			continue
+		}
+		if !IsNamedSessionBead(b) || NamedSessionIdentity(b) != bare {
+			continue
+		}
+		matches++
+		if matches == 1 {
+			canonical = b
+		}
+	}
+	if matches == 1 {
+		return canonical, true
+	}
+	return beads.Bead{}, false
+}
+
+// findCanonicalNamedSessionBeadForLookup is the canonical-detection predicate
+// for lookupConfiguredNamedSession's own alias-metadata candidate stage. It
+// adds FindCanonicalNamedSessionBead's alias-only-uniqueness fallback on top
+// of findCanonicalNamedSessionBeadStrict, but only when spec carries genuine
+// corroborating identity (NamedSessionBackingTemplate(spec) != "") -- never
+// for a degenerate spec (spec.Agent and spec.Named both nil).
+//
+// FindCanonicalNamedSessionBead's own alias fallback has no such gate: its
+// direct callers (TestFindCanonicalNamedSessionBead_AliasSoleLiveCandidateIsCanonical)
+// intentionally accept a degenerate spec matching a bare alias-only bead when
+// it is the sole live candidate -- a reasonable contract for a caller that
+// already knows candidates is an exhaustive, deliberately-scoped set. It is
+// not reasonable for lookupConfiguredNamedSession's alias-metadata query
+// stage: that reaches arbitrary store-resident beads through a wide
+// `alias`-keyed query, where a degenerate spec makes NamedSessionBeadMatchesSpec
+// vacuously true for any bead that simply never set template/agent_name --
+// indistinguishable from a zero-cost decoy (ga-t3a0fv round 2; see
+// TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf).
+// Requiring a non-empty backing template restores the corroboration
+// NamedSessionBeadMatchesSpec's contract implies, while still letting a real
+// pool-instance bead whose alias/template/agent_name authentically match a
+// fully-specified spec resolve as canonical here
+// (TestLookupNamedSession_LiveAliasOwnedBeadResolvesCanonically).
+//
+// namedSessionCandidateIsSelf deliberately does not use this function (or
+// any alias fallback): it is invoked once per candidate from
+// lookupConfiguredNamedSession's conflictCandidates loop, so the uniqueness
+// count aliasOnlyCanonicalNamedSessionBead relies on to reject a genuine
+// collision would always observe exactly 1 (itself) and could never detect a
+// second live colliding candidate. By the time that loop runs,
+// findCanonicalNamedSessionBeadForLookup has already evaluated the same
+// alias-matching pool as a whole at the call site below and found no safe
+// winner, so re-attempting the same fallback per-candidate could only
+// reintroduce that false-uniqueness bug, never legitimately succeed.
+func findCanonicalNamedSessionBeadForLookup(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	if bead, ok := findCanonicalNamedSessionBeadStrict(candidates, spec); ok {
+		return bead, true
+	}
+	if NamedSessionBackingTemplate(spec) == "" {
+		return beads.Bead{}, false
+	}
+	if bead, ok := aliasOnlyCanonicalNamedSessionBead(candidates, spec); ok {
+		return bead, true
+	}
+	return bareIdentityCanonicalBead(candidates, spec)
 }
 
 // FindConflictingNamedSessionSpecForBead finds the configured named session blocked by a bead.

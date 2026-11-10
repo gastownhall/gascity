@@ -998,6 +998,50 @@ func TestEnsureBundledPacksCurrentSkipsNonBundledPacks(t *testing.T) {
 	}
 }
 
+// TestEnsureBundledPacksCurrentSkipsNonCanonicalBundledPin mirrors
+// lockedBundledCanonicalImports in cmd/gc/legacy_pack_preflight.go: a bundled
+// source pinned at a non-canonical commit is an ordinary remote import that
+// gc import install owns fetching, so the reload-time repair loop must leave
+// it alone. Today it does not, so a roles pack pinned off-canonical makes
+// every controller config reload call EnsureRepoInCache for it, which can
+// clone under the machine-wide cache write lock. Git is stubbed to fail here
+// so any attempt to touch it fails the test loudly instead of silently
+// succeeding via a real clone.
+func TestEnsureBundledPacksCurrentSkipsNonCanonicalBundledPin(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := config.PublicGascityRolesPackSource
+	const nonCanonicalCommit = "0123456789abcdef0123456789abcdef01234567"
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  map[string]LockedPack{source: {Version: "1.0.0", Commit: nonCanonicalCommit}},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("unexpected git invocation for non-canonical bundled pin: %v", args)
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+
+	cachePath, err := RepoCachePath(source, nonCanonicalCommit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
+		t.Fatalf("non-canonical bundled pin should not create a synthetic cache, stat err = %v", statErr)
+	}
+}
+
 func TestEnsureBundledPacksCurrentNoLockfile(t *testing.T) {
 	city := t.TempDir()
 	if err := EnsureBundledPacksCurrent(city); err != nil {

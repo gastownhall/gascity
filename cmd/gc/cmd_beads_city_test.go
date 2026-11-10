@@ -933,6 +933,9 @@ func writeCityEndpointCityConfigWithCompat(t *testing.T, cityDir string, dolt co
 		if rig.DoltPort != "" {
 			fmt.Fprintf(&content, "dolt_port = %q\n", rig.DoltPort) //nolint:errcheck
 		}
+		if rig.SuspendedOnStart {
+			content.WriteString("suspended_on_start = true\n")
+		}
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content.String()), 0o644); err != nil {
 		t.Fatal(err)

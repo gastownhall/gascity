@@ -193,6 +193,23 @@ func TestHasAndNames(t *testing.T) {
 	}
 }
 
+func TestResolvesExcludesFallback(t *testing.T) {
+	r := New()
+	f, _ := fakeFactory(t)
+	if err := r.Register("k8s", f); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := r.RegisterPrefix("exec:", f); err != nil {
+		t.Fatalf("RegisterPrefix: %v", err)
+	}
+	r.SetFallback(f)
+	for name, want := range map[string]bool{"k8s": true, "exec:/bin/x": true, "definitely-unregistered": false, "": false} {
+		if got := r.Resolves(name); got != want {
+			t.Errorf("Resolves(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestCloneIsIndependentOfOriginal(t *testing.T) {
 	r := New()
 	exact, _ := fakeFactory(t)
@@ -235,5 +252,73 @@ func TestCloneIsIndependentOfOriginal(t *testing.T) {
 	// Duplicate detection still applies on the clone.
 	if err := c.Register("builtin", packRT); err == nil {
 		t.Error("clone must reject names already registered in the original")
+	}
+}
+
+func TestHostCapabilitiesFollowSelectionResolution(t *testing.T) {
+	r := New()
+	f, _ := fakeFactory(t)
+	shared := runtime.HostCapabilities{SharesHostFilesystem: true}
+	both := runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+	if err := r.Register("hosted", f, WithHostCapabilities(StaticHostCapabilities(both))); err != nil {
+		t.Fatalf("Register hosted: %v", err)
+	}
+	if err := r.Register("boxed", f); err != nil {
+		t.Fatalf("Register boxed: %v", err)
+	}
+	type call struct{ name, cityName, cityPath string }
+	var got []call
+	if err := r.RegisterPrefix("exec:", f, WithHostCapabilities(func(name, cityName, cityPath string) runtime.HostCapabilities {
+		got = append(got, call{name, cityName, cityPath})
+		return shared
+	})); err != nil {
+		t.Fatalf("RegisterPrefix: %v", err)
+	}
+	if err := r.Register("exec:exact", f); err != nil {
+		t.Fatalf("Register exec:exact: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		want runtime.HostCapabilities
+	}{
+		{"hosted", both},
+		{"boxed", runtime.HostCapabilities{}},        // registered without host capabilities
+		{"exec:/bin/pack", shared},                   // the prefix registration reports
+		{"exec:exact", runtime.HostCapabilities{}},   // exact beats prefix, as in New
+		{"unregistered", runtime.HostCapabilities{}}, // no fallback set
+	}
+	for _, c := range cases {
+		if caps := r.HostCapabilities(c.name, "city", "/city"); caps != c.want {
+			t.Errorf("HostCapabilities(%q) = %+v, want %+v", c.name, caps, c.want)
+		}
+	}
+	if len(got) != 1 || got[0] != (call{"exec:/bin/pack", "city", "/city"}) {
+		t.Fatalf("prefix host-capability calls = %+v, want one call with the full selection name and city", got)
+	}
+
+	r.SetFallback(f, WithHostCapabilities(StaticHostCapabilities(shared)))
+	if caps := r.HostCapabilities("unregistered", "city", "/city"); caps != shared {
+		t.Fatalf("fallback HostCapabilities = %+v, want %+v (the fallback runtime is what runs)", caps, shared)
+	}
+	if caps := r.HostCapabilities("", "city", "/city"); caps != shared {
+		t.Fatalf("empty selection HostCapabilities = %+v, want the fallback's %+v", caps, shared)
+	}
+}
+
+func TestCloneKeepsHostCapabilities(t *testing.T) {
+	r := New()
+	f, _ := fakeFactory(t)
+	want := runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+	if err := r.Register("hosted", f, WithHostCapabilities(StaticHostCapabilities(want))); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	r.SetFallback(f, WithHostCapabilities(StaticHostCapabilities(want)))
+	c := r.Clone()
+	if caps := c.HostCapabilities("hosted", "", ""); caps != want {
+		t.Fatalf("clone HostCapabilities(hosted) = %+v, want %+v", caps, want)
+	}
+	if caps := c.HostCapabilities("other", "", ""); caps != want {
+		t.Fatalf("clone fallback HostCapabilities = %+v, want %+v", caps, want)
 	}
 }

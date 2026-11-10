@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestGeneratedClientInSync regenerates client_gen.go from the live spec
@@ -21,22 +22,30 @@ import (
 // guard the spec → committed-artifact pipeline so the typed contract
 // can't drift unnoticed.
 func TestGeneratedClientInSync(t *testing.T) {
-	if _, err := exec.LookPath("oapi-codegen"); err != nil {
-		// CI installs oapi-codegen via `make spec-ci`, which also runs
-		// regeneration and fails on drift. Only skip when running locally
-		// without the tool — CI has the GC_REQUIRE_OAPI_CODEGEN=1 env set.
-		if os.Getenv("GC_REQUIRE_OAPI_CODEGEN") == "1" {
-			t.Fatalf("oapi-codegen not on PATH; install via `go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0`")
-		}
-		t.Skip("oapi-codegen not on PATH; install via `go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0` (or set GC_REQUIRE_OAPI_CODEGEN=1 in CI to fatal)")
-	}
+	oapiCodegen := oapiCodegenBinary(t)
 
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		t.Fatalf("find repo root: %v", err)
 	}
 
-	cmd := exec.Command("go", "run", "./cmd/gen-client")
+	// Under bazel the prebuilt gen-client binary ships in runfiles; the
+	// `go run` fallback covers plain `go test` (and needs a module cache).
+	// Kept to a single call site: the source-resource census counts these.
+	genClient := "go"
+	args := []string{"run", "./cmd/gen-client"}
+	for _, rf := range runfilesRoots() {
+		bin := filepath.Join(rf, "_main", "cmd", "gen-client", "gen-client_", "gen-client")
+		if _, statErr := os.Stat(bin); statErr == nil {
+			genClient = bin
+			args = nil
+			break
+		}
+	}
+	if oapiCodegen != "" {
+		args = append(args, "-oapi-codegen", oapiCodegen)
+	}
+	cmd := exec.Command(genClient, args...)
 	cmd.Dir = repoRoot
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -101,9 +110,44 @@ func sameStepDependencies(got, want *[]string) bool {
 	return slices.Equal(*got, *want)
 }
 
+// oapiCodegenBinary returns the oapi-codegen the drift check runs, or ""
+// to let cmd/gen-client pick (PATH, else `go run` of its pinned version).
+// Under bazel it is the hermetic MODULE.bazel-pinned build named by
+// GC_OAPI_CODEGEN (a runfiles path); a missing build fails the test, as does
+// any gen-client failure, so the drift check never silently skips.
+func oapiCodegenBinary(t *testing.T) string {
+	t.Helper()
+	rel := os.Getenv("GC_OAPI_CODEGEN")
+	if rel == "" {
+		return ""
+	}
+	for _, rf := range runfilesRoots() {
+		bin := filepath.Join(rf, filepath.FromSlash(rel))
+		if _, err := os.Stat(bin); err == nil {
+			return bin
+		}
+	}
+	t.Fatalf("GC_OAPI_CODEGEN=%q not found under runfiles %v", rel, runfilesRoots())
+	return ""
+}
+
+// runfilesRoots lists the bazel runfiles directories in lookup order.
+func runfilesRoots() []string {
+	var roots []string
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf != "" {
+			roots = append(roots, rf)
+		}
+	}
+	return roots
+}
+
 // findRepoRoot walks up from the current working directory until it
 // finds a go.mod file.
 func findRepoRoot() (string, error) {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root, nil
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", err

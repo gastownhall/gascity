@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -141,7 +142,7 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 		t.Fatal("status-based indefinite deferral was not preserved")
 	}
 
-	past := time.Now().Add(-time.Minute).Format(time.RFC3339Nano)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	expired, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-expired","status":"deferred","issue_type":"task","defer_until":"` + past + `"}`))
 	if !ok {
 		t.Fatal("expired deferred decode returned ok=false")
@@ -149,8 +150,33 @@ func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
 	if expired.Status != "open" {
 		t.Fatalf("expired Status = %q, want normalized open", expired.Status)
 	}
-	if IsDeferred(expired, time.Now()) {
-		t.Fatal("expired time-bound deferral remained deferred")
+	// bd's deferred status is a deferral in its own right: an elapsed
+	// defer_until only says when bd's own sweep may lift it, so the row
+	// stays deferred until the store itself records the wake (#6207).
+	if !expired.IndefinitelyDeferred {
+		t.Fatal("elapsed time-bound deferral lost its status-based deferral marker")
+	}
+	if !IsDeferred(expired, time.Now()) {
+		t.Fatal("elapsed time-bound deferral read as ready; bd still records status=deferred")
+	}
+	// The encoder must restore the store's real status on the wire so a
+	// round trip carries the deferral, date and all.
+	encoded, err := EncodeBeadEventPayload(expired)
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	var wire struct {
+		Status     string     `json:"status"`
+		DeferUntil *time.Time `json:"defer_until"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode encoded payload: %v", err)
+	}
+	if wire.Status != "deferred" {
+		t.Fatalf("round-trip wire status = %q, want bd's deferred", wire.Status)
+	}
+	if wire.DeferUntil == nil {
+		t.Fatal("round-trip wire lost defer_until")
 	}
 }
 
@@ -257,5 +283,51 @@ func TestDecodeBeadEventPayloadMisses(t *testing.T) {
 		if b, ok := DecodeBeadEventPayload(payload); ok {
 			t.Errorf("%s: ok=true bead=%+v, want (Bead{}, false)", name, b)
 		}
+	}
+}
+
+// TestBeadEventIDCanonicalizesSubjectAgainstPayload pins the identity rule for
+// bead.* events: the payload snapshot names the bead, the envelope subject is
+// only a fallback, and a subject that names a different bead is rejected so no
+// consumer applies one bead's snapshot under another bead's key.
+func TestBeadEventIDCanonicalizesSubjectAgainstPayload(t *testing.T) {
+	payload := json.RawMessage(`{"id":"ga-1","title":"work","status":"closed"}`)
+	wrapped := json.RawMessage(`{"bead":{"id":"ga-1","status":"closed"}}`)
+	for _, tc := range []struct {
+		name     string
+		subject  string
+		payload  json.RawMessage
+		wantID   string
+		mismatch bool
+	}{
+		{name: "matching subject", subject: "ga-1", payload: payload, wantID: "ga-1"},
+		{name: "subject whitespace is ignored", subject: "  ga-1\n", payload: payload, wantID: "ga-1"},
+		{name: "missing subject recovered from payload", payload: payload, wantID: "ga-1"},
+		{name: "wrapped payload shape", subject: "ga-1", payload: wrapped, wantID: "ga-1"},
+		{name: "mismatched subject rejected", subject: "ga-2", payload: payload, mismatch: true},
+		{name: "mismatched subject rejected for wrapped payload", subject: "ga-2", payload: wrapped, mismatch: true},
+		{name: "undecodable payload keeps subject", subject: "ga-1", payload: json.RawMessage(`{`), wantID: "ga-1"},
+		{name: "payload without id keeps subject", subject: "ga-1", payload: json.RawMessage(`{"status":"closed"}`), wantID: "ga-1"},
+		{name: "no payload keeps subject", subject: " ga-1 ", wantID: "ga-1"},
+		{name: "nothing names a bead", payload: json.RawMessage(`{`), wantID: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := BeadEventID(tc.subject, tc.payload)
+			if tc.mismatch {
+				if !errors.Is(err, ErrBeadEventIdentityMismatch) {
+					t.Fatalf("BeadEventID(%q) = (%q, %v), want ErrBeadEventIdentityMismatch", tc.subject, got, err)
+				}
+				if got != "" {
+					t.Fatalf("BeadEventID(%q) id = %q on mismatch, want empty", tc.subject, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BeadEventID(%q): %v", tc.subject, err)
+			}
+			if got != tc.wantID {
+				t.Fatalf("BeadEventID(%q) = %q, want %q", tc.subject, got, tc.wantID)
+			}
+		})
 	}
 }

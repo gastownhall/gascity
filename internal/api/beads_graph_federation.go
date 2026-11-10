@@ -6,22 +6,40 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// relocatedGraphStore returns the graph-class store when — and only when — the
-// city has actually relocated it.
+// relocatedGraphStore returns the graph-class handle when — and only when —
+// the city has actually relocated it.
 //
-// Routing is keyed on STORE IDENTITY, the same rule handler_beads.go's by-id
-// class resolver and handler_convoy_dispatch.go's workflow scan use: on a
-// default city GraphBeadStore() returns the city store itself, so there is
+// Routing is keyed on STORE IDENTITY (beads.SameStore), the same rule
+// Stores.Plan and handler_convoy_dispatch.go's workflow scan use: on a default
+// city Stores().Graph() wraps the city's work store itself, so there is
 // nothing to federate and every caller's extra arm stays dead. That identity
-// guard is what keeps a single-store city byte-identical.
-func relocatedGraphStore(state State) beads.Store {
-	graph := state.GraphBeadStore().Store
-	if graph == nil || graph == state.CityBeadStore() {
+// guard is what keeps a single-store city byte-identical. Under the
+// split-strict gate the graph handle reads the work store's class view, a
+// store of its own, so a gate fixture keeps its split shape.
+func relocatedGraphStore(state State) (beads.GraphStore, bool) {
+	st := state.Stores()
+	graph := st.Graph()
+	if beads.IsNilStore(graph) || beads.SameStore(graph, st.Work()) {
+		return beads.GraphStore{}, false
+	}
+	return graph, true
+}
+
+// graphBindingPrefixes is the reserved id namespaces of the binding st serves
+// the graph class from, as cmd/gc's readyLegReservedPrefixes reads them for
+// `gc ready`, or nil when the graph class is not relocated. The cross-store
+// ready rule takes the binding's own verdict on a blocker in one of them,
+// which no other store can hold, and reads every copy of any other.
+func graphBindingPrefixes(st storeref.Stores) []string {
+	binding, ok := st.Topology().BindingFor(coordclass.ClassGraph)
+	if !ok {
 		return nil
 	}
-	return graph
+	return append([]string(nil), binding.Prefixes...)
 }
 
 // queryTopology answers the city facts a generated work_query or MCP catalog has
@@ -32,7 +50,8 @@ func relocatedGraphStore(state State) beads.Store {
 // this surface renders names the same reader the CLI's cityQueryTopology picks
 // for the same city.
 func queryTopology(state State) config.QueryTopology {
-	topo := config.QueryTopology{FederatedReady: relocatedGraphStore(state) != nil}
+	_, federated := relocatedGraphStore(state)
+	topo := config.QueryTopology{FederatedReady: federated}
 	if cfg := state.Config(); cfg != nil {
 		topo.Beads = cfg.Beads
 	}

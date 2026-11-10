@@ -30,26 +30,61 @@ var ErrUnknownRuntime = errors.New("unknown runtime provider")
 // (e.g. "exec:/path/to/script") and own its parsing.
 type Factory func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error)
 
+// HostCapabilitiesFunc reports what the runtime behind a selection name
+// guarantees about the controller's host. Like a prefix [Factory], it
+// receives the full selection name, so a prefix registration can answer per
+// selection (an exec: script reports through its own handshake).
+type HostCapabilitiesFunc func(name, cityName, cityPath string) runtime.HostCapabilities
+
+// StaticHostCapabilities returns a HostCapabilitiesFunc that reports caps for
+// every selection.
+func StaticHostCapabilities(caps runtime.HostCapabilities) HostCapabilitiesFunc {
+	return func(_, _, _ string) runtime.HostCapabilities { return caps }
+}
+
+// Option configures one registration.
+type Option func(*entry)
+
+// WithHostCapabilities declares the registration's host capabilities. A
+// registration without it reports the zero [runtime.HostCapabilities].
+func WithHostCapabilities(f HostCapabilitiesFunc) Option {
+	return func(e *entry) { e.host = f }
+}
+
+// entry is one registration: the factory and what its runtime declares.
+type entry struct {
+	factory Factory
+	host    HostCapabilitiesFunc
+}
+
+func newEntry(f Factory, opts []Option) entry {
+	e := entry{factory: f}
+	for _, opt := range opts {
+		opt(&e)
+	}
+	return e
+}
+
 // Registry maps runtime selection names to provider factories.
 // The zero value is not usable; call [New].
 type Registry struct {
 	mu       sync.RWMutex
-	exact    map[string]Factory
-	prefixes map[string]Factory
-	fallback Factory
+	exact    map[string]entry
+	prefixes map[string]entry
+	fallback entry
 }
 
 // New returns an empty Registry.
 func New() *Registry {
 	return &Registry{
-		exact:    make(map[string]Factory),
-		prefixes: make(map[string]Factory),
+		exact:    make(map[string]entry),
+		prefixes: make(map[string]entry),
 	}
 }
 
 // Register binds an exact selection name to a factory. Duplicate names,
 // blank names, and nil factories are errors.
-func (r *Registry) Register(name string, f Factory) error {
+func (r *Registry) Register(name string, f Factory, opts ...Option) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("registering runtime provider: name is empty")
@@ -62,7 +97,7 @@ func (r *Registry) Register(name string, f Factory) error {
 	if _, exists := r.exact[name]; exists {
 		return fmt.Errorf("registering runtime provider %q: name already registered", name)
 	}
-	r.exact[name] = f
+	r.exact[name] = newEntry(f, opts)
 	return nil
 }
 
@@ -70,7 +105,7 @@ func (r *Registry) Register(name string, f Factory) error {
 // e.g. "exec:") to a factory. The factory receives the full selection
 // name. Duplicate prefixes, malformed prefixes, and nil factories are
 // errors.
-func (r *Registry) RegisterPrefix(prefix string, f Factory) error {
+func (r *Registry) RegisterPrefix(prefix string, f Factory, opts ...Option) error {
 	if prefix == "" || !strings.HasSuffix(prefix, ":") {
 		return fmt.Errorf("registering runtime provider prefix %q: prefix must end with ':'", prefix)
 	}
@@ -82,7 +117,7 @@ func (r *Registry) RegisterPrefix(prefix string, f Factory) error {
 	if _, exists := r.prefixes[prefix]; exists {
 		return fmt.Errorf("registering runtime provider prefix %q: prefix already registered", prefix)
 	}
-	r.prefixes[prefix] = f
+	r.prefixes[prefix] = newEntry(f, opts)
 	return nil
 }
 
@@ -90,15 +125,15 @@ func (r *Registry) RegisterPrefix(prefix string, f Factory) error {
 // matches. The current production fallback is tmux (see
 // cmd/gc/runtime_registry.go); without a fallback, unknown names return
 // [ErrUnknownRuntime].
-func (r *Registry) SetFallback(f Factory) {
+func (r *Registry) SetFallback(f Factory, opts ...Option) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.fallback = f
+	r.fallback = newEntry(f, opts)
 }
 
 // New resolves a selection name and constructs its provider.
 func (r *Registry) New(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	f := r.lookup(name)
+	f := r.lookup(name).factory
 	if f == nil {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownRuntime, name)
 	}
@@ -109,23 +144,52 @@ func (r *Registry) New(name string, sc config.SessionConfig, cityName, cityPath 
 	return p, nil
 }
 
-func (r *Registry) lookup(name string) Factory {
+// HostCapabilities reports what the runtime a selection name resolves to
+// guarantees about the controller's host. It resolves exactly as [New] does —
+// exact name, longest prefix, then the fallback — so it describes the
+// runtime that would actually run. A selection that resolves to nothing, or
+// to a registration without [WithHostCapabilities], reports the zero value.
+func (r *Registry) HostCapabilities(name, cityName, cityPath string) runtime.HostCapabilities {
+	host := r.lookup(name).host
+	if host == nil {
+		return runtime.HostCapabilities{}
+	}
+	return host(name, cityName, cityPath)
+}
+
+func (r *Registry) lookup(name string) entry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if f, ok := r.exact[name]; ok {
-		return f
+	if e, ok := r.exact[name]; ok {
+		return e
 	}
 	var bestPrefix string
-	var best Factory
-	for prefix, f := range r.prefixes {
+	var best entry
+	for prefix, e := range r.prefixes {
 		if strings.HasPrefix(name, prefix) && len(prefix) > len(bestPrefix) {
-			bestPrefix, best = prefix, f
+			bestPrefix, best = prefix, e
 		}
 	}
-	if best != nil {
+	if best.factory != nil {
 		return best
 	}
 	return r.fallback
+}
+
+// Resolves reports whether name resolves to an exact or prefix registration,
+// that is, to something other than the fallback.
+func (r *Registry) Resolves(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.exact[name]; ok {
+		return true
+	}
+	for prefix := range r.prefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Clone returns a registry with the receiver's registrations that shares
@@ -137,11 +201,11 @@ func (r *Registry) Clone() *Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	c := New()
-	for name, f := range r.exact {
-		c.exact[name] = f
+	for name, e := range r.exact {
+		c.exact[name] = e
 	}
-	for prefix, f := range r.prefixes {
-		c.prefixes[prefix] = f
+	for prefix, e := range r.prefixes {
+		c.prefixes[prefix] = e
 	}
 	c.fallback = r.fallback
 	return c
@@ -153,6 +217,18 @@ func (r *Registry) Has(name string) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.exact[name]
 	return ok
+}
+
+// Prefixes returns the registered prefix selections, sorted.
+func (r *Registry) Prefixes() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prefixes := make([]string, 0, len(r.prefixes))
+	for prefix := range r.prefixes {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	return prefixes
 }
 
 // Names returns the registered exact selection names, sorted.
