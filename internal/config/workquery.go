@@ -188,9 +188,10 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
-// probes: they must drop a held bead and nothing else, so they never take the
-// pool-demand serve rules' wider label set.
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped probes (the
+// in_progress ones and the bd-1.0.4 assigned-ready wisp probe): they must drop
+// a held bead and nothing else, so they never take the pool-demand serve rules'
+// wider label set.
 func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
@@ -324,10 +325,6 @@ func poolDemandMigrationFilterJQ(limit int) string {
 
 func bdQueryEphemeralStatusShell(status string) string {
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
-}
-
-func bdQueryEphemeralInProgressQuietShell() string {
-	return bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null`
 }
 
 // ephemeralStatusSnapshotShell emits a memoized read of one ephemeral status
@@ -518,6 +515,13 @@ func preferExecutablePoolDemandScript() string {
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
+// RoutedReadyClaimWindow is how many routed ready rows a pool worker's claim
+// tier reads (routedReadyTierCommand). A worker claims only from these rows,
+// so the controller names pool demand bound to a managed worktree only for
+// rows inside this window: a seat placed for a row behind it would be served
+// none of its own work.
+const RoutedReadyClaimWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path rides the reader's canonical
@@ -530,12 +534,12 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
 	// rows — the bounded window contained zero P0s until the older rows
 	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// created_at term. The tier stays widened past a single row
+	// (RoutedReadyClaimWindow, not limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -813,14 +817,12 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // ready queue. The hold dimension is the same defect class as the dependency
 // dimension above, so it shares the same fall-through.
 //
-// Scope (ga-5736js): the hold check is the WORK-SERVING decision only. The
-// assignee-scoped probes that answer "does a session still need to exist" —
-// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
-// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
-// assignment still keeps its owner visible to demand and recovery accounting.
-// Those callers pass checkHold=false, which omits every `.labels` reference
-// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
-// pins the omission, not just the outcome.
+// Scope (ga-5736js): the hold check is the WORK-SERVING decision only, and it
+// reads the candidate row after the tier's read has cut it to one. The wisp
+// probes (ephemeralAssignedInProgressProbeScript and
+// ephemeralAssignedReadyProbeScript) drop held rows inside their own jq
+// selection, ahead of their `.[:1]` cut, so they pass checkHold=false: the
+// count here would always read zero for them.
 //
 // Enrichment is fail-open: a failed or unparseable `bd show`, or an
 // unparseable `bd list` row, degrades to the stock behavior of serving the
@@ -935,10 +937,19 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// The read excludes beadmeta.DispatchHoldLabels (never the human label) before
+// its --limit=1. Its callers serve the first row and exit the query, so a held
+// row it returned would be stripped by the hook's held-candidate filter and
+// starve every tier below (#8010); filtering ahead of the limit also keeps a
+// held head from hiding an unheld assignment for the same identity. On bd-1.0.4
+// the wisp probe behind it (ephemeralAssignedReadyProbeScript) filters the same
+// way.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1)` +
+		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
+		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -1017,8 +1028,8 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // this probe's jq consumes the `bd query` snapshot, never raw stdout, so it
 // never serves an unparseable row. An unparseable or failed scan does not fall
 // through as an empty tier either: the snapshot read itself fails the query
-// (ephemeralStatusSnapshotShell). The hold-transparent existence
-// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+// (ephemeralStatusSnapshotShell). The open tier's wisp probe,
+// ephemeralAssignedReadyProbeScript, drops held rows the same way (#8010).
 //
 // It must also apply the same inProgressBlockedByEnrichmentScript gate before
 // serving a surviving candidate, or a blocked in_progress wisp step is
@@ -1065,19 +1076,25 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 // front door put the wisp somewhere a plain read cannot see it, which is the
 // single-store city.
 //
+// It is the wisp half of the assigned-ready tier: like assignedReadyTierCommand
+// ahead of it, it serves its first row and exits the query. So it drops
+// beadmeta.DispatchHoldLabels (never the human label) inside its jq selection,
+// before the `.[:1]` cut. A held wisp it served would be stripped by the hook's
+// held-candidate filter and starve every tier below it (#8010), and filtering
+// ahead of the cut keeps a held wisp from hiding an unheld one assigned to the
+// same identity.
+//
 // It tries the fast dependency_count == 0 candidate first, then falls back to
 // a dependency_count > 0 candidate enriched via a real bd show --json call,
 // so a step whose dependencies have since all closed is still reachable —
-// see ephemeralReadyDependencyCandidateFilterJQ. The enrichment call passes
-// checkHold=false: this is an assignee-scoped existence probe, not the
-// in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
-// pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
+// see ephemeralReadyDependencyCandidateFilterJQ.
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause()
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -1085,8 +1102,9 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		// federated=false: this row comes from `bd query`, which never
 		// carries a resolved blocked_by, so skip straight to the bd show
-		// fallback. checkHold=false: ga-5736js, this probe must stay
-		// hold-transparent.
+		// fallback. checkHold=false: the selector above already excludes
+		// held candidates before the `.[:1]` truncation, so the
+		// post-truncation nheld check here would always read zero.
 		inProgressBlockedByEnrichmentScript(false, false) +
 		`fi; `
 }
@@ -1252,6 +1270,10 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
+//
+// The assigned-ready tier skips dispatch-held rows (never the human label),
+// in its ready read and in its bd-1.0.4 wisp probe alike, so a held assignment
+// is neither served nor able to mask other work.
 //
 // Mail (issue_type=message) is withheld from every tier: it is read, never
 // claimed (#4419). bd's ready path and `bd list` omit it natively, the
@@ -1493,7 +1515,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 }
 
 // RecoveryHookMarker prefixes every diagnostic the DEFAULT on_death/on_boot
-// recovery hooks print to stdout when a bd release fails. It is the contract
+// recovery hooks print to stdout when a bd read or release fails. It is the contract
 // between the generated templates (which emit it) and the controller callers
 // (which surface only marked output): a user-supplied on_death/on_boot override
 // is passed through verbatim and carries no marker, so its stdout is not
@@ -1514,24 +1536,42 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
+// recoveryReadShell wraps one bd read of a DEFAULT recovery hook; name is the
+// read's bd subcommand and selector, reported as "bd <name>". A read that
+// exits non-zero prints one RecoveryHookMarker line on fd 3 and contributes
+// nothing to the sweep, not even rows it printed before it failed; a read that
+// succeeds feeds its output to filter and keeps its stderr dropped.
+//
+// The marker goes to fd 3, which the hook points at its real stdout BEFORE the
+// pipeline (`exec 3>&1`), so it bypasses the pipe from the reads to the release
+// loop. On that pipe it would be read as a bead id and handed to `bd update`.
+// The hook itself still exits 0: the controller drops the stdout of a hook that
+// exits non-zero, and the marker is the point.
+func recoveryReadShell(hook, name, read, filter string) string {
+	return `if r=$(` + read + ` 2>/dev/null); then printf '%s\n' "$r" | ` + filter + ` 2>/dev/null; ` +
+		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: bd ` + name + ` (exit %s)\n' "$?" >&3; fi; `
+}
+
 func buildOnDeath(a *Agent, topo QueryTopology) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
+	listRead := recoveryReadShell("on_death", "list",
+		`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`,
+		`jq -r '.[] | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
+	ephemeralRead := recoveryReadShell("on_death", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
 	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
+	return `exec 3>&1; { ` +
+		listRead +
 		ephemeralRead +
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
@@ -1563,14 +1603,19 @@ func buildOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
+	routedRead := recoveryReadShell("on_boot", "list "+beadmeta.RoutedToMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`,
+		`jq -r '.[].id'`)
+	runTargetRead := recoveryReadShell("on_boot", "list "+beadmeta.RunTargetMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`,
+		`jq -r '.[] | select(`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") | .id'`)
+	ephemeralRead := recoveryReadShell("on_boot", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $template) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $template) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`"))) | .id'`)
+	return `template=` + shellquote.Quote(template) + `; exec 3>&1; ` +
 		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
+		routedRead +
+		runTargetRead +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`

@@ -18,9 +18,10 @@ check for new messages from other agents or the controller.
 ## Work pickup
 
 Session startup should include the claim protocol for assigned work. When you
-finish your current task or have no active work mid-session, run `gc hook` to
-check for routed work, then claim exactly one returned bead with
-`gc bd update <id> --claim` before working it.
+finish your current task or have no active work mid-session, run
+`gc hook --claim` to find and claim one routed work item in a single step. If
+you instead claim a bead `gc hook` returned with `gc bd update <id> --claim`, a
+failed claim means another agent holds that bead: do not work it.
 
 `gc hook --inject` is legacy compatibility for older Stop/session-end hook
 files. It exits successfully without checking or claiming work, and fresh
@@ -31,7 +32,8 @@ managed hook installs do not call it.
 - `gc prime` — load/reload agent context
 - `gc mail check --inject` — check for inter-agent messages
 - `gc hook` — check for available routed work
-- `gc bd update <id> --claim` — claim one bead before working it
+- `gc hook --claim` — find and claim one routed work item
+- `gc bd update <id> --claim` — claim one bead before working it; fails if another agent holds it
 - `gc bd ready` — list ready beads (tasks)
 - `gc bd show <id>` — show bead details
 - `gc bd close <id>` — mark a bead as done

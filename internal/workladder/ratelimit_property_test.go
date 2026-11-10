@@ -30,7 +30,8 @@ import (
 // release, so a workless seat's episode stands as it is until then. A
 // seat's claims may wait on a person, the wait beginning and ending at
 // random: such a seat's restart is held (awaiting a person), as the lane
-// holds it, and a waiting claim is nudged only a Cap apart.
+// holds it, and a waiting claim is nudged only a Cap apart, or a WaitCap
+// while its seat's newest turn completed.
 
 // rlPool is how the world's provider pool answers a turn.
 type rlPool uint8
@@ -218,7 +219,7 @@ func (s *rlSim) reading(now time.Time) TurnReading {
 		return r
 	}
 	last := ended[len(ended)-1]
-	r.LastFailed = last.outcome != rlCompleted
+	r.LastFailed, r.LastCompleted = last.outcome != rlCompleted, last.outcome == rlCompleted
 	for i := len(ended) - 1; i >= 0 && ended[i].outcome == rlRefused; i-- {
 		r.Refused++
 	}
@@ -616,12 +617,14 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 	// WL1 holds: every entry of a nudgeable seat hears from the ladder. A
-	// wait on a person that begins is paced from its start.
+	// wait on a person that begins is paced from its start, and is paced a
+	// WaitCap apart while the seat's newest turn completed.
 	eligible := acting
 	for _, e := range d.Next.Entries {
 		since, ok := s.lastHeard[e.Key]
 		switch {
-		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || entryOrZero(prev, e.Key).AwaitsHuman != e.AwaitsHuman:
+		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || entryOrZero(prev, e.Key).AwaitsHuman != e.AwaitsHuman ||
+			(e.AwaitsHuman && quietWait(o)):
 			s.lastHeard[e.Key] = o.Now
 		case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 			return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -630,6 +633,11 @@ func (w *rlWorld) pass(i, step int) error {
 	for _, a := range d.Actions {
 		switch a := a.(type) {
 		case Nudge:
+			if entryOrZero(d.Next, a.Key).AwaitsHuman && quietWait(o) {
+				if pe := entryOrZero(prev, a.Key); !pe.AwaitsHuman || o.Now.Sub(pe.Last) < DefaultWaitCap {
+					return fail("a wait on a person nudged on a reading that shows its newest turn completed, short of a WaitCap after its start or last nudge")
+				}
+			}
 			s.lastHeard[a.Key] = o.Now
 		case Alert:
 			s.lastHeard[a.Key] = o.Now
@@ -751,14 +759,21 @@ func TestRateLimitInvariantsAcrossSeats(t *testing.T) {
 	forEachN(t, rlWorlds()/4, func(seed uint64) error {
 		return newRLWorld(seed, 2+int(seed%4)).run()
 	})
-	rlCovered(t)
+	// A seat refused again within SeatFreshGap of its own fresh restart
+	// (exhausted/again) is the one-seat sim's to reach: across seats the
+	// provider gap spaces the restarts, and the seats whose work waits on a
+	// person, nudged only a WaitCap apart while their newest turn completed,
+	// take few turns between episodes, so the move is too rare there to pin.
+	rlCovered(t, RateLimitMove{RateLimitTransitionExhausted, RateLimitCauseAgain})
 }
 
-func rlCovered(t *testing.T) {
+// rlCovered fails t unless the sims reached every move but those in skip,
+// and every other branch rlCoverage counts.
+func rlCovered(t *testing.T, skip ...RateLimitMove) {
 	t.Helper()
 	var missing []string
 	for i, mv := range rlMoveSlots {
-		if rlCoverage.moves.m[i].Load() == 0 {
+		if rlCoverage.moves.m[i].Load() == 0 && !slices.Contains(skip, mv) {
 			missing = append(missing, fmt.Sprintf("%s/%s", mv.Transition, mv.Cause))
 		}
 	}

@@ -655,6 +655,23 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// Federation selects which of this city's agents may act on the rig's bead
+	// store. "city" (the default) keeps today's behavior: city-scoped agents
+	// read every rig, and any agent whose identity matches a row may serve,
+	// claim or release it. "rig" restricts this city to identities inside the
+	// rig's namespace ("<name>/...", compared under the bead store's actor
+	// fold) and to this city's own pool sessions of the rig's agents; rows
+	// owned by anything else are left alone. Set it on a rig whose bead store
+	// another city also attaches. It is deliberately not patchable. NOT YET
+	// ENFORCED: this build validates the setting and warns at start and
+	// reload, but still acts on every row of the rig's store, so a rig with
+	// federation = "rig" is not protected yet.
+	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Namespace declares whether another city may serve this rig's namespace
+	// on the same bead store: "shared" (the default) or "exclusive".
+	// "exclusive" requires federation = "rig". It is a declaration that
+	// cross-city checks read; it changes nothing in this city on its own.
+	Namespace string `toml:"namespace,omitempty" jsonschema:"enum=shared,enum=exclusive"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -2511,6 +2528,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 
@@ -2532,11 +2563,11 @@ type APIConfig struct {
 	// only config edits. City registry creation (POST /v0/city) is not covered:
 	// a grant binds a path-resident city name, which a not-yet-created city
 	// lacks, so creation stays governed by the supervisor-registry guards.
-	// Built-in callers (the bundled gc API client and dashboard SPA) send only
-	// the CSRF header and mint no grant, so enabling this gate turns their direct
-	// city mutations away with a clear 401; such deployments front mutations
-	// through the trusted authority that mints grants instead. The value is one
-	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The in-city gc client and the dashboard SPA mint no grant and send only
+	// the CSRF header, so enabling this gate turns their direct city mutations
+	// away with a clear 401; a remote gc context with a grant_command does mint
+	// one per mutation. The value is one or more "kid:base64-ed25519-pubkey"
+	// entries, comma separated, read once at startup.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
 	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
@@ -2790,13 +2821,18 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // MaintenanceConfig groups periodic store-maintenance subsections.
 type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
+	// Dolt configures the periodic Dolt store maintenance loop. The loop
+	// is observe-only for now: it takes no backup snapshot and runs no
+	// CALL DOLT_GC.
 	Dolt DoltMaintenance `toml:"dolt,omitempty"`
 }
 
-// DoltMaintenance configures the periodic Dolt store maintenance loop.
-// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+// DoltMaintenance configures the periodic Dolt store maintenance loop,
+// which is observe-only: each cycle runs the disk-space pre-flight and
+// records run history and events — it takes no backup snapshot and runs
+// no CALL DOLT_GC, so a completed run does not mean the store was
+// compacted. Opt-in for v1: omission or enabled=false leaves the loop
+// disabled.
 type DoltMaintenance struct {
 	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
 	Enabled bool `toml:"enabled,omitempty"`
@@ -2804,10 +2840,13 @@ type DoltMaintenance struct {
 	// string (e.g., "168h"). Defaults to 168h (weekly).
 	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
 	// AlertTo is the agent identity to mail on failure (e.g.,
-	// "gascity/mayor"). Empty disables alert mail.
+	// "gascity/mayor"). Empty disables alert mail. It has no effect while
+	// the loop is observe-only: an observe-only cycle cannot fail, so no
+	// alert mail is sent.
 	AlertTo string `toml:"alert_to,omitempty"`
-	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
+	// GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration
+	// string. Defaults to 10m. It has no effect while the loop is
+	// observe-only.
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
 }
 
@@ -2918,6 +2957,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter is how long a config-drift restart may stay
+	// deferred behind a seat's held work before the controller emits one
+	// escalated session.config_drift_deferred event for the episode. The
+	// escalation is a signal only: it never drains, restarts or kills the
+	// session. Positive Go duration string (e.g., "30m", "4h"). Defaults to
+	// "1h".
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -2962,7 +3008,12 @@ type DaemonConfig struct {
 	// unanswered nudge (a nudge the seat could not take, such as one held at
 	// a permission prompt, does not count). A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
-	// their decision) is nudged only hourly, and never recycled or released.
+	// their decision) is never recycled or released. While the seat's turns
+	// show its newest turn completed, it is nudged only daily, which takes
+	// up an answer that started no turn; any other reading (a turn open, a
+	// failed, canceled or status-less newest turn, no turn, turns that cannot
+	// be read) keeps it nudged hourly, so an answer whose turn died is
+	// redriven.
 	// A seat whose provider refuses its turns with a rate limit (two in a
 	// row, as its own transcript records them, the newest after a nudge it
 	// took) is paced as on a degraded provider, and once a nudge it took
@@ -2989,7 +3040,7 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no stashes, and no commits that removal would orphan — commits
+	// tree and no commits that removal would orphan — commits
 	// reachable from no branch, tag, or remote-tracking ref — are removed;
 	// push state is deliberately not the test, since `git worktree remove`
 	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
@@ -3047,8 +3098,9 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
-	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
+	// provisioned, which only its owner removes), clean working tree, no
+	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -3109,7 +3161,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (not a managed worktree, clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3349,6 +3401,20 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DefaultDriftDeferralEscalateAfter is the default age at which a deferred
+// config-drift episode over held work escalates.
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
+// DriftDeferralEscalateAfterDuration returns the drift-deferral escalation
+// horizon. Defaults to DefaultDriftDeferralEscalateAfter if empty,
+// unparseable, or not positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur := durationOr(d.DriftDeferralEscalateAfter, DefaultDriftDeferralEscalateAfter); dur > 0 {
+		return dur
+	}
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -3653,7 +3719,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
@@ -5166,6 +5234,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateProgramStatus(&cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateRigFederation(cfg.Rigs); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

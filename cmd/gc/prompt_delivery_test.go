@@ -121,6 +121,84 @@ func TestPromptDelivery(t *testing.T) {
 	}
 }
 
+// TestPromptDeliveryPackDeclaredRuntime pins ga-s5y62b.3: a pack-declared
+// (exec-backed RPP) runtime has no argv slot for PromptSuffix/PromptFlag (its
+// start wire carries only Nudge), so a normal-sized prompt must be delivered
+// through the nudge no matter which prompt mode the agent resolved to. Before
+// the fix, config.ResolveProvider's unconditional PromptMode="arg" default
+// sent the prompt down the argv branch and the runtime silently dropped it.
+func TestPromptDeliveryPackDeclaredRuntime(t *testing.T) {
+	const prompt = "do the work"
+	packRuntimes := map[string]config.DiscoveredRuntime{
+		"acme-runtime": {Name: "acme-runtime"},
+	}
+
+	modes := []struct {
+		name string
+		rp   *config.ResolvedProvider
+	}{
+		{"nil provider", nil},
+		{"empty prompt mode", &config.ResolvedProvider{}},
+		{"arg prompt mode", &config.ResolvedProvider{PromptMode: "arg"}},
+		{"flag prompt mode with flag", &config.ResolvedProvider{PromptMode: "flag", PromptFlag: "--prompt"}},
+		{"flag prompt mode without flag", &config.ResolvedProvider{PromptMode: "flag"}},
+	}
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			got, err := promptDelivery(prompt, false, m.rp, "wake", "acme-runtime", packRuntimes)
+			if err != nil {
+				t.Fatalf("promptDelivery() unexpected error: %v", err)
+			}
+			if got.PromptSuffix != "" || got.PromptFlag != "" {
+				t.Errorf("promptDelivery() PromptSuffix=%q PromptFlag=%q, want both empty: an RPP runtime cannot receive argv prompt bytes", got.PromptSuffix, got.PromptFlag)
+			}
+			if !got.Delivered {
+				t.Errorf("promptDelivery() Delivered = false, want true: the prompt must ride the nudge")
+			}
+			if want := prependStartupPromptToNudge(prompt, "wake"); got.Nudge != want {
+				t.Errorf("promptDelivery() Nudge = %q, want %q", got.Nudge, want)
+			}
+			if got.OversizedFallback {
+				t.Errorf("promptDelivery() OversizedFallback = true, want false: the prompt is under the size threshold")
+			}
+			if got.EffectiveMode != "nudge" {
+				t.Errorf("promptDelivery() EffectiveMode = %q, want %q", got.EffectiveMode, "nudge")
+			}
+		})
+	}
+
+	t.Run("opted-in nudge-fallback runtime also nudges a normal prompt", func(t *testing.T) {
+		optedIn := map[string]config.DiscoveredRuntime{
+			"acme-runtime": {Name: "acme-runtime", PromptDelivery: "nudge-fallback"},
+		}
+		got, err := promptDelivery(prompt, false, &config.ResolvedProvider{PromptMode: "arg"}, "wake", "acme-runtime", optedIn)
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error: %v", err)
+		}
+		if got.PromptSuffix != "" || !got.Delivered || got.Nudge != prependStartupPromptToNudge(prompt, "wake") {
+			t.Errorf("promptDelivery() = %+v, want nudge delivery with no PromptSuffix", promptDeliveryResultLens(got))
+		}
+	})
+
+	t.Run("builtin runtime name absent from packRuntimes keeps argv delivery", func(t *testing.T) {
+		got, err := promptDelivery(prompt, false, &config.ResolvedProvider{PromptMode: "arg"}, "wake", "tmux", packRuntimes)
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error: %v", err)
+		}
+		if got.PromptSuffix != shellquote.Quote(prompt) || got.EffectiveMode != "argv" {
+			t.Errorf("promptDelivery() = %+v, want unchanged argv delivery for builtin tmux", promptDeliveryResultLens(got))
+		}
+	})
+
+	t.Run("oversized prompt on non-opted-in pack runtime still hard-fails", func(t *testing.T) {
+		big := repeatToBytes("a", maxPromptSuffixRawBytes)
+		_, err := promptDelivery(big, false, &config.ResolvedProvider{PromptMode: "arg"}, "wake", "acme-runtime", packRuntimes)
+		if !errors.Is(err, errOversizedPromptUnsupportedRuntime) {
+			t.Errorf("promptDelivery() error = %v, want errors.Is(err, errOversizedPromptUnsupportedRuntime)", err)
+		}
+	})
+}
+
 // --- Oversized-prompt argv-safety guard (gastownhall/gascity ga-q8wgom.1.1) ---
 //
 // promptDelivery must never place a prompt into an OS exec() argv when that

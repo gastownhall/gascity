@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
@@ -153,7 +155,7 @@ func TestBuildFragmentApplyPlanSkipsRootTrackWhenExternalRootEdgeExists(t *testi
 		},
 	}
 
-	plan, err := buildFragmentApplyPlan(store, fragment, FragmentOptions{
+	plan, err := buildFragmentApplyPlan(beadstest.GraphMolecule(store), fragment, FragmentOptions{
 		RootID: root.ID,
 		ExternalDeps: []ExternalDep{
 			{
@@ -352,7 +354,7 @@ max_attempts = 3
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "scoped-teardown", []string{dir}, Options{})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "scoped-teardown", []string{dir}, Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -442,7 +444,7 @@ func TestInstantiateSimple(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		Title: "My Feature",
 		Vars:  map[string]string{"feature": "auth"},
 	})
@@ -522,7 +524,7 @@ func TestInstantiateExternalDepsCreateBlockingDeps(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		ExternalDeps: []ExternalDep{
 			{StepID: "wf", DependsOnID: blocker.ID, Type: "blocks"},
 			{StepID: "wf.step", DependsOnID: blocker.ID, Type: "blocks"},
@@ -552,7 +554,7 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -604,7 +606,7 @@ func TestInstantiateGraphApplyIncludesExternalDeps(t *testing.T) {
 		},
 	}
 
-	if _, err := Instantiate(context.Background(), store, recipe, Options{
+	if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		ExternalDeps: []ExternalDep{
 			{StepID: "wf", DependsOnID: blocker.ID, Type: "blocks"},
 			{StepID: "wf.step", DependsOnID: blocker.ID, Type: "blocks"},
@@ -641,7 +643,7 @@ func TestInstantiateRetriesTransientGraphApplyBeforeFallback(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -679,7 +681,7 @@ func TestInstantiateFallsBackWhenGraphApplyDoltConnectionTimesOut(t *testing.T) 
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -719,7 +721,7 @@ func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -753,7 +755,7 @@ func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) 
 		},
 	}
 
-	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err == nil {
 		t.Fatal("Instantiate error = nil, want graph apply error")
 	}
@@ -945,7 +947,7 @@ func TestInstantiateSequentialGraphWorkflowDefersRoutingUntilGraphWired(t *testi
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1038,7 +1040,7 @@ func TestInstantiateGraphWorkflowFailureClearsInstantiationFence(t *testing.T) {
 		},
 	}
 
-	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err == nil {
 		t.Fatal("expected error on dep failure")
 	}
@@ -1105,7 +1107,7 @@ func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1144,7 +1146,7 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1193,7 +1195,7 @@ func TestInstantiateStampsWorkflowExpandedForRealChildren(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		if _, err := Instantiate(context.Background(), store, recipe(), Options{}); err != nil {
+		if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe(), Options{}); err != nil {
 			t.Fatalf("Instantiate: %v", err)
 		}
 		root := store.plan.Nodes[0]
@@ -1211,7 +1213,7 @@ func TestInstantiateStampsWorkflowExpandedForRealChildren(t *testing.T) {
 		SetGraphApplyEnabled(false)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		result, err := Instantiate(context.Background(), store, recipe(), Options{})
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe(), Options{})
 		if err != nil {
 			t.Fatalf("Instantiate: %v", err)
 		}
@@ -1240,7 +1242,7 @@ func TestInstantiateRootOnlyGraphWorkflowOmitsWorkflowExpanded(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1337,7 +1339,7 @@ func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 		},
 	}
 
-	if _, err := Instantiate(context.Background(), store, recipe, Options{}); err != nil {
+	if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{}); err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
 	if store.plan == nil {
@@ -1374,7 +1376,7 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{PriorityOverride: priorityPtr(3)})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{PriorityOverride: priorityPtr(3)})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1410,7 +1412,7 @@ func TestInstantiateUsesGraphApplyPriorityOverride(t *testing.T) {
 		},
 	}
 
-	if _, err := Instantiate(context.Background(), store, recipe, Options{PriorityOverride: priorityPtr(2)}); err != nil {
+	if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{PriorityOverride: priorityPtr(2)}); err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
 	if store.plan == nil {
@@ -1525,7 +1527,7 @@ func TestInstantiateRejectsPartialGraphApplyResult(t *testing.T) {
 		},
 	}
 
-	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err == nil || !strings.Contains(err.Error(), "wf.step") {
 		t.Fatalf("Instantiate error = %v, want missing wf.step mapping", err)
 	}
@@ -1547,7 +1549,7 @@ func TestInstantiateWithParentID(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		ParentID: parent.ID,
 	})
 	if err != nil {
@@ -1569,7 +1571,7 @@ func TestInstantiatePreserveRootTypeKeepsTaskRoot(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{PreserveRootType: true})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{PreserveRootType: true})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1613,7 +1615,7 @@ func TestInstantiateGraphWorkflowIgnoresParentIDOnRoot(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{ParentID: parent.ID})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{ParentID: parent.ID})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1685,7 +1687,7 @@ func TestInstantiateGraphWorkflowDefersAssignmentsUntilGraphWired(t *testing.T) 
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -1736,7 +1738,7 @@ func TestInstantiateWithIdempotencyKey(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		IdempotencyKey: "converge:abc:iter:1",
 	})
 	if err != nil {
@@ -1771,7 +1773,7 @@ func TestInstantiateFragmentInheritsRootPriority(t *testing.T) {
 		},
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{RootID: root.ID})
 	if err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
@@ -1811,7 +1813,7 @@ func TestInstantiateFragmentRecordsParentChildDeps(t *testing.T) {
 		},
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{RootID: root.ID})
 	if err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
@@ -1873,7 +1875,7 @@ func TestInstantiateFragmentPrefersRecipeParentOverExternalParent(t *testing.T) 
 		},
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{
 		RootID: root.ID,
 		ExternalDeps: []ExternalDep{
 			{
@@ -1934,7 +1936,7 @@ func TestInstantiateFragmentPrefersRecipeParentWhenChildPrecedesParent(t *testin
 		},
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{
 		RootID: root.ID,
 		ExternalDeps: []ExternalDep{
 			{
@@ -1973,7 +1975,7 @@ func TestInstantiateFragmentRejectsDuplicateExternalParents(t *testing.T) {
 		},
 	}
 
-	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{
+	_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{
 		RootID: root.ID,
 		ExternalDeps: []ExternalDep{
 			{StepID: "frag.scope.child", DependsOnID: "external-1", Type: "parent-child"},
@@ -2021,7 +2023,7 @@ func TestInstantiateFragmentGraphApplyPrefersRecipeParentOverExternalParent(t *t
 		},
 	}
 
-	if _, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{
+	if _, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{
 		RootID: root.ID,
 		ExternalDeps: []ExternalDep{
 			{
@@ -2076,7 +2078,7 @@ func TestBuildFragmentApplyPlan_UsesTracksOwnershipEdges(t *testing.T) {
 		},
 	}
 
-	plan, err := buildFragmentApplyPlan(store, recipe, FragmentOptions{RootID: root.ID})
+	plan, err := buildFragmentApplyPlan(beadstest.GraphMolecule(store), recipe, FragmentOptions{RootID: root.ID})
 	if err != nil {
 		t.Fatalf("buildFragmentApplyPlan: %v", err)
 	}
@@ -2109,7 +2111,7 @@ func TestInstantiateRootOnly(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -2138,7 +2140,7 @@ func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -2180,7 +2182,7 @@ func TestInstantiateVarDefaults(t *testing.T) {
 	}
 
 	// Don't provide "branch" — should use default
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		Vars: map[string]string{"title": "My Thing"},
 	})
 	if err != nil {
@@ -2211,7 +2213,7 @@ func TestInstantiateSubstitutesAssigneeVars(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -2242,7 +2244,7 @@ func TestInstantiateSubstitutesLabelVars(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -2264,7 +2266,7 @@ func TestInstantiateSubstitutesLabelVars(t *testing.T) {
 
 func TestInstantiateNilRecipe(t *testing.T) {
 	store := beads.NewMemStore()
-	_, err := Instantiate(context.Background(), store, nil, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), nil, Options{})
 	if err == nil {
 		t.Fatal("expected error for nil recipe")
 	}
@@ -2272,7 +2274,7 @@ func TestInstantiateNilRecipe(t *testing.T) {
 
 func TestInstantiateEmptyRecipe(t *testing.T) {
 	store := beads.NewMemStore()
-	_, err := Instantiate(context.Background(), store, &formula.Recipe{Name: "empty"}, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), &formula.Recipe{Name: "empty"}, Options{})
 	if err == nil {
 		t.Fatal("expected error for empty recipe")
 	}
@@ -2308,7 +2310,7 @@ func TestInstantiateCreateFailure(t *testing.T) {
 		},
 	}
 
-	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err == nil {
 		t.Fatal("expected error on create failure")
 	}
@@ -2351,7 +2353,7 @@ func TestInstantiateDepFailure(t *testing.T) {
 		},
 	}
 
-	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err == nil {
 		t.Fatal("expected error on dep failure")
 	}
@@ -2368,7 +2370,7 @@ func TestInstantiateDepFailure(t *testing.T) {
 
 func TestCookOnRequiresParentID(t *testing.T) {
 	store := beads.NewMemStore()
-	_, err := CookOn(context.Background(), store, "x", nil, Options{})
+	_, err := CookOn(context.Background(), beadstest.GraphMolecule(store), "x", nil, Options{})
 	if err == nil {
 		t.Fatal("expected error when ParentID is empty")
 	}
@@ -2398,7 +2400,7 @@ depends_on = ["implement"]
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "e2e-test", []string{dir}, Options{
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "e2e-test", []string{dir}, Options{
 		Title: "Auth Flow",
 		Vars:  map[string]string{"title": "Auth Flow"},
 	})
@@ -2481,7 +2483,7 @@ timeout = "2m"
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "ralph-demo", []string{dir}, Options{})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "ralph-demo", []string{dir}, Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -2598,7 +2600,7 @@ title = "Work"
 	}
 
 	store := beads.NewMemStore()
-	_, err := Cook(context.Background(), store, "needs-graph-compiler", []string{dir}, Options{})
+	_, err := Cook(context.Background(), beadstest.GraphMolecule(store), "needs-graph-compiler", []string{dir}, Options{})
 	if err == nil {
 		t.Fatal("Cook succeeded, want formula compiler requirement error")
 	}
@@ -2645,7 +2647,7 @@ metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = 
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "scoped-demo", []string{dir}, Options{})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "scoped-demo", []string{dir}, Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -2736,7 +2738,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	}
 
 	t.Run("unresolved vars in child title rejected", func(t *testing.T) {
-		_, err := Instantiate(context.Background(), store, recipe, Options{
+		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 			Title: "My Feature",
 			Vars:  map[string]string{"epic": "CLOUD-123"},
 		})
@@ -2752,7 +2754,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 
 	t.Run("all vars resolved succeeds", func(t *testing.T) {
-		result, err := Instantiate(context.Background(), store, recipe, Options{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 			Title: "My Feature",
 			Vars:  map[string]string{"epic": "CLOUD-123", "feature": "auth"},
 		})
@@ -2767,7 +2769,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	t.Run("root title override bypasses residual check", func(t *testing.T) {
 		// Root step has {{title}} but opts.Title overrides it — should succeed
 		// even without providing the "title" var.
-		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), &formula.Recipe{
 			Name: "root-override",
 			Steps: []formula.RecipeStep{
 				{ID: "root-override", Title: "{{title}}", Type: "molecule", IsRoot: true},
@@ -2783,7 +2785,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 
 	t.Run("root title override substitutes provided vars", func(t *testing.T) {
-		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), &formula.Recipe{
 			Name: "root-override-vars",
 			Steps: []formula.RecipeStep{
 				{ID: "root-override-vars", Title: "fallback", Type: "molecule", IsRoot: true},
@@ -2804,7 +2806,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 
 	t.Run("root title override satisfies required title var", func(t *testing.T) {
-		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), &formula.Recipe{
 			Name: "root-required-title",
 			Steps: []formula.RecipeStep{
 				{ID: "root-required-title", Title: "{{title}}", Type: "molecule", IsRoot: true},
@@ -2827,7 +2829,7 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(gaStore), recipe, Options{
 			Title: "My Feature",
 			Vars:  map[string]string{"epic": "CLOUD-123"},
 		})
@@ -2867,7 +2869,7 @@ func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
 	}
 
 	t.Run("sequential path rejects unresolved routing var", func(t *testing.T) {
-		_, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(beads.NewMemStore()), recipe, Options{
 			Vars: map[string]string{"topic": "widgets"},
 		})
 		if err == nil {
@@ -2882,7 +2884,7 @@ func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
 	})
 
 	t.Run("sequential path allows resolved routing var", func(t *testing.T) {
-		result, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(beads.NewMemStore()), recipe, Options{
 			Vars: map[string]string{"topic": "widgets", "review_target": "gc.review-synthesizer"},
 		})
 		if err != nil {
@@ -2899,7 +2901,7 @@ func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(gaStore), recipe, Options{
 			Vars: map[string]string{"topic": "widgets"},
 		})
 		if err == nil {
@@ -2940,7 +2942,7 @@ func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err := Instantiate(context.Background(), gaStore, routedToRecipe, Options{})
+		_, err := Instantiate(context.Background(), beadstest.GraphMolecule(gaStore), routedToRecipe, Options{})
 		if err == nil {
 			t.Fatal("graph-apply Instantiate should reject unresolved {{review_target}} in gc.routed_to")
 		}
@@ -2972,7 +2974,7 @@ func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 		},
 	}
 
-	_, err = Attach(context.Background(), store, recipe, parent.ID, AttachOptions{})
+	_, err = Attach(context.Background(), beadstest.GraphMolecule(store), recipe, parent.ID, AttachOptions{})
 	if err == nil {
 		t.Fatal("Attach should reject missing required vars")
 	}
@@ -3017,7 +3019,7 @@ func TestInstantiateRejectsResidualTimeoutVars(t *testing.T) {
 	}
 	recipe := makeRecipe("{step_timeout}")
 
-	_, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+	_, err := Instantiate(context.Background(), beadstest.GraphMolecule(beads.NewMemStore()), recipe, Options{
 		Vars: map[string]string{"check_timeout": "30s"},
 	})
 	if err == nil {
@@ -3032,7 +3034,7 @@ func TestInstantiateRejectsResidualTimeoutVars(t *testing.T) {
 	SetGraphApplyEnabled(true)
 	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-	_, err = Instantiate(context.Background(), gaStore, recipe, Options{
+	_, err = Instantiate(context.Background(), beadstest.GraphMolecule(gaStore), recipe, Options{
 		Vars: map[string]string{"check_timeout": "30s"},
 	})
 	if err == nil {
@@ -3107,7 +3109,7 @@ func TestInstantiateRejectsInvalidSubstitutedTimeoutVars(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Instantiate(context.Background(), beads.NewMemStore(), makeRecipe(tc.metadata), Options{
+			_, err := Instantiate(context.Background(), beadstest.GraphMolecule(beads.NewMemStore()), makeRecipe(tc.metadata), Options{
 				Vars: tc.vars,
 			})
 			if err == nil {
@@ -3143,7 +3145,7 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 		SetGraphApplyEnabled(false)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+		_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, FragmentOptions{
 			RootID: root.ID,
 			Vars:   map[string]string{"epic": "CLOUD-123"},
 		})
@@ -3166,7 +3168,7 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+		_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(gaStore), fragment, FragmentOptions{
 			RootID: root.ID,
 			Vars:   map[string]string{"epic": "CLOUD-123"},
 		})
@@ -3208,7 +3210,7 @@ func TestInstantiateFragmentRejectsResidualRoutingMetadataVars(t *testing.T) {
 		SetGraphApplyEnabled(false)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+		_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, FragmentOptions{
 			RootID: root.ID,
 		})
 		if err == nil {
@@ -3230,7 +3232,7 @@ func TestInstantiateFragmentRejectsResidualRoutingMetadataVars(t *testing.T) {
 		SetGraphApplyEnabled(true)
 		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
-		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+		_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(gaStore), fragment, FragmentOptions{
 			RootID: root.ID,
 		})
 		if err == nil {
@@ -3346,7 +3348,7 @@ func TestInstantiateStampsFormulaHash(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3404,7 +3406,7 @@ needs = ["build"]
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "mol-hash-child", []string{dir}, Options{})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "mol-hash-child", []string{dir}, Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -3430,7 +3432,7 @@ func TestInstantiateNoHashWhenEmpty(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3462,7 +3464,7 @@ func TestInstantiateStampsFormulaVarsOnRoot(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		Vars: map[string]string{
 			"problem":   "SAF-88 API Guidelines",
 			"linear_id": "SAF-88",
@@ -3500,7 +3502,7 @@ func TestInstantiateDoesNotStampEmptyVars(t *testing.T) {
 	emptyDefault := ""
 	recipe.Vars["linear_id"].Default = &emptyDefault
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{
 		Vars: map[string]string{
 			"problem": "real problem",
 		},
@@ -3576,7 +3578,7 @@ func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3617,7 +3619,7 @@ func TestInstantiate_StepBeadsExcludedFromReady(t *testing.T) {
 		},
 	}
 
-	if _, err := Instantiate(context.Background(), store, recipe, Options{}); err != nil {
+	if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{}); err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
 
@@ -3705,7 +3707,7 @@ func TestInstantiate_GraphWorkflowSkipsStepCoercion(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3749,7 +3751,7 @@ func TestInstantiate_GraphAttemptRecipeSkipsStepCoercion(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := graphAttemptRecipeForStepTypeTest()
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3849,7 +3851,7 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 		},
 	}
 
-	result, err := Instantiate(context.Background(), store, recipe, Options{DeferAssignees: true})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{DeferAssignees: true})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3898,7 +3900,7 @@ func TestInstantiateRefusesASessionStep(t *testing.T) {
 				Deps:  []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
 				Vars:  c.defs,
 			}
-			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: c.vars})
+			_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{Vars: c.vars})
 			SetGraphApplyEnabled(prev)
 			all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 			if err == nil || !strings.Contains(err.Error(), c.want) || len(all) != 0 {
@@ -3918,10 +3920,130 @@ func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	recipe := &formula.FragmentRecipe{Name: "frag", Steps: []formula.RecipeStep{{ID: "frag.s", Title: "S", Type: "task", Labels: []string{"gc:session"}}}, Entries: []string{"frag.s"}, Sinks: []string{"frag.s"}}
-	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{RootID: root.ID})
 	all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 1 {
 		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
+	}
+}
+
+// TestCookStampsDeclaredGateType pins that the type a formula declares on a
+// [steps.gate] reaches the synthesized gate bead as gc.gate_type metadata.
+// gc's stores have no gate-condition column, so without the stamp no reader
+// (such as the core human-gate notify and re-nudge orders) can tell a human
+// gate from a timer gate. The stamp must survive every instantiation path:
+// v1 and graph.v2 formulas, with graph-apply on and off.
+func TestCookStampsDeclaredGateType(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	const steps = `
+[[steps]]
+id = "approve"
+title = "Approve"
+[steps.gate]
+type = "human"
+id = "approval"
+
+[[steps]]
+id = "wait"
+title = "Wait"
+[steps.gate]
+type = "timer"
+timeout = "1h"
+
+[[steps]]
+id = "untyped"
+title = "Untyped"
+[steps.gate]
+id = "bare"
+
+[[steps]]
+id = "plain"
+title = "Plain"
+`
+	formulas := map[string]string{
+		"gate-type-v1": `
+formula = "gate-type-v1"
+`,
+		"gate-type-v2": `
+formula = "gate-type-v2"
+version = 2
+contract = "graph.v2"
+`,
+	}
+
+	for name, header := range formulas {
+		for _, graphApply := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/graphApply=%t", name, graphApply), func(t *testing.T) {
+				prev := IsGraphApplyEnabled()
+				SetGraphApplyEnabled(graphApply)
+				t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(header+steps), 0o644); err != nil {
+					t.Fatalf("writing formula: %v", err)
+				}
+				// A plain MemStore lacks GraphApplyStore, so Instantiate would
+				// silently take the sequential path; the spy forces the
+				// graph-apply path and captures the plan it submits.
+				var store beads.Store = beads.NewMemStore()
+				spy := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+				if graphApply {
+					store = spy
+				}
+				result, err := Cook(context.Background(), beadstest.GraphMolecule(store), name, []string{dir}, Options{})
+				if err != nil {
+					t.Fatalf("Cook: %v", err)
+				}
+				planMetadata := map[string]map[string]string{}
+				if graphApply {
+					if spy.calls != 1 || spy.plan == nil {
+						t.Fatalf("ApplyGraphPlan calls = %d, want 1 (graph-apply path not taken)", spy.calls)
+					}
+					for _, node := range spy.plan.Nodes {
+						planMetadata[node.Key] = node.Metadata
+					}
+				}
+
+				wantGateType := map[string]string{
+					name + ".gate-approve": "human",
+					name + ".gate-wait":    "timer",
+					name + ".gate-untyped": "",
+					name + ".approve":      "",
+					name + ".wait":         "",
+					name + ".plain":        "",
+				}
+				for stepID, want := range wantGateType {
+					beadID, ok := result.IDMapping[stepID]
+					if !ok {
+						t.Fatalf("IDMapping has no %q; mapping=%v", stepID, result.IDMapping)
+					}
+					var metadata map[string]string
+					if graphApply {
+						metadata, ok = planMetadata[stepID]
+						if !ok {
+							t.Fatalf("graph-apply plan has no node %q", stepID)
+						}
+					} else {
+						b, err := store.Get(beadID)
+						if err != nil {
+							t.Fatalf("Get %s (%s): %v", stepID, beadID, err)
+						}
+						metadata = b.Metadata
+					}
+					got, present := metadata[beadmeta.GateTypeMetadataKey]
+					if want == "" {
+						if present {
+							t.Errorf("%s: %s = %q, want no key", stepID, beadmeta.GateTypeMetadataKey, got)
+						}
+						continue
+					}
+					if got != want {
+						t.Errorf("%s: %s = %q, want %q", stepID, beadmeta.GateTypeMetadataKey, got, want)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -3941,7 +4063,7 @@ func TestInstantiateResolvesDefaultReferencingSuppliedVar(t *testing.T) {
 			"reviewer": {Default: &def},
 		},
 	}
-	result, err := Instantiate(context.Background(), store, recipe, Options{Vars: map[string]string{"rig_name": "r1"}})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{Vars: map[string]string{"rig_name": "r1"}})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -3951,6 +4073,398 @@ func TestInstantiateResolvesDefaultReferencingSuppliedVar(t *testing.T) {
 	}
 	if step.Title != "Review by r1/reviewer" {
 		t.Fatalf("title = %q, want %q", step.Title, "Review by r1/reviewer")
+	}
+}
+
+// errInjectedActivation and errInjectedStamp are the faults mintFaultStore
+// injects into a mint's activation and failure-stamp writes.
+var (
+	errInjectedActivation = errors.New("injected activation conflict")
+	errInjectedStamp      = errors.New("injected stamp conflict")
+)
+
+// stampAlways refuses every failure-stamp attempt on a bead.
+const stampAlways = -1
+
+// mintFaultStore injects the correlated faults a failed mint meets on its
+// hottest rows. It fails the first activation Update (the one clearing the
+// instantiation fence) of the bead created at activationIndex, refuses
+// SetMetadataBatch per creation index, and logs every SetMetadataBatch target
+// in order. Embedding the interface promotes no graph-apply capability, so
+// Instantiate takes the fenced sequential path.
+type mintFaultStore struct {
+	beads.Store
+	created []string
+
+	activationIndex int // index into created; -1 disables the activation fault
+	activationFired bool
+
+	stampRefusals map[int]int   // creation index -> refusals, or stampAlways
+	stampFault    error         // wrapped by every refusal; errInjectedStamp when nil
+	stampFaults   map[int]error // per-creation-index override of stampFault
+	stampPartial  bool          // a refused stamp first writes molecule_failed alone
+	refused       map[string]int
+	stampCalls    []string
+}
+
+func newMintFaultStore(inner beads.Store) *mintFaultStore {
+	return &mintFaultStore{
+		Store:           inner,
+		activationIndex: -1,
+		stampRefusals:   map[int]int{},
+		refused:         map[string]int{},
+	}
+}
+
+func (s *mintFaultStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil {
+		s.created = append(s.created, created.ID)
+	}
+	return created, err
+}
+
+func (s *mintFaultStore) indexOf(id string) int {
+	for i, createdID := range s.created {
+		if createdID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *mintFaultStore) Update(id string, opts beads.UpdateOpts) error {
+	if !s.activationFired && s.activationIndex >= 0 && s.indexOf(id) == s.activationIndex {
+		if v, ok := opts.Metadata[InstantiatingMetadataKey]; ok && v == "" {
+			s.activationFired = true
+			return fmt.Errorf("%w on %s", errInjectedActivation, id)
+		}
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s *mintFaultStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.stampCalls = append(s.stampCalls, id)
+	if limit, ok := s.stampRefusals[s.indexOf(id)]; ok && (limit == stampAlways || s.refused[id] < limit) {
+		s.refused[id]++
+		if s.stampPartial {
+			if err := s.Store.SetMetadataBatch(id, map[string]string{beadmeta.MoleculeFailedMetadataKey: kvs[beadmeta.MoleculeFailedMetadataKey]}); err != nil {
+				return err
+			}
+		}
+		fault := s.stampFault
+		if f, ok := s.stampFaults[s.indexOf(id)]; ok {
+			fault = f
+		}
+		if fault == nil {
+			fault = errInjectedStamp
+		}
+		return fmt.Errorf("%w on %s", fault, id)
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// twoStepGraphWorkflow is a fenced graph workflow: root "wf" and its child
+// "wf.body".
+func twoStepGraphWorkflow() *formula.Recipe {
+	return &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+}
+
+func assertStampedAndUnfenced(t *testing.T, store beads.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" || b.Metadata[InstantiatingMetadataKey] != "" {
+			t.Errorf("bead %s: molecule_failed=%q %s=%q; want stamped and un-fenced",
+				id, b.Metadata[beadmeta.MoleculeFailedMetadataKey], InstantiatingMetadataKey, b.Metadata[InstantiatingMetadataKey])
+		}
+	}
+}
+
+func assertStampCalls(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("stamp calls = %v, want %v", got, want)
+	}
+}
+
+// A mint that fails on its root's activation stamps the root even when the
+// root's first stamp meets the same transient fault: the refused stamp is
+// retried after every other bead.
+func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
+	cases := []struct {
+		name    string
+		recipe  *formula.Recipe
+		partial bool
+	}{
+		{name: "two-step", recipe: twoStepGraphWorkflow()},
+		{name: "partial first stamp", recipe: twoStepGraphWorkflow(), partial: true},
+		{name: "root only", recipe: &formula.Recipe{
+			Name:  "wf",
+			Steps: []formula.RecipeStep{{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMintFaultStore(beads.NewMemStore())
+			store.activationIndex = 0
+			store.stampRefusals[0] = 1
+			store.stampPartial = tc.partial
+
+			_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), tc.recipe, Options{})
+			if !store.activationFired {
+				t.Fatalf("root activation fault never fired (err=%v); the mint took another path", err)
+			}
+			root := store.created[0]
+			if got := store.refused[root]; got != 1 {
+				t.Fatalf("root stamp refused %d times, want 1", got)
+			}
+			if !errors.Is(err, errInjectedActivation) {
+				t.Fatalf("err = %v, want the activation fault", err)
+			}
+			if want := fmt.Sprintf(`activating graph step "wf": %v on %s`, errInjectedActivation, root); err.Error() != want {
+				t.Fatalf("err = %q, want %q", err.Error(), want)
+			}
+			want := append(append([]string{}, store.created...), root)
+			assertStampCalls(t, store.stampCalls, want...)
+			assertStampedAndUnfenced(t, store, store.created...)
+		})
+	}
+}
+
+// A mint whose root stamp is refused on both attempts still stamps the body,
+// and its error names the root it could not confirm without carrying the
+// stamp fault: neither its typed identity nor its text, which the controller
+// would classify as if the mint itself had failed that way.
+func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	cases := []struct {
+		name  string
+		fault error
+	}{
+		{name: "stamp conflict", fault: errInjectedStamp},
+		{name: "not found", fault: beads.ErrNotFound},
+		{name: "deadline", fault: context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMintFaultStore(beads.NewMemStore())
+			store.activationIndex = 0
+			store.stampRefusals[0] = stampAlways
+			store.stampFault = tc.fault
+
+			_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), twoStepGraphWorkflow(), Options{})
+			if !store.activationFired {
+				t.Fatalf("root activation fault never fired (err=%v); the mint took another path", err)
+			}
+			root, body := store.created[0], store.created[1]
+			if got := store.refused[root]; got != 2 {
+				t.Fatalf("root stamp refused %d times, want 2", got)
+			}
+			assertStampCalls(t, store.stampCalls, root, body, root)
+			assertStampedAndUnfenced(t, store, body)
+			if !errors.Is(err, errInjectedActivation) {
+				t.Fatalf("err = %v, want it to wrap the activation fault", err)
+			}
+			if errors.Is(err, tc.fault) {
+				t.Fatalf("err = %v wraps the stamp fault; the mint cause must keep the error's identity", err)
+			}
+			if strings.Contains(err.Error(), tc.fault.Error()) {
+				t.Fatalf("err = %q carries the stamp fault's text %q; only the cause may speak for the mint", err.Error(), tc.fault.Error())
+			}
+			suffix := fmt.Sprintf("(failure stamp not confirmed on %s)", root)
+			if !strings.HasSuffix(err.Error(), suffix) {
+				t.Fatalf("err = %q, want suffix %q", err.Error(), suffix)
+			}
+			want := fmt.Sprintf(`activating graph step "wf": %v on %s %s`, errInjectedActivation, root, suffix)
+			if err.Error() != want {
+				t.Fatalf("err = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+// markFailedReporting retries each refused stamp once after the rest and
+// reports every bead whose retry was refused too, not only the first.
+func TestMarkFailedReportingRetriesOnceAndJoinsEveryFailure(t *testing.T) {
+	errB2 := errors.New("b2 stamp conflict")
+	store := newMintFaultStore(beads.NewMemStore())
+	store.stampRefusals = map[int]int{0: 1, 1: stampAlways, 2: stampAlways}
+	store.stampFaults = map[int]error{1: errB2, 2: beads.ErrNotFound}
+	for _, title := range []string{"b1", "b2", "b3"} {
+		if _, err := store.Create(beads.Bead{Title: title, Type: "task", Metadata: map[string]string{InstantiatingMetadataKey: "true"}}); err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+	}
+	b1, b2, b3 := store.created[0], store.created[1], store.created[2]
+
+	err := markFailedReporting(beadstest.GraphMolecule(store), store.created)
+
+	assertStampCalls(t, store.stampCalls, b1, b2, b3, b1, b2, b3)
+	assertStampedAndUnfenced(t, store, b1)
+	if err == nil {
+		t.Fatal("markFailedReporting = nil, want the b2 and b3 stamp failures")
+	}
+	if strings.Contains(err.Error(), "marking "+b1+" ") {
+		t.Fatalf("err = %q names %s, whose retried stamp landed", err.Error(), b1)
+	}
+	for _, id := range []string{b2, b3} {
+		if !strings.Contains(err.Error(), "marking "+id+" molecule_failed") {
+			t.Fatalf("err = %q, want it to name %s", err.Error(), id)
+		}
+	}
+	if !errors.Is(err, errB2) || !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want errors.Is both stamp faults", err)
+	}
+}
+
+// A fragment whose dep wiring fails names the created bead whose failure
+// stamp was refused on both attempts and still stamps the rest.
+func TestInstantiateFragmentFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "Workflow root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	store := newMintFaultStore(&errDepStore{Store: base})
+	store.stampRefusals[0] = stampAlways
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.b", Title: "B", Type: "task"},
+			{ID: "frag.a", Title: "A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.b", DependsOnID: "frag.a", Type: "blocks"},
+		},
+	}
+
+	_, err = InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), recipe, FragmentOptions{RootID: root.ID})
+	if len(store.created) != 2 {
+		t.Fatalf("created %d fragment beads, want 2 (err=%v)", len(store.created), err)
+	}
+	refused, other := store.created[0], store.created[1]
+	if got := store.refused[refused]; got != 2 {
+		t.Fatalf("stamp on %s refused %d times, want 2", refused, got)
+	}
+	assertStampCalls(t, store.stampCalls, refused, other, refused)
+	assertStampedAndUnfenced(t, store, other)
+	if err == nil {
+		t.Fatal("InstantiateFragment succeeded; want the dep wiring failure")
+	}
+	want := fmt.Sprintf("wiring fragment dep frag.b->frag.a: injected dep failure (failure stamp not confirmed on %s)", refused)
+	if err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+	if errors.Is(err, errInjectedStamp) {
+		t.Fatalf("err = %v wraps the stamp fault; the wiring error must keep the error's identity", err)
+	}
+}
+
+// A failed mint whose stamps all land, on the first attempt or on the retry,
+// returns the site's cause unchanged and retries only the refused stamps.
+func TestInstantiateFailureStampsEachBeadOnceWhenStampsLand(t *testing.T) {
+	createFail := &formula.Recipe{
+		Name: "fail-test",
+		Steps: []formula.RecipeStep{
+			{ID: "fail-test", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "fail-test.step", Title: "Step", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "fail-test.step", DependsOnID: "fail-test", Type: "parent-child"},
+		},
+	}
+	depFail := &formula.Recipe{
+		Name: "dep-fail",
+		Steps: []formula.RecipeStep{
+			{ID: "dep-fail", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "dep-fail.b", Title: "B", Type: "task"},
+			{ID: "dep-fail.a", Title: "A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "dep-fail.b", DependsOnID: "dep-fail", Type: "parent-child"},
+			{StepID: "dep-fail.a", DependsOnID: "dep-fail", Type: "parent-child"},
+			{StepID: "dep-fail.b", DependsOnID: "dep-fail.a", Type: "blocks"},
+		},
+	}
+	cases := []struct {
+		name            string
+		inner           func(beads.Store) beads.Store
+		recipe          *formula.Recipe
+		activationIndex int
+		stampRefusals   map[int]int
+		wantErr         func(created []string) string
+		wantCalls       func(created []string) []string
+	}{
+		{
+			name:    "create failure",
+			inner:   func(s beads.Store) beads.Store { return &errStore{Store: s, failOnCreate: 2} },
+			recipe:  createFail,
+			wantErr: func([]string) string { return `creating bead for step "fail-test.step": injected create failure` },
+		},
+		{
+			name:    "dep failure",
+			inner:   func(s beads.Store) beads.Store { return &errDepStore{Store: s} },
+			recipe:  depFail,
+			wantErr: func([]string) string { return "wiring dep dep-fail.b->dep-fail: injected dep failure" },
+		},
+		{
+			name:          "dep failure with a stamp refused once",
+			inner:         func(s beads.Store) beads.Store { return &errDepStore{Store: s} },
+			recipe:        depFail,
+			stampRefusals: map[int]int{0: 1},
+			wantErr:       func([]string) string { return "wiring dep dep-fail.b->dep-fail: injected dep failure" },
+			wantCalls:     func(c []string) []string { return append(append([]string{}, c...), c[0]) },
+		},
+		{
+			name:            "later bead activation with its stamp refused once",
+			inner:           func(s beads.Store) beads.Store { return s },
+			recipe:          twoStepGraphWorkflow(),
+			activationIndex: 1,
+			stampRefusals:   map[int]int{1: 1},
+			wantErr: func(c []string) string {
+				return fmt.Sprintf(`activating graph step "wf.body": %v on %s`, errInjectedActivation, c[1])
+			},
+			wantCalls: func(c []string) []string { return append(append([]string{}, c...), c[1]) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMintFaultStore(tc.inner(beads.NewMemStore()))
+			if tc.activationIndex > 0 {
+				store.activationIndex = tc.activationIndex
+			}
+			if tc.stampRefusals != nil {
+				store.stampRefusals = tc.stampRefusals
+			}
+
+			_, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), tc.recipe, Options{})
+			if tc.activationIndex > 0 && !store.activationFired {
+				t.Fatalf("activation fault never fired (err=%v); the mint took another path", err)
+			}
+			if err == nil {
+				t.Fatal("Instantiate succeeded; want the injected failure")
+			}
+			if want := tc.wantErr(store.created); err.Error() != want {
+				t.Fatalf("err = %q, want the cause unchanged %q", err.Error(), want)
+			}
+			wantCalls := store.created
+			if tc.wantCalls != nil {
+				wantCalls = tc.wantCalls(store.created)
+			}
+			assertStampCalls(t, store.stampCalls, wantCalls...)
+			assertStampedAndUnfenced(t, store, store.created...)
+		})
 	}
 }
 
@@ -3983,7 +4497,7 @@ func TestInstantiateRootMetadataStampsRootOnly(t *testing.T) {
 	store := beads.NewMemStore()
 	rootMeta := map[string]string{testRootMetaKey: "alice"}
 
-	result, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{RootMetadata: rootMeta})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), rootMetadataRecipe(false), Options{RootMetadata: rootMeta})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -4012,7 +4526,7 @@ func TestInstantiateRootMetadataStampsRootOnlyViaGraphApply(t *testing.T) {
 	withGraphApply(t, true)
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 
-	if _, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{
+	if _, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), rootMetadataRecipe(false), Options{
 		RootMetadata: map[string]string{testRootMetaKey: "alice"},
 	}); err != nil {
 		t.Fatalf("Instantiate: %v", err)
@@ -4045,7 +4559,7 @@ func TestInstantiateRootMetadataStampsAttachedRootOnlyWisp(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create source: %v", err)
 		}
-		result, err := Instantiate(context.Background(), store, rootMetadataRecipe(true), Options{
+		result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), rootMetadataRecipe(true), Options{
 			ParentID:     source.ID,
 			RootMetadata: map[string]string{testRootMetaKey: "alice"},
 		})
@@ -4075,7 +4589,7 @@ func TestInstantiateRootMetadataStampsAttachedRootOnlyWisp(t *testing.T) {
 func TestInstantiateWithoutRootMetadataStampsNothing(t *testing.T) {
 	withGraphApply(t, false)
 	store := beads.NewMemStore()
-	result, err := Instantiate(context.Background(), store, rootMetadataRecipe(false), Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), rootMetadataRecipe(false), Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,6 +293,29 @@ func TestMailNotifyWakeWakesIdleLatchedNamedHolder(t *testing.T) {
 				got.Metadata["wake_request"], got.Metadata["wake_requested_at"], pokes, warnings.String())
 		}
 	}}, nil)
+	assertIdleLatchedHolderWoke(t, res)
+}
+
+// TestSessionWakeOfIdleLatchedNamedHolderAgreesWithTheReconciler: `gc session
+// wake` of an idle-latched holder reports the wake requested, not a session
+// that will not start, because the reconciler honors the explicit wake it
+// records over the idle latch and starts the holder. The will-not-start
+// predicate and the reconciler read the latch alike.
+func TestSessionWakeOfIdleLatchedNamedHolderAgreesWithTheReconciler(t *testing.T) {
+	var code int
+	var stdout, stderr bytes.Buffer
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{beforeReconcile: func(_ *testing.T, cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, holder beads.Bead) {
+		code = doSessionWake(holder.ID, &stdout, &stderr, false, sessionWakeDeps{
+			store: store, cfg: cfg, cityPath: cityPath, cityResolved: true, sp: sp,
+			now:                       func() time.Time { return time.Date(2026, 9, 22, 21, 52, 0, 0, time.UTC) },
+			withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+			cityUsesManagedReconciler: func(string) bool { return true },
+			pokeController:            func(string, reconcilekey.Key) error { return nil },
+		})
+	}}, nil)
+	if code != 0 || strings.Contains(stderr.String(), "will not start") || !strings.Contains(stdout.String(), "wake requested") {
+		t.Fatalf("gc session wake of the idle-latched holder = %d, stdout=%q stderr=%q; want the wake requested", code, stdout.String(), stderr.String())
+	}
 	assertIdleLatchedHolderWoke(t, res)
 }
 

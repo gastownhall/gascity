@@ -12,12 +12,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1072,13 +1070,19 @@ title = "Do work"
 // --meta flag refuses the cook: before any root, step, synthetic input convoy
 // or blocking dependency exists, on every arm. The --attach arms used to skip
 // the flag entirely (issue #7309), and the standalone path parsed it only
-// after the molecule was already materialized.
+// after the molecule was already materialized. A key the bead store would
+// refuse is refused the same way: bd and native Dolt reject "my-key" only at
+// the stamp, after the cook has written its beads, and the file store under
+// this test accepts it, so only the up-front check refuses it here.
 func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
+	const refusedKeyMeta = "my-key=v"
+	refusedKey := fmt.Sprintf("invalid metadata %q: %v", refusedKeyMeta, beadmeta.ValidateKey("my-key"))
 	rows := []struct {
 		name    string
 		formula string
 		attach  bool
 		badMeta string
+		want    string
 	}{
 		{name: "standalone legacy-work no equals", formula: "legacy-work", badMeta: "novalue"},
 		{name: "standalone legacy-work empty key", formula: "legacy-work", badMeta: "=v"},
@@ -1088,6 +1092,10 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 		{name: "attach legacy-work empty key", formula: "legacy-work", attach: true, badMeta: "=v"},
 		{name: "attach graph-work no equals", formula: "graph-work", attach: true, badMeta: "novalue"},
 		{name: "attach graph-work empty key", formula: "graph-work", attach: true, badMeta: "=v"},
+		{name: "standalone legacy-work key the store refuses", formula: "legacy-work", badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "standalone graph-work key the store refuses", formula: "graph-work", badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "attach legacy-work key the store refuses", formula: "legacy-work", attach: true, badMeta: refusedKeyMeta, want: refusedKey},
+		{name: "attach graph-work key the store refuses", formula: "graph-work", attach: true, badMeta: refusedKeyMeta, want: refusedKey},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -1114,6 +1122,9 @@ func TestFormulaCookRefusesMalformedMetaBeforeWriting(t *testing.T) {
 			}
 			if !strings.Contains(out, "invalid metadata") {
 				t.Fatalf("output %q does not report the malformed --meta flag", out)
+			}
+			if row.want != "" && !strings.Contains(out, row.want) {
+				t.Fatalf("output %q does not contain %q", out, row.want)
 			}
 
 			// IncludeClosed and TierMode both, so a closed or wisp-tier bead a
@@ -1420,34 +1431,6 @@ func (s *formulaCookMetaStampStore) SetMetadataBatch(id string, kvs map[string]s
 		}
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
-}
-
-// sourceWorkflowLockHeld reports whether the one source-workflow lock under
-// cityPath is held right now. A non-blocking flock through a fresh descriptor
-// of its lock file is refused while any other descriptor holds it, in this
-// process or another: the exclusion the lock gives overlapping cooks.
-func sourceWorkflowLockHeld(t *testing.T, cityPath string) bool {
-	t.Helper()
-	names := sourceWorkflowLockFiles(t, cityPath)
-	if len(names) != 1 {
-		t.Fatalf("source-workflow lock files under %s = %v, want exactly the one the cook takes", cityPath, names)
-	}
-	f, err := os.OpenFile(filepath.Join(citylayout.RuntimeDataDir(cityPath), "sling-source-locks", names[0]), os.O_RDWR, 0)
-	if err != nil {
-		t.Fatalf("opening source-workflow lock %s: %v", names[0], err)
-	}
-	defer f.Close() //nolint:errcheck // test cleanup
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-		return true
-	}
-	if err != nil {
-		t.Fatalf("probing source-workflow lock %s: %v", names[0], err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
-		t.Fatalf("releasing the probe's hold on source-workflow lock %s: %v", names[0], err)
-	}
-	return false
 }
 
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {

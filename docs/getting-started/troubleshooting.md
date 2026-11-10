@@ -4,10 +4,43 @@ description: Common installation and setup issues and how to fix them.
 ---
 
 <Note>
-If `gc start` fails after install, use the
+If `gc init` or `gc start` fails after install, use the
 [`gc start` failure walkthrough](/troubleshooting/gc-start-walkthrough) to
 match the final `FATAL:` line to the likely cause and resolution.
 </Note>
+
+## Startup is blocked by Dolt author identity
+
+`gc init` and `gc start` stop with "startup is blocked by Dolt author identity"
+when Dolt's author name or email is missing or empty. The fix copies your git
+identity, so git needs one first: if `git config --global user.name` or
+`git config --global user.email` prints nothing, set it with
+`git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email.
+
+Then copy your git identity into Dolt wherever Dolt's name or email is missing
+or empty, and run `gc start` in the city:
+
+```bash
+[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
+gc start
+```
+
+## A new city is still setting up
+
+A new city takes a few minutes to finish setting up after `gc init`. Until it
+does, these signals are normal and need no action:
+
+- `gc init`'s output can end at `Adopting sessions...`.
+- `gc status` can list agents as `unknown (partial status)` and print
+  `bead cache unavailable` or `session snapshot timed out`.
+- `gc doctor` can report the store as not running.
+- A dashboard run page can say "run projection is warming"; refresh it after a
+  minute.
+
+If any of these persist after ten minutes, run `gc doctor`.
 
 ## Run the Built-in Doctor
 
@@ -92,7 +125,7 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 
 ## `gascity-pack-binding` Doctor Warning
 
-Cities created by gc v1.4.x import the public Gas City pack under the key
+Cities created by older releases import the public Gas City pack under the key
 `gascity`:
 
 ```toml
@@ -102,9 +135,9 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 
 The import key namespaces the pack's commands and skills, and the pack
 ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
-role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+role prompts in current Gas City pack releases run `gc gc claim`. Under
 `[imports.gascity]` that command is `gc gascity claim`, so role workers fail
-their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+their first claim once the pack is updated. Current `gc init` writes
 `[imports.gc]`.
 
 `gc doctor` reports this as a warning; the city keeps working at the pinned
@@ -252,9 +285,7 @@ durable versioned storage and is recommended for real work.
 Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
 are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
 built with a Go toolchain that distrusts the compromised eMudhra CA
-intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
-deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
-`dolt_backup sync` under heavy write load. Check your version:
+intermediates. Check your version:
 
 ```bash
 dolt version
@@ -554,13 +585,6 @@ switch the agent to a provider that can receive it.
 A server in an agent's own `agents/<name>/mcp/` directory is meant for that
 agent alone. If the agent's provider cannot receive it, that agent does not
 start, and the warning says `cannot start`; the rest of the city still starts.
-
-## `gc version` Prints Unexpected Output
-
-If `gc version` prints git progress lines (`Enumerating objects...`) instead
-of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
-bug where remote pack fetches wrote git sideband output to the terminal,
-fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 
 ## Provider Credentials Dropped When the Supervisor Starts
 

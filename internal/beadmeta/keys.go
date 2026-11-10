@@ -48,18 +48,25 @@ const (
 	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
 	// (its ID) whose claim asked a person and is waiting on their decision:
 	// an approval asked by mail. While the key names the seat holding the
-	// claim (AwaitsHuman), the work ladder only nudges it, an hour after the
-	// ask and hourly after that: it never recycles or releases it, and raises
-	// none of the escalations its pacing would (started_recycled,
-	// started_unanswered, release_unfinished). A nudge the seat cannot take
-	// still counts toward nudge_refused, and a release already in flight that
-	// raced the claim's start still raises release_raced_start. The asking
-	// agent writes it with its request and clears it when it works the step
-	// again: the wait ends in a turn of the seat (or when the claim closes),
-	// and the hourly nudge is what takes up an answer whose turn died before
-	// it could clear the key. It names its seat, not the step: a claim
-	// released and taken by another seat is that seat's work, whatever the
-	// key still says, and no dispatch path reads it.
+	// claim (AwaitsHuman), the work ladder never recycles or releases it, and
+	// raises none of the escalations its pacing would (started_recycled,
+	// started_unanswered, release_unfinished). While the seat's own turns
+	// show the newest ended turn completed, it nudges the claim only a day
+	// after the ask or after its last nudge, however long the person takes:
+	// that takes up an answer that started no turn of the seat (a reply that
+	// asks for none, a wake that failed). Any other reading (a turn open, the
+	// newest turn failed, canceled or ended with no status, no turn) or none
+	// keeps it nudged an hour after the ask or after its last nudge, at once
+	// when that is already past, so a turn the answer started that died is
+	// redriven. A nudge the seat cannot take still counts toward
+	// nudge_refused, and a release already in flight that raced the claim's
+	// start still raises release_raced_start. The asking agent writes it with
+	// its request and clears it when it works the step again: the wait ends
+	// in a turn of the seat (or when the claim closes), and those nudges are
+	// what take up an answer whose turn died, or never started, before it
+	// could clear the key. It names its seat, not the step: a claim released
+	// and taken by another seat is that seat's work, whatever the key still
+	// says, and no dispatch path reads it.
 	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
@@ -231,6 +238,7 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
+	GateTypeMetadataKey                  = "gc.gate_type" // declared [steps.gate] type, stamped verbatim: gc stores have no gate-condition column
 	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
@@ -364,18 +372,30 @@ const (
 	SyntheticMetadataKey          = "gc.synthetic"
 	TemplateMetadataKey           = "gc.template"
 	TerminalMetadataKey           = "gc.terminal"
-	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
+	// TriggerBeadIDMetadataKey records, on a demand-spawned SESSION's bead, the
+	// id of the bead whose demand spawned it. It is controller demand
+	// bookkeeping only: it is never exported into the session's shell, which
+	// sees just GC_SPAWN_ORIGIN=demand, and a session names its own bead with
+	// `gc hook current --id-only` (CurrentClaimBeadIDMetadataKey).
+	TriggerBeadIDMetadataKey = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
 	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
-	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
-	// into the city binding, the cross-boundary edges it did not copy: a JSON
-	// list of {dir, type, other, other_status_at_import, payload, action}. No
-	// cross-store edge is ever written, so this keeps the history readable;
-	// the rig's retained-source backup is authoritative for a reverse.
-	MigratedCrossEdgesMetadataKey  = "gc.migrated_cross_edges"
+	// MigratedCrossEdgesMetadataKey records, on a bead, the cross-boundary
+	// edges a writer dropped rather than write across stores: a JSON list of
+	// {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable.
+	// The rig importer records it on a bead it moved into the city binding,
+	// where the rig's retained-source backup is authoritative for a reverse.
+	// `gc doctor --fix` records it on a work row whose malformed "<type>:<id>"
+	// blocks literal it removed because only the binding holds <id>; there
+	// the entry, payload included, is the only trace of that edge.
+	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
+	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
+	// TriggerBeadIDMetadataKey. Like that key it is controller demand
+	// bookkeeping and never reaches the session's shell.
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -408,10 +428,24 @@ const (
 // routed bead or a generic bead. The kid names the key that signed the grant,
 // so it identifies a person only when each principal signs with a key of
 // their own, and the same launcher's work carries a new value after a key
-// rotation. It is server-owned. The generic bead API refuses a client-supplied
-// value, and nothing is stamped when the request carried no verified
-// principal.
+// rotation. On the API it is server-owned: the generic bead API refuses a
+// client-supplied value, and a request with no verified principal stamps
+// nothing. Two writers copy a value instead of verifying a grant. The drain
+// dispatcher copies its run root's value onto each item workflow root it
+// instantiates, so that copy is as trustworthy as the run root's. A local
+// `gc sling` run from inside a session stamps the initiator of the work that
+// session has claimed (cmd/gc sling_inherit.go). Such a value is only as
+// trustworthy as the stamp it was copied from and the session identity in the
+// caller's environment, and nothing on the bead tells it apart from a
+// grant-verified one.
 const InitiatorMetadataKey = "gc.initiator"
+
+// OwnerNamespaceMetadataKey is the creation stamp a rig with federation =
+// "rig" writes on every row created through its guarded store: the rig's
+// identity namespace ("<rig>/" under the actor fold). It marks a gc-created row
+// that carries no owner identity as the creating city's. Only that store
+// writes it.
+const OwnerNamespaceMetadataKey = "gc.owner_namespace"
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
@@ -482,11 +516,10 @@ const (
 	// `gc hook --claim`. It is the durable back-channel that makes the claimed
 	// step id readable from the step's own shell: GC_BEAD_ID exists only in the
 	// dispatch condition-script environment (internal/convergence/condition.go),
-	// and GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-	// pool-level spawn marker (cmd/gc/build_desired_state.go) — is absent on
-	// other seats and never drives claim selection, so without this stamp a
-	// formula step cannot reliably name the bead it is running and silently
-	// skips its own close. `gc hook current` reads it back.
+	// and no session shell carries a trigger bead id (see
+	// TriggerBeadIDMetadataKey), so without this stamp a formula step cannot
+	// name the bead it is running and silently skips its own close.
+	// `gc hook current` reads it back.
 	//
 	// It is deliberately distinct from internal/session.CurrentBeadIDKey
 	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
@@ -515,8 +548,8 @@ const (
 	MoleculeIDMetadataKey = "molecule_id"
 
 	// MoleculeFailedMetadataKey marks the beads of a partially-instantiated
-	// molecule as failed (value "true"). Written best-effort by
-	// internal/molecule markFailed on instantiation error paths; read by
+	// molecule as failed (value "true"). Written by internal/molecule
+	// markFailed on instantiation error paths; read by
 	// dispatch/sling/cmd/gc to skip or close failed roots.
 	MoleculeFailedMetadataKey = "molecule_failed"
 
@@ -654,6 +687,7 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	GateTypeMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
@@ -680,6 +714,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	OwnerNamespaceMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
@@ -765,6 +800,34 @@ var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
 }
+
+// WorktreeOwnershipEvidenceKeys are the eight worktree-ownership keys a
+// provisioner publishes onto a bead after `gc worktree ensure` succeeds. With
+// a work dir (WorkDirMetadataKey or LegacyWorkDirMetadataKey) and
+// WorkBranchMetadataKey they are the complete evidence the controller turns
+// into the verified spec it starts that bead's session in. Their presence is
+// what makes a bead's work dir a managed worktree rather than a plain
+// directory.
+var WorktreeOwnershipEvidenceKeys = []string{
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+}
+
+// ManagedWorktreeEvidenceKeys are every key of a bead's managed-worktree
+// evidence: the work dir pair, the branch and the eight ownership keys. The
+// evidence binds that one bead (the worktree's provenance names it), so a
+// bead cloned from it must not inherit any of them.
+var ManagedWorktreeEvidenceKeys = append([]string{
+	WorkDirMetadataKey,
+	LegacyWorkDirMetadataKey,
+	WorkBranchMetadataKey,
+}, WorktreeOwnershipEvidenceKeys...)
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
 // particular live session through continuation-group routing. They must be

@@ -59,6 +59,7 @@ type SQLiteStoreOptions struct {
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
 	readOnly                bool
+	readOnlyNoMmap          bool
 	privateRecovery         bool
 }
 
@@ -148,6 +149,17 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 func WithSQLiteStoreReadOnly() SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
 		o.readOnly = true
+	}
+}
+
+// WithSQLiteStoreReadOnlyNoMmap opens an existing database read-only, as
+// WithSQLiteStoreReadOnly, without the mmap window: for a reader that walks a
+// whole database once (a storage snapshot's JSONL), where mapping it counts
+// every page it touches, on every pooled connection, against the resident set.
+func WithSQLiteStoreReadOnlyNoMmap() SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.readOnly = true
+		o.readOnlyNoMmap = true
 	}
 }
 
@@ -309,6 +321,9 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// sqliteStorePerStoreConnections times, not once. sqliteStoreDSNWithMode
 	// keeps that budget honest.
 	dsn := sqliteStoreDSN(dbPath, cfg.readOnly)
+	if cfg.readOnlyNoMmap {
+		dsn = sqliteSnapshotSourceDSN(dbPath)
+	}
 	if cfg.privateRecovery {
 		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
 	}

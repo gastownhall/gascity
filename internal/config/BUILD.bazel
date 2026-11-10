@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "config",
     srcs = [
+        "actor_fold.go",
         "agent_discovery.go",
         "bead_policy_validation.go",
         "beads_proxied_idle.go",
@@ -48,6 +49,7 @@ go_library(
         "resolve.go",
         "resolved_cache.go",
         "revision.go",
+        "rig_federation.go",
         "service.go",
         "session_capacity.go",
         "session_setup_path.go",
@@ -101,6 +103,7 @@ go_test(
     name = "config_test",
     srcs = [
         "acp_session_config_test.go",
+        "actor_fold_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
         "beads_proxied_idle_test.go",
@@ -154,6 +157,7 @@ go_test(
         "patch_test.go",
         "pricing_registry_test.go",
         "pricing_test.go",
+        "program_status_decide_test.go",
         "program_status_test.go",
         "progress_stall_test.go",
         "provenance_test.go",
@@ -169,6 +173,7 @@ go_test(
         "resolved_cache_test.go",
         "retired_key_test.go",
         "revision_test.go",
+        "rig_federation_test.go",
         "rig_merge_strategy_test.go",
         "service_test.go",
         "session_model_phase0_spec_test.go",
@@ -193,6 +198,7 @@ go_test(
         "validate_durations_test.go",
         "validate_semantics_test.go",
         "webhook_test.go",
+        "workquery_assigned_ready_hold_test.go",
         "workquery_budget_test.go",
         "workquery_ephemeral_blocked_test.go",
         "workquery_ephemeral_inprogress_hold_test.go",
