@@ -2474,6 +2474,26 @@ coherence, and end-to-end provider wiring. Do not put low-level edge cases
 here. Corrupt files, exact parser failures, request validation branches, and
 single handler error cases belong in unit tests next to the implementation.
 
+#### Infrastructure scope PID identity (`cmd/gc/infra_scope_integration_test.go`)
+
+`TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd` wraps a stand-in
+managed Dolt server in a throwaway systemd user scope and checks that the PID
+gc records is the post-exec server, alone in its scope, and accepted by gc's
+start-identity and command-line ownership checks. It needs a reachable
+systemd user manager and the user bus passed into the test, so it skips in
+every CI lane and in default local sweeps. Run it locally:
+
+```bash
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_env=XDG_RUNTIME_DIR --test_env=DBUS_SESSION_BUS_ADDRESS \
+  --test_filter=TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd \
+  //cmd/gc:gc_test
+```
+
+Its scope is created under `gascity-test.slice`, so on hosts that define that
+slice the slice's limits bound it. It starts no real Dolt, city or supervisor,
+and it does not cover PID-namespace (bwrap `--unshare-pid`) seats.
+
 #### Dashboard serve-level projection tests (`test/dashport`)
 
 `test/dashport` is the Go serve-level (Layer A) e2e for the dashboard. It stands

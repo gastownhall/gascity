@@ -3859,3 +3859,53 @@ func skipWithoutProcessInspection(t *testing.T) {
 		t.Skip("needs /proc or lsof to identify port holders")
 	}
 }
+
+// TestDoltStateWriteProviderKeepsInfraScopeForSamePID covers a provider
+// start/ensure-ready call against a live scoped server: save_state rewrites the
+// provider state from flags only, and the scope record gc wrote when it started
+// the server must survive while the recorded PID is unchanged, then be dropped
+// once a different PID is recorded.
+func TestDoltStateWriteProviderKeepsInfraScopeForSamePID(t *testing.T) {
+	cityPath := t.TempDir()
+	stateFile := providerManagedDoltStatePath(cityPath)
+	const unit = "gascity-infra-0123abcd.scope"
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running: true, PID: 4242, Port: 3311, DataDir: "/data", StartedAt: "2026-11-10T00:00:00Z", InfraScope: unit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeProvider := func(pid string) doltRuntimeState {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		cmd := newDoltStateCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"write-provider", "--file", stateFile, "--pid", pid, "--running", "true", "--port", "3311", "--data-dir", "/data"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("write-provider --pid %s: %v (stderr %q)", pid, err, stderr.String())
+		}
+		state, err := readDoltRuntimeStateFile(stateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+
+	state := writeProvider("4242")
+	if state.InfraScope != unit {
+		t.Fatalf("same pid: infra_scope = %q, want %q", state.InfraScope, unit)
+	}
+	if err := publishManagedDoltRuntimeStateFromState(cityPath, state); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	published, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.InfraScope != unit {
+		t.Fatalf("published infra_scope = %q, want %q", published.InfraScope, unit)
+	}
+
+	state = writeProvider("5151")
+	if state.InfraScope != "" {
+		t.Fatalf("different pid: infra_scope = %q, want empty", state.InfraScope)
+	}
+}

@@ -152,10 +152,17 @@ scoped server that died. What survives:
 - The server's own output, which goes to the managed `dolt.log` as for an
   unscoped server.
 
+On a host that keeps no per-user journal files, the user manager's records
+land only in the system journal, so reading them needs journal read access
+(membership in the `adm` or `systemd-journal` group). `journalctl -g` also
+needs a journalctl built with PCRE2; `--user-unit` does not.
+
 ## Resource attribution
 
-Scopes are created with systemd auto-generated names (`run-rNNNNNNNN.scope`),
-so `systemd-cgls --user` shows anonymous units under the slice rather than
+Agent pane scopes (`GC_AGENT_SLICE`) are created with systemd auto-generated
+names (`run-rNNNNNNNN.scope`); infra scopes are named `gascity-infra-<random>.scope`
+and carry a `gascity infra:` description. For agent pane scopes,
+`systemd-cgls --user` shows anonymous units under the slice rather than
 per-agent names. To attribute a scope to an agent session, list the
 processes inside it:
 

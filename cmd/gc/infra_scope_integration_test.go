@@ -34,15 +34,18 @@ const infraScopeIntegrationSlice = "gascity-test.slice"
 //
 // It runs the production spawn path (startManagedDoltSQLServer through
 // infraCommand, with the production wrapper and probe) from a session-stamped
-// environment. The "dolt" it spawns is a stand-in on PATH that execs a
-// long-running sleep, so no Dolt binary, city or store is involved. It skips
+// environment. The "dolt" it spawns is a stand-in on PATH that blocks while
+// keeping the spawned "sql-server --config <file>" argv, so gc's command-line
+// ownership check runs against it as well; no Dolt binary, city or store is
+// involved. It does not cover PID-namespace (bwrap --unshare-pid) seats or
+// the state-file write around the spawn. It skips
 // when no systemd user manager is reachable or when scoping would not be
 // applied to this caller (neither lingering nor under user@<uid>.service).
 //
 // Run it on a host with a user manager, keeping the test runner local and
 // passing the user bus through:
 //
-//	bazel test --config=integration --strategy=TestRunner=local \
+//	bazel test --config=ci --config=integration --strategy=TestRunner=local \
 //	  --test_env=XDG_RUNTIME_DIR --test_env=DBUS_SESSION_BUS_ADDRESS \
 //	  --test_filter=TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd \
 //	  //cmd/gc:gc_test
@@ -65,21 +68,30 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv(managedDoltTestModeEnv, "")
 	t.Setenv(managedDoltScopeWatchdogEnv, "0")
+	// The stand-in stays the post-exec process itself (it blocks in the
+	// shell's builtin read on a FIFO, so it forks nothing) and keeps the
+	// dolt-shaped argv gc spawned: "<script> sql-server --config <file>".
+	// That lets the command-line ownership check run against it too.
 	binDir := t.TempDir()
-	standIn := "#!/bin/sh\n[ \"$1\" = sql-server ] || exit 2\nexec sleep 300\n"
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "block.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	standIn := "#!/bin/sh\n[ \"$1\" = sql-server ] || exit 2\nexec 3<>'" + fifo + "'\nread -r _ <&3\n"
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(standIn), 0o755); err != nil {
 		t.Fatalf("write stand-in dolt: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	dir := t.TempDir()
 	logFile, err := os.Create(filepath.Join(dir, "dolt.log"))
 	if err != nil {
 		t.Fatalf("create log: %v", err)
 	}
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	started, err := startManagedDoltSQLServer("", filepath.Join(dir, "dolt-config.yaml"), logFile.Name(), logFile)
+	configFile := filepath.Join(dir, "dolt-config.yaml")
+	started, err := startManagedDoltSQLServer("", configFile, logFile.Name(), logFile)
 	if err != nil {
 		t.Fatalf("startManagedDoltSQLServer: %v", err)
 	}
@@ -93,10 +105,23 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 		t.Fatalf("recorded infra scope = %q, want a %s unit", started.InfraScope, infraUnitPattern)
 	}
 
-	// The recorded PID becomes the stand-in once systemd-run and the shell
-	// have exec'd: the same PID, no intermediate process left behind.
-	if !infraPollUntil(10*time.Second, func() bool { return procComm(started.PID) == "sleep" }) {
-		t.Fatalf("pid %d is %q, want the post-exec stand-in %q", started.PID, procComm(started.PID), "sleep")
+	// The recorded PID becomes the stand-in once systemd-run has exec'd: the
+	// same PID, no intermediate process left behind.
+	if !infraPollUntil(10*time.Second, func() bool { return procComm(started.PID) == "dolt" }) {
+		t.Fatalf("pid %d is %q, want the post-exec stand-in %q", started.PID, procComm(started.PID), "dolt")
+	}
+
+	// gc's command-line ownership check (used by the reuse and repair paths
+	// before they adopt or signal a recorded PID) accepts the post-exec
+	// process as this layout's managed server.
+	layout := managedDoltRuntimeLayout{DataDir: filepath.Join(dir, "data"), ConfigFile: configFile}
+	if !managedDoltProcessOwnedWithStateDir(started.PID, layout, layout.DataDir) {
+		args, _ := processArgs(started.PID)
+		t.Fatalf("ownership check rejected the scoped spawn (pid %d, args %q)", started.PID, args)
+	}
+	other := managedDoltRuntimeLayout{DataDir: layout.DataDir, ConfigFile: filepath.Join(dir, "other-config.yaml")}
+	if managedDoltProcessOwnedWithStateDir(started.PID, other, other.DataDir) {
+		t.Fatalf("ownership check accepted the scoped spawn for a different config file")
 	}
 
 	// systemd's own view: the scope's cgroup holds exactly the recorded PID.

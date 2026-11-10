@@ -1973,7 +1973,7 @@ func managedDoltInfraScopeHint(cityPath string) string {
 			continue
 		}
 		return fmt.Sprintf("the managed Dolt server (pid %d) was started in systemd user scope %s, which is removed once it exits; "+
-			"its journal records remain: journalctl --user-unit=%s (all such scopes: journalctl -g 'gascity infra:'), and its own output is in the managed dolt.log",
+			"its journal records remain: journalctl --user-unit=%s (all such scopes: journalctl -g 'gascity infra:'; without per-user journals this needs adm or systemd-journal group access), and its own output is in the managed dolt.log",
 			state.PID, unit, unit)
 	}
 	return ""
