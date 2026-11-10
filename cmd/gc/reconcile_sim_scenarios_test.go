@@ -184,6 +184,7 @@ func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 // the gate stays closed. Under live sessions (R35), unconfirmed, nothing
 // reads gone, however long it lasts.
 func TestSimR34R35ServerGone(t *testing.T) {
+	skipOnSimExecLeaf(t, "server whose death it confirms (runtime.ServerDeathConfirmer)")
 	for _, confirmed := range []bool{false, true} {
 		for _, coldBoot := range []bool{true, false} {
 			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
@@ -310,6 +311,7 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // time, and the runtime's death clears it in the same-pass restart's PreWake
 // CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
+	skipOnSimExecLeaf(t, "Full sleep capability, which the detached-at marker tracks")
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), gc1Work())
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
 	attach := func(on bool) {

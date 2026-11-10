@@ -114,6 +114,9 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		resolved.ACPOmittedArgs = nil
 		resolved.OptionsSchema = nil
 		resolved.EffectiveDefaults = nil
+		// The provider's program-status declaration describes the provider's
+		// program, not the operator's replacement command line.
+		resolved.ProgramStatus = ProgramStatusBinding{}
 	}
 
 	// Step 5: default prompt_mode.
@@ -325,6 +328,8 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.UpstreamEnv.AuthToken != "" {
 		result.UpstreamEnv.AuthToken = city.UpstreamEnv.AuthToken
 	}
+	// Program-status binding merges per sub-field (mergeProgramStatusBinding).
+	result.ProgramStatus = mergeProgramStatusBinding(base.ProgramStatus, city.ProgramStatus)
 
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
@@ -647,6 +652,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
 		UpstreamEnv:            spec.UpstreamEnv,
+		ProgramStatus:          spec.ProgramStatus.clone(),
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -947,6 +953,21 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 			out.Env[k] = v
 		}
 	}
+	// upstream_env is the harness's serving-env contract, and it is merged
+	// through the chain by MergeProviderOverBuiltin. Folding the resolved
+	// chain back onto the leaf has to carry it, or a provider written as
+	// `base = "builtin:claude"` loses the binding its base declares: the
+	// upstream axis then hard-errors with "declares no upstream_env.api_key
+	// binding" for a harness that does declare one. Per field, leaf wins.
+	if out.UpstreamEnv.BaseURL == "" {
+		out.UpstreamEnv.BaseURL = r.UpstreamEnv.BaseURL
+	}
+	if out.UpstreamEnv.APIKey == "" {
+		out.UpstreamEnv.APIKey = r.UpstreamEnv.APIKey
+	}
+	if out.UpstreamEnv.AuthToken == "" {
+		out.UpstreamEnv.AuthToken = r.UpstreamEnv.AuthToken
+	}
 	if r.PermissionModes != nil {
 		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
 		for k, v := range r.PermissionModes {
@@ -956,6 +977,8 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if r.OptionsSchema != nil {
 		out.OptionsSchema = deepCopyProviderOptions(r.OptionsSchema)
 	}
+	// The chain walk already merged every layer's binding, the leaf's included.
+	out.ProgramStatus = r.ProgramStatus.clone()
 	// EffectiveDefaults on ResolvedProvider is the normalized merged defaults;
 	// replace OptionDefaults on the folded spec so same-layer schema-managed
 	// args cannot be shadowed again by the original stale leaf map.

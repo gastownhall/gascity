@@ -21,9 +21,39 @@ var (
 	_ runtime.InteractionProvider = (*Provider)(nil)
 )
 
-// Pending delegates to the underlying Tmux instance.
+// Pending delegates to the underlying Tmux instance. With the
+// program-status switch at shadow, a pending read is recorded beside the
+// program's own record read fresh with the parsers' capture
+// (pendingWithRecord, shadowPending); the answer is the parsers' alone.
 func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
-	return p.tm.Pending(name)
+	if !p.tm.shadowing() {
+		return p.tm.Pending(name)
+	}
+	pending, reading, ok, err := p.pendingWithRecord(name)
+	if err == nil && ok {
+		p.shadowPending(name, pending, reading)
+	}
+	return pending, err
+}
+
+// shadowPending records a pending read (pending): the parsers' verdict beside
+// the record's fresh pending verdict (runtime.ProgramFreshPendingVerdict) on
+// r, the record read fresh with the parsers' capture, the reading a
+// kind-only pending interaction would come from. The reading is taken before
+// Pending returns, so an answer its caller gives the dialog cannot reach it.
+// It records on change only (the sink filters).
+func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction, r runtime.ProgramPendingReading) {
+	if r.Status.Mode != runtime.ProgramStatusShadow {
+		return
+	}
+	now := time.Now()
+	scrape := runtime.ProgramVerdictNone
+	if pending != nil {
+		scrape = runtime.ProgramVerdictPending
+	}
+	p.tm.shadowGo(func() {
+		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramFreshPendingVerdict(r, time.Time{}, now), r.Status, now, 0, false)
+	})
 }
 
 // Respond delegates to the underlying Tmux instance.
@@ -689,8 +719,11 @@ func (d *approvalDedup) clear(session string) {
 // ---------------------------------------------------------------------------
 
 // Pending checks the tmux pane for an active Claude Code approval prompt,
-// Codex approval overlay or AskUserQuestion dialog (Kind "question", which
-// offers no options: it is answered in the terminal).
+// Codex approval overlay or AskUserQuestion dialog (Kind "question"). A
+// question's Prompt is its question text, bounded, and its Options are the
+// labels Respond picks with action QuestionSelectAction: none on a page an
+// option's key does not answer (multi-select, option previews), which is
+// answered in the terminal, as free text and chat are.
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -722,7 +755,8 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    dialog.question.promptText(),
+			Prompt:    boundPromptText(dialog.question.Question),
+			Options:   dialog.question.answerChoices(),
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}
@@ -804,8 +838,8 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		return err
 	}
 	if q := dialog.question; q != nil {
-		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); it is answered in the terminal (gc session attach %s), not by a message",
-			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), name)
+		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); %s",
+			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), q.answerHint(name))
 	}
 	approval := dialog.approval
 	if approval == nil {
@@ -877,7 +911,7 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	if err != nil {
 		return paneDialog{}, err
 	}
-	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+	if q := parseQuestionDialog(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
 		return paneDialog{question: q}, nil
 	}
 	approval := parseApprovalPrompt(paneText)
@@ -973,11 +1007,11 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 		return preVerify(err)
 	}
 	// A question's numbered options are its own, not the fixed approval menu
-	// the keys below encode: refuse before any key, and before the "prompt
-	// already gone" path that would report the open dialog as answered.
+	// the keys below encode: it is answered by respondQuestion, before the
+	// "prompt already gone" path that would report the open dialog as
+	// answered.
 	if dialog.question != nil {
-		return fmt.Errorf("%w: session %q is showing a question dialog (%s); it is answered in the terminal (gc session attach %s)",
-			runtime.ErrInteractionActionUnavailable, name, dialog.question.promptText(), name)
+		return t.respondQuestion(ctx, name, target, dialog.question, response)
 	}
 	current := dialog.approval
 	if current == nil {
@@ -1037,6 +1071,67 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	}
 
 	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
+}
+
+// respondQuestion answers the question page q that target shows: action
+// QuestionSelectAction picks the option response.Text names
+// (questionOptionKey) with that option's number key, typed once, and the
+// answer is verified by the page leaving the pane (leftFor): the dialog's
+// next page, its review page, or none. A response naming another request is
+// refused with runtime.ErrInteractionGone, and one the page does not offer,
+// or any response to a page the key does not answer (TerminalOnly), with
+// runtime.ErrInteractionActionUnavailable, all before any key. Once the key
+// is typed, only a read proving the session or its pane gone
+// (paneProvenGone) counts as the page leaving; a read that fails otherwise,
+// or a page still showing at the deadline, is an error, since the key may
+// have changed the page.
+func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+	answered := q.requestID()
+	// An action no question takes is refused as such, whatever request it
+	// names.
+	if response.Action == QuestionSelectAction && response.RequestID != "" && response.RequestID != answered {
+		return fmt.Errorf("question changed: expected %s, got %s: %w", response.RequestID, answered, runtime.ErrInteractionGone)
+	}
+	key, err := questionOptionKey(q, response)
+	if err != nil {
+		return fmt.Errorf("session %q: %w", name, err)
+	}
+	t.cancelCopyModeIfParked(inputCtx(ctx), target)
+	// key is one digit from 1 to 9, typed as given (see respond).
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
+		case errors.Is(err, ErrNoServer):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
+		return fmt.Errorf("send-keys failed: %w", err)
+	}
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(respondVerifyInterval)
+		dialog, err := t.dialogInPane(target)
+		if err != nil {
+			if paneProvenGone(err) {
+				// The session ended, and the page with it.
+				return nil
+			}
+			return fmt.Errorf("verifying the answer to question page %s: option %s was typed once, and reading the pane failed: %w",
+				answered, key, err)
+		}
+		if q.leftFor(dialog.question) {
+			return nil
+		}
+	}
+	return fmt.Errorf("question page %s still showed %s after option %s was typed once (see it in the terminal: gc session attach %s)",
+		answered, respondVerifyTimeout, key, name)
+}
+
+// paneProvenGone reports whether err, from reading a pane, proves its session
+// or its agent pane gone: tmux answered without it. A tmux server that could
+// not be reached (ErrNoServer) proves nothing, as in Pending.
+func paneProvenGone(err error) bool {
+	return errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) || errors.Is(err, errAgentPaneGone)
 }
 
 // respondCleared reports whether the approval Respond answered has left

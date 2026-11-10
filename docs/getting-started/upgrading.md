@@ -9,8 +9,8 @@ databases that the new `bd` may need to migrate. This page walks through an
 upgrade of a running city, using a city at `~/my-city` with one rig,
 `my-project`, at `~/my-project`.
 
-Gas City 1.5 requires Beads (`bd`) 1.3.1; Gas City 1.5.1 and later are tested with 1.3.2. The Homebrew `gascity` formula
-depends on `beads`, so `brew upgrade gascity` upgrades both.
+The Homebrew `gascity` formula depends on `beads`, so `brew upgrade gascity`
+upgrades both to the latest release.
 
 ## Check what you are upgrading from
 
@@ -22,10 +22,10 @@ bd version
 What you need to do to the Beads databases depends on the `bd` your city has
 been running:
 
-| Coming from | `bd` it ran | Beads schema step |
-|---|---|---|
-| Gas City 1.4.2 | 1.3.0 | None. Beads 1.3.1 and 1.3.2 keep the 1.3.0 schema. |
-| Gas City 1.4.1 or earlier | 1.2.2 or older | Run `migrate schema` once for the city and once for each rig (see [Migrate the Beads schema](#migrate-the-beads-schema)). |
+| `bd` it ran | Beads schema step |
+|---|---|
+| 1.3.0 or newer | None. The current `bd` keeps the 1.3.0 schema. |
+| 1.2.2 or older | Run `migrate schema` once for the city and once for each rig (see [Migrate the Beads schema](#migrate-the-beads-schema)). |
 
 If you are not sure, run the migration step anyway. On a database that is
 already current it changes nothing and reports `Schema already at v66`.
@@ -55,7 +55,7 @@ tar -czf ~/my-project-beads-backup.tgz -C ~/my-project .beads   # repeat for eac
 
 | What | Why it matters |
 |---|---|
-| `~/my-city/.beads/dolt` | The Dolt data for the city **and every rig**. A city created before Gas City 1.5 runs one Dolt server whose data directory holds one database per scope. |
+| `~/my-city/.beads/dolt` | The Dolt data for the city **and every rig**. A city created by an older release runs one Dolt server whose data directory holds one database per scope. |
 | `~/my-city/.beads` | The city's Beads identity and connection settings. |
 | `~/my-city/.gc/site.toml` | Where each rig lives on this machine. |
 | `~/my-city/city.toml`, `pack.toml`, packs and lock files | Your city's configuration. |
@@ -73,26 +73,26 @@ previous `gc` and `bd`.
 ```bash
 brew update
 brew upgrade gascity        # also upgrades beads
-gc version                  # 1.5.0 or newer
-bd version                  # 1.3.2
+gc version                  # the latest release
+bd version
 ```
 
-With a direct download, install `bd` 1.3.2 from the
-[Beads release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2)
+With a direct download, install the latest `bd` from the
+[Beads releases](https://github.com/gastownhall/beads/releases)
 as well as the new `gc`. Upgrade every `bd` that reaches these databases,
 including copies elsewhere on your `PATH` (`which -a bd`). An older `bd` cannot
 open a migrated database.
 
 ## Migrate the Beads schema
 
-Skip this section if your city was already running `bd` 1.3.0.
+Skip this section if your city was already running `bd` 1.3.0 or newer.
 
 Beads 1.3 moves the database schema from v53 to v66. `bd` migrates a store it
 runs itself automatically, but a city's databases live on the Dolt server Gas
 City manages. `bd` treats that server as shared, because other clients may
 still be running an older `bd`, so it waits for you to ask by name. Until you
 do, `bd` refuses every write, and most reads fail too: `bd list`, `bd show`
-and `bd ready` stop with `table not found: leases`. Gas City 1.5 does not run
+and `bd ready` stop with `table not found: leases`. Gas City does not run
 this migration for you.
 
 The city and each rig have their own database, so migrate each one. Start the
@@ -159,13 +159,11 @@ Each run reports how many rows it corrected, or
 
 ## Optional: hand the city's Dolt process to Beads
 
-New cities created by Gas City 1.5 run a Dolt store that `bd` owns. An
+New cities run a Dolt store that `bd` owns. An
 upgraded city keeps its Gas City–managed Dolt server and keeps working on it.
 Moving it to the `bd`-owned topology is optional, is a separate step, and
 **cannot be reversed**, so take a fresh backup first and finish the schema
 migration above before you start. `gc beads city migrate-proxied` performs
 the move; the
-[Gas City 1.5.0 release notes](https://github.com/gastownhall/gascity/releases/tag/v1.5.0)
-and the
 [migration runbook](https://github.com/gastownhall/gascity/blob/main/engdocs/runbooks/beads-migrate-proxied.md)
-cover the procedure, what it refuses, and how to verify it.
+covers the procedure, what it refuses, and how to verify it.

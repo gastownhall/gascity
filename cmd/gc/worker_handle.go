@@ -323,19 +323,27 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
-	// Direct CLI creates use this resolver rather than resolveTemplate, so
-	// project the workspace environment here before handing the runtime to the
+	applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, cityPath, template, transport, resolved)
+	return factory.SessionForResolvedRuntime(sessionCfg)
+}
+
+// applyWorkerCreateRuntimeInputs layers the city-config-derived inputs onto a
+// direct CLI create's runtime: the session environment, the provider-overlay
+// staging hints, and the program-status capture arm. Direct creates build
+// runtime.Config here rather than through resolveTemplate.
+func applyWorkerCreateRuntimeInputs(sessionCfg *worker.ResolvedSessionConfig, cfg *config.City, cityPath, template, transport string, resolved *config.ResolvedProvider) {
+	// Project the workspace environment here before handing the runtime to the
 	// worker factory. In particular, workspace.env BD_BIN must follow the same
 	// schema-compatible executable as the controller and resumed sessions.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
+	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Stage provider-overlay hooks on the CLI create path the same way the
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
 	// (gc-6bw8o).
 	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
-	return factory.SessionForResolvedRuntime(sessionCfg)
 }
 
 func resolvedWorkerSessionConfigWithConfig(
@@ -430,9 +438,11 @@ func resolvedWorkerSessionConfigWithConfig(
 // resolvedWorkerSessionEnvWithConfig composes the environment for worker
 // create and resume paths. Workspace environment belongs between the ambient
 // provider process context and provider-authored values, matching the
-// canonical resolveTemplate layering. Identity and controller-only overlays
+// canonical resolveTemplate layering. The program-status env (empty unless
+// armed for transport) follows the provider env, as on the template launch
+// path (applyTemplateProgramStatus). Identity and controller-only overlays
 // remain authoritative at the end.
-func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider) map[string]string {
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, transport string) map[string]string {
 	if resolved == nil {
 		return nil
 	}
@@ -440,10 +450,12 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	if cfg != nil {
 		workspaceEnv = cfg.Workspace.Env
 	}
+	_, programStatusEnv := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
 		expandEnvMap(workspaceEnv),
 		expandEnvMap(resolved.Env),
+		expandEnvMap(programStatusEnv),
 		processenv.ControllerOnlyEnvOverlay(),
 	)
 	if strings.TrimSpace(cityPath) != "" {
@@ -476,6 +488,7 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
+	sessions := beads.SessionStore{Store: store}
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -485,10 +498,10 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+		if info, pr, err := session.ResolveSessionRecordByExactID(sessions, target); err == nil {
 			return factory.SessionByRecord(info, pr)
 		}
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return factory.SessionByID(id)
 		}
 		if sp != nil {
@@ -741,7 +754,8 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
+	programStatusArm, _ := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -771,6 +785,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 		SessionLive:            sessionLive,
+		ProgramStatus:          programStatusArm,
 	}.ToRuntimeConfig()
 	runtimeHints.WorkDir = workDir
 	runtimeHints.Env = sessionEnv
@@ -1017,17 +1032,30 @@ func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info se
 			}
 		}
 	}
-	for _, providerName := range []string{info.Provider, info.Template} {
-		providerName = strings.TrimSpace(providerName)
-		if providerName == "" {
-			continue
-		}
-		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
-		if err == nil {
-			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
-		}
+	if resolved := resolveProviderByName(cfg, info.Provider, info.Template); resolved != nil {
+		return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 	}
 	return nil, ""
+}
+
+// resolveProviderByName resolves the provider a session no agent template
+// resolves for runs, by name: the first of names (its stored provider, then
+// its template) that resolves against cfg's provider catalog, nil when none
+// does.
+func resolveProviderByName(cfg *config.City, names ...string) *config.ResolvedProvider {
+	if cfg == nil {
+		return nil
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if resolved, err := config.ResolveProvider(&config.Agent{Provider: name}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+			return resolved
+		}
+	}
+	return nil
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

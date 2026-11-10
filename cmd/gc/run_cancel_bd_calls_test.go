@@ -130,11 +130,11 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 	// run root last, each with its teardown tail spared.
 	cancelRoot := func(rootID string) int {
 		t.Helper()
-		exclude, err := molecule.TeardownTailExclusion(store, rootID)
+		exclude, err := molecule.TeardownTailExclusion(beadstest.GraphMolecule(store), rootID)
 		if err != nil {
 			t.Fatalf("TeardownTailExclusion(%s): %v", rootID, err)
 		}
-		n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, rootID, beadmeta.OutcomeCanceled,
+		n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(beadstest.GraphMolecule(store), rootID, beadmeta.OutcomeCanceled,
 			"run canceled via POST /runs/{id}/cancel",
 			map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, exclude)
 		if err != nil {
@@ -145,7 +145,7 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 	if err := store.SetMetadata(run.ID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
 		t.Fatalf("mark run canceling: %v", err)
 	}
-	tree, err := sourceworkflow.WorkflowTree(store, run.ID)
+	tree, err := sourceworkflow.WorkflowTree(beadstest.GraphMolecule(store), run.ID)
 	if err != nil {
 		t.Fatalf("WorkflowTree: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestRunCancelCloseOrderHonorsBlockersWhenBdRefusesTheBatch(t *testing.T) {
 	store := wrapWithCachingStore(context.Background(),
 		wrapStoreWithBeadPolicies(beads.NewBdStore("/fake-bd", runner), &config.City{}), nil, false)
 
-	if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, root.ID, beadmeta.OutcomeCanceled,
+	if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(beadstest.GraphMolecule(store), root.ID, beadmeta.OutcomeCanceled,
 		"run canceled via POST /runs/{id}/cancel", map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
 		t.Fatalf("CloseWorkflowSubtreeAsExcept: %v", err)
 	}

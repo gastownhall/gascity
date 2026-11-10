@@ -537,8 +537,13 @@ adopts it.
   provider`, with `message`) is an operator lane message op at the boundary
   under a minted key (`deliverInitialMessage`), refused 422 before anything
   is created when it is over the limit (`checkInitialMessage`); only a
-  failed proposal fails the create and rolls it back. An agent create's
-  message rides its first start's prompt
+  failed proposal fails the create and rolls it back. Without the lane, a
+  provider session that comes up waiting on a pending interaction keeps
+  the create: its initial message is queued as its first user turn
+  (`worker.MessageRequest.QueueBehindPending`), never refused into a
+  rollback. An extmsg notice to a session waiting on one is queued too
+  (`session.Manager.Send` queues behind it), never dropped. An agent
+  create's message rides its first start's prompt
   (`template_overrides.initial_message`) and is no lane op.
 - Wait withdrawal (`withdrawQueuedWaitNudges`): a wait whose nudge is a lane
   notice holds its op id as `nudge_id`; an op id (`opjournal.IsOpID`) is

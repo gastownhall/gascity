@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -136,7 +137,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	tmuxCfg.SocketName = socketName
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	manager := sessionpkg.NewManagerWithOptions(store, provider, sessionpkg.WithCityPath(root))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), provider, sessionpkg.WithCityPath(root))
 	city, err := sessionpkg.NewCityDir(root)
 	if err != nil {
 		return nil, err

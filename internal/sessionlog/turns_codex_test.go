@@ -151,8 +151,10 @@ func TestScanTurnsCodexLateEnds(t *testing.T) {
 // codex_error_info variant, the HTTP status a variant carries, and the
 // message. RateLimited reads the variant or the status, never the message: a
 // usage limit, or a 429 that spent Codex's own retries, is a rate limit; a 429
-// named only in the text is not. A late end for a turn a newer start closed
-// keeps its error too.
+// named only in the text is not. Only the usage limit is a spent quota
+// (Quota): Codex's own class for an allowance that comes back when the
+// account's period resets. A late end for a turn a newer start closed keeps
+// its error too.
 func TestScanTurnsCodexFailedTurnKeepsItsError(t *testing.T) {
 	clock := func(s string) string { return "2026-10-08T02:22:" + s + "Z" }
 	started := func(s, id string) string {
@@ -185,7 +187,7 @@ func TestScanTurnsCodexFailedTurnKeepsItsError(t *testing.T) {
 		ended("t4", "04.000", "04.500", TurnStatusFailed, TurnFailure{Message: "a bare error"}),
 		ended("t3", "03.000", "03.500", TurnStatusFailed, TurnFailure{Code: "http_connection_failed", Status: 503, Message: "stream disconnected"}),
 		ended("t2", "02.000", "02.500", TurnStatusFailed, TurnFailure{Code: "response_too_many_failed_attempts", Status: 429, RateLimited: true, Message: "exceeded retry limit, last status: 429 Too Many Requests"}),
-		ended("t1", "01.000", "01.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Message: "You've hit your usage limit."}),
+		ended("t1", "01.000", "01.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}),
 	}})
 	if !utf8.ValidString(got.Recent[1].Failure.Message) {
 		t.Errorf("message cut mid-rune: %q", got.Recent[1].Failure.Message)
@@ -203,7 +205,7 @@ func TestScanTurnsCodexFailedTurnKeepsItsError(t *testing.T) {
 		Open:    true,
 		Current: ScannedTurn{ID: "t2", StartedAt: turnTime(t, clock("02.000"))},
 		Recent: []ScannedTurn{
-			ended("t1", "01.000", "02.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Message: "You've hit your usage limit."}),
+			ended("t1", "01.000", "02.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}),
 		},
 	})
 }

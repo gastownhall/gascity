@@ -168,3 +168,65 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverABdSubprocessWorkLeg(t *test
 		t.Fatalf("bd ran %q, want the claim, then one settling read of the same leg %q", ran, want)
 	}
 }
+
+// TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim pins the split-city
+// path for a bead the work store holds whose status changed after the reader
+// served it (here it was closed). bd refuses the claim as not claimable; that is
+// the work store's answer about a row it holds, so the claim is lost there and
+// the binding is never probed or written.
+//
+// The binding holds an open, unassigned copy of the same id, the co-residence a
+// migrated city keeps (`gc storage migrate` copies and never deletes back). A
+// refusal that opened the escalation would find that copy resident and claim
+// it, so the copy is what makes a probe or a binding write observable.
+func TestClassRoutedClaimKeepsAWorkLegStatusRefusalAsALostClaim(t *testing.T) {
+	const id = "ga-closedrace"
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, id, map[string]string{"gc.routed_to": "worker"})
+
+	claimCmd := "update " + id + " --claim --json"
+	showCmd := "show --json " + id
+	replies := map[string]struct{ out, err string }{
+		claimCmd: {err: "exit status 1: Error updating " + id + ": issue not claimable: status closed\n" +
+			`{"error":"1 of 1 issues failed to update","failed":[{"id":"` + id + `","error":"updating issue: issue not claimable: status closed"}],"schema_version":1}`},
+		showCmd: {out: `[{"id":"` + id + `","title":"work","status":"closed","issue_type":"task","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`},
+	}
+	var ran []string
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := strings.Join(args, " ")
+			ran = append(ran, cmd)
+			reply, ok := replies[cmd]
+			if name != "bd" || !ok {
+				t.Errorf("unexpected command: %s %s", name, cmd)
+				return nil, fmt.Errorf("unexpected command: %s %s", name, cmd)
+			}
+			if reply.err != "" {
+				return []byte(reply.out), errors.New(reply.err)
+			}
+			return []byte(reply.out), nil
+		}
+	}
+
+	route := newClaimRouteFor(t, class)
+	ops := classRoutedHookClaimOps(hookClaimOps{Claim: hookClaimWithBdStore, ReadWorkMeta: hookReadClaimedBeadWithBdStore}, route)
+	_, ok, err := ops.Claim(context.Background(), t.TempDir(), nil, id, "worker-1")
+	if err != nil || ok {
+		t.Fatalf("claim of %s = (ok=%v err=%v), want a lost claim (ok=false, nil error)", id, ok, err)
+	}
+	if route.knownResident(id) {
+		t.Fatalf("the route probed the binding for %s: the refusal is the work store's answer about a row it holds, so it must not open the escalation", id)
+	}
+	twin, err := class.Get(id)
+	if err != nil {
+		t.Fatalf("binding Get(%s): %v", id, err)
+	}
+	if twin.Status != "open" || strings.TrimSpace(twin.Assignee) != "" {
+		t.Fatalf("the binding's copy of %s is status=%q assignee=%q, want open and unassigned: a work-leg refusal must not reach the binding", id, twin.Status, twin.Assignee)
+	}
+	if want := []string{claimCmd, showCmd}; !slices.Equal(ran, want) {
+		t.Fatalf("bd ran %q, want the claim and one read of the same leg %q", ran, want)
+	}
+}

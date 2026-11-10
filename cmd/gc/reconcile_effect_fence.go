@@ -49,9 +49,13 @@ func (t *tx) readFence(ctx context.Context) string {
 // L3 and L4 fresh on the leaf, L5 through work, each bounded; now stamps the
 // quiet window, passNow the idle proof's pass. L5 comes after L3 and L4:
 // cheapest first, and nearest the CAS, so a claim landing while they are
-// read is seen (v5.10a B).
+// read is seen (v5.10a B). An idle sleep's shadow sample (n.IdleShadow)
+// takes its first reading before every leg.
 func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, now, passNow time.Time, work func() *txWork) txFence {
 	f := txFence{Read: n.Legs & (legAttach | legPending | legWork)}
+	if n.IdleShadow && leaf != nil {
+		f.IdleShadow = runtime.BeginShadowIdleProof(leaf, name)
+	}
 	if n.Legs&legAttach != 0 {
 		f.Attach, f.AttachEscalate = attachLeg(ctx, leaf, name, n.Escalates, now)
 	}
@@ -152,8 +156,15 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 
 // provedIdle is legacy's idle probe (shouldBeginIdleDrainInfo) on leaf:
 // WaitForIdle succeeds, and the runtime reports no activity after the pass
-// began.
+// began. It is recorded as an idle proof (runtime.ShadowIdleProof).
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
+	return runtime.ShadowIdleProof(ctx, leaf, name, func(ctx context.Context) bool {
+		return legacyProvedIdle(ctx, leaf, name, passNow)
+	})
+}
+
+// legacyProvedIdle is provedIdle's proof.
+func legacyProvedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
 	wp, ok := leaf.(runtime.IdleWaitProvider)
 	if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeoutFor(leaf, name)) != nil {
 		return false

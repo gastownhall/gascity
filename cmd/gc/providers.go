@@ -92,16 +92,32 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
+	// Every city's leaf gets the shadow sink; the leaf hands it out only
+	// while its live switch is shadow (a reload publishes the switch to a
+	// leaf it keeps), so off and on record nothing. A short-lived process
+	// records only the sessions it decides for (programShadowDecideFor).
+	var comparisons runtime.ProgramStatusComparisonSink
+	var enabled, followUps func() bool
+	var work func() func()
+	if cityPath != "" {
+		comparisons = programShadowScoped(programStatusShadowSink(cityPath))
+		enabled, followUps, work = programShadowRecording, programShadowFollowUps, programShadowBeginWork
+	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
+		ComparisonSink:      comparisons,
+		ComparisonEnabled:   enabled,
+		ComparisonFollowUps: followUps,
+		ComparisonWork:      work,
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		DebounceMs:          sc.DebounceMsOrDefault(),
+		DisplayMs:           sc.DisplayMsOrDefault(),
+		SocketName:          socketName,
+		RuntimeDir:          runtimeDir,
+		ProgramStatus:       sc.ProgramStatusMode(),
 	}
 }
 
@@ -904,10 +920,13 @@ func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.St
 	case "fail":
 		return mail.NewFailFake()
 	default:
+		// The callers resolved each store for its class; the handles carry that
+		// class to beadmail.
+		msg, sess := beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore}
 		if cached {
-			return beadmail.NewCachedWithStores(msgStore, sessStore)
+			return beadmail.NewCachedWithStores(msg, sess)
 		}
-		return beadmail.NewWithStores(msgStore, sessStore)
+		return beadmail.NewWithStores(msg, sess)
 	}
 }
 
@@ -1375,7 +1394,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	remote, err := sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

@@ -22,14 +22,15 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
-// TestGcBdSplitRound4Refusals covers the #8333 allowlist round-2 review:
-// --graph is refused, a parent's inherited labels are judged, init --prefix
-// may not take a reserved namespace, and an external: endpoint is not a
-// cross-store edge.
+// TestGcBdSplitRound4Refusals covers the #8333 allowlist round-2 review: a
+// --graph plan gc cannot read is refused (bd_split_graph_judge_test.go covers
+// the node-by-node judgment of a readable plan), a parent's inherited labels
+// are judged, init --prefix may not take a reserved namespace, and an
+// external: endpoint is not a cross-store edge.
 func TestGcBdSplitRound4Refusals(t *testing.T) {
 	runGuardCases(t, []guardCase{
-		{"create --graph", []string{"create", "--graph", "plan.json"}, beads.Bead{}, bdReadNotFound, true, "--graph", false},
-		{"create --graph enterprise", []string{"create", "--graph", "plan.json"}, beads.Bead{}, bdReadNotFound, true, "--graph", true},
+		{"create --graph of an unreadable plan", []string{"create", "--graph", "plan.json"}, beads.Bead{}, bdReadNotFound, true, "--graph", false},
+		{"create --graph of an unreadable plan enterprise", []string{"create", "--graph", "plan.json"}, beads.Bead{}, bdReadNotFound, true, "--graph", true},
 		{"init --prefix in a reserved namespace", []string{"init", "--prefix", "gcg"}, beads.Bead{}, bdReadNotFound, true, "reserved namespace", false},
 		{"init --prefix with its dash", []string{"init", "--prefix", "gcg-"}, beads.Bead{}, bdReadNotFound, true, "reserved namespace", false},
 		{"init --prefix work", []string{"init", "--prefix", "demo"}, beads.Bead{}, bdReadNotFound, false, "", false},

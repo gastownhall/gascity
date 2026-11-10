@@ -117,6 +117,54 @@ type Fake struct {
 	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
 	// nil entry reads the script.
 	TurnHistoryErrors map[string][]error
+	// ProgramPanes are the agent-pane rows a FullFake's ProgramStatus judges
+	// with [JudgeProgramStatus], by session name; a running session without
+	// one reads Unread, as under the switch off. HealProgramCapture rewrites
+	// them. Use SetProgramPane and ProgramPane while other goroutines may
+	// read the fake.
+	ProgramPanes map[string]ProgramPaneRow
+	// ProgramCachedPanes model a state cache whose snapshot lags the pane:
+	// a FullFake's ProgramStatus judges a session's row here in place of
+	// its ProgramPanes row, while every fresh read (ProgramStatusShadowRead,
+	// ProgramStatusHoldRead) judges ProgramPanes. Absent, both agree.
+	ProgramCachedPanes map[string]ProgramPaneRow
+	// StartupNudgeHandbacks are the startup nudges a FullFake hands back
+	// once per session name ([StartupNudgeHandbackProvider]), as a leaf
+	// whose Start found its program blocked through the startup ladder.
+	// Use SetStartupNudgeHandback while other goroutines may read the fake.
+	StartupNudgeHandbacks map[string]string
+	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
+	ProgramStatusErrors map[string]error
+	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
+	// session name.
+	ProgramCaptureHealErrors map[string]error
+	// ProgramShadowSink is the comparison sink a FullFake hands out as a
+	// shadowing leaf ([ProgramStatusShadowProvider]); nil, as under a switch
+	// that is not shadow, records nothing.
+	ProgramShadowSink ProgramStatusComparisonSink
+	// programArms counts the captures HealProgramCapture armed, naming each
+	// one's nonce.
+	programArms int
+	// ScreenTurnRunning makes a FullFake's screen show a turn in progress by
+	// session name, as a pane whose busy indicator is drawn does: TurnRunning
+	// answers true and SnapshotIdle false. An absent entry shows no turn.
+	ScreenTurnRunning map[string]bool
+	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
+	// screen that cannot be captured does.
+	ScreenReadErrors map[string]error
+	// HeldOpen are the files a FullFake's HeldFiles names by session name,
+	// as the files a running session's process tree holds open.
+	HeldOpen map[string][]string
+	// HeldOpenErrors fail a FullFake's HeldFiles by session name, as a
+	// process tree that cannot be read does.
+	HeldOpenErrors map[string]error
+	// PaneActivity is the activity a FullFake's FreshActivity reads by
+	// session name, the session's own clock where it has moved past the
+	// Activity that GetLastActivity serves, as a pane that drew after the
+	// tmux fleet snapshot was taken has. An absent entry reads Activity.
+	PaneActivity map[string]time.Time
+	// PaneActivityErrors fail a FullFake's FreshActivity by session name.
+	PaneActivityErrors map[string]error
 }
 
 var (

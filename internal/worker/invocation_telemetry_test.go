@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -50,7 +51,7 @@ func newInvocationTelemetryHandle(t *testing.T) (*SessionHandle, *beads.MemStore
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -501,7 +502,7 @@ func newFamilyTelemetryHandle(t *testing.T, profile Profile, provider, command s
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -971,5 +972,22 @@ func TestMessageWithoutTranscriptEmitsNothing(t *testing.T) {
 	}
 	if got := bead.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != "" {
 		t.Fatalf("cursor metadata = %q, want empty", got)
+	}
+}
+
+// TestSweepIntervalWindowEndsAtUsageClose pins the closed interval's discovery
+// window: a session closed straight from a live state has no slept_at inside
+// the interval, so the window ends at usage_closed_at rather than at now.
+func TestSweepIntervalWindowEndsAtUsageClose(t *testing.T) {
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	now := start.Add(48 * time.Hour)
+	meta := map[string]string{"awake_started_at": start.Format(time.RFC3339)}
+	for k, v := range sessionpkg.UsageClosePatch(closedAt) {
+		meta[k] = v
+	}
+	notBefore, notAfter := sweepIntervalWindow(meta, now)
+	if !notBefore.Equal(start) || !notAfter.Equal(closedAt) {
+		t.Fatalf("window = [%s, %s], want [%s, %s]", notBefore, notAfter, start, closedAt)
 	}
 }

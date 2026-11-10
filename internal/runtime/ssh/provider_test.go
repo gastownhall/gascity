@@ -874,24 +874,30 @@ func TestProvider_PreStartTransportFailureOmitsCredentials(t *testing.T) {
 // rule above. Redacting means rendering rather than wrapping, which costs the
 // error chain — acceptable for a message nothing matches on, but cancellation
 // is matched on, and shellRunner.run returns it before reading any stderr, so
-// that branch has nothing to redact and keeps its %w.
+// that branch has nothing to redact: it fails with the start's own context
+// error, never the runtime.ErrRuntimeUnavailable the ssh call wraps around it,
+// which would defer the start instead of ending it.
 func TestProvider_PreStartCancellationStaysMatchable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
 		switch {
 		case isTmux("has-session")(argv):
 			return nil, 1, nil
 		case len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], "curl"):
-			return nil, -1, fmt.Errorf("ssh box: %w", context.DeadlineExceeded)
+			// Canceled mid-command, as shellRunner.run reports it.
+			cancel()
+			return nil, -1, fmt.Errorf("ssh box: %w", context.Canceled)
 		}
 		return nil, 0, nil
 	})}
-	err := providerWith(f).Start(context.Background(), "s", runtime.Config{
+	err := providerWith(f).Start(ctx, "s", runtime.Config{
 		Command:  "agent",
 		PreStart: []string{"curl https://x"},
 		Env:      map[string]string{"GC_RIG": "hauler"},
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("a canceled pre_start must stay matchable, got %v", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("a canceled pre_start must stay matchable as the cancellation, not runtime.ErrRuntimeUnavailable, got %v", err)
 	}
 }
 

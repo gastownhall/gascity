@@ -146,8 +146,8 @@ func TestResolveReconcilerModeTable(t *testing.T) {
 		{name: "unknown", cfg: v2DefaultCity(func(c *config.City) { c.Daemon.SessionReconciler = "v3" }), wantErr: "is not a known value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := resolveReconcilerMode(tc.cfg, envOf(tc.env))
-			mode, latchErr := latchReconcilerMode(tc.cfg, envOf(tc.env))
+			res, err := resolveReconcilerMode(tc.cfg, "", envOf(tc.env))
+			mode, latchErr := latchReconcilerMode(tc.cfg, "", envOf(tc.env))
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || latchErr == nil || mode != reconcilerLegacy {
 					t.Fatalf("resolve err = %v, latch = %v, %v; want an error containing %q", err, mode, latchErr, tc.wantErr)
@@ -176,19 +176,19 @@ func TestResolveReconcilerModeEachTrueGapFallsBack(t *testing.T) {
 	for _, tc := range v2RefusalCases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := v2DefaultCity(tc.cfg)
-			res, err := resolveReconcilerMode(cfg, noEnv)
+			res, err := resolveReconcilerMode(cfg, "", noEnv)
 			if err != nil || res.Mode != reconcilerLegacy || res.Reason != reconcilerFallbackLegacy {
 				t.Fatalf("resolve(unset, %s) = %+v, %v; want the legacy fallback", tc.name, res, err)
 			}
 			if len(res.Fallbacks) != 1 || !strings.Contains(res.Fallbacks[0], tc.config) || !strings.Contains(res.Fallbacks[0], tc.pr) {
 				t.Fatalf("fallbacks = %q, want one naming %q and %s", res.Fallbacks, tc.config, tc.pr)
 			}
-			boot := reconcilerBootWarnings(cfg, res)
+			boot := reconcilerBootWarnings(cfg, nil, res)
 			if len(boot) != 1 || !strings.Contains(boot[0], "legacy (default fallback: ") || !strings.Contains(boot[0], tc.config) || !strings.Contains(boot[0], `set session_reconciler = "legacy"`) {
 				t.Errorf("boot warnings = %q, want the fallback naming %q and the fix", boot, tc.config)
 			}
 			cfg.Daemon.SessionReconciler = "v2"
-			if _, err := latchReconcilerMode(cfg, noEnv); err == nil || !strings.Contains(err.Error(), tc.config) {
+			if _, err := latchReconcilerMode(cfg, "", noEnv); err == nil || !strings.Contains(err.Error(), tc.config) {
 				t.Errorf("latch(explicit v2, %s) err = %v, want the hard refusal naming %q", tc.name, err, tc.config)
 			}
 		})
@@ -201,7 +201,7 @@ func TestResolveReconcilerModeEachTrueGapFallsBack(t *testing.T) {
 func TestControllerWiringLogsTheResolution(t *testing.T) {
 	var stderr bytes.Buffer
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", DependsOn: []string{"db"}}}}
-	w, err := newControllerWiring(cfg, noEnv, &stderr)
+	w, err := newControllerWiring(cfg, "", noEnv, &stderr)
 	if err != nil || w.mode != reconcilerLegacy || w.v2 != nil {
 		t.Fatalf("wiring(unset, depends_on) = %+v, %v; want legacy", w, err)
 	}
@@ -210,7 +210,7 @@ func TestControllerWiringLogsTheResolution(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if w, err = newControllerWiring(&config.City{}, noEnv, &stderr); err != nil || w.mode != reconcilerLegacy {
+	if w, err = newControllerWiring(&config.City{}, "", noEnv, &stderr); err != nil || w.mode != reconcilerLegacy {
 		t.Fatalf("wiring(empty config) = %+v, %v; want the legacy fallback", w, err)
 	}
 	if got := stderr.String(); strings.Count(got, "warning: session reconciler: legacy (default fallback: ") != 1 {
@@ -219,7 +219,7 @@ func TestControllerWiringLogsTheResolution(t *testing.T) {
 
 	stderr.Reset()
 	cfg = v2DefaultCity(func(c *config.City) { c.Session.ProgressStallTimeout = "30m" })
-	w, err = newControllerWiring(cfg, noEnv, &stderr)
+	w, err = newControllerWiring(cfg, "", noEnv, &stderr)
 	if err != nil || w.mode != reconcilerV2 || w.v2 == nil {
 		t.Fatalf("wiring(unset, clean) = %+v, %v; want v2", w, err)
 	}
@@ -422,7 +422,7 @@ func TestBuildDoctorChecksResolvesTheReconcilerUnderTheProcessEnv(t *testing.T) 
 func TestDefaultV2CityPassesC07OnTheRoutesItOpens(t *testing.T) {
 	root := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(root, "store"))
-	if res, err := resolveReconcilerMode(cfg, noEnv); err != nil || res.Mode != reconcilerV2 || res.Reason != reconcilerDefaultV2 {
+	if res, err := resolveReconcilerMode(cfg, "", noEnv); err != nil || res.Mode != reconcilerV2 || res.Reason != reconcilerDefaultV2 {
 		t.Fatalf("resolveReconcilerMode = %+v, %v; want the v2 default", res, err)
 	}
 	plan, err := resolveCityStoragePlan(root, cfg)
