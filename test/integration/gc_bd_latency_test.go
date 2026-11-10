@@ -277,6 +277,15 @@ func newGCBdLatencyFixture(t *testing.T, env []string, root string) (string, str
 	t.Helper()
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(root, cityName)
+	rigDir := filepath.Join(root, "latency-rig-alpha")
+	// Registered first, so it runs last: after the city and supervisor stops and
+	// both Dolt kills, and before the caller's TempDir removal. Any bd client or
+	// proxy the fixture owns must be gone, or removal races a live writer.
+	t.Cleanup(func() {
+		if survivors := stopIntegrationOwnedProcesses(cityDir, rigDir); len(survivors) > 0 {
+			t.Errorf("fixture-owned processes survived teardown: %s", strings.Join(survivors, "; "))
+		}
+	})
 	registerIntegrationDoltSQLServerCleanup(t, cityDir)
 	configPath := filepath.Join(root, "latency.toml")
 	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n", cityName)
@@ -291,7 +300,6 @@ func newGCBdLatencyFixture(t *testing.T, env []string, root string) (string, str
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
-	rigDir := filepath.Join(root, "latency-rig-alpha")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}

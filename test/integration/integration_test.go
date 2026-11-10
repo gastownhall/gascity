@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -745,6 +746,72 @@ func cleanupIntegrationDoltSQLServersUnderRoot(root string) {
 		return
 	}
 	terminateIntegrationPIDs(integrationDoltSQLServerKillSet(procs, root))
+}
+
+// stopIntegrationOwnedProcesses terminates every process still running inside
+// one of roots (by working directory or command line) and waits for each to be
+// reaped, so a fixture removes its directories only after its clients are gone.
+// A bd client the supervisor started for a canceled order escapes the
+// supervisor's parent-death signal, and its db-proxy-child can rewrite
+// .beads/dolt after Dolt stopped. It returns a description of every process
+// that survived, so a failed stop is reported instead of racing RemoveAll.
+func stopIntegrationOwnedProcesses(roots ...string) []string {
+	const passes = 3 // a killed client can race one last spawn; the set shrinks to empty
+	for range passes {
+		procs := readProcessSnapshot()
+		killSet := integrationOwnedProcessKillSet(procs, integrationProcessCwd, os.Getpid(), roots...)
+		if len(killSet) == 0 {
+			return nil
+		}
+		terminateIntegrationPIDs(killSet)
+	}
+	var survivors []string
+	procs := readProcessSnapshot()
+	for pid := range integrationOwnedProcessKillSet(procs, integrationProcessCwd, os.Getpid(), roots...) {
+		survivors = append(survivors, fmt.Sprintf("pid=%d ppid=%d cmd=%s", pid, procs[pid].ppid, procs[pid].cmd))
+	}
+	slices.Sort(survivors)
+	return survivors
+}
+
+// integrationOwnedProcessKillSet selects the processes that belong to roots: a
+// working directory within a root or a command line naming a path inside one.
+// A root matches only at a path-separator boundary, so a sibling city whose
+// name merely starts with an owned root's name is never selected; self is never
+// selected either.
+func integrationOwnedProcessKillSet(procs map[int]procSnapshot, cwdOf func(pid int) string, self int, roots ...string) map[int]bool {
+	killSet := make(map[int]bool)
+	for pid, info := range procs {
+		if pid == self {
+			continue
+		}
+		cwd := cwdOf(pid)
+		for _, root := range roots {
+			if pathWithinIntegrationRoot(root, cwd) || integrationCommandNamesPathUnder(info.cmd, root) {
+				killSet[pid] = true
+				break
+			}
+		}
+	}
+	return killSet
+}
+
+func integrationCommandNamesPathUnder(cmd, root string) bool {
+	cleanRoot := filepath.Clean(root)
+	if root == "" || cleanRoot == "." || cleanRoot == string(os.PathSeparator) {
+		return false
+	}
+	return strings.Contains(cmd, cleanRoot+string(os.PathSeparator))
+}
+
+// integrationProcessCwd returns pid's working directory, or "" where the
+// platform cannot report it (no /proc) or the process is gone.
+func integrationProcessCwd(pid int) string {
+	cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func integrationDoltSQLServerKillSet(procs map[int]procSnapshot, root string) map[int]bool {
