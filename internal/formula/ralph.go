@@ -418,19 +418,12 @@ func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
 			continue
 		}
 		if step.Ralph != nil && step.Ralph.MaxAttemptsVar != "" {
-			name := step.Ralph.MaxAttemptsVar
-			raw, ok := vars[name]
-			if !ok {
-				return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, name)
+			if _, ok := vars[step.Ralph.MaxAttemptsVar]; !ok {
+				return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, step.Ralph.MaxAttemptsVar)
 			}
-			n, err := strconv.Atoi(strings.TrimSpace(raw))
-			if err != nil || n < 1 {
-				return fmt.Errorf("step %q: check max_attempts var %q = %q, want an integer >= 1", step.ID, name, raw)
+			if err := resolveCheckMaxAttemptsVar(step, vars); err != nil {
+				return err
 			}
-			spec := cloneRalphSpec(step.Ralph)
-			spec.MaxAttempts = n
-			spec.MaxAttemptsVar = ""
-			step.Ralph = spec
 		}
 		if err := ResolveCheckMaxAttemptsVars(step.Children, vars); err != nil {
 			return err
@@ -441,5 +434,28 @@ func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
 			}
 		}
 	}
+	return nil
+}
+
+// resolveCheckMaxAttemptsVar replaces step's check max_attempts placeholder
+// with the integer value its var has in vars. A step without a placeholder, or
+// whose var vars has no value for, is left as it is.
+func resolveCheckMaxAttemptsVar(step *Step, vars map[string]string) error {
+	if step.Ralph == nil || step.Ralph.MaxAttemptsVar == "" {
+		return nil
+	}
+	name := step.Ralph.MaxAttemptsVar
+	raw, ok := vars[name]
+	if !ok {
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 1 {
+		return fmt.Errorf("step %q: check max_attempts var %q = %q, want an integer >= 1", step.ID, name, raw)
+	}
+	spec := cloneRalphSpec(step.Ralph)
+	spec.MaxAttempts = n
+	spec.MaxAttemptsVar = ""
+	step.Ralph = spec
 	return nil
 }

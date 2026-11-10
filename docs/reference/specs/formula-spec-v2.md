@@ -752,8 +752,10 @@ timeout = "2m"
 `"{{name}}"` placeholder (`max_attempts = "{{attempts}}"`). The compiler
 substitutes the var's value (the caller's `--var`, else the declared default)
 before materialization, so the control bead and spec sidecar carry a literal
-count. The value must be an integer ≥ 1; a missing, non-integer, or smaller
-value fails compilation. Any other string is a parse error.
+count. In an expansion template the var resolves against the expansion's vars
+(its defaults and the rule's or step's overrides) before the invoking
+formula's. The value must be an integer ≥ 1; a missing, non-integer, or
+smaller value fails compilation. Any other string is a parse error.
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration

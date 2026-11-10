@@ -413,6 +413,12 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 			expanded.Ralph.Check.Path = substituteVars(substituteTargetPlaceholders(expanded.Ralph.Check.Path, target), vars)
 			expanded.Ralph.Check.Timeout = substituteVars(substituteTargetPlaceholders(expanded.Ralph.Check.Timeout, target), vars)
 		}
+		// A "{{var}}" check max_attempts names a var of the formula that
+		// defines the step, so a template's resolves against the expansion's
+		// vars; a var they have no value for is left to the compile-wide pass.
+		if err := resolveCheckMaxAttemptsVar(expanded, vars); err != nil {
+			return nil, err
+		}
 
 		// Handle children recursively with depth tracking
 		if len(expanded.Children) > 0 {
