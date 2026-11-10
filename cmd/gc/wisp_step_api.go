@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The step reminder through the controller (GET /work/active-step).
@@ -83,19 +84,46 @@ func (cs *controllerState) activeWorkStep(ctx context.Context, assignees []strin
 	if work == nil {
 		return nil, fmt.Errorf("%w: %q", api.ErrActiveWorkStepScopeNotHeld, scopeRoot)
 	}
-	graph := resolveGraphStore(routes, work, cfg, cityPath, nil)
-	// The one-listing question is decided on the stores, before any is bound:
-	// a binding is a clone, and a clone is never the same handle as another.
-	oneStore := sameStoreHandle(work, graph)
-	workReader, err := activeWorkStepReader(ctx, cityPath, cfg, work)
+	// The molecule readers are the Molecule{Active} plan over the frame the
+	// hook's own resolution reads (scopeStores: the graph placement over
+	// work, then work itself when it is another store), Near the raw scope
+	// store rather than a work handle, so the work reads stay as they are.
+	plan, err := scopeStores(cityPath, routes, work).Plan(storeref.Molecule{Kind: storeref.MoleculeActive, Scope: storeref.WorkRef, Near: work, NearRef: stepWorkStoreRef})
+	if err != nil {
+		return nil, fmt.Errorf("planning the step reminder's molecule readers: %w", err)
+	}
+	// The one-listing question is decided on the plan, before any leg is
+	// bound: a binding is a clone, and a clone is never the same handle as
+	// another.
+	oneStore := len(plan.Legs) == 1
+	// Each store is bound to ctx when it runs subprocesses (scopedStoreLike),
+	// so a request the hook gave up on stops its bd children.
+	var bindErr error
+	bound, err := storeref.BindLegs(plan, func(store beads.Store) (beads.Store, error) {
+		scoped, err := scopedStoreLike(ctx, cityPath, cfg, store)
+		if err != nil {
+			bindErr = fmt.Errorf("binding the store to the request: %w", err)
+			return nil, bindErr
+		}
+		if scoped != nil {
+			return scoped, nil
+		}
+		return store, nil
+	})
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	if err != nil {
 		return nil, err
 	}
-	graphReader, err := activeWorkStepReader(ctx, cityPath, cfg, graph)
-	if err != nil {
-		return nil, err
-	}
-	r := stepResolution{work: workReader, graph: graphReader, logf: func(string, ...any) {}}
+	// Each leg is read live through its clone: the molecule listing through
+	// the leg, every other read through its strict reader, which is the
+	// work and graph readers' too (the graph leg leads; a one-leg plan is one
+	// store for both).
+	r := stepResolution{logf: func(string, ...any) {}}
+	storeref.EachTypedLeg(bound, func(leg storeref.TypedLeg) { r.molecules = append(r.molecules, stepMoleculeLegOf(leg, true)) })
+	r.graph = r.molecules[0].strict
+	r.work = r.molecules[len(r.molecules)-1].strict
 	return r.activeStep(oneStore, assignees)
 }
 
@@ -120,20 +148,6 @@ func activeWorkStepScopeStore(cfg *config.City, cityPath string, cityStore beads
 		}
 	}
 	return nil
-}
-
-// activeWorkStepReader is store's live read handle, bound to ctx when the
-// store runs subprocesses (scopedStoreLike), so a request the hook gave up on
-// stops its bd children.
-func activeWorkStepReader(ctx context.Context, cityPath string, cfg *config.City, store beads.Store) (activeStepReader, error) {
-	scoped, err := scopedStoreLike(ctx, cityPath, cfg, store)
-	if err != nil {
-		return nil, fmt.Errorf("binding the store to the request: %w", err)
-	}
-	if scoped != nil {
-		store = scoped
-	}
-	return beads.HandlesFor(store).Live, nil
 }
 
 // activeWorkStepAPITimeout bounds how long a hook waits for the controller's

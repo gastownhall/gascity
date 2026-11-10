@@ -242,7 +242,10 @@ func TestRelicIDCollisionInferredCloseAutoclosesTheRelic(t *testing.T) {
 			if len(stores) != 2 || stores[0] != work || stores[1] != f.binding {
 				t.Fatalf("event stores for colliding id %s = %d store(s), want the work store, then the binding", f.stepID, len(stores))
 			}
-			owner, live, err := liveCloseOwner(stores, f.stepID, f.binding)
+			f.cs.mu.RLock()
+			route := f.cs.beadEventRouteLocked(f.stepID)
+			f.cs.mu.RUnlock()
+			owner, live, err := liveCloseOwner(f.cs.Stores(), route, stores, f.stepID, f.binding)
 			if err != nil || owner != f.binding || live.Status != "closed" {
 				t.Fatalf("close owner for %s = (%T, %q, %v), want the binding's closed row", f.stepID, owner, live.Status, err)
 			}

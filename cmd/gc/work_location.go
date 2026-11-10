@@ -348,3 +348,26 @@ func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
 		return b, nil
 	}
 }
+
+// wispGCRoots is the pass's readers over l, the census (wispGCLegs): the
+// legs with a store that is not graph, in plan order, by ref, as the work
+// arm and the holder walk select them. A leg set that cannot be read reads
+// the graph placement alone, and answers no work leg.
+func (l WorkLegs) wispGCRoots(stores storeref.Stores, graph beads.StoreReader) wispGCRoots {
+	if err := l.unusable(); err != nil {
+		roots := wispGCGraphRoots(stores, graph)
+		roots.planErr = err
+		return roots
+	}
+	var refs []storeref.StoreRef
+	census := map[string]beads.StoreReader{}
+	for _, leg := range l.plan.Legs { // residency:allow — the census plan's own legs, in eachLeg's order; refs and stores only
+		if leg.Leg.Store == nil || beads.SameStore(leg.Leg.Store, graph) { // residency:allow — the same leg's store
+			continue
+		}
+		ref := string(leg.Leg.Ref)
+		refs = append(refs, leg.Leg.Ref)
+		census[ref] = leg.Leg.Store // residency:allow — the same leg's store
+	}
+	return planWispGCRoots(stores, graph, refs, census)
+}

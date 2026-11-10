@@ -300,6 +300,7 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		}
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
+		route := cs.beadEventRouteLocked(id)
 		probe := cs.beadEventRelicProbeLocked(id)
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
@@ -321,7 +322,7 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveCloseOwner(stores, id, relic)
+		store, live, err := liveCloseOwner(cs.Stores(), route, stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)

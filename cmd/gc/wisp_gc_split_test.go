@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The wisp GC on a split city (R7 and the work-class molecule roots).
@@ -375,6 +376,10 @@ func (unreadableLegs) each(func(beads.Store))            {}
 func (unreadableLegs) unusable() error                   { return errNoWorkStore }
 func (unreadableLegs) suspendedRigs() []string           { return nil }
 func (unreadableLegs) eachLeg(func(string, beads.Store)) {}
+func (unreadableLegs) wispGCRoots(storeref.Stores, beads.StoreReader) wispGCRoots {
+	return wispGCRoots{planErr: errNoWorkStore}
+}
+
 func (unreadableLegs) storeForRef(string) (beads.Store, bool, bool) {
 	return nil, false, false
 }
@@ -477,8 +482,8 @@ func newTestGC() *testGC {
 }
 
 func (g *testGC) pass(legs wispGCLegs, graph beads.Store, now time.Time) error {
-	_, err := g.wg.runGC(legs, beads.GraphStore{Store: graph}, beads.SessionStore{}, beads.MailStore{}, now)
-	_, werr := g.work.pass(context.Background(), legs, graph, time.Hour, now)
+	_, err := g.wg.runGC(testWispGCRoots(graph, legs), legs, beads.GraphStore{Store: graph}, beads.SessionStore{}, beads.MailStore{}, now)
+	_, werr := g.work.pass(context.Background(), testWispGCRoots(graph, legs), legs, graph, time.Hour, now)
 	return errors.Join(err, werr)
 }
 
@@ -495,7 +500,7 @@ func withWorkArmBudget(t *testing.T, n int, fn func()) {
 // for THIS city's ref, as storeForRef does on a split city.
 func TestSingleStoreSourceRefResolution(t *testing.T) {
 	graph := beads.NewMemStore()
-	h := wispGCHolders{graph: graph, cityName: "home"}
+	h := wispGCHolders{graph: graph, roots: testWispGCRoots(graph, nil), cityName: "home"}
 	for ref, want := range map[string]bool{
 		"city:home":   true,
 		"city:other":  false,

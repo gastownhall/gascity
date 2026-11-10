@@ -285,7 +285,7 @@ func TestConvoyAutocloseAcrossStoresFailsClosedOnAnUnreadableStore(t *testing.T)
 	}
 	t.Run("binding list fails", func(t *testing.T) {
 		work, binding, convoy, workChild, _ := newFixture(t)
-		run := doConvoyAutocloseWith(work, convoyAutocloseHomes{children: &listErrStore{Store: binding, err: down}}, events.Discard, workChild.ID, io.Discard, io.Discard)
+		run := doConvoyAutocloseWith(work, testStores(work, nil), convoyAutocloseHomes{children: &listErrStore{Store: binding, err: down}}, events.Discard, workChild.ID, io.Discard, io.Discard)
 		if run.finished() {
 			t.Error("run finished although the binding's children could not be listed")
 		}
@@ -295,9 +295,9 @@ func TestConvoyAutocloseAcrossStoresFailsClosedOnAnUnreadableStore(t *testing.T)
 	})
 	t.Run("work parent read fails", func(t *testing.T) {
 		work, binding, convoy, _, graphChild := newFixture(t)
+		// The parent's work home is the city work store, which cannot be read.
 		unreadable := &getErrStore{Store: work, err: down}
-		homes := convoyAutocloseHomes{parent: func(string) beads.Store { return unreadable }}
-		run := doConvoyAutocloseWith(binding, homes, events.Discard, graphChild.ID, io.Discard, io.Discard)
+		run := doConvoyAutocloseWith(binding, testStores(unreadable, binding), convoyAutocloseHomes{}, events.Discard, graphChild.ID, io.Discard, io.Discard)
 		if run.finished() {
 			t.Error("run finished although the parent could not be read")
 		}
@@ -343,8 +343,9 @@ func TestConvoyAutocloseReadsABindingRowsParentFromItsOwnStoreFirst(t *testing.T
 			if err := binding.Close(child.ID); err != nil {
 				t.Fatal(err)
 			}
-			homes := convoyAutocloseHomes{parent: func(string) beads.Store { return work }}
-			doConvoyAutocloseWith(binding, homes, events.Discard, child.ID, io.Discard, io.Discard)
+			// The parent's work home is the city work store, which holds the
+			// unrelated convoy reusing the id.
+			doConvoyAutocloseWith(binding, testStores(work, binding), convoyAutocloseHomes{}, events.Discard, child.ID, io.Discard, io.Discard)
 			if got, _ := work.Get("gc-7"); got.Status == "closed" {
 				t.Fatalf("closing %s autoclosed an unrelated work convoy that reuses its parent's id", child.ID)
 			}

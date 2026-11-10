@@ -75,8 +75,6 @@ var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
 	"storage_maintenance.go migrationSourceLaneRefusal switch":              {Count: 1, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
 	"storage_preflight_split.go splitClearLaneFor eq":                       {Count: 4, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
 	"storage_preflight_split.go splitPreflightEstimate eq":                  {Count: 1, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
-	"wisp_autoclose.go collectInputConvoyWorkflowRoots eq":                  {Count: 1, Reason: "the raw graph store != the raw work store (the two-store convoy probe); T7g (RoutedWork over a rig-less frame)"},
-	"wisp_step_inject.go sameStoreHandle eq":                                {Count: 1, Reason: "the step reminder's one-store test over raw stores; T7g (MoleculeActive)"},
 	"work_location.go WorkLegs.isWork eq":                                   {Count: 1, Reason: "the raw unwraps of a store and the work leg; T9"},
 }
 
