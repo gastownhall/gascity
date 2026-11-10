@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -444,22 +446,71 @@ func cmdGCTestActiveRoots(currentRoot string) []string {
 	return cleaned
 }
 
+// isStaleCmdGCTestConfigPath reports whether the dolt sql-server pid, whose
+// --config is configPath, is residue of an ended cmd/gc test run. pid is the
+// server as this process sees it. Paths are judged where the server sees them
+// and a PID from another PID namespace is never trusted: a Bazel linux-sandbox
+// test runs in a private /tmp and PID namespace that an unsandboxed sweeper
+// cannot see into except through /proc/<pid> (ga-dhgw89).
 func isStaleCmdGCTestConfigPath(pid int, configPath string, activeRoots []string, tempParent string) bool {
 	return isStaleCmdGCTestConfigPathWithPIDCheck(pid, configPath, activeRoots, tempParent, pidAlive)
 }
 
-func isStaleCmdGCTestConfigPathWithPIDCheck(_ int, configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
+func isStaleCmdGCTestConfigPathWithPIDCheck(pid int, configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
 	if configPath == "" || tempParent == "" {
 		return false
 	}
 	if configUnderActiveTestRoot(configPath, activeRoots) {
 		return false
 	}
-	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
+	root, ownerPID, ok := cmdGCTestConfigOwnerRoot(configPath, tempParent)
 	if !ok {
-		return isAbandonedGoTempDirConfigPath(configPath, tempParent)
+		return isAbandonedGoTempDirConfigPath(pid, configPath, tempParent)
 	}
-	return !pidAliveFn(ownerPID)
+	return cmdGCTestRootOwnerGone(pid, root, ownerPID, pidAliveFn)
+}
+
+// cmdGCTestRootOwnerGone judges a gct<N>-/gcx<N>- root where the server sees
+// it. The root's owner holds its alive sentinel for the owner's whole
+// lifetime, in whatever namespace it runs: held means alive, free means gone.
+// Only a root with no sentinel falls back to the owner PID, and only when the
+// server shares this process's PID namespace: N names a process in the
+// owner's namespace, so it says nothing here otherwise.
+func cmdGCTestRootOwnerGone(pid int, root string, ownerPID int, pidAliveFn func(int) bool) bool {
+	view, ok := processRootView(pid)
+	if !ok {
+		return false
+	}
+	exists, held := aliveSentinelHeldWithTimeout(filepath.Join(view, root))
+	switch {
+	case held:
+		return false
+	case exists:
+		return pathObservable(view)
+	default:
+		return samePIDNamespaceAsSelf(pid) && pathObservable(view) && !pidAliveFn(ownerPID)
+	}
+}
+
+// aliveSentinelHeldWithTimeout is aliveSentinelHeld bounded like
+// statWithTimeout: the root comes from an arbitrary process's argv and may sit
+// on a hung NFS/FUSE mount. A timeout reports the sentinel held, so a stuck
+// mount protects the server instead of wedging the startup sweep.
+func aliveSentinelHeldWithTimeout(dir string) (exists, held bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	type result struct{ exists, held bool }
+	ch := make(chan result, 1)
+	go func() {
+		exists, held := aliveSentinelHeld(dir)
+		ch <- result{exists, held}
+	}()
+	select {
+	case r := <-ch:
+		return r.exists, r.held
+	case <-ctx.Done():
+		return true, true
+	}
 }
 
 // isAbandonedGoTempDirConfigPath classifies configs under a Go t.TempDir()
@@ -469,28 +520,97 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(_ int, configPath string, activeRoot
 // run (timeout or panic), or an external temp wipe (harness/CI/
 // systemd-tmpfiles) after a SIGKILL that TestMain cannot trap. The missing
 // config file is the stale signal — a concurrent live run keeps its config
-// on disk until its servers stop.
-func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
+// on disk until its servers stop. It is judged where the server sees it
+// (pathGoneInOwnMountNamespace).
+func isAbandonedGoTempDirConfigPath(pid int, configPath, tempParent string) bool {
 	if _, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{"Test"}); !ok {
 		return false
 	}
-	// Bounded like statConfigPathState: configPath comes from an arbitrary
-	// host process's argv and may sit on a hung NFS/FUSE mount. A timeout
-	// returns ctx.Err() rather than ErrNotExist, so a stuck mount degrades
-	// to "not stale" (protect) instead of wedging the startup sweep.
-	_, err := statWithTimeout(configPath)
-	return errors.Is(err, os.ErrNotExist)
+	return pathGoneInOwnMountNamespace(pid, configPath)
 }
 
-func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
+// pathGoneInOwnMountNamespace reports whether the absolute path is missing
+// where pid sees it. A Bazel linux-sandbox action mounts a private
+// _hermetic_tmp over /tmp, so a live sandboxed run's paths are absent from
+// every unsandboxed process's /tmp (ga-dhgw89). Every stat is bounded: the
+// path comes from an arbitrary process's argv and may sit on a hung NFS/FUSE
+// mount, and a timeout reads as present. A path that cannot be observed —
+// relative, pid gone, or its view unreadable — is never reported gone.
+func pathGoneInOwnMountNamespace(pid int, path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	view, ok := processRootView(pid)
+	if !ok {
+		return false
+	}
+	if _, err := statWithTimeout(filepath.Join(view, path)); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	// An exit between the two observations also reads as a missing path, so
+	// the path counts as gone only while pid's view is still observable.
+	return pathObservable(view)
+}
+
+// processRootView returns the directory that resolves absolute paths the way
+// pid sees them: /proc/<pid>/root on a host with per-process namespaces under
+// /proc (Linux), or "/" on a host without them (Darwin), where every process
+// shares one view. ok is false when pid's view cannot be observed.
+func processRootView(pid int) (string, bool) {
+	if !hostHasProcNamespaces() {
+		return "/", true
+	}
+	view := filepath.Join("/proc", strconv.Itoa(pid), "root")
+	if !pathObservable(view) {
+		return "", false
+	}
+	return view, true
+}
+
+// pathObservable reports whether path can be stat'd within statWithTimeout's
+// bound.
+func pathObservable(path string) bool {
+	_, err := statWithTimeout(path)
+	return err == nil
+}
+
+// hostHasProcNamespaces reports whether this host exposes per-process
+// namespaces under /proc.
+func hostHasProcNamespaces() bool {
+	_, err := os.Readlink("/proc/self/ns/pid")
+	return err == nil
+}
+
+// samePIDNamespaceAsSelf reports whether pid runs in this process's PID
+// namespace. A host without /proc namespaces has only one; on a host with
+// them, any read failure reports false.
+func samePIDNamespaceAsSelf(pid int) bool {
+	if !hostHasProcNamespaces() {
+		return true
+	}
+	self, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return false
+	}
+	other, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid"))
+	return err == nil && other == self
+}
+
+// cmdGCTestConfigOwnerRoot returns the gct<pid>-/gcx<pid>- root directly under
+// tempParent that configPath lies under, and that root's owner PID.
+func cmdGCTestConfigOwnerRoot(configPath string, tempParent string) (string, int, bool) {
 	for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
 		root, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{prefix})
 		if !ok {
 			continue
 		}
-		return pidFromPrefixedDirName(filepath.Base(root), prefix)
+		pid, ok := pidFromPrefixedDirName(filepath.Base(root), prefix)
+		if !ok {
+			return "", 0, false
+		}
+		return root, pid, true
 	}
-	return 0, false
+	return "", 0, false
 }
 
 // snapshotDoltProcessesForConfigRoots returns the dolt sql-servers whose
@@ -1182,11 +1302,4 @@ func testFakeDoltSQLServerExitsOnSIGTERM(t *testing.T) {
 	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Fatalf("fake dolt sql-server ended with %v, want termination by SIGTERM", fake.ProcessState)
 	}
-}
-
-// pathGoneInOwnMountNamespace is a placeholder for the red commit: it judges
-// the path in the caller's own namespace, ignoring pid.
-func pathGoneInOwnMountNamespace(_ int, path string) bool {
-	_, err := statWithTimeout(path)
-	return errors.Is(err, os.ErrNotExist)
 }
