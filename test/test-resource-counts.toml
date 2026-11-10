@@ -2295,13 +2295,11 @@ calls = 1
 path = "internal/pidutil/cmdline_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/pidutil/cmdline_unix_test.go"
 resource = "subprocess"
 calls = 1
-tagged = true
 
 [[count]]
 path = "internal/pidutil/environ_darwin_test.go"
@@ -2323,7 +2321,6 @@ calls = 2
 path = "internal/pidutil/testcmd_unix_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "internal/processgroup/processgroup_unix_test.go"
@@ -3728,7 +3725,11 @@ calls = 1
 path = "test/tmuxtest/orphan_sweep_tmux_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
+
+[[count]]
+path = "test/tmuxtest/orphan_sweep_tmux_test.go"
+resource = "tmux"
+calls = 2
 
 [[count]]
 path = "test/toolhome/toolhome_test.go"
