@@ -444,7 +444,7 @@ func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 	store := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
 	mailStore := beads.MailStore{Store: store}
 
-	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	purged, _, err := PurgeReadMessageWisps(mailStore, cutoff, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot(t *testing.T) {
 	}
 
 	mailStore := beads.MailStore{Store: store}
-	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	purged, _, err := PurgeReadMessageWisps(mailStore, cutoff, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot(t *testing.T) {
 	}
 
 	mailStore := beads.MailStore{Store: store}
-	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	purged, _, err := PurgeReadMessageWisps(mailStore, cutoff, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -568,7 +568,7 @@ func TestPurgeReadMessageWisps_SurfacesLiveRecheckError(t *testing.T) {
 	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
 
 	mailStore := beads.MailStore{Store: store}
-	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	purged, _, err := PurgeReadMessageWisps(mailStore, cutoff, 0)
 	if err == nil {
 		t.Fatal("PurgeReadMessageWisps: want error, got nil (a live-read failure must not be swallowed)")
 	}
@@ -594,7 +594,7 @@ func TestPurgeReadMessageWisps_DeleteErrorSurfacedAndContinues(t *testing.T) {
 	}
 	mailStore := beads.MailStore{Store: store}
 
-	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	purged, _, err := PurgeReadMessageWisps(mailStore, cutoff, 0)
 	if err == nil {
 		t.Fatal("expected delete error to be surfaced")
 	}
@@ -609,7 +609,7 @@ func TestPurgeReadMessageWisps_DeleteErrorSurfacedAndContinues(t *testing.T) {
 func TestPurgeReadMessageWisps_ListErrorSurfaced(t *testing.T) {
 	store := listErrStore{MemStore: beads.NewMemStore(), err: errors.New("store down")}
 	mailStore := beads.MailStore{Store: store}
-	purged, err := PurgeReadMessageWisps(mailStore, time.Now())
+	purged, _, err := PurgeReadMessageWisps(mailStore, time.Now(), 0)
 	if err == nil {
 		t.Fatal("expected list error to be surfaced")
 	}
@@ -805,4 +805,237 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// capWisp builds an aged, read, wisp-tier message bead for the purge-cap tests.
+func capWisp(id string, createdAt time.Time) beads.Bead {
+	return beads.Bead{ID: id, Type: "message", Status: "open", CreatedAt: createdAt, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true}
+}
+
+// queryCaptureStore records the ListQuery PurgeReadMessageWisps issues.
+type queryCaptureStore struct {
+	*deleteTrackStore
+	queries []beads.ListQuery
+}
+
+func (s *queryCaptureStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, q)
+	return s.deleteTrackStore.List(q)
+}
+
+// TestPurgeReadMessageWisps_CapStopsAfterLimitOldestFirst pins the per-tick
+// delete-attempt cap: with five aged candidates seeded out of age order and a
+// limit of two, exactly the two OLDEST are deleted, the rest survive, and the
+// caller is told candidates remain.
+func TestPurgeReadMessageWisps_CapStopsAfterLimitOldestFirst(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	seed := []beads.Bead{
+		capWisp("age-3h", at(3)), capWisp("age-6h", at(6)), capWisp("age-2h", at(2)),
+		capWisp("age-5h", at(5)), capWisp("age-4h", at(4)),
+	}
+	store := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+
+	purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 2 {
+		t.Fatalf("purged = %d, want 2 (the cap)", purged)
+	}
+	if !capped {
+		t.Error("capped = false, want true (3 aged candidates remain)")
+	}
+	if len(store.deleted) != 2 || store.deleted[0] != "age-6h" || store.deleted[1] != "age-5h" {
+		t.Fatalf("deleted = %v, want [age-6h age-5h] (oldest first)", store.deleted)
+	}
+	for _, id := range []string{"age-4h", "age-3h", "age-2h"} {
+		if _, err := store.Get(id); err != nil {
+			t.Errorf("%s should survive this tick: %v", id, err)
+		}
+	}
+}
+
+// TestPurgeReadMessageWisps_CapDrainsAcrossTicks asserts a backlog larger than
+// the cap drains over successive calls, and the final call (nothing left over)
+// reports capped=false.
+func TestPurgeReadMessageWisps_CapDrainsAcrossTicks(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	var seed []beads.Bead
+	for i := 0; i < 5; i++ {
+		seed = append(seed, capWisp("w"+string(rune('a'+i)), now.Add(-time.Duration(10-i)*time.Hour)))
+	}
+	store := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	mailStore := beads.MailStore{Store: store}
+
+	wantPurged := []int{2, 2, 1}
+	wantCapped := []bool{true, true, false}
+	for tick := range wantPurged {
+		purged, capped, err := PurgeReadMessageWisps(mailStore, cutoff, 2)
+		if err != nil {
+			t.Fatalf("tick %d: unexpected error: %v", tick, err)
+		}
+		if purged != wantPurged[tick] || capped != wantCapped[tick] {
+			t.Fatalf("tick %d: purged=%d capped=%v, want purged=%d capped=%v", tick, purged, capped, wantPurged[tick], wantCapped[tick])
+		}
+	}
+	if len(store.deleted) != 5 {
+		t.Fatalf("deleted = %v, want all 5 drained", store.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_CapExactlyMetIsNotCapped: when the candidate count
+// equals the limit nothing is left over, so capped must be false (the cap-hit
+// log line fires only while candidates remain).
+func TestPurgeReadMessageWisps_CapExactlyMetIsNotCapped(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	seed := []beads.Bead{capWisp("a", now.Add(-3*time.Hour)), capWisp("b", now.Add(-2*time.Hour))}
+	store := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+
+	purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 2 || capped {
+		t.Fatalf("purged=%d capped=%v, want purged=2 capped=false", purged, capped)
+	}
+}
+
+// TestPurgeReadMessageWisps_NonPositiveLimitIsUncapped keeps the "pass 0 for no
+// cap" convention SweepUnreadMessagesBefore already uses.
+func TestPurgeReadMessageWisps_NonPositiveLimitIsUncapped(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	for _, limit := range []int{0, -1} {
+		var seed []beads.Bead
+		for i := 0; i < 4; i++ {
+			seed = append(seed, capWisp("u"+string(rune('a'+i)), now.Add(-time.Duration(10-i)*time.Hour)))
+		}
+		store := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+		purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, limit)
+		if err != nil {
+			t.Fatalf("limit %d: unexpected error: %v", limit, err)
+		}
+		if purged != 4 || capped {
+			t.Fatalf("limit %d: purged=%d capped=%v, want purged=4 capped=false", limit, purged, capped)
+		}
+	}
+}
+
+// TestPurgeReadMessageWisps_DeleteFailuresCountAgainstCap: the cap bounds
+// delete ATTEMPTS, so a failing delete consumes budget. A store whose deletes
+// all fail must not be retried across the whole backlog in one tick.
+func TestPurgeReadMessageWisps_DeleteFailuresCountAgainstCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	seed := []beads.Bead{
+		capWisp("bad-1", now.Add(-6*time.Hour)), capWisp("bad-2", now.Add(-5*time.Hour)),
+		capWisp("good", now.Add(-4*time.Hour)),
+	}
+	store := &deleteTrackStore{
+		MemStore:   beads.NewMemStoreFrom(100, seed, nil),
+		failDelete: map[string]error{"bad-1": errors.New("boom-1"), "bad-2": errors.New("boom-2")},
+	}
+
+	purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, 2)
+	if err == nil || !strings.Contains(err.Error(), "boom-1") || !strings.Contains(err.Error(), "boom-2") {
+		t.Fatalf("err = %v, want both delete failures joined", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
+	}
+	if !capped {
+		t.Error("capped = false, want true (good remains)")
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("deleted = %v: the two failed attempts must have used the whole budget", store.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_LiveRecheckFailuresCountAgainstCap: a live re-verify
+// error is an attempt too; a flapping backend must not turn the cap into an
+// unbounded Get loop.
+func TestPurgeReadMessageWisps_LiveRecheckFailuresCountAgainstCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	snapshot := []beads.Bead{
+		capWisp("err-1", now.Add(-6*time.Hour)), capWisp("err-2", now.Add(-5*time.Hour)),
+		capWisp("good", now.Add(-4*time.Hour)),
+	}
+	underlying := &deleteTrackStore{
+		MemStore:   beads.NewMemStoreFrom(100, snapshot, nil),
+		failDelete: map[string]error{},
+		getErrors:  map[string]error{"err-1": errors.New("down-1"), "err-2": errors.New("down-2")},
+	}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: snapshot}
+
+	purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, 2)
+	if err == nil {
+		t.Fatal("want the live re-verify errors surfaced")
+	}
+	if purged != 0 || !capped {
+		t.Fatalf("purged=%d capped=%v, want purged=0 capped=true", purged, capped)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none (budget spent on failed re-verifies)", underlying.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_SkipsDoNotConsumeCap: candidates that are skipped
+// without a delete attempt (not yet aged, gone live, un-read live) cost no
+// budget, so real work behind them still gets the full cap.
+func TestPurgeReadMessageWisps_SkipsDoNotConsumeCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	snapshot := []beads.Bead{
+		capWisp("too-new", now.Add(-10*time.Minute)),
+		capWisp("gone", now.Add(-9*time.Hour)),
+		capWisp("unread-live", now.Add(-8*time.Hour)),
+		capWisp("good-1", now.Add(-7*time.Hour)),
+		capWisp("good-2", now.Add(-6*time.Hour)),
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, snapshot, nil), failDelete: map[string]error{}}
+	if err := underlying.MemStore.Delete("gone"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+	if err := underlying.Update("unread-live", beads.UpdateOpts{RemoveLabels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "false"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: snapshot}
+
+	purged, capped, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, cutoff, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 2 || capped {
+		t.Fatalf("purged=%d capped=%v, want purged=2 capped=false (skips are free)", purged, capped)
+	}
+	if !contains(underlying.deleted, "good-1") || !contains(underlying.deleted, "good-2") {
+		t.Fatalf("deleted = %v, want good-1 and good-2", underlying.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_QueriesOldestFirst pins the candidate query shape.
+// "Oldest first" is what makes a capped tick make deterministic progress
+// through a backlog instead of re-scanning an arbitrary prefix; every backend
+// the mail store can sit on honors Sort, so the query must ask for it.
+func TestPurgeReadMessageWisps_QueriesOldestFirst(t *testing.T) {
+	store := &queryCaptureStore{deleteTrackStore: &deleteTrackStore{MemStore: beads.NewMemStore(), failDelete: map[string]error{}}}
+
+	if _, _, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, time.Now(), 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List called %d times, want 1", len(store.queries))
+	}
+	q := store.queries[0]
+	if q.Sort != beads.SortCreatedAsc {
+		t.Errorf("Sort = %q, want %q", q.Sort, beads.SortCreatedAsc)
+	}
+	if q.Type != messageBeadType || q.TierMode != beads.TierWisps || !q.IncludeClosed || q.Metadata[mail.ReadMetadataKey] != "true" {
+		t.Errorf("query = %+v, want read message wisps (open or closed)", q)
+	}
 }

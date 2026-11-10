@@ -141,6 +141,9 @@ var wispGCSessionPurgeBatchCap = 500
 // memoryWispGC.sessionPurgeCursor), so kept sessions do not starve the rest.
 var wispGCSessionPurgeScanCap = 2000
 
+// wispGCMailPurgeBatchCap is the per-tick read-message purge cap (RED stub).
+var wispGCMailPurgeBatchCap = 500
+
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
 // actually delete rows (true) or run dry (false). It is a package var so tests
 // can flip it without touching the process environment. By default it reads
@@ -390,7 +393,7 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 		// The read-message retention arm is messaging-class: its candidate query
 		// and wisp-tier delete loop live inside the messaging edge (beadmail),
 		// against the messaging store — disjoint from the graph-class purge above.
-		mailPurged, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL))
+		mailPurged, _, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL), wispGCMailPurgeBatchCap)
 		purged += mailPurged
 		if mailErr != nil {
 			deleteErr = errors.Join(deleteErr, mailErr)

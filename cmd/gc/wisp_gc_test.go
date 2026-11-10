@@ -3211,3 +3211,119 @@ func TestWispGC_ReloadCarryFollowsEnablement(t *testing.T) {
 		}
 	}
 }
+
+// withMailPurgeBatchCap overrides the per-tick read-message purge cap for the
+// duration of a test, restoring the prior value on cleanup.
+func withMailPurgeBatchCap(t *testing.T, batchCap int) {
+	t.Helper()
+	prev := wispGCMailPurgeBatchCap
+	wispGCMailPurgeBatchCap = batchCap
+	t.Cleanup(func() { wispGCMailPurgeBatchCap = prev })
+}
+
+// mailPurgeBacklog seeds n aged read message wisps m0..m(n-1), m0 the oldest.
+func mailPurgeBacklog(now time.Time, n int) []beads.Bead {
+	seed := make([]beads.Bead, 0, n)
+	for i := 0; i < n; i++ {
+		seed = append(seed, makeGCMessageWisp(fmt.Sprintf("m%d", i), now.Add(-time.Duration(100-i)*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}))
+	}
+	return seed
+}
+
+const mailPurgeCapLogFragment = "read message wisp purge stopped after"
+
+func TestWispGCMailPurgeBatchCapDefault(t *testing.T) {
+	if wispGCMailPurgeBatchCap != 500 {
+		t.Fatalf("wispGCMailPurgeBatchCap = %d, want 500 (the other wisp GC arms' per-tick cap)", wispGCMailPurgeBatchCap)
+	}
+}
+
+// A first-deploy backlog of read mail must not be deleted in one tick: the arm
+// stops after wispGCMailPurgeBatchCap delete attempts, oldest first, says so
+// once, and drains the rest on later ticks. The cap-hit line stops appearing
+// the tick the backlog is gone.
+func TestWispGC_MailPurgeCapBoundsOneTickAndDrains(t *testing.T) {
+	withMailPurgeBatchCap(t, 2)
+	now := time.Now()
+	store := newGCStore(mailPurgeBacklog(now, 5))
+	wg := newWispGC(5*time.Minute, 0, time.Hour)
+
+	wantPurged := []int{2, 2, 1}
+	wantCapLine := []bool{true, true, false}
+	for tick := range wantPurged {
+		var purged int
+		logOutput := captureWispGCLog(t, func() {
+			var err error
+			purged, err = wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+			if err != nil {
+				t.Fatalf("tick %d: runGC: %v", tick, err)
+			}
+		})
+		if purged != wantPurged[tick] {
+			t.Fatalf("tick %d: purged = %d, want %d", tick, purged, wantPurged[tick])
+		}
+		if got := strings.Contains(logOutput, mailPurgeCapLogFragment); got != wantCapLine[tick] {
+			t.Fatalf("tick %d: cap-hit line present = %v, want %v; log = %q", tick, got, wantCapLine[tick], logOutput)
+		}
+		if tick == 0 {
+			if want := fmt.Sprintf("%s 2 delete attempts", mailPurgeCapLogFragment); !strings.Contains(logOutput, want) {
+				t.Fatalf("tick 0 log = %q, want it to name the cap (%q)", logOutput, want)
+			}
+			if n := strings.Count(logOutput, mailPurgeCapLogFragment); n != 1 {
+				t.Fatalf("tick 0 logged the cap %d times, want once", n)
+			}
+			assertDeletedIDs(t, store.deletedIDs, "m0", "m1") // oldest first
+		}
+	}
+	assertDeletedIDs(t, store.deletedIDs, "m0", "m1", "m2", "m3", "m4")
+}
+
+// A backlog exactly the size of the cap leaves nothing behind, so no cap-hit
+// line: the line means "candidates remain", not "the cap was reached".
+func TestWispGC_MailPurgeCapExactlyMetStaysQuiet(t *testing.T) {
+	withMailPurgeBatchCap(t, 3)
+	now := time.Now()
+	store := newGCStore(mailPurgeBacklog(now, 3))
+
+	logOutput := captureWispGCLog(t, func() {
+		wg := newWispGC(5*time.Minute, 0, time.Hour)
+		purged, err := wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+		if err != nil || purged != 3 {
+			t.Fatalf("runGC purged=%d err=%v, want 3 and nil", purged, err)
+		}
+	})
+	if strings.Contains(logOutput, mailPurgeCapLogFragment) {
+		t.Fatalf("log = %q, want no cap-hit line when nothing is left over", logOutput)
+	}
+}
+
+// The cap bounds delete ATTEMPTS: a backend that fails every delete must see
+// at most the cap per tick, not the whole backlog, and the failures still
+// surface as the tick's error.
+func TestWispGC_MailPurgeCapCountsFailedDeleteAttempts(t *testing.T) {
+	withMailPurgeBatchCap(t, 2)
+	now := time.Now()
+	store := newGCStore(mailPurgeBacklog(now, 5))
+	for _, id := range []string{"m0", "m1", "m2", "m3", "m4"} {
+		store.deleteErrors[id] = errors.New("delete boom")
+	}
+
+	var runErr error
+	var purged int
+	logOutput := captureWispGCLog(t, func() {
+		wg := newWispGC(5*time.Minute, 0, time.Hour)
+		purged, runErr = wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+	})
+	if runErr == nil {
+		t.Fatal("runGC: want the delete failures surfaced")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
+	}
+	if len(store.deleteAttempts) != 2 {
+		t.Fatalf("delete attempts = %v, want exactly 2 (the cap) in one tick", store.deleteAttempts)
+	}
+	if !strings.Contains(logOutput, mailPurgeCapLogFragment) {
+		t.Fatalf("log = %q, want the cap-hit line (3 candidates remain)", logOutput)
+	}
+}

@@ -1314,7 +1314,7 @@ func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 // retention delete semantics). Beads with a zero or not-yet-past CreatedAt are
 // skipped. Per-bead delete failures are joined and returned without aborting the
 // sweep; returns the number of beads purged.
-func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error) {
+func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time, _ int) (int, bool, error) {
 	entries, err := store.List(beads.ListQuery{
 		Type:          messageBeadType,
 		Metadata:      map[string]string{mail.ReadMetadataKey: "true"},
@@ -1322,7 +1322,7 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 		TierMode:      beads.TierWisps,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("listing read message wisps: %w", err)
+		return 0, false, fmt.Errorf("listing read message wisps: %w", err)
 	}
 	purged := 0
 	var deleteErr error
@@ -1354,7 +1354,7 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 		}
 		purged++
 	}
-	return purged, deleteErr
+	return purged, false, deleteErr
 }
 
 // deleteMessageWispBead removes a message wisp bead, stripping its dependencies
