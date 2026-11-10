@@ -2016,6 +2016,15 @@ export const zListBodySessionBindingRecord = z.object({
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zSessionClosedPayload = z.object({
+    agent_name: z.string().optional(),
+    alias: z.string().optional(),
+    reason: z.string().optional(),
+    session_id: z.string(),
+    template: z.string().optional(),
+    title: z.string().optional()
+});
+
 export const zSessionCommandStatusBody = z.object({
     idempotency_key: z.string().optional(),
     op: zConversationOp.optional(),
@@ -2044,6 +2053,14 @@ export const zSessionCreateBody = z.object({
     options: z.record(z.string(), z.string()).optional(),
     project_id: z.string().optional(),
     session_name: z.string().optional(),
+    title: z.string().optional()
+});
+
+export const zSessionCreatedPayload = z.object({
+    agent_name: z.string().optional(),
+    alias: z.string().optional(),
+    session_id: z.string(),
+    template: z.string().optional(),
     title: z.string().optional()
 });
 
@@ -4144,8 +4161,10 @@ export const zEventPayload = z.union([
     zRigCreateSucceededPayload,
     zRigProvisionProgressPayload,
     zRotatedPayload,
+    zSessionClosedPayload,
     zSessionConfigDriftDeferredPayload,
     zSessionCreateSucceededPayload,
+    zSessionCreatedPayload,
     zSessionDemandClaimDivergencePayload,
     zSessionDrainAckedWithAssignedWorkPayload,
     zSessionLifecyclePayload,
@@ -5709,6 +5728,24 @@ export const zTypedEventStreamEnvelopeRigProvisionProgress = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.closed
+ */
+export const zTypedEventStreamEnvelopeSessionClosed = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionClosedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.closed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export const zTypedEventStreamEnvelopeSessionColdStartTimeout = z.object({
@@ -5777,6 +5814,24 @@ export const zTypedEventStreamEnvelopeSessionCrashed = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('session.crashed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope session.created
+ */
+export const zTypedEventStreamEnvelopeSessionCreated = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionCreatedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.created'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6693,10 +6748,12 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeRequestResultSessionMessage.extend({ type: z.literal('request.result.session.message') }),
     zTypedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
+    zTypedEventStreamEnvelopeSessionClosed.extend({ type: z.literal('session.closed') }),
     zTypedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedEventStreamEnvelopeSessionConfigDriftDeferred.extend({ type: z.literal('session.config_drift_deferred') }),
     zTypedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
+    zTypedEventStreamEnvelopeSessionCreated.extend({ type: z.literal('session.created') }),
     zTypedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),
@@ -8291,6 +8348,25 @@ export const zTypedTaggedEventStreamEnvelopeRigProvisionProgress = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.closed
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionClosed = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionClosedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.closed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.cold_start_timeout
  */
 export const zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout = z.object({
@@ -8363,6 +8439,25 @@ export const zTypedTaggedEventStreamEnvelopeSessionCrashed = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('session.crashed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope session.created
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionCreated = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionCreatedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.created'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -9325,10 +9420,12 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeRequestResultSessionMessage.extend({ type: z.literal('request.result.session.message') }),
     zTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedTaggedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
+    zTypedTaggedEventStreamEnvelopeSessionClosed.extend({ type: z.literal('session.closed') }),
     zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred.extend({ type: z.literal('session.config_drift_deferred') }),
     zTypedTaggedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedTaggedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
+    zTypedTaggedEventStreamEnvelopeSessionCreated.extend({ type: z.literal('session.created') }),
     zTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),

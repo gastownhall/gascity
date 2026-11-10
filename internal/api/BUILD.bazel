@@ -513,6 +513,7 @@ go_test(
         "session_lane_messages_test.go",
         "session_lane_respond_test.go",
         "session_lane_stop_test.go",
+        "session_list_events_test.go",
         "session_materialization_guard_test.go",
         "session_message_late_delivery_test.go",
         "session_model_phase0_interface_spec_test.go",

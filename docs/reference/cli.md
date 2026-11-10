@@ -1655,7 +1655,7 @@ error is reported on stderr and the command still exits 0, so bead hooks never
 fail on it. JSON summaries report whether submission to the configured provider
 was attempted; the event bus does not acknowledge durable persistence.
 
-Four requests are refused with exit 1 and nothing is recorded. In --json mode
+Five requests are refused with exit 1 and nothing is recorded. In --json mode
 the failure object carries the code.
 
 - reserved_actor: --actor starts with "cache-", or the default actor is one
@@ -1665,6 +1665,9 @@ the failure object carries the code.
   gc reads it from the store.
 - journal_derived_refused: op.changed or fact.recorded, which the
   controller derives from operation-journal rows; no command records one.
+- session_list_derived_refused: session.created or session.closed, which
+  the controller derives from session beads' bead events; no command
+  records one.
 - bead_payload_not_found: --bead-payload names a bead the store it resolves
   to does not hold (bead.deleted excepted: the event is recorded with its
   subject alone). Any other failure to read it is reported on stderr and the
