@@ -25,6 +25,8 @@ func TestControllerOwned(t *testing.T) {
 		{"startup-health episode", beads.Bead{Type: "startup-health-episode"}, true},
 		{"'STARTUP-HEALTH-EPISODE '", beads.Bead{Type: "STARTUP-HEALTH-EPISODE "}, true},
 		{"convergence", beads.Bead{Type: "Convergence"}, true},
+		{"stalled-bead episode", beads.Bead{Type: "stalled-bead-episode"}, true},
+		{"' STALLED-BEAD-EPISODE '", beads.Bead{Type: " STALLED-BEAD-EPISODE "}, true},
 		{"op row", beads.Bead{Type: "op", Labels: []string{"gc:op", "gc:op-conv:gc-7"}}, true},
 		{"fact row", beads.Bead{Type: "op", Status: "closed", Labels: []string{"gc:fact", "gc:fact-conv:gc-7"}}, true},
 		{"' OP '", beads.Bead{Type: " OP "}, true},

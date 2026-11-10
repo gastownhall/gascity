@@ -2883,7 +2883,8 @@ type StalledBeadsConfig struct {
 	// Thresholds maps a priority label ("P0", "P1", ...) to the stall
 	// threshold for in_progress beads of that priority. Duration strings
 	// (e.g., "90m"). Entries override the built-in defaults of P0=2h, P1=6h,
-	// P2=24h and P3=72h.
+	// P2=24h and P3=72h. Labels run P0 through P4, and one priority may be
+	// named once: "P1" together with "p1", or "P7", is rejected.
 	Thresholds map[string]string `toml:"thresholds,omitempty"`
 	// FallbackThreshold is the stall threshold for a bead whose priority has
 	// no entry (unset, or P4 and below). Duration string. Defaults to "24h".
@@ -2892,10 +2893,15 @@ type StalledBeadsConfig struct {
 
 var stalledBeadPriorityKey = regexp.MustCompile(`^[Pp]([0-9]+)$`)
 
+// stalledBeadMaxPriority is the lowest priority a [stalled_beads] threshold
+// key may name; bead priorities run P0 through P4.
+const stalledBeadMaxPriority = 4
+
 // Overrides parses the configured thresholds into per-priority durations and
 // the fallback duration (0 when unset). An unknown priority label or a
-// duration that does not parse as positive is an error naming the offending
-// key; ValidateDurations reports the same errors at load time.
+// duration that does not parse as positive, a priority above P4, or two keys
+// that name the same priority ("P1" and "p1") is an error naming the
+// offending key; ValidateDurations reports the same errors at load time.
 func (c StalledBeadsConfig) Overrides() (map[int]time.Duration, time.Duration, error) {
 	parse := func(field, raw string) (time.Duration, error) {
 		d, err := time.ParseDuration(raw)
@@ -2913,6 +2919,7 @@ func (c StalledBeadsConfig) Overrides() (map[int]time.Duration, time.Duration, e
 	}
 	sort.Strings(keys)
 	byPriority := make(map[int]time.Duration, len(keys))
+	keyFor := make(map[int]string, len(keys))
 	for _, k := range keys {
 		m := stalledBeadPriorityKey.FindStringSubmatch(k)
 		if m == nil {
@@ -2922,6 +2929,13 @@ func (c StalledBeadsConfig) Overrides() (map[int]time.Duration, time.Duration, e
 		if err != nil {
 			return nil, 0, fmt.Errorf("[stalled_beads] thresholds key %q: %w", k, err)
 		}
+		if priority > stalledBeadMaxPriority {
+			return nil, 0, fmt.Errorf("[stalled_beads] thresholds key %q names a priority above P%d", k, stalledBeadMaxPriority)
+		}
+		if first, dup := keyFor[priority]; dup {
+			return nil, 0, fmt.Errorf("[stalled_beads] thresholds key %q duplicates key %q: both name P%d", k, first, priority)
+		}
+		keyFor[priority] = k
 		d, err := parse("thresholds."+k, c.Thresholds[k])
 		if err != nil {
 			return nil, 0, err

@@ -87,6 +87,10 @@ func TestClassifyGoldenTable(t *testing.T) {
 		// episodes in the work store, silently resetting quarantine at cutover.
 		{"startup-health episode", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{"session_name": "worker-1"}}, ClassSessions},
 		{"startup-health episode with stray root_bead_id stays sessions", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassSessions},
+		// A stalled-bead episode records a stall of a work bead and is written
+		// through the work store's typed handle (internal/beadstall), so it
+		// classifies with work: no session label, no graph root.
+		{"stalled-bead episode stays work", beads.Bead{Type: "stalled-bead-episode", Metadata: map[string]string{"stalled_bead_id": "ga-target"}}, ClassWork},
 		// A durable session wait written without gc:wait (session.IsWaitBead):
 		// a wait-typed bead whose session:<session_id> label names its own
 		// session_id. The per-entity label on any OTHER shape is still not a

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_test(
     name = "beadstall_test",
     srcs = [
+        "stalled_bead_api_test.go",
         "stalled_bead_edges_test.go",
         "stalled_bead_red_test.go",
         "testenv_import_test.go",
@@ -10,6 +11,7 @@ go_test(
     embed = [":beadstall"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/fsys",
         "//internal/testenv",
     ],
@@ -51,5 +53,8 @@ go_library(
     srcs = ["stalled_bead.go"],
     importpath = "github.com/gastownhall/gascity/internal/beadstall",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/beads"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+    ],
 )

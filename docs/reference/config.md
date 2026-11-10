@@ -920,7 +920,7 @@ StalledBeadsConfig configures the stalled in_progress bead alarm: how long an in
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `thresholds` | map[string]string |  |  | Thresholds maps a priority label ("P0", "P1", ...) to the stall threshold for in_progress beads of that priority. Duration strings (e.g., "90m"). Entries override the built-in defaults of P0=2h, P1=6h, P2=24h and P3=72h. |
+| `thresholds` | map[string]string |  |  | Thresholds maps a priority label ("P0", "P1", ...) to the stall threshold for in_progress beads of that priority. Duration strings (e.g., "90m"). Entries override the built-in defaults of P0=2h, P1=6h, P2=24h and P3=72h. Labels run P0 through P4, and one priority may be named once: "P1" together with "p1", or "P7", is rejected. |
 | `fallback_threshold` | string |  | `24h` | FallbackThreshold is the stall threshold for a bead whose priority has no entry (unset, or P4 and below). Duration string. Defaults to "24h". |
 
 ## StorageBindingConfig

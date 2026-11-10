@@ -858,7 +858,7 @@ ensure_bd_runtime_issue_prefix() {
 # beads (#1039). Must match doctor.RequiredCustomTypes.
 # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
 gc_custom_types() {
-    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op}"
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op,stalled-bead-episode}"
 }
 
 valid_custom_types_value() {

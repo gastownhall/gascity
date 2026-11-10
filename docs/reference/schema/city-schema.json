@@ -3181,7 +3181,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Thresholds maps a priority label (\"P0\", \"P1\", ...) to the stall\nthreshold for in_progress beads of that priority. Duration strings\n(e.g., \"90m\"). Entries override the built-in defaults of P0=2h, P1=6h,\nP2=24h and P3=72h."
+          "description": "Thresholds maps a priority label (\"P0\", \"P1\", ...) to the stall\nthreshold for in_progress beads of that priority. Duration strings\n(e.g., \"90m\"). Entries override the built-in defaults of P0=2h, P1=6h,\nP2=24h and P3=72h. Labels run P0 through P4, and one priority may be\nnamed once: \"P1\" together with \"p1\", or \"P7\", is rejected."
         },
         "fallback_threshold": {
           "type": "string",

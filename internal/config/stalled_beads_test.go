@@ -23,10 +23,10 @@ func TestStalledBeadsOverrides(t *testing.T) {
 		{
 			name: "priority labels and fallback",
 			config: StalledBeadsConfig{
-				Thresholds:        map[string]string{"P0": "90m", "p3": "48h", "P7": "30m"},
+				Thresholds:        map[string]string{"P0": "90m", "p3": "48h", "P4": "30m"},
 				FallbackThreshold: "8h",
 			},
-			want:     map[int]time.Duration{0: 90 * time.Minute, 3: 48 * time.Hour, 7: 30 * time.Minute},
+			want:     map[int]time.Duration{0: 90 * time.Minute, 3: 48 * time.Hour, 4: 30 * time.Minute},
 			fallback: 8 * time.Hour,
 		},
 		{
@@ -69,6 +69,10 @@ func TestStalledBeadsInvalidOverridesHaveContext(t *testing.T) {
 		{name: "non label", config: StalledBeadsConfig{Thresholds: map[string]string{"urgent": "1h"}}, key: "urgent"},
 		{name: "negative priority", config: StalledBeadsConfig{Thresholds: map[string]string{"P-1": "1h"}}, key: "P-1"},
 		{name: "priority overflow", config: StalledBeadsConfig{Thresholds: map[string]string{"P999999999999999999999999999999": "1h"}}, key: "P999999999999999999999999999999"},
+		{name: "priority above range", config: StalledBeadsConfig{Thresholds: map[string]string{"P7": "1h"}}, key: "P7"},
+		{name: "two digit priority above range", config: StalledBeadsConfig{Thresholds: map[string]string{"P10": "1h"}}, key: "P10"},
+		{name: "case duplicate keys", config: StalledBeadsConfig{Thresholds: map[string]string{"P1": "1h", "p1": "2h"}}, key: "p1"},
+		{name: "case duplicate names the first key too", config: StalledBeadsConfig{Thresholds: map[string]string{"P1": "1h", "p1": "2h"}}, key: "P1"},
 		{name: "invalid threshold", config: StalledBeadsConfig{Thresholds: map[string]string{"P1": "soon"}}, key: "thresholds.P1"},
 		{name: "zero threshold", config: StalledBeadsConfig{Thresholds: map[string]string{"P1": "0s"}}, key: "thresholds.P1"},
 		{name: "negative threshold", config: StalledBeadsConfig{Thresholds: map[string]string{"P1": "-1h"}}, key: "thresholds.P1"},

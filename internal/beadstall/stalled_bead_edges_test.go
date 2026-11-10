@@ -15,14 +15,14 @@ func TestDetectStalledBeadMissingPriorityReportsP2(t *testing.T) {
 
 	now := time.Date(2026, time.October, 22, 12, 0, 0, 0, time.UTC)
 	updated := now.Add(-8 * time.Hour)
-	got := detectStalledBead(beads.Bead{ID: "ga-target", Status: "in_progress", UpdatedAt: updated}, thresholds{
+	got := Detect(beads.Bead{ID: "ga-target", Status: "in_progress", UpdatedAt: updated}, Thresholds{
 		byPriority: map[int]time.Duration{0: time.Hour, 2: 24 * time.Hour},
 		fallback:   8 * time.Hour,
 	}, now)
-	if got.priority != 2 || got.threshold != 8*time.Hour || !got.stalled {
+	if got.Priority != 2 || got.Threshold != 8*time.Hour || !got.Stalled {
 		t.Fatalf("missing-priority detection = %+v, want P2 at the configured 8h fallback boundary", got)
 	}
-	if got.beadID != "ga-target" || !got.updatedAt.Equal(updated) || got.age != 8*time.Hour {
+	if got.BeadID != "ga-target" || !got.UpdatedAt.Equal(updated) || got.Age != 8*time.Hour {
 		t.Fatalf("missing-priority detection lost identity or timestamps: %+v", got)
 	}
 }
@@ -48,11 +48,11 @@ func TestEpisodeStoreCorruptMetadataReturnsContext(t *testing.T) {
 				"stalled_bead_alert_disposition":     "pending",
 			}
 			metadata[tt.key] = tt.value
-			tracker, err := store.Create(beads.Bead{Title: "corrupt episode", Type: episodeBeadType, Metadata: metadata})
+			tracker, err := store.Create(beads.Bead{Title: "corrupt episode", Type: EpisodeBeadType, Metadata: metadata})
 			if err != nil {
 				t.Fatalf("create corrupt tracker: %v", err)
 			}
-			_, ok, err := newEpisodeStore(store).load("ga-target")
+			_, ok, err := NewEpisodeStore(beads.WorkStore{Store: store}).Load("ga-target")
 			if err == nil || ok {
 				t.Fatalf("load corrupt episode = (ok=%v, err=%v), want a visible failure", ok, err)
 			}
@@ -70,14 +70,14 @@ func TestEpisodeStoreClearMissingDoesNotCreateTrackingWork(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
-	episodes := newEpisodeStore(store)
-	if err := episodes.clear("ga-missing"); err != nil {
+	episodes := NewEpisodeStore(beads.WorkStore{Store: store})
+	if err := episodes.Clear("ga-missing"); err != nil {
 		t.Fatalf("clear missing episode: %v", err)
 	}
-	if _, ok, err := episodes.load("ga-missing"); err != nil || ok {
+	if _, ok, err := episodes.Load("ga-missing"); err != nil || ok {
 		t.Fatalf("load missing episode after clear = (%v, %v), want (false, nil)", ok, err)
 	}
-	trackers, err := store.List(beads.ListQuery{Type: episodeBeadType, IncludeClosed: true})
+	trackers, err := store.List(beads.ListQuery{Type: EpisodeBeadType, IncludeClosed: true})
 	if err != nil || len(trackers) != 0 {
 		t.Fatalf("tracking beads after missing clear = (%+v, %v), want none", trackers, err)
 	}
@@ -88,38 +88,38 @@ func TestEpisodeStoreSaveAfterClearPreservesHistoryAndStartsFresh(t *testing.T) 
 	t.Parallel()
 
 	store := beads.NewMemStore()
-	episodes := newEpisodeStore(store)
+	episodes := NewEpisodeStore(beads.WorkStore{Store: store})
 	now := time.Date(2026, time.October, 22, 12, 0, 0, 0, time.UTC)
-	first := episode{
-		beadID:             "ga-target",
-		lastKnownUpdatedAt: now.Add(-8 * time.Hour),
-		firstStaleAt:       now,
-		priority:           1,
-		alertDisposition:   alertSent,
+	first := Episode{
+		BeadID:             "ga-target",
+		LastKnownUpdatedAt: now.Add(-8 * time.Hour),
+		FirstStaleAt:       now,
+		Priority:           1,
+		AlertDisposition:   AlertSent,
 	}
-	if err := episodes.save(first); err != nil {
+	if err := episodes.Save(first); err != nil {
 		t.Fatalf("save first episode: %v", err)
 	}
-	if err := episodes.clear(first.beadID); err != nil {
+	if err := episodes.Clear(first.BeadID); err != nil {
 		t.Fatalf("clear first episode: %v", err)
 	}
-	closed, err := store.List(beads.ListQuery{Type: episodeBeadType, IncludeClosed: true})
+	closed, err := store.List(beads.ListQuery{Type: EpisodeBeadType, IncludeClosed: true})
 	if err != nil || len(closed) != 1 || closed[0].Status != "closed" {
 		t.Fatalf("cleared trackers = (%+v, %v), want one closed episode", closed, err)
 	}
 	before := closed[0]
 	next := first
-	next.lastKnownUpdatedAt = now
-	next.firstStaleAt = now.Add(6 * time.Hour)
-	next.alertDisposition = alertPending
-	if err := newEpisodeStore(store).save(next); err != nil {
+	next.LastKnownUpdatedAt = now
+	next.FirstStaleAt = now.Add(6 * time.Hour)
+	next.AlertDisposition = AlertPending
+	if err := NewEpisodeStore(beads.WorkStore{Store: store}).Save(next); err != nil {
 		t.Fatalf("save later episode: %v", err)
 	}
-	loaded, ok, err := newEpisodeStore(store).load(next.beadID)
+	loaded, ok, err := NewEpisodeStore(beads.WorkStore{Store: store}).Load(next.BeadID)
 	if err != nil || !ok || !reflect.DeepEqual(loaded, next) {
 		t.Fatalf("later episode = (%+v, %v, %v), want (%+v, true, nil)", loaded, ok, err, next)
 	}
-	trackers, err := store.List(beads.ListQuery{Type: episodeBeadType, IncludeClosed: true})
+	trackers, err := store.List(beads.ListQuery{Type: EpisodeBeadType, IncludeClosed: true})
 	if err != nil || len(trackers) != 2 {
 		t.Fatalf("episode history = (%+v, %v), want two episodes", trackers, err)
 	}

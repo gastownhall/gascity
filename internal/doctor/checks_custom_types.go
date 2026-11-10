@@ -40,6 +40,10 @@ import (
 // type". A native-store city never noticed because its SQL path does not
 // validate.
 //
+// "stalled-bead-episode" (internal/beadstall.EpisodeBeadType) is included
+// because the stalled in_progress bead alarm records one per stalled bead, and
+// a bd store that validates types refuses both its write and its typed list.
+//
 // The list itself lives in internal/beads, beside the native store's typed
 // list pushdown that relies on every scope carrying it. This is a copy, so a
 // caller that appends to or edits it cannot change the pushdown's vocabulary.
