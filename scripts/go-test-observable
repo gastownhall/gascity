@@ -74,6 +74,36 @@ fi
 echo "observable go test: log=$log" >&2
 echo "observable go test: command=go test -json $*" >&2
 
+# A package that hits its -timeout budget panics with "test timed out after
+# <d>" and a "running tests:" list, then a goroutine dump long enough to push
+# that header out of the output tail below. No test-level fail event is
+# emitted, so the run read as a red with no failing test to name.
+# Surface the binary's own header and count, per package, the top-level tests
+# that started but never reached a pass, fail or skip.
+print_timeout_summary() {
+  local header
+  header="$(jq -r 'select(.Action == "output" and .Output != null) | .Output' "$log" \
+    | sed '/^$/d' \
+    | awk '/^panic: test timed out after /{p=1} p && /^goroutine /{exit} p{print}')"
+  if [ -z "$header" ]; then
+    return
+  fi
+  echo "observable go test: a package hit its -timeout budget; the test binary reported what was still running:" >&2
+  printf '%s\n' "$header" >&2
+  jq -r 'select(.Test != null and (.Test | contains("/") | not))
+    | select(.Action == "run" or .Action == "pass" or .Action == "fail" or .Action == "skip")
+    | [.Action, .Package, .Test] | @tsv' "$log" \
+    | awk -F'\t' '
+        $1 == "run" { open[$2 "\t" $3] = 1; next }
+        { delete open[$2 "\t" $3] }
+        END {
+          for (key in open) { split(key, parts, "\t"); unfinished[parts[1]]++ }
+          for (pkg in unfinished) {
+            printf "observable go test: %s: %d top-level test(s) started but never finished; the package was killed before they completed\n", pkg, unfinished[pkg]
+          }
+        }' >&2
+}
+
 print_failure_details() {
   if ! command -v jq >/dev/null 2>&1; then
     return
@@ -103,6 +133,7 @@ print_failure_details() {
     done
   else
     echo "observable go test: no test-level failure event was emitted; showing package output tail" >&2
+    print_timeout_summary
   fi
 
   failure_lines="${OBSERVABLE_FAILURE_LINES:-240}"
