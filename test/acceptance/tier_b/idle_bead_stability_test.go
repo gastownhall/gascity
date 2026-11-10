@@ -69,7 +69,9 @@ func TestPlainIdleOpenBeadCountsStayBounded(t *testing.T) {
 	probe := idleBeadStabilityProbeConfig(t)
 	env := newIsolatedTierBEnv(t, "fake")
 	c := helpers.NewCity(t, env)
-	c.Init("claude")
+	// Single-store: the probe counts order runs and wisps in the work file
+	// store, where a born-split city keeps neither.
+	c.InitSingleStore("claude")
 	setCityPatrolInterval(t, c.Dir, "1s")
 	writePlainIdleProbeOrders(t, c.Dir)
 
