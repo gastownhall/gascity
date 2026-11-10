@@ -30,14 +30,16 @@ var execIdleProbeBudget = 5 * time.Second
 
 // idleBoundaryDeclared reports whether the pack declared everything an idle
 // boundary needs: an activity clock (report-activity), an attachment probe
-// (report-attachment), and the exec connection (proc.exec) over which the
-// in-box tmux pane is observed. A pack that declares all three runs its agent
-// in an in-box tmux session gc can read; a failed handshake counts as not
-// declared.
+// (report-attachment), the exec connection (proc.exec) over which the in-box
+// tmux pane is observed, and idle-boundary, the pack's word that its agent
+// runs in the in-box tmux session `main` gc can read. The first three alone
+// prove no tmux: a pack whose box runs none declares them honestly. A failed
+// handshake counts as not declared.
 func (p *Provider) idleBoundaryDeclared() bool {
 	return p.handshakeCapability(runtime.ProtocolCapabilityReportActivity) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) &&
-		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) &&
+		p.handshakeCapability(runtime.ProtocolCapabilityIdleBoundary)
 }
 
 // rememberReadyPrompt records the session's configured ready-prompt prefix so
@@ -154,8 +156,9 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 // tmux.PromptObservationLines lines over the exec connection and applies
 // tmux.ClassifyIdlePane, so the boundary is the one local tmux uses.
 //
-// A pack that does not declare report-activity, report-attachment and
-// proc.exec gets [runtime.ErrInteractionUnsupported] without any op being run.
+// A pack that does not declare report-activity, report-attachment, proc.exec
+// and idle-boundary gets [runtime.ErrInteractionUnsupported] without any op
+// being run.
 //
 // timeout is a hard upper bound: the ready-prompt read (see
 // readyPromptPrefix) and every capture run under a context that expires at

@@ -125,6 +125,18 @@ type migrationSourceWindow struct {
 	lane      beads.BeadsDiagnostic
 	laneKnown bool
 	closed    bool
+	// deadline is when the verb's time budget runs out (zero: none). The
+	// engine stops at the next batch boundary past it (infra_copy_engine.go).
+	deadline time.Time
+}
+
+// setTimeBudget gives the window's run budget to spend from now; zero or less
+// is none.
+func (w *migrationSourceWindow) setTimeBudget(budget time.Duration) {
+	if w == nil || budget <= 0 {
+		return
+	}
+	w.deadline = time.Now().Add(budget)
 }
 
 // migrationWindows holds the process's open window. The controller lock the
@@ -190,7 +202,11 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		}
 		for _, root := range rigRoots {
 			owned, err := scopeProviderOwned(cityPath, root)
-			if err == nil && owned {
+			if err != nil {
+				stopErr := w.stopProvider()
+				return nil, errors.Join(fmt.Errorf("the maintenance window cannot tell whether bd owns a proxied server for rig scope %s (%w), so it can neither start that server nor rule it out, and this run reads that rig; the whole run is refused, nothing was written. Repair the rig's .beads metadata, or unbind the rig, then run this again", root, err), stopErr)
+			}
+			if owned {
 				err = migrationWindowStartScope(cityPath, root)
 			}
 			if err != nil {

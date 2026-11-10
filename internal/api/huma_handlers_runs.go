@@ -653,9 +653,8 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 			unique = append(unique, holder)
 		}
 	}
-	sessions := s.state.SessionsBeadStore()
-	store := sessions.Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		for _, holder := range unique {
 			fail(holder, errors.New("no session store configured"))
 		}
@@ -691,7 +690,7 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mgr := s.sessionManager(sessions)
+			mgr := s.sessionManager(store)
 			info, err := mgr.Get(id)
 			if err != nil {
 				results[i] = err

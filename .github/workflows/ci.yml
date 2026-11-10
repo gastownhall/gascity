@@ -144,6 +144,9 @@ jobs:
   #   - pack-gate: live checks against the gascity-packs registry (the
   #     bundled pack's provenance pins and a registry smoke), not tests of
   #     this tree.
+  #   - windows-lane, windows-lane-test: rbe-west builds for Linux only, so
+  #     the GOOS=windows/darwin cross-compiles and the native Windows tests
+  #     run on Blacksmith runners.
   # Check and CI / required keep their names for branch protection and the
   # main ruleset; both fan in exactly those gating jobs, and every job here
   # feeds CI / required. The advisory live probes of upstream code (contract
@@ -169,6 +172,55 @@ jobs:
         run: go test -count=1 ./internal/credentialprovider
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
+
+  # The Windows lane: rbe-west builds for Linux only, so these GOOS
+  # cross-compiles run here. Each list under .github/windows-lane/ is an
+  # allowlist of packages that pass; a package joins it in the PR that makes
+  # it pass, and from then on cannot regress. test-build.txt is shorter than
+  # build.txt because it also compiles test files; -exec /bin/true links the
+  # test binaries without running them. Vet stays nogo in the Bazel build.
+  # The darwin steps are the macOS compile proof for every package.
+  windows-lane:
+    name: Windows lane / cross-compile
+    needs:
+      - runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Build the Windows allowlist
+        run: GOOS=windows go build $(cat .github/windows-lane/build.txt)
+      - name: Compile the Windows allowlist's tests
+        run: GOOS=windows go test -count=1 -vet=off -run '^$' -exec /bin/true $(cat .github/windows-lane/test-build.txt)
+      - name: Build the nogo analyzers and their tests for Windows
+        working-directory: tools/nogo
+        run: GOOS=windows go build ./analyzers/... && GOOS=windows go test -count=1 -vet=off -run '^$' -exec /bin/true ./analyzers/...
+      - name: Build every package and its tests for macOS
+        run: GOOS=darwin go build ./... && GOOS=darwin go test -count=1 -vet=off -run '^$' -exec /bin/true ./...
+
+  # Native Windows tests for the packages in .github/windows-lane/test.txt.
+  # A package joins the list once its tests pass on Windows.
+  windows-lane-test:
+    name: Windows lane / native tests
+    needs:
+      - runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_windows }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Test the Windows allowlist
+        shell: pwsh
+        run: go test -count=1 @(Get-Content .github/windows-lane/test.txt)
 
   # Runs distinct live/provenance checks when pack-related files change.
   pack-gate:
@@ -230,6 +282,8 @@ jobs:
       - changes
       - credential-provider-windows
       - pack-gate
+      - windows-lane
+      - windows-lane-test
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -278,6 +332,8 @@ jobs:
       - check
       - credential-provider-windows
       - pack-gate
+      - windows-lane
+      - windows-lane-test
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:

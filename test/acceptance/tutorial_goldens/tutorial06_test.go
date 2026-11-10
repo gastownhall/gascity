@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTutorial06Beads(t *testing.T) {
@@ -167,17 +168,16 @@ func TestTutorial06Beads(t *testing.T) {
 		}
 	})
 
-	t.Run("bd list --status in_progress --flat", func(t *testing.T) {
-		ws.noteWarning("tutorial 06 coverage workaround: the page expects live in-progress work, so the page driver marks the refactor bead in_progress before running the filtered status query")
-		if out, err := ws.runShell(fmt.Sprintf("bd update %s --status in_progress", refactorID), ""); err != nil {
-			t.Fatalf("seed refactor in_progress state: %v\n%s", err, out)
-		}
-		out, err := ws.runShell("bd list --status in_progress --flat", "")
-		if err != nil {
-			t.Fatalf("bd list --status in_progress --flat: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Refactor auth module") {
-			t.Fatalf("in-progress list should expose live runtime work:\n%s", out)
+	t.Run("bd list --type session --flat --include-infra", func(t *testing.T) {
+		// The mayor's session bead appears once the supervisor materializes
+		// the always-on named session, so wait for it rather than assert once.
+		var out string
+		if !waitForCondition(t, 90*time.Second, 3*time.Second, func() bool {
+			var err error
+			out, err = ws.runShell("bd list --type session --flat --include-infra", "")
+			return err == nil && strings.Contains(out, "[session]") && strings.Contains(out, "mayor")
+		}) {
+			t.Fatalf("session listing should show the mayor's session bead:\n%s", out)
 		}
 	})
 
@@ -249,14 +249,30 @@ func TestTutorial06Beads(t *testing.T) {
 	})
 
 	t.Run("gc convoy status mc-d4g", func(t *testing.T) {
-		out, err := ws.runShell(fmt.Sprintf("gc convoy status %s", sprintConvoyID), "")
-		if err != nil {
-			t.Fatalf("gc convoy status %s: %v\n%s", sprintConvoyID, err, out)
-		}
-		for _, want := range []string{"Sprint 42", "Fix the login bug", "Refactor auth module", "Update API docs"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("convoy status missing %q:\n%s", want, out)
+		// convoy status reads through the supervisor's bead cache, which can
+		// trail the convoy create that just wrote the tracks by a moment, so
+		// wait for every member rather than read once.
+		wants := []string{"Sprint 42", "Fix the login bug", "Refactor auth module", "Update API docs"}
+		listsEveryMember := func(out string) bool {
+			for _, want := range wants {
+				if !strings.Contains(out, want) {
+					return false
+				}
 			}
+			return true
+		}
+		var out string
+		var err error
+		reads := 0
+		if !waitForCondition(t, 30*time.Second, time.Second, func() bool {
+			reads++
+			out, err = ws.runShell(fmt.Sprintf("gc convoy status %s", sprintConvoyID), "")
+			return err == nil && listsEveryMember(out)
+		}) {
+			t.Fatalf("gc convoy status %s never listed every member of %q within 30s (%v):\n%s", sprintConvoyID, wants, err, out)
+		}
+		if reads > 1 {
+			ws.noteWarning("tutorial 06 runtime workaround: gc convoy status, read through the supervisor's bead cache, trailed the convoy create for %d read(s), so the page driver waited for every member", reads-1)
 		}
 	})
 
