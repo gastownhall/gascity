@@ -141,7 +141,11 @@ var wispGCSessionPurgeBatchCap = 500
 // memoryWispGC.sessionPurgeCursor), so kept sessions do not starve the rest.
 var wispGCSessionPurgeScanCap = 2000
 
-// wispGCMailPurgeBatchCap is the per-tick read-message purge cap (RED stub).
+// wispGCMailPurgeBatchCap bounds the read-message retention arm. Like
+// wispGCClosurePurgeBatchCap it caps DELETE ATTEMPTS per tick — counting
+// failures, not just successful purges — oldest message first, so a large
+// backlog of read mail, and a failing delete backend, drain across successive
+// ticks instead of one unbounded pass. Package var so tests can shrink it.
 var wispGCMailPurgeBatchCap = 500
 
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
@@ -393,13 +397,16 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 		// The read-message retention arm is messaging-class: its candidate query
 		// and wisp-tier delete loop live inside the messaging edge (beadmail),
 		// against the messaging store — disjoint from the graph-class purge above.
-		mailPurged, _, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL), wispGCMailPurgeBatchCap)
+		mailPurged, mailCapped, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL), wispGCMailPurgeBatchCap)
 		purged += mailPurged
 		if mailErr != nil {
 			deleteErr = errors.Join(deleteErr, mailErr)
 		}
 		if mailPurged > 0 {
 			log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
+		}
+		if mailCapped {
+			log.Printf("wisp gc: read message wisp purge stopped after %d delete attempts (cap); remaining candidates drain on later ticks", wispGCMailPurgeBatchCap)
 		}
 	}
 

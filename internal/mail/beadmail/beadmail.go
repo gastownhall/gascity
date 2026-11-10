@@ -1314,22 +1314,34 @@ func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 // retention delete semantics). Beads with a zero or not-yet-past CreatedAt are
 // skipped. Per-bead delete failures are joined and returned without aborting the
 // sweep; returns the number of beads purged.
-func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time, _ int) (int, bool, error) {
+//
+// limit caps DELETE ATTEMPTS per call (pass 0 for no cap), oldest candidate
+// first, so a large backlog drains across calls instead of one tick. A delete
+// that ran (success or failure) and a live re-verify that failed with anything
+// but NotFound each use one attempt; skipped candidates (not yet aged, gone, or
+// no longer read) use none. The candidate list itself is unbounded: a
+// server-side limit would let skipped rows starve eligible ones behind them.
+// capped reports that the limit stopped the sweep with aged candidates left.
+func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time, limit int) (int, bool, error) {
 	entries, err := store.List(beads.ListQuery{
 		Type:          messageBeadType,
 		Metadata:      map[string]string{mail.ReadMetadataKey: "true"},
 		IncludeClosed: true,
 		TierMode:      beads.TierWisps,
+		Sort:          beads.SortCreatedAsc,
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("listing read message wisps: %w", err)
 	}
-	purged := 0
+	purged, attempts := 0, 0
 	var deleteErr error
 	live := beads.LiveFor(store)
 	for _, entry := range entries {
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
+		}
+		if limit > 0 && attempts >= limit {
+			return purged, true, deleteErr
 		}
 		// The candidate list above can answer from the CachingStore's stale
 		// view. A message the user just un-read (or that vanished) inside the
@@ -1342,12 +1354,14 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time, _ int) (int,
 			continue
 		}
 		if err != nil {
+			attempts++
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("live re-verify of bead %q before delete: %w", entry.ID, err))
 			continue
 		}
 		if current.Metadata[mail.ReadMetadataKey] != "true" {
 			continue
 		}
+		attempts++
 		if err := deleteMessageWispBead(store, entry.ID); err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
