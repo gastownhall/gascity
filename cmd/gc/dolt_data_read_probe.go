@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The data-read probe closes the blind spot behind ga-vrq5pu: dolt-health and
@@ -75,22 +77,67 @@ const (
 	managedDoltDataReadErrorChunk
 )
 
-// classifyManagedDoltDataReadError sorts a read error: a table or database that
+// managedDoltMissingObjectPattern matches the MySQL 1146/1049 forms for a table
+// or database that is not there ("Table 'gascity.wisps' doesn't exist"). The
+// quoted object name is part of the match: a bare "doesn't exist" also ends
+// dolt's "root hash doesn't exist" and file-level messages, which are not an
+// absent table.
+var managedDoltMissingObjectPattern = regexp.MustCompile(`(table|database) '[^']*' (doesn't|does not) exist`)
+
+// managedDoltDataReadErrorMaxBytes bounds the error text a probe report carries.
+const managedDoltDataReadErrorMaxBytes = 512
+
+// classifyManagedDoltDataReadText sorts a read error: a table or database that
 // is not there is healthy (the table is created lazily and may be dropped), a
-// chunk-store signature is data loss, and anything else is inconclusive.
-func classifyManagedDoltDataReadError(err error) managedDoltDataReadErrorKind {
-	msg := strings.ToLower(err.Error())
+// chunk-store signature (including a missing root hash) is data loss, and
+// anything else is inconclusive.
+func classifyManagedDoltDataReadText(text string) managedDoltDataReadErrorKind {
+	msg := strings.ToLower(text)
 	switch {
 	case strings.Contains(msg, "empty chunk returned"),
-		strings.Contains(msg, "required but not found"):
+		strings.Contains(msg, "required but not found"),
+		strings.Contains(msg, "root hash doesn't exist"):
 		return managedDoltDataReadErrorChunk
 	case strings.Contains(msg, "table not found"),
-		strings.Contains(msg, "doesn't exist"),
-		strings.Contains(msg, "does not exist"),
-		strings.Contains(msg, "database not found"):
+		strings.Contains(msg, "database not found"),
+		managedDoltMissingObjectPattern.MatchString(msg):
 		return managedDoltDataReadErrorAbsent
 	}
 	return managedDoltDataReadErrorOther
+}
+
+// managedDoltDataReadErrorText reduces a read error to what a report should
+// carry. The CLI runner returns its whole combined output, so the rows of the
+// statements that succeeded precede the error line. The lines that carry a
+// signature are kept, else the lines that say "error", else the whole text; the
+// result is bounded.
+func managedDoltDataReadErrorText(err error) string {
+	var signature, errorLines []string
+	for _, line := range strings.Split(err.Error(), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case classifyManagedDoltDataReadText(line) != managedDoltDataReadErrorOther:
+			signature = append(signature, line)
+		case strings.Contains(strings.ToLower(line), "error"):
+			errorLines = append(errorLines, line)
+		}
+	}
+	text := strings.Join(strings.Fields(err.Error()), " ")
+	switch {
+	case len(signature) > 0:
+		text = strings.Join(signature, "; ")
+	case len(errorLines) > 0:
+		text = strings.Join(errorLines, "; ")
+	}
+	if len(text) > managedDoltDataReadErrorMaxBytes {
+		cut := managedDoltDataReadErrorMaxBytes
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "..."
+	}
+	return text
 }
 
 // managedDoltIgnoredTableDiscoverySQL lists the existing dolt-ignored tables in
@@ -135,7 +182,7 @@ func managedDoltLeafReadStatementsFor(db string, tables []string) []string {
 func managedDoltDataReadProbeWith(ops managedDoltDataReadOps) managedDoltDataReadResult {
 	refs, err := ops.listTables()
 	if err != nil {
-		return managedDoltDataReadResult{Warning: "discovering dolt-ignored tables: " + err.Error()}
+		return managedDoltDataReadResult{Warning: "discovering dolt-ignored tables: " + managedDoltDataReadErrorText(err)}
 	}
 	var dbs []string
 	byDB := map[string][]string{}
@@ -154,13 +201,14 @@ func managedDoltDataReadProbeWith(ops managedDoltDataReadOps) managedDoltDataRea
 		if err == nil {
 			continue
 		}
-		switch classifyManagedDoltDataReadError(err) {
+		text := managedDoltDataReadErrorText(err)
+		switch classifyManagedDoltDataReadText(text) {
 		case managedDoltDataReadErrorAbsent:
 		case managedDoltDataReadErrorChunk:
-			return managedDoltDataReadResult{Err: db + ": " + err.Error()}
+			return managedDoltDataReadResult{Err: db + ": " + text}
 		default:
 			if result.Warning == "" {
-				result.Warning = db + ": " + err.Error()
+				result.Warning = db + ": " + text
 			}
 		}
 	}
