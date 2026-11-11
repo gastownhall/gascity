@@ -49,6 +49,34 @@ func heldLabelVariants() []string {
 	return append(append([]string(nil), beadmeta.DispatchHoldLabels...), " Hold:External ")
 }
 
+func TestDrainAckOpenArm_BudgetHeldOpenWorkIsProvablyNonClaimable(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "budget-work", Type: "task", Status: "open", Assignee: "worker",
+		Metadata: map[string]string{beadmeta.BudgetDeferredUntilMetadataKey: budgetStampNow().Add(time.Hour).Format(time.RFC3339)},
+	}}, nil)
+	got, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(testSeatWork("", nil, store, nil), sessionpkg.Info{ID: "worker"}, budgetStampNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatalf("drain-ack reported budget-held bead %s as claimable", got.ID)
+	}
+}
+
+func TestDrainAckOpenArm_ExpiredBudgetStampOpenWorkStillFires(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "budget-work", Type: "task", Status: "open", Assignee: "worker",
+		Metadata: map[string]string{beadmeta.BudgetDeferredUntilMetadataKey: budgetStampNow().Add(-time.Hour).Format(time.RFC3339)},
+	}}, nil)
+	got, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(testSeatWork("", nil, store, nil), sessionpkg.Info{ID: "worker"}, budgetStampNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.ID != "budget-work" {
+		t.Fatalf("drain-ack open arm=(%q, %v), want expired budget-work", got.ID, found)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_HeldAssignedOpenWorkIsNotWakeDemand(t *testing.T) {
 	for _, label := range heldLabelVariants() {
 		t.Run(label, func(t *testing.T) {

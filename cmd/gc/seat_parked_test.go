@@ -58,6 +58,12 @@ func pin(id, assignee string) beads.Bead {
 	return beads.Bead{ID: id, Type: "task", Status: "open", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}
 }
 
+func budgetStampedPin(stamp string) beads.Bead {
+	b := pin("w1", "s1")
+	b.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = stamp
+	return b
+}
+
 func TestParkSeatsClassifiesOneSeat(t *testing.T) {
 	inProgress := func(b beads.Bead) beads.Bead { b.Status = "in_progress"; return b }
 	for _, tc := range []struct {
@@ -110,6 +116,11 @@ func TestParkSeatsClassifiesOneSeat(t *testing.T) {
 			b.DeferUntil = &later
 			return b
 		}()}, ready: []bool{false}, wantEligible: true},
+		{name: "a budget-held pin is no pool demand, so it does not park", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(time.Hour))}, ready: []bool{false}, wantEligible: true},
+		{name: "an expired-stamp pin still parks", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(-time.Hour))}, ready: []bool{false}, wantEligible: true, wantParked: true},
+		{name: "an exactly-now stamp still parks", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(0))}, ready: []bool{false}, wantEligible: true, wantParked: true},
+		{name: "a blank stamp still parks", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(" \t")}, ready: []bool{false}, wantEligible: true, wantParked: true},
+		{name: "a malformed stamp still parks", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin("tomorrow")}, ready: []bool{false}, wantEligible: true, wantParked: true},
 		{name: "a named seat is not a pool seat", row: parkedRow("s1", func(i *session.Info) { i.ConfiguredNamedSession, i.PoolManaged, i.PoolSlot = true, false, "" }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "a row whose template is not configured is not parked", row: parkedRow("s1", func(i *session.Info) { i.Template = "gone" }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 	} {
@@ -323,6 +334,10 @@ func TestParkSeatsContinuesThroughTheWake(t *testing.T) {
 		{name: "an in-progress claim does not", row: parkedRow("s1"), work: []beads.Bead{pin("w1", "s1"), inProgress(pin("w2", "s1"))}, ready: []bool{true, false}},
 		{name: "a started pin does not", row: parkedRow("s1", func(i *session.Info) { i.CurrentClaimBeadID = "w1" }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{true}},
 		{name: "a deferred pin does not", row: parkedRow("s1"), work: []beads.Bead{deferred(pin("w1", "s1"))}, ready: []bool{false}},
+		{name: "a budget-held pin does not continue", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(time.Hour))}, ready: []bool{false}},
+		{name: "a ready budget-held pin does not continue", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(time.Hour))}, ready: []bool{true}},
+		{name: "an expired-stamp pin parks and continues", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(-time.Hour))}, ready: []bool{false}, wantParked: true, wantContinues: true},
+		{name: "an expired-stamp ready pin continues", row: parkedRow("s1"), work: []beads.Bead{budgetStampedPin(parkRFC(-time.Hour))}, ready: []bool{true}, wantContinues: true},
 		{name: "a workless seat does not", row: parkedRow("s1"), ready: []bool{}},
 		{name: "a seat whose runtime died does not", row: parkedRow("s1", func(i *session.Info) { i.SleepReason = string(session.SleepReasonRuntimeMissing) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{true}},
 		{name: "a fresh-wake seat does not", row: parkedRow("s1", func(i *session.Info) { i.WakeMode = "fresh" }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{true}},

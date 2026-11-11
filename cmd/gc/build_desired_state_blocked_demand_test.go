@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"io"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -11,6 +13,109 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func budgetDemandConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "budget-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)}},
+	}
+}
+
+func budgetDemandWork(id, stamp string) beads.Bead {
+	return beads.Bead{ID: id, Title: id, Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey:            "worker",
+		beadmeta.BudgetDeferredUntilMetadataKey: stamp,
+	}}
+}
+
+func TestDefaultScaleCheckCountsAndDemandSkipsBudgetHeldRows(t *testing.T) {
+	now := budgetStampNow()
+	for _, tc := range []struct {
+		name string
+		rows []beads.Bead
+		want []string
+	}{
+		{name: "empty"},
+		{name: "stamp alone", rows: []beads.Bead{budgetDemandWork("held", now.Add(time.Hour).Format(time.RFC3339))}},
+		{name: "eligible sibling", rows: []beads.Bead{budgetDemandWork("held", now.Add(time.Hour).Format(time.RFC3339)), budgetDemandWork("eligible", "")}, want: []string{"eligible"}},
+		{name: "exactly now", rows: []beads.Bead{budgetDemandWork("boundary", now.Format(time.RFC3339))}, want: []string{"boundary"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, backing := newDemandCache(t, true, tc.rows...)
+			backing.armed.Store(true)
+			counts, demand, partial, errs := defaultScaleCheckCountsAndDemand(budgetDemandConfig(),
+				[]defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: store}},
+				newReadyDemandCacheWithReads(newV2DemandReads(now, nil)))
+			if len(errs) != 0 || partial["worker"] {
+				t.Fatalf("healthy read: errors=%v partial=%v", errs, partial)
+			}
+			readOps := backing.readLog()
+			t.Run("no extra backing read", func(t *testing.T) {
+				if len(readOps) != 0 {
+					t.Fatalf("stamp gate read the backing store: %v", readOps)
+				}
+			})
+			t.Run("count", func(t *testing.T) {
+				if counts["worker"] != len(tc.want) || demand["worker"].Count != len(tc.want) {
+					t.Fatalf("count=%d demand.Count=%d, want %d", counts["worker"], demand["worker"].Count, len(tc.want))
+				}
+			})
+			t.Run("provenance", func(t *testing.T) {
+				if got := demand["worker"].WorkBeadIDs; !slices.Equal(got, tc.want) {
+					t.Fatalf("WorkBeadIDs=%v, want %v", got, tc.want)
+				}
+			})
+			t.Run("source rows unchanged", func(t *testing.T) {
+				for _, row := range tc.rows {
+					got, err := backing.Get(row.ID)
+					if err != nil || !reflect.DeepEqual(got, row) {
+						t.Fatalf("source row changed: got=%+v err=%v want=%+v", got, err, row)
+					}
+				}
+			})
+		})
+	}
+	t.Run("failed ready read remains partial", func(t *testing.T) {
+		store, _ := newDemandCache(t, false, budgetDemandWork("held", "2999-01-01T00:00:00Z"))
+		rec := &externalReadsRecording{FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
+			keyOf(sourceDemand, store): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{ReadyAllErr: errDemandBackingDown}}},
+		}}
+		counts, _, partial, errs := defaultScaleCheckCountsAndDemand(budgetDemandConfig(),
+			[]defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: store}},
+			newReadyDemandCacheWithReads(newV2DemandReads(now, rec)))
+		if counts["worker"] != 0 || !partial["worker"] || len(errs) == 0 {
+			t.Fatalf("failed read: count=%d partial=%v errors=%v, want zero with partial and error", counts["worker"], partial, errs)
+		}
+	})
+}
+
+func TestBuildDesiredStateFutureBudgetStampStartsNoSeat(t *testing.T) {
+	now := budgetStampNow()
+	for _, tc := range []struct {
+		name string
+		rows []beads.Bead
+		want int
+	}{
+		{name: "stamp alone", rows: []beads.Bead{budgetDemandWork("held", now.Add(time.Hour).Format(time.RFC3339))}},
+		{name: "eligible sibling", rows: []beads.Bead{budgetDemandWork("held", now.Add(time.Hour).Format(time.RFC3339)), budgetDemandWork("eligible", "")}, want: 1},
+		{name: "exactly now", rows: []beads.Bead{budgetDemandWork("boundary", now.Format(time.RFC3339))}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(0, tc.rows, nil)
+			got := buildDesiredStateWithSessionBeadsAt("budget-city", t.TempDir(), now, now,
+				budgetDemandConfig(), runtime.NewFake(), store, nil, newSessionBeadSnapshot(nil), nil, io.Discard)
+			seats := 0
+			for _, desired := range got.State {
+				if desired.TemplateName == "worker" {
+					seats++
+				}
+			}
+			if seats != tc.want {
+				t.Fatalf("requested seats=%d, want %d; counts=%v", seats, tc.want, got.ScaleCheckCounts)
+			}
+		})
+	}
+}
 
 // TestCollectOpenUnassignedRoutedWorkExcludesBlocked covers gc-ft31x, the
 // build_desired_state.go sibling of gc-4zb/#4395: the controller-demand read at

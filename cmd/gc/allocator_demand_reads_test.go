@@ -36,6 +36,75 @@ type demandBacking struct {
 
 var errDemandBackingDown = errors.New("demand backing down")
 
+func TestDemandReadsNowIsThePassClock(t *testing.T) {
+	now := budgetStampNow()
+	assertClock := func(t *testing.T, reads demandReads, want time.Time) {
+		t.Helper()
+		clock, ok := reads.(interface{ Now() time.Time })
+		if !ok {
+			t.Fatal("demand reads do not expose the pass clock")
+		}
+		if got := clock.Now(); !got.Equal(want) {
+			t.Fatalf("decision clock=%s, want %s", got, want)
+		}
+	}
+	// Assert the proposed seam at runtime so the RED suite reports a missing
+	// behavior instead of failing to compile before the builder adds it.
+	pinClock := func(t *testing.T, cache *readyDemandCache) *readyDemandCache {
+		t.Helper()
+		pinner, ok := any(cache).(interface {
+			withDecisionTime(time.Time) *readyDemandCache
+		})
+		if !ok {
+			t.Fatal("ready demand cache cannot pin the pass clock")
+		}
+		return pinner.withDecisionTime(now)
+	}
+	t.Run("v2 pass clock", func(t *testing.T) {
+		assertClock(t, newV2DemandReads(now, nil), now)
+	})
+	t.Run("legacy cache pin", func(t *testing.T) {
+		assertClock(t, pinClock(t, newReadyDemandCache()).demandReads(), now)
+	})
+	t.Run("pin preserves cache identity", func(t *testing.T) {
+		cache := newReadyDemandCache()
+		if got := pinClock(t, cache); got != cache {
+			t.Fatal("pinning replaced the pass cache")
+		}
+	})
+	t.Run("v2 ignores legacy pin", func(t *testing.T) {
+		v2Now := now.Add(-time.Hour)
+		cache := pinClock(t, newReadyDemandCacheWithReads(newV2DemandReads(v2Now, nil)))
+		assertClock(t, cache.demandReads(), v2Now)
+	})
+	t.Run("nil cache remains nil", func(t *testing.T) {
+		if got := pinClock(t, nil); got != nil {
+			t.Fatal("pinning a nil cache allocated a cache")
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		reads demandReads
+	}{
+		{name: "zero legacy clock", reads: legacyDemandReads{}},
+		{name: "unpinned cache clock", reads: newReadyDemandCache().demandReads()},
+		{name: "nil cache clock", reads: (*readyDemandCache)(nil).demandReads()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock, ok := tc.reads.(interface{ Now() time.Time })
+			if !ok {
+				t.Fatal("legacy demand reads do not expose a clock")
+			}
+			before := time.Now()
+			got := clock.Now()
+			after := time.Now()
+			if got.Before(before) || got.After(after) {
+				t.Fatalf("unpinned clock=%s, want wall clock between %s and %s", got, before, after)
+			}
+		})
+	}
+}
+
 // exactDemandBacking opts the backing into exact cached reads, as the
 // controller's SQLite binding is.
 type exactDemandBacking struct{ *demandBacking }

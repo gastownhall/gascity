@@ -28,6 +28,97 @@ import (
 
 const agreementTemplate = "rig/worker"
 
+func budgetStampNow() time.Time {
+	return time.Date(2031, 6, 12, 12, 0, 0, 0, time.UTC)
+}
+
+func budgetStampCases() []struct {
+	name, stamp  string
+	held, absent bool
+} {
+	return []struct {
+		name, stamp  string
+		held, absent bool
+	}{
+		{name: "future UTC", stamp: "2031-06-12T13:00:00Z", held: true},
+		{name: "padded future", stamp: " \t2031-06-12T13:00:00Z\n", held: true},
+		{name: "future offset with earlier local time", stamp: "2031-06-12T11:00:00-02:00", held: true},
+		{name: "future fractional second", stamp: "2031-06-12T12:00:00.000000001Z", held: true},
+		{name: "exactly now", stamp: "2031-06-12T12:00:00Z"},
+		{name: "same instant with offset", stamp: "2031-06-12T14:00:00+02:00"},
+		{name: "past", stamp: "2031-06-12T11:59:59Z"},
+		{name: "absent", absent: true},
+		{name: "empty"},
+		{name: "whitespace", stamp: " \t\n"},
+		{name: "date only", stamp: "2031-06-13"},
+		{name: "lowercase t", stamp: "2031-06-12t13:00:00Z"},
+		{name: "space separated", stamp: "2031-06-12 13:00:00Z"},
+		{name: "zoneless", stamp: "2031-06-12T13:00:00"},
+		{name: "epoch seconds", stamp: "1939035600"},
+		{name: "impossible date", stamp: "2031-02-30T13:00:00Z"},
+		{name: "hour 24", stamp: "2031-06-12T24:00:00Z"},
+		{name: "free text", stamp: "tomorrow"},
+	}
+}
+
+// budgetStampDemand runs the real demand gate through the collector's existing
+// v2 clock seam. It keeps these tests compilable before the gate gains now.
+func budgetStampDemand(t *testing.T, b beads.Bead, now time.Time) bool {
+	t.Helper()
+	store, _ := newDemandCache(t, true, b)
+	counts, _, partial, errs := defaultScaleCheckCountsAndDemand(agreementConfig(),
+		[]defaultScaleCheckTarget{{template: agreementTemplate, storeKey: "city", store: store}},
+		newReadyDemandCacheWithReads(newV2DemandReads(now, nil)))
+	if len(errs) != 0 || partial[agreementTemplate] {
+		t.Fatalf("healthy demand read: errors=%v partial=%v", errs, partial)
+	}
+	return counts[agreementTemplate] != 0
+}
+
+func TestDemandServableForTemplatesBudgetStampContract(t *testing.T) {
+	for _, tc := range budgetStampCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			b := beads.Bead{ID: "budget-work", Type: "task", Status: "open", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}}
+			if !tc.absent {
+				b.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = tc.stamp
+			}
+			if got := budgetStampDemand(t, b, budgetStampNow()); got != !tc.held {
+				t.Fatalf("counted=%v, want %v for stamp %q", got, !tc.held, tc.stamp)
+			}
+		})
+	}
+	// An expired budget stamp does not undo the existing dispatch hold.
+	t.Run("hold still excludes an expired stamp", func(t *testing.T) {
+		b := beads.Bead{ID: "held-work", Type: "task", Status: "open", Labels: []string{beadmeta.HoldExternalLabel}, Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:            agreementTemplate,
+			beadmeta.BudgetDeferredUntilMetadataKey: "2031-06-12T11:00:00Z",
+		}}
+		if budgetStampDemand(t, b, budgetStampNow()) {
+			t.Fatal("dispatch-held row counted after budget expiry")
+		}
+	})
+}
+
+func TestDemandAndClaimGateAgreeOnBudgetStamp(t *testing.T) {
+	for _, tc := range budgetStampCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			b := beads.Bead{ID: "budget-work", Type: "task", Status: "open", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}}
+			if !tc.absent {
+				b.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = tc.stamp
+			}
+			counted := budgetStampDemand(t, b, budgetStampNow())
+			claimable := hookCandidateClaimable(b, hookClaimRouteTargets(agreementTemplate), budgetStampNow())
+			if counted != claimable {
+				t.Fatalf("demand=%v claimable=%v for stamp %q", counted, claimable, tc.stamp)
+			}
+		})
+	}
+}
+
 func agreementConfig() *config.City {
 	// "solo" is capped at one session, so it is a singleton rather than a pool:
 	// NormalizePoolRouteTarget must not collapse a suffix against it.

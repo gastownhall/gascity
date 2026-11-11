@@ -103,6 +103,57 @@ func assignedWorkIDs(work []beads.Bead) []string {
 	return ids
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandAtDropsBudgetHeldBead(t *testing.T) {
+	for _, tc := range budgetStampCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			b := budgetDemandWork("assigned-budget-work", tc.stamp)
+			b.Assignee = "worker"
+			if tc.absent {
+				delete(b.Metadata, beadmeta.BudgetDeferredUntilMetadataKey)
+			}
+			got := filterAssignedWorkBeadsForPoolDemandAt(budgetDemandConfig(), "", nil, nil,
+				[]beads.Bead{b}, []string{""}, budgetStampNow())
+			if kept := len(got) == 1 && got[0].ID == b.ID; kept != !tc.held {
+				t.Fatalf("assigned demand=%v, want kept=%v for stamp %q", assignedWorkIDs(got), !tc.held, tc.stamp)
+			}
+		})
+	}
+}
+
+func TestFilterAssignedWorkBudgetStampControlsIdentityWake(t *testing.T) {
+	for _, tc := range []struct {
+		name, stamp string
+		want        int
+		cause       demandRowClaimability
+	}{
+		{name: "future stamp", stamp: "2999-01-01T00:00:00Z", cause: demandRowDeferred},
+		{name: "expired stamp", stamp: "2000-01-01T00:00:00Z", want: 1, cause: demandRowClaimable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := budgetDemandConfig()
+			b := budgetDemandWork("assigned-budget-work", tc.stamp)
+			b.Assignee = "worker"
+			unblocked := false
+			b.IsBlocked = &unblocked
+			filtered := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, []beads.Bead{b}, []string{""})
+			var requests []SessionRequest
+			for _, desired := range ComputePoolDesiredStates(cfg, filtered, nil, nil) {
+				requests = append(requests, desired.Requests...)
+			}
+			t.Run("wake requests", func(t *testing.T) {
+				if len(requests) != tc.want || (tc.want == 1 && requests[0].Tier != "wake-known-identity") {
+					t.Fatalf("requests=%+v, want %d wake-known-identity", requests, tc.want)
+				}
+			})
+			t.Run("classification", func(t *testing.T) {
+				if got := classifyDemandRowClaimability(b, budgetStampNow()); got != tc.cause {
+					t.Fatalf("classification=%q, want %q", got, tc.cause)
+				}
+			})
+		})
+	}
+}
+
 // TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores
 // pins the store projection where alignment is CONSTRUCTED. Every other test of
 // this contract exercises a consumer that is handed an already-aligned slice;

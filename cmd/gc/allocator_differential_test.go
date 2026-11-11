@@ -438,6 +438,47 @@ func diffConfig(agents ...config.Agent) *config.City {
 	return &config.City{Workspace: config.Workspace{Name: "diff-city"}, Agents: agents}
 }
 
+func budgetStampDiffCity() diffCity {
+	return diffCity{
+		name: "budget-stamp-future-and-expired",
+		cfg:  diffConfig(diffAgent("worker", 3)),
+		beads: []beads.Bead{
+			diffWork("budget-future", "worker", beadmeta.BudgetDeferredUntilMetadataKey, diffNow.Add(time.Hour).Format(time.RFC3339)),
+			diffWork("budget-expired", "worker", beadmeta.BudgetDeferredUntilMetadataKey, diffNow.Add(-time.Hour).Format(time.RFC3339)),
+			diffWork("eligible-sibling", "worker"),
+		},
+	}
+}
+
+// Agreement alone would let both allocators count the same held row. The
+// expected request count also pins the intended behavior through gatherDemand.
+func TestBudgetStampAllocationAcceptsOnlyEligibleRows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []beads.Bead
+		want int
+	}{
+		{name: "held row alone", rows: []beads.Bead{diffWork("held", "worker", beadmeta.BudgetDeferredUntilMetadataKey, diffNow.Add(time.Hour).Format(time.RFC3339))}},
+		{name: "eligible sibling", rows: []beads.Bead{diffWork("held", "worker", beadmeta.BudgetDeferredUntilMetadataKey, diffNow.Add(time.Hour).Format(time.RFC3339)), diffWork("eligible", "worker")}, want: 1},
+		{name: "future expired and sibling", rows: budgetStampDiffCity().beads, want: 2},
+		{name: "exactly now", rows: []beads.Bead{diffWork("boundary", "worker", beadmeta.BudgetDeferredUntilMetadataKey, diffNow.Format(time.RFC3339))}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, path := range []struct {
+				name string
+				run  func(*testing.T, diffCity) allocOutcome
+			}{{name: "legacy", run: legacyAllocation}, {name: "v2", run: v2Allocation}} {
+				t.Run(path.name, func(t *testing.T) {
+					c := diffCity{name: tc.name, cfg: diffConfig(diffAgent("worker", 3)), beads: cloneDiffBeads(tc.rows)}
+					if got := path.run(t, c).accepted["worker"]; got != tc.want {
+						t.Fatalf("accepted requests=%d, want %d", got, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func diffCities(t *testing.T) []diffCity {
 	chat := func(mode string) *config.City {
 		cfg := diffConfig(diffAgent("worker", 3), diffAgent("chat", 1))
@@ -468,6 +509,7 @@ func diffCities(t *testing.T) []diffCity {
 		return diffWork(id, dispatcher, beadmeta.KindMetadataKey, beadmeta.KindWorkflowFinalize, beadmeta.RootStoreRefMetadataKey, root)
 	}
 	return append([]diffCity{
+		budgetStampDiffCity(),
 		{
 			name: "routed demand reuses an asleep row and plans the rest",
 			cfg:  diffConfig(diffAgent("worker", 3)),

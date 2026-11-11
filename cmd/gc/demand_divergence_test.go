@@ -112,7 +112,8 @@ func TestDivergenceIsNotRecordedForAClaimsErroredDrain(t *testing.T) {
 func TestDivergenceClassification(t *testing.T) {
 	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
 	blockedTrue := true
-	future := time.Now().Add(time.Hour)
+	now := budgetStampNow()
+	future := now.Add(time.Hour)
 	for _, tt := range []struct {
 		name       string
 		bead       beads.Bead
@@ -174,6 +175,22 @@ func TestDivergenceClassification(t *testing.T) {
 			wantClass: events.DemandClaimBenign, wantStat: "in_progress",
 		},
 		{
+			name: "open but budget held", triggerID: "wb-1",
+			bead: beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:            "rig/worker",
+				beadmeta.BudgetDeferredUntilMetadataKey: future.Format(time.RFC3339),
+			}},
+			wantClass: events.DemandClaimBenign, wantStat: "open",
+		},
+		{
+			name: "expired budget stamp remains claimable", triggerID: "wb-1",
+			bead: beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:            "rig/worker",
+				beadmeta.BudgetDeferredUntilMetadataKey: now.Add(-time.Hour).Format(time.RFC3339),
+			}},
+			wantClass: events.DemandClaimDivergence, wantStat: "open",
+		},
+		{
 			name: "closed", triggerID: "wb-1",
 			bead:      beads.Bead{ID: "wb-1", Status: "closed", Type: "task", Metadata: routed},
 			wantClass: events.DemandClaimBenign, wantStat: "closed",
@@ -198,12 +215,38 @@ func TestDivergenceClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
 			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
+			ops.Now = func() time.Time { return now }
 			status, class := classifyDemandTrigger(tt.triggerID, "/rig", opts, ops)
 			if class != tt.wantClass {
 				t.Errorf("classification = %q, want %q", class, tt.wantClass)
 			}
 			if status != tt.wantStat {
 				t.Errorf("status = %q, want %q", status, tt.wantStat)
+			}
+		})
+	}
+}
+
+func TestBudgetStampDeferralPrecedesOtherClaimabilityCauses(t *testing.T) {
+	blocked := true
+	for _, tc := range []struct {
+		name      string
+		stamp     string
+		labels    []string
+		isBlocked *bool
+		want      demandRowClaimability
+	}{
+		{name: "future before unknown blockedness", stamp: "2999-01-01T00:00:00Z", want: demandRowDeferred},
+		{name: "future before blocked projection", stamp: "2999-01-01T00:00:00Z", isBlocked: &blocked, want: demandRowDeferred},
+		{name: "future before dispatch hold", stamp: "2999-01-01T00:00:00Z", labels: []string{beadmeta.HoldExternalLabel}, want: demandRowDeferred},
+		{name: "expired preserves dispatch hold", stamp: "2000-01-01T00:00:00Z", labels: []string{beadmeta.HoldExternalLabel}, want: demandRowHeld},
+		{name: "malformed preserves unproven blockedness", stamp: "tomorrow", isBlocked: &blocked, want: demandRowBlockednessUnproven},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := budgetDemandWork("budget-work", tc.stamp)
+			b.Labels, b.IsBlocked = tc.labels, tc.isBlocked
+			if got := classifyDemandRowClaimability(b, budgetStampNow()); got != tc.want {
+				t.Fatalf("classification=%q, want %q", got, tc.want)
 			}
 		})
 	}
