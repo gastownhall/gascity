@@ -53,12 +53,14 @@ func TestDefaultRecoveryHooksSurfaceFailures(t *testing.T) {
 //	                    exits 1, which is how a truncated list looks
 //
 // READ is ASSIGNEE, ROUTED or RUN_TARGET (the three `bd list` reads, told apart
-// by their arguments) or QUERY. `bd update` always succeeds. Every call is
-// appended to $FAKE_BD_LOG.
+// by their arguments) or QUERY. `bd update` and `bd reclaim` always succeed
+// (reclaim reports nothing reverted, so no route backfill follows). Every call
+// is appended to $FAKE_BD_LOG.
 const fakeRecoveryBD = `#!/bin/sh
 [ -n "$FAKE_BD_LOG" ] && printf '%s\n' "$*" >> "$FAKE_BD_LOG"
 case "$1" in
 update) exit 0 ;;
+reclaim) printf '{"count":0,"reclaimed":null}'; exit 0 ;;
 query) mode=$FAKE_BD_QUERY; out=$FAKE_BD_QUERY_OUT ;;
 list)
 	case "$*" in
@@ -78,7 +80,7 @@ printf '%s' "${out:-[]}"
 type recoveryHookRun struct {
 	stdout  string
 	exit    int
-	updates []string // the id each `bd update` was invoked with, in order
+	updates []string // the id each `bd update` / `bd reclaim --id` was invoked with, in order
 	reads   []string // every `bd list` / `bd query` invocation, in order
 }
 
@@ -103,6 +105,8 @@ func runRecoveryHook(t *testing.T, command string, env map[string]string) recove
 		switch {
 		case len(fields) >= 2 && fields[0] == "update":
 			run.updates = append(run.updates, fields[1])
+		case len(fields) >= 3 && fields[0] == "reclaim" && fields[1] == "--id":
+			run.updates = append(run.updates, fields[2])
 		case len(fields) >= 1 && (fields[0] == "list" || fields[0] == "query"):
 			run.reads = append(run.reads, line)
 		}
@@ -156,7 +160,8 @@ func TestDefaultRecoveryHooksReadFailures(t *testing.T) {
 		bootRunBead    = `[{"id":"b-run","metadata":{}}]`
 		bootQueryBead  = `[{"id":"b-query","assignee":"","metadata":{"gc.routed_to":"worker"}}]`
 	)
-	death := (&Agent{Name: "worker"}).EffectiveOnDeathFor(QueryTopology{})
+	// on_death's default release only exists for a pool instance.
+	death := (&Agent{Name: "worker", PoolName: "worker"}).EffectiveOnDeathFor(QueryTopology{})
 	boot := (&Agent{Name: "worker"}).EffectiveOnBootFor(QueryTopology{})
 
 	// readCounts is how many times each read must have run: (list, query) for

@@ -113,6 +113,9 @@ case "$1" in
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
     ;;
+  query)
+    printf '[]'
+    ;;
   *)
     exit 1
     ;;
@@ -180,6 +183,9 @@ case "$1" in
     printf '%s\n' "$*" >> "$BD_LOG"
     printf '{"reclaimed":[{"id":"ga-routed","previous_owner":"x"}],"count":1}'
     ;;
+  query)
+    printf '[]'
+    ;;
   *)
     exit 1
     ;;
@@ -210,6 +216,9 @@ case "$1" in
       exit 1
     fi
     printf '{"reclaimed":[{"id":"ga-good","previous_owner":"x"}],"count":1}'
+    ;;
+  query)
+    printf '[]'
     ;;
   *)
     exit 1
@@ -246,6 +255,9 @@ case "$1" in
   update)
     echo "metadata write rejected" >&2
     exit 1
+    ;;
+  query)
+    printf '[]'
     ;;
   *)
     exit 1
