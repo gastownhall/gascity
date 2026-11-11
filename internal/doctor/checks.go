@@ -586,101 +586,60 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// RuntimeOwnership is what a runtime's own identity proves about who owns it.
+type RuntimeOwnership int
+
+const (
+	// RuntimeOwned means an open session row owns the runtime.
+	RuntimeOwned RuntimeOwnership = iota
+	// RuntimeOrphaned means the identity reads were complete and no open row owns
+	// the runtime.
+	RuntimeOrphaned
+	// RuntimeUnproven means an identity read failed or was incomplete, so neither
+	// ownership nor orphanhood is established.
+	RuntimeUnproven
+)
+
+// RuntimeOwnerResolver answers, for one runtime name, who owns it; the string
+// is why when the answer is RuntimeUnproven.
+type RuntimeOwnerResolver func(name string) (RuntimeOwnership, string)
+
+// RuntimeOwnerSource builds a RuntimeOwnerResolver from a fresh read of the
+// session rows, or errors when none can be built.
+type RuntimeOwnerSource func() (RuntimeOwnerResolver, error)
+
+// OrphanSessionsCheck finds runtimes no session row owns.
 type OrphanSessionsCheck struct {
-	cfg             *config.City
-	cityName        string
-	sessionTemplate string
-	sp              runtime.Provider
+	sp     runtime.Provider
+	owners RuntimeOwnerSource
 }
 
-// NewOrphanSessionsCheck creates a check for orphaned sessions.
-func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *OrphanSessionsCheck {
-	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewOrphanSessionsCheck creates a check for orphaned sessions that decides by
+// runtime identity through owners.
+func NewOrphanSessionsCheck(sp runtime.Provider, owners RuntimeOwnerSource) *OrphanSessionsCheck {
+	return &OrphanSessionsCheck{sp: sp, owners: owners}
 }
 
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run finds sessions with the city prefix that don't match any configured agent.
+// Run is not implemented yet.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
-	r := &CheckResult{Name: c.Name()}
-	prefix := "" // per-city socket isolation: all sessions belong to this city
-	running, err := c.sp.ListRunning(prefix)
-	partialList := runtime.IsPartialListError(err)
-	if err != nil && !partialList {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("listing sessions: %v", err)
-		return r
-	}
-
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
-
-	var orphans []string
-	for _, s := range running {
-		if !expected[s] {
-			orphans = append(orphans, s)
-		}
-	}
-
-	if len(orphans) == 0 {
-		if partialList {
-			r.Status = StatusWarning
-			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
-			return r
-		}
-		r.Status = StatusOK
-		r.Message = "no orphaned sessions"
-		return r
-	}
-	r.Status = StatusWarning
-	if partialList {
-		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(orphans))
-	} else {
-		r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
-	}
-	r.Details = orphans
-	return r
+	return &CheckResult{Name: c.Name(), Status: StatusError, Message: "not implemented"}
 }
 
 // CanFix returns true — orphan sessions can be killed.
 func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all orphaned sessions. It refuses while a controller is running
-// (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it. Like
-// ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
-// orphan whose tmux server died after the listing counts as removed.
-func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
-	if IsControllerRunning(ctx.CityPath) {
-		return errControllerRunningFixSkipped
-	}
-	prefix := "" // per-city socket isolation: all sessions belong to this city
-	running, err := c.sp.ListRunning(prefix)
-	if runtime.IsPartialListError(err) {
-		return fmt.Errorf("listing sessions partially failed: %w", err)
-	}
-	if err != nil {
-		return err
-	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
-	for _, s := range running {
-		if !expected[s] {
-			if err := runtime.StopForCleanup(c.sp, s); err != nil {
-				return fmt.Errorf("killing orphan session %q: %w", s, err)
-			}
+// Fix is not implemented yet.
+func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
+	var orphans []string // not implemented: identifies none
+	for _, s := range orphans {
+		if err := runtime.StopForCleanup(c.sp, s); err != nil {
+			return err
 		}
 	}
-	return nil
+	return errors.New("not implemented")
 }
 
 // --- Data checks ---

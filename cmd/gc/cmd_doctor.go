@@ -416,6 +416,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
 	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
+	storeFactory := storeGate.StoreFactory(perRunStoreFactory(openStoreForCity(cityPath)))
+
 	// sessionSP is the session provider the session checks read, and the
 	// ownerless-runtimes check after them; sessionSPErr is why there is none.
 	var sessionSP runtime.Provider
@@ -437,13 +439,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			} else {
 				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(sp, newOwnerlessRuntimesCheck(cfg, cityPath, storeFactory, sp, nil).runtimeOwnerSource()))
 				sessionSP = sp
 			}
 		}
 	}
-
-	storeFactory := storeGate.StoreFactory(perRunStoreFactory(openStoreForCity(cityPath)))
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1121,13 +1122,168 @@ func TestOrphanSessionsCheck_NoOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+// ownedRuntimes is an owner source that proves each named runtime owned and
+// every other runtime an orphan: a stand-in for the census-backed identity
+// read cmd/gc injects.
+func ownedRuntimes(owned ...string) RuntimeOwnerSource {
+	return func() (RuntimeOwnerResolver, error) {
+		return func(name string) (RuntimeOwnership, string) {
+			if slices.Contains(owned, name) {
+				return RuntimeOwned, ""
+			}
+			return RuntimeOrphaned, ""
+		}, nil
+	}
+}
+
+func startRuntimes(t *testing.T, sp runtime.Provider, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := sp.Start(context.Background(), n, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The check decides by identity, never by comparing a runtime's name to a
+// configured agent's (ga-cm3cfp): a pool instance whose name no configured
+// agent produces is owned when the resolver says so, and a runtime named
+// exactly like a configured agent is an orphan when the resolver says so.
+func TestOrphanSessionsCheck_DecidesByIdentityNotName(t *testing.T) {
+	sp := runtime.NewFake()
+	startRuntimes(t, sp, "pool-worker-7", "adopted-runtime", "test-mayor")
+	owners := ownedRuntimes("pool-worker-7", "adopted-runtime")
+	c := NewOrphanSessionsCheck(sp, owners)
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning for the untracked runtime; msg = %s", r.Status, r.Message)
+	}
+	if got := strings.Join(r.Details, "\n"); got != "test-mayor" {
+		t.Fatalf("details = %q, want only the untracked test-mayor", got)
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if sp.IsRunning("test-mayor") {
+		t.Error("untracked runtime survived the fix")
+	}
+	for _, kept := range []string{"pool-worker-7", "adopted-runtime"} {
+		if !sp.IsRunning(kept) {
+			t.Errorf("tracked runtime %q was stopped by the fix", kept)
+		}
+	}
+}
+
+// An identity that cannot be proven is reported as unproven, never as an
+// orphan, and Fix stops nothing while any identity is unproven — not even the
+// runtime it could prove orphaned.
+func TestOrphanSessionsCheck_UnprovenIdentityIsNeverAnOrphan(t *testing.T) {
+	sp := runtime.NewFake()
+	startRuntimes(t, sp, "unreadable", "untracked")
+	source := func() (RuntimeOwnerResolver, error) {
+		return func(name string) (RuntimeOwnership, string) {
+			if name == "unreadable" {
+				return RuntimeUnproven, "GC_SESSION_ID unreadable"
+			}
+			return RuntimeOrphaned, ""
+		}, nil
+	}
+	c := NewOrphanSessionsCheck(sp, source)
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	got := strings.Join(r.Details, "\n")
+	if !strings.Contains(got, "untracked") {
+		t.Errorf("details %q do not name the provable orphan", got)
+	}
+	if !strings.Contains(got, "unreadable") || !strings.Contains(got, "unproven") || !strings.Contains(got, "GC_SESSION_ID unreadable") {
+		t.Errorf("details %q do not report the unreadable runtime as unproven with its reason", got)
+	}
+	if strings.Contains(r.Message, "2 orphaned") {
+		t.Errorf("message %q counts the unproven runtime as an orphan", r.Message)
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err == nil {
+		t.Fatal("Fix() error = nil, want a refusal while an identity is unproven")
+	}
+	if n := sp.CountCalls("Stop", "untracked") + sp.CountCalls("Stop", "unreadable"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 while any identity is unproven", n)
+	}
+}
+
+// A runtime that is unproven and nothing else is a warning, not an OK.
+func TestOrphanSessionsCheck_OnlyUnprovenStillWarns(t *testing.T) {
+	sp := runtime.NewFake()
+	startRuntimes(t, sp, "unreadable")
+	source := func() (RuntimeOwnerResolver, error) {
+		return func(string) (RuntimeOwnership, string) { return RuntimeUnproven, "store unreadable" }, nil
+	}
+	r := NewOrphanSessionsCheck(sp, source).Run(&CheckContext{})
+	if r.Status != StatusWarning || !strings.Contains(strings.Join(r.Details, "\n"), "unreadable") {
+		t.Fatalf("result %+v, want a warning naming the unproven runtime", r)
+	}
+}
+
+// An owner source that cannot be built (no store, no census) authorizes
+// nothing: Run reports it without naming an orphan and Fix refuses before any
+// Stop.
+func TestOrphanSessionsCheck_OwnerSourceErrorAuthorizesNothing(t *testing.T) {
+	sp := runtime.NewFake()
+	startRuntimes(t, sp, "stale-worker")
+	source := func() (RuntimeOwnerResolver, error) { return nil, errors.New("session store unreadable") }
+	c := NewOrphanSessionsCheck(sp, source)
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "session store unreadable") || len(r.Details) != 0 {
+		t.Fatalf("result %+v, want a warning with the cause and no orphan named", r)
+	}
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "session store unreadable") {
+		t.Fatalf("Fix() error = %v, want the owner source's cause", err)
+	}
+	if n := sp.CountCalls("Stop", "stale-worker"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 without an identity read", n)
+	}
+}
+
+// Run and Fix each build their own resolver, so a Fix never acts on the
+// identity read a stale Run took.
+func TestOrphanSessionsCheck_ResolverIsBuiltPerRunAndFix(t *testing.T) {
+	sp := runtime.NewFake()
+	startRuntimes(t, sp, "worker")
+	built := 0
+	source := func() (RuntimeOwnerResolver, error) {
+		built++
+		owned := built == 1 // the Run sees it owned; the Fix's own read does not
+		return func(string) (RuntimeOwnership, string) {
+			if owned {
+				return RuntimeOwned, ""
+			}
+			return RuntimeOrphaned, ""
+		}, nil
+	}
+	c := NewOrphanSessionsCheck(sp, source)
+	if r := c.Run(&CheckContext{}); r.Status != StatusOK {
+		t.Fatalf("Run status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if built != 2 {
+		t.Errorf("resolver built %d times, want once per Run and Fix", built)
+	}
+	if sp.IsRunning("worker") {
+		t.Error("Fix acted on the stale Run read instead of its own")
 	}
 }
 
@@ -1140,10 +1296,7 @@ func TestOrphanSessionsCheck_Found(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1159,10 +1312,7 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	if err := c.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
@@ -1195,8 +1345,7 @@ func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(
 			}
 			sp.StopErrors["stale-worker"] = tc.stopErr
 
-			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
-			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			err := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor")).Fix(&CheckContext{CityPath: t.TempDir()})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
@@ -1229,10 +1378,7 @@ func TestOrphanSessionsCheck_FixSkipsWhenControllerRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	err := c.Fix(&CheckContext{CityPath: cityDir})
 	if err == nil {
 		t.Fatal("Fix() error = nil, want refusal while controller is running")
@@ -1257,8 +1403,7 @@ func TestOrphanSessionsCheck_PartialListWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1277,8 +1422,7 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(sp, ownedRuntimes("mayor"))
 	if err := c.Fix(&CheckContext{}); err == nil {
 		t.Fatal("Fix() error = nil, want partial list failure")
 	}
