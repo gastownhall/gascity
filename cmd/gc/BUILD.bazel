@@ -1149,6 +1149,7 @@ go_test(
         "beads_provider_script_trace_test.go",
         "beads_proxied_idle_timeout_test.go",
         "beads_proxied_native_test.go",
+        "beads_quiescence_readers_test.go",
         "beads_quiescence_test.go",
         "beads_reload_store_guard_test.go",
         "beads_rig_inherits_external_test.go",
