@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // The wisp GC purge on its lane (wisp_gc_lane.go): the tick only wakes it, a
@@ -17,20 +22,18 @@ import (
 // suspension interplay, and the stop/join — hold pass by pass.
 
 // gatedWispGC is a wisp GC tracker whose purge blocks inside runGC until the
-// test releases it, counting its runs. With block unset it runs like a
-// tracker that purges nothing, at once.
+// test releases it, counting its runs.
 type gatedWispGC struct {
-	runs  atomic.Int32
-	block bool
-	// started is closed when the first purge enters runGC; a blocked purge
+	runs atomic.Int32
+	// started is closed when the first purge enters runGC; the blocked purge
 	// waits for release.
 	started   chan struct{}
 	release   chan struct{}
 	startOnce sync.Once
 }
 
-func newGatedWispGC(block bool) *gatedWispGC {
-	return &gatedWispGC{block: block, started: make(chan struct{}), release: make(chan struct{})}
+func newGatedWispGC() *gatedWispGC {
+	return &gatedWispGC{started: make(chan struct{}), release: make(chan struct{})}
 }
 
 func (g *gatedWispGC) shouldRun(time.Time) bool { return true }
@@ -38,9 +41,7 @@ func (g *gatedWispGC) shouldRun(time.Time) bool { return true }
 func (g *gatedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	g.runs.Add(1)
 	g.startOnce.Do(func() { close(g.started) })
-	if g.block {
-		<-g.release
-	}
+	<-g.release
 	return 0, nil
 }
 
@@ -52,7 +53,7 @@ func (g *gatedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, be
 func TestWispGCLane_TickCompletesWhilePurgeBlocked(t *testing.T) {
 	t.Run("legacy tick", func(t *testing.T) {
 		cr, _ := newPhaseFixtureRuntime(t, false, false)
-		gated := newGatedWispGC(true)
+		gated := newGatedWispGC()
 		cr.wg = gated
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -95,7 +96,7 @@ func TestWispGCLane_TickCompletesWhilePurgeBlocked(t *testing.T) {
 	t.Run("v2 maintenance tick", func(t *testing.T) {
 		cr, store := newPhaseFixtureRuntime(t, false, true)
 		armMaintenanceLanes(t, cr, store)
-		gated := newGatedWispGC(true)
+		gated := newGatedWispGC()
 		cr.wg = gated
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -197,7 +198,7 @@ func TestWispGCLane_StoppedBeforeTheSlotEnqueuesNoWake(t *testing.T) {
 // patrol-timer wait in between.
 func TestWispGCLane_WakeRunsThePurgeAtOnce(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
-	gated := newGatedWispGC(true)
+	gated := newGatedWispGC()
 	cr.wg = gated
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -423,4 +424,80 @@ func TestWispGCLane_StageInstallTransitions(t *testing.T) {
 			t.Errorf("installed tracker sessionPurgeCursor=%v, want the carried cursor", fresh.sessionPurgeCursor)
 		}
 	})
+}
+
+// TestCityRuntimeRunJoinsAnInFlightWispGCPurgeOnExit: stopping the controller
+// waits for the purge it currently runs. run() stops the wisp GC lane on the
+// way out and joins the lane before returning, so a controller exit never
+// abandons a purge mid-read — the purge finishes with its stores, its trace
+// and its output still available to it, and only then does run return
+// (#2604, PR #8431, AC-6). The lane-level cancel-and-wait join is
+// TestWispGCLane_TickCompletesWhilePurgeBlocked.
+func TestCityRuntimeRunJoinsAnInFlightWispGCPurgeOnExit(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	// A fast patrol so the controller's own tick loop wakes the purge in
+	// seconds, not after the default interval.
+	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	if _, err := f.WriteString("\n[daemon]\npatrol_interval = \"5ms\"\n"); err != nil {
+		t.Fatalf("append config: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	gated := newGatedWispGC()
+	cr.wg = gated
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		cr.run(ctx)
+	}()
+	select {
+	case <-gated.started:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the controller's patrol ticks never started the purge")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+		t.Fatal("run returned while its purge was still running; the exit must join the lane")
+	case <-time.After(5 * time.Second):
+	}
+
+	close(gated.release)
+	select {
+	case <-runDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("run did not return after the purge it was joining finished")
+	}
 }
