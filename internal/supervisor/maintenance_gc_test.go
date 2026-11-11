@@ -263,8 +263,8 @@ func TestRunDoltGC_LiveSessionsSkipGCAndLogReason(t *testing.T) {
 		},
 	})
 
-	if err := loop.runDoltGC(context.Background()); err != nil {
-		t.Fatalf("runDoltGC = %v; want nil (a skip is not a failure)", err)
+	if err := loop.runDoltGC(context.Background()); !errors.Is(err, errGCSkippedLiveSessions) {
+		t.Fatalf("runDoltGC = %v; want errGCSkippedLiveSessions (a skip is not a failure)", err)
 	}
 	if ops.gcCalls != 0 {
 		t.Errorf("ExecGC called %d times with live sessions; want 0", ops.gcCalls)
