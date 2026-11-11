@@ -579,3 +579,121 @@ func TestWispGCLane_StopWaitsForPurgeInFlight(t *testing.T) {
 		t.Fatal("the lane stop returned before the purge's pass was recorded")
 	}
 }
+
+// routeRecordingWispGC is an always-due tracker that records the stores and
+// legs its purge was handed, and returns a fixed count and error.
+type routeRecordingWispGC struct {
+	purged int
+	err    error
+	got    *wispGCPurgeArgs
+}
+
+type wispGCPurgeArgs struct {
+	legs  wispGCLegs
+	graph beads.GraphStore
+	mail  beads.MailStore
+}
+
+func (r routeRecordingWispGC) shouldRun(time.Time) bool { return true }
+
+func (r routeRecordingWispGC) runGC(legs wispGCLegs, graph beads.GraphStore, _ beads.SessionStore, mail beads.MailStore, _ time.Time) (int, error) {
+	*r.got = wispGCPurgeArgs{legs: legs, graph: graph, mail: mail}
+	return r.purged, r.err
+}
+
+// Kills: a lane purge that drops its reporting. A completed purge with
+// deletions and a joined error keeps its log lines, its typed store routing,
+// the relocated work-arm wake and the wisp_gc trace operation, recorded in a
+// purge cycle of its own rather than in a tick's.
+func TestWispGCLane_ReportsPurgeInItsOwnTraceCycle(t *testing.T) {
+	cr, _ := laneRuntime(t, true)
+	got := &wispGCPurgeArgs{}
+	cr.wg = routeRecordingWispGC{purged: 2, err: fmt.Errorf("%s\n%s", "delete failed", "list failed"), got: got}
+	cr.logPrefix = "test-city"
+	cr.sp = runtime.NewFake()
+	cr.buildFn = func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	cr.trace = newSessionReconcilerTraceManager(cr.cityPath, "test-city", io.Discard)
+
+	runBareTick(cr, "patrol")
+	if !runLanePass(cr, true) {
+		t.Fatalf("the lane did not purge on a wake with a due tracker; stderr: %s", cr.stderr.(*bytes.Buffer).String())
+	}
+
+	stderr := cr.stderr.(*bytes.Buffer).String()
+	for _, want := range []string{"test-city: wisp gc: delete failed\n", "test-city: wisp gc: list failed\n"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want line %q", stderr, want)
+		}
+	}
+	if stdout := cr.stdout.(*bytes.Buffer).String(); !strings.Contains(stdout, "Bead GC: purged 2 expired bead(s)") {
+		t.Errorf("stdout = %q, want the purge count", stdout)
+	}
+
+	if got.graph.Store == nil || got.graph.Store != cr.graphBeadStore().Store {
+		t.Errorf("purge graph store = %v, want the typed graph-class store %v", got.graph.Store, cr.graphBeadStore().Store)
+	}
+	if got.mail.Store != cr.mailBeadStore().Store {
+		t.Errorf("purge mail store = %v, want the typed messaging-class store %v", got.mail.Store, cr.mailBeadStore().Store)
+	}
+	if got.legs == nil {
+		t.Error("purge on a relocated city got no work legs")
+	}
+	select {
+	case <-cr.workGCLaneOf().wakeCh:
+	default:
+		t.Error("the purge on a relocated city did not wake the work-arm lane")
+	}
+
+	records := closeTrace(t, cr)
+	var purgeOp *SessionReconcilerTraceRecord
+	// A cycle's trigger is on its cycle_start record.
+	cycleStarts := map[string]SessionReconcilerTraceRecord{}
+	for i := range records {
+		r := &records[i]
+		if r.RecordType == TraceRecordCycleStart {
+			cycleStarts[r.TickID] = *r
+		}
+		if r.RecordType == TraceRecordOperation && fmt.Sprint(r.Fields["operation_name"]) == "wisp_gc" {
+			if purgeOp != nil {
+				t.Fatalf("more than one wisp_gc operation record: %+v and %+v", *purgeOp, *r)
+			}
+			purgeOp = r
+		}
+	}
+	if purgeOp == nil {
+		t.Fatalf("no wisp_gc operation record; operations: %v", operationRecords(records))
+	}
+	if purgeOp.SiteCode != TraceSiteControllerTickPhase {
+		t.Errorf("wisp_gc site = %q, want %q", purgeOp.SiteCode, TraceSiteControllerTickPhase)
+	}
+	start, ok := cycleStarts[purgeOp.TickID]
+	if !ok {
+		t.Fatalf("wisp_gc cycle %q has no cycle_start record", purgeOp.TickID)
+	}
+	if start.TickTrigger != wispGCLaneTraceTrigger || start.TriggerDetail != wispGCLaneTraceDetail {
+		t.Errorf("wisp_gc cycle trigger = %q/%q, want %q/%q", start.TickTrigger, start.TriggerDetail, wispGCLaneTraceTrigger, wispGCLaneTraceDetail)
+	}
+	tickCycles := 0
+	for _, c := range cycleStarts {
+		if c.TickTrigger != wispGCLaneTraceTrigger {
+			tickCycles++
+		}
+	}
+	if tickCycles == 0 {
+		t.Error("the tick recorded no cycle of its own")
+	}
+	if fmt.Sprint(purgeOp.Fields["purged"]) != "2" {
+		t.Errorf("wisp_gc payload purged = %v, want 2; fields: %v", purgeOp.Fields["purged"], purgeOp.Fields)
+	}
+	completed := false
+	for _, r := range records {
+		if r.RecordType == TraceRecordCycleResult && r.TickID == purgeOp.TickID {
+			completed = r.CompletionStatus == TraceCompletionCompleted
+		}
+	}
+	if !completed {
+		t.Errorf("purge cycle %q did not complete", purgeOp.TickID)
+	}
+}
