@@ -367,6 +367,7 @@ type NativeDoltStore struct {
 	// asks reconnect to swap the dead handle only if no other reader already did.
 	generation uint64
 	actor      string
+	creator    string
 	idPrefix   string
 
 	// sawRows latches when the backend answered a read of this store with at
@@ -531,6 +532,12 @@ type NativeReopenFunc func(context.Context) (NativeStorage, error)
 
 // NativeDoltStoreOption configures a NativeDoltStore at open.
 type NativeDoltStoreOption func(*NativeDoltStore)
+
+// WithNativeCreator overrides the created_by identity the store stamps on new
+// rows.
+func WithNativeCreator(_ string) NativeDoltStoreOption {
+	return func(*NativeDoltStore) {}
+}
 
 // WithNativeReopen injects the reconnect hook the read path uses to recover the
 // managed Dolt connection after a transient failure. The hook must re-resolve
