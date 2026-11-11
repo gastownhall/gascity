@@ -2478,6 +2478,11 @@ resource = "fixed_sleep"
 calls = 2
 
 [[count]]
+path = "internal/runtime/herdr/server_env_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "internal/runtime/herdr/staleserver_test.go"
 resource = "net_listen"
 calls = 2
