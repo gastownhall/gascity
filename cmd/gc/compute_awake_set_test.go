@@ -705,6 +705,59 @@ func TestNamedOnDemand_ExplicitWakeWakesWithoutDemand(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "explicit-wake")
 }
 
+// A rig-scoped agent with no dir keeps a bare qualified name while its named
+// session expands to <rig>/<name>. An explicit wake on that session must
+// resolve the rig-qualified template to the agent, as the other arms do.
+func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateBareAgent(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/worker", Template: "rig-a/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "rig-a--worker",
+			Template:      "rig-a/worker",
+			State:         "asleep",
+			ExplicitWake:  true,
+			NamedIdentity: "rig-a/worker",
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "rig-a--worker")
+	assertReason(t, result, "rig-a--worker", "explicit-wake")
+}
+
+func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateSuspendedAgent(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "worker", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/worker", Template: "rig-a/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "rig-a--worker",
+			Template:      "rig-a/worker",
+			State:         "asleep",
+			ExplicitWake:  true,
+			NamedIdentity: "rig-a/worker",
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig-a--worker")
+}
+
+func TestNamedOnDemand_ExplicitWakeAmbiguousBaseNameStaysAsleep(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig-a/worker"}, {QualifiedName: "rig-b/worker"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:           "mc-1",
+			SessionName:  "rig-c--worker",
+			Template:     "rig-c/worker",
+			State:        "asleep",
+			ExplicitWake: true,
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig-c--worker")
+}
+
 func TestNamedOnDemand_WorkDone_StaysAwakeUntilIdle(t *testing.T) {
 	// On-demand session with work done: still running, no demand.
 	// Stays awake via on-demand:running override — drains only after
@@ -1055,6 +1108,16 @@ func TestManual_ExplicitAgent(t *testing.T) {
 		Now:          now,
 	})
 	assertAwake(t, result, "s-mc-1")
+}
+
+func TestManual_RigQualifiedTemplateBareAgent(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:       []AwakeAgent{{QualifiedName: "worker"}},
+		SessionBeads: []AwakeSessionBead{{ID: "mc-1", SessionName: "s-mc-1", Template: "rig-a/worker", State: "asleep", ManualSession: true}},
+		Now:          now,
+	})
+	assertAwake(t, result, "s-mc-1")
+	assertReason(t, result, "s-mc-1", "manual")
 }
 
 func TestManual_NoDemand_StaysAwake(t *testing.T) {

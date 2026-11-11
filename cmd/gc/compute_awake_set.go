@@ -310,7 +310,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		if !bead.ExplicitWake || bead.State == "closed" || bead.DependencyOnly {
 			continue
 		}
-		if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+		if agent, ok := lookupAgent(bead.Template); ok && !agent.Suspended {
 			desired[key(bead)] = "explicit-wake"
 		}
 	}
@@ -445,7 +445,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		if !bead.ManualSession || bead.State == "closed" || bead.Drained {
 			continue
 		}
-		if _, ok := agentsByName[bead.Template]; ok {
+		if _, ok := lookupAgent(bead.Template); ok {
 			desired[key(bead)] = "manual"
 		}
 	}
