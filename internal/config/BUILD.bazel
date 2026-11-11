@@ -4,6 +4,7 @@ go_library(
     name = "config",
     srcs = [
         "actor_fold.go",
+        "agent_commit_class.go",
         "agent_discovery.go",
         "bead_policy_validation.go",
         "beads_proxied_idle.go",
@@ -104,6 +105,7 @@ go_test(
     srcs = [
         "acp_session_config_test.go",
         "actor_fold_test.go",
+        "agent_commit_class_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
         "beads_proxied_idle_test.go",

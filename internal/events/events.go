@@ -680,6 +680,15 @@ const (
 	// awaiting import, a clear left pending, or rows written to the rig after
 	// its import.
 	StorageRigResidue = "storage.rig_residue"
+
+	// WorktreeDriftStalled fires when the independent health-patrol sweep
+	// (patrolCommitClassWorktreeDrift) finds a commit-class agent's
+	// persistent worktree detached or behind its default branch for
+	// longer than the configured threshold, with no session having run to
+	// correct it. Unlike bead.worktree.* events, this is not tied to any
+	// one bead's lifecycle — it is fleet-wide worktree-identity drift,
+	// keyed by agent.QualifiedName(). See ga-6prf1p.
+	WorktreeDriftStalled = "worktree.drift_stalled"
 )
 
 // IsJournalDerived reports whether eventType is one the controller derives
@@ -771,6 +780,7 @@ var KnownEventTypes = []string{
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured, StorageBindingStranded,
 	StorageRigImport, StorageRigResidue,
+	WorktreeDriftStalled,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
 	// SSE payload is not yet registered in internal/api (the payload registration lives in a

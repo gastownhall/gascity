@@ -1783,6 +1783,19 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 			p.recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
 	}
+	if cr.cfg.Daemon.WorktreeDriftPatrolEnabled() {
+		phaseStart := time.Now()
+		driftEventsFired := patrolCommitClassWorktreeDrift(
+			cr.cityPath,
+			cr.cfg,
+			cr.cityBeadStore(),
+			cr.cfg.Daemon.WorktreeDriftThresholdDuration(),
+			cr.rec,
+			clock.Real{}.Now(),
+			cr.stderr,
+		)
+		p.recordPhase(TraceSiteControllerTickPhase, "patrol_commit_class_worktree_drift", phaseStart, map[string]any{"fired": driftEventsFired})
+	}
 	return p.ctx.Err() != nil
 }
 
