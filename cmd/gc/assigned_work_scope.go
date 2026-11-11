@@ -241,6 +241,13 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		if beads.IsDeferred(wb, now) {
 			continue
 		}
+		// A row bd records as blocked folds to status open the same way, and bd
+		// ready hides it just as it hides a deferred one, so it is no demand
+		// either. SourceStatus is the recorded status; it is empty once an
+		// event or an explicit transition superseded it.
+		if wb.SourceStatus == "blocked" {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {

@@ -255,7 +255,9 @@ type Bead struct {
 	// reads it to tell a row a Live read omits by design from one another
 	// process changed: a NativeDoltStore Live "open" is bd's raw open
 	// (nativeListPushesRawOpen), so a parked row is absent from that page
-	// without being stale.
+	// without being stale. It is also what keeps a row bd records as blocked,
+	// hooked or pinned out of Ready: IsReadyCandidateForTier reads it, since
+	// bd ready withholds those rows while Status and IsBlocked do not say so.
 	SourceStatus string `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
@@ -898,7 +900,9 @@ func IsReadyCandidate(b Bead, now time.Time) bool {
 }
 
 // IsReadyCandidateForTier reports whether a bead passes the store-independent
-// Ready filters for the requested storage tier.
+// Ready filters for the requested storage tier: open status, the tier, an
+// actionable type, no deferral, and no recorded status bd ready withholds
+// (see isRecordedNonReadyStatus).
 func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	switch tier {
 	case TierWisps:
@@ -914,7 +918,8 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	}
 	return b.Status == "open" &&
 		!IsReadyExcludedBead(b) &&
-		!IsDeferred(b, now)
+		!IsDeferred(b, now) &&
+		!isRecordedNonReadyStatus(b)
 }
 
 // IsReadyExcludedBead reports whether a bead is infrastructure rather than
@@ -949,6 +954,23 @@ func HasReadyExcludedLabel(b Bead) bool {
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
+}
+
+// isRecordedNonReadyStatus reports whether the store recorded b with a
+// built-in status bd ready withholds although Status folds it to "open":
+// blocked, hooked or pinned. bd ready admits status open and any custom status
+// in the active category, so only these three built-in non-active statuses are
+// excluded; "deferred" is IsDeferred's. This city configures no custom
+// statuses, and the set is closed because a custom status cannot reuse a
+// built-in name. A custom status that is not active therefore still reads as a
+// candidate here, deliberately. An empty SourceStatus means the store reported
+// none, so nothing is excluded.
+func isRecordedNonReadyStatus(b Bead) bool {
+	switch b.SourceStatus {
+	case "blocked", "hooked", "pinned":
+		return true
+	}
+	return false
 }
 
 // setBeadStatus applies an explicit Gas City status transition. Any such
