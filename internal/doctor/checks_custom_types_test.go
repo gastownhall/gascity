@@ -101,9 +101,28 @@ func customTypesTestEnv(base []string, host, port string) []string {
 	return out
 }
 
-// customTypesServerInitEnv is a compile-only placeholder until GREEN.
+// customTypesDoltReadyTimeoutSeconds is how long `bd init --server` may wait
+// for the Dolt server it auto-starts to accept connections. bd's own default
+// is 10 s, and on a loaded gate host Dolt's start has run past it: the server
+// was spawned but not yet listening when bd gave up (ga-8mj4m71b). bd returns
+// the moment the server greets, so this budget costs a healthy run nothing; it
+// only sets how long a server that never comes up takes to fail the test. It
+// feeds the fixture's setup, not the check under test.
+const customTypesDoltReadyTimeoutSeconds = 120
+
+// customTypesServerInitEnv returns base with BEADS_DOLT_READY_TIMEOUT set to
+// customTypesDoltReadyTimeoutSeconds, replacing any inherited value. bd reads
+// the variable as a whole number of seconds; anything else (a Go duration such
+// as "120s") makes it warn and fall back to its 10 s default.
 func customTypesServerInitEnv(base []string) []string {
-	return base
+	const key = "BEADS_DOLT_READY_TIMEOUT"
+	out := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if name, _, _ := strings.Cut(entry, "="); name != key {
+			out = append(out, entry)
+		}
+	}
+	return append(out, key+"="+strconv.Itoa(customTypesDoltReadyTimeoutSeconds))
 }
 
 func customTypesTestServerPort(t testing.TB, initOutput string) string {
@@ -527,6 +546,29 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		}
 		return out
 	}
+	// initServerStore runs the `bd init --server` that makes bd auto-start this
+	// store's Dolt, under the load-tolerant readiness budget. When it fails,
+	// Dolt's own log is the only record of whether the server was still
+	// starting or had died, and it goes with the temp dir, so it is printed.
+	initServerStore := func(dir, prefix string) string {
+		t.Helper()
+		args := []string{"init", "--server", "--non-interactive", "-p", prefix, "--skip-hooks", "--skip-agents"}
+		out, err := runBD(dir, customTypesServerInitEnv(os.Environ()), args...)
+		if err != nil {
+			var stderr []byte
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				stderr = exitErr.Stderr
+			}
+			doltLog, readErr := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.log"))
+			if readErr != nil {
+				doltLog = []byte("(unreadable: " + readErr.Error() + ")")
+			}
+			t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s\n.beads/dolt-server.log:\n%s",
+				strings.Join(args, " "), err, out, stderr, doltLog)
+		}
+		return out
+	}
 
 	targetDir := guardedWorkspaceDir(t)
 	decoyDir := guardedWorkspaceDir(t)
@@ -547,9 +589,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		}
 	})
 
-	targetInit := mustRunBD(targetDir, nil,
-		"init", "--server", "--non-interactive",
-		"-p", "target", "--skip-hooks", "--skip-agents")
+	targetInit := initServerStore(targetDir, "target")
 	targetPort = customTypesTestServerPort(t, targetInit)
 	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(targetDir, ".beads", "config.yaml"), contract.ConfigState{
 		IssuePrefix:    "target",
@@ -563,9 +603,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	targetEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", targetPort)
 	mustRunBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
 
-	decoyInit := mustRunBD(decoyDir, nil,
-		"init", "--server", "--non-interactive",
-		"-p", "decoy", "--skip-hooks", "--skip-agents")
+	decoyInit := initServerStore(decoyDir, "decoy")
 	decoyPort = customTypesTestServerPort(t, decoyInit)
 	decoyEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", decoyPort)
 	mustRunBD(decoyDir, decoyEnv, "config", "set", "types.custom", "decoy-only")
