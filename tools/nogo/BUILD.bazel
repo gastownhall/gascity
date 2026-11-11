@@ -32,12 +32,16 @@ go_test(
     name = "nogo_test",
     srcs = [
         "analyzers_test.go",
+        "bundle_test.go",
         "modules_test.go",
     ],
     data = [
         "analyzers.bzl",
         "config.json",
         "go.mod",
+        "golangci-lint-bundle.txt",
+        "//:MODULE.bazel",
+        "//:Makefile",
         "//:go.mod",
     ],
     deps = [
