@@ -339,8 +339,8 @@ func (l *workGCLane) lastPassAge(now time.Time) (time.Duration, bool) {
 }
 
 // startWorkGCLane starts the lane goroutine and returns a channel closed when it
-// exits. The tick wakes it whenever the wisp GC runs; a backstop runs a pass
-// one wisp-GC interval after the last one otherwise.
+// exits. Every wisp GC purge wakes it (wisp_gc_lane.go); a backstop runs a
+// pass one wisp-GC interval after the last one otherwise.
 func (cr *CityRuntime) startWorkGCLane(ctx context.Context) <-chan struct{} {
 	lane := cr.workGCLaneOf()
 	interval := 10 * time.Minute
