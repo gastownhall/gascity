@@ -829,6 +829,7 @@ var readyExcludeTypes = map[string]bool{
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
 	"op":                     true, // conversation operation journal op, fact and runtime rows; lanes execute them, never Ready (internal/opjournal)
+	"worktree_drift":         true, // per-agent drift tracking record, reused and never closed; bookkeeping, never actionable Ready work (cmd/gc worktree drift patrol)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{

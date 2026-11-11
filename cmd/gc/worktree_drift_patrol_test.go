@@ -3,13 +3,16 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -90,7 +93,7 @@ const testDriftThreshold = time.Hour
 
 func TestPatrolCommitClassWorktreeDrift_NilConfig(t *testing.T) {
 	_, store := setupWorktreeDriftPatrolTest(t)
-	fired := patrolCommitClassWorktreeDrift(t.TempDir(), nil, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(t.TempDir(), nil, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 for nil config", fired)
 	}
@@ -99,7 +102,7 @@ func TestPatrolCommitClassWorktreeDrift_NilConfig(t *testing.T) {
 func TestPatrolCommitClassWorktreeDrift_NilStore(t *testing.T) {
 	cityPath, _ := setupWorktreeDriftPatrolTest(t)
 	cfg := commitClassAgentConfig()
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, nil, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 for nil store", fired)
 	}
@@ -115,7 +118,7 @@ func TestPatrolCommitClassWorktreeDrift_ZeroThreshold(t *testing.T) {
 		return &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", behind: 5}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, 0, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, 0, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 when threshold disables the feature", fired)
 	}
@@ -133,7 +136,7 @@ func TestPatrolCommitClassWorktreeDrift_SkipsNonCommitClassAgent(t *testing.T) {
 		return &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", behind: 5}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 for reset-class agent", fired)
 	}
@@ -162,7 +165,7 @@ func TestPatrolCommitClassWorktreeDrift_SkipsMissingWorktree(t *testing.T) {
 		return &fakeWorktreeDriftGit{isRepo: true}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 when worktree was never materialized", fired)
 	}
@@ -186,7 +189,7 @@ func TestPatrolCommitClassWorktreeDrift_SkipsInProgressOperation(t *testing.T) {
 		}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 when a rebase/merge/cherry-pick is in progress", fired)
 	}
@@ -214,7 +217,7 @@ func TestPatrolCommitClassWorktreeDrift_SkipsUncommittedWork(t *testing.T) {
 		}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 when worktree has uncommitted work (grace window)", fired)
 	}
@@ -241,7 +244,7 @@ func TestPatrolCommitClassWorktreeDrift_SkipsUnresolvableComparison(t *testing.T
 		}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 when origin/<default> is not locally resolvable", fired)
 	}
@@ -264,7 +267,7 @@ func TestPatrolCommitClassWorktreeDrift_DetachedHeadIsDrift(t *testing.T) {
 		}
 	}
 
-	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, now, nil)
+	fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, now, nil)
 	if fired != 0 {
 		t.Errorf("fired = %d, want 0 on first observation (under threshold)", fired)
 	}
@@ -292,7 +295,7 @@ func TestPatrolCommitClassWorktreeDrift_UsesOriginPlusDefaultBranchForComparison
 		return fake
 	}
 
-	patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, time.Now(), nil)
+	patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, time.Now(), nil)
 	if fake.aheadBehindRefSeen != "origin/develop" {
 		t.Errorf("AheadBehindRef called with %q, want %q", fake.aheadBehindRefSeen, "origin/develop")
 	}
@@ -316,7 +319,7 @@ func TestPatrolCommitClassWorktreeDrift_Lifecycle(t *testing.T) {
 	tick1 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	// Tick 1: drift first observed, under threshold — no event yet.
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick1, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick1, nil); fired != 0 {
 		t.Fatalf("tick1: fired = %d, want 0 (first observation, under threshold)", fired)
 	}
 	if len(rec.events) != 0 {
@@ -333,7 +336,7 @@ func TestPatrolCommitClassWorktreeDrift_Lifecycle(t *testing.T) {
 
 	// Tick 2: still drifted, now past threshold — event fires exactly once.
 	tick2 := tick1.Add(testDriftThreshold + time.Second)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick2, nil); fired != 1 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick2, nil); fired != 1 {
 		t.Fatalf("tick2: fired = %d, want 1 (past threshold)", fired)
 	}
 	if len(rec.events) != 1 {
@@ -369,7 +372,7 @@ func TestPatrolCommitClassWorktreeDrift_Lifecycle(t *testing.T) {
 
 	// Tick 3: still drifted, still past threshold — no duplicate event.
 	tick3 := tick2.Add(time.Minute)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick3, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick3, nil); fired != 0 {
 		t.Fatalf("tick3: fired = %d, want 0 (already fired, must not duplicate)", fired)
 	}
 	if len(rec.events) != 1 {
@@ -380,7 +383,7 @@ func TestPatrolCommitClassWorktreeDrift_Lifecycle(t *testing.T) {
 	resolved := &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", defaultBranch: "main", ahead: 0, behind: 0}
 	newWorktreeDriftGitProbe = func(_ string) worktreeDriftGitProbe { return resolved }
 	tick4 := tick3.Add(time.Minute)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick4, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick4, nil); fired != 0 {
 		t.Fatalf("tick4: fired = %d, want 0 (resolved)", fired)
 	}
 	b, err = store.Get(trackingID)
@@ -397,7 +400,7 @@ func TestPatrolCommitClassWorktreeDrift_Lifecycle(t *testing.T) {
 	// Tick 5: drift reappears — fresh observation window (not the old timestamp).
 	newWorktreeDriftGitProbe = func(_ string) worktreeDriftGitProbe { return drifted }
 	tick5 := tick4.Add(time.Minute)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick5, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick5, nil); fired != 0 {
 		t.Fatalf("tick5: fired = %d, want 0 (fresh observation, under threshold)", fired)
 	}
 	b, err = store.Get(trackingID)
@@ -457,11 +460,11 @@ func driftTrackingBead(t *testing.T, store beads.Store) beads.Bead {
 // tick1 and its stall event one threshold later, returning the firing tick.
 func driftAndFireOnce(t *testing.T, cityPath string, cfg *config.City, store beads.Store, rec events.Recorder, tick1 time.Time) time.Time {
 	t.Helper()
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick1, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick1, nil); fired != 0 {
 		t.Fatalf("tick1: fired = %d, want 0 (first observation, under threshold)", fired)
 	}
 	tick2 := tick1.Add(testDriftThreshold + time.Second)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick2, nil); fired != 1 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick2, nil); fired != 1 {
 		t.Fatalf("tick2: fired = %d, want 1 (past threshold)", fired)
 	}
 	return tick2
@@ -486,7 +489,7 @@ func TestPatrolCommitClassWorktreeDrift_FailedStallFlagClearKeepsObservationWind
 	setWorktreeDriftProbe(t, &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", defaultBranch: "main"})
 	store.armed = true
 	tick3 := tick2.Add(time.Minute)
-	patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick3, nil)
+	patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick3, nil)
 	b := driftTrackingBead(t, mem)
 	if got, want := b.Metadata[worktreeDriftMetaFirstObservedAt], tick1.Format(time.RFC3339); got != want {
 		t.Errorf("tick3: first_observed_at = %q, want %q kept: a failed stall-flag clear must not half-reset the episode", got, want)
@@ -498,7 +501,7 @@ func TestPatrolCommitClassWorktreeDrift_FailedStallFlagClearKeepsObservationWind
 	// Tick 4: still resolved, store recovered — the retry finishes the clear.
 	store.armed = false
 	tick4 := tick3.Add(time.Minute)
-	patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick4, nil)
+	patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick4, nil)
 	b = driftTrackingBead(t, mem)
 	if b.Metadata[worktreeDriftMetaFirstObservedAt] != "" || b.Metadata[worktreeDriftMetaStallEventFired] != "" {
 		t.Fatalf("tick4: metadata = %v, want both cleared by the retry", b.Metadata)
@@ -507,11 +510,11 @@ func TestPatrolCommitClassWorktreeDrift_FailedStallFlagClearKeepsObservationWind
 	// Ticks 5-6: a new drift episode past the threshold still fires.
 	setWorktreeDriftProbe(t, &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", defaultBranch: "main", behind: 3})
 	tick5 := tick4.Add(time.Minute)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick5, nil); fired != 0 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick5, nil); fired != 0 {
 		t.Fatalf("tick5: fired = %d, want 0 (fresh window, under threshold)", fired)
 	}
 	tick6 := tick5.Add(testDriftThreshold + time.Second)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick6, nil); fired != 1 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick6, nil); fired != 1 {
 		t.Fatalf("tick6: fired = %d, want 1 (new episode past threshold)", fired)
 	}
 	if len(rec.events) != 2 {
@@ -538,7 +541,7 @@ func TestPatrolCommitClassWorktreeDrift_PartialClearFailureRefiresInsteadOfSuppr
 	setWorktreeDriftProbe(t, &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", defaultBranch: "main"})
 	store.armed = true
 	tick3 := tick2.Add(time.Minute)
-	patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick3, nil)
+	patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick3, nil)
 	b := driftTrackingBead(t, mem)
 	if got := b.Metadata[worktreeDriftMetaStallEventFired]; got != "" {
 		t.Errorf("tick3: stall_event_fired = %q, want it cleared before the window so a partial failure cannot leave it stranded", got)
@@ -549,7 +552,7 @@ func TestPatrolCommitClassWorktreeDrift_PartialClearFailureRefiresInsteadOfSuppr
 	store.armed = false
 	setWorktreeDriftProbe(t, drifted)
 	tick4 := tick3.Add(time.Minute)
-	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, rec, tick4, nil); fired != 1 {
+	if fired := patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, rec, tick4, nil); fired != 1 {
 		t.Fatalf("tick4: fired = %d, want 1: a partial clear failure must re-fire, not suppress the alert", fired)
 	}
 	if len(rec.events) != 2 {
@@ -592,7 +595,7 @@ func TestPatrolCommitClassWorktreeDrift_ObservesAgentWithWorkDirOverride(t *test
 			}
 
 			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-			patrolCommitClassWorktreeDrift(cityPath, cfg, store, testDriftThreshold, nil, now, nil)
+			patrolCommitClassWorktreeDrift(cityPath, cfg, beads.WorkStore{Store: store}, testDriftThreshold, nil, now, nil)
 			if len(probed) != 1 || probed[0] != want {
 				t.Fatalf("probed worktrees = %v, want [%s]", probed, want)
 			}
@@ -602,4 +605,74 @@ func TestPatrolCommitClassWorktreeDrift_ObservesAgentWithWorkDirOverride(t *test
 			}
 		})
 	}
+}
+
+// TestWorktreeDriftBeadTypeIsRegistered pins the type the patrol writes to the
+// vocabulary every scope registers (beads.RequiredCustomTypes). A store that
+// validates types — bd on its CLI front door, the native store against its
+// custom_types table — refuses a type nobody registered with "invalid issue
+// type", so an unlisted type makes the patrol's Create fail on a real city
+// while the in-memory store lets it pass.
+func TestWorktreeDriftBeadTypeIsRegistered(t *testing.T) {
+	if !slices.Contains(beads.RequiredCustomTypes, worktreeDriftBeadType) {
+		t.Fatalf("beads.RequiredCustomTypes = %v, want it to list %q", beads.RequiredCustomTypes, worktreeDriftBeadType)
+	}
+	if !beads.IsReadyExcludedType(worktreeDriftBeadType) {
+		t.Errorf("IsReadyExcludedType(%q) = false: a never-closed bookkeeping record must not surface as ready work", worktreeDriftBeadType)
+	}
+	// Deliberately not controller-owned: an owned type must classify off the
+	// work class, and the patrol writes this record to the city work store.
+	if coordclass.ControllerOwnedType(worktreeDriftBeadType) {
+		t.Errorf("ControllerOwnedType(%q) = true: the record lives in the work class, so it cannot be an owned shape", worktreeDriftBeadType)
+	}
+}
+
+// typeValidatingStore wraps a store and refuses Create and List for a type that
+// is neither a bd built-in nor registered in beads.RequiredCustomTypes, as a bd
+// or native store does with "invalid issue type". The in-memory store accepts
+// any string.
+type typeValidatingStore struct {
+	beads.Store
+}
+
+func (s typeValidatingStore) validType(typ string) error {
+	switch typ {
+	case "", "bug", "feature", "task", "epic", "chore", "decision":
+		return nil
+	}
+	if slices.Contains(beads.RequiredCustomTypes, typ) {
+		return nil
+	}
+	return fmt.Errorf("invalid issue type %q", typ)
+}
+
+func (s typeValidatingStore) Create(b beads.Bead) (beads.Bead, error) {
+	if err := s.validType(b.Type); err != nil {
+		return beads.Bead{}, err
+	}
+	return s.Store.Create(b)
+}
+
+func (s typeValidatingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if err := s.validType(q.Type); err != nil {
+		return nil, err
+	}
+	return s.Store.List(q)
+}
+
+// The patrol must be able to record its first observation, and then fire its
+// stall event, over a store that validates bead types.
+func TestPatrolCommitClassWorktreeDrift_WorksOverATypeValidatingStore(t *testing.T) {
+	cityPath, mem := setupWorktreeDriftPatrolTest(t)
+	store := typeValidatingStore{Store: mem}
+	cfg := commitClassAgentConfig()
+	rec := &fakeDriftRecorder{}
+	setWorktreeDriftProbe(t, &fakeWorktreeDriftGit{isRepo: true, currentBranch: "builder", defaultBranch: "main", behind: 3})
+
+	driftAndFireOnce(t, cityPath, cfg, store, rec, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC))
+
+	if len(rec.events) != 1 || rec.events[0].Type != events.WorktreeDriftStalled {
+		t.Fatalf("recorded events = %+v, want exactly one %s", rec.events, events.WorktreeDriftStalled)
+	}
+	driftTrackingBead(t, mem)
 }

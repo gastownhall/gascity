@@ -40,6 +40,12 @@ import (
 // type". A native-store city never noticed because its SQL path does not
 // validate.
 //
+// "worktree_drift" is included for the same reason (cmd/gc
+// worktreeDriftBeadType): the controller's worktree drift patrol creates one
+// tracking bead per commit-class agent and lists them by type. Left out, a
+// city on the bd CLI front door refuses the patrol's Create and typed List
+// with "invalid issue type" and the stall event never fires.
+//
 // The list itself lives in internal/beads, beside the native store's typed
 // list pushdown that relies on every scope carrying it. This is a copy, so a
 // caller that appends to or edits it cannot change the pushdown's vocabulary.

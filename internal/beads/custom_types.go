@@ -8,4 +8,7 @@ var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
 	"convergence", "step", "startup-health-episode", "op",
+	// worktree_drift is the per-agent tracking record of the worktree drift
+	// patrol (cmd/gc worktree_drift_patrol.go).
+	"worktree_drift",
 }

@@ -37,6 +37,12 @@ var newWorktreeDriftGitProbe = func(workDir string) worktreeDriftGitProbe {
 // bead per configured agent identity is ever created — it is reused
 // indefinitely across observe/resolve cycles, never one-per-incident, so
 // this cannot grow unbounded with fleet uptime.
+//
+// The type is registered in beads.RequiredCustomTypes (a type-validating store
+// refuses an unregistered one) and listed in the Ready exclusions, since the
+// record is never closed and is never work. It is not coordclass
+// controller-owned: an owned type must classify off the work class, and this
+// record is written to the city work store.
 const worktreeDriftBeadType = "worktree_drift"
 
 const (
@@ -84,7 +90,7 @@ const (
 func patrolCommitClassWorktreeDrift(
 	cityPath string,
 	cfg *config.City,
-	store beads.Store,
+	store beads.WorkStore,
 	threshold time.Duration,
 	rec events.Recorder,
 	now time.Time,
@@ -93,7 +99,7 @@ func patrolCommitClassWorktreeDrift(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if cfg == nil || store == nil || threshold <= 0 {
+	if cfg == nil || store == (beads.WorkStore{}) || threshold <= 0 {
 		return 0
 	}
 	if rec == nil {
@@ -210,7 +216,7 @@ func driftWorktreePath(cityPath string, cfg *config.City, agent *config.Agent) (
 // getOrCreateWorktreeDriftBead returns the single reusable worktree_drift
 // tracking bead for identity, creating it if this is the first time drift
 // has ever been observed for that agent.
-func getOrCreateWorktreeDriftBead(store beads.Store, identity string) (beads.Bead, error) {
+func getOrCreateWorktreeDriftBead(store beads.WorkStore, identity string) (beads.Bead, error) {
 	existing, err := store.List(beads.ListQuery{
 		Type:     worktreeDriftBeadType,
 		Metadata: map[string]string{worktreeDriftMetaIdentity: identity},
@@ -234,7 +240,7 @@ func getOrCreateWorktreeDriftBead(store beads.Store, identity string) (beads.Bea
 // observation window when a previously-drifted worktree is found no longer
 // drifted. A no-op when no tracking bead exists yet, since a worktree that
 // has never drifted has nothing to clear.
-func clearWorktreeDriftObservation(store beads.Store, identity string, stderr io.Writer) {
+func clearWorktreeDriftObservation(store beads.WorkStore, identity string, stderr io.Writer) {
 	existing, err := store.List(beads.ListQuery{
 		Type:     worktreeDriftBeadType,
 		Metadata: map[string]string{worktreeDriftMetaIdentity: identity},

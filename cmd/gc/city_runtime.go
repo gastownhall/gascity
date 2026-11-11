@@ -1788,7 +1788,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		driftEventsFired := patrolCommitClassWorktreeDrift(
 			cr.cityPath,
 			cr.cfg,
-			cr.cityBeadStore(),
+			cr.cityWorkStore(),
 			cr.cfg.Daemon.WorktreeDriftThresholdDuration(),
 			cr.rec,
 			clock.Real{}.Now(),
