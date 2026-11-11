@@ -20,8 +20,8 @@ import (
 //
 // The tick stays the purge's only trigger. A tick that stops before the wake
 // slot (a quiescent city, an FS-pressure skip) wakes nothing, as it ran no
-// purge before; the lane's own timer only paces wakes and never starts a
-// purge by itself.
+// purge before; the lane's own timer only paces wakes and installs reloaded
+// policy, and never starts a purge by itself.
 
 const (
 	// wispGCLaneSafeTickTrigger names the lane in safeTick panic lines.
@@ -39,14 +39,22 @@ const (
 )
 
 // wispGCLane runs the wisp GC purge off the controller tick. It owns the
-// tracker: only a pass reads or writes it.
+// tracker: only a pass reads or writes the installed one, so its cadence and
+// cursor change only between purges.
 type wispGCLane struct {
 	wakeCh chan struct{}
 
 	// passMu serializes passes and guards active.
 	passMu sync.Mutex
-	// active is the lane's tracker; nil while wisp GC is disabled.
+	// active is the installed tracker; nil while wisp GC is disabled.
 	active wispGC
+
+	stageMu sync.Mutex
+	// staged is the tracker the last successful reload built, waiting for
+	// the next pass to install it, when stagedPending is set. A nil staged
+	// tracker with stagedPending set is a disable, not "no update".
+	staged        wispGC
+	stagedPending bool
 
 	statusMu   sync.Mutex
 	lastPassAt time.Time
@@ -58,7 +66,7 @@ func newWispGCLane(seed wispGC) *wispGCLane {
 
 // wispGCLaneOf returns this runtime's lane, creating it on first use. The
 // lane is seeded once with the tracker the runtime was constructed with
-// (cr.wg).
+// (cr.wg); every later policy reaches it through stage.
 func (cr *CityRuntime) wispGCLaneOf() *wispGCLane {
 	cr.wispGCLaneOnce.Do(func() { cr.wispGCLane = newWispGCLane(cr.wg) })
 	return cr.wispGCLane
@@ -71,6 +79,29 @@ func (l *wispGCLane) wake() {
 	case l.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+// stage hands the lane the tracker a successful config reload built from the
+// config it applied, nil when that config disables wisp GC. It never waits
+// for a purge: the lane installs it before its next pass.
+func (l *wispGCLane) stage(next wispGC) {
+	l.stageMu.Lock()
+	defer l.stageMu.Unlock()
+	l.staged, l.stagedPending = next, true
+}
+
+// installStagedLocked installs the latest staged tracker, if any, carrying
+// the last completed purge's progress over to it (carryWispGCState). passMu
+// must be held.
+func (l *wispGCLane) installStagedLocked() {
+	l.stageMu.Lock()
+	next, pending := l.staged, l.stagedPending
+	l.staged, l.stagedPending = nil, false
+	l.stageMu.Unlock()
+	if !pending {
+		return
+	}
+	l.active = carryWispGCState(l.active, next)
 }
 
 // notePass records a purge that finished.
@@ -115,8 +146,9 @@ func (cr *CityRuntime) startWispGCLane(ctx context.Context) (stop func()) {
 	}
 }
 
-// runWispGCLanePass is one lane pass: purge if a tick's wake asked for it, the
-// tracker is due, the city is not quiescent and it has a graph store. It sets
+// runWispGCLanePass is one lane pass: install any staged policy, then purge if
+// a tick's wake asked for it, the installed tracker is due, the city is not
+// quiescent and it has a graph store. It sets
 // *ran just before the purge starts, so a purge that panics still counts
 // toward the lane's pacing.
 func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bool) {
@@ -126,6 +158,7 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 	lane := cr.wispGCLaneOf()
 	lane.passMu.Lock()
 	defer lane.passMu.Unlock()
+	lane.installStagedLocked()
 	wg := lane.active
 	if !wake || wg == nil || !wg.shouldRun(time.Now()) {
 		return

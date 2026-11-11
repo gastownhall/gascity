@@ -9391,24 +9391,27 @@ func applyWispGCReload(t *testing.T, cr *CityRuntime, tomlPath, extra string) {
 	}
 }
 
-// stampWispGCLastRun records a pass at lastRun on cr's tracker and returns it.
+// stampWispGCLastRun records a pass at lastRun on the wisp GC lane's tracker
+// and returns it.
 func stampWispGCLastRun(t *testing.T, cr *CityRuntime, lastRun time.Time) *memoryWispGC {
 	t.Helper()
-	m, ok := cr.wg.(*memoryWispGC)
+	wg := installedWispGC(cr)
+	m, ok := wg.(*memoryWispGC)
 	if !ok {
-		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wg)
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", wg)
 	}
 	m.lastRun = lastRun
 	return m
 }
 
-// rebuiltWispGC returns cr's tracker after a reload, failing unless the reload
-// replaced prev with a new *memoryWispGC.
+// rebuiltWispGC returns the wisp GC lane's tracker after a reload, failing
+// unless the reload replaced prev with a new *memoryWispGC.
 func rebuiltWispGC(t *testing.T, cr *CityRuntime, prev *memoryWispGC) *memoryWispGC {
 	t.Helper()
-	m, ok := cr.wg.(*memoryWispGC)
+	wg := installedWispGC(cr)
+	m, ok := wg.(*memoryWispGC)
 	if !ok {
-		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wg)
+		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", wg)
 	}
 	if m == prev {
 		t.Fatal("wisp GC tracker not rebuilt by the reload")
@@ -9434,10 +9437,10 @@ func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
 			applyWispGCReload(t, cr, tomlPath, tc.reload)
 
 			next := rebuiltWispGC(t, cr, prev)
-			if cr.wg.shouldRun(lastRun.Add(10 * time.Minute)) {
+			if next.shouldRun(lastRun.Add(10 * time.Minute)) {
 				t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
 			}
-			if !cr.wg.shouldRun(lastRun.Add(time.Hour)) {
+			if !next.shouldRun(lastRun.Add(time.Hour)) {
 				t.Fatal("wisp GC not due 1h after its last run; want the 1h cadence kept")
 			}
 			if next.ttl != tc.wantTTL {
@@ -9473,10 +9476,10 @@ func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
 				t.Fatalf("rebuilt interval/ttl/mailRetentionTTL = %v/%v/%v, want %v/%v/%v",
 					next.interval, next.ttl, next.mailRetentionTTL, tc.want, tc.wantTTL, tc.wantMail)
 			}
-			if cr.wg.shouldRun(lastRun.Add(tc.notDueAt)) {
+			if next.shouldRun(lastRun.Add(tc.notDueAt)) {
 				t.Fatalf("wisp GC due %v after its last run on a %s interval; want the new interval counted from the last run", tc.notDueAt, tc.interval)
 			}
-			if !cr.wg.shouldRun(lastRun.Add(tc.dueAt)) {
+			if !next.shouldRun(lastRun.Add(tc.dueAt)) {
 				t.Fatalf("wisp GC not due %v after its last run on a %s interval", tc.dueAt, tc.interval)
 			}
 		})
@@ -9503,16 +9506,17 @@ func TestCityRuntimeReloadWispGCFollowsEnablement(t *testing.T) {
 	stampWispGCLastRun(t, cr, lastRun)
 
 	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nshutdown_timeout = \"1s\"\n")
-	if cr.wg != nil {
-		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", cr.wg)
+	if wg := installedWispGC(cr); wg != nil {
+		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", wg)
 	}
 	runLanePass(cr, true)
 
 	applyWispGCReload(t, cr, tomlPath, enabled)
-	if _, ok := cr.wg.(*memoryWispGC); !ok {
-		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", cr.wg)
+	wg := installedWispGC(cr)
+	if _, ok := wg.(*memoryWispGC); !ok {
+		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", wg)
 	}
-	if !cr.wg.shouldRun(lastRun.Add(time.Minute)) {
+	if !wg.shouldRun(lastRun.Add(time.Minute)) {
 		t.Fatal("newly enabled wisp GC not due on its first tick; want it due as at process start")
 	}
 }
