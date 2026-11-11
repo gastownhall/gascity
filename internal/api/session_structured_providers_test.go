@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1158,92 +1159,175 @@ func TestHandleSessionStreamStructuredUsesRelocatedSessionStoreForPaneFallback(t
 func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *testing.T) {
 	for _, surface := range []string{"city-huma", "legacy"} {
 		t.Run(surface, func(t *testing.T) {
-			isolateProviderDiscovery(t)
-			fs := newSessionFakeState(t)
-			searchBase := t.TempDir()
-			srv := New(fs)
-			structuredPeekPoll := make(chan time.Time)
-			srv.structuredPeekPoll = structuredPeekPoll
-			humaHandler := newTestCityHandlerWith(t, fs, srv)
-			srv.sessionLogSearchPaths = []string{searchBase}
-
-			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
-			workDir := t.TempDir()
-			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
-				Template: "myrig/worker",
-				Title:    "Promote",
-				Command:  "claude",
-				WorkDir:  workDir,
-				Provider: "claude",
-				Hints:    runtime.Config{},
-				ExtraMeta: map[string]string{
-					"session_origin": "manual",
-				},
-			})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			fs.sp.SetPeekOutput(info.SessionName, "pane fallback before history")
-
-			handler := humaHandler
-			path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured"
-			if surface == "legacy" {
-				handler = srv.legacySessionHandler()
-				path = "/v0/session/" + info.ID + "/stream?format=structured"
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			rec := newSyncResponseRecorder()
-			req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
-			done := make(chan struct{})
-			go func() {
-				handler.ServeHTTP(rec, req)
-				close(done)
-			}()
-
-			fallbackBody := waitForRecorderSubstring(t, rec, "pane fallback before history", 10*time.Second)
-			if !strings.Contains(fallbackBody, structuredTranscriptUnavailableCode) {
-				t.Fatalf("fallback body missing degraded diagnostic: %s", fallbackBody)
-			}
-
-			writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
-				`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"authoritative history"},"timestamp":"2025-01-01T00:00:00Z"}`,
-			)
-			select {
-			case structuredPeekPoll <- time.Now():
-			case <-time.After(hangBudget):
-				t.Fatal("structured peek stream did not consume the injected poll tick")
-			}
-
-			body := waitForRecorderSubstring(t, rec, `"reset_reason":"stream_changed"`, 10*time.Second)
-			cancel()
-			<-done
-
-			var promoted *SessionStreamStructuredMessageEvent
-			for _, frame := range parseSSETestFrames(body) {
-				if frame.Event != "structured" {
-					continue
-				}
-				var update SessionStreamStructuredMessageEvent
-				if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
-					t.Fatalf("decode structured frame: %v; data=%s", err, frame.Data)
-				}
-				if update.Operation == sessionStructuredOperationReset {
-					promoted = &update
-				}
-			}
-			if promoted == nil || promoted.ResetReason != sessionStructuredResetStreamChanged {
-				t.Fatalf("structured frames did not promote with reset/stream_changed: %s", body)
-			}
-			if got := structuredMessageIDs(promoted.StructuredMessages); !equalStrings(got, []string{"m1"}) {
-				t.Fatalf("promoted message IDs = %v, want [m1]", got)
-			}
-			if len(promoted.StructuredMessages[0].Blocks) != 1 || promoted.StructuredMessages[0].Blocks[0].Text != "authoritative history" {
-				t.Fatalf("promoted message blocks = %+v, want authoritative history", promoted.StructuredMessages[0].Blocks)
-			}
+			testStructuredPromotionWithoutReconnect(t, surface, false)
 		})
 	}
+}
+
+// TestSessionStreamStructuredPromotesHistoryWrittenBeforeFirstPoll holds the
+// stream between its first fallback frame and its first history check, writes
+// the transcript there, and requires the stream to promote on that check
+// without a poll tick.
+func TestSessionStreamStructuredPromotesHistoryWrittenBeforeFirstPoll(t *testing.T) {
+	for _, surface := range []string{"city-huma", "legacy"} {
+		t.Run(surface, func(t *testing.T) {
+			testStructuredPromotionWithoutReconnect(t, surface, true)
+		})
+	}
+}
+
+// testStructuredPromotionWithoutReconnect drives one structured peek stream
+// from its pane fallback to authoritative history on the same connection.
+// holdFirstHistoryCheck parks the stream after its first fallback frame, so the
+// transcript lands before the stream makes its first history check.
+func testStructuredPromotionWithoutReconnect(t *testing.T, surface string, holdFirstHistoryCheck bool) {
+	t.Helper()
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	var gate *structuredHistoryCheckGate
+	if holdFirstHistoryCheck {
+		gate = newStructuredHistoryCheckGate(fs.sp)
+		fs.sessionProvider = gate
+		t.Cleanup(gate.Release)
+	}
+	srv := New(fs)
+	structuredPeekPoll := make(chan time.Time)
+	srv.structuredPeekPoll = structuredPeekPoll
+	humaHandler := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Promote",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fs.sp.SetPeekOutput(info.SessionName, "pane fallback before history")
+
+	handler := humaHandler
+	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured"
+	if surface == "legacy" {
+		handler = srv.legacySessionHandler()
+		path = "/v0/session/" + info.ID + "/stream?format=structured"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rec := newSyncResponseRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if gate != nil {
+		select {
+		case <-gate.entered:
+		case <-time.After(hangBudget):
+			t.Fatal("structured peek stream never reached its first history check")
+		}
+	}
+	fallbackBody := waitForRecorderSubstring(t, rec, "pane fallback before history", 10*time.Second)
+	if !strings.Contains(fallbackBody, structuredTranscriptUnavailableCode) {
+		t.Fatalf("fallback body missing degraded diagnostic: %s", fallbackBody)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"authoritative history"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+	if gate != nil {
+		gate.Release()
+	}
+	select {
+	case structuredPeekPoll <- time.Now():
+	case <-time.After(hangBudget):
+		t.Fatal("structured peek stream did not consume the injected poll tick")
+	}
+
+	body := waitForRecorderSubstring(t, rec, `"reset_reason":"stream_changed"`, 10*time.Second)
+	cancel()
+	<-done
+
+	var promoted *SessionStreamStructuredMessageEvent
+	for _, frame := range parseSSETestFrames(body) {
+		if frame.Event != "structured" {
+			continue
+		}
+		var update SessionStreamStructuredMessageEvent
+		if err := json.Unmarshal([]byte(frame.Data), &update); err != nil {
+			t.Fatalf("decode structured frame: %v; data=%s", err, frame.Data)
+		}
+		if update.Operation == sessionStructuredOperationReset {
+			promoted = &update
+		}
+	}
+	if promoted == nil || promoted.ResetReason != sessionStructuredResetStreamChanged {
+		t.Fatalf("structured frames did not promote with reset/stream_changed: %s", body)
+	}
+	if got := structuredMessageIDs(promoted.StructuredMessages); !equalStrings(got, []string{"m1"}) {
+		t.Fatalf("promoted message IDs = %v, want [m1]", got)
+	}
+	if len(promoted.StructuredMessages[0].Blocks) != 1 || promoted.StructuredMessages[0].Blocks[0].Text != "authoritative history" {
+		t.Fatalf("promoted message blocks = %+v, want authoritative history", promoted.StructuredMessages[0].Blocks)
+	}
+}
+
+// structuredHistoryCheckGate holds the structured peek handler between its first
+// fallback frame and its first history check. In that handler the first Pending
+// read after a Peek ends the first fallback frame, and the first history check
+// follows it.
+type structuredHistoryCheckGate struct {
+	*runtime.Fake
+	mu          sync.Mutex
+	peeked      bool
+	held        bool
+	entered     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newStructuredHistoryCheckGate(fake *runtime.Fake) *structuredHistoryCheckGate {
+	return &structuredHistoryCheckGate{Fake: fake, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+// Peek records that a peek happened.
+func (g *structuredHistoryCheckGate) Peek(name string, lines int) (string, error) {
+	g.mu.Lock()
+	g.peeked = true
+	g.mu.Unlock()
+	return g.Fake.Peek(name, lines)
+}
+
+// Pending closes entered and blocks until Release on the first call after a peek.
+func (g *structuredHistoryCheckGate) Pending(name string) (*runtime.PendingInteraction, error) {
+	g.mu.Lock()
+	hold := g.peeked && !g.held
+	if hold {
+		g.held = true
+	}
+	g.mu.Unlock()
+	if hold {
+		close(g.entered)
+		<-g.release
+	}
+	return g.Fake.Pending(name)
+}
+
+// Release lets the held Pending call return. It is safe to call more than once.
+func (g *structuredHistoryCheckGate) Release() {
+	g.releaseOnce.Do(func() { close(g.release) })
 }
 
 func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnapshot(t *testing.T) {
