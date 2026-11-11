@@ -103,8 +103,9 @@ the underlying reason (see **Compact Quarantine Reasons** below) before
 reclaiming. Like the offline `dolt gc --archive-level=0` procedure above,
 it writes classic table files. Unlike that procedure,
 `--gc-only` runs against the live managed server and does not require stopping
-the city — though quiescing writers still makes the GC faster and more
-thorough.
+the city, but it skips any database with a connected session (see the live-session
+gate in `gc dolt compact --help`), so quiesce writers first; `--force` overrides
+the skip.
 
 ### A full GC canceled at the read timeout
 
@@ -634,6 +635,10 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+Separately, `gc dolt compact` skips `CALL DOLT_GC` on a database that has live
+sessions connected, or whose session probe fails. The log names the database and
+the next run retries; `--force` runs the GC anyway.
 
 ## When to Escalate
 

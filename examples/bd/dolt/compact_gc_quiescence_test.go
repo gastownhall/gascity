@@ -16,8 +16,8 @@ const (
 	// quiescenceProbeLogLine is the dolt.log line of the beads probe: empty
 	// db= because the probe selects no database.
 	quiescenceProbeLogLine = "db= query=SELECT COUNT(*) FROM information_schema.processlist WHERE db = 'beads'"
-	quiescenceBareGC       = "CALL DOLT_GC()"
-	quiescenceFullGC       = "CALL DOLT_GC('--full')"
+	quiescenceBareGC       = "CALL DOLT_GC('--archive-level=0')"
+	quiescenceFullGC       = "CALL DOLT_GC('--full', '--archive-level=0')"
 )
 
 func assertQuiescenceSkipped(t *testing.T, out, log string) {
