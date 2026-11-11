@@ -347,3 +347,80 @@ func TestWispGCLane_RejectedReloadStagesNothing(t *testing.T) {
 		t.Errorf("a rejected reload changed the deployed tracker: %T -> %T", before, lane.active)
 	}
 }
+
+// TestWispGCLane_StageInstallTransitions covers the staging rules between
+// reloads and installs: a disable clears the tracker, a disable coalesced
+// with a later enable installs the fresh tracker's own cadence (the disable
+// ended the old cadence — nothing carries), the latest staged policy wins,
+// and a plain enable-to-enable replacement carries the running tracker's
+// lastRun and session cursor.
+func TestWispGCLane_StageInstallTransitions(t *testing.T) {
+	seedTracker := func(lastRun time.Time, cursor *beads.SeekBoundary) *memoryWispGC {
+		return &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: lastRun, sessionPurgeCursor: cursor}
+	}
+	freshTracker := func(interval time.Duration) *memoryWispGC {
+		return &memoryWispGC{interval: interval, ttl: 48 * time.Hour}
+	}
+	lastRun := time.Now().Add(-10 * time.Minute)
+	cursor := &beads.SeekBoundary{CreatedAt: lastRun, ID: "gcg-carry"}
+
+	t.Run("disable", func(t *testing.T) {
+		lane := newWispGCLane(seedTracker(lastRun, cursor))
+		lane.stage(nil)
+		if !lane.stagedPending() {
+			t.Fatal("a disable left nothing staged")
+		}
+		lane.installStaged()
+		if lane.active != nil {
+			t.Errorf("after installing a disable, tracker = %T, want nil", lane.active)
+		}
+		if lane.stagedPending() {
+			t.Error("the staged disable survived its install")
+		}
+	})
+
+	t.Run("coalesced disable then enable installs fresh cadence", func(t *testing.T) {
+		lane := newWispGCLane(seedTracker(lastRun, cursor))
+		fresh := freshTracker(15 * time.Minute)
+		lane.stage(nil)
+		lane.stage(fresh)
+		lane.installStaged()
+		if lane.active != wispGC(fresh) {
+			t.Fatalf("installed tracker = %p, want the fresh enable %p", lane.active, fresh)
+		}
+		if !fresh.lastRun.IsZero() {
+			t.Errorf("fresh tracker carried lastRun=%v from the retired cadence; a disable ends the cadence", fresh.lastRun)
+		}
+		if fresh.sessionPurgeCursor != nil {
+			t.Errorf("fresh tracker carried sessionPurgeCursor=%v from the retired cadence", fresh.sessionPurgeCursor)
+		}
+	})
+
+	t.Run("latest staged policy wins", func(t *testing.T) {
+		lane := newWispGCLane(seedTracker(lastRun, cursor))
+		first := freshTracker(15 * time.Minute)
+		latest := freshTracker(30 * time.Minute)
+		lane.stage(first)
+		lane.stage(latest)
+		lane.installStaged()
+		if lane.active != wispGC(latest) {
+			t.Errorf("installed tracker = %p, want the latest staged policy %p", lane.active, latest)
+		}
+	})
+
+	t.Run("enable carries the running cadence", func(t *testing.T) {
+		lane := newWispGCLane(seedTracker(lastRun, cursor))
+		fresh := freshTracker(15 * time.Minute)
+		lane.stage(fresh)
+		lane.installStaged()
+		if lane.active != wispGC(fresh) {
+			t.Fatalf("installed tracker = %p, want %p", lane.active, fresh)
+		}
+		if !fresh.lastRun.Equal(lastRun) {
+			t.Errorf("installed tracker lastRun=%v, want %v carried from the running tracker", fresh.lastRun, lastRun)
+		}
+		if fresh.sessionPurgeCursor != cursor {
+			t.Errorf("installed tracker sessionPurgeCursor=%v, want the carried cursor", fresh.sessionPurgeCursor)
+		}
+	})
+}
