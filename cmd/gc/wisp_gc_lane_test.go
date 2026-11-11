@@ -546,3 +546,36 @@ func TestWispGCLane_PurgeHoldsSuspendedRigRetirement(t *testing.T) {
 		t.Fatalf("provider ops = %q, want one stop once the purge finished", ops)
 	}
 }
+
+// Kills: a lane stop that abandons a purge in flight. run() defers the stop
+// after its shutdown, so a stop that returns early lets shutdown close the
+// stores and the trace under the purge. The stop returns only after the
+// purge has returned and its pass is recorded.
+func TestWispGCLane_StopWaitsForPurgeInFlight(t *testing.T) {
+	wg := newBlockingWispGC()
+	cr, _, _ := newWispGCLaneRuntime(t, wg)
+	stop := cr.startWispGCLane(context.Background())
+	cr.wispGCLaneOf().wake()
+	wg.awaitPurgeStart(t)
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("the lane stop returned while its purge was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(wg.release)
+	select {
+	case <-stopped:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the lane stop did not return after its purge finished")
+	}
+	if _, ran := cr.wispGCLaneOf().lastPassAge(time.Now()); !ran {
+		t.Fatal("the lane stop returned before the purge's pass was recorded")
+	}
+}
