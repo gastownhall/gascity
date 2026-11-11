@@ -2037,6 +2037,7 @@ go_test(
         "reconcile_settle_test.go",
         "reconcile_sim_coverage_test.go",
         "reconcile_sim_determinism_test.go",
+        "reconcile_sim_drain_deadline_test.go",
         "reconcile_sim_drift_test.go",
         "reconcile_sim_exec_test.go",
         "reconcile_sim_invariants_test.go",
