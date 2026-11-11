@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -499,5 +500,118 @@ func TestCityRuntimeRunJoinsAnInFlightWispGCPurgeOnExit(t *testing.T) {
 	case <-runDone:
 	case <-time.After(60 * time.Second):
 		t.Fatal("run did not return after the purge it was joining finished")
+	}
+}
+
+// cycleID returns the tick ID of the last recorded cycle with this phase
+// payload, or "" when none was recorded.
+func cycleID(records []SessionReconcilerTraceRecord, phase string) string {
+	var id string
+	for _, r := range records {
+		if r.RecordType == TraceRecordCycleResult && r.Fields["phase"] == phase {
+			id = r.TickID
+		}
+	}
+	return id
+}
+
+// TestWispGCLane_TracesThePurgeInItsOwnCycle: the lane leaves the record the
+// purge always left — a controller.tick.phase wisp_gc operation — but in a
+// trace cycle of its own (trigger wisp-gc-lane), not in a tick's; the tick
+// that woke it records wake_wisp_gc_lane in its own cycle instead, and never
+// runs the purge. The purge-count and per-line error log output and the
+// work arm's wake are the migrated log tests and TestWorkGCLaneWiring.
+func TestWispGCLane_TracesThePurgeInItsOwnCycle(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	var runs atomic.Int32
+	cr.wg = countingWispGC{runs: &runs}
+	runFixtureTick(cr, "patrol")
+	if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+		t.Fatal("a due pass declined to run the purge")
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("the pass ran the purge %d time(s), want 1 (the tick never does)", runs.Load())
+	}
+	records := closeTrace(t, cr)
+
+	tickCycle := cycleID(records, "tick")
+	purgeCycle := cycleID(records, "wisp_gc")
+	if tickCycle == "" {
+		t.Fatal("no tick cycle was recorded")
+	}
+	if purgeCycle == "" {
+		t.Fatal("the purge recorded no cycle of its own")
+	}
+	if purgeCycle == tickCycle {
+		t.Fatalf("the purge ran in the tick's cycle (%s); it must have one of its own", purgeCycle)
+	}
+	if got := passCompletion(records, "wisp_gc"); got != TraceCompletionCompleted {
+		t.Errorf("the purge's cycle completion = %q, want %q", got, TraceCompletionCompleted)
+	}
+	for _, r := range records {
+		if r.RecordType != TraceRecordCycleResult || r.Fields["phase"] != "wisp_gc" {
+			continue
+		}
+		if got := fmt.Sprint(r.Fields["trigger"]); got != wispGCLaneTraceTrigger {
+			t.Errorf("the purge's cycle trigger = %q, want %q", got, wispGCLaneTraceTrigger)
+		}
+	}
+
+	sawWake, sawPurgeOp := false, false
+	for _, r := range records {
+		if r.RecordType != TraceRecordOperation {
+			continue
+		}
+		switch fmt.Sprint(r.Fields["operation_name"]) {
+		case "wake_wisp_gc_lane":
+			sawWake = true
+			if r.TickID != tickCycle {
+				t.Errorf("the wake op recorded in cycle %s, want the tick's %s", r.TickID, tickCycle)
+			}
+		case "wisp_gc":
+			sawPurgeOp = true
+			if r.TickID != purgeCycle {
+				t.Errorf("the purge op recorded in cycle %s, want its own %s", r.TickID, purgeCycle)
+			}
+		}
+	}
+	if !sawWake {
+		t.Error("the tick recorded no wake_wisp_gc_lane operation")
+	}
+	if !sawPurgeOp {
+		t.Error("the purge recorded no controller.tick.phase wisp_gc operation")
+	}
+}
+
+// panickingWispGC is a tracker whose purge panics inside runGC.
+type panickingWispGC struct{}
+
+func (panickingWispGC) shouldRun(time.Time) bool { return true }
+
+func (panickingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	panic("purge boom")
+}
+
+// TestWispGCLane_PurgePanicIsRecoveredAndAbortsItsCycle: a panicking purge
+// never takes the controller with it. The pass still counts as a purge for
+// the duty cycle (ran=true, so the next wake is paced against a real pass),
+// its store-work registration is released by the recovery, and its trace
+// cycle ends aborted.
+func TestWispGCLane_PurgePanicIsRecoveredAndAbortsItsCycle(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	cr.wg = panickingWispGC{}
+	if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+		t.Fatal("a pass whose purge panicked did not report running a purge; a recovered panic still counts as a pass")
+	}
+	if cr.cs.storeWorkInFlight() {
+		t.Fatal("the purging pass's store-work registration outlived its recovered panic")
+	}
+	records := closeTrace(t, cr)
+	if got := passCompletion(records, "wisp_gc"); got != TraceCompletionAborted {
+		t.Errorf("a panicked purge's cycle completion = %q, want %q", got, TraceCompletionAborted)
+	}
+	// The lane's last-pass status saw the pass too, whatever it did inside.
+	if _, ran := cr.wispGCLaneOf().lastPass(); !ran {
+		t.Error("the lane recorded no pass after its purge panicked")
 	}
 }
