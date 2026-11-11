@@ -38,7 +38,10 @@ type reapOrphanResult struct {
 }
 
 // reapOrphanMolecules finds molecule roots left open with no runnable work and
-// closes their subtrees (crn-vbsr0). A root qualifies when: (1) it is a
+// closes their subtrees (crn-vbsr0). The molecule roots and their step
+// subtrees are graph beads, read and closed through graph; the attached target
+// beads are work beads, read through work, so the two may live in different
+// stores. A root qualifies when: (1) it is a
 // non-terminal "molecule" bead; (2) it has at least one attached target bead
 // (metadata.molecule_id == root.ID) and every such target is terminal —
 // exactly the shape attachedMoleculeIsParked already protects, since #3474 is
@@ -88,12 +91,12 @@ func reapOrphanMolecules(graph beads.GraphStore, work beads.WorkStore, rec event
 
 // isOrphanMolecule applies the crn-vbsr0 reap predicate to a single
 // candidate root. See reapOrphanMolecules for the full rationale.
-func isOrphanMolecule(graph beads.GraphStore, _ beads.WorkStore, root beads.Bead) (bool, error) {
+func isOrphanMolecule(graph beads.GraphStore, work beads.WorkStore, root beads.Bead) (bool, error) {
 	if root.Type != "molecule" || convoycore.IsTerminalStatus(root.Status) {
 		return false, nil
 	}
 
-	targets, err := graph.ListByMetadata(map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	targets, err := work.ListByMetadata(map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return false, fmt.Errorf("listing target beads for molecule %s: %w", root.ID, err)
 	}
