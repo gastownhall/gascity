@@ -35,6 +35,7 @@ func TestCitySuspensionCheck_OK_NotSuspended(t *testing.T) {
 }
 
 func TestCitySuspensionCheck_Warns_ConfiguredDefault(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
 	dir := t.TempDir()
 	// No runtime override written; suspension comes solely from the
 	// configured suspended_on_start default.
@@ -55,6 +56,7 @@ func TestCitySuspensionCheck_Warns_ConfiguredDefault(t *testing.T) {
 }
 
 func TestCitySuspensionCheck_Warns_ExplicitOverride(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
 	dir := t.TempDir()
 	writeSuspensionStateFile(t, dir, `{"city":{"suspended":true}}`)
 	// Configured default is false; the explicit runtime override alone
@@ -104,6 +106,7 @@ func TestCitySuspensionCheck_Warns_GCSuspendedEnv(t *testing.T) {
 }
 
 func TestCitySuspensionCheck_UnreadableState_ReportsUnknown(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
 	dir := t.TempDir()
 	// Corrupt JSON: suspensionstate.Load returns an error (distinct from
 	// the missing-file case, which returns a zero-value State and no

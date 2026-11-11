@@ -44,8 +44,10 @@ func (c *CitySuspensionCheck) Name() string { return "city-suspension" }
 
 // Run loads the runtime suspension state and reports the city's
 // effective suspension using the same resolution the runtime and
-// `gc status` use (suspensionstate.EffectiveCitySuspended merged with
-// cfg.Workspace.EffectiveSuspendedOnStart). A read error (a corrupt or
+// `gc status` use: GC_SUSPENDED=1 in the environment is honored first,
+// as in cmd/gc's effectiveCitySuspended, then
+// suspensionstate.EffectiveCitySuspended merged with
+// cfg.Workspace.EffectiveSuspendedOnStart. A read error (a corrupt or
 // unreadable suspension-state.json — a missing file is not an error,
 // see suspensionstate.Load) is reported as unknown, never inferred to
 // mean the city is running.
