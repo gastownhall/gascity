@@ -463,6 +463,20 @@ func TestRewatch_RerunRefusals(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a 403 that mentions the 50-run limit is a failure after one POST", func(t *testing.T) {
+		// No public source quotes the refusal for the 50-run limit, so this body
+		// is invented and deliberately unpinned: it must reach the operator.
+		api := healable()
+		api.rerunErr = &APIError{Status: 403, Body: `{"message":"This workflow run has already been re-run 50 times"}`}
+		res, err := Rewatch(context.Background(), api, RewatchRequest{HeadSHA: rewatchSHA})
+		if err == nil {
+			t.Fatalf("a 403 mentioning the 50-run limit returned no error (treated as a benign no-op); reruns=%v", api.reruns)
+		}
+		api.assertCalls(t, 1, 1, 1, 1)
+		if res.Decision == DecisionRerun || res.RunID != 900 {
+			t.Fatalf("result = %+v, want it populated for the summary and not a re-run", res)
+		}
+	})
 	t.Run("rate limit during the POST is a failure", func(t *testing.T) {
 		api := healable()
 		api.rerunErr = &RateLimitError{Reset: rewatchT0, Err: errors.New("limited")}
@@ -476,8 +490,8 @@ func TestRewatch_RerunRefusals(t *testing.T) {
 		}
 	})
 	t.Run("a benign refusal is a no-op that names the refusal", func(t *testing.T) {
-		if len(benignRerunRefusals) != 3 {
-			t.Fatalf("benignRerunRefusals has %d entries, want exactly the three the ruling allows (already running, past the 30-day limit, 50 attempts)", len(benignRerunRefusals))
+		if len(benignRerunRefusals) != 2 {
+			t.Fatalf("benignRerunRefusals has %d entries, want exactly the two the ruling allows (already running, past the 30-day limit)", len(benignRerunRefusals))
 		}
 		for _, benign := range benignRerunRefusals {
 			api := healable()

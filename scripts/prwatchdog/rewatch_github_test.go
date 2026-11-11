@@ -178,6 +178,34 @@ func TestFetchCheckRuns_OnTheRewatchClientTracksAllFourChecks(t *testing.T) {
 	}
 }
 
+// TestBenignRefusal_PinsTheTwoPublicBodies pins the two benign refusals by
+// literal status and body, deliberately without reading benignRerunRefusals,
+// so a changed pin fails here. Both bodies are quoted from public reports, not
+// captured live: "This workflow is already running" from actions/runner#3872
+// and "Unable to retry this workflow run because it was created over a month
+// ago" from cli/cli#9989.
+func TestBenignRefusal_PinsTheTwoPublicBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"already running", "This workflow is already running", "workflow already running"},
+		{"past the 30-day limit", "Unable to retry this workflow run because it was created over a month ago", "run past the 30-day re-run limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := benignRefusal(&APIError{Status: 403, Body: tc.body}); got != tc.want {
+				t.Fatalf("benignRefusal(403, %q) = %q, want %q", tc.body, got, tc.want)
+			}
+			for _, status := range []int{404, 422, 500} {
+				if got := benignRefusal(&APIError{Status: status, Body: tc.body}); got != "" {
+					t.Fatalf("benignRefusal(%d, %q) = %q, want not benign", status, tc.body, got)
+				}
+			}
+		})
+	}
+}
+
 func TestBenignRefusal_IsATableNotProse(t *testing.T) {
 	for _, tc := range []struct {
 		name string
