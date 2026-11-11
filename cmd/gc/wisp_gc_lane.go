@@ -55,6 +55,11 @@ type wispGCLane struct {
 	// tracker with stagedPending set is a disable, not "no update".
 	staged        wispGC
 	stagedPending bool
+	// stagedReset remembers a disable staged since the last install, even
+	// when an enable staged after it replaced it: the next install then
+	// starts the tracker afresh, as a disable followed by an enable always
+	// has, rather than carrying the previous cadence and cursor over.
+	stagedReset bool
 
 	statusMu   sync.Mutex
 	lastPassAt time.Time
@@ -88,17 +93,24 @@ func (l *wispGCLane) stage(next wispGC) {
 	l.stageMu.Lock()
 	defer l.stageMu.Unlock()
 	l.staged, l.stagedPending = next, true
+	if next == nil {
+		l.stagedReset = true
+	}
 }
 
-// installStagedLocked installs the latest staged tracker, if any, carrying
-// the last completed purge's progress over to it (carryWispGCState). passMu
-// must be held.
+// installStagedLocked installs the latest staged tracker, if any. An
+// enabled-to-enabled replacement carries the last completed purge's progress
+// (carryWispGCState); after a disable it starts afresh. passMu must be held.
 func (l *wispGCLane) installStagedLocked() {
 	l.stageMu.Lock()
-	next, pending := l.staged, l.stagedPending
-	l.staged, l.stagedPending = nil, false
+	next, pending, reset := l.staged, l.stagedPending, l.stagedReset
+	l.staged, l.stagedPending, l.stagedReset = nil, false, false
 	l.stageMu.Unlock()
 	if !pending {
+		return
+	}
+	if reset {
+		l.active = next
 		return
 	}
 	l.active = carryWispGCState(l.active, next)
