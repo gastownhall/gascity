@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -1098,7 +1099,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	t.Helper()
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot, released: make(chan struct{})}
 	upgrader := websocket.Upgrader{}
-	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts.server = httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
@@ -1272,7 +1273,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		if err := conn.WriteJSON(resp); err != nil {
 			t.Errorf("write websocket response: %v", err)
 		}
-	}))
+	})))
 	return ts
 }
 

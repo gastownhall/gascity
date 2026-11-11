@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -462,7 +461,7 @@ func TestMailNotifyOpRequireRefusalIsAnError(t *testing.T) {
 // dedup-suppressed send proposes nothing.
 func TestMailSendNotifyOpsPerRecipient(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}
@@ -883,11 +882,11 @@ func TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
 				laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
 			})
 			h, c = submitOpCity(t, "auto", srv)
-			if _, err := sessionFrontDoor(c.reload(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
+			if _, err := sessionFrontDoor(c.reloadSessions(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
 				t.Fatalf("suspending the session: %v", err)
 			}
 			if tc.draining {
-				if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
+				if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
 					t.Fatalf("draining the session: %v", err)
 				}
 			}
@@ -1113,7 +1112,7 @@ func TestSessionSubmitLocalQueuedClosesQueued(t *testing.T) {
 	h, c := submitOpCity(t, "auto", nil)
 	// A session still being created, with no runtime yet, queues the
 	// message for its first start.
-	if err := c.store.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
+	if err := c.sessions.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
 		t.Fatalf("marking the session creating: %v", err)
 	}
 	if err := c.sp.Stop(c.name); err != nil {
@@ -1234,7 +1233,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 // gc mail reply --json names the notice's op.
 func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("alice", "bob", "Hello", "first"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1490,7 +1489,7 @@ func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 	c.h.opStore = cliOpIncapableStore{c.h.opStore}
 	var warn bytes.Buffer
 	nudgeWarningWriter = &warn
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}

@@ -76,7 +76,15 @@ type ProgramStatus struct {
 	Probed          bool // the program sent the support probe this incarnation (doctor)
 	LastError       bool // an error report was seen; sticky across clear (annotation only)
 	Reported        bool // a root report was seen this incarnation: no root then reads cleared, not silent
-	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable
+	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable or predates the tap's arm
+	// HoldDeclared annotates a reading under our nonce (valid, silent or
+	// cleared): the pane was armed declaring the mid-turn hold
+	// ([ProgramStatusArm.HoldMidTurn]). It is the pane's, not the program's.
+	HoldDeclared bool
+	// SettleDeclared annotates a reading as HoldDeclared does: the pane was
+	// armed declaring the record-driven interrupt settle
+	// ([ProgramStatusArm.DecideSettle]).
+	SettleDeclared bool
 }
 
 // Valid reports whether the reading may be used: judged valid, with a root
@@ -204,6 +212,27 @@ type ProgramStatusArm struct {
 	Capture bool   // arm the pane-output reader
 	App     string // reader drops reports naming another program
 	Relay   bool   // wrap the agent in the probe-answering relay (only with Capture)
+	// HoldMidTurn marks the pane as one whose program aborts a turn that
+	// input is typed into (only with Capture): under the switch on, only a
+	// starved queue's bypass is deferred while a fresh read shows a live
+	// working record ([ProgramStatusHoldProvider], [ProgramTypingHolds]).
+	HoldMidTurn bool
+	// DecideStartup lets the startup ladder decide with the program's record
+	// under the switch on (only with Capture): a turn start past the
+	// pre-send baseline confirms the startup nudge, and a live blocked
+	// record holds the send and hands the nudge back
+	// ([StartupNudgeHandbackProvider]). Without it the ladder decides from
+	// the screen alone, as under off. A start carries it to the leaf.
+	DecideStartup bool
+	// DecideSettle marks the pane as one whose interrupt settle decides with
+	// the program's record under the switch on (only with Capture): the
+	// idle wait after an interrupt gc sent returns at the first root
+	// boundary past the pre-interrupt baseline, and a dialog raised since
+	// ends it with [ErrPendingInteraction] ([InterruptNoteProvider]).
+	// Without it the wait decides from the screen alone, as under off. It is
+	// bound to the pane as HoldMidTurn is ([ProgramStatus.SettleDeclared]),
+	// so heal keeps a live pane current.
+	DecideSettle bool
 }
 
 // ProgramCaptureAction is what one heal call did.
@@ -215,6 +244,7 @@ const (
 	ProgramCaptureArmed     ProgramCaptureAction = "armed"
 	ProgramCaptureDisarmed  ProgramCaptureAction = "disarmed"
 	ProgramCaptureDeferred  ProgramCaptureAction = "deferred" // pipe busy, pane dead, or backoff
+	ProgramCaptureDeclared  ProgramCaptureAction = "declared" // a healthy capture's hold declaration set or withdrawn
 )
 
 // ProgramCaptureHealer is an optional extension the controller calls on the
@@ -234,16 +264,42 @@ func ProgramCaptureHealerFor(p Provider, name string) (ProgramCaptureHealer, boo
 }
 
 // ProgramStatusComparison is one shadow-mode decision: today's reading beside
-// what the record would decide. Closed tokens only.
+// what the record would decide. Closed tokens only: no field carries program
+// text (title, msg) or prompt text.
 type ProgramStatusComparison struct {
-	Session   string
-	Family    string // provider family (resolved built-in ancestor); config data, not a role
-	Point     string // closed token, validated by the event payload enum
-	Scrape    string // closed token
-	Program   string // closed token
-	Status    ProgramStatus
-	LatencyMs int64 // program signal minus scrape signal; meaningful only when Timed
-	Timed     bool
+	Session   string             // the session's runtime name
+	SessionID string             // the session's bead id, when the point knows it
+	Family    string             // provider family (resolved built-in ancestor); config data, not a role
+	Point     ProgramStatusPoint // the decision point
+	Scrape    ProgramVerdict     // today's reading, which decided
+	Program   ProgramVerdict     // what the record-side rule would decide
+	Status    ProgramStatus      // the reading the record-side rule judged, at the decision
+	LatencyMs int64              // program signal minus scrape signal; meaningful only when Timed
+	Timed     bool               // a valid reading, Status or a later follow-up read, showed the program's signal
+	Dropped   int                // comparisons the emitter dropped, under pressure, since its last one
+	// HoldActivity is the runtime's last activity the rule judged hold
+	// liveness with ([ProgramStatus.HoldLive]); zero when it used none.
+	HoldActivity time.Time
+	// JudgedAt is when the rule judged; zero means when the comparison is
+	// recorded. With HoldActivity it makes the recorded hold liveness, and
+	// the record's recorded age, the rule's own.
+	JudgedAt time.Time
+}
+
+// JudgedTime is when the comparison's rule judged: JudgedAt, or recordedAt
+// when JudgedAt is zero.
+func (c ProgramStatusComparison) JudgedTime(recordedAt time.Time) time.Time {
+	if c.JudgedAt.IsZero() {
+		return recordedAt
+	}
+	return c.JudgedAt
+}
+
+// HoldLive is the hold liveness the comparison's rule judged with: the
+// reading's [ProgramStatus.HoldLive] under HoldActivity at
+// [ProgramStatusComparison.JudgedTime].
+func (c ProgramStatusComparison) HoldLive(recordedAt time.Time) bool {
+	return c.Status.HoldLive(c.HoldActivity, c.JudgedTime(recordedAt))
 }
 
 // ProgramStatusComparisonSink receives shadow comparisons. Implementations
@@ -252,7 +308,8 @@ type ProgramStatusComparisonSink func(ProgramStatusComparison)
 
 // ProgramTapLiveness is the process table's word on whether a pane's capture
 // reader (the tap holding the pane's nonce) is alive. The zero value is
-// unknown: the snapshot was unavailable.
+// unknown: the snapshot was unavailable, or was scanned before the tap was
+// armed and so cannot hold it.
 type ProgramTapLiveness string
 
 // The tap-liveness tristate.
@@ -287,8 +344,14 @@ type ProgramPaneRow struct {
 	Tap         string             // the pane's tap nonce option as read ("<rand>.<pane_id>")
 	TapLiveness ProgramTapLiveness // a process holding Tap's nonce, from the process table
 	AgentGone   bool               // the caller's liveness says the agent is gone
-	RecordForm  ProgramRecordForm
-	Record      ProgramStatus // the decoded record; read only when RecordForm is decoded
+	// HoldDeclared is the pane's hold declaration as read: set only when
+	// the pane's hold option names this row's pane.
+	HoldDeclared bool
+	// SettleDeclared is the pane's settle declaration as read: set only
+	// when the pane's settle option names this row's pane.
+	SettleDeclared bool
+	RecordForm     ProgramRecordForm
+	Record         ProgramStatus // the decoded record; read only when RecordForm is decoded
 }
 
 // JudgeProgramStatus derives a reading from one agent-pane row. The first
@@ -304,6 +367,9 @@ type ProgramPaneRow struct {
 //  6. no root: silent if no root was ever reported this incarnation (a
 //     probe or child reports alone leave it silent), else cleared;
 //  7. valid, ReaderVerified when the process table confirmed the tap.
+//
+// A silent, cleared or valid reading carries the pane's HoldDeclared and
+// SettleDeclared.
 //
 // Only a valid reading carries state. The others carry none of the record's
 // claims, only its annotations (LastError under rule 3; Probed, Reported and
@@ -330,14 +396,17 @@ func JudgeProgramStatus(row ProgramPaneRow) ProgramStatus {
 		return ProgramStatus{Mode: mode, Validity: ProgramStatusReaderLost, Nonce: row.Tap}
 	}
 	if !ours {
-		return ProgramStatus{Mode: mode, Validity: ProgramStatusSilent, Nonce: row.Tap}
+		return ProgramStatus{Mode: mode, Validity: ProgramStatusSilent, Nonce: row.Tap, HoldDeclared: row.HoldDeclared, SettleDeclared: row.SettleDeclared}
 	}
 	if row.Record.State == "" {
-		return judgeNoRoot(mode, row.Record)
+		s := judgeNoRoot(mode, row.Record)
+		s.HoldDeclared, s.SettleDeclared = row.HoldDeclared, row.SettleDeclared
+		return s
 	}
 	s := row.Record
 	s.Mode, s.Validity = mode, ProgramStatusValid
 	s.ReaderVerified = row.TapLiveness == ProgramTapAlive
+	s.HoldDeclared, s.SettleDeclared = row.HoldDeclared, row.SettleDeclared
 	s.Kind = blockKind(s.State, s.Kind)
 	return s
 }

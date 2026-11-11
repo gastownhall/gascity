@@ -3,11 +3,126 @@ package events
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestInodeStableAcrossAppendChangesOnRotation pins the identity the watcher's
+// rotation detector compares: it stays fixed while the active log is appended
+// to, changes when a rotation puts a fresh file at the path, and reads the same
+// through an open handle as by path.
+func TestInodeStableAcrossAppendChangesOnRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, before, err := statInode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == 0 {
+		t.Skip("inode unavailable on this platform")
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, appended, err := statInode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended != before {
+		t.Fatalf("identity changed across an append to the same file: %d -> %d", before, appended)
+	}
+
+	rotating := path + ".rotating"
+	if err := os.Rename(path, rotating); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, fresh, err := statInode(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == before {
+		t.Fatal("the fresh active log has the rotated file's identity; the rotation would go undetected")
+	}
+
+	held, err := os.Open(rotating)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close() //nolint:errcheck // test cleanup
+	_, viaHandle, err := inodeOfFile(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaHandle != before {
+		t.Fatalf("identity read through a handle = %d, want the by-path identity %d", viaHandle, before)
+	}
+}
+
+// TestForceRotateWhileResumeBackfillHoldsActiveLog covers a watcher resuming
+// from an old cursor, which keeps the active log open for its backfill. The
+// recorder must still rotate and finish archiving while that reader is open,
+// and the watcher must deliver every event once, in order, across the rotation.
+func TestForceRotateWhileResumeBackfillHoldsActiveLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	recordN(rec, "pre", 3) // seq 1..3
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+	if fw, ok := w.(*fileWatcher); !ok || !fw.needsBackfill || fw.activeFile == nil {
+		t.Fatalf("precondition: want a resuming watcher holding the active log open, got %#v", w)
+	}
+
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate while a watcher holds the active log: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatalf("ForceRotate did not rotate: %s", res.Reason)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+	if leftover, err := filepath.Glob(path + ".rotating-*"); err != nil || len(leftover) != 0 {
+		t.Fatalf("archiving left rotation sources behind: %v (glob err %v); stderr: %s", leftover, err, stderr.String())
+	}
+
+	recordN(rec, "post", 2) // anchor is seq 4, then seq 5..6
+	got := drainWatcher(t, w, 6)
+	for i, e := range got {
+		if want := uint64(i + 1); e.Seq != want {
+			t.Fatalf("event %d seq = %d, want %d (all: %v)", i, e.Seq, want, got)
+		}
+	}
+}
 
 // TestWatcherSurvivesRotationWithoutGap exercises designer §8.1: the
 // watcher must detect rotation (inode change), reset its byte offset

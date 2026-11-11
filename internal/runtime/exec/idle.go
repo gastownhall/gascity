@@ -30,14 +30,16 @@ var execIdleProbeBudget = 5 * time.Second
 
 // idleBoundaryDeclared reports whether the pack declared everything an idle
 // boundary needs: an activity clock (report-activity), an attachment probe
-// (report-attachment), and the exec connection (proc.exec) over which the
-// in-box tmux pane is observed. A pack that declares all three runs its agent
-// in an in-box tmux session gc can read; a failed handshake counts as not
-// declared.
+// (report-attachment), the exec connection (proc.exec) over which the in-box
+// tmux pane is observed, and idle-boundary, the pack's word that its agent
+// runs in the in-box tmux session `main` gc can read. The first three alone
+// prove no tmux: a pack whose box runs none declares them honestly. A failed
+// handshake counts as not declared.
 func (p *Provider) idleBoundaryDeclared() bool {
 	return p.handshakeCapability(runtime.ProtocolCapabilityReportActivity) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) &&
-		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) &&
+		p.handshakeCapability(runtime.ProtocolCapabilityIdleBoundary)
 }
 
 // rememberReadyPrompt records the session's configured ready-prompt prefix so
@@ -154,8 +156,9 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 // tmux.PromptObservationLines lines over the exec connection and applies
 // tmux.ClassifyIdlePane, so the boundary is the one local tmux uses.
 //
-// A pack that does not declare report-activity, report-attachment and
-// proc.exec gets [runtime.ErrInteractionUnsupported] without any op being run.
+// A pack that does not declare report-activity, report-attachment, proc.exec
+// and idle-boundary gets [runtime.ErrInteractionUnsupported] without any op
+// being run.
 //
 // timeout is a hard upper bound: the ready-prompt read (see
 // readyPromptPrefix) and every capture run under a context that expires at
@@ -328,17 +331,30 @@ func paneLines(out string) []string {
 // via `script is-attached <name>`, separating "no client" from "could not
 // tell", and implements [runtime.AttachmentObserverWithError]. A pack that did
 // not declare report-attachment answers (false, nil) without running an op.
-// An op failure, meaning any non-zero exit including 2, wraps
-// [runtime.ErrRuntimeUnavailable], which callers gating a destructive action
-// treat as attached. A pack reports a session that does not exist by printing
-// "false" and exiting 0.
+// An op failure, meaning any non-zero exit including 2, or an answer other
+// than exactly `true` or `false`, wraps [runtime.ErrRuntimeUnavailable],
+// which callers gating a destructive action treat as attached. A pack
+// reports a session that does not exist by printing "false" and exiting 0.
+// On a v2-ready pack the op runs under probeOpTimeout, inside v2's fence
+// bound.
 func (p *Provider) IsAttachedWithError(name string) (bool, error) {
 	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
 		return false, nil
 	}
-	out, err := p.run(nil, "is-attached", name)
+	timeout := p.timeout
+	if p.v2Ready() {
+		timeout = probeOpTimeout
+	}
+	out, err := p.runWithTimeout(timeout, nil, "is-attached", name)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	return strings.TrimSpace(out) == "true", nil
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: exec provider %s is-attached %s: answer is neither true nor false (%d bytes)", runtime.ErrRuntimeUnavailable, p.script, name, len(out))
+	}
 }

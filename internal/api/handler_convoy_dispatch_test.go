@@ -959,7 +959,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if cityInfo.ref != "city:city" || cityInfo.scopeKind != "city" || cityInfo.scopeRef != "city" {
 		t.Fatalf("city info = %+v, want city:city", cityInfo)
 	}
-	if cityInfo.store != state.cityBeadStore {
+	if !beads.SameStore(cityInfo.store, state.cityBeadStore) {
 		t.Fatal("city store mismatch")
 	}
 
@@ -970,7 +970,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if rigInfo.ref != "rig:alpha" || rigInfo.scopeKind != "rig" || rigInfo.scopeRef != "alpha" {
 		t.Fatalf("rig info = %+v, want rig:alpha", rigInfo)
 	}
-	if rigInfo.store != state.stores["alpha"] {
+	if !beads.SameStore(rigInfo.store, state.stores["alpha"]) {
 		t.Fatal("rig store mismatch")
 	}
 
@@ -981,7 +981,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
 
-	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// A city that relocates nothing has no orders binding to name: Stores().Orders()
 	// is the city store, and an orders: ref there would be a second name for a store
 	// the city: ref already resolves.
 	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
@@ -1008,12 +1008,30 @@ func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
 	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
 		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
 	}
-	if info.store != beads.Store(binding) {
+	if !beads.SameStore(info.store, binding) {
 		t.Fatal("orders store mismatch")
 	}
 
 	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
 		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheGraphBinding is the graph twin of the
+// orders test above: on a city that relocates graph alone, the graph: ref
+// resolves to the graph binding, not to the orders class's store.
+func TestWorkflowStoreByRefResolvesTheGraphBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.graphBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "graph:bright-lights")
+	if !ok || !beads.SameStore(info.store, binding) {
+		t.Fatalf("workflowStoreByRef(graph:bright-lights) = %+v, %v; want the graph binding", info, ok)
 	}
 }
 

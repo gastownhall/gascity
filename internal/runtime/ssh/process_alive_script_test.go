@@ -71,3 +71,38 @@ func TestProcessAliveScriptRunsUnderBWKAwk(t *testing.T) {
 		}
 	}
 }
+
+// TestPaneTreeRunsNamesAcceptsRunningGCExecutable pins #7551 on the ssh
+// provider's ProcessAlive output: an agent pane whose child runs the gc
+// binary under its own on-disk name (GC_BIN = os.Executable, e.g. Nix
+// wrapProgram's .gc-wrapped) is alive for process_names = ["gc"]. The
+// running test binary plays the remote gc binary, just as GC_BIN plays it
+// in production.
+func TestPaneTreeRunsNamesAcceptsRunningGCExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() = %v, want the running test binary's path", err)
+	}
+	self := filepath.Base(exe)
+	if self == "gc" {
+		t.Fatalf("running executable is named %q; the alias under test is a no-op here", self)
+	}
+	out := "agent 100\n" +
+		processSectionComm + "\n" +
+		"  100     1 zsh\n" +
+		"  101   100 " + self + "\n" +
+		processSectionArgs + "\n" +
+		"  100     1 zsh\n" +
+		"  101   100 " + exe + " convoy control --serve --follow ntrecv/core.control-dispatcher\n"
+
+	alive, degraded := paneTreeRunsNames(out, proctable.ProcessNameSet([]string{"gc"}))
+	if degraded {
+		t.Fatal("paneTreeRunsNames reported degraded on a readable snapshot")
+	}
+	if !alive {
+		t.Errorf("paneTreeRunsNames([gc]) = false, want true: the pane's child runs the gc binary as %q", self)
+	}
+	if alive, _ := paneTreeRunsNames(out, proctable.ProcessNameSet([]string{"claude"})); alive {
+		t.Error(`paneTreeRunsNames([claude]) = true, want false: the gc executable's name must not satisfy another provider's names`)
+	}
+}

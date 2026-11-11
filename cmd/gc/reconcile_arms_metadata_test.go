@@ -230,8 +230,8 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 
 // Kills the launch and close refresh drifting from legacy's (SESS-713..715,
 // SESS-701): wake_mode, command, the provider family and resume keys
-// follow the resolution, an empty resolved value never clobbers a stored
-// one; continuation_epoch and a session key the provider takes are
+// follow the resolution, an empty command or a nil resolution never
+// clobbers a stored value; continuation_epoch and a session key the provider takes are
 // backfilled, a stored key kept; a stale close clears; a typeless row is
 // repaired; and work_dir is backfilled, alias-guarded for a legacy
 // identity and never under its running session.
@@ -370,5 +370,225 @@ func TestAliasTakenReadsTheRowsLeg(t *testing.T) {
 				t.Fatalf("aliasTaken = %v, want %v", got, tc.taken)
 			}
 		})
+	}
+}
+
+// providerProjectionKeys are the provider name and the six family and
+// resume keys a successful provider resolution projects onto a session.
+var providerProjectionKeys = []string{
+	"provider", "provider_kind", "builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag",
+}
+
+// providerProjectionCase is a stored provider projection reconciled
+// against a resolution: want is the projection after (a missing key reads
+// empty) and family, when set, its provider family.
+type providerProjectionCase struct {
+	name     string
+	stored   map[string]string
+	resolved *config.ResolvedProvider
+	want     map[string]string
+	family   string
+}
+
+// providerProjectionCases are the cases both reconciliation paths share
+// (#8539): a successful resolution is authoritative for the six family and
+// resume keys, empties included; a nil one keeps all seven.
+func providerProjectionCases(t *testing.T) []providerProjectionCase {
+	t.Helper()
+	claudeMax := map[string]string{
+		"provider": "claude-max", "provider_kind": "claude", "builtin_ancestor": "claude",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "claude --resume", "session_id_flag": "--session-id",
+	}
+	// startCommand is the unnamed resolution of a start-command escape hatch.
+	startCommand := func(agent *config.Agent, ws *config.Workspace) *config.ResolvedProvider {
+		resolved, err := config.ResolveProvider(agent, ws, nil, nil)
+		if err != nil || resolved == nil || resolved.Name != "" {
+			t.Fatalf("ResolveProvider(start command) = %+v, %v; want an unnamed resolution", resolved, err)
+		}
+		return resolved
+	}
+	return []providerProjectionCase{
+		{
+			name: "AC-1/a codex wrapper switched to claude",
+			stored: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+			want:     map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag", "session_id_flag": "--session-id"},
+			family:   "claude",
+		},
+		{
+			name:     "AC-1/switched to a provider with no family or resume keys",
+			stored:   claudeMax,
+			resolved: &config.ResolvedProvider{Name: "plain-cli"},
+			want:     map[string]string{"provider": "plain-cli"},
+		},
+		{
+			name:     "AC-1/claude switched back to a codex wrapper",
+			stored:   map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag", "session_id_flag": "--session-id"},
+			resolved: &config.ResolvedProvider{Name: "codex-wrapped", BuiltinAncestor: "codex", ResumeCommand: "codex resume {{.SessionKey}}"},
+			want: map[string]string{
+				"provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			family: "codex",
+		},
+		{
+			name: "AC-2/same provider, stale keys its config dropped",
+			stored: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude",
+				"resume_flag": "--resume", "resume_style": "flag", "resume_command": "codex resume {{.SessionKey}}", "session_id_flag": "--session-id",
+			},
+			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"},
+			want: map[string]string{
+				"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume", "resume_style": "flag",
+			},
+			family: "claude",
+		},
+		{
+			name: "AC-2/a row whose name already switched but whose family did not",
+			stored: map[string]string{
+				"provider": "claude", "provider_kind": "codex", "builtin_ancestor": "codex", "resume_command": "codex resume {{.SessionKey}}",
+			},
+			resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"},
+			want:     map[string]string{"provider": "claude", "resume_flag": "--resume", "resume_style": "flag"},
+			family:   "claude",
+		},
+		{
+			name:     "AC-3/a nil resolution keeps all seven keys",
+			stored:   claudeMax,
+			resolved: nil,
+			want:     claudeMax,
+		},
+		{
+			name:     "AC-3/a converged row, its cleared keys empty or absent",
+			stored:   map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume", "resume_command": ""},
+			resolved: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume"},
+			want:     map[string]string{"provider": "my-claude", "provider_kind": "claude", "builtin_ancestor": "claude", "resume_flag": "--resume"},
+		},
+		{
+			name:     "AC-4/an agent start command with its own resume command",
+			stored:   claudeMax,
+			resolved: startCommand(&config.Agent{Name: "worker", StartCommand: "run-worker", ResumeCommand: "run-worker --resume {{.SessionKey}}"}, nil),
+			want:     map[string]string{"provider": "claude-max", "resume_command": "run-worker --resume {{.SessionKey}}"},
+		},
+		{
+			name:     "AC-4/a workspace start command",
+			stored:   claudeMax,
+			resolved: startCommand(&config.Agent{Name: "worker"}, &config.Workspace{StartCommand: "run-city"}),
+			want:     map[string]string{"provider": "claude-max"},
+		},
+	}
+}
+
+// Kills A7 keeping a previous provider's family or resume keys that a
+// successful resolution leaves empty (#8539): the patch carries exactly
+// the changed keys, clears as explicit empties, and the refreshed row
+// refreshes to nothing.
+func TestDesiredRowLaunchRefreshClearsMissingProviderFields(t *testing.T) {
+	for _, tc := range providerProjectionCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := TemplateParams{Command: "run-worker", ResolvedProvider: tc.resolved}
+			raw := rowRefreshKeys{"command": "run-worker", "continuation_epoch": "1"}
+			maps.Copy(raw, tc.stored)
+			wantPatch := session.MetadataPatch{}
+			for _, k := range providerProjectionKeys {
+				if tc.want[k] != tc.stored[k] {
+					wantPatch[k] = tc.want[k]
+				}
+			}
+			m := session.MetadataPatch{}
+			refreshLaunchKeys(m, tp, raw)
+			if !maps.Equal(m, wantPatch) {
+				t.Fatalf("refreshLaunchKeys patch = %v, want %v", m, wantPatch)
+			}
+			got := maps.Clone(map[string]string(raw))
+			maps.Copy(got, m)
+			for _, k := range providerProjectionKeys {
+				if got[k] != tc.want[k] {
+					t.Errorf("%s = %q after refresh, want %q", k, got[k], tc.want[k])
+				}
+			}
+			if tc.family != "" {
+				if family := session.ProviderFamilyFromMetadata(got, ""); family != tc.family {
+					t.Errorf("provider family = %q after refresh, want %q", family, tc.family)
+				}
+			}
+			again := session.MetadataPatch{}
+			refreshLaunchKeys(again, tp, rowRefreshKeys(got))
+			if len(again) != 0 {
+				t.Errorf("refreshed row refreshed again: patch %v, want nothing", again)
+			}
+		})
+	}
+}
+
+// TestDesiredRowIdentityProviderProjectionBoundary drives the provider
+// projection through desiredRowIdentity, the A7 row-metadata boundary
+// (#8539): an absent resolution keeps every stored field, a converged row
+// proposes nothing, an unnamed start-command resolution keeps the stored
+// provider name, and an empty resolved command keeps the stored command.
+func TestDesiredRowIdentityProviderProjectionBoundary(t *testing.T) {
+	cfg := identityCity()
+	seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: "asleep"}
+	claude := &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, Command: "claude run", ResolvedProvider: claude}
+	// A codex-era row: every family/resume field populated.
+	codex := rowRefreshKeys{
+		"command": "codex-wrapped", "provider": "codex-wrapped", "provider_kind": "codex", "builtin_ancestor": "codex",
+		"resume_flag": "--codex-resume", "resume_style": "subcommand", "resume_command": "codex resume {{.SessionKey}}",
+		"session_id_flag": "--codex-session", "session_key": "k-1", "continuation_epoch": "1",
+	}
+	// The codex row after the switch to claude has been applied.
+	projection := maps.Clone(map[string]string(codex))
+	maps.Copy(projection, map[string]string{
+		"command": "claude run", "provider": "claude", "provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "--resume", "resume_style": "flag", "resume_command": "", "session_id_flag": "",
+	})
+	// AC-3: an absent resolution keeps every stored field, and the converged
+	// row proposes nothing.
+	bare := tp
+	bare.Command, bare.ResolvedProvider = "", nil
+	if id := desiredRowIdentity(cfg, bare, seat, codex); len(id.Meta) != 0 {
+		t.Fatalf("absent resolution: meta %v, want the stored values kept", id.Meta)
+	}
+	if id := desiredRowIdentity(cfg, tp, seat, rowRefreshKeys(projection)); len(id.Meta) != 0 {
+		t.Fatalf("converged: meta %v, want no write", id.Meta)
+	}
+	// AC-4: a successful unnamed start-command resolution keeps the stored
+	// provider name while clearing the fields it does not carry and
+	// projecting its explicit ResumeCommand, here on a row whose command and
+	// provider name already follow claude but whose family/resume fields are
+	// stale.
+	corrupted := maps.Clone(codex)
+	corrupted["command"], corrupted["provider"] = "claude run", "claude"
+	unnamed := &config.ResolvedProvider{Command: "custom-agent run", ResumeCommand: "custom-agent resume {{.SessionKey}}"}
+	tpUnnamed := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, Command: "custom-agent run", ResolvedProvider: unnamed}
+	wantUnnamed := session.MetadataPatch{
+		"command": "custom-agent run", "provider_kind": "", "builtin_ancestor": "",
+		"resume_flag": "", "resume_style": "", "resume_command": "custom-agent resume {{.SessionKey}}", "session_id_flag": "",
+	}
+	if id := desiredRowIdentity(cfg, tpUnnamed, seat, corrupted); !maps.Equal(id.Meta, wantUnnamed) {
+		t.Fatalf("unnamed: meta %v, want %v with no provider entry", id.Meta, wantUnnamed)
+	}
+	// Command keeps its own non-empty guard: an empty resolved command never
+	// clears a stored launch command.
+	quiet := tp
+	quiet.Command = ""
+	quietID := desiredRowIdentity(cfg, quiet, seat, codex)
+	if _, ok := quietID.Meta["command"]; ok {
+		t.Fatalf("empty resolved command queued %q, want the stored command kept", quietID.Meta["command"])
+	}
+}
+
+// The shared projection helper's guards: a nil queue or a nil resolution is
+// a no-op, never a panic, and a nil resolution queues nothing (the
+// absent-resolution half of #8539's contract).
+func TestQueueChangedResolvedProviderSessionMetadataNilGuards(t *testing.T) {
+	existing := map[string]string{"provider": "claude", "provider_kind": "codex"}
+	queueChangedResolvedProviderSessionMetadata(existing, nil, &config.ResolvedProvider{Name: "omp"})
+	var queued []string
+	queueChangedResolvedProviderSessionMetadata(existing, func(k, _ string) { queued = append(queued, k) }, nil)
+	if len(queued) != 0 {
+		t.Fatalf("nil resolution queued %v, want nothing", queued)
 	}
 }

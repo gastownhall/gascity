@@ -762,6 +762,54 @@ func TestCheckTriggerEventNoEventsProvider(t *testing.T) {
 	}
 }
 
+// strandedEventsProvider is an event log caught mid-rotation: its plain List
+// misses the events still stranded in the in-flight rotating file, which
+// ListInFlight folds in, as a FileRecorder's do during an archive's
+// compression window.
+type strandedEventsProvider struct {
+	*events.Fake
+	stranded []events.Event
+}
+
+func (p *strandedEventsProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	visible, err := p.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	return append(events.ApplyFilter(p.stranded, filter), visible...), nil
+}
+
+// TestCheckTriggerEventReadsEventsStrandedInARotation: while an archive is
+// compressed, the events just rotated out of the active log live only in the
+// in-flight rotating file. The check reads them too, so it does not call an
+// event order undue over a matching event that is on disk.
+func TestCheckTriggerEventReadsEventsStrandedInARotation(t *testing.T) {
+	ep := &strandedEventsProvider{
+		Fake:     events.NewFake(),
+		stranded: []events.Event{{Seq: 3, Type: "bead.closed"}},
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, func(string) uint64 { return 2 })
+	if !result.Due {
+		t.Fatalf("Due = false, want true for the event stranded in the rotating file; reason: %s", result.Reason)
+	}
+}
+
+// TestCheckTriggerEventReportsAReadFailure: a check that cannot read the event
+// log says the read failed, not that no event matched, so a caller that keeps
+// how far its checks have read does not move past events it never read.
+func TestCheckTriggerEventReportsAReadFailure(t *testing.T) {
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	failed := CheckTrigger(a, time.Time{}, neverRan, events.NewFailFake(), nil)
+	if failed.Due || !failed.ReadFailed {
+		t.Fatalf("unreadable log: result = %+v, want not due and ReadFailed", failed)
+	}
+	unmatched := CheckTrigger(a, time.Time{}, neverRan, newEventsProvider(t, []events.Event{{Type: "bead.created"}}), nil)
+	if unmatched.Due || unmatched.ReadFailed {
+		t.Fatalf("no matching event: result = %+v, want not due and not ReadFailed", unmatched)
+	}
+}
+
 func TestCheckTriggerCooldownRigScoped(t *testing.T) {
 	// Rig order should query with scoped name; city order with plain name.
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
@@ -1160,5 +1208,40 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 	res := CheckTrigger(a, now, neverRan, nil, nil)
 	if res.Due || !strings.Contains(res.Reason, "bad tz") {
 		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
+	}
+}
+
+// TestCheckEventStart pins where a standalone event check starts: an order
+// that has run reads past its run cursor; one that has never run reads past
+// the event head, so it opens none of the history below it and is due only on
+// an event recorded later (ga-1clac5).
+func TestCheckEventStart(t *testing.T) {
+	ep := events.NewFake()
+	for _, typ := range []string{"bead.closed", "bead.created", "bead.closed"} {
+		ep.Record(events.Event{Type: typ})
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+
+	start, err := CheckEventStart(ep, 0)
+	if err != nil || start != 3 {
+		t.Fatalf("never run: CheckEventStart = %d, %v; want the head 3", start, err)
+	}
+	startFn := func(string) uint64 { return start }
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); got.Due {
+		t.Fatalf("never run, history only: result = %+v, want not due", got)
+	}
+	ep.Record(events.Event{Type: "bead.closed"})
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); !got.Due || got.Reason != "event: 1 bead.closed event(s)" {
+		t.Fatalf("never run, new event: result = %+v, want due on the one new event", got)
+	}
+
+	if start, err := CheckEventStart(ep, 2); err != nil || start != 2 {
+		t.Fatalf("has run: CheckEventStart = %d, %v; want its run cursor 2", start, err)
+	}
+	if start, err := CheckEventStart(nil, 0); err != nil || start != 0 {
+		t.Fatalf("no provider: CheckEventStart = %d, %v; want 0", start, err)
+	}
+	if _, err := CheckEventStart(events.NewFailFake(), 0); err == nil {
+		t.Fatal("unreadable head: CheckEventStart returned no error")
 	}
 }

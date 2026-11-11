@@ -6,21 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -60,14 +64,20 @@ func (f *fakeRigHashConfig) ConfigSet(key, value string) error {
 
 func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 	t.Helper()
+	stubInfraMigrationSource(t)
+	return newRigImportFixtureCopying(t, nil, rigs...)
+}
+
+// newRigImportFixtureCopying is newRigImportFixture over whatever work store
+// openInfraMigrationSource serves. The rigs are registered, and seed (when
+// given) fills them, before the city copy runs, so the copy's boundary plan
+// reads the rigs as `gc storage migrate --from-work` (Step 4) does before any
+// rig is imported (Step 4b).
+func newRigImportFixtureCopying(t *testing.T, seed func(*rigImportFixture), rigs ...config.Rig) *rigImportFixture {
+	t.Helper()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
-	stubInfraMigrationSource(t)
 	stubInfraControllerPing(t, 0)
-	var log bytes.Buffer
-	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("the fixture city did not converge: %s: %s", got.Outcome, log.String())
-	}
 	f := &rigImportFixture{
 		t:        t,
 		request:  request,
@@ -110,6 +120,20 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		return conf, nil
 	}
 	t.Cleanup(func() { rigImportHashConfigOpener = prevHash })
+	if seed != nil {
+		seed(f)
+	}
+	// The copy probes the city's rigs from the config it loads; this city has
+	// none on disk, so the probe reads the fixture's.
+	prevProbe := infraCityBoundaryProbe
+	infraCityBoundaryProbe = func(cityPath string, _ *config.City, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
+		return probeElsewhere(rigImportEnv{CityPath: cityPath, Cfg: f.cfg}, "", resolveStoreScopeRoot(cityPath, cityPath), fromBackup, ids)
+	}
+	t.Cleanup(func() { infraCityBoundaryProbe = prevProbe })
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("the fixture city did not converge: %s: %s", got.Outcome, log.String())
+	}
 	return f
 }
 
@@ -542,7 +566,7 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 		}
 		return len(gates) == 1
 	}
-	if _, err := dispatch.ReleaseCrossStoreGates(binding, resolve); err != nil {
+	if _, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve); err != nil {
 		t.Fatal(err)
 	}
 	if !gateOpen() {
@@ -551,11 +575,120 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 	if err := rig.Close("gp-w1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dispatch.ReleaseCrossStoreGates(binding, resolve); err != nil {
+	if _, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve); err != nil {
 		t.Fatal(err)
 	}
 	if gateOpen() {
 		t.Fatal("the gate still holds its owner after the rig blocker closed")
+	}
+}
+
+// TestAGateOnARigGraphRowReleasesOnceTheRigImportMovesIt: a gate is minted
+// while its blocker, a graph row, still lives in a rig: by the city copy
+// (Step 4), or by another rig's import. The rig's own import (Step 4b) then
+// moves the row into the binding and clears the rig, and nothing re-points
+// the gate. The gate lane reads the binding as well: the gate holds its owner
+// while the row is open there, and releases it once the row closes.
+//
+// Red while the lane skipped the binding: no store it read held the row, so
+// the gate was marked unresolved and held its owner forever.
+func TestAGateOnARigGraphRowReleasesOnceTheRigImportMovesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		owner, row    string
+		build         func(t *testing.T) (f *rigImportFixture, city beads.Store)
+		importsBefore []string
+	}{
+		{
+			name:  "minted by the city copy",
+			owner: "mc-d1", row: "ga-x1",
+			build: func(t *testing.T) (*rigImportFixture, beads.Store) {
+				source := d9SQLiteSource(t, []beads.Bead{graphRow("mc-d1", "mc-d1", "open", nil)}, []beads.Dep{{IssueID: "mc-d1", DependsOnID: "ga-x1", Type: "blocks"}})
+				prev := openInfraMigrationSource
+				openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+				t.Cleanup(func() { openInfraMigrationSource = prev })
+				f := newRigImportFixtureCopying(t, func(f *rigImportFixture) {
+					f.seed("ga", []beads.Bead{graphRow("ga-x1", "ga-x1", "open", nil)}, nil)
+				}, config.Rig{Name: "ga", Prefix: "ga"})
+				return f, source
+			},
+		},
+		{
+			name:  "minted by another rig's import",
+			owner: "gb-d1", row: "ga-x1",
+			build: func(t *testing.T) (*rigImportFixture, beads.Store) {
+				f := newRigImportFixture(t, config.Rig{Name: "ga", Prefix: "ga"}, config.Rig{Name: "gb", Prefix: "gb"})
+				f.seed("ga", []beads.Bead{graphRow("ga-x1", "ga-x1", "open", nil)}, nil)
+				f.seed("gb", []beads.Bead{graphRow("gb-d1", "gb-d1", "open", nil)}, []beads.Dep{{IssueID: "gb-d1", DependsOnID: "ga-x1", Type: "blocks"}})
+				city, err := openInfraMigrationSource(f.request.CityPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return f, city
+			},
+			importsBefore: []string{"gb"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, city := tc.build(t)
+			for _, rig := range append(tc.importsBefore, "ga") {
+				if code, stdout, stderr := f.importRigs(rig); code != 0 {
+					t.Fatalf("importing rig %s = %d: %s %s", rig, code, stdout, stderr)
+				}
+			}
+			if rest := rigTestList(t, f.rig("ga")); len(rest) != 0 {
+				t.Fatalf("rig ga holds %v after its import, want nothing", rigTestIDs(rest))
+			}
+			binding, err := openInfraDestination(f.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = closeBeadStoreHandle(binding) })
+			gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+			if err != nil || len(gates) != 1 || gates[0].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != tc.owner || gates[0].Metadata[beadmeta.CrossStoreBlockerMetadataKey] != tc.row {
+				t.Fatalf("gates = %+v (%v), want one holding %s on %s", gates, err, tc.owner, tc.row)
+			}
+			gate := gates[0]
+			rigs := map[string]beads.Store{}
+			for _, rig := range f.cfg.Rigs {
+				rigs[rig.Name] = f.rig(rig.Name)
+			}
+			resolve := crossStoreBlockerResolver(binding, city, f.cfg, rigs, nil)
+			pass := func() dispatch.CrossStoreGateReport {
+				t.Helper()
+				report, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return report
+			}
+			ready := func() bool {
+				t.Helper()
+				rows, err := binding.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, b := range rows {
+					if b.ID == tc.owner {
+						return true
+					}
+				}
+				return false
+			}
+
+			if report := pass(); len(report.Released)+len(report.Unresolved) != 0 || ready() {
+				t.Fatalf("while %s is open in the binding: report %+v, %s ready %v; want the gate holding it", tc.row, report, tc.owner, ready())
+			}
+			if state := mustBeadMeta(t, binding, gate.ID, beadmeta.CrossStoreGateStateMetadataKey); state != "" {
+				t.Fatalf("gate %s was marked %q while the binding holds its blocker", gate.ID, state)
+			}
+			if err := binding.Close(tc.row); err != nil {
+				t.Fatal(err)
+			}
+			if report := pass(); len(report.Released) != 1 || report.Released[0] != gate.ID || !ready() {
+				t.Fatalf("after %s closed in the binding: report %+v, %s ready %v; want gate %s released", tc.row, report, tc.owner, ready(), gate.ID)
+			}
+		})
 	}
 }
 
@@ -928,7 +1061,7 @@ func TestControllerBootCensusEmitsRigResidue(t *testing.T) {
 	if len(residue) != 1 || residue[0] != "packs" {
 		t.Errorf("storage.rig_residue subjects = %v, want [packs]", residue)
 	}
-	if !strings.Contains(stderr.String(), "rig packs: awaiting import") || !strings.Contains(stderr.String(), "sleepy") {
+	if !strings.Contains(stderr.String(), "rig packs: awaiting import") || !strings.Contains(stderr.String(), "sleepy") || !strings.Contains(stderr.String(), "each is censused when it resumes") {
 		t.Errorf("the boot warning = %q", stderr.String())
 	}
 }
@@ -1089,6 +1222,250 @@ func TestControllerBootCensusRecordsARigWithNothingToImportClean(t *testing.T) {
 	if !strings.Contains(stderr.String(), "rig quiet: recorded clean") || strings.Contains(stderr.String(), "rig quiet: awaiting import") {
 		t.Errorf("the boot warning = %q", stderr.String())
 	}
+}
+
+// TestRigSuspendedAtBootIsCensusedWhenItResumes: the boot census never opens
+// a suspended rig, so a rig added to a born-split city before its first start
+// and suspended at that start (gc rig add --start-suspended, or gc rig
+// suspend) has no record after genesis. The controller censuses it once, on
+// the first tick after it resumes: a store holding only work is recorded
+// clean, so status and the doctor pass with no import and no second boot.
+// Ticks while it is still suspended do not open it.
+func TestRigSuspendedAtBootIsCensusedWhenItResumes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		suspend func(t *testing.T, cityPath string, rig *config.Rig)
+	}{
+		{name: "added with --start-suspended", suspend: func(_ *testing.T, _ string, rig *config.Rig) { rig.SuspendedOnStart = true }},
+		{name: "suspended before the first start", suspend: func(t *testing.T, cityPath string, rig *config.Rig) {
+			t.Helper()
+			if _, err := updateRigSuspension(fsys.OSFS{}, cityPath, rig.Name, suspendRigInState); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+			request := storageTestRequest(t, cfg)
+			stubInfraMigrationSource(t)
+			stubInfraControllerPing(t, 0)
+			stubResumeRepair(t)
+			rigPath := t.TempDir()
+			rig := config.Rig{Name: "r1", Prefix: "gr", Path: rigPath}
+			tc.suspend(t, request.CityPath, &rig)
+			cfg.Rigs = append(cfg.Rigs, rig)
+			rigFile := filepath.Join(rigPath, ".gc", "beads.json")
+			openRig := func() (*beads.FileStore, error) {
+				store, err := beads.OpenFileStore(fsys.OSFS{}, rigFile, beads.WithFileStoreIDPrefix("gr"))
+				if err != nil {
+					return nil, err
+				}
+				store.HonorExplicitIDs = true
+				return store, nil
+			}
+			var opens atomic.Int32
+			prevOpen := openStorageScopeStore
+			openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+				if samePath(storePath, rigPath) {
+					opens.Add(1)
+					return openRig()
+				}
+				return prevOpen(storePath, cityPath)
+			}
+			t.Cleanup(func() { openStorageScopeStore = prevOpen })
+			target := mustResolveInfraTarget(t, request.CityPath, cfg)
+			loc := newRigImportLocation(target, request.CityPath, rig.Name)
+
+			var stderr bytes.Buffer
+			// gc rig add, before the first start: nothing beside an
+			// unconverged binding.
+			recordNewRigClean(request.CityPath, cfg, rig, &stderr)
+			seed, err := openRig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := seed.Create(workRow("gr-1", "open")); err != nil {
+				t.Fatal(err)
+			}
+			// The first start: genesis, then the controller's boot census.
+			routes, err := storageBootGate(request.CityPath, cfg, "gc start", nil, &stderr)
+			if err != nil {
+				t.Fatalf("genesis boot refused: %v", err)
+			}
+			_ = routes.close()
+			done := rigCensusSignals(t)
+			rec := events.NewFake()
+			cr := &CityRuntime{cfg: cfg, cityPath: request.CityPath, rec: rec, sp: runtime.NewFake(), stdout: io.Discard, stderr: &stderr, logPrefix: "gc start"}
+			ctx := context.Background()
+			cr.startRigResidueCensus(ctx)
+			awaitRigCensus(t, done, "the boot census")
+			cr.enterBeadsQuiescenceIfDue(ctx) // ticks while r1 is still suspended
+			cr.enterBeadsQuiescenceIfDue(ctx)
+			refuteRigCensus(t, done, "a tick censused r1 while it was suspended")
+			if n := opens.Load(); n != 0 {
+				t.Fatalf("r1 was opened %d time(s) while suspended", n)
+			}
+			if present, err := infraPathExists(loc.CleanPath()); err != nil || present {
+				t.Fatalf("r1 was recorded clean while suspended (present=%v err=%v)", present, err)
+			}
+
+			// gc rig resume, then the controller's next ticks.
+			if _, err := updateRigSuspension(fsys.OSFS{}, request.CityPath, rig.Name, resumeRigInState); err != nil {
+				t.Fatal(err)
+			}
+			cr.enterBeadsQuiescenceIfDue(ctx)
+			awaitRigCensus(t, done, "after r1 resumed")
+			cr.enterBeadsQuiescenceIfDue(ctx)
+			refuteRigCensus(t, done, "r1 was censused a second time")
+			if n := opens.Load(); n != 1 {
+				t.Errorf("r1 was opened %d time(s), want once, by the census on resume", n)
+			}
+			if !rigRecordSpeaksFor(loc.CleanPath(), rigStoreRoot(request.CityPath, rig)) {
+				t.Errorf("r1 was not recorded clean for its store when it resumed: %s", stderr.String())
+			}
+			if data, err := os.ReadFile(loc.CleanPath()); err != nil || !strings.Contains(string(data), "the controller's census when the rig resumed") {
+				t.Errorf("r1's clean record does not name the census that wrote it: %q (%v)", data, err)
+			}
+			if subjects := rigResidueSubjects(rec); len(subjects) != 0 {
+				t.Errorf("storage.rig_residue subjects = %v, want none", subjects)
+			}
+			if !strings.Contains(stderr.String(), "rig r1: recorded clean") {
+				t.Errorf("the controller did not say it recorded r1 clean: %q", stderr.String())
+			}
+			var stdout bytes.Buffer
+			if code := doStorageStatus(request, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "rig r1: clean") {
+				t.Errorf("status = %d, want 0 naming r1 clean: %s", code, stdout.String())
+			}
+			if res := newStorageRigsCheck(cfg, request.CityPath).Run(nil); res.Status != doctor.StatusOK {
+				t.Errorf("doctor storage-rigs = %v %q %v, want OK", res.Status, res.Message, res.Details)
+			}
+		})
+	}
+}
+
+// TestRigResumedHoldingAGraphRowIsNamedWhenItResumes: a rig suspended at boot
+// whose store holds an infrastructure row is censused when it resumes as the
+// boot would have censused it: no clean record, and storage.rig_residue names
+// it awaiting import.
+func TestRigResumedHoldingAGraphRowIsNamedWhenItResumes(t *testing.T) {
+	stubResumeRepair(t)
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp", SuspendedOnStart: true})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	done := rigCensusSignals(t)
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	cr := &CityRuntime{cfg: f.cfg, cityPath: f.request.CityPath, rec: rec, sp: runtime.NewFake(), stdout: io.Discard, stderr: &stderr, logPrefix: "gc start"}
+	ctx := context.Background()
+	cr.startRigResidueCensus(ctx)
+	awaitRigCensus(t, done, "the boot census")
+	if subjects := rigResidueSubjects(rec); len(subjects) != 0 {
+		t.Fatalf("the boot census named %v, want none (packs is suspended)", subjects)
+	}
+	if _, err := updateRigSuspension(fsys.OSFS{}, f.request.CityPath, "packs", resumeRigInState); err != nil {
+		t.Fatal(err)
+	}
+	cr.enterBeadsQuiescenceIfDue(ctx)
+	awaitRigCensus(t, done, "after packs resumed")
+	if got := rigResidueSubjects(rec); strings.Join(got, ",") != "packs" {
+		t.Errorf("storage.rig_residue subjects = %v, want [packs]", got)
+	}
+	if fileExists(f.loc("packs").CleanPath()) {
+		t.Error("a resumed rig holding a graph row was recorded clean")
+	}
+	if !strings.Contains(stderr.String(), "rig packs: awaiting import (1 infrastructure bead(s)") {
+		t.Errorf("the resume census warning = %q", stderr.String())
+	}
+}
+
+// TestResumedRigCensusWaitsForTheCityAndSkipsRemovedRigs: a rig suspended at
+// boot is censused only once neither it nor the city is suspended, and a rig
+// removed from the config before it resumes is never opened.
+func TestResumedRigCensusWaitsForTheCityAndSkipsRemovedRigs(t *testing.T) {
+	stubResumeRepair(t)
+	t.Setenv("GC_SUSPENDED", "")
+	f := newRigImportFixture(t,
+		config.Rig{Name: "quiet", Prefix: "gq", SuspendedOnStart: true},
+		config.Rig{Name: "gone", Prefix: "gg", SuspendedOnStart: true})
+	f.seed("quiet", []beads.Bead{workRow("gq-1", "open")}, nil)
+	f.open["gone"] = func() (beads.Store, error) {
+		t.Error("the controller opened a rig removed from the config")
+		return beads.NewMemStore(), errors.New("removed")
+	}
+	done := rigCensusSignals(t)
+	var stderr bytes.Buffer
+	cr := &CityRuntime{cfg: f.cfg, cityPath: f.request.CityPath, rec: events.NewFake(), sp: runtime.NewFake(), stdout: io.Discard, stderr: &stderr, logPrefix: "gc start"}
+	ctx := context.Background()
+	cr.startRigResidueCensus(ctx)
+	awaitRigCensus(t, done, "the boot census")
+
+	t.Setenv("GC_SUSPENDED", "1")
+	if _, err := updateRigSuspension(fsys.OSFS{}, f.request.CityPath, "quiet", resumeRigInState); err != nil {
+		t.Fatal(err)
+	}
+	cr.enterBeadsQuiescenceIfDue(ctx)
+	refuteRigCensus(t, done, "quiet was censused while the city was suspended")
+	if fileExists(f.loc("quiet").CleanPath()) {
+		t.Fatal("quiet was recorded clean while the city was suspended")
+	}
+
+	t.Setenv("GC_SUSPENDED", "")
+	reloaded := *f.cfg
+	reloaded.Rigs = []config.Rig{f.cfg.Rigs[0]}
+	cr.cfg = &reloaded
+	if _, err := updateRigSuspension(fsys.OSFS{}, f.request.CityPath, "gone", resumeRigInState); err != nil {
+		t.Fatal(err)
+	}
+	cr.enterBeadsQuiescenceIfDue(ctx)
+	awaitRigCensus(t, done, "after the city resumed")
+	cr.enterBeadsQuiescenceIfDue(ctx)
+	refuteRigCensus(t, done, "a second census ran")
+	if !fileExists(f.loc("quiet").CleanPath()) || !f.relicFree("quiet") {
+		t.Errorf("quiet was not recorded clean once the city resumed: %s", stderr.String())
+	}
+	if fileExists(f.loc("gone").CleanPath()) {
+		t.Error("a rig removed from the config was recorded clean")
+	}
+}
+
+// rigCensusSignals replaces the census-finished seam with a channel, so a
+// test can count the controller's rig censuses.
+func rigCensusSignals(t *testing.T) chan struct{} {
+	t.Helper()
+	done := make(chan struct{}, 8)
+	prev := rigResidueCensusDone
+	rigResidueCensusDone = func() { done <- struct{}{} }
+	t.Cleanup(func() { rigResidueCensusDone = prev })
+	return done
+}
+
+// awaitRigCensus waits for one rig census to finish.
+func awaitRigCensus(t *testing.T, done chan struct{}, when string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("no rig census finished: %s", when)
+	}
+}
+
+// refuteRigCensus fails if a rig census finishes within a short wait.
+func refuteRigCensus(t *testing.T, done chan struct{}, why string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatalf("unexpected rig census: %s", why)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// stubResumeRepair keeps gc start's is_blocked repair, which the tick runs
+// for a resumed scope, out of a test that ticks a controller runtime.
+func stubResumeRepair(t *testing.T) {
+	t.Helper()
+	oldRepair, oldCandidates := resumeRepairBlockedFlags, resumeRepairCandidates
+	t.Cleanup(func() { resumeRepairBlockedFlags, resumeRepairCandidates = oldRepair, oldCandidates })
+	resumeRepairCandidates = func(string, *config.City) []blockedRepairScope { return nil }
+	resumeRepairBlockedFlags = func(string, *config.City, []blockedRepairScope, io.Writer, string) {}
 }
 
 // TestNoCensusRecordsASharedRigStoreClean: MF8 holds for every writer of

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -114,6 +115,12 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	}
 	defer release()
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
+	// A runtime-only handle has no session row to queue a startup nudge
+	// for: one the runtime handed back (its program held it behind a
+	// dialog, under program_status "on") is dropped, and said so.
+	if nudge, ok := runtime.TakeStartupNudgeHandback(h.provider, h.sessionName); ok && err == nil {
+		log.Printf("worker: %q: started without its startup nudge, held back behind a dialog its program reported; a runtime-only handle has no session queue to hold it (%d bytes dropped)", h.sessionName, len(nudge))
+	}
 	return err
 }
 
@@ -634,7 +641,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	// A pre-read first: a session that reads busy, or whose input a pending
 	// interaction owns, will not reach a boundary within the wait, so the
 	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.
-	if runtime.IdleBoundaryNow(h.provider, h.sessionName).OutOfReach() {
+	// Under the program-status shadow switch the pre-read is recorded beside
+	// the record read fresh with it; nothing reads that record.
+	if runtime.ShadowIdleBoundaryNow(h.provider, h.sessionName, "", h.providerName).OutOfReach() {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {

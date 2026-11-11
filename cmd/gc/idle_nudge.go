@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -146,10 +147,10 @@ func nudgeStalledPoolClaims(
 	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	// beads.SessionStore embeds the Store interface, so a wrapper holding a nil
-	// store is still a non-nil beads.Store. Unwrap it so the half-built
-	// dependency guard also covers the SessionStore the reconciler passes.
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	// A typed handle over no store is still a non-nil beads.Store, so the
+	// half-built dependency guard asks IsNilStore, which sees through every
+	// class layer, to cover the SessionStore the reconciler passes.
+	if beads.IsNilStore(store) {
 		return
 	}
 	// The shared engine keys work by bead ID alone, which cannot tell two
@@ -208,7 +209,7 @@ func nudgeStalledPoolContinuations(
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return
 	}
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	if beads.IsNilStore(store) {
 		return
 	}
 	runNudgeBackstop(
@@ -517,7 +518,7 @@ func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
 }
 
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
-	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(p.cfg, s)
 }
 
 // outstandingID acts only while the trigger bead is genuinely unclaimed. A
@@ -633,6 +634,14 @@ func (p poolClaimBackstop) clearHold(store beads.Store, s *beads.Bead, stdout io
 // whose in-progress claim is exactly what a working agent looks like, keeps
 // the stricter rule.
 func claimNudgeBusyHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	hold := claimNudgeScreenHold(sp, s, sessName, now)
+	shadowHold(sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointClaimNudgeHold, hold != "", now, runtime.ProgramHoldVerdict)
+	return hold
+}
+
+// claimNudgeScreenHold is claimNudgeBusyHold's reading.
+func claimNudgeScreenHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
 	last, err := sp.GetLastActivity(sessName)
 	if err != nil || (!last.IsZero() && now.Sub(last) < idleClaimNudgeGrace) {
 		return executionHoldNotQuiet

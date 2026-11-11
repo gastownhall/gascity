@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 func openManagedDoltLifecycleLock(cityPath string) (*os.File, managedDoltRuntimeLayout, error) {
@@ -27,11 +28,15 @@ func tryManagedDoltLifecycleLock(f *os.File) (bool, error) {
 	if f == nil {
 		return false, fmt.Errorf("nil managed dolt lock file")
 	}
-	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	_, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       f.Name(),
+	})
 	if err == nil {
 		return true, nil
 	}
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if errors.Is(err, filelock.ErrBusy) {
 		return false, nil
 	}
 	return false, fmt.Errorf("lock managed dolt lifecycle: %w", err)
@@ -41,6 +46,5 @@ func releaseManagedDoltLifecycleLock(f *os.File) {
 	if f == nil {
 		return
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()
 }

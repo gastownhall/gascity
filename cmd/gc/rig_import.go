@@ -19,7 +19,8 @@ package main
 //  5. Write the manifest (S1's (id, created_at) format, plus #gc:scope,
 //     #gc:scope-annotated and #gc:gate), then the marker.
 //  6. Raise bd's min_hash_length in the rig store, so a short id minted
-//     after the clear can never re-mint an imported one.
+//     after the clear cannot re-mint an imported one (only probabilistically
+//     at bd's cap of 8 characters).
 //  7. Back up, prove the backup, mark the cleared note pending, delete the
 //     rig copies in batches, mark the note complete. No edge is re-added.
 //
@@ -36,7 +37,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -565,7 +565,7 @@ func rigImportPlanContext(env rigImportEnv, rig config.Rig, snap rigSnapshot, ma
 	}
 	ctx.Held = held
 	if ids := elsewhereCandidates(snap, gen, held); len(ids) > 0 {
-		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig, ids)
+		ctx.Elsewhere, ctx.ElsewhereUnread = probeElsewhere(env, rig.Name, rigStoreRoot(env.CityPath, rig), true, ids)
 	}
 	if env.Cfg != nil {
 		gate := newForeignClaimGate(env.Cfg, beads.SessionStore{Store: binding})
@@ -598,8 +598,15 @@ func planRigImportReadingPayloads(ctx rigPlanContext, rigStore beads.Store) rigI
 // returns implements beads.DepMetadataReader whatever its leaf is, and so do
 // the caching and proxied stores; each answers with an error when the store
 // beneath it cannot read a payload (the bd CLI store, which the default
-// proxied-server topology opens; DoltLite; an exec store). The probe stops at
-// the first edge whose read fails.
+// proxied-server topology opens; DoltLite; a bd-backed exec store). The probe
+// stops at the first edge whose read fails.
+//
+// A payload-blind store (a generic exec store, beads.DepMetadataAbsentByProtocol)
+// answers every read with "none", so the probe alone would pass it. The rig
+// import does not take that declaration yet: it records no annotation of it,
+// and says nothing, so such a rig with an edge to read is refused here as one
+// that cannot be asked. The city migration takes it, announced and recorded
+// in its manifest.
 func rigImportPayloadRefusal(rigStore beads.Store, snap rigSnapshot, plan rigImportPlan) (rigImportRefusal, bool) {
 	touched := make(map[string]bool, len(plan.Move)+len(plan.Retained))
 	for _, b := range plan.Move {
@@ -619,22 +626,34 @@ func rigImportPayloadRefusal(rigStore beads.Store, snap rigSnapshot, plan rigImp
 			}
 		}
 	}
+	if protocol, blind := beads.DepMetadataAbsent(rigStore); blind && len(edges) > 0 {
+		return rigImportRefusal{
+			IDs:    []string{edges[0].IssueID, edges[0].DependsOnID},
+			Reason: fmt.Sprintf("the rig store is a %s store, whose protocol carries no dependency payload, and the import does not take that declaration for the %d edge(s) it copies or backs up", protocol, len(edges)),
+			Remedy: "serve the rig from a store that reads edge payloads (a native Dolt open), or remove its edges on the rows the import moves; nothing was written",
+		}, true
+	}
 	for _, d := range edges {
 		if _, err := infraReadEdgePayload(rigStore, d.IssueID, d.DependsOnID); err != nil {
 			return rigImportRefusal{
 				IDs:    []string{d.IssueID, d.DependsOnID},
 				Reason: fmt.Sprintf("the rig store cannot report the payload on edge %s -> %s (%v), and the import reads the payload of each of the %d edge(s) it copies or backs up: an edge copied or cleared without its payload loses it", d.IssueID, d.DependsOnID, err, len(edges)),
-				Remedy: "serve the rig from a store that reads edge payloads (a native Dolt open; a proxied-server rig opens natively with GC_BEADS_PROXIED_NATIVE=1), or re-run if the read failed transiently; nothing was written",
+				Remedy: "serve the rig from a store that reads edge payloads (a native Dolt open; inside the run's maintenance window a proxied-server rig opens on the proxied-native lane), or re-run if the read failed transiently; nothing was written",
 			}, true
 		}
 	}
 	return rigImportRefusal{}, false
 }
 
-// probeElsewhere reads ids from every store other than rig's and the
-// binding: the city work store and each other bound rig. A store that cannot
-// be opened or read is named in unread.
-func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string][]beads.Bead, []string) {
+// probeElsewhere reads ids from every store other than the source and the
+// binding: for a rig import, the city work store (cityWork) and each other
+// bound rig (any but skipRig, whose store root is not skipRoot). A store that
+// cannot be opened or read is named in unread.
+//
+// The city copy asks the same question of every bound rig whose store is not
+// the city's (skipRig empty, skipRoot the city store), and of the city work
+// store only when it copies out of the backup (cityWork).
+func probeElsewhere(env rigImportEnv, skipRig, skipRoot string, cityWork bool, ids []string) (map[string][]beads.Bead, []string) {
 	found := map[string][]beads.Bead{}
 	var unread []string
 	read := func(label string, open func() (beads.Store, error)) {
@@ -655,11 +674,12 @@ func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string]
 			}
 		}
 	}
-	read("the city work store", func() (beads.Store, error) { return rigImportCityWorkOpener(env.CityPath) })
+	if cityWork {
+		read("the city work store", func() (beads.Store, error) { return rigImportCityWorkOpener(env.CityPath) })
+	}
 	if env.Cfg != nil {
-		self := rigStoreRoot(env.CityPath, rig)
 		for _, other := range env.Cfg.Rigs {
-			if other.Name == rig.Name || strings.TrimSpace(other.Path) == "" || samePath(rigStoreRoot(env.CityPath, other), self) {
+			if other.Name == skipRig || strings.TrimSpace(other.Path) == "" || samePath(rigStoreRoot(env.CityPath, other), skipRoot) {
 				continue
 			}
 			r := other
@@ -828,7 +848,7 @@ func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan ri
 		result.Edges++
 	}
 	for _, g := range plan.Gates {
-		gate, err := createRigImportGate(binding, loc.Rig, g)
+		gate, err := createRigImportGate(binding, rigImportStamp(loc.Rig), rigScopeRef(loc.Rig), g)
 		if err != nil {
 			return err
 		}
@@ -843,16 +863,19 @@ func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan ri
 	return nil
 }
 
-// createRigImportGate mints one S3b gate for g in the binding, stamped as
-// this import's and scoped as its owner.
-func createRigImportGate(binding beads.Store, rig string, g rigImportGate) (beads.Bead, error) {
-	gate := dispatch.NewCrossStoreGate(binding, g.Owner, g.Blocker)
-	gate.Metadata[infraMigrationStampKey] = rigImportStamp(rig)
-	scope := strings.TrimSpace(g.Owner.Metadata[beadmeta.RootStoreRefMetadataKey])
-	if scope == "" {
-		scope = rigScopeRef(rig)
+// createRigImportGate mints one S3b gate for g in the binding, stamped with
+// stamp (the migration's gc.infra_migrated_from) and scoped as its owner, or
+// as scope when the owner carries none. The rig import and the city copy
+// both mint through it.
+func createRigImportGate(binding beads.Store, stamp, scope string, g rigImportGate) (beads.Bead, error) {
+	gate := dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, g.Owner, g.Blocker)
+	gate.Metadata[infraMigrationStampKey] = stamp
+	if owned := strings.TrimSpace(g.Owner.Metadata[beadmeta.RootStoreRefMetadataKey]); owned != "" {
+		scope = owned
 	}
-	gate.Metadata[beadmeta.RootStoreRefMetadataKey] = scope
+	if scope != "" {
+		gate.Metadata[beadmeta.RootStoreRefMetadataKey] = scope
+	}
 	created, err := binding.Create(gate)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("minting the cross-store gate for %s on %s: %w", g.Owner.ID, g.Blocker, err)
@@ -1006,33 +1029,8 @@ func rigImportWriteManifest(loc rigImportLocation, target infraBindingTarget, ma
 // sequence). conf was opened, and its provider checked, before anything was
 // written.
 func rigImportReserveIDs(conf rigHashLengthConfig, manifest *infraCopyManifest) (int, error) {
-	floor := rigImportHashFloor(sortedMapKeys(manifest.IDs))
-	if floor == 0 || conf == nil {
-		return 0, nil
-	}
-	current, err := conf.ConfigGet(bdMinHashLengthKey)
-	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
-	}
-	if n, perr := strconv.Atoi(strings.TrimSpace(current)); perr == nil && n >= floor {
-		floor = n
-	} else if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
-		return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
-	}
-	maxText, err := conf.ConfigGet(bdMaxHashLengthKey)
-	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMaxHashLengthKey, err)
-	}
-	maxLen := bdDefaultMaxHashLength
-	if n, perr := strconv.Atoi(strings.TrimSpace(maxText)); perr == nil && n > 0 {
-		maxLen = n
-	}
-	if maxLen < floor {
-		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
-		}
-	}
-	return floor, nil
+	floor, _, err := raiseBdHashFloor(conf, rigImportHashFloor(sortedMapKeys(manifest.IDs)))
+	return floor, err
 }
 
 // rigImportClear is phase 7: back up, prove, mark pending, delete in
@@ -1470,7 +1468,7 @@ func deleteChunks(store beads.Store, chunks [][]string, between func() error) er
 const rigImportLogPrefix = "gc storage migrate --from-rigs"
 
 // doStorageMigrateFromRigs is `gc storage migrate --from-rigs`.
-func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorRequest, rigNames []string, stdout, stderr io.Writer) int {
+func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorRequest, rigNames []string, stdout, stderr io.Writer) (code int) {
 	const logPrefix = rigImportLogPrefix
 	if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1524,6 +1522,21 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed, the guard last, and before anything opens
+	// one: the city's provider serves its rigs' stores too, and the rigs bd
+	// owns a proxied scope for are started with it. It closes before the guard
+	// is released.
+	rigRoots := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		rigRoots = append(rigRoots, resolveStoreScopeRoot(request.CityPath, rig.Path))
+	}
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr, &code)
 	// A shared-store attestation is recorded per rig, where it lifts that
 	// rig's refusal (importRig).
 	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
