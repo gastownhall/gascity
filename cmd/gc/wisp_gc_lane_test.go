@@ -137,3 +137,91 @@ func TestWispGCLane_TickCompletesWhilePurgeBlocked(t *testing.T) {
 		}
 	})
 }
+
+// drainWispGCWakes removes every wake queued on the lane and reports how
+// many there were.
+func drainWispGCWakes(lane *wispGCLane) int {
+	n := 0
+	for {
+		select {
+		case <-lane.wakeCh:
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// TestWispGCLane_TickReachingTheSlotEnqueuesOneWake: every controller tick
+// that reaches the wake slot — the exact slot the purge used to run in —
+// hands the lane exactly one wake, whatever trigger ran the tick and without
+// the lane needing to be running to receive it.
+func TestWispGCLane_TickReachingTheSlotEnqueuesOneWake(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	lane := cr.wispGCLaneOf()
+	if n := drainWispGCWakes(lane); n != 0 {
+		t.Fatalf("a fresh lane queued %d wakes before any tick, want 0", n)
+	}
+	for _, trigger := range []string{"patrol", "poke", "startup-poke", "control-dispatcher", "reload"} {
+		t.Run(trigger, func(t *testing.T) {
+			runFixtureTick(cr, trigger)
+			if n := drainWispGCWakes(lane); n != 1 {
+				t.Errorf("a %s tick reaching the wake slot enqueued %d wakes, want 1", trigger, n)
+			}
+		})
+	}
+}
+
+// TestWispGCLane_StoppedBeforeTheSlotEnqueuesNoWake: a tick stopped before
+// the wake slot never enqueues a wake. The store read that stops the pass
+// is in a reap phase well before the slot (see the recorded abort in
+// TestCityRuntimeTickCancelledMidPassAborts), so the lane stays asleep.
+func TestWispGCLane_StoppedBeforeTheSlotEnqueuesNoWake(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.onRecord = func(string) { cancel() }
+	runFixtureTickCtx(ctx, cr, "patrol")
+	closeTrace(t, cr)
+	if n := drainWispGCWakes(cr.wispGCLaneOf()); n != 0 {
+		t.Errorf("a tick stopped before the wake slot enqueued %d wakes, want 0", n)
+	}
+}
+
+// TestWispGCLane_WakeRunsThePurgeAtOnce: an arrived wake starts the purge
+// immediately. The fixture's config leaves wisp GC off, so the lane's pacing
+// falls back to the work arm's 10-minute backstop; a purge that starts well
+// inside it proves the lane never sits on an arrived wake waiting out its
+// timer — the tick's wake is what runs the GC, and it runs without a
+// patrol-timer wait in between.
+func TestWispGCLane_WakeRunsThePurgeAtOnce(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	gated := newGatedWispGC(true)
+	cr.wg = gated
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	laneDone := cr.startWispGCLane(ctx)
+
+	cr.wispGCLaneOf().wake()
+	select {
+	case <-gated.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the lane did not run the woken purge; it waited for its backstop instead")
+	}
+	if runs := gated.runs.Load(); runs != 1 {
+		t.Errorf("the woken pass ran %d purges, want 1", runs)
+	}
+
+	cancel()
+	select {
+	case <-laneDone:
+		t.Fatal("the lane exited while its purge was in flight")
+	case <-time.After(2 * time.Second):
+	}
+	close(gated.release)
+	select {
+	case <-laneDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the lane did not stop after its released purge finished")
+	}
+}
