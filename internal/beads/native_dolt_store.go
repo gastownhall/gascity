@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -366,9 +367,15 @@ type NativeDoltStore struct {
 	// with a transient connection error records the generation it observed and
 	// asks reconnect to swap the dead handle only if no other reader already did.
 	generation uint64
-	actor      string
-	creator    string
-	idPrefix   string
+	// actor is the ownership-fence subject and the history actor; it is the
+	// constant nativeDoltStoreActor unless a test pins another. It is never
+	// the created_by identity (see creator).
+	actor string
+	// creator is the created_by identity stamped on every row this store
+	// creates, resolved once at construction the way bd's getActorWithGit
+	// resolves it, so a native create attributes as the bd CLI would.
+	creator  string
+	idPrefix string
 
 	// sawRows latches when the backend answered a read of this store with at
 	// least one row, counted as the backend returned it and before
@@ -534,9 +541,10 @@ type NativeReopenFunc func(context.Context) (NativeStorage, error)
 type NativeDoltStoreOption func(*NativeDoltStore)
 
 // WithNativeCreator overrides the created_by identity the store stamps on new
-// rows.
-func WithNativeCreator(_ string) NativeDoltStoreOption {
-	return func(*NativeDoltStore) {}
+// rows, in place of the one resolved from the ambient environment when the store
+// was built.
+func WithNativeCreator(creator string) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) { s.creator = creator }
 }
 
 // WithNativeReopen injects the reconnect hook the read path uses to recover the
@@ -607,7 +615,61 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
+	return &NativeDoltStore{storage: storage, actor: actor, creator: nativeCreatorIdentity(), localStrings: newLocalSidecar("")}
+}
+
+// nativeCreatorIdentity resolves the created_by identity the way bd's
+// getActorWithGit does: BEADS_ACTOR, BD_ACTOR, git config user.name, USER. The
+// env reads go through AmbientNativeDoltOpenEnv, never a bare os.Getenv: a
+// concurrent proxied open withholds the whole BEADS_ and BD_ namespaces under
+// nativeDoltOpenEnvMu, and a bare read inside that window would see them unset
+// and fall through to a different identity. git runs only when both variables
+// are empty, which is an operator terminal: the supervisor and every session
+// set BEADS_ACTOR. It returns "" when nothing resolves, which stamps nothing.
+func nativeCreatorIdentity() string {
+	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
+		if v := strings.TrimSpace(AmbientNativeDoltOpenEnv(key)); v != "" {
+			return v
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nativeCreatorGitTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "config", "user.name").Output(); err == nil {
+		if v := strings.TrimSpace(string(out)); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(AmbientNativeDoltOpenEnv("USER"))
+}
+
+// nativeCreatorGitTimeout bounds the git lookup in nativeCreatorIdentity so a
+// wedged git never stalls a store open.
+const nativeCreatorGitTimeout = 2 * time.Second
+
+// stampCreator sets issue.CreatedBy to the store's creator when the caller did
+// not set one.
+func (s *NativeDoltStore) stampCreator(issue *beadslib.Issue) {
+	if issue.CreatedBy == "" {
+		issue.CreatedBy = s.creator
+	}
+}
+
+// metadataWithFrom returns metadata with a non-empty from also written under
+// the "from" key, the shape BdStore writes a sender in, unless the caller
+// already set that key. The input map is never mutated.
+func metadataWithFrom(metadata map[string]string, from string) map[string]string {
+	if from == "" {
+		return metadata
+	}
+	if _, set := metadata["from"]; set {
+		return metadata
+	}
+	merged := make(map[string]string, len(metadata)+1)
+	for k, v := range metadata {
+		merged[k] = v
+	}
+	merged["from"] = from
+	return merged
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -1289,7 +1351,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
-	req, err := nativeGraphApplyBatchRequest(plan, s.actor, ephemeral, noHistory)
+	req, err := nativeGraphApplyBatchRequest(plan, s.actor, s.creator, ephemeral, noHistory)
 	if err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
@@ -1365,7 +1427,7 @@ func (s *NativeDoltStore) applyGraphPlanOverCapInTransaction(ctx context.Context
 		pendingAssignees := make(map[int]string)
 
 		for i, node := range plan.Nodes {
-			metadata, err := metadataRawFromMap(node.Metadata)
+			metadata, err := metadataRawFromMap(metadataWithFrom(node.Metadata, node.From))
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
 			}
@@ -1384,6 +1446,7 @@ func (s *NativeDoltStore) applyGraphPlanOverCapInTransaction(ctx context.Context
 				Priority:    priority,
 				IssueType:   issueType,
 				Sender:      node.From,
+				CreatedBy:   s.creator,
 				Labels:      append([]string(nil), node.Labels...),
 				Metadata:    metadata,
 				Ephemeral:   ephemeral,
@@ -1545,6 +1608,7 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
+	s.stampCreator(issue)
 	request, err := nativeCreateRequestFromIssue(s.actor, issue)
 	if err != nil {
 		return Bead{}, err
@@ -1956,6 +2020,7 @@ func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Trans
 	if err != nil {
 		return Bead{}, err
 	}
+	s.stampCreator(issue)
 	deps := cloneNativeDependencies(issue.Dependencies)
 	issue.Dependencies = nil
 	if err := tx.CreateIssue(ctx, issue, s.actor); err != nil {
@@ -3227,11 +3292,11 @@ func nativeGraphApplyParentRef(node GraphApplyNode) (issueops.Ref, bool) {
 // order among themselves does not matter for this, since ALL creates land
 // before any edge, parent link or assignment update regardless of which node
 // produced which.
-func nativeGraphApplyBatchRequest(plan *GraphApplyPlan, actor string, ephemeral, noHistory bool) (issueops.ApplyBatchRequest, error) {
+func nativeGraphApplyBatchRequest(plan *GraphApplyPlan, actor, creator string, ephemeral, noHistory bool) (issueops.ApplyBatchRequest, error) {
 	items := make([]issueops.ApplyItem, 0, 2*len(plan.Nodes)+len(plan.Edges))
 
 	for _, node := range plan.Nodes {
-		metadata, err := metadataRawFromMap(node.Metadata)
+		metadata, err := metadataRawFromMap(metadataWithFrom(node.Metadata, node.From))
 		if err != nil {
 			return issueops.ApplyBatchRequest{}, fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
 		}
@@ -3250,6 +3315,7 @@ func nativeGraphApplyBatchRequest(plan *GraphApplyPlan, actor string, ephemeral,
 			Priority:    priority,
 			IssueType:   issueType,
 			Sender:      node.From,
+			CreatedBy:   creator,
 			Labels:      append([]string(nil), node.Labels...),
 			Metadata:    metadata,
 			Ephemeral:   ephemeral,
@@ -3367,7 +3433,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 	} else {
 		issue.Priority = 2
 	}
-	raw, err := metadataRawFromMap(b.Metadata)
+	raw, err := metadataRawFromMap(metadataWithFrom(b.Metadata, b.From))
 	if err != nil {
 		return nil, err
 	}
@@ -3402,6 +3468,15 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 	return issue, nil
 }
 
+// nativeSender is the sender a row reads back as: the sender column, else the
+// "from" metadata key BdStore writes a sender under.
+func nativeSender(sender string, metadata map[string]string) string {
+	if sender != "" {
+		return sender
+	}
+	return metadata["from"]
+}
+
 func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if issue == nil {
 		return Bead{}, nil
@@ -3419,7 +3494,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Priority:             nativePriorityFromIssue(issue),
 		CreatedAt:            issue.CreatedAt,
 		Assignee:             issue.Assignee,
-		From:                 issue.Sender,
+		From:                 nativeSender(issue.Sender, metadata),
 		Description:          issue.Description,
 		Labels:               append([]string(nil), issue.Labels...),
 		Metadata:             metadata,
