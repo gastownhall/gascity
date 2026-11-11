@@ -286,3 +286,47 @@ func TestWorkflowRequestsReadOneEpoch(t *testing.T) {
 		t.Errorf("workflowEventRoot over a swapped epoch = %v after %d Stores() reads; want the city's root after one", ok, state.calls)
 	}
 }
+
+// TestIsGraphConvoyIDKeepsSharedStoreAliasOrder pins isGraphConvoyID's walk
+// over rigs that share a store, as BeadStores()' sorted, store-deduped names
+// walked it: a store several names share is read once, at its first name in
+// sort order, even though the plan names it once, as the city.
+func TestIsGraphConvoyIDKeepsSharedStoreAliasOrder(t *testing.T) {
+	t7dGateOff(t)
+	workflowRootIn := func(t *testing.T, store *beads.MemStore, id string) {
+		t.Helper()
+		if _, err := store.Create(beads.Bead{ID: id, Title: "graph", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("rig named like the city over the city store", func(t *testing.T) {
+		state := newFakeState(t)
+		state.cityName = t7dCity
+		city := &beads.MemStore{HonorExplicitIDs: true}
+		workflowRootIn(t, city, "X")
+		state.cityBeadStore = city
+		state.stores = map[string]beads.Store{t7dCity: city}
+		got, frozen := isGraphConvoyID(New(state), "X"), frozenIsGraphConvoyID(New(state), "X")
+		if got != frozen || !got {
+			t.Errorf("isGraphConvoyID(X) = %v, frozen %v; want true: the rig named like the city reads the shared city store", got, frozen)
+		}
+	})
+
+	t.Run("an alias sorting first answers for the shared store", func(t *testing.T) {
+		state := newFakeState(t)
+		state.cityName = t7dCity
+		city := &beads.MemStore{HonorExplicitIDs: true}
+		workflowRootIn(t, city, "Y")
+		beta := &beads.MemStore{HonorExplicitIDs: true}
+		if _, err := beta.Create(beads.Bead{ID: "Y", Title: "plain", Type: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		state.cityBeadStore = city
+		state.stores = map[string]beads.Store{"alpha": city, "beta": beta}
+		got, frozen := isGraphConvoyID(New(state), "Y"), frozenIsGraphConvoyID(New(state), "Y")
+		if got != frozen || !got {
+			t.Errorf("isGraphConvoyID(Y) = %v, frozen %v; want true: alpha, over the city store, sorts before beta and answers", got, frozen)
+		}
+	})
+}

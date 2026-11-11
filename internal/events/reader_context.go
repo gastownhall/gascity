@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // ctxCheckInterval is how many active-log lines ReadFilteredContext scans
@@ -71,7 +73,7 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 		}
 	}
 
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(result) == 0 {
