@@ -1,0 +1,26 @@
+# fx provider profiles — apply to a city.toml alongside the existing provider
+# blocks. Proven against fx v0.0.16 (revision 481104fdbc24) under the real tmux
+# runtime; see ../README.md and engdocs/design/hookless-startup-context.md.
+#
+# The TUI takes no positional prompt on this build (it prints help and exits),
+# so its prompt rides Core's post-ready nudge. A build that accepts a first
+# prompt can use prompt_mode = "arg" instead.
+
+[providers.fx]
+base = ""
+command = "fx"
+prompt_mode = "none"
+process_names = ["fx"]
+resume_flag = "-r"
+supports_hooks = false
+ready_delay_ms = 2000
+
+# Select with provider = "fx-ask" on an agent that also sets
+# lifecycle = "one_shot".
+[providers.fx-ask]
+base = ""
+command = "fx"
+args = ["ask", "--json", "--no-save", "--no-color"]
+prompt_mode = "arg"
+process_names = ["fx"]
+supports_hooks = false
