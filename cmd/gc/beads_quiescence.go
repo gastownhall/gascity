@@ -176,6 +176,11 @@ func (cr *CityRuntime) tickRetireSuspendedRigScopes(p *tickPass) bool {
 	}
 	open := p.sessionBeads.OpenInfos()
 	drained := func(scopeRoot string) bool {
+		// Store work dispatched off the tick (a wisp GC purge) may still be
+		// reading the scope's store.
+		if cr.cs.storeWorkInFlight() {
+			return false
+		}
 		for _, info := range open {
 			if runningNames[info.SessionName] && sessionInScope(cr.cityPath, cr.cfg, info, scopeRoot) {
 				return false
