@@ -285,6 +285,7 @@ exports_files([
     "MODULE.bazel",
     "Makefile",
     "TESTING.md",
+    "gazelle.go.work",
     "go.mod",
     "go.sum",
     "deps.env",
