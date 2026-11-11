@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -35,13 +36,18 @@ const tailChunkSize = 64 * 1024
 
 // ExtractTailMeta reads the last portion of a session file to extract
 // model and context usage without full DAG resolution. Returns nil (no
-// error) if the file has no usable data.
+// error) if the file has no usable data. A gc ACP capture (IsACPCapturePath)
+// yields only activity, derived from its JSON-RPC prompt/response pairing.
 func ExtractTailMeta(path string) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+
+	if IsACPCapturePath(path) {
+		return extractACPCaptureTailMeta(f)
+	}
 
 	data, startsMidLine, err := readTail(f)
 	if err != nil {
@@ -184,10 +190,35 @@ func splitLines(data []byte) ([][]byte, error) {
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	UUID    string          `json:"uuid"`
-	Message json.RawMessage `json:"message"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	UUID      string          `json:"uuid"`
+	Message   json.RawMessage `json:"message"`
+	Timestamp tailTime        `json:"timestamp"`
+}
+
+// tailTime decodes a transcript entry timestamp without letting an
+// off-format value reject the whole line. Anything that is not a parseable
+// RFC3339 string decodes to the zero time, which is what TailUsage.Timestamp
+// documents and what every consumer already handles via the fall-back-to-now
+// path in modelUsageFact. A strict time.Time field would instead fail the
+// whole json.Unmarshal, and both decode sites drop the entry on error —
+// taking usage, model, context and activity with it.
+type tailTime struct{ time.Time }
+
+// UnmarshalJSON decodes an RFC3339 timestamp string, yielding the zero time
+// for any other shape.
+func (t *tailTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Time = time.Time{}
+		return nil
+	}
+	// parseCodexSessionTime is the package's lenient RFC3339Nano→RFC3339
+	// parser (reader.go); despite the name it is format-generic and returns
+	// the zero time rather than an error.
+	t.Time = parseCodexSessionTime(s)
+	return nil
 }
 
 // messageStopReason extracts stop_reason from an assistant message.
@@ -268,7 +299,7 @@ func isInterruptMessage(message json.RawMessage) bool {
 	if msg.Content[0] == '"' {
 		var s string
 		if json.Unmarshal(msg.Content, &s) == nil {
-			return bytes.Contains([]byte(s), []byte("[Request interrupted by user]"))
+			return containsInterruptMarker(s)
 		}
 	}
 	// Array content: [{"type":"text","text":"..."}]
@@ -277,12 +308,19 @@ func isInterruptMessage(message json.RawMessage) bool {
 	}
 	if json.Unmarshal(msg.Content, &blocks) == nil {
 		for _, b := range blocks {
-			if bytes.Contains([]byte(b.Text), []byte("[Request interrupted by user]")) {
+			if containsInterruptMarker(b.Text) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// Both native markers terminate a turn. Preserve legacy matching and require
+// the new tool-use marker to stand alone, not appear in ordinary user prose.
+func containsInterruptMarker(text string) bool {
+	return bytes.Contains([]byte(text), []byte("[Request interrupted by user]")) ||
+		bytes.Equal(bytes.TrimSpace([]byte(text)), []byte("[Request interrupted by user for tool use]"))
 }
 
 // unwrapJSONString handles JSONL files where the message field is stored

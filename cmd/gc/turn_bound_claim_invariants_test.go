@@ -25,7 +25,8 @@ import (
 //     then immediately executes the work in the same process — it has no turn to
 //     outlive, which is why the hook fences do not apply to it.
 //
-// One entry is not a pull path and is here for a different reason:
+// Two entries are not pull paths and are here for a different reason: both
+// FORWARD a claim rather than originate one.
 //
 //   - class_store_emit.go FORWARDS a claim; it cannot originate one. It is the
 //     relocated class store's emission wrapper, and it holds no id, no assignee
@@ -35,15 +36,29 @@ import (
 //     cannot claim" on every split city. The invariant this guard protects —
 //     the controller never assigns — is untouched: nothing here decides to
 //     claim, and the callers that do are still exactly the four above.
+//   - bead_policy_store.go FORWARDS a claim for the same reason, one layer
+//     further down the composition. beadPolicyStore.Claim is a pure type-
+//     assertion pass-through to the wrapped store, exactly like its
+//     ReleaseIfCurrent — it holds no id, no assignee and no policy of its own,
+//     and without it the whole CachingStore -> beadPolicyStore -> NativeDoltStore
+//     chain would degrade the two-argument claim capability to "unsupported"
+//     for every caller behind the policy layer, worker pull paths included.
+//   - hook_claim_bead_events.go FORWARDS the hook's own claim seam. Its
+//     wrapper calls the hookClaimOps.Claim it was handed and then announces
+//     the landed claim to the city event log; it holds no candidate, no
+//     assignee and no policy of its own, and claimHookWork (the fenced worker
+//     pull path above) is the only place it is composed.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
 var claimCASAllowedFiles = map[string]bool{
-	"cmd_hook_claim.go":    true,
-	"claim_class_route.go": true,
-	"cmd_bd_by_id.go":      true,
-	"cmd_agent_script.go":  true,
-	"class_store_emit.go":  true,
+	"cmd_hook_claim.go":         true,
+	"claim_class_route.go":      true,
+	"cmd_bd_by_id.go":           true,
+	"cmd_agent_script.go":       true,
+	"class_store_emit.go":       true,
+	"bead_policy_store.go":      true,
+	"hook_claim_bead_events.go": true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this
@@ -58,6 +73,7 @@ var claimCASMarkers = []string{".Claim(", `"--claim"`}
 // may contain a call at all, and no runtime assertion can observe a call that a
 // future commit has not written yet.
 func TestClaimCASStaysOnTheWorkerPullPath(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading cmd/gc: %v", err)
@@ -105,6 +121,7 @@ var renderedHookConfigRoots = []string{
 // and it would look completely reasonable in review, because the rendered
 // command is claim-free today. The guard is on the SHAPE, not on the argv.
 func TestRenderedHookCommandsReachGcHookOnlyThroughHookRun(t *testing.T) {
+	chdirToRealPackageDir(t)
 	commands := renderedHookCommands(t)
 	if len(commands) == 0 {
 		t.Fatal("found no rendered hook commands; this gate has lost its subject")
@@ -140,6 +157,7 @@ const shippedPromptRoot = "../../internal/bootstrap/packs/core/assets/prompts"
 // worker's budget and teaches the wrong protocol. Re-checking belongs BETWEEN
 // tool calls.
 func TestShippedPromptsDoNotLoopTheClaimInsideOneToolCall(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(shippedPromptRoot)
 	if err != nil {
 		t.Fatalf("reading %s: %v", shippedPromptRoot, err)
@@ -197,6 +215,7 @@ func shellBlocksMentioningClaim(prompt string) []string {
 // explicit: fence the door, or don't ship the prompt. Releasing or updating a
 // bead the worker already holds is unaffected — only acquisition is pinned.
 func TestNoShippedPromptAcquiresWorkThroughTheByIDClaimDoor(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(shippedPromptRoot)
 	if err != nil {
 		t.Fatalf("reading %s: %v", shippedPromptRoot, err)

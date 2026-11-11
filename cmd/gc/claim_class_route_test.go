@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,37 +110,206 @@ func TestClassRoutedClaimEscalatesOnlyOnNotFound(t *testing.T) {
 // error that does not PROVE the bead is elsewhere leaves ownership unresolved on
 // a bead this session may already own, so it must be returned as-is and never
 // retried against a second store — retrying it is how one bead gets claimed
-// twice.
+// twice. The read of the same leg that settles such an error proves absence
+// only when it answers not-found: a leg that reads the bead back, or whose read
+// fails too, keeps the work store's error as the answer. A store that did not
+// answer the write is not asked again, so only an error the store answered with
+// reaches that read.
 func TestClassRoutedClaimFailsClosedOnEveryOtherError(t *testing.T) {
-	class := newClaimRouteClassStore(t)
-	// The binding DOES hold the bead, so the only thing keeping the claim off it
-	// is the classification of the work store's error.
-	mintClaimRouteBead(t, class, "gcg-200", nil)
-	route := newClaimRouteFor(t, class)
-
-	for _, tt := range []struct {
+	for _, read := range []struct {
 		name string
+		bead beads.Bead
 		err  error
 	}{
-		{"write timeout", context.DeadlineExceeded},
-		{"store contention", errors.New("bd update --claim: database is locked")},
-		{"controller socket flap", errors.New("dial unix .gc/controller.sock: connect: connection refused")},
+		{name: "the leg reads the bead back", bead: beads.Bead{ID: "gcg-200", Status: "open"}},
+		{name: "the leg's read fails too", err: errors.New("bd show: database is locked")},
+	} {
+		for _, tt := range []struct {
+			name  string
+			err   error
+			reads int // settling reads of the leg the write ran against
+		}{
+			// The store did not answer the write.
+			{"write timeout", context.DeadlineExceeded, 0},
+			{"store contention", errors.New("bd update --claim: database is locked"), 0},
+			{"controller socket flap", errors.New("dial unix .gc/controller.sock: connect: connection refused"), 0},
+			// The store answered with an error that names no miss.
+			{"write conflict", errors.New("claimIssue: bd serve at https://bdserve.example.test:30635 answered 409 conflict: row version changed"), 1},
+			{"write refused", errors.New("bd update --claim: exit status 1: Error: gcg-200 failed validation: status transition not allowed"), 1},
+		} {
+			t.Run(read.name+"/"+tt.name, func(t *testing.T) {
+				class := newClaimRouteClassStore(t)
+				// The binding DOES hold the bead, so the only thing keeping the
+				// claim off it is the classification of the work store's error.
+				mintClaimRouteBead(t, class, "gcg-200", nil)
+				route := newClaimRouteFor(t, class)
+				workErr, readBead, readErr := tt.err, read.bead, read.err
+				reads := 0
+				ops := classRoutedHookClaimOps(hookClaimOps{
+					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+						return beads.Bead{}, false, workErr
+					},
+					ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+						reads++
+						return readBead, readErr
+					},
+				}, route)
+				_, ok, err := ops.Claim(context.Background(), "/work", nil, "gcg-200", "worker-1")
+				if ok || !errors.Is(err, workErr) {
+					t.Fatalf("claim = (ok=%v err=%v), want the work store's own error returned unchanged; only a proven absence may send a claim to a second store", ok, err)
+				}
+				if held, getErr := class.Get("gcg-200"); getErr != nil || strings.TrimSpace(held.Assignee) != "" {
+					t.Fatalf("the binding's copy of gcg-200 was claimed for %q after a %s; an unresolved work-store mutation must not be retried elsewhere", held.Assignee, tt.name)
+				}
+				if reads != tt.reads {
+					t.Fatalf("the leg the write ran against was read %d time(s), want %d", reads, tt.reads)
+				}
+			})
+		}
+	}
+}
+
+// TestClassRoutedClaimSettlesAnUnrecognizedWriteErrorByReadingTheLeg is the
+// ga-ylpbsy.30 shape: a work store that answers a claim of a bead it does not
+// hold with an error the not-found predicate does not recognize (a remote work
+// store's wire not_found, whose text names no "not found"). The reader served
+// the bead from the binding because this leg's READ says it holds no such row;
+// the claim must take the same answer from the same leg and land in the
+// binding, or every seat spawned for the bead skips it and drains.
+func TestClassRoutedClaimSettlesAnUnrecognizedWriteErrorByReadingTheLeg(t *testing.T) {
+	const id = "gcg--9223372036838841776"
+	wireMiss := errors.New("claimIssue: bd serve at https://bdserve.example.test:30635 answered 404 not_found: no issue or wisp with that id")
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, id, map[string]string{"gc.routed_to": "bd.dog"})
+	route := newClaimRouteFor(t, class)
+	type readCall struct {
+		dir string
+		env []string
+	}
+	var reads []readCall
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			return beads.Bead{}, false, wireMiss
+		},
+		ReadWorkMeta: func(_ context.Context, dir string, env []string, beadID, _ string) (beads.Bead, error) {
+			reads = append(reads, readCall{dir: dir, env: env})
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", beadID, beads.ErrNotFound)
+		},
+	}, route)
+
+	claimed, ok, err := ops.Claim(context.Background(), "/city", []string{"GC_STORE_SCOPE=city"}, id, "bd.dog-1")
+	if err != nil || !ok || strings.TrimSpace(claimed.Assignee) != "bd.dog-1" {
+		t.Fatalf("claim = (%+v ok=%v err=%v), want it claimed in the binding the reader served it from", claimed, ok, err)
+	}
+	held, err := class.Get(id)
+	if err != nil || strings.TrimSpace(held.Assignee) != "bd.dog-1" || !strings.EqualFold(held.Status, "in_progress") {
+		t.Fatalf("binding holds %s as status=%q assignee=%q (err=%v), want in_progress owned by bd.dog-1", id, held.Status, held.Assignee, err)
+	}
+	if len(reads) != 1 || reads[0].dir != "/city" || !slices.Equal(reads[0].env, []string{"GC_STORE_SCOPE=city"}) {
+		t.Fatalf("the settling read ran as %+v, want exactly one read of the leg the write ran against", reads)
+	}
+}
+
+// TestClassRoutedWritesSettleAnUnrecognizedErrorByReadingTheLeg covers the two
+// claim-time writes besides the claim that take the same escalation: the work
+// stamp and the continuation pre-assignment. Reached before any routed claim
+// (an adoption, a continuation sibling), they must land where the reader reads
+// the bead, not fail against the ledger that cannot see it.
+func TestClassRoutedWritesSettleAnUnrecognizedErrorByReadingTheLeg(t *testing.T) {
+	wireMiss := errors.New("updateIssue: bd serve at https://bdserve.example.test:30635 answered 404 not_found: no issue or wisp with that id")
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-610", nil)
+	mintClaimRouteBead(t, class, "gcg-611", nil)
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
+			return wireMiss
+		},
+		AssignContinuation: func(context.Context, string, []string, string, string) error {
+			return wireMiss
+		},
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", beadID, beads.ErrNotFound)
+		},
+	}, newClaimRouteFor(t, class))
+
+	if err := ops.StampWorkMeta(context.Background(), "/city", nil, "gcg-610", "worker-1", map[string]string{beadmeta.WorkBranchMetadataKey: "feat/split"}); err != nil {
+		t.Fatalf("stamp: %v, want it written to the binding", err)
+	}
+	if stamped, err := class.Get("gcg-610"); err != nil || stamped.Metadata[beadmeta.WorkBranchMetadataKey] != "feat/split" {
+		t.Fatalf("binding holds gcg-610 metadata %v (err=%v), want the stamp", stamped.Metadata, err)
+	}
+	if err := ops.AssignContinuation(context.Background(), "/city", nil, "gcg-611", "worker-1"); err != nil {
+		t.Fatalf("continuation assignment: %v, want it written to the binding", err)
+	}
+	if assigned, err := class.Get("gcg-611"); err != nil || strings.TrimSpace(assigned.Assignee) != "worker-1" {
+		t.Fatalf("binding holds gcg-611 assignee %q (err=%v), want worker-1", assigned.Assignee, err)
+	}
+}
+
+// TestClassRoutedClaimSkipsTheSettlingReadWhenItCannotMeanAnything pins the
+// errors that already answer the read: a named wisp refusal, which is the leg
+// saying it HOLDS the bead; a store that did not answer, which a second request
+// would only load further; and a context that is done, which no read can run
+// under. None may read the leg, and none may escalate.
+func TestClassRoutedClaimSkipsTheSettlingReadWhenItCannotMeanAnything(t *testing.T) {
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-620", nil)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tt := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+	}{
+		{"named wisp refusal", context.Background(), fmt.Errorf("claiming bead %q: %w", "gcg-620", beads.ErrWispNotClaimable)},
+		{"claim context done", canceled, errors.New("claimIssue: request canceled")},
+		{"store did not answer", context.Background(), errors.New("claimIssue: dial tcp 10.0.0.1:30635: connect: connection refused")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			workErr := tt.err
+			reads := 0
 			ops := classRoutedHookClaimOps(hookClaimOps{
 				Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
 					return beads.Bead{}, false, workErr
 				},
-			}, route)
-			_, ok, err := ops.Claim(context.Background(), "/work", nil, "gcg-200", "worker-1")
+				ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					reads++
+					return beads.Bead{}, beads.ErrNotFound
+				},
+			}, newClaimRouteFor(t, class))
+			_, ok, err := ops.Claim(tt.ctx, "/work", nil, "gcg-620", "worker-1")
 			if ok || !errors.Is(err, workErr) {
-				t.Fatalf("claim = (ok=%v err=%v), want the work store's own error returned unchanged; only beads.ErrNotFound may send a claim to a second store", ok, err)
+				t.Fatalf("claim = (ok=%v err=%v), want the work store's own error", ok, err)
 			}
-			if held, getErr := class.Get("gcg-200"); getErr != nil || strings.TrimSpace(held.Assignee) != "" {
-				t.Fatalf("the binding's copy of gcg-200 was claimed for %q after a %s; an unresolved work-store mutation must not be retried elsewhere", held.Assignee, tt.name)
+			if reads != 0 {
+				t.Fatalf("the leg was read %d time(s), want none", reads)
+			}
+			if held, getErr := class.Get("gcg-620"); getErr != nil || strings.TrimSpace(held.Assignee) != "" {
+				t.Fatalf("the binding's copy was claimed for %q", held.Assignee)
 			}
 		})
+	}
+}
+
+// TestClassRoutedReadNeverRereadsItsOwnFailure: the claim-time READ is the
+// proof the writes borrow, so a read that failed with an unrecognized error is
+// the answer — re-reading the same leg would ask the same question twice.
+func TestClassRoutedReadNeverRereadsItsOwnFailure(t *testing.T) {
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-630", nil)
+	readErr := errors.New("bd show: database is locked")
+	reads := 0
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+			reads++
+			return beads.Bead{}, readErr
+		},
+	}, newClaimRouteFor(t, class))
+	if _, err := ops.ReadWorkMeta(context.Background(), "/work", nil, "gcg-630", "worker-1"); !errors.Is(err, readErr) {
+		t.Fatalf("read = %v, want the leg's own read failure", err)
+	}
+	if reads != 1 {
+		t.Fatalf("the leg was read %d times, want once", reads)
 	}
 }
 
@@ -435,15 +605,67 @@ func TestClassRoutedClaimNeverEscalatesACommittedWorkClaim(t *testing.T) {
 	}
 }
 
+// TestClassRoutedRestampSplitsOnResidency pins the discriminator
+// restampHookAdoption keys its fail-open/fail-closed decision on. A re-stamp of
+// a bead the binding was PROVED to hold is declined as errRestampGraphResident
+// without touching the work seam — there is no transfer primitive there and no
+// close-path actor fence that would need one — while any other id is the work
+// store's and delegates unchanged. Getting this split wrong in either direction
+// is a #5716 loop: fail-open on a work-store bead hands over an unclosable
+// bead, and fail-closed on a resident one refuses adoption of a bead whose close
+// would have succeeded untouched.
+func TestClassRoutedRestampSplitsOnResidency(t *testing.T) {
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-c00", nil)
+	route := newClaimRouteFor(t, class)
+
+	type restampCall struct{ beadID, from, to string }
+	var baseCalls []restampCall
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		Claim: notFoundClaim(t, "gcg-c00"),
+		RestampAdopted: func(_ context.Context, _ string, _ []string, beadID, from, to string) (bool, error) {
+			baseCalls = append(baseCalls, restampCall{beadID, from, to})
+			return true, nil
+		},
+	}, route)
+
+	// Residency is a memo of a PROVED answer, so the claim that escalated is what
+	// records it — the same order a real adoption re-stamp runs in.
+	if _, ok, err := ops.Claim(context.Background(), "/work", nil, "gcg-c00", "worker-1"); err != nil || !ok {
+		t.Fatalf("routed claim of gcg-c00 = (ok=%v err=%v), want the escalation that memoizes residency", ok, err)
+	}
+
+	moved, err := ops.RestampAdopted(context.Background(), "/work", nil, "gcg-c00", "legacy-1", "worker-1")
+	if moved {
+		t.Fatal("re-stamp of a binding-resident bead reported moved=true; the graph store has no transfer primitive to move it with")
+	}
+	if !errors.Is(err, errRestampGraphResident) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want errRestampGraphResident so the caller can tell it apart from the work store's identical unsupported error", err)
+	}
+	if !errors.Is(err, beads.ErrConditionalTransferUnsupported) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want it to still satisfy beads.ErrConditionalTransferUnsupported", err)
+	}
+	if len(baseCalls) != 0 {
+		t.Fatalf("resident re-stamp reached the work seam %d time(s) (%+v); the work store does not hold this bead", len(baseCalls), baseCalls)
+	}
+
+	// Any id the binding was not proved to hold is the work store's, forwarded
+	// verbatim.
+	moved, err = ops.RestampAdopted(context.Background(), "/work", nil, "ga-c01", "legacy-2", "worker-1")
+	if err != nil || !moved {
+		t.Fatalf("re-stamp of a non-resident bead = (moved=%v err=%v), want the work seam's own answer", moved, err)
+	}
+	want := []restampCall{{"ga-c01", "legacy-2", "worker-1"}}
+	if len(baseCalls) != 1 || baseCalls[0] != want[0] {
+		t.Fatalf("work seam saw %+v, want exactly %+v", baseCalls, want)
+	}
+}
+
 // TestHookClaimClassRouteRefusesABindingThatCannotClaim pins the capability
 // check at the door, the shape storebinding.NewBeadsNudgeQueue already uses: a
 // leaf without the two-argument CAS claim cannot serve a claim-time route, and
 // discovering that per-bead in the middle of a tick is what made a whole
 // `gc hook --claim` invocation terminal.
-//
-// *beads.SQLiteStore is the only production store with it; the other compiled-in
-// binding provider (beadsworkspace) opens a *beads.NativeDoltStore, which has
-// ReleaseIfCurrent and no Claim.
 func TestHookClaimClassRouteRefusesABindingThatCannotClaim(t *testing.T) {
 	route, err := newHookClaimClassRoute(claimRouteNoCASStore{Store: beads.NewMemStore()})
 	if !errors.Is(err, errClaimRouteBindingCannotClaim) {
@@ -502,10 +724,9 @@ func TestHookClaimRouteVerdictDegradesRatherThanWedgingTheTick(t *testing.T) {
 	}
 }
 
-// claimRouteNoCASStore models the production binding leaf that has no
-// two-argument claim: beads.NativeDoltStore, which beadsworkspace's OpenEngine
-// returns. beads.MemStore implements Claim, so the capability has to be hidden
-// behind a wrapper that does not.
+// claimRouteNoCASStore models a binding leaf without the two-argument claim.
+// Embedding the beads.Store INTERFACE re-exports only that interface's methods,
+// so the leaf lacks the capability whatever store it wraps.
 type claimRouteNoCASStore struct{ beads.Store }
 
 // newClaimRouteFor opens a claim-time class route over a store the row controls.

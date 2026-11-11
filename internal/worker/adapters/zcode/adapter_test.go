@@ -58,8 +58,12 @@ if os.environ.get("STUB_IGNORE_INT"):
 
 sleep_for = float(os.environ.get("STUB_SLEEP", "0"))
 if sleep_for:
+    # STUB_RELEASE_FILE ends the sleep as soon as it exists: STUB_SLEEP is then
+    # only a ceiling, and a test holds the turn open exactly as long as it needs
+    # to observe something.
+    release = os.environ.get("STUB_RELEASE_FILE")
     deadline = time.time() + sleep_for
-    while time.time() < deadline:
+    while time.time() < deadline and not (release and os.path.exists(release)):
         time.sleep(0.1)
     done = os.environ.get("STUB_DONE_FILE")
     if done:
@@ -74,6 +78,10 @@ if os.environ.get("STUB_BAD_JSON"):
 rc = int(os.environ.get("STUB_RC", "0"))
 if rc:
     sys.stderr.write("stub failure\n")
+    # STUB_STDERR_LINES pads the failure with that many more stderr lines.
+    pad = int(os.environ.get("STUB_STDERR_LINES", "0"))
+    if pad:
+        sys.stderr.write(("x" * 63 + "\n") * pad)
     sys.exit(rc)
 
 # Fail only when resuming, to exercise the stale-sid recovery path.
@@ -87,6 +95,42 @@ print(json.dumps({
     "usage": {"inputTokens": 11, "outputTokens": 3, "totalTokens": 14},
     "projection": {"turnCount": 1, "totalTokenCount": 14},
 }))
+`
+
+// ptyDriver runs its arguments behind a pseudo-terminal, standing in for a
+// tmux pane: our stdin is relayed into the pty and everything the child writes
+// comes back out on our stdout, escape sequences and all. TERM is forwarded to
+// the child, so the harness's signal path ends a session the way it does off a
+// tty; a child that exits ends the relay, and its status becomes ours.
+const ptyDriver = `#!/usr/bin/env python3
+import os, pty, select, signal, sys
+
+child, master = pty.fork()
+if child == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+
+signal.signal(signal.SIGTERM, lambda *_: os.kill(child, signal.SIGTERM))
+
+fds = [master, 0]
+while True:
+    ready, _, _ = select.select(fds, [], [])
+    if master in ready:
+        try:
+            data = os.read(master, 65536)
+        except OSError:  # EIO: the child closed its side
+            data = b""
+        if not data:
+            break
+        os.write(1, data)
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if data:
+            os.write(master, data)
+        else:
+            fds.remove(0)
+
+_, status = os.waitpid(child, 0)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 `
 
 // installedAdapter materializes the adapter once per test binary. Installing
@@ -122,6 +166,10 @@ type harness struct {
 	ctlPath   string
 	mirrorDir string
 	workDir   string
+	// ptyDriver wraps the adapter in a pseudo-terminal when tty is set, so it
+	// takes the branches it takes in a tmux pane.
+	ptyDriver string
+	tty       bool
 	env       map[string]string
 	// stderr holds the last run's stderr. The adapter's die_config sites all
 	// exit 78 and only stderr says which precondition tripped (ga-xx7x9).
@@ -151,6 +199,10 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 	if err := os.WriteFile(bundle, []byte("// stub bundle\n"), 0o644); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
+	driver := filepath.Join(root, "pty-driver")
+	if err := os.WriteFile(driver, []byte(ptyDriver), 0o755); err != nil {
+		t.Fatalf("write pty driver: %v", err)
+	}
 
 	h := &harness{
 		t:         t,
@@ -160,6 +212,7 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 		ctlPath:   filepath.Join(root, "stub.ctl"),
 		mirrorDir: mirrorDir,
 		workDir:   workDir,
+		ptyDriver: driver,
 		env: map[string]string{
 			"HOME":                    home,
 			"XDG_STATE_HOME":          filepath.Join(home, ".local", "state"),
@@ -189,7 +242,11 @@ func (h *harness) envList() []string {
 }
 
 func (h *harness) command() *exec.Cmd {
-	cmd := exec.Command(h.adapter)
+	name, args := h.adapter, []string(nil)
+	if h.tty {
+		name, args = "python3", []string{h.ptyDriver, h.adapter}
+	}
+	cmd := exec.Command(name, args...)
 	cmd.Dir = h.workDir
 	cmd.Env = h.envList()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -283,6 +340,15 @@ func (h *harness) start() *session {
 	return s
 }
 
+// startOnTTY is start with the adapter's stdio on a pseudo-terminal: it then
+// takes the branches it takes in a tmux pane (echo off, announcements drawn in
+// place) and its output arrives with the escape sequences it actually emits.
+func (h *harness) startOnTTY() *session {
+	h.t.Helper()
+	h.tty = true
+	return h.start()
+}
+
 func (s *session) send(line string) {
 	s.t.Helper()
 	s.sendRaw(line + "\n")
@@ -370,10 +436,27 @@ func (s *session) closeAndWait() (string, int) {
 	return s.wait()
 }
 
+// wait reaps the adapter. Like every other lifecycle wait in this suite it is
+// bounded by adapterWaitBudget: an adapter that never exits used to block here
+// until the package's go-test timeout (observed once as a 20-minute hang on a
+// host at load ~337), with no record of what the adapter was doing. Now the
+// adapter's group is killed and the test fails with its output.
 func (s *session) wait() (string, int) {
 	s.t.Helper()
+	waited := make(chan error, 1)
+	go func() { waited <- s.cmd.Wait() }()
+	var waitErr error
+	select {
+	case waitErr = <-waited:
+	case <-time.After(adapterWaitBudget):
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		<-waited
+		<-s.done
+		s.t.Fatalf("adapter did not exit within %s; killed its process group.\nstdout:\n%s\nstderr:\n%s",
+			adapterWaitBudget, s.output(), s.errOut.String())
+	}
 	code := 0
-	if err := s.cmd.Wait(); err != nil {
+	if err := waitErr; err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
 			s.t.Fatalf("wait adapter: %v", err)
@@ -814,6 +897,258 @@ func TestFailingTurnPrintsErrorAndMarker(t *testing.T) {
 	}
 }
 
+// report_stderr reads only its 300-character excerpt. Folding the newlines of
+// the whole stderr first is quadratic in bash: a 16 MiB stderr held the
+// adapter inside that one expansion for well over a minute, with no ready
+// marker and its TERM trap deferred until the expansion finished.
+func TestALargeTurnStderrIsExcerptedPromptly(t *testing.T) {
+	t.Parallel()
+
+	const padLines = 262144 // 64-byte lines: 16 MiB of stderr
+	h := newHarness(t, map[string]string{"STUB_RC": "3", "STUB_STDERR_LINES": fmt.Sprint(padLines)})
+	s := h.start()
+	s.send("one")
+	s.waitForTurns(1)
+	out, code := s.closeAndWait()
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0:\n%s", code, out)
+	}
+
+	raw := "stub failure\n" + strings.Repeat(strings.Repeat("x", 63)+"\n", 5)
+	want := "zcode-repl stderr: " + strings.ReplaceAll(raw[:300], "\n", " ") + "\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("stderr excerpt is not the first 300 characters, newlines folded; want %q in:\n%s", want, out)
+	}
+}
+
+// bash 5.2 checks a read's -t timer again after storing the byte it read, so a
+// byte that lands as the idle wait's timer expires comes back with status 142
+// and the byte in the variable. The race is microseconds wide, so a BASH_ENV
+// shim makes every idle-wait byte arrive that way: the adapter must keep it.
+func TestAnIdleWaitTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "late-timer.bash")
+	// The idle wait is the one timed read into "line". IFS is empty inside
+	// the call, so test each argument rather than a joined "$*".
+	const lateTimer = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        builtin read -r -n 1 line
+        local rc=$?
+        if (( rc == 0 )) && [[ -n "$line" ]]; then return 142; fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(lateTimer), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	s.send("hello world")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"hello world"}) {
+		t.Fatalf("prompts = %q, want [\"hello world\"]", got)
+	}
+}
+
+// TestABash32IdleWaitTimeoutIsNotEndOfInput pins the idle wait against the
+// shape bash 3.2 (/bin/bash on stock macOS) gives a timed-out read: status 1,
+// the same as end of input, with the variable left unassigned. The shim
+// replays that shape on a real timeout, so the test runs on any bash, and
+// announces each one; taking it for end of input ends the session after one
+// idle IDLE_WAKE_SECS, before the second announcement.
+func TestABash32IdleWaitTimeoutIsNotEndOfInput(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "bash32-timeout.bash")
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        builtin read "$@"
+        local rc=$?
+        # A timeout in either shape: bash >= 4's, or 3.2's own when this runs
+        # under 3.2.
+        if [[ -z "${line-}" ]] && { (( rc > 128 )) || { (( rc == 1 )) && [[ -z "${line+set}" ]]; }; }; then
+            shim_idle_wakes=$(( ${shim_idle_wakes:-0} + 1 ))
+            printf 'shim idle wake %s\n' "$shim_idle_wakes"
+            unset line
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(bash32Timeout), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// Two emulated timeouts in a row: the first did not end the session.
+	s.waitForOutput("shim idle wake 2", 20*time.Second)
+	if !s.alive() {
+		t.Fatalf("adapter took an idle read timeout for end of input and exited:\n%s", s.output())
+	}
+	s.send("after idle")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"after idle"}) {
+		t.Fatalf("prompts = %q, want [\"after idle\"]", got)
+	}
+}
+
+// TestAnIdleWaitReadErrorEndsTheSession proves a read that fails outright is
+// end of input, not an idle timeout. A failed read returns status 1 with the
+// variable unassigned on every bash — the same shape bash 3.2 gives a timeout
+// — but it fails at once, without waiting out the timer, so the adapter must
+// exit rather than retry it in a hot loop. The shim fails the idle wait the
+// way bash 3.2 fails a read from a bad descriptor.
+func TestAnIdleWaitReadErrorEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "read-error.bash")
+	const readError = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        echo "read: read error: 0: Input/output error" >&2
+        return 1
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(readError), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// wait fails the test if the adapter is still retrying after
+	// adapterWaitBudget.
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); len(got) != 0 {
+		t.Fatalf("prompts = %q, want none", got)
+	}
+}
+
+// The drain's one-byte peek has the same bash 5.2 race as the idle wait: a
+// byte that lands as the drain timer expires comes back with status 142 and
+// the byte in the variable. The newline is no exception — bash checks the
+// timer once more after the loop that consumed it, so a blank interior line
+// landing at the deadline is consumed with status 142 too. Dropping either
+// splits one prompt into two, one of them missing a byte. The shim makes every
+// peek return that way: it reads with the caller's own arguments minus the
+// timer, and reports any read that consumed input as having timed out, which
+// is what bash 5.2 does when the timer expires right after the byte arrives.
+func TestADrainPeekTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
+	t.Parallel()
+
+	const lateTimer = `read() {
+    local arg timed=0 skip=0
+    local -a untimed=()
+    for arg in "$@"; do
+        if (( skip )); then skip=0; continue; fi
+        if [[ "$arg" == -t ]]; then timed=1; skip=1; continue; fi
+        untimed+=("$arg")
+    done
+    if (( timed )) && [[ "${!#}" == peek ]]; then
+        builtin read "${untimed[@]}"
+        local rc=$?
+        if (( rc == 0 )); then return 142; fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "next line's first byte", body: "line one\nline two\nline three"},
+		{name: "blank interior line", body: "paragraph one\n\nparagraph two"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			shim := filepath.Join(t.TempDir(), "late-drain-timer.bash")
+			if err := os.WriteFile(shim, []byte(lateTimer), 0o644); err != nil {
+				t.Fatalf("write shim: %v", err)
+			}
+			h := newHarness(t, map[string]string{"BASH_ENV": shim})
+			if _, code := h.run(tc.body + "\n"); code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if got := h.prompts(); !equalStrings(got, []string{tc.body}) {
+				t.Fatalf("prompts = %q, want [%q]", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestABash32DrainPeekTimeoutEndsOnlyTheBurst pins the drain against the shape
+// bash 3.2 (/bin/bash on stock macOS) gives a timed-out read: status 1, the
+// same as end of input and a read error. All three mean the burst is over, and
+// none of them may cost the prompt in hand or the session. The shim replays
+// that shape on a real timeout, so the test runs on any bash, and announces
+// it. A byte 3.2 takes off the fd as its timer fires is gone before the script
+// regains control, so there is no byte to recover on that shell.
+func TestABash32DrainPeekTimeoutEndsOnlyTheBurst(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "bash32-drain-timeout.bash")
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == peek ]]; then
+        builtin read "$@"
+        local rc=$?
+        # A timeout in either shape: bash >= 4's, or 3.2's own when this runs
+        # under 3.2.
+        if [[ -z "${peek-}" ]] && (( rc > 128 || rc == 1 )); then
+            printf 'shim drain timeout\n'
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(bash32Timeout), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	s.send("first burst\nstill first")
+	s.waitForTurns(1)
+	if !strings.Contains(s.output(), "shim drain timeout") {
+		t.Fatalf("the drain never timed out through the shim:\n%s", s.output())
+	}
+	s.send("second burst")
+	s.waitForTurns(2)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	want := []string{"first burst\nstill first", "second burst"}
+	if got := h.prompts(); !equalStrings(got, want) {
+		t.Fatalf("prompts = %q, want %q", got, want)
+	}
+}
+
 func TestUnparsableResponseIsReported(t *testing.T) {
 	t.Parallel()
 
@@ -852,6 +1187,153 @@ func TestTurnInFlightIsAnnouncedBeforeTheReadyMarker(t *testing.T) {
 	// reads as ready, not busy.
 	if first := strings.Index(out, "zcode-repl ready"); first > busy {
 		t.Fatalf("startup marker must precede the first in-flight line:\n%s", out)
+	}
+}
+
+// A turn is silent from its announcement until the reply lands, and gc's
+// execution backstop reads a pane with no output inside its grace window as a
+// stalled seat and drains it — which is what happened to every turn longer
+// than ~90 s (2026-09-09). On a tty the adapter therefore redraws the busy
+// line in place while the turn runs: fresh output for tmux, an unchanged pane
+// for everything that reads the tail.
+func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ready = "zcode-repl ready"
+		busy  = "zcode-repl turn in flight (C-c to interrupt)"
+	)
+	reply := strings.Repeat("x", 60) // proves autowrap is restored for replies
+	h := newHarness(t, map[string]string{
+		"STUB_RESPONSE":             reply,
+		"STUB_SLEEP":                "20", // a ceiling only: the turn is released below
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+	release := filepath.Join(h.workDir, "turn-release")
+	h.env["STUB_RELEASE_FILE"] = release
+
+	s := h.startOnTTY()
+	// The CRLF is the line discipline's, so this also proves stdout is a tty.
+	s.waitForOutput(ready+"\r\n", adapterWaitBudget)
+	readyOffset := strings.Index(s.output(), ready+"\r\n")
+	s.send("a turn longer than the heartbeat")
+
+	// Observe two redraws; disabling autowrap must keep the announcement on
+	// one physical row, including panes narrower than the message.
+	draw := "\x1b[?7l" + busy + "\x1b[?7h"
+	redraw := draw + strings.Repeat("\r\x1b[2K"+draw, 2)
+	s.waitForOutput(redraw, adapterWaitBudget)
+	midTurn := through(t, s.output()[readyOffset:], redraw)
+
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatalf("release turn: %v", err)
+	}
+	finished := reply + "\r\n" + ready + "\r\n"
+	s.waitForOutput(finished, adapterWaitBudget)
+	afterTurn := through(t, s.output()[readyOffset:], finished)
+
+	for _, width := range []int{80, 30, len(busy)} {
+		t.Run(fmt.Sprintf("width=%d", width), func(t *testing.T) {
+			pane := renderPane(t, midTurn, width)
+			if len(pane) != 1 || !strings.HasPrefix(pane[0], "zcode-repl turn in flight") {
+				t.Fatalf("want one busy row mid-turn, got:\n%q", pane)
+			}
+			if width >= len(busy) && pane[0] != busy {
+				t.Fatalf("busy line = %q, want %q", pane[0], busy)
+			}
+			pane = renderPane(t, afterTurn, width)
+			if want := renderPane(t, finished, width); !equalStrings(pane, want) {
+				t.Fatalf("completion must clear busy text and restore reply wrapping:\ngot: %q\nwant: %q", pane, want)
+			}
+		})
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The heartbeat is tty-only, and that guard is the whole reason every piped
+// consumer of this adapter is unaffected by it. Nothing else pins the guard:
+// no other piped test runs a turn longer than a beat, so a regression would
+// stack redraw bytes into every piped reader unnoticed.
+func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
+	t.Parallel()
+
+	const busy = "zcode-repl turn in flight (C-c to interrupt)"
+	// The stub holds the turn open for several beat periods: had the guard
+	// regressed, the redraws would have landed before the turn completes.
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "3",
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+
+	s := h.start()
+	s.waitForOutput("zcode-repl ready\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+	s.waitForOutput(busy+"\n", adapterWaitBudget)
+	s.waitForOutput("ok\n", adapterWaitBudget)
+
+	out := s.output()
+	if strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("heartbeat redraw bytes reached a piped consumer:\n%q", out)
+	}
+	if n := strings.Count(out, busy); n != 1 {
+		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// A non-completing child must not mask inactivity beyond the configured
+// heartbeat lifetime. The child outlives the one-second budget; it still
+// completes normally, but no beat may land at or after the deadline.
+func TestTurnHeartbeatExpiresBeforeTheChildCompletes(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                    "3",
+		"ZCODE_REPL_HEARTBEAT_SECS":     "1",
+		"ZCODE_REPL_HEARTBEAT_MAX_SECS": "1",
+	})
+	s := h.startOnTTY()
+	s.waitForOutput("zcode-repl ready\r\n", adapterWaitBudget)
+	s.send("outlive the heartbeat budget")
+	s.waitForOutput("ok\r\nzcode-repl ready\r\n", adapterWaitBudget)
+	if n := strings.Count(s.output(), "zcode-repl turn in flight"); n != 1 {
+		t.Fatalf("busy announcement appeared %d times, want only the initial announcement after heartbeat expiry:\n%q", n, s.output())
+	}
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// Malformed heartbeat settings are config errors like the adapter's other
+// preconditions: exit 78 naming the variable, rather than reaching sleep with
+// a value it cannot use.
+func TestMalformedHeartbeatConfigurationIsAConfigError(t *testing.T) {
+	t.Parallel()
+
+	// An empty value is deliberately absent: ${ZCODE_REPL_HEARTBEAT_SECS:-30}
+	// treats unset and empty alike, so both take the default rather than dying.
+	for _, key := range []string{"ZCODE_REPL_HEARTBEAT_SECS", "ZCODE_REPL_HEARTBEAT_MAX_SECS"} {
+		for _, value := range []string{"0", "-1", "30s", "abc", "9999999999999999999999"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				t.Parallel()
+
+				h := newHarness(t, map[string]string{key: value})
+				if _, code := h.run("hello\n"); code != 78 {
+					t.Fatalf("%s=%q exit code = %d, want 78 (EX_CONFIG)", key, value, code)
+				}
+				if !strings.Contains(h.stderr, key) {
+					t.Fatalf("exit 78 did not name the rejected variable; stderr = %q", h.stderr)
+				}
+			})
+		}
 	}
 }
 
@@ -1416,6 +1898,57 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	}
 }
 
+// Once the adapter's signal traps are armed, no shell code may expand a
+// command or process substitution. On bash 5.2 a trapped signal that lands
+// while bash is expanding one runs the trap inside that expansion: the trap's
+// own text then fails to parse ("trap: line 2: unexpected EOF while looking
+// for matching `)'"), so `exit 0` never runs, and the shell either exits 1 or
+// wedges for good — spinning, or blocked reading a comsub pipe whose write end
+// it still holds. Observed as TestInterruptedTurnClosesTheMirrorEntry failing
+// at its wait deadline on a loaded host, with exactly that stderr: its TERM
+// lands right after the error line, inside report_stderr's substitution.
+// `$(<file)` is affected too (it hung 36 of 400 standalone runs). The race is
+// a few instructions wide, so this pins the invariant structurally instead.
+func TestNoSubstitutionsWhileSignalTrapsAreArmed(t *testing.T) {
+	t.Parallel()
+
+	lines := strings.Split(string(zcodeadapter.Script()), "\n")
+	armed := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "trap ") && strings.HasSuffix(line, " TERM") {
+			armed = i
+			break
+		}
+	}
+	if armed < 0 {
+		t.Fatal("no top-level TERM trap found in zcode-repl")
+	}
+
+	heredocEnd := ""
+	for i := armed; i < len(lines); i++ {
+		line := lines[i]
+		if heredocEnd != "" {
+			if line == heredocEnd {
+				heredocEnd = ""
+			}
+			continue
+		}
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "#") {
+			continue
+		}
+		if _, tag, ok := strings.Cut(code, "<<'"); ok {
+			heredocEnd, _, _ = strings.Cut(tag, "'")
+		}
+		code = strings.ReplaceAll(code, "$((", "")
+		for _, form := range []string{"$(", "`", "<(", ">("} {
+			if strings.Contains(code, form) {
+				t.Errorf("zcode-repl:%d expands %q after the signal traps are armed: %s", i+1, form, code)
+			}
+		}
+	}
+}
+
 // Entry ids are identities to gc: HistorySnapshot.Cursor.AfterEntryID is one,
 // and history comparison short-circuits on id equality. Positional ids alone
 // made every conversation emit the same sequence, so two unrelated
@@ -1584,6 +2117,87 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// through returns raw up to and including its last occurrence of needle, so a
+// pane rendered from it is the pane the instant that output landed rather than
+// whatever a later chunk had half-delivered. An absent needle fails the test
+// rather than returning a silently truncated prefix, the same way renderPane
+// refuses to misrender input it does not understand.
+func through(t *testing.T, raw, needle string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, needle)
+	if i < 0 {
+		t.Fatalf("needle %q never arrived in the output:\n%q", needle, raw)
+	}
+	return raw[:i+len(needle)]
+}
+
+// renderPane replays a tty byte stream at a bounded terminal width, for the
+// controls the adapter emits: CR, LF, erase-line (ESC[2K), cursor-up
+// (ESC[1A), and autowrap (ESC[?7l/h). Any other escape fails the test rather
+// than misrendering. Trailing empty rows are dropped, as tmux capture-pane
+// drops them.
+func renderPane(t *testing.T, raw string, width int) []string {
+	t.Helper()
+	rows := []string{""}
+	row, col := 0, 0
+	autowrap := true
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; c {
+		case '\r':
+			col = 0
+		case '\n':
+			row++
+			if row == len(rows) {
+				rows = append(rows, "")
+			}
+		case 0x1b:
+			switch {
+			case strings.HasPrefix(raw[i:], "\x1b[?7l"), strings.HasPrefix(raw[i:], "\x1b[?7h"):
+				autowrap = raw[i+4] == 'h'
+				i += 4
+				continue
+			case strings.HasPrefix(raw[i:], "\x1b[2K"):
+				rows[row] = ""
+			case strings.HasPrefix(raw[i:], "\x1b[1A"):
+				if row == 0 {
+					t.Fatalf("cursor moved above the pane at byte %d:\n%q", i, raw)
+				}
+				row--
+			default:
+				t.Fatalf("unrendered escape at byte %d: %q", i, raw[i:])
+			}
+			i += 3
+		default:
+			if width > 0 && col >= width {
+				if !autowrap {
+					col = width - 1
+				} else {
+					row++
+					col = 0
+					if row == len(rows) {
+						rows = append(rows, "")
+					}
+				}
+			}
+			line := rows[row]
+			for len(line) < col {
+				line += " "
+			}
+			if col < len(line) {
+				line = line[:col] + string([]byte{c}) + line[col+1:]
+			} else {
+				line += string([]byte{c})
+			}
+			rows[row] = line
+			col++
+		}
+	}
+	for len(rows) > 1 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return rows
 }
 
 // extractPyFunc slices a top-level function definition out of the embedded

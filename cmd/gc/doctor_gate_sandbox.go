@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -67,14 +68,22 @@ func newGateSandboxReadCheck(cityPath string) *gateSandboxReadCheck {
 	return &gateSandboxReadCheck{cityPath: cityPath, probe: defaultGateSandboxRead}
 }
 
+// gateSandboxCommandRunnerWithEnvContext is the bd runner the probe forks
+// through. The exact-env variant is required: the layering variants merge
+// overrides onto a snapshot of the controller's own process environment, which
+// would hand the probe the very values the gate sandbox strips and report a
+// healthy sandbox while gates are blind.
+//
+// It is a package-level var so TestGateSandboxRunnerIsTheExactEnvRunner can pin
+// it; the check's whole value depends on this one binding, and an inlined call
+// makes reverting it invisible to the suite.
+var gateSandboxCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithExactEnvContext
+
 // defaultGateSandboxRead runs the store preflight's read under the gate
 // environment. Read-only and bounded.
 //
 // The read forks bd through the sanctioned runner in internal/beads, which owns
-// every bd subprocess call. The exact-env variant is required: the layering
-// variants merge overrides onto a snapshot of the controller's own process
-// environment, which would hand the probe the very values the gate sandbox
-// strips and report a healthy sandbox while gates are blind.
+// every bd subprocess call.
 func defaultGateSandboxRead(cityPath string, env []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorGateSandboxReadTimeout)
 	defer cancel()
@@ -85,7 +94,7 @@ func defaultGateSandboxRead(cityPath string, env []string) error {
 			exact[name] = value
 		}
 	}
-	run := beads.ExecCommandRunnerWithExactEnvContext(ctx, exact)
+	run := gateSandboxCommandRunnerWithEnvContext(ctx, exact)
 	if _, err := run(cityPath, "bd", "list", "--json", "--limit", "1"); err != nil {
 		// The runner already folds bd's stderr/stdout detail into err, so the
 		// message is the whole diagnostic; clip it to one readable line.
@@ -95,13 +104,27 @@ func defaultGateSandboxRead(cityPath string, env []string) error {
 }
 
 // doctorClipGateOutput keeps a failing probe's output to one readable line.
+//
+// The cut lands on a rune boundary: bd output is arbitrary text, and slicing a
+// multi-byte rune in half would put invalid UTF-8 into the doctor report.
 func doctorClipGateOutput(out string) string {
 	const maxLen = 300
 	out = strings.Join(strings.Fields(out), " ")
-	if len(out) > maxLen {
-		return out[:maxLen] + "…"
+	if len(out) <= maxLen {
+		return out
 	}
-	return out
+	clipped := out[:maxLen]
+	// A truncated multi-byte sequence decodes as (RuneError, 1); a real U+FFFD
+	// in the input decodes with its full 3-byte size, so this only drops the
+	// bytes the cut orphaned.
+	for len(clipped) > 0 {
+		r, size := utf8.DecodeLastRuneInString(clipped)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		clipped = clipped[:len(clipped)-1]
+	}
+	return clipped + "…"
 }
 
 // Name returns the doctor check identifier.
@@ -114,10 +137,12 @@ func (c *gateSandboxReadCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	if err := c.probe(c.cityPath, env); err != nil {
 		res.Status = doctor.StatusError
 		res.Message = fmt.Sprintf("bead read failed inside the gate sandbox (the same read succeeded for the controller): %v", err)
-		res.Details = gateSandboxDetails(env)
+		res.Details = gateSandboxBlindDetails(env)
 		res.FixHint = "gate commands get HOME=<city> plus an explicit env whitelist, so anything gc/bd resolves from HOME must be threaded in: " +
 			"check that BEADS_CREDENTIALS_FILE and GC_HOME in the details above point at real, readable paths " +
-			"(gc threads the resolved beads credentials file into the gate env; set BEADS_CREDENTIALS_FILE in the controller's environment to override)"
+			"(gc threads the resolved beads credentials file into the gate env; set BEADS_CREDENTIALS_FILE in the controller's environment to override). " +
+			"Those four are not the whole delta — the controller's read is built by bdRuntimeEnvWithErrorRecoveryContext, so if they look right, " +
+			"the cause is likely one of the controller-only keys the details list as absent (a workspace-pinned BD_BIN, or a hosted credential passthrough)"
 		return res
 	}
 	res.Status = doctor.StatusOK
@@ -130,12 +155,7 @@ func (c *gateSandboxReadCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 // read can resolve its credentials and caches.
 func gateSandboxDetails(env []string) []string {
 	wanted := []string{"HOME", "GC_HOME", "BEADS_DIR", "BEADS_CREDENTIALS_FILE"}
-	values := make(map[string]string, len(wanted))
-	for _, entry := range env {
-		if name, value, ok := strings.Cut(entry, "="); ok {
-			values[name] = value
-		}
-	}
+	values := gateSandboxEnvValues(env)
 	details := make([]string, 0, len(wanted))
 	for _, name := range wanted {
 		value, ok := values[name]
@@ -145,6 +165,56 @@ func gateSandboxDetails(env []string) []string {
 		details = append(details, name+"="+value)
 	}
 	return details
+}
+
+// gateSandboxBlindDetails is gateSandboxDetails plus the controller-only keys
+// the gate env does not carry. Only the failing branch needs them, and only for
+// attribution: the preflight control builds its env with
+// bdRuntimeEnvWithErrorRecoveryContext, which can add a workspace-pinned BD_BIN
+// and the hosted credential passthrough, while convergence.ConditionEnv.Environ
+// threads none of them. Reporting just the four HOME-derived values presents
+// them as the whole difference between a working controller read and a blind
+// gate, which sends the operator after BEADS_CREDENTIALS_FILE for a failure
+// caused by a missing BD_BIN.
+func gateSandboxBlindDetails(env []string) []string {
+	details := gateSandboxDetails(env)
+	absent := gateSandboxControllerOnlyKeys(gateSandboxEnvValues(env))
+	if len(absent) == 0 {
+		return details
+	}
+	return append(details, "not threaded into the gate env: "+strings.Join(absent, ", "))
+}
+
+// gateSandboxEnvValues indexes an environ slice by variable name.
+func gateSandboxEnvValues(env []string) map[string]string {
+	values := make(map[string]string, len(env))
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			values[name] = value
+		}
+	}
+	return values
+}
+
+// gateSandboxControllerOnlyKeys returns the keys the controller's own bd env
+// constructor can set that are absent from the gate env, in declaration order.
+//
+// Computed against the passed env rather than hard-coded so the list shrinks on
+// its own if one of these is ever added to the gate whitelist.
+func gateSandboxControllerOnlyKeys(values map[string]string) []string {
+	candidates := make([]string, 0, 1+len(hostedBeadsCredentialPassthroughKeys))
+	// cmd/gc/bd_env.go: applyWorkspacePinnedBdBinary resolves the bd the
+	// controller must use; a gate resolves bd off conditionPATH() instead.
+	candidates = append(candidates, "BD_BIN")
+	candidates = append(candidates, hostedBeadsCredentialPassthroughKeys...)
+
+	absent := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		if _, ok := values[name]; !ok {
+			absent = append(absent, name)
+		}
+	}
+	return absent
 }
 
 // CanFix reports that this check has no automatic remediation.

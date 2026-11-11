@@ -42,11 +42,11 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers, and on gc's host for an exec runtime\nwhose handshake declares fs.host with locality local. Template variables\nsame as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",
@@ -149,6 +149,10 @@
           "type": "string",
           "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
         },
+        "scale_check_authoritative": {
+          "type": "boolean",
+          "description": "ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on\nnew demand, its zeros included.\n\nBy default a cold pool with a custom ScaleCheck is ALSO probed by gc's\nown Ready()/gc.routed_to count, merged with max(). That default exists\nfor a real case: a rig-scoped check cannot see work routed to it that\nlives in the city store, so without the probe such a pool would never\nwake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a\ncustom check can never answer \"no demand\" while cold — max(0,1) is 1 —\nso a pool whose check deliberately withholds demand is re-woken every\ntick, finds the work its own check already judged unactionable, and\ndrains. Measured in production: 43 spawn/drain cycles in\n40 minutes, one Claude cold start every ~30s, for as long as a review\nwas outstanding.\n\nSet this only when the check reads the same store the routed work lives\nin — then the probe can discover nothing the check has not already\nweighed, and its disagreement is pure churn. A check that FAILS is\nstill not a zero: it stays partial and falls through to the probe, so\nthis cannot strand routed work behind a broken check."
+        },
         "drain_timeout": {
           "type": "string",
           "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
@@ -168,7 +172,7 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
         "sling_query": {
           "type": "string",
@@ -176,11 +180,11 @@
         },
         "idle_timeout": {
           "type": "string",
-          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking. Not applied to a [[named_session]]\nwith mode = \"always\": the controller keeps that session running."
         },
         "max_session_age": {
           "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle. Not applied to a\n[[named_session]] with mode = \"always\".\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
         },
         "max_session_age_jitter": {
           "type": "string",
@@ -658,6 +662,10 @@
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
+        "scale_check_authoritative": {
+          "type": "boolean",
+          "description": "ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the\nlast word on new demand, its zeros included. See Agent."
+        },
         "option_defaults": {
           "additionalProperties": {
             "type": "string"
@@ -1132,6 +1140,48 @@
       "type": "object",
       "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
     },
+    "ProgramStatusBinding": {
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "osc7501",
+            "none"
+          ],
+          "description": "Protocol declares the status protocol: \"osc7501\" declares, \"none\"\nexplicitly undeclares an inherited declaration, and \"\" inherits."
+        },
+        "app": {
+          "type": "string",
+          "description": "App is the program name the capture reader accepts reports from; reports\nnaming another program are dropped. Empty accepts any program name."
+        },
+        "relay": {
+          "type": "boolean",
+          "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
+        },
+        "hold_mid_turn": {
+          "type": "boolean",
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs the conversation lane's\nkeystroke boundary and the bypass of the quiescence gate that a\ndelivery starved on a never-quiet session takes. Under the [session]\nprogram_status switch on, the lane's quiescence boundary stays closed,\nand a delivery at it is held right before it is typed, while a fresh\nread of the program's own record shows a live working record; the lane\ntakes the starved bypass only on such a read that decides and shows no\nlive working record. Under off and shadow the lane never takes the\nstarved bypass. Legacy delivery defers the bypass under on while such a\nread shows a live working record, and otherwise takes it as without\nthe declaration. Every other delivery is unchanged. It reaches a pane\nwhen its capture is armed (create, respawn, heal), and heal keeps it\ncurrent. Unset inherits."
+        },
+        "decide_startup": {
+          "type": "boolean",
+          "description": "DecideStartup opts the startup ladder into deciding with the program's\nown record under the [session] program_status switch on: a turn start\npast the record read before the first send confirms the startup nudge,\nand a live blocked record holds the send (nothing is typed into the\ndialog) and, once the ladder runs out, hands the nudge back to be\nqueued for the session. Without it the ladder decides from the screen\nalone, exactly as under off. Declare it only for a program whose\nrecords were shown to agree with the ladder's outcomes. Unset inherits."
+        },
+        "decide_settle": {
+          "type": "boolean",
+          "description": "DecideSettle opts the interrupt settle into deciding with the program's\nown record under the [session] program_status switch on: the idle wait\nthat follows an interrupt gc sent returns at the first root boundary\npast the pre-interrupt record, and a dialog the program reports since\nends it as a pending interaction, so no further keys are sent. Without\nit the wait decides from the screen alone, exactly as under off. It\nreaches a pane when its capture is armed (create, respawn, heal), and\nheal keeps it current. Declare it only for a program whose records were\nshown to agree with the settle's outcomes. Unset inherits."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents: keys gc\nsets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per\nlayer; an empty value withholds the variable."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProgramStatusBinding is a provider's program-status declaration: whether its program reports state over OSC 7501 and how gc captures those reports."
+    },
     "ProviderOption": {
       "properties": {
         "key": {
@@ -1322,6 +1372,10 @@
           "$ref": "#/$defs/UpstreamEnvBinding",
           "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
         },
+        "program_status": {
+          "$ref": "#/$defs/ProgramStatusBinding",
+          "description": "ProgramStatus declares whether this harness's program reports its own\nstate over the OSC 7501 Program Status Protocol and how gc captures the\nreports. Inert unless [session] program_status is \"shadow\" or \"on\"."
+        },
         "print_args": {
           "items": {
             "type": "string"
@@ -1342,7 +1396,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports. When any layer\nsets acp_args, args and args_append reach only the CLI launch, except\nschema-managed flags such as a curated model, which become option\ndefaults that both launches carry: when a layer more specific than the\nacp_args layer declares args that reach the CLI launch, the CLI\ntransport is the default, and an explicit ACP session that still drops\nargs prints a warning."
         }
       },
       "additionalProperties": false,

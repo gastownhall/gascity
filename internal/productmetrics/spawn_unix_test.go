@@ -178,6 +178,9 @@ func TestRecordOnceReservesAndStartsAfterReleasingStateTransaction(t *testing.T)
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne, testSpawnTokenOne)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	startCalled := false
 	waitCalled := make(chan struct{})
 	deps.spawn = spawnDependencies{
@@ -223,6 +226,9 @@ func TestRecordOnceKeepsStoredEventWhenSpawnWindowExpires(t *testing.T) {
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne, testSpawnTokenOne)
 	deps.now = func() time.Time { return current }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	deps.beforeRecordOperation = func(operation recordOperation) {
 		if operation == recordOperationSpawnThrottleRead {
 			current = testRecordHour.Add(defaultRecordDecisionBudget)
@@ -261,6 +267,9 @@ func TestRecordOnceRejectsRegeneratedPriorSpawnToken(t *testing.T) {
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne, testSpawnTokenOne)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	starts := 0
 	deps.spawn = spawnDependencies{
 		executable: func() (string, error) { return "/opt/gascity/bin/gc", nil },
@@ -293,6 +302,9 @@ func TestRecordOnceDoesNotStartWhenRetainedThrottleLeaseCloseFails(t *testing.T)
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne, testSpawnTokenTwo)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	closedLease := false
 	var injectionErr error
 	deps.storageHooks.afterRead = func(path string, _, read int, readErr error) {

@@ -156,16 +156,16 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 	}
 	def := defaultFlags()
 
-	// beads.conditional_writes: Mode gate, default Off.
+	// beads.conditional_writes: Mode gate, default Auto (mc-dpo2b).
 	beads := byKey[keyBeadsConditionalWrites]
-	if beads.Default.Mode == nil || *beads.Default.Mode != Off {
-		t.Fatalf("beads Spec.Default = %v, want Off", beads.Default.Mode)
+	if beads.Default.Mode == nil || *beads.Default.Mode != Auto {
+		t.Fatalf("beads Spec.Default = %v, want Auto", beads.Default.Mode)
 	}
-	if def.BeadsConditionalWrites() != Off {
-		t.Errorf("defaultFlags beads = %q, want off", def.BeadsConditionalWrites())
+	if def.BeadsConditionalWrites() != Auto {
+		t.Errorf("defaultFlags beads = %q, want auto", def.BeadsConditionalWrites())
 	}
-	if got := (config.BeadsConfig{}).NormalizedConditionalWrites(); got != string(Off) {
-		t.Errorf("config accessor default = %q, want %q", got, Off)
+	if got := (config.BeadsConfig{}).NormalizedConditionalWrites(); got != string(Auto) {
+		t.Errorf("config accessor default = %q, want %q", got, Auto)
 	}
 
 	// beads.guarded_release: Mode gate, default Off.
@@ -190,5 +190,32 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 	}
 	if !(config.DaemonConfig{}).FormulaV2Enabled() {
 		t.Errorf("config accessor formula_v2 default = false, want true")
+	}
+
+	// ops.content, ops.control, ops.lifecycle: Mode gates, default Auto
+	// (D-GATES, OJ-8); the zero [ops] table (no accessor) resolves each to auto.
+	unsetOps, err := Resolve(&config.City{}, ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	for _, g := range []struct {
+		key string
+		def Mode
+		res Mode
+	}{
+		{keyOpsContent, def.OpsContent(), unsetOps.OpsContent()},
+		{keyOpsControl, def.OpsControl(), unsetOps.OpsControl()},
+		{keyOpsLifecycle, def.OpsLifecycle(), unsetOps.OpsLifecycle()},
+	} {
+		spec := byKey[g.key]
+		if spec.Default.Mode == nil || *spec.Default.Mode != Auto {
+			t.Errorf("%s Spec.Default = %v, want Auto", g.key, spec.Default.Mode)
+		}
+		if g.def != Auto {
+			t.Errorf("defaultFlags %s = %q, want auto", g.key, g.def)
+		}
+		if g.res != Auto {
+			t.Errorf("Resolve of an empty [ops] %s = %q, want auto", g.key, g.res)
+		}
 	}
 }

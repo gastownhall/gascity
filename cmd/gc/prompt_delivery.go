@@ -49,6 +49,26 @@ type promptDeliveryResult struct {
 	// through a different mechanism than its configured prompt mode would
 	// otherwise select.
 	OversizedFallback bool
+	// ConfiguredMode is the agent's configured prompt delivery mode
+	// (rp.PromptMode: "arg", "flag", or "none"); empty when rp is nil, i.e.
+	// no provider resolved. Reported alongside EffectiveMode so a
+	// nudge-fallback or hard-fail finding can be traced back to what the
+	// agent actually asked for.
+	ConfiguredMode string
+	// EffectiveMode is the delivery mode promptDelivery actually selected:
+	// "acp", "none", "argv", "flag", "nudge", "nudge-fallback", or
+	// "hard-fail". "nudge" is selected for a pack-declared (exec/RPP)
+	// runtime, whose start wire carries no argv prompt slot. It can
+	// diverge from ConfiguredMode — e.g. a configured_mode=arg prompt
+	// that is oversized effectively becomes "nudge-fallback" or
+	// "hard-fail" depending on runtime support.
+	EffectiveMode string
+	// RawBytes and ArgvBytes are the prompt's raw and shellquote-encoded
+	// byte lengths, recorded whenever the oversized-prompt guard is
+	// evaluated (i.e. whenever the ACP/none-mode short-circuits don't
+	// apply). Zero when the guard never ran.
+	RawBytes  int
+	ArgvBytes int
 }
 
 // promptDeliverySupport classifies how a runtime can absorb a prompt that is
@@ -126,6 +146,9 @@ var errOversizedPromptUnsupportedRuntime = errors.New("startup prompt exceeds ar
 // Delivery mechanism, in precedence order:
 //   - ACP or a "none" prompt-mode provider: prepend the prompt to the nudge.
 //     Neither is argv-bound, so the size guard below never applies to them.
+//   - a runtime named in packRuntimes (pack-declared, exec-backed): the same
+//     nudge routing, at any prompt size below the oversized threshold and for
+//     any prompt mode, because the RPP start wire has no argv prompt slot.
 //   - flag prompt-mode with a configured flag: pass the prompt via argv suffix
 //     plus the provider's prompt flag.
 //   - default: pass the prompt as a quoted argv suffix.
@@ -144,12 +167,16 @@ var errOversizedPromptUnsupportedRuntime = errors.New("startup prompt exceeds ar
 // delivered/not-delivered.
 //
 // packRuntimes is the city's pack-declared runtime registry
-// (config.City.Runtimes), consulted only for the oversized-prompt guard's
-// promptDeliverySupportFor classification; nil is fine when runtimeName is a
-// builtin runtime. promptDelivery remains pure/I-O-free: no provider
-// construction, handshake, or subprocess spawn happens here.
+// (config.City.Runtimes), consulted for the oversized-prompt guard's
+// promptDeliverySupportFor classification and for the pack-declared nudge
+// routing above; nil is fine when runtimeName is a builtin runtime.
+// promptDelivery remains pure/I-O-free: no provider construction, handshake,
+// or subprocess spawn happens here.
 func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudge string, runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) (promptDeliveryResult, error) {
 	res := promptDeliveryResult{Nudge: nudge}
+	if rp != nil {
+		res.ConfiguredMode = rp.PromptMode
+	}
 	if prompt == "" {
 		return res, nil
 	}
@@ -157,14 +184,18 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 	case isACP:
 		res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 		res.Delivered = true
+		res.EffectiveMode = "acp"
 		return res, nil
 	case rp != nil && rp.PromptMode == "none":
 		res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 		res.Delivered = true
+		res.EffectiveMode = "none"
 		return res, nil
 	}
 
 	suffix := shellquote.Quote(prompt)
+	res.RawBytes = len(prompt)
+	res.ArgvBytes = len(suffix)
 	if len(prompt) >= maxPromptSuffixRawBytes || len(suffix) >= maxPromptSuffixQuotedBytes {
 		switch promptDeliverySupportFor(runtimeName, packRuntimes) {
 		case promptDeliverySupportArgvSafe:
@@ -175,18 +206,35 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 			res.Nudge = prependStartupPromptToNudge(prompt, nudge)
 			res.Delivered = true
 			res.OversizedFallback = true
+			res.EffectiveMode = "nudge-fallback"
 			return res, nil
 		default:
-			return promptDeliveryResult{}, fmt.Errorf(
+			res.EffectiveMode = "hard-fail"
+			return res, fmt.Errorf(
 				"%w: runtime %q, prompt %d raw bytes / %d argv-encoded bytes (limits: %d raw / %d argv-encoded)",
 				errOversizedPromptUnsupportedRuntime, runtimeName, len(prompt), len(suffix),
 				maxPromptSuffixRawBytes, maxPromptSuffixQuotedBytes)
 		}
 	}
 
+	// A pack-declared runtime is exec-backed over the RPP wire, whose start
+	// message carries only the nudge: PromptSuffix and PromptFlag have no slot
+	// and would be silently dropped whatever the agent's prompt mode resolved
+	// to (config.ResolveProvider defaults it to "arg" unconditionally). It
+	// sits after the size guard so an oversized prompt keeps its existing
+	// opt-in/hard-fail routing.
+	if _, packDeclared := packRuntimes[strings.TrimSpace(runtimeName)]; packDeclared {
+		res.Nudge = prependStartupPromptToNudge(prompt, nudge)
+		res.Delivered = true
+		res.EffectiveMode = "nudge"
+		return res, nil
+	}
+
 	res.PromptSuffix = suffix
 	res.Delivered = res.PromptSuffix != ""
+	res.EffectiveMode = "argv"
 	if rp != nil && rp.PromptMode == "flag" {
+		res.EffectiveMode = "flag"
 		if rp.PromptFlag != "" {
 			res.PromptFlag = rp.PromptFlag
 		} else {

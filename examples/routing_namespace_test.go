@@ -8,13 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
 	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
 )
 
 func TestShippedExamplesDoNotHardcodeShortRoutedToPools(t *testing.T) {
-	_, filename, _, _ := runtime.Caller(0)
-	root := filepath.Dir(filename)
+	root := bazeltest.OverrideRoot()
+	if root != "" {
+		root = filepath.Join(root, "examples")
+	} else {
+		_, filename, _, _ := runtime.Caller(0)
+		root = filepath.Dir(filename)
+	}
 	badRoutes := []string{
 		"gc.routed_to=dog",
 		"gc.routed_to=worker",
@@ -32,7 +39,15 @@ func TestShippedExamplesDoNotHardcodeShortRoutedToPools(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || strings.HasSuffix(path, "_test.go") {
+		if entry.IsDir() {
+			// Skip bazel's go_test staging directories (*_test_) and hidden
+			// entries; their contents are not shipped example sources.
+			if name := entry.Name(); strings.HasPrefix(name, ".") || strings.HasSuffix(name, "_test_") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test") {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -595,6 +610,9 @@ func TestT3BridgeGastownPreStartPassesDefaultBranch(t *testing.T) {
 
 func examplesRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "examples")
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
 }

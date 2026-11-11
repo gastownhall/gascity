@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type workflowEventProjection struct {
@@ -443,11 +444,12 @@ func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bo
 	}
 
 	matches := make([]beads.Bead, 0, 2)
-	for _, info := range workflowStores(state) {
-		if info.store == nil {
-			continue
-		}
-		bead, err := info.store.Get(subjectID)
+	// Every rig leg, retired or not: the subject may be rig WORK, which a
+	// relic-free rig still holds (S4b retires its leg only for graph rows).
+	for _, info := range workflowStoresIncludingRetiredRigs(state) {
+		// A residence probe over every workflowStores leg, in its plan role;
+		// only the owner hits.
+		bead, err := info.leg.Reader.Get(subjectID)
 		if err == nil {
 			matches = append(matches, bead)
 		}
@@ -467,20 +469,39 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 		return workflowStoreInfo{}, beads.Bead{}, false
 	}
 
-	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil {
-		root, ok := workflowRootInStore(info.store, rootID)
+	// gc.root_store_ref is the run's SCOPE, never its location (S4 §2.1). On a
+	// split city every new root lives in the graph binding whatever its scope,
+	// so the binding is probed FIRST: a rig-scoped root there must not be
+	// shadowed by the rig store the metadata names, and an id held by both (an
+	// import's copy before its clear) resolves to the binding's row, as every
+	// by-id read does. The store the metadata names is then probed as the
+	// relic leg — a pre-S4 rig tree — unless that rig is proven relic-free.
+	// Both probes name one store each and read it strictly, as they always
+	// have; the scan after them is the federation's.
+	st := state.Stores() // one epoch for the legs and the hint's lookup
+	legs, _ := workflowLegs(st, state.CityName(), workflowLegQuery{keepRigNamedLikeCity: true})
+	if info, ok := workflowGraphLeg(legs); ok {
+		if root, ok := workflowRootInStore(info.leg.Strict, rootID); ok {
+			return info, root, true
+		}
+	}
+	if info, ok := workflowLegNamed(st, legs, workflowRefFromMetadata(bead.Metadata[beadmeta.RootStoreRefMetadataKey])); ok {
+		root, ok := workflowRootInStore(info.leg.Strict, rootID)
 		if ok {
 			return info, root, true
 		}
 	}
 
+	cityName := workflowCityScopeRef(state.CityName())
 	matches := make([]workflowRootMatch, 0, 2)
-	for _, info := range workflowStores(state) {
-		if info.store == nil {
-			continue
+	for _, info := range legs {
+		if info.scopeKind == beadmeta.ScopeKindRig && info.scopeRef == cityName {
+			continue // workflowStores never reads a rig named like the city
 		}
-		root, ok := workflowRootInStore(info.store, rootID)
-		if ok {
+		// A residence probe over every workflowStores leg, in its plan role;
+		// only the owner hits. (The root_store_ref hint above names one store
+		// and is not.)
+		if root, ok := workflowRootInStore(info.leg.Reader, rootID); ok {
 			matches = append(matches, workflowRootMatch{info: info, root: root})
 		}
 	}
@@ -490,8 +511,30 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 	return workflowStoreInfo{}, beads.Bead{}, false
 }
 
-func workflowRootInStore(store beads.Store, rootID string) (beads.Bead, bool) {
-	root, err := store.Get(rootID)
+// workflowRefFromMetadata is a gc.root_store_ref value as the ref
+// workflowLegNamed matches: workflowStoreByRef's spelling, trimmed around
+// its colon, or "" for a value that names no store.
+func workflowRefFromMetadata(ref string) string {
+	kind, scopeRef, ok := strings.Cut(strings.TrimSpace(ref), ":")
+	scopeRef = strings.TrimSpace(scopeRef)
+	if !ok || scopeRef == "" {
+		return ""
+	}
+	return strings.TrimSpace(kind) + ":" + scopeRef
+}
+
+// workflowGraphLeg is the relocated graph binding's leg among legs (the
+// plan's Authority leg, which workflowLegs lists first), and false on a city
+// that relocates nothing.
+func workflowGraphLeg(legs []workflowStoreInfo) (workflowStoreInfo, bool) {
+	if len(legs) == 0 || legs[0].leg.Role != storeref.RoleAuthority {
+		return workflowStoreInfo{}, false
+	}
+	return legs[0], true
+}
+
+func workflowRootInStore(leg beads.FederatedReader, rootID string) (beads.Bead, bool) {
+	root, err := leg.Get(rootID)
 	if err != nil || !isWorkflowRoot(root) {
 		return beads.Bead{}, false
 	}

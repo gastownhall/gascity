@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -79,7 +85,7 @@ STUB_ENV = "present"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testActorIn(t, session.ActorAgent, cityDir)); err != nil {
 		t.Fatalf("handle.Start: %v", err)
 	}
 
@@ -1299,7 +1305,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, cityDir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1309,8 +1315,9 @@ session_id_flag = "--session-id"
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("handle.Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
 	}
 
 	start := sp.LastStartConfig(info.SessionName)
@@ -1353,6 +1360,10 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
@@ -1366,12 +1377,27 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionTargetWithConfig: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
-	if stop := sp.Calls[len(sp.Calls)-1]; stop.Method != "Stop" || stop.Name != info.SessionName {
-		t.Fatalf("last runtime call = %#v, want Stop %q", stop, info.SessionName)
+	// The live event recorder now wired into the CLI factory (#5859) makes
+	// Kill's worker.operation telemetry re-enrich session identity after the
+	// runtime mutation, which issues a trailing IsRunning probe — so the Stop
+	// call is no longer guaranteed to be last. Find it instead of assuming it.
+	stop, ok := lastRuntimeCallByMethod(sp.Calls, "Stop")
+	if !ok || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want a Stop %q", sp.Calls, info.SessionName)
 	}
+}
+
+// lastRuntimeCallByMethod returns the last call matching method, if any.
+func lastRuntimeCallByMethod(calls []runtime.Call, method string) (runtime.Call, bool) {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].Method == method {
+			return calls[i], true
+		}
+	}
+	return runtime.Call{}, false
 }
 
 // TestWorkerObserveSessionTargetWithConfigDoesNotFetchSessionBeadMoreThanTwice
@@ -1406,6 +1432,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	backing = cliSessionStore(backing, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -1504,6 +1534,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -1514,9 +1548,12 @@ command = "/bin/echo"
 	if err := workerKillSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName); err != nil {
 		t.Fatalf("workerKillSessionTargetWithConfig: %v", err)
 	}
-	last := sp.Calls[len(sp.Calls)-1]
-	if last.Method != "Stop" || last.Name != info.SessionName {
-		t.Fatalf("last runtime call = %#v, want Stop %q", last, info.SessionName)
+	// See TestWorkerHandleForSessionTargetWithConfigResolvesSessionName: the
+	// live recorder wired into the CLI factory (#5859) adds a trailing
+	// IsRunning enrichment probe after Kill, so Stop is no longer last.
+	stop, ok := lastRuntimeCallByMethod(sp.Calls, "Stop")
+	if !ok || stop.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want a Stop %q", sp.Calls, info.SessionName)
 	}
 }
 
@@ -2640,5 +2677,239 @@ func assertControllerTokenWithheld(t *testing.T, name string, env map[string]str
 	}
 	if val != "" {
 		t.Errorf("%s[%s] = %q, want empty", name, convergence.TokenEnvVar, val)
+	}
+}
+
+// TestWorkerFactoryWithConfigRecordsWorkerOperationToCityEventLog is the
+// assertion #5859 is about: the CLI-built worker.Factory carries a live event
+// recorder, so a lifecycle op driven through it lands a worker.operation
+// record in <city>/.gc/events.jsonl. Before the recorder was wired in, the
+// factory held none and the record was dropped on the floor.
+func TestWorkerFactoryWithConfigRecordsWorkerOperationToCityEventLog(t *testing.T) {
+	resetCLIFactoryRecorders(t)
+	t.Setenv("GC_EVENTS", "")
+
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template:  "worker",
+		Title:     "Probe",
+		Command:   "stub",
+		WorkDir:   t.TempDir(),
+		Provider:  "stub",
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	factory, err := workerFactoryWithConfig(cityDir, store, sp, cfg)
+	if err != nil {
+		t.Fatalf("workerFactoryWithConfig: %v", err)
+	}
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("factory.SessionByID: %v", err)
+	}
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Kill: %v", err)
+	}
+
+	eventsPath := filepath.Join(cityDir, ".gc", "events.jsonl")
+	raw, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", eventsPath, err)
+	}
+	var found *events.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var e events.Event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("unmarshaling %q: %v", line, err)
+		}
+		if e.Type == events.WorkerOperation {
+			found = &e
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %q record in %s; log = %s", events.WorkerOperation, eventsPath, string(raw))
+	}
+	if !strings.Contains(string(found.Payload), info.SessionName) {
+		t.Fatalf("%q payload = %s, want it to name session %q", events.WorkerOperation, string(found.Payload), info.SessionName)
+	}
+}
+
+// An attachment probe that cannot tell answers attached with an unavailable
+// error, so the awake input and the detached-at clock defer instead of reading
+// "detached". A probe error that does not itself wrap the sentinel is still
+// "unknown".
+func TestWorkerSessionTargetAttachedReportsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		probeErr error
+	}{
+		{name: "unavailable", probeErr: fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)},
+		{name: "untyped", probeErr: fmt.Errorf("attach probe: unparsable client count")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start(worker): %v", err)
+			}
+			sp.AttachedErrors["worker"] = tc.probeErr
+
+			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, "worker")
+			if !attached || !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, tc.probeErr) {
+				t.Fatalf("workerSessionTargetAttachedWithConfig = (%v, %v), want (true, unavailable wrapping %v)", attached, err, tc.probeErr)
+			}
+		})
+	}
+}
+
+// attachmentHolds owns the classification every destructive gate shares: only
+// runtime.ErrSessionNotFound reads as "not attached". An unavailable probe
+// whose text happens to match runtime.IsSessionGone still holds.
+func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		attached  bool
+		probeErr  error
+		wantHolds bool
+		wantErr   bool
+	}{
+		{name: "attached", attached: true, wantHolds: true},
+		{name: "confirmed detached"},
+		{name: "session not found", probeErr: fmt.Errorf("probe: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable", probeErr: fmt.Errorf("probe timed out: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "unavailable text that IsSessionGone matches", probeErr: fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "untyped", probeErr: errors.New("probe: unparsable client count"), wantHolds: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("worker", tc.attached)
+			if tc.probeErr != nil {
+				sp.AttachedErrors["worker"] = tc.probeErr
+			}
+
+			holds, err := attachmentHolds(sp, "worker")
+			if holds != tc.wantHolds || (err != nil) != tc.wantErr {
+				t.Fatalf("attachmentHolds = (%v, %v), want holds=%v err=%v", holds, err, tc.wantHolds, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+		})
+	}
+}
+
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch is the
+// #8539 end-to-end guard: a bead reconciled from a provider with an explicit
+// resume command to one that resumes by flag/style must resolve a worker
+// runtime with an EMPTY resume command. Pre-fix, the reconciler left the old
+// provider's resume_command pinned on the bead, and the resolver's fallback
+// (firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)) replayed
+// the old provider's command on every resume.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "true old-exec"})
+
+	// Tick 1: the bead is created on a provider whose resume story is an
+	// explicit resume command alone.
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName:     "worker",
+			Command:          "true old-exec",
+			ResolvedProvider: &config.ResolvedProvider{Name: "oldprov", ResumeCommand: "true old-resume {{.SessionKey}}"},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, store)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(created))
+	}
+	if got := created[0].Metadata["resume_command"]; got == "" {
+		t.Fatal("tick 1: resume_command was not stamped at creation")
+	}
+
+	// Tick 2: the agent's provider becomes one that resumes by flag/style
+	// with no resume command; reconciliation clears the stale command.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "true new-exec",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "newprov", ResumeFlag: "--continue", ResumeStyle: "flag",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, store)[0].Metadata["resume_command"]; got != "" {
+		t.Fatalf("tick 2: reconciled resume_command = %q, want empty", got)
+	}
+
+	// Reread the refreshed session information and resolve the runtime from
+	// it, as the resume path does.
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(created[0].ID)
+	if err != nil {
+		t.Fatalf("rereading session %s: %v", created[0].ID, err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "newprov"}},
+		Providers: map[string]config.ProviderSpec{
+			"newprov": {Command: "true", Args: []string{"new-exec"}, ResumeFlag: "--continue", ResumeStyle: "flag"},
+		},
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfig("", cfg, info, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := resolved.Resume.ResumeCommand; got != "" {
+		t.Fatalf("Resume.ResumeCommand = %q, want empty (the stale oldprov command must not survive the switch)", got)
+	}
+	if got := resolved.Resume.ResumeFlag; got != "--continue" {
+		t.Fatalf("Resume.ResumeFlag = %q, want --continue", got)
+	}
+	if got := resolved.Resume.ResumeStyle; got != "flag" {
+		t.Fatalf("Resume.ResumeStyle = %q, want flag", got)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }

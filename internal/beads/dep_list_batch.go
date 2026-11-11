@@ -14,12 +14,12 @@ type DependencyBatchLister interface {
 	// DepListBatch returns each anchor's DOWN edges, keyed by the anchor id as
 	// the caller spelled it.
 	//
-	// A MISSING ANCHOR GETS NO ENTRY. DepList answers ErrNotFound for an anchor
-	// that is not there; a batch cannot, because failing the call for one absent
-	// id would discard the answers for every id that was found. An anchor that
-	// IS held and has no edges gets an entry carrying an empty slice, so the two
-	// cases stay distinguishable — but presence in this map is not a portable
-	// existence check across store types.
+	// A MISSING ANCHOR GETS NO ENTRY. DepList answers an anchor that is not
+	// there with no edges, the same answer an edge-free anchor gets; a batch is
+	// keyed by anchor, so it can keep the two apart. An anchor that IS held and
+	// has no edges gets an entry carrying an empty slice, so the two cases stay
+	// distinguishable — but presence in this map is not a portable existence
+	// check across store types.
 	//
 	// A FAILED READ RETURNS NO MAP. Implementations return a nil map alongside
 	// their error rather than the partial answer, because a caller that walks a
@@ -50,7 +50,12 @@ var ErrDepListBatchUnsupported = errors.New("batched dep-edge read unsupported b
 // that forwards the capability but is backed by a store without it reports
 // "unsupported" through one path rather than by returning an empty answer that
 // reads as a graph with no edges.
-func DepListBatchFor(store Store) (DependencyBatchLister, bool) {
-	batch, ok := store.(DependencyBatchLister)
+//
+// It sees through class handles: a handle answers with its store's batch. It
+// walks the class layers itself rather than through As, because As answers
+// this capability by calling here; skipping a class guard is safe because the
+// batch is a class-neutral read (passesClassGate).
+func DepListBatchFor(store StoreReader) (DependencyBatchLister, bool) {
+	batch, ok := physicalStore(store).(DependencyBatchLister)
 	return batch, ok
 }

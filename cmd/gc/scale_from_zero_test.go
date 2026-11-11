@@ -615,7 +615,7 @@ func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCan
 // answers 0 stays asleep even though routed work is sitting there ready.
 //
 // Without the opt-in, the cold-wake probe merges max(custom 0, probe 1) and the
-// pool is re-woken every tick — the lookout/hand loop of 2026-08-31, where a
+// pool is re-woken every tick — the production loop this guards against, where a
 // parked epic stayed routed and unassigned while its review was out and the
 // check correctly withheld demand the probe then supplied anyway.
 func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckZeroStaysAsleep(t *testing.T) {

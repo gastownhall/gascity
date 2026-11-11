@@ -1,0 +1,13 @@
+⏺ I have a few questions before I
+plan this.
+────────────────────────────
+ ←  ☐ Scope  ✔ Submit  →
+Which scope should the change
+cover?
+❯ 1. Small
+     Only the bug fix
+  2. Medium
+────────────────────────────
+  5. Chat about this
+Enter to select · Tab/Arrow keys
+to navigate · Esc to cancel
