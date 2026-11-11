@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -18,6 +19,11 @@ import (
 // route target, but the reconciler counts zero demand for it, so a pool with
 // no other work never spawns a session. It is report-only: closing or
 // re-materializing the bead is a disposition decision, not a mechanical fix.
+//
+// It reads the city store, every non-suspended rig store, and, on a split-storage
+// city, the relocated graph binding, where workflow beads live and no scope store
+// reaches. A gate is exempt: it is a wait condition parked on its owner, so a
+// gate routed to a pool is not reported.
 type unreachableRoutedWorkCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -47,8 +53,11 @@ func (c *unreachableRoutedWorkCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 			"fix bead store access, then rerun gc doctor",
 			details)
 	}
-	return warnCheck(c.Name(),
-		fmt.Sprintf("%d routed bead(s) can never wake their route target; %d scope(s) skipped", len(findings), len(skipped)),
+	message := fmt.Sprintf("%d routed bead(s) can never wake their route target", len(findings))
+	if len(skipped) > 0 {
+		message += fmt.Sprintf("; %d scope(s) skipped", len(skipped))
+	}
+	return warnCheck(c.Name(), message,
 		"close each stale bead, or re-create the work as an actionable bead such as a vapor/root-only wisp; gc doctor --fix does not change them",
 		details)
 }
@@ -85,20 +94,39 @@ func (c *unreachableRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings
 			skipped = append(skipped, fmt.Sprintf("%s skipped: reading beads: %v", sc.label, err))
 			continue
 		}
-		for _, b := range items {
-			route := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			// A gate is a deliberate wait condition parked on its owner, never
-			// work a pool is expected to pick up.
-			if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" || route == "" ||
-				b.Type == "gate" || !beads.IsReadyExcludedType(b.Type) {
-				continue
-			}
-			findings = append(findings, fmt.Sprintf(
-				"%s bead %s (type %s) is routed to %q: the controller's demand probe cannot see type %s, so %q will never be woken by it even though gc hook displays it",
-				sc.label, b.ID, b.Type, route, b.Type, route))
+		findings = append(findings, unreachableRoutedFindings(sc.label, items)...)
+	}
+	// On a split-storage city the workflow-class beads live in the relocated graph
+	// binding, which none of the scope stores above reaches.
+	if graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every routed workflow bead wherever it lives; the binding is the one scope the work-scope walk above cannot reach
+		const label = "graph binding"
+		switch items, err := graph.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth}); {
+		case err != nil:
+			skipped = append(skipped, fmt.Sprintf("%s skipped: reading beads: %v", label, err))
+		default:
+			findings = append(findings, unreachableRoutedFindings(label, items)...)
 		}
 	}
 	return findings, skipped
+}
+
+// unreachableRoutedFindings returns one finding per open, unassigned bead in
+// items that is routed to a target and whose type the demand probe excludes.
+func unreachableRoutedFindings(label string, items []beads.Bead) []string {
+	var findings []string
+	for _, b := range items {
+		route := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
+		// A gate is a deliberate wait condition parked on its owner, never
+		// work a pool is expected to pick up.
+		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" || route == "" ||
+			b.Type == "gate" || !beads.IsReadyExcludedType(b.Type) {
+			continue
+		}
+		findings = append(findings, fmt.Sprintf(
+			"%s bead %s (type %s) is routed to %q: the controller's demand probe cannot see type %s, so %q will never be woken by it even though gc hook displays it",
+			label, b.ID, b.Type, route, b.Type, route))
+	}
+	return findings
 }
 
 func (c *unreachableRoutedWorkCheck) CanFix() bool                     { return false }
