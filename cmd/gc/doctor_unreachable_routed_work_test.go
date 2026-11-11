@@ -99,3 +99,47 @@ func TestUnreachableRoutedWorkReportsUnreadableStore(t *testing.T) {
 		t.Fatalf("want a skipped-scope warning naming the error, got %#v", result)
 	}
 }
+
+// TestUnreachableRoutedWorkScansTheGraphBindingOnASplitCity pins the split-storage
+// blind spot: on a city with a [storage] section, workflow-class beads live in the
+// relocated graph binding, which no scope store reaches, so a routed step stranded
+// there was invisible to the check even though the wake path cannot see it either.
+func TestUnreachableRoutedWorkScansTheGraphBindingOnASplitCity(t *testing.T) {
+	cityDir := t.TempDir()
+	binding := sessionSplitRoutes(t, cityDir)
+	if _, err := binding.Create(beads.Bead{
+		Title:    "stranded step",
+		Type:     "step",
+		Metadata: map[string]string{"gc.routed_to": "bd.dog", "gc.kind": "workflow"},
+	}); err != nil {
+		t.Fatalf("seeding the routed step in the graph binding: %v", err)
+	}
+	result := newUnreachableRoutedWorkCheck(&config.City{}, cityDir, func(path string, _ beads.ListQuery) ([]beads.Bead, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return nil, nil
+	}).Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for a routed step in the graph binding: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{"graph binding bead ", "(type step) is routed to \"bd.dog\""} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+}
+
+// TestUnreachableRoutedWorkOmitsSkipSuffixWhenNothingWasSkipped keeps the summary
+// from reporting "0 scope(s) skipped" on a run that read every scope.
+func TestUnreachableRoutedWorkOmitsSkipSuffixWhenNothingWasSkipped(t *testing.T) {
+	result := runUnreachableRoutedWork(t,
+		[]beads.Bead{routedBead("CITY-1", "step", "open", "", "bd.dog")}, nil)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	if strings.Contains(result.Message, "skipped") {
+		t.Fatalf("message = %q, want no skip suffix when no scope was skipped", result.Message)
+	}
+}
