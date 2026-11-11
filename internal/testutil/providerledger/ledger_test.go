@@ -679,6 +679,58 @@ func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsHybridCompositionToLocalRoute(t *testing.T) {
+	var proof *ProofRef
+	var wrapper *ContractClaim
+
+	for _, entry := range Catalog() {
+		for i, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/hybrid", "New"):
+				if entry.ID != "runtime.composition.hybrid" {
+					t.Errorf("hybrid.New is claimed by %q, want runtime.composition.hybrid", entry.ID)
+				}
+				if claim.Disposition != DispositionProved {
+					t.Errorf("hybrid composition disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				proof = claim.Proof
+			case repoSymbol("cmd/gc", "newHybridProvider"):
+				wrapper = &entry.Claims[i]
+			}
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("hybrid.New proof is missing")
+	}
+	if proof.File != "internal/runtime/hybrid/conformance_test.go" || proof.Test != "TestHybridConformance" {
+		t.Errorf("hybrid.New proof = %s#%s, want hybrid conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("hybrid.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory routes every session to the local backend, so
+	// the shared contract never reaches the remote route; the scope keeps the
+	// rendered ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests"; got != want {
+		t.Errorf("hybrid.New proof scope = %q, want %q", got, want)
+	}
+
+	// cmd/gc.newHybridProvider builds the K8s backend before it consults its
+	// routing predicate, so the contract cannot run against the wrapper
+	// without a Kubernetes client configuration. The proof above must not be
+	// read as covering it: the wrapper stays waived, with its reason on record.
+	if wrapper == nil {
+		t.Fatal("cmd/gc.newHybridProvider claim is missing")
+	}
+	if wrapper.Disposition != DispositionWaived {
+		t.Errorf("cmd/gc.newHybridProvider disposition = %q, want %q", wrapper.Disposition, DispositionWaived)
+	}
+	if wrapper.Waiver == nil || !strings.Contains(wrapper.Waiver.Reason, "K8s backend before") {
+		t.Errorf("cmd/gc.newHybridProvider waiver = %+v, want a reason naming the K8s-before-routing construction order", wrapper.Waiver)
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesUsesDeclaredPortIdentity(t *testing.T) {
 	dir := writeRuntimeDoubleFixture(t, map[string]string{
 		"runtime.go": `package runtime
@@ -1681,7 +1733,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if second[4].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[4].Claims[0].Waiver.Owner)
 	}
-	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
+	if second[len(second)-1].Source.Function != "newHybridProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
 	}
 }
