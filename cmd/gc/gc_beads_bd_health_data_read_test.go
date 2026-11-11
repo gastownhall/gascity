@@ -124,3 +124,38 @@ printf 'err=[%s]\nwarn=[%s]\nready=[%s]\n' "$GC_HEALTH_DATA_READ_ERROR" "$GC_HEA
 		}
 	}
 }
+
+// A data-read failure must reach healthBeadsProvider's caller. Today health
+// fails, recover runs and, when it succeeds, the original health error is
+// dropped: the helper's recovery path reports success without re-running the
+// data-read probe, so unreadable data looked healthy. A restart cannot restore a
+// lost chunk, so a failure carrying the probe's marker is returned as it is and
+// recover is not started (the breaker-open skip works the same way).
+//
+// The fixture cannot let recover finish: a successful publish needs a live
+// managed dolt, so only the skip is observable here. A re-check after recover
+// would still need its own test against a live server.
+func TestHealthBeadsProviderReturnsDataReadFailureWithoutRecover(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	const text = "dolt data read probe failed: gascity: empty chunk returned from ChunkStore"
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, text)
+
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	err := healthBeadsProvider(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "empty chunk returned from ChunkStore") {
+		t.Fatalf("healthBeadsProvider() = %v, want the original chunk text", err)
+	}
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	if got := strings.Fields(string(ops)); len(got) != 1 || got[0] != "health" {
+		t.Fatalf("provider ops = %v, want only health (no recover for a data-read failure)", got)
+	}
+	if _, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
+		t.Fatalf("a data-read failure must not start the recover cooldown for %q", cityPath)
+	}
+}

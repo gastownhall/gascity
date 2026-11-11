@@ -270,3 +270,57 @@ func stubManagedDoltHealthyServer(t *testing.T) {
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "1", nil }
 }
+
+// "root hash doesn't exist" is the recorded signature of the damaged store
+// (gm.damaged-20260907T201522): the table's chunks are gone. It carries the
+// substring "doesn't exist", so a classifier keyed on that phrase alone reads
+// data loss as a healthy absent table.
+func TestManagedDoltDataReadProbeRootHashMissingIsNotHealthy(t *testing.T) {
+	for _, msg := range []string{
+		"root hash doesn't exist: 46kuq3j8iokgq0c3gmjd9dfmh4pnopgc",
+		"Error 1105: root hash doesn't exist: 46kuq3j8iokgq0c3gmjd9dfmh4pnopgc",
+	} {
+		ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+			func(string, []string) error { return errors.New(msg) }, nil)
+		got := managedDoltDataReadProbeWith(ops)
+		if !strings.Contains(got.Err, "root hash doesn't exist") {
+			t.Errorf("%q: Err = %q (warning %q), want a failure carrying the text", msg, got.Err, got.Warning)
+		}
+	}
+}
+
+// Only dolt's own absent-table and absent-database forms are healthy. Any other
+// "doesn't exist" proves nothing about the data, so it is inconclusive.
+func TestManagedDoltDataReadProbeUnrelatedDoesNotExistIsInconclusive(t *testing.T) {
+	for _, msg := range []string{
+		"journal file doesn't exist",
+		"manifest does not exist",
+	} {
+		ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+			func(string, []string) error { return errors.New(msg) }, nil)
+		got := managedDoltDataReadProbeWith(ops)
+		if got.Err != "" || !strings.Contains(got.Warning, msg) {
+			t.Errorf("%q: probe = %+v, want an inconclusive warning carrying the text", msg, got)
+		}
+	}
+}
+
+// The CLI runner returns the whole combined output, so earlier statements' rows
+// precede the error. Only the error line may reach the report, and a long dump
+// must be bounded.
+func TestManagedDoltDataReadProbeReportsOnlyErrorLinesBounded(t *testing.T) {
+	rows := "id\n--\n1\n2\n3\n"
+	ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+		func(string, []string) error { return errors.New(rows + "Error 1105: " + testEmptyChunkErr) }, nil)
+	got := managedDoltDataReadProbeWith(ops)
+	if !strings.Contains(got.Err, testEmptyChunkErr) || strings.Contains(got.Err, "--") {
+		t.Errorf("Err = %q, want the error line only, without the preceding rows", got.Err)
+	}
+	long := "Error 1105: " + testEmptyChunkErr + strings.Repeat(" padding", 500)
+	ops = dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+		func(string, []string) error { return errors.New(long) }, nil)
+	got = managedDoltDataReadProbeWith(ops)
+	if !strings.Contains(got.Err, testEmptyChunkErr) || len(got.Err) > 600 {
+		t.Errorf("len(Err) = %d, want the signature kept and the text bounded to 600 bytes", len(got.Err))
+	}
+}
