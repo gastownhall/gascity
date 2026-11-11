@@ -16,6 +16,7 @@ import (
 type fakeDoltOps struct {
 	liveSessions int
 	liveErr      error
+	liveDelay    time.Duration
 
 	execGCErr   error
 	execGCDelay time.Duration
@@ -31,10 +32,17 @@ type fakeDoltOps struct {
 	calls      *[]string
 }
 
-func (f *fakeDoltOps) LiveSessions(context.Context) (int, error) {
+func (f *fakeDoltOps) LiveSessions(ctx context.Context) (int, error) {
 	f.probeCalls++
 	if f.calls != nil {
 		*f.calls = append(*f.calls, "gc.probe")
+	}
+	if f.liveDelay > 0 {
+		select {
+		case <-time.After(f.liveDelay):
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
 	return f.liveSessions, f.liveErr
 }
@@ -305,5 +313,30 @@ func TestRunDoltGC_ProbeError_FailsClosedWithStageGC(t *testing.T) {
 	}
 	if !ops.closed {
 		t.Errorf("ops.Close not called on probe-error path — connection would leak")
+	}
+}
+
+func TestRunDoltGC_ProbeDeadline_FailsClosedWithStageGC(t *testing.T) {
+	t.Parallel()
+	ops := &fakeDoltOps{liveDelay: 100 * time.Millisecond, smokeCount: 5}
+	loop := newGCTestLoop(t, config.DoltMaintenance{Enabled: true, GCTimeout: "1s"}, ops)
+	loop.smokeTimeout = 10 * time.Millisecond
+
+	err := loop.runDoltGC(context.Background())
+	var me *MaintenanceError
+	if !errors.As(err, &me) {
+		t.Fatalf("runDoltGC = %v; want *MaintenanceError (fail-closed on probe deadline)", err)
+	}
+	if me.Stage != "gc" {
+		t.Errorf("Stage = %q; want %q", me.Stage, "gc")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v; want it to wrap context.DeadlineExceeded", err)
+	}
+	if ops.gcCalls != 0 {
+		t.Errorf("ExecGC called %d times after a probe deadline overrun; want 0", ops.gcCalls)
+	}
+	if !ops.closed {
+		t.Errorf("ops.Close not called on probe-deadline path — connection would leak")
 	}
 }

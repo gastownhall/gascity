@@ -831,7 +831,8 @@ var errGCSkippedLiveSessions = errors.New("gc skipped: live sessions on target d
 // can destroy them (ga-vrq5pu). A probe error fails closed rather than GCing
 // blind. The probe is a point-in-time check, not a lock: a session can connect
 // and write between the probe and CALL DOLT_GC(), so the gate narrows the
-// hazard window and does not make GC safe.
+// hazard window and does not make GC safe. The live-session probe shares the
+// smoke-test deadline, and a deadline overrun fails closed as Stage "gc".
 //
 // When openDoltOps is nil, runDoltGC returns nil.
 func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
@@ -844,7 +845,9 @@ func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 	}
 	defer ops.Close() //nolint:errcheck // best-effort cleanup; underlying pool manages lifecycle
 
-	live, err := ops.LiveSessions(ctx)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, m.smokeTimeout)
+	live, err := ops.LiveSessions(probeCtx)
+	cancelProbe()
 	if err != nil {
 		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("probe live sessions: %w", err)}
 	}
