@@ -1838,6 +1838,19 @@ A ledger that still carries a leftover per-row count from before policy version
 3 fails to parse with a message naming the key. Delete the key and regenerate;
 the count it held now lives in the counts file.
 
+Every pull request gets a census growth report, produced by
+`scripts/census-growth.go` from the base and head copies of the counts file and
+`test/test-resources.toml` and written to the job summary (same-repo pull
+requests also get one updatable comment). For each counted policy row it shows
+the aggregate and Small calls and files before and after, then the changed
+records, and labels a decrease matched by an equal increase of the same resource
+elsewhere as moved. **GROWTH** means a figure increased or a record was added;
+**POLICY-ROW** means any policy row was added, removed or changed, including
+`expires` and `owner_bead`, which the counts do not cover. The workflow is
+report-only: it never fails a run for growth and decides nothing. To make it blocking, add
+`--enforce` to the command in `.github/workflows/census-growth.yml`; a maintainer
+then clears a flagged pull request with the `ledger-growth-approved` label.
+
 ## Five test categories, clear boundaries
 
 ### 1. Unit tests (`*_test.go` next to the code)

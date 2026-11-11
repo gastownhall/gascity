@@ -1,0 +1,76 @@
+name: Census growth report
+
+# Report-only: shows how a pull request moves the resource-census counts file
+# (test/test-resource-counts.toml) and the policy rows (test/test-resources.toml)
+# so a ceiling raise is visible to reviewers. To make growth blocking, add
+# --enforce to the command below; ledger-growth-approved then clears it.
+# scripts/ and .github/workflows/ need admin review (CODEOWNERS).
+
+on:
+  pull_request:
+    branches: [main, 'hotfix/**', 'release/**']
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: census-growth-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Report census growth
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Compare with base revision
+        env:
+          APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'ledger-growth-approved') }}
+        run: |
+          base="$RUNNER_TEMP/census-base"
+          mkdir -p "$base"
+          # A base that predates a file yields an empty copy; the report says so.
+          git show ${{ github.event.pull_request.base.sha }}:test/test-resource-counts.toml > "$base/counts.toml" 2>/dev/null || : > "$base/counts.toml"
+          git show ${{ github.event.pull_request.base.sha }}:test/test-resources.toml > "$base/policy.toml" 2>/dev/null || : > "$base/policy.toml"
+          approved=""
+          if [ "$APPROVED" = "true" ]; then approved="--approved"; fi
+          status=0
+          go run scripts/census-growth.go \
+            --base-counts "$base/counts.toml" --head-counts test/test-resource-counts.toml \
+            --base-policy "$base/policy.toml" --head-policy test/test-resources.toml \
+            $approved > "$RUNNER_TEMP/census-growth.md" || status=$?
+          cat "$RUNNER_TEMP/census-growth.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      # Fork PRs get a read-only token and cannot comment: their report is the
+      # job summary above.
+      - name: Update sticky comment
+        if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MARKER: '<!-- census-growth-report -->'
+        run: |
+          report="$RUNNER_TEMP/census-growth.md"
+          [ -s "$report" ] || exit 0
+          id=$(gh api "repos/$REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\"))][0].id // empty" | head -n 1)
+          # Stay quiet on a clean PR, but still refresh a comment that already exists.
+          if [ -z "$id" ] && ! grep -qE 'GROWTH|POLICY-ROW' "$report"; then exit 0; fi
+          if [ -n "$id" ]; then
+            jq -Rs '{body: .}' "$report" | gh api --method PATCH "repos/$REPOSITORY/issues/comments/$id" --input - > /dev/null
+          else
+            jq -Rs '{body: .}' "$report" | gh api --method POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" --input - > /dev/null
+          fi

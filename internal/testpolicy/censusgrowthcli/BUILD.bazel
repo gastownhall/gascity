@@ -49,4 +49,5 @@ go_library(
     srcs = ["run.go"],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/censusgrowthcli",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/testpolicy/censusgrowth"],
 )
