@@ -186,6 +186,48 @@ func TestIsReadyCandidate(t *testing.T) {
 	}
 }
 
+// TestIsReadyCandidateForTierRecordedStatus pins that a row whose store
+// recorded a status bd ready withholds (blocked, hooked, pinned) is not a ready
+// candidate in any tier, though Status folds it to "open". "review" is a
+// custom-status residual the predicate deliberately leaves alone: bd ready
+// admits custom statuses in the active category, so only the three built-in
+// non-active statuses may be excluded (ga-1qz2dic).
+func TestIsReadyCandidateForTierRecordedStatus(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tiers := []struct {
+		name string
+		tier TierMode
+		row  Bead
+	}{
+		{"TierIssues", TierIssues, Bead{Status: "open", Type: "task"}},
+		{"TierWisps", TierWisps, Bead{Status: "open", Type: "task", Ephemeral: true}},
+		{"TierBoth", TierBoth, Bead{Status: "open", Type: "task"}},
+	}
+	statuses := []struct {
+		source string
+		want   bool
+	}{
+		{"blocked", false},
+		{"hooked", false},
+		{"pinned", false},
+		{"", true},
+		{"open", true},
+		{"in_progress", true},
+		{"review", true},
+	}
+	for _, tier := range tiers {
+		for _, st := range statuses {
+			t.Run(tier.name+"/"+st.source, func(t *testing.T) {
+				row := tier.row
+				row.SourceStatus = st.source
+				if got := IsReadyCandidateForTier(row, now, tier.tier); got != st.want {
+					t.Fatalf("IsReadyCandidateForTier(SourceStatus %q, %s) = %v, want %v", st.source, tier.name, got, st.want)
+				}
+			})
+		}
+	}
+}
+
 // TestDependencySatisfied pins the exact truth table a blocking dependency
 // must satisfy before its dependent can be considered ready: a dependency
 // that is still open never satisfies (regardless of any work_outcome value

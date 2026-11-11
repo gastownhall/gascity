@@ -456,6 +456,40 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead(t 
 	}
 }
 
+// TestFilterAssignedWorkBeadsForPoolDemandDropsBdBlockedRoutedBead probes
+// ga-1qz2dic ruling R6: bd records the routed bead blocked, which the store
+// folds to status open with the raw status in SourceStatus. bd ready (the pool
+// claim query) hides the row, so pool demand must not request a worker for it.
+func TestFilterAssignedWorkBeadsForPoolDemandDropsBdBlockedRoutedBead(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	row := func(sourceStatus string) beads.Bead {
+		return beads.Bead{
+			ID:           "routed-work",
+			Status:       "open",
+			Type:         "task",
+			Assignee:     "worker",
+			SourceStatus: sourceStatus,
+			Metadata:     map[string]string{"gc.routed_to": "worker"},
+		}
+	}
+	demandRequests := func(work []beads.Bead) []SessionRequest {
+		filtered := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, make([]string, len(work)))
+		var requests []SessionRequest
+		for _, ds := range ComputePoolDesiredStates(cfg, filtered, nil, nil) {
+			requests = append(requests, ds.Requests...)
+		}
+		return requests
+	}
+
+	// Control: the same routed row recorded open is demand.
+	if got := demandRequests([]beads.Bead{row("open")}); len(got) != 1 {
+		t.Fatalf("open row requests = %#v, want one (control)", got)
+	}
+	if got := demandRequests([]beads.Bead{row("blocked")}); len(got) != 0 {
+		t.Fatalf("blocked row requests = %#v, want none: no worker can claim a row bd ready hides", got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

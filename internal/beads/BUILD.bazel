@@ -89,6 +89,7 @@ go_test(
         "caching_store_batch_reads_test.go",
         "caching_store_batch_test.go",
         "caching_store_binding_test.go",
+        "caching_store_blocked_refresh_internal_test.go",
         "caching_store_cadence_internal_test.go",
         "caching_store_change_source_test.go",
         "caching_store_claim_internal_test.go",
