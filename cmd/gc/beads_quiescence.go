@@ -181,6 +181,16 @@ func (cr *CityRuntime) tickRetireSuspendedRigScopes(p *tickPass) bool {
 				return false
 			}
 		}
+		// A wisp GC purge runs off the tick on its own lane (wisp_gc_lane.go)
+		// and registers itself as store work before its store snapshot, so a
+		// suspended rig's sessions can read drained while a purge is still
+		// reading the rig's store through its legs (wispGCLegs). Hold the pair
+		// until the work settles: no store read restarts a pair being torn
+		// down. The two-tick settling rule in retireSuspendedScopes stays the
+		// authority for when the pair then actually stops.
+		if cr.cs.storeWorkInFlight() {
+			return false
+		}
 		return true
 	}
 	cr.retireSuspendedScopes(p.ctx, suspended.withoutCity(), drained)

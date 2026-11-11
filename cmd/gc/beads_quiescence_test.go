@@ -424,6 +424,43 @@ func TestBlockedRepairSkipsSuspendedScopesAndRunsOnResume(t *testing.T) {
 	}
 }
 
+// A wisp GC purge runs off the tick on its own lane (wisp_gc_lane.go) and
+// registers itself as store work — controllerState.beginStoreWork — before
+// its store snapshot. A suspended rig's sessions can read drained while the
+// purge is still reading the rig's store through its legs, and stopping the
+// pair under that read would restart it with the purge's next read, so the
+// rig path holds the retire until the work settles — the same signal the
+// city path has held on since the autoclose-run fix
+// (TestBeadsQuiescenceRetiresOnlyAfterInFlightStoreWorkFinishes).
+func TestRetireSuspendedRigScopeHoldsWhileStoreWorkReads(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+
+	end := cr.cs.beginStoreWork() // the purge's registration, wispGCLanePass
+	cr.tickRetireSuspendedRigScopes(p)
+	cr.tickRetireSuspendedRigScopes(p)
+	cr.tickRetireSuspendedRigScopes(p)
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("the suspended rig's pair was stopped while a purge was still reading: %q", ops)
+	}
+
+	end()
+	cr.tickRetireSuspendedRigScopes(p)
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first tick after the purge finished = %q, want none", ops)
+	}
+	cr.tickRetireSuspendedRigScopes(p)
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the purge finished reading", ops)
+	}
+}
+
 // A suspended proxied scope's pair is stopped whenever it is found running,
 // not once: a late touch that restarted it is undone on the next tick.
 func TestRetireSuspendedProxiedScopeConvergesOnLiveState(t *testing.T) {
