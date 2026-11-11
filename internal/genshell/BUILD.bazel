@@ -21,6 +21,7 @@ go_library(
 go_test(
     name = "genshell_test",
     srcs = [
+        "boundary_test.go",
         "genshell_concurrency_windows_test.go",
         "genshell_env_test.go",
         "genshell_env_windows_test.go",
@@ -29,8 +30,14 @@ go_test(
         "shims_test.go",
         "testenv_import_test.go",
     ],
+    # boundary_test.go scans the whole module for non-Windows importers.
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":genshell"],
     deps = [
+        "//internal/bazeltest",
         "//internal/shellquote",
         "//internal/testenv",
     ],
