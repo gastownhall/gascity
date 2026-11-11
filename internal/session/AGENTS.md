@@ -170,3 +170,25 @@ clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
 resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
+
+## Legacy session pass parity
+
+A change that adds or alters a step of the legacy session reconciler pass
+names its v2 counterpart in the same pull request: an arm or effect by
+function, a `v2LatchRefusals` entry in `cmd/gc/reconcile_latch.go`, or a
+`parityLegacyOnly` ledger row with an owner bead
+(`cmd/gc/reconcile_session_parity_ledger_test.go`). Three inventories fail the
+build otherwise:
+
+- Every registry key a legacy site writes and no built v2 site does carries
+  exactly one marker: a pending v2 site on the owning bead, or an entry in
+  `LegacyOnlyMarkers()` (`fields_legacy_only.go`), which is a ledger or latch
+  reference, an accepted reason, or a ruling pending on a bead
+  (`TestLegacyOnlyKeysAreMarked`).
+- Every ledger row stays current: its legacy symbol is still declared and no
+  v2 file yet holds its witness symbol, so the fix that gives the step a v2
+  counterpart deletes the row (`TestParityLegacyOnlyTable`).
+- Every event type a legacy-pass file emits has a v2 emitter or a cover
+  (`TestLegacyPassEventsHaveACounterpart`). The scan reads `events.Event`
+  literals, not events whose Type travels through a variable, and classifies by
+  file, so a helper shared with other callers is not reachability-analyzed.

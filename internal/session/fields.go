@@ -202,7 +202,11 @@ var (
 	// v2SleepIntentClear is A20's clear of a woken row's leftover
 	// idle-stop-pending mark (SESS-616).
 	v2SleepIntentClear = v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")
-	v2StartAccrual     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
+	// v2NamedGone is the v2 retire of a removed configured named session, unbuilt
+	// until ga-48o9dqp.
+	v2NamedGone = Site{Mode: ModeV2, File: "cmd/gc/reconcile_arms_close.go"}.pending("ga-48o9dqp",
+		"PAR-NAMEDGONE: v2 retires a removed configured named session bead")
+	v2StartAccrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
 		"S3/S5 accrue a failed start (SESS-537)")
 	opCreate = op(srcManager, "Manager.createBeadOnly")
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
@@ -334,8 +338,8 @@ var registry = slices.Concat([]Field{
 	{Key: "pending_create_claim", Class: ClassLifecycle, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers")), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "pending_create_started_at", Class: ClassLifecycle, Writers: sites(legacyPreWake), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "creation_complete_at", Class: ClassLifecycle, Writers: sites(legacyCommit)},
-	{Key: "archived_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "RetireNamedSessionPatch"), op(srcWaitStore, "Store.wakeSessionFromBead"))},
-	{Key: "continuity_eligible", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "RetireNamedSessionPatch"), op(srcWaitStore, "Store.wakeSessionFromBead"))},
+	{Key: "archived_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "RetireNamedSessionPatch"), v2NamedGone, op(srcWaitStore, "Store.wakeSessionFromBead"))},
+	{Key: "continuity_eligible", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "RetireNamedSessionPatch"), v2NamedGone, op(srcWaitStore, "Store.wakeSessionFromBead"))},
 	{Key: "close_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
@@ -411,7 +415,7 @@ var registry = slices.Concat([]Field{
 		Clears: sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
 	},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"), opUnmint), Clears: sites(opMint)},
-	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
+	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_arms_drain.go"}.pending("ga-8epipf3", "PAR-DRAINDL: v2 retires a pool seat past its drain deadline, or the bead shows the v2 sim already does"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},
 	{Key: "unknown_state_first_seen", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
 	{Key: "unknown_state_value", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
@@ -464,10 +468,10 @@ var registry = slices.Concat([]Field{
 		beadmeta.BoundStepIDMetadataKey),
 	same(ClassLaunchConfig, false, sites(legacy(srcBeads, "stampResolvedProviderSessionMetadata")), "provider", "provider_kind", "builtin_ancestor"),
 	same(ClassAssignmentIdentity, false, sites(legacy(srcBeads, "syncDesiredPoolSlots")), "pool_slot", "pool_managed"),
-	same(ClassLaunchConfig, false, sites(legacy(srcTransition, "RetireNamedSessionPatch")), "retired_named_identity"),
+	same(ClassLaunchConfig, false, sites(legacy(srcTransition, "RetireNamedSessionPatch"), v2NamedGone), "retired_named_identity"),
 	same(ClassLaunchConfig, false, sites(legacy("internal/session/mcp_metadata.go", "WithStoredMCPMetadata")),
 		MCPIdentityMetadataKey, MCPServersSnapshotMetadataKey),
-	same(ClassLaunchConfig, false, sites(legacy("cmd/gc/build_desired_state.go", "computePoolTriggerBindingPatch")), beadmeta.TriggerBeadIDMetadataKey,
+	same(ClassLaunchConfig, false, sites(legacy("cmd/gc/build_desired_state.go", "computePoolTriggerBindingPatch"), v2("cmd/gc/reconcile_effect_launch.go", "foldPreWake")), beadmeta.TriggerBeadIDMetadataKey,
 		beadmeta.TriggerBeadStoreRefMetadataKey, beadmeta.BrainParentSIDMetadataKey, beadmeta.PackMetadataKey, beadmeta.PackWorkspaceMetadataKey),
 	same(ClassLaunchConfig, false, sites(op("internal/worker/handle_construct.go", "applyCanonicalProfileIdentityMetadata")), "worker_profile_provider_family",
 		"worker_profile_transport_class", "worker_profile_behavior_version", "worker_profile_transcript_adapter_version",
@@ -542,8 +546,8 @@ var registry = slices.Concat([]Field{
 		"attached_config_drift_deferred_key"),
 	same(ClassAdvisory, false, sleepPolicy, "requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source",
 		"sleep_capability", "sleep_policy_adjustment_reason", "config_wake_suppressed"),
-	same(ClassAdvisory, false, sites(legacy(srcReconciler, "mirrorStartupHealthEpisodeMetadata")), "startup_health_active_count", "startup_health_active_kind"),
-	same(ClassAdvisory, false, sites(legacy("cmd/gc/warm_bind_nudge.go", "markWarmBindBinding")), "warm_bind_nudged_for_trigger"),
+	same(ClassAdvisory, false, sites(legacy(srcReconciler, "mirrorStartupHealthEpisodeMetadata"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_arms_metadata.go"}.pending("ga-73fsd2f", "the v2 mirror of the startup-health episode, with PAR-PROVHEALTH")), "startup_health_active_count", "startup_health_active_kind"),
+	same(ClassAdvisory, false, sites(legacy("cmd/gc/warm_bind_nudge.go", "markWarmBindBinding"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_launch.go"}.pending("ga-ampl0ro", "PAR-WARMNUDGE: v2 delivers the warm-bind claim nudge once per trigger bead")), "warm_bind_nudged_for_trigger"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/warm_bind_nudge.go", "markWarmBindBinding"), legacy("cmd/gc/warm_bind_nudge.go", "withdrawWarmBindNotice")),
 		"warm_bind_notice_trigger"),
 	// The runtime lease (L1). Legacy writes it too, so no key is new.

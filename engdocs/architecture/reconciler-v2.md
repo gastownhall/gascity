@@ -487,18 +487,18 @@ The status values mean:
 | MAINT-022 on_death edges | done (P1.4) | - |
 | MAINT-023 barrier replies before resume | P2-7, P2-8 | `TestCityRuntimeV2ReloadReplyBeforeResume` |
 | MAINT-024 provider swap needs a complete listing | inherited inside the barrier; effect wait in P4 | - |
-| MAINT-025 soft drift rewrite | off until P4.4 | `TestCityRuntimeV2SoftReloadRepliesUnavailable` |
+| MAINT-025 soft drift rewrite | done: A8 accepts each drifted row under an open request (`decideBaselineSoftReload`, `reconcile_soft_reload.go`); the unavailable reply remains for a planner without effects | `TestSimSoftReloadAcceptsDriftOnce`, `TestCityRuntimeV2SoftReloadRepliesUnavailable` |
 | MAINT-026 FS gate pauses workers | P2-7 | `TestWorkerFSGateHoldsAndForcesAWindowAfterFivePatrols` |
 | MAINT-027 Dolt preflight | inherited | - |
 | MAINT-028/029 orders lane, route delta | done / inherited | - |
 | MAINT-030 snapshots feed decisions | off until P3 (the v2 tick reads a cached snapshot for maintenance only) | - |
-| MAINT-031 corpse close | off until P4.4 | - |
+| MAINT-031 corpse close | done: A21 and C3 (`kept_owners.tsv`) | - |
 | MAINT-032/033/035/037 closed-bead reaper, process orphans, worktree reaper, extmsg reapers | inherited | `TestCityRuntimeTickV2RunsMaintenancePhasesOnly` |
-| MAINT-034 stale creating | off until P4.1 | - |
-| MAINT-036 drain-ack finalize | off until P4.2 | - |
+| MAINT-034 stale creating | done: A10 and C3 rollback (`kept_owners.tsv`) | - |
+| MAINT-036 drain-ack finalize | done: A4 and `reconcile_finalize.go` (D4) | - |
 | MAINT-038 `beadReconcileTick` gating | P2-4, P2-8, P2-9 | `TestCityRuntimeV2StartupSkipsLegacyBootReconcile`, `TestLegacySessionEntryGuardBlocksAndCountsUnderV2`, `TestV2LegacySessionEntriesReportedInTrace` |
 | MAINT-039/040/041/043 completions, wisp GC, services, convergence | inherited | `TestCityRuntimeTickV2RunsMaintenancePhasesOnly` |
-| MAINT-042 chat auto-suspend | off until P4.4 | - |
+| MAINT-042 chat auto-suspend | refused under v2 until PAR-CHAT (`v2LatchRefusals`) | `TestV2LatchRefusesEachDeferredFeature` |
 | MAINT-044/050 partial census, pool desired | P3 | - |
 | MAINT-045/046/048 usage facts, transcript meta, detached delta | P2-4 (sub-steps in the v2 list) | `TestCityRuntimeTickV2RunsMaintenancePhasesOnly`, `TestCityRuntimeStartupV2RunsMaintenancePhasesOnly` |
 | MAINT-047 orphan release | off until P3 | - |

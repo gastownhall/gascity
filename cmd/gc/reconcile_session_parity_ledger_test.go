@@ -58,7 +58,71 @@ const (
 	legacyOnlyAccepted = "accepted"
 )
 
-var parityLegacyOnly = []parityLegacyRow{}
+// parityLegacyOnly is every legacy-only step the differential fixtures cannot
+// hold. An open row is a gap with an owner bead; its fix deletes the row
+// because the fix trips the row's witness. An accepted row is a ruling with
+// its residual stated. The witness scan reads identifiers in non-test v2
+// files, so a fix that reimplements a step under new names does not trip it:
+// the owner bead's review catches that, not this table.
+var parityLegacyOnly = []parityLegacyRow{
+	{
+		ID: "PAR-DRAINDL", Legacy: []string{"retirePoolSlotAtDrainDeadline"},
+		Witness:     []string{"poolSlotDrainRetireDeadline", "poolSlotDrainAgePastDeadline"},
+		V2Status:    "no v2 arm or effect retires a pool seat at its drain deadline; ga-8epipf3 found the v2 sim already correct for the case it tried, by a path no arm owns",
+		Disposition: legacyOnlyOpen, Owner: "ga-8epipf3",
+	},
+	{
+		ID: "PAR-NAMEDGONE", Legacy: []string{"bumpSuspendDeferral", "retireRemovedConfiguredNamedSessionBead"},
+		Witness:     []string{"namedSuspendConfirmTicks", "RetireNamedSessionPatch"},
+		V2Status:    "no confirm window before draining a named session whose spec is absent, and no retire of a removed configured named session bead",
+		Disposition: legacyOnlyOpen, Owner: "ga-48o9dqp",
+	},
+	{
+		ID: "PAR-PINS", Legacy: []string{"newWarmClaimTriggerResolver"},
+		Witness:     []string{"newWarmClaimTriggerResolver"},
+		V2Status:    "v2 pool launch does not resolve trigger-bead opt_* pins from a rig store",
+		Disposition: legacyOnlyOpen, Owner: "ga-ampl0ro",
+	},
+	{
+		ID: "PAR-WARMNUDGE", Legacy: []string{"deliverWarmBindClaimNudge"},
+		Witness:     []string{"deliverWarmBindClaimNudge", "markWarmBindBinding"},
+		V2Status:    "v2 never delivers the warm-bind claim nudge, so a warm seat bound to a trigger bead is not told to claim it",
+		Disposition: legacyOnlyOpen, Owner: "ga-ampl0ro",
+	},
+	{
+		ID: "PAR-WAKEREF", Legacy: []string{"emitSessionWakeRefused"},
+		Witness:     []string{"emitSessionWakeRefused", "SessionWakeRefused"},
+		V2Status:    "v2 emits no session.wake_refused event; v2 writes wake_refused_event_at only as a cleared value, so the registry does not mark that key legacy-only and this row is its only record",
+		Disposition: legacyOnlyOpen, Owner: "ga-h0zfmce",
+	},
+	{
+		ID: "PAR-PROVHEALTH", Legacy: []string{"recordRedSkip", "recordGreenTick", "emitProviderHealthGateAlert"},
+		Witness:     []string{"recordRedSkip", "recordGreenTick", "emitProviderHealthGateAlert", "ProviderHealthGateAlert"},
+		V2Status:    "v2 keeps no provider-health episode bookkeeping and raises no provider_health_gate alert",
+		Disposition: legacyOnlyOpen, Owner: "ga-73fsd2f",
+	},
+	{
+		ID: "PAR-PREBOOT", Legacy: []string{"reapPreBootSessionBeads"},
+		Witness:     []string{"reapPreBootSessionBeads"},
+		V2Status:    "v2 relies on ServerConfirmedDead reaching ConfirmedDead and arm A9 to close a bead whose runtime died with the host",
+		Disposition: legacyOnlyAccepted,
+		Reason:      "arm A9 covers a runtime whose death the server confirms; residual: after a host reboot where server death is unconfirmable, an alias-holding orphan bead can persist, and the acp and subprocess runtimes were not traced",
+	},
+	{
+		ID: "PAR-DRAINLOG", Legacy: []string{"sweepDrainSkips"},
+		Witness:     []string{"sweepDrainSkips"},
+		V2Status:    "v2 does not dedupe the drain-skip log line",
+		Disposition: legacyOnlyAccepted,
+		Reason:      "a log dedupe with no effect on session state; residual: a repeated log line",
+	},
+	{
+		ID: "PAR-FORCEKILL", Legacy: []string{"escalateWedgedDrainAckStopPending"},
+		Witness:     []string{"escalateWedgedDrainAckStopPending", "terminateDrainAckRuntimeByProcessTable", "queueDrainAckForcedTermination", "AsProcessTableScanner"},
+		V2Status:    "v2 only alerts through escalateStop (session.drain_stop_escalated at 30 minutes, then every 15) and never kills the runtime",
+		Disposition: legacyOnlyAccepted,
+		Reason:      "ga-zwddym6 builds no force path; residual: a drain-acked seat whose runtime survives its stop stays parked holding its pool slot name until an operator acts, the one accepted row that can strand a pool seat; the open question on CONTRACT section 12.2 item 1 stays with the operator or pm",
+	},
+}
 
 var (
 	parIDShape   = regexp.MustCompile(`^PAR-[A-Z0-9]+$`)
@@ -349,13 +413,79 @@ const (
 // with a Type, other than the v2 files (reconcile_*.go, allocator*.go), which
 // are v2 by name. A new emitting file nobody classified fails
 // TestLegacyPassEventsHaveACounterpart.
-var eventFileClass = map[string]string{}
+//
+// The scan reads literals only, and the legacy-pass class is by file: a helper
+// a legacy-pass file shares with other callers is not reachability-analyzed, so
+// the class is coarse. An event whose Type travels through a variable is seen
+// only when its file is classified outside.
+var eventFileClass = map[string]string{
+	"api_state.go":                          fileOutside,
+	"bd_inventory_trust.go":                 fileOutside,
+	"bead_worktree_reaper.go":               fileOutside,
+	"beads_blocked_repair.go":               fileOutside,
+	"cache_notification.go":                 fileOutside,
+	"city_runtime.go":                       fileOutside,
+	"cityinit_impl.go":                      fileOutside,
+	"claim_loop_guard.go":                   fileOutside,
+	"claim_stall_guard.go":                  fileOutside,
+	"class_store_emit.go":                   fileOutside,
+	"cmd_convoy.go":                         fileOutside,
+	"cmd_convoy_dispatch.go":                fileOutside,
+	"cmd_event_emit.go":                     fileOutside,
+	"cmd_handoff.go":                        fileOutside,
+	"cmd_hook_claim.go":                     fileOutside,
+	"cmd_mail.go":                           fileOutside,
+	"cmd_runtime_drain.go":                  fileOutside,
+	"cmd_supervisor.go":                     fileOutside,
+	"cmd_suspend.go":                        fileOutside,
+	"config_drift_episode.go":               fileOutside,
+	"control_dispatcher_scope_gap_event.go": fileOutside,
+	"controller.go":                         fileOutside,
+	"convergence_store.go":                  fileOutside,
+	"cross_store_gate_lane.go":              fileOutside,
+	"dead_assignee_event.go":                fileOutside,
+	"demand_divergence.go":                  fileOutside,
+	"doctor_bd_inventory.go":                fileOutside,
+	"dolt_project_id.go":                    fileOutside,
+	"drain_ack_escalation.go":               fileLegacy,
+	"drain_fence_unavailable.go":            fileOutside,
+	"endpoint_capacity.go":                  fileOutside,
+	"execution_backstop.go":                 fileOutside,
+	"fs_pressure.go":                        fileOutside,
+	"hook_session_claim.go":                 fileOutside,
+	"molecule_autoclose.go":                 fileOutside,
+	"order_dispatch.go":                     fileOutside,
+	"order_outcome.go":                      fileOutside,
+	"pending_interaction_lane.go":           fileOutside,
+	"program_status_shadow.go":              fileOutside,
+	"provider_health_gate.go":               fileLegacy,
+	"provider_swap.go":                      fileOutside,
+	"rig_import.go":                         fileOutside,
+	"rig_import_census.go":                  fileOutside,
+	"runtime_ownerless_reap.go":             fileOutside,
+	"session_lifecycle_parallel.go":         fileOutside,
+	"session_list_events.go":                fileOutside,
+	"session_pool_drain_deadline.go":        fileLegacy,
+	"session_reconciler.go":                 fileLegacy,
+	"storage_boot.go":                       fileOutside,
+	"store_rollout.go":                      fileOutside,
+	"work_ladder_lane.go":                   fileOutside,
+	"work_query_failure.go":                 fileOutside,
+	"work_release.go":                       fileOutside,
+}
 
 // legacyEventCover maps an events.* constant a legacy-pass file emits and no
 // v2 file does to what covers it: "ledger:<id>", "latch:<PAR id>",
 // "accepted:<reason>" or "ruling-pending:<bead>: <note>", as the registry's
 // markers read.
-var legacyEventCover = map[string]string{}
+var legacyEventCover = map[string]string{
+	"SessionMaxAgeKilled":                   "latch:PAR-AGE",
+	"SessionUnknownState":                   "ledger:unknown-state-diagnostic",
+	"SessionWakeRefused":                    "ledger:PAR-WAKEREF",
+	"SessionPoolSlotRetiredAtDrainDeadline": "ledger:PAR-DRAINDL",
+	"ProviderHealthGateAlert":               "ledger:PAR-PROVHEALTH",
+	"SessionResetStalled":                   "ruling-pending:ga-a8dp0uk8: awaiting the architect's per-item ruling on session.reset_stalled",
+}
 
 // eventEmission is what one file's literals say.
 type eventEmission struct {
@@ -363,22 +493,22 @@ type eventEmission struct {
 	unresolved int             // literals whose Type is not an events.* selector
 }
 
-// scanEventEmissions finds, per file, the Type of every events.Event literal.
+// isEventsEvent reports whether e names events.Event.
+func isEventsEvent(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Event" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "events"
+}
+
+// scanEventEmissions finds, per file, the Type of every events.Event literal,
+// the elided elements of a []events.Event literal included.
 func scanEventEmissions(files map[string]*ast.File) map[string]*eventEmission {
 	out := map[string]*eventEmission{}
 	for name, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			cl, ok := n.(*ast.CompositeLit)
-			if !ok {
-				return true
-			}
-			sel, ok := cl.Type.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Event" {
-				return true
-			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "events" {
-				return true
-			}
+		record := func(cl *ast.CompositeLit) {
 			for _, e := range cl.Elts {
 				kv, ok := e.(*ast.KeyValueExpr)
 				if !ok {
@@ -399,6 +529,26 @@ func scanEventEmissions(files map[string]*ast.File) map[string]*eventEmission {
 					}
 				}
 				em.unresolved++
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			switch t := cl.Type.(type) {
+			case *ast.SelectorExpr:
+				if isEventsEvent(t) {
+					record(cl)
+				}
+			case *ast.ArrayType:
+				if isEventsEvent(t.Elt) {
+					for _, e := range cl.Elts {
+						if el, ok := e.(*ast.CompositeLit); ok && el.Type == nil {
+							record(el)
+						}
+					}
+				}
 			}
 			return true
 		})
@@ -567,5 +717,39 @@ func TestEventInventoryCatches(t *testing.T) {
 	read := scanEventEmissions(map[string]*ast.File{"filter.go": parseSource(t, "filter.go", "package main\nimport \"x/events\"\nfunc f() { _ = events.Filter{Type: events.OnlyLegacy} }\n")})
 	if len(read) != 0 {
 		t.Errorf("a filter's Type is scanned as an emission: %v", read)
+	}
+}
+
+// TestScanEventEmissionsReadsLiteralShapes pins what the scan sees: a plain
+// literal, the elided elements of a slice, a pointer-free nested one, and a
+// Type that is no events.* selector, which it counts as unresolved.
+func TestScanEventEmissionsReadsLiteralShapes(t *testing.T) {
+	const src = `package main
+import "events"
+func f(x string) {
+	_ = events.Event{Type: events.SessionWoke}
+	_ = []events.Event{{Type: events.SessionStranded}, {Type: events.SessionUpdated, Actor: "gc"}}
+	_ = events.Event{Type: x}
+	_ = struct{ Type string }{Type: events.NotAnEvent}
+}
+`
+	f, err := parser.ParseFile(token.NewFileSet(), "shapes.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	em := scanEventEmissions(map[string]*ast.File{"shapes.go": f})["shapes.go"]
+	if em == nil {
+		t.Fatal("the scan saw no events in shapes.go")
+	}
+	for _, want := range []string{"SessionWoke", "SessionStranded", "SessionUpdated"} {
+		if !em.types[want] {
+			t.Errorf("events.%s not found; saw %v", want, em.types)
+		}
+	}
+	if em.types["NotAnEvent"] || len(em.types) != 3 {
+		t.Errorf("a non-events.Event literal counted: %v", em.types)
+	}
+	if em.unresolved != 1 {
+		t.Errorf("unresolved = %d, want 1 (Type: x)", em.unresolved)
 	}
 }
