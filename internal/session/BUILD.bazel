@@ -24,6 +24,7 @@ go_library(
         "facts.go",
         "fields.go",
         "fields_guard.go",
+        "fields_legacy_only.go",
         "held_transcript.go",
         "holds.go",
         "incarnation.go",

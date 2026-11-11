@@ -16,7 +16,7 @@ import (
 
 // The session field registry's table tests.
 
-var beadID = regexp.MustCompile(`^mc-[a-z0-9]+(\.[0-9]+)*$`)
+var beadID = regexp.MustCompile(`^(mc|ga)-[a-z0-9]+(\.[0-9]+)*$`)
 
 // liveModes are the controller modes that see f written: an operator write
 // lands under either, except a new key's, which only a v2 city writes.
@@ -152,6 +152,143 @@ func funcName(fd *ast.FuncDecl) string {
 		return id.Name + "." + fd.Name.Name
 	}
 	return fd.Name.Name
+}
+
+// legacyOnlyKeys is every key a legacy site writes and no built v2 site does.
+// An operator site does not count: it runs under either controller and writes
+// its own transition, not the legacy pass's. A pending v2 site is unbuilt.
+func legacyOnlyKeys(fields []Field) map[string]Field {
+	out := map[string]Field{}
+	for _, f := range fields {
+		legacyWrites, v2Builds := false, false
+		for _, s := range f.Writers {
+			legacyWrites = legacyWrites || s.Mode == ModeLegacy
+			v2Builds = v2Builds || s.Mode == ModeV2 && s.Func != ""
+		}
+		if legacyWrites && !v2Builds {
+			out[f.Key] = f
+		}
+	}
+	return out
+}
+
+var (
+	markerLedger  = regexp.MustCompile(`^ledger:(PAR-[A-Z0-9]+|[a-z0-9]+(-[a-z0-9]+)*)$`)
+	markerLatch   = regexp.MustCompile(`^latch:PAR-[A-Z0-9]+(-[A-Z0-9]+)*$`)
+	markerPending = regexp.MustCompile(`^ruling-pending:((mc|ga)-[a-z0-9]+(\.[0-9]+)*): \S.*$`)
+)
+
+// markerShape is why a map marker is malformed, or "".
+func markerShape(m string) string {
+	switch {
+	case markerLedger.MatchString(m), markerLatch.MatchString(m), markerPending.MatchString(m):
+		return ""
+	case strings.HasPrefix(m, "accepted:") && strings.TrimSpace(strings.TrimPrefix(m, "accepted:")) != "":
+		return ""
+	}
+	return fmt.Sprintf("marker %q is none of ledger:<PAR id or finding>, latch:<PAR id>, accepted:<reason>, ruling-pending:<bead>: <note>", m)
+}
+
+// legacyOnlyFindings is inventory test (a): every key with a legacy writer and
+// no built v2 writer carries exactly one marker, (i) a pending v2 site on the
+// bead that owns the gap, (ii) the PAR id of the v2LatchRefusals entry that
+// bans the feature writing it, or (iii) a ruling: a ledger row, an accepted
+// reason, or a ruling still pending on a bead. A marker on a key that has
+// since gained a built v2 writer is stale.
+func legacyOnlyFindings(fields []Field, markers map[string]string) []string {
+	var out []string
+	only := legacyOnlyKeys(fields)
+	keys := make([]string, 0, len(only))
+	for k := range only {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		pending := 0
+		for _, s := range only[k].Writers {
+			if s.Mode == ModeV2 && s.Func == "" && s.Pending != "" {
+				pending++
+			}
+		}
+		_, mapped := markers[k]
+		n := pending
+		if mapped {
+			n++
+		}
+		switch {
+		case n == 0:
+			out = append(out, fmt.Sprintf("%s: a legacy site writes it and no built v2 site does, and it carries no marker; add a pending v2 site on the owning bead, or a LegacyOnlyMarkers entry (a ledger or latch PAR id, an accepted reason, or a pending ruling)", k))
+		case n > 1:
+			out = append(out, fmt.Sprintf("%s: carries more than one marker (%d pending v2 site(s), map entry %v); keep exactly one", k, pending, mapped))
+		}
+	}
+	byKey := map[string]Field{}
+	for _, f := range fields {
+		byKey[f.Key] = f
+	}
+	mk := make([]string, 0, len(markers))
+	for k := range markers {
+		mk = append(mk, k)
+	}
+	sort.Strings(mk)
+	for _, k := range mk {
+		if why := markerShape(markers[k]); why != "" {
+			out = append(out, fmt.Sprintf("%s: %s", k, why))
+		}
+		switch {
+		case byKey[k].Key == "":
+			out = append(out, fmt.Sprintf("%s: marker for a key the registry does not have", k))
+		case only[k].Key == "":
+			out = append(out, fmt.Sprintf("%s: stale marker %q: the key now has a built v2 writer or no legacy writer; delete the marker", k, markers[k]))
+		}
+	}
+	return out
+}
+
+// TestLegacyOnlyKeysAreMarked runs the inventory over the real registry.
+func TestLegacyOnlyKeysAreMarked(t *testing.T) {
+	for _, f := range legacyOnlyFindings(Fields(), LegacyOnlyMarkers()) {
+		t.Error(f)
+	}
+}
+
+// TestLegacyOnlyFindingsCatches checks the inventory against synthetic
+// registries, each failing for its reason.
+func TestLegacyOnlyFindingsCatches(t *testing.T) {
+	legacyW := legacy("cmd/gc/a.go", "legacyWrite")
+	builtV2 := v2("cmd/gc/reconcile_a.go", "armWrite")
+	pendingV2 := Site{Mode: ModeV2, File: "cmd/gc/reconcile_a.go"}.pending("ga-abc123", "the v2 write")
+	field := func(key string, writers ...Site) Field {
+		return Field{Key: key, Class: ClassAdvisory, Writers: writers}
+	}
+	good := map[string]string{"k": "accepted: a ruling"}
+	for _, tc := range []struct {
+		name    string
+		fields  []Field
+		markers map[string]string
+		want    string // "" means no finding
+	}{
+		{"unmarked legacy-only key", []Field{field("k", legacyW)}, nil, "k: a legacy site writes it and no built v2 site does, and it carries no marker"},
+		{"an operator writer is not a v2 writer", []Field{field("k", legacyW, op("internal/session/a.go", "OperatorWrite"))}, nil, "carries no marker"},
+		{"marked by a map entry", []Field{field("k", legacyW)}, good, ""},
+		{"marked by a pending v2 site", []Field{field("k", legacyW, pendingV2)}, nil, ""},
+		{"a built v2 writer needs none", []Field{field("k", legacyW, builtV2)}, nil, ""},
+		{"a v2-only key needs none", []Field{field("k", builtV2)}, nil, ""},
+		{"two markers", []Field{field("k", legacyW, pendingV2)}, good, "carries more than one marker"},
+		{"stale marker: the key gained a v2 writer", []Field{field("k", legacyW, builtV2)}, good, "stale marker"},
+		{"marker for an unknown key", []Field{field("k", legacyW)}, map[string]string{"k": "accepted: x", "gone": "accepted: x"}, "gone: marker for a key the registry does not have"},
+		{"a malformed marker", []Field{field("k", legacyW)}, map[string]string{"k": "later"}, "is none of ledger:"},
+		{"an accepted marker with no reason", []Field{field("k", legacyW)}, map[string]string{"k": "accepted:  "}, "is none of ledger:"},
+		{"a pending ruling needs a note", []Field{field("k", legacyW)}, map[string]string{"k": "ruling-pending:ga-abc123: "}, "is none of ledger:"},
+		{"a ledger marker", []Field{field("k", legacyW)}, map[string]string{"k": "ledger:PAR-DRAINLOG"}, ""},
+		{"a latch marker", []Field{field("k", legacyW)}, map[string]string{"k": "latch:PAR-AGE"}, ""},
+		{"a pending ruling", []Field{field("k", legacyW)}, map[string]string{"k": "ruling-pending:ga-abc123: awaiting the architect"}, ""},
+	} {
+		got := strings.Join(legacyOnlyFindings(tc.fields, tc.markers), "\n")
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: want %q, got:\n%s", tc.name, tc.want, got)
+		}
+	}
 }
 
 // TestSessionFieldRegistryCatches mutates the table the ways its rules exist
