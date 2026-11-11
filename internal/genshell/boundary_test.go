@@ -75,11 +75,17 @@ func TestGenshellFenceCatchesNonWindowsImporters(t *testing.T) {
 	write("linuxonly/l_linux.go", "package linuxonly\n\n"+importLib)
 	write("darwintag/d.go", "//go:build darwin || windows\n\npackage darwintag\n\n"+importLib)
 	write("customtag/c.go", "//go:build integration\n\npackage customtag\n\n"+importLib)
+	write("negcustom/n.go", "//go:build !integration\n\npackage negcustom\n\n"+importLib)
+	write("negarch/a.go", "//go:build !arm64\n\npackage negarch\n\n"+importLib)
+	write("negcgo/c.go", "//go:build !cgo\n\npackage negcgo\n\n"+importLib)
+	write("mixed/m.go", "//go:build windows || !integration\n\npackage mixed\n\n"+importLib)
 	// Must pass: Windows-only, test-only, the fenced tree itself, or not importing it.
 	write("win/w_windows.go", "package win\n\n"+importLib)
 	write("win/w_windows_amd64.go", "package win\n\n"+importLib)
 	write("wintag/w.go", "//go:build windows\n\npackage wintag\n\n"+importLib)
 	write("winarch/w.go", "//go:build windows && amd64\n\npackage winarch\n\n"+importLib)
+	write("winneg/w.go", "//go:build windows && !integration\n\npackage winneg\n\n"+importLib)
+	write("winarchneg/w.go", "//go:build windows && !arm64\n\npackage winarchneg\n\n"+importLib)
 	write("ignored/i.go", "//go:build ignore\n\npackage main\n\n"+importLib)
 	write("tests/t_test.go", "package tests\n\n"+importLib)
 	write("internal/genshell/genshelltest/kit.go", "package genshelltest\n\n"+importLib)
@@ -94,14 +100,18 @@ func TestGenshellFenceCatchesNonWindowsImporters(t *testing.T) {
 		"darwintag/d.go",
 		"kit/kit.go",
 		"linuxonly/l_linux.go",
+		"mixed/m.go",
+		"negarch/a.go",
+		"negcgo/c.go",
+		"negcustom/n.go",
 		"nottagged/n.go",
 		"plain/plain.go",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("offenders = %q, want %q", got, want)
 	}
-	if scanned != 12 {
-		t.Errorf("scanned %d non-test files outside the fenced tree, want 12", scanned)
+	if scanned != 18 {
+		t.Errorf("scanned %d non-test files outside the fenced tree, want 18", scanned)
 	}
 }
 
@@ -181,26 +191,69 @@ func windowsOnly(base string, src []byte) bool {
 			// A constraint that cannot be read cannot clear the file.
 			return false
 		}
-		return !expr.Eval(fenceTagsFor("linux")) && !expr.Eval(fenceTagsFor("darwin"))
+		return constraintExcludesLinuxAndDarwin(expr)
 	}
 	return false
 }
 
-// fenceTagsFor answers build tags for a GOOS=goos build. Other operating
-// systems are false and "ignore" is false; every other tag (arch, Go version,
-// cgo, custom tags) is assumed satisfiable, so a file the fence cannot rule out
-// for linux or darwin is treated as one that can build there.
-func fenceTagsFor(goos string) func(string) bool {
-	return func(tag string) bool {
-		switch {
-		case tag == goos, tag == "unix":
-			return true
-		case tag == "ignore", fenceKnownOS[tag]:
-			return false
-		default:
-			return true
+// fenceMaxFreeTags bounds the free tags constraintExcludesLinuxAndDarwin
+// enumerates. A constraint with more cannot clear its file.
+const fenceMaxFreeTags = 12
+
+// constraintExcludesLinuxAndDarwin reports whether expr is false in every
+// GOOS=linux and GOOS=darwin build. In such a build the GOOS tag and "unix"
+// are true, and "ignore" and every other operating system are false. Every
+// other tag in expr (arch, cgo, goN.N, custom tags) is free: the fence cannot
+// know how a build sets it, so it tries every true/false assignment of the
+// free tags, and expr excludes linux and darwin only if no assignment
+// satisfies it on either. A negated free tag such as !integration therefore
+// cannot clear a file.
+func constraintExcludesLinuxAndDarwin(expr constraint.Expr) bool {
+	var free []string
+	seen := map[string]bool{}
+	var collect func(constraint.Expr)
+	collect = func(e constraint.Expr) {
+		switch e := e.(type) {
+		case *constraint.TagExpr:
+			if seen[e.Tag] {
+				return
+			}
+			seen[e.Tag] = true
+			if e.Tag != "unix" && e.Tag != "ignore" && !fenceKnownOS[e.Tag] {
+				free = append(free, e.Tag)
+			}
+		case *constraint.NotExpr:
+			collect(e.X)
+		case *constraint.AndExpr:
+			collect(e.X)
+			collect(e.Y)
+		case *constraint.OrExpr:
+			collect(e.X)
+			collect(e.Y)
 		}
 	}
+	collect(expr)
+	if len(free) > fenceMaxFreeTags {
+		return false
+	}
+	freeIndex := make(map[string]int, len(free))
+	for i, tag := range free {
+		freeIndex[tag] = i
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		for assignment := 0; assignment < 1<<len(free); assignment++ {
+			ok := func(tag string) bool {
+				if i, isFree := freeIndex[tag]; isFree {
+					return assignment&(1<<i) != 0
+				}
+				return tag == goos || tag == "unix"
+			}
+			if expr.Eval(ok) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 var fenceKnownOS = map[string]bool{
