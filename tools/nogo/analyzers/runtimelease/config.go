@@ -117,5 +117,5 @@ var allowed = map[string]Allowance{
 	api + ":Server.humaHandleRigRestart": {Reason: "a rig restart: stops every agent of a rig (a sweep; a residual, CONTRACT §12.5)"},
 	// internal/doctor: gc doctor --fix.
 	doctor + ":ZombieSessionsCheck.Fix": {Reason: "gc doctor --fix: refuses while a controller runs (IsControllerRunning), so no controller start races it; an operator's start of the same name meanwhile is not excluded (a residual, CONTRACT §12.5)"},
-	doctor + ":OrphanSessionsCheck.Fix": {Reason: "gc doctor --fix: refuses while a controller runs (IsControllerRunning), and stops only names no configured agent owns; an operator's start of such a name meanwhile is not excluded (a residual, CONTRACT §12.5)"},
+	doctor + ":OrphanSessionsCheck.Fix": {Reason: "gc doctor --fix: refuses while a controller runs (IsControllerRunning), and stops only runtimes whose own identity proves no open session row owns them (any unproven identity refuses the whole repair); an operator's start of such a name meanwhile is not excluded (a residual, CONTRACT §12.5)"},
 }

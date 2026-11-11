@@ -608,7 +608,10 @@ type RuntimeOwnerResolver func(name string) (RuntimeOwnership, string)
 // session rows, or errors when none can be built.
 type RuntimeOwnerSource func() (RuntimeOwnerResolver, error)
 
-// OrphanSessionsCheck finds runtimes no session row owns.
+// OrphanSessionsCheck finds runtimes no session row owns. It decides by each
+// runtime's own identity (its owner source), never by comparing the runtime's
+// name to a configured agent's: pool instances, session-id-named runtimes and
+// adopted runtimes have no configured name to match.
 type OrphanSessionsCheck struct {
 	sp     runtime.Provider
 	owners RuntimeOwnerSource
@@ -623,23 +626,115 @@ func NewOrphanSessionsCheck(sp runtime.Provider, owners RuntimeOwnerSource) *Orp
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run is not implemented yet.
+// orphanScan is one identity read of the listed runtimes.
+type orphanScan struct {
+	orphans  []string // runtimes whose identity proves no open row owns them
+	unproven []string // "name: ..." lines for runtimes whose identity is not established
+}
+
+// scan reads the identity of each listed runtime through a resolver built for
+// this call alone, so no answer outlives the read it came from. Nothing is
+// built for an empty listing.
+func (c *OrphanSessionsCheck) scan(running []string) (orphanScan, error) {
+	var out orphanScan
+	if len(running) == 0 {
+		return out, nil
+	}
+	resolve, err := c.owners()
+	if err != nil {
+		return out, err
+	}
+	for _, name := range running {
+		switch owned, why := resolve(name); owned {
+		case RuntimeOwned:
+		case RuntimeOrphaned:
+			out.orphans = append(out.orphans, name)
+		default:
+			out.unproven = append(out.unproven, fmt.Sprintf("%s: ownership unproven (%s)", name, why))
+		}
+	}
+	return out, nil
+}
+
+// Run lists the runtimes whose identity shows no open session row owns them,
+// and separately the ones whose identity could not be established.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
-	return &CheckResult{Name: c.Name(), Status: StatusError, Message: "not implemented"}
+	r := &CheckResult{Name: c.Name()}
+	prefix := "" // per-city socket isolation: all sessions belong to this city
+	running, err := c.sp.ListRunning(prefix)
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("listing sessions: %v", err)
+		return r
+	}
+	found, err2 := c.scan(running)
+	if err2 != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot prove which runtimes are orphaned: %v", err2)
+		return r
+	}
+
+	if len(found.orphans) == 0 && len(found.unproven) == 0 {
+		if partialList {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
+			return r
+		}
+		r.Status = StatusOK
+		r.Message = "no orphaned sessions"
+		return r
+	}
+	r.Status = StatusWarning
+	summary := fmt.Sprintf("%d orphaned session(s)", len(found.orphans))
+	if len(found.unproven) > 0 {
+		summary = fmt.Sprintf("%s, %d with unproven ownership", summary, len(found.unproven))
+	}
+	if partialList {
+		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%s visible)", err, summary)
+	} else {
+		r.Message = summary
+	}
+	r.Details = append(append(r.Details, found.orphans...), found.unproven...)
+	return r
 }
 
 // CanFix returns true — orphan sessions can be killed.
 func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
-// Fix is not implemented yet.
-func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
-	var orphans []string // not implemented: identifies none
-	for _, s := range orphans {
+// Fix kills the orphaned runtimes. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles orphan
+// sessions, and an uncoordinated Stop here would race it. It reads identity
+// afresh and stops nothing unless every listed runtime's identity is
+// established: an owner source that cannot be built, a partial listing, or one
+// unproven runtime each refuse the whole repair. Like ZombieSessionsCheck.Fix,
+// it stops through runtime.StopForCleanup, so an orphan whose tmux server died
+// after the listing counts as removed.
+func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
+	prefix := "" // per-city socket isolation: all sessions belong to this city
+	running, err := c.sp.ListRunning(prefix)
+	if runtime.IsPartialListError(err) {
+		return fmt.Errorf("listing sessions partially failed: %w", err)
+	}
+	if err != nil {
+		return err
+	}
+	found, err := c.scan(running)
+	if err != nil {
+		return fmt.Errorf("cannot prove which runtimes are orphaned, stopping none: %w", err)
+	}
+	if len(found.unproven) > 0 {
+		return fmt.Errorf("stopping none: %d runtime(s) have unproven ownership: %s", len(found.unproven), strings.Join(found.unproven, "; "))
+	}
+	for _, s := range found.orphans {
 		if err := runtime.StopForCleanup(c.sp, s); err != nil {
-			return err
+			return fmt.Errorf("killing orphan session %q: %w", s, err)
 		}
 	}
-	return errors.New("not implemented")
+	return nil
 }
 
 // --- Data checks ---
