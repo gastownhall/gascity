@@ -1,0 +1,29 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -1,5 +1,10 @@
+ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+ 
++config_setting(
++    name = "pure_go",
++    flag_values = {"@io_bazel_rules_go//go/config:pure": "true"},
++)
++
+ go_library(
+     name = "beads",
+     srcs = [
+@@ -18,11 +23,13 @@
+         "//internal/storage/backends",
+         "//internal/storage/dolt",
+         "//internal/storage/domain",
+-        "//internal/storage/embeddeddolt",
+         "//internal/storage/schema",
+         "//internal/types",
+         "//internal/workspacegate",
+-    ],
++    ] + select({
++        ":pure_go": [],
++        "//conditions:default": ["//internal/storage/embeddeddolt"],
++    }),
+ )
+ 
+ alias(

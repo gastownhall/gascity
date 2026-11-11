@@ -1332,7 +1332,8 @@ help:
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
 ## source tree used by whole-repo scan guards, apply the hermeticity
 ## ledger's go_test tags (test/bazel-hermeticity.toml), and regenerate the
-## integration lane's package suite (//test:integration_packages). Run after
+## integration lane's package suite (//test:integration_packages) and the
+## darwin compile-and-lint check's target list (//tools/darwincheck). Run after
 ## adding packages.
 .PHONY: bazel-sync
 # BAZEL_SYNC_FLAGS: CI passes --config=remote-exec, so gazelle and its Go
@@ -1342,3 +1343,4 @@ bazel-sync:
 	python3 tools/bazel/repo_tree.py
 	python3 tools/bazel/hermetic_tags.py
 	python3 tools/bazel/integration_suite.py
+	python3 tools/bazel/darwin_check.py

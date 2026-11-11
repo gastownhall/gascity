@@ -1,0 +1,1 @@
+repo(default_visibility = ["//tools/darwincheck:__pkg__"])

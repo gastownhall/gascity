@@ -265,7 +265,10 @@ go_deps.module_override(
 )
 go_deps.module_override(
     patch_strip = 1,
-    patches = ["//third_party/patches:beads_migrations.patch"],
+    patches = [
+        "//third_party/patches:beads_migrations.patch",
+        "//third_party/patches:beads_pure.patch",
+    ],
     path = "github.com/steveyegge/beads",
 )
 

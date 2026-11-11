@@ -34,7 +34,13 @@ go_library(
     # The SPA bundle built by Bazel (vite under rules_js), not the committed
     # dist/ copy: //cmd/gc embeds what the sources build to. dist_in_sync_test
     # keeps the committed copy (what a Node-less `go build` embeds) identical.
-    embedsrcs = [":dist"],  # keep
+    embedsrcs = select({
+        # The darwin check (//tools/darwincheck) compiles this package for
+        # darwin without running the SPA build, so it embeds the committed
+        # dist/ copy, which dist_in_sync_test keeps identical to the build.
+        "@rules_go//go/platform:darwin": glob(["dist/**"]),
+        "//conditions:default": [":dist"],
+    }),  # keep
     importpath = "github.com/gastownhall/gascity/internal/api/dashboardspa",
     visibility = ["//:__subpackages__"],
 )
