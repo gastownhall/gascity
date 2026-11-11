@@ -203,7 +203,10 @@ func TestSimNamedSpecAbsentWithLiveWorkIsHeld(t *testing.T) {
 // back starts under that identity, and the work assigned to it can be given to
 // another session (legacy's RetireNamedSessionPatch archive frees all three).
 func TestSimRemovedNamedSessionFreesItsIdentity(t *testing.T) {
-	work := beads.Bead{ID: "gw-gc-7", Title: "work", Type: "task", Status: "open", Assignee: "gc-7", Metadata: map[string]string{"gc.routed_to": goneName}}
+	// The work is routed to the pool, which still serves it: a claim whose
+	// route no agent serves stays on the row under legacy's retire as well
+	// (keptUnservedRoute), so it is no test of the row's end.
+	work := beads.Bead{ID: "gw-gc-7", Title: "work", Type: "task", Status: "open", Assignee: "gc-7", Metadata: map[string]string{"gc.routed_to": "worker"}}
 	s := goneSim(t, true, work)
 	s.setSpecs(false, false)
 	for range 3 {
