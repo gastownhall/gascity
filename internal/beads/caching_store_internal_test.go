@@ -3992,6 +3992,71 @@ func TestCachingStoreBdPrimeExcludesIndefinitelyDeferredRowsFromReady(t *testing
 	}
 }
 
+// TestCachingStoreBdPrimeExcludesElapsedDatedDeferredRowsFromReady is the
+// elapsed-date sibling of TestCachingStoreBdPrimeExcludesIndefinitelyDeferredRowsFromReady.
+// bd records the row status=deferred with a defer_until that has already
+// elapsed (#6207): bd ready never serves it whatever its date, and the sweep
+// that would flip it back to open is advisory, so the read model must not
+// surface it as ready work until the store itself records the wake.
+func TestCachingStoreBdPrimeExcludesElapsedDatedDeferredRowsFromReady(t *testing.T) {
+	t.Parallel()
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			t.Fatal("empty bd command")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.0.5 (test)\n"), nil
+		case "sql":
+			return []byte(`[{"id":"bd-deferred","is_blocked":0}]`), nil
+		case "list":
+			return []byte(`[
+				{"id":"bd-deferred","title":"parked","status":"deferred","defer_until":"2020-01-01T00:00:00Z","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}}
+			]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		case "dep":
+			t.Fatalf("unexpected dep scan command: %v", args)
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want elapsed dated deferred row excluded", got)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 0 {
+		t.Fatalf("CachedReady() = %+v, want elapsed dated deferred row excluded", cached)
+	}
+
+	stored, err := cache.Get("bd-deferred")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", stored.Status)
+	}
+	if !IsDeferred(stored, time.Now()) {
+		t.Fatal("elapsed dated deferral read as ready; bd still records status=deferred")
+	}
+}
+
 func TestCachingStoreStatusBasedDeferralCanReopen(t *testing.T) {
 	for _, reopen := range []string{"event", "local-update"} {
 		t.Run(reopen, func(t *testing.T) {

@@ -86,12 +86,14 @@ func newScratchServer(t *testing.T, kind string) string {
 	return socket
 }
 
-// captureProvider is a tmux provider on socket arming with companion.
+// captureProvider is a tmux provider on socket arming with companion, under
+// the switch on.
 func captureProvider(t *testing.T, socket, companion string) *Provider {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.SocketName = socket
 	cfg.ProgramStatusBin = companion
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	cfg.NudgeIdleTimeout = 250 * time.Millisecond
 	return NewProviderWithConfig(cfg)
 }
@@ -136,6 +138,23 @@ func armedNonce(t *testing.T, p *Provider, name string) string {
 		t.Fatalf("armed nonce %q is not <rand>.%s", nonce, pane)
 	}
 	return nonce
+}
+
+// declaringArm arms a capture declaring the mid-turn hold and the interrupt
+// settle, so a test that removes the capture sees both declarations go.
+var declaringArm = runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true, DecideSettle: true}
+
+// requireDeclared fails unless name's agent pane, armed under nonce by
+// declaringArm, carries both declarations bound to the pane, so a later
+// check that they are unset can fail.
+func requireDeclared(t *testing.T, p *Provider, name, nonce string) {
+	t.Helper()
+	_, pane, _ := strings.Cut(nonce, ".")
+	for _, opt := range []string{programHoldOption, programSettleOption} {
+		if got := paneOption(t, p, name, opt); got != pane {
+			t.Fatalf("armed pane %s = %q, want it bound to %s", opt, got, pane)
+		}
+	}
 }
 
 // tapRunning reports whether a tap holding nonce's rand is in the process
@@ -393,13 +412,14 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	first := armedNonce(t, p, name)
+	requireDeclared(t, p, name, first)
 	awaitRecord(t, p, name, first, runtime.ProgramWorking)
 
 	cfg.Command = emitterCommand(emit, "report state=idle", "hang")
@@ -407,7 +427,7 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Fatalf("after an unarmed respawn %s = %q, want unset", opt, got)
 		}
@@ -453,13 +473,14 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	nonce := armedNonce(t, p, name)
+	requireDeclared(t, p, name, nonce)
 	awaitRecord(t, p, name, nonce, runtime.ProgramWorking)
 	eventually(t, "a valid working reading under on", func() bool {
 		p.cache.Invalidate()
@@ -472,7 +493,7 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch under off: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Errorf("after a respawn under off %s = %q, want unset", opt, got)
 		}
@@ -635,13 +656,14 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			cfg := runtime.Config{
 				Command:       emitterCommand(emit, "report state=working", "interactive"),
 				WorkDir:       t.TempDir(),
-				ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+				ProgramStatus: declaringArm,
 			}
 			if err := p.Start(context.Background(), name, cfg); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
 			t.Cleanup(func() { _ = p.Stop(name) })
 			nonce := armedNonce(t, p, name)
+			requireDeclared(t, p, name, nonce)
 			target, err := p.tm.agentPaneTarget(name)
 			if err != nil {
 				t.Fatal(err)
@@ -696,7 +718,7 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != disarmed || deferred != 0 {
 				t.Fatalf("DisarmProgramCaptures after the revive = %d, %d, %v; want %d disarmed and none deferred", n, deferred, err, disarmed)
 			}
-			for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+			for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 				if got := paneOption(t, p, name, opt); got != "" {
 					t.Fatalf("revived pane %s = %q, want unset", opt, got)
 				}

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type getErrStore struct {
@@ -303,9 +304,9 @@ func TestSlingStoreRefReportsPrefixStoreWhenPrefixStoreMissing(t *testing.T) {
 	srv := New(state)
 	agentCfg := config.Agent{Name: "worker", Dir: "myrig"}
 
-	store := srv.findSlingStore("myrig", agentCfg, "FE-123")
-	if store != nil {
-		t.Fatalf("findSlingStore returned %T, want nil missing prefix store", store)
+	store, scope := srv.findSlingStore(state.Stores(), "myrig", agentCfg, "FE-123")
+	if store != (beads.WorkStore{}) || scope != storeref.RigRef("frontend") {
+		t.Fatalf("findSlingStore returned %v at %s, want no store at the missing prefix store's scope", store, scope)
 	}
 	if got := srv.slingStoreRef("myrig", agentCfg, "FE-123"); got != "rig:frontend" {
 		t.Fatalf("slingStoreRef = %q, want rig:frontend", got)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1326,7 +1327,7 @@ func TestBackstopLaneWakesOnReadyOnlyChange(t *testing.T) {
 // content.
 func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) {
 	store := beads.NewMemStore()
-	idx, _ := session.BuildClosedNamedSessionBeadIndex(beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-c", "mayor")}, nil))
+	idx, _ := session.BuildClosedNamedSessionBeadIndex(beadstest.Sessions(beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-c", "mayor")}, nil)))
 	demand, closed, scale := keyOf(sourceDemand, store), keyOf(sourceClosedNamed, store), sourceKey{kind: sourceScaleCheck}
 	base := func() *externalReadsRecording {
 		return &externalReadsRecording{Sources: map[sourceKey]sourceResult{

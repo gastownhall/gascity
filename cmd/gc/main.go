@@ -51,7 +51,11 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
-	return run(args, stdout, stderr)
+	code := run(args, stdout, stderr)
+	// A process that recorded program-status shadow comparisons writes the
+	// ones still queued before it exits, bounded so exit never waits long.
+	flushProgramStatusShadow(programShadowFlushTimeout)
+	return code
 }
 
 // errExit is a sentinel error returned by cobra RunE functions to signal
@@ -347,7 +351,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
@@ -1783,7 +1787,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // those is deliberately out of scope here, so do not read the shared path's
 // remaining callers as long-lived-only.
 // Nothing enforces that cfg is fresh; the one-shot entry points
-// (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
+// (openCityStoreAtWithConfig, oneShotRigStoreOpener) and the one-shot convoy
+// store openers (openAllConvoyStoresAt, openConvoyStoreByIDAt) are the only
+// callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	result, err := openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
@@ -1821,10 +1827,14 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if authoritative {
 		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
+	// The storage migration's maintenance window forces the proxied-native
+	// lane for this city's opens alone (storage_maintenance.go). Its opens
+	// skip the memo: a scope memoized before the window took the other lane.
+	forceProxied := activeMigrationWindow(runtimeCityPath) != nil
 	// A one-shot invocation with the memo active opens each scope once; see
 	// invocation_store_memo.go. Long-lived opens never take the memo.
 	var memoEntry *invocationStoreEntry
-	if memo := activeInvocationStoreMemo(); memo != nil && !longLived {
+	if memo := activeInvocationStoreMemo(); memo != nil && !longLived && !forceProxied {
 		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
 		memoEntry.mu.Lock()
 		defer memoEntry.mu.Unlock()
@@ -1882,6 +1892,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		ConditionalWrites:          mode,
 		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
 		NativeTransport:            nativeTransport,
+		ForceProxiedNative:         forceProxied,
 		LongLived:                  longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
@@ -2062,6 +2073,11 @@ func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath strin
 	}
 	store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 	store.SetEnv(env)
+	if !execProviderIsBdBacked(provider) {
+		// The exec protocol carries no dependency payload, and nothing under
+		// this provider is bd, where a graph plan writes one (S5 §1.4).
+		store.DeclarePayloadBlind()
+	}
 	return store, nil
 }
 

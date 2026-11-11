@@ -680,7 +680,7 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 // rbe-west cannot run, allowing only the path-gated ones to skip.
 func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate"}
+	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate", "windows-lane", "windows-lane-test"}
 	for jobName, want := range map[string]struct {
 		name  string
 		needs []string
@@ -717,7 +717,8 @@ func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 // TestCIWorkflowRunsNoBazelCoveredSuite: every build and test of this tree
 // runs under Bazel (bazel.yml's lanes, bazel-nightly.yml). ci.yml keeps
 // only the gating jobs rbe-west cannot run -- the Windows credential-provider
-// tests (no Windows workers) and the pack gate's live registry checks --
+// tests (no Windows workers), the Windows lane's cross-compiles and native
+// tests, and the pack gate's live registry checks --
 // plus routing and the two required fan-ins; advisory-probes.yml holds the
 // advisory live probes of upstream HEADs and their routing. A new job in
 // either needs a reason it cannot be a Bazel target.
@@ -727,6 +728,8 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 			"runner-policy", "changes", // routing
 			"credential-provider-windows", // no Windows workers
 			"pack-gate",                   // live registry and pin provenance
+			"windows-lane",                // GOOS=windows/darwin cross-compiles; rbe-west builds Linux only
+			"windows-lane-test",           // no Windows workers
 			"check", "ci-required",        // required fan-ins
 		},
 		advisoryProbesWorkflowFile: {
@@ -755,9 +758,11 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 			}
 		}
 	}
-	runner := readCriticalPathWorkflow(t, "ci.yml").Jobs["credential-provider-windows"].RunsOn
-	if runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
-		t.Errorf("credential-provider-windows runs-on = %q, want runner_policy.py's Blacksmith Windows runner", runner)
+	ci := readCriticalPathWorkflow(t, "ci.yml")
+	for _, job := range []string{"credential-provider-windows", "windows-lane-test"} {
+		if runner := ci.Jobs[job].RunsOn; runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
+			t.Errorf("%s runs-on = %q, want runner_policy.py's Blacksmith Windows runner", job, runner)
+		}
 	}
 }
 
@@ -930,8 +935,51 @@ func TestReleasePipelinesVerifyExactBinaryMetadata(t *testing.T) {
 			if tt.wantVersionArg != "" && !strings.Contains(metadataCheck.Run, tt.wantVersionArg) {
 				t.Errorf("binary metadata verification does not require release version %s", tt.wantVersionArg)
 			}
+			if want := goreleaserGCDistPath(t); !strings.Contains(metadataCheck.Run, want) {
+				t.Errorf("binary metadata verification does not check %s, where GoReleaser writes the gc build", want)
+			}
 		})
 	}
+}
+
+// goreleaserGCDistPath returns where GoReleaser writes the linux/amd64 gc
+// binary. GoReleaser names a build's dist directory after its id (defaulting
+// to the project name), so renaming the gc build id silently moves the binary
+// out from under the release verifiers.
+func goreleaserGCDistPath(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(repoRoot(t), ".goreleaser.yml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var cfg struct {
+		ProjectName string `yaml:"project_name"`
+		Builds      []struct {
+			ID     string `yaml:"id"`
+			Binary string `yaml:"binary"`
+		} `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	project := cfg.ProjectName
+	if project == "" {
+		project = "gascity"
+	}
+	for _, b := range cfg.Builds {
+		if b.Binary != "gc" {
+			continue
+		}
+		id := b.ID
+		if id == "" {
+			id = project
+		}
+		return "dist/" + id + "_linux_amd64_v1/gc"
+	}
+	t.Fatalf("%s has no build producing the gc binary", path)
+	return ""
 }
 
 func readCriticalPathWorkflow(t *testing.T, name string) ciCriticalPathWorkflow {

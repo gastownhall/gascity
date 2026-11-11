@@ -9,11 +9,19 @@ import (
 
 // ProgramStatusDeclaration is a program-status declaration as gc arms it:
 // whether capture is declared, the program name the capture reader accepts
-// reports from, and whether the program runs under the probe-answering relay.
+// reports from, whether the program runs under the probe-answering relay,
+// whether input typed mid-turn aborts its turn (the mid-turn hold), and
+// whether the startup ladder and the interrupt settle decide with the
+// program's record under the switch on (decide_startup, decide_settle): a
+// family declares those only once a shadow measured its records against
+// that decision.
 type ProgramStatusDeclaration struct {
-	Declared bool
-	App      string
-	Relay    bool
+	Declared      bool
+	App           string
+	Relay         bool
+	HoldMidTurn   bool
+	DecideStartup bool
+	DecideSettle  bool
 }
 
 // ProgramStatusExpectation is a profile's OSC 7501 program-status
@@ -117,7 +125,6 @@ var programStatusPending = map[RequirementCode]string{
 	RequirementProgramStatusQueueBehindBlocked: "ga-f4ovjm.22",
 	RequirementProgramStatusImmediateRefused:   "ga-f4ovjm.22",
 	RequirementProgramStatusReadiness:          "ga-f4ovjm.23",
-	RequirementProgramStatusShadowIdentical:    "ga-f4ovjm.17",
 	RequirementProgramStatusTranscriptTurn:     "ga-f4ovjm.24",
 }
 
@@ -131,8 +138,10 @@ func ProgramStatusPendingSlice(code RequirementCode) (string, bool) {
 // ProgramStatusGate classifies profile for WC-PSTAT row code before the
 // row's behavior runs. implementation is the declaration gc's provider data
 // arms for the profile's family. A declaration that drifts from the
-// profile's expectation (declared, app or relay) fails; an undeclared
-// profile is out of scope (Unsupported); a row whose behavior has not landed
+// profile's expectation (declared, app, relay, hold or a decision opt-in)
+// fails; an undeclared
+// profile is out of scope (Unsupported), as is a profile not declaring the
+// mid-turn hold for the hold's row; a row whose behavior has not landed
 // is pending (Unsupported, naming its slice). run is true only when the row
 // must be checked.
 func ProgramStatusGate(profile Profile, code RequirementCode, implementation ProgramStatusDeclaration) (result Result, run bool) {
@@ -145,6 +154,9 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	if implementation.Declared {
 		evidence["implementation_app"] = implementation.App
 		evidence["implementation_relay"] = strconv.FormatBool(implementation.Relay)
+		evidence["implementation_hold_mid_turn"] = strconv.FormatBool(implementation.HoldMidTurn)
+		evidence["implementation_decide_startup"] = strconv.FormatBool(implementation.DecideStartup)
+		evidence["implementation_decide_settle"] = strconv.FormatBool(implementation.DecideSettle)
 	}
 	switch slice, pending := ProgramStatusPendingSlice(code); {
 	case implementation != expected:
@@ -154,6 +166,9 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	case !expected.Declared:
 		return Unsupported(profile.ID, code,
 			fmt.Sprintf("provider %q does not declare program status (out of scope)", profile.Provider)).WithEvidence(evidence), false
+	case code == RequirementProgramStatusHoldMidTurn && !expected.HoldMidTurn:
+		return Unsupported(profile.ID, code,
+			fmt.Sprintf("provider %q does not declare the mid-turn hold (out of scope)", profile.Provider)).WithEvidence(evidence), false
 	case pending:
 		evidence["pending_slice"] = slice
 		return Unsupported(profile.ID, code,

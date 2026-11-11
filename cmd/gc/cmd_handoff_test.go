@@ -17,10 +17,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -441,7 +441,7 @@ func TestDoHandoffAutoCreatesMailAfterArchive(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("messages after first call = %d, want 1", len(first))
 	}
-	if err := beadmail.New(store).Archive(first[0].ID); err != nil {
+	if err := newTestBeadMail(store).Archive(first[0].ID); err != nil {
 		t.Fatalf("archive first mail: %v", err)
 	}
 
@@ -886,7 +886,7 @@ func TestDoHandoff_RequireRefusalSendsNoMail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rowStore.DisableConditionalWrites = true
-	mgr := session.NewManagerWithOptions(rowStore, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(rowStore), runtime.NewFake(), session.WithCityPath(t.TempDir()))
 
 	store := beads.NewMemStore()
 	rec := events.NewFake()
@@ -1479,7 +1479,7 @@ var handoffMessagingForbidden = []string{
 	"doHandoffAuto(store,",
 	"doHandoffWithOutcome(store,",
 	"doHandoffRemoteWithForce(cityPath, store,",
-	"beadmail.NewWithStores(store,",
+	"beads.MailStore{Store: store}",
 }
 
 // TestHandoffRootsRouteMailThroughTheMessagingClassStore is the TRIPWIRE, not the
@@ -1509,7 +1509,7 @@ func TestHandoffRootsRouteMailThroughTheMessagingClassStore(t *testing.T) {
 	// wrapper, which answers no to all of them. Nothing else in the tree fails
 	// on that, so the shape is pinned here.
 	if unwrapped := len(mailStoreUnwrapCall.FindAllString(content, -1)); unwrapped != calls {
-		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the messaging leg of beadmail.NewWithStores is a beads.Store and must be the embedded store, not the typed wrapper around it", unwrapped, calls)
+		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the doHandoff* arms take the messaging store as a beads.Store and must be handed the embedded store, not the typed wrapper around it", unwrapped, calls)
 	}
 }
 
@@ -1537,6 +1537,9 @@ func TestHandoffMessagingScanDetectsTheDefectItGuards(t *testing.T) {
 		routed := strings.Replace(needle, "(store,", "(msgStore,", 1)
 		if routed == needle {
 			routed = strings.Replace(needle, ", store,", ", msgStore,", 1) // a store after the city path
+		}
+		if routed == needle {
+			routed = strings.Replace(needle, "{Store: store}", "{Store: msgStore}", 1) // the messaging handle beadmail takes
 		}
 		if routed == needle {
 			t.Errorf("forbidden needle %q does not name a store argument, so it cannot be the unrouted spelling of anything", needle)

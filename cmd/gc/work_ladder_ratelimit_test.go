@@ -51,11 +51,15 @@ type rlSeat struct {
 	loseRestart  bool
 
 	delivered []time.Time // nudges the seat took, in its current conversation
-	hist      runtime.TurnHistory
-	pending   int
-	restarts  []time.Time
-	nudges    int
-	reads     int
+	// refused is each ended turn's outcome, by its conversation and start,
+	// fixed when the turn is first read ended: a transcript never rewrites a
+	// turn that ended, whatever the pool does later.
+	refused  map[rlTurnKey]bool
+	hist     runtime.TurnHistory
+	pending  int
+	restarts []time.Time
+	nudges   int
+	reads    int
 }
 
 // rlWorld is a ladderCity of one or more seats on a provider that refuses
@@ -209,7 +213,16 @@ func (w *rlWorld) turnsOf(s *rlSeat) {
 			continue
 		}
 		turn := runtime.EndedTurn{TurnID: fmt.Sprintf("c%d-t%d", conv, i), StartedAt: d, EndedAt: end, Status: runtime.TurnStatusCompleted}
-		if s.refuse(conv) {
+		k := rlTurnKey{conv: conv, start: d}
+		refused, ok := s.refused[k]
+		if !ok {
+			refused = s.refuse(conv)
+			if s.refused == nil {
+				s.refused = map[rlTurnKey]bool{}
+			}
+			s.refused[k] = refused
+		}
+		if refused {
 			turn.Status, turn.Failure = runtime.TurnStatusFailed, s.failure
 		}
 		s.hist.Recent = append([]runtime.EndedTurn{turn}, s.hist.Recent...)
@@ -223,6 +236,12 @@ func (w *rlWorld) turnsOf(s *rlSeat) {
 	case !last.IsZero():
 		w.sp.SetActivity(s.name, last)
 	}
+}
+
+// rlTurnKey names one turn of a seat: its conversation and its start.
+type rlTurnKey struct {
+	conv  int64
+	start time.Time
 }
 
 // step runs one pass at w.now, then the seats take what it sent and the
@@ -1301,7 +1320,8 @@ func TestWorkLadderPartialSnapshotHoldsTheRestart(t *testing.T) {
 
 // The answer to a wait on a person starts a turn of the seat. When the
 // seat's provider refuses that turn with a rate limit, the key still names
-// the seat: the ladder nudges the step hourly, the refusals open the seat's
+// the seat, and its newest turn failed: the ladder nudges the step hourly
+// while its turns keep failing, the refusals open the seat's
 // episode, and the episode holds its restart (one held alert, awaiting a
 // person) for as long as the key names the seat, since a fresh restart would
 // drop the conversation the answer is in. Once the key is cleared, the
@@ -1329,6 +1349,7 @@ func TestWorkLadderRefusedAnswerToAWaitIsNotRestarted(t *testing.T) {
 			if err := w.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: s.id}}); err != nil {
 				t.Fatal(err)
 			}
+			s.delivered = append(s.delivered, w.now) // the person's answer, by mail, starts a turn the provider refuses
 			w.runUntil(6*time.Hour, nil)
 			reasons, messages := w.alertsOf(s)
 			if w.rowOf(s).Metadata["restart_requested"] != "" || !slices.Equal(w.transitions(s), []string{"opened", "held(awaiting_human)"}) ||

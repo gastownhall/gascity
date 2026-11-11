@@ -23,7 +23,7 @@ substitute. -->
 - [ ] `make check` (`bazel test //...` plus shell guards)
 - [ ] `make bazel-sync` and committed the result if imports, packages, or files changed
 - [ ] `make check-docs` (`bazel test //test/docsync:docsync_test`) if docs, navigation, or links changed
-  > **Note:** `docs/` is authored for [docs.gascityhall.com](https://docs.gascityhall.com) (Mintlify), not for direct GitHub viewing. Use extensionless page links (e.g. `/tutorials/01-beads`, not `/tutorials/01-beads.md`). If something looks broken on GitHub but works on the live site, that's intentional.
+  > **Note:** `docs/` is authored for [docs.gascity.com](https://docs.gascity.com) (Mintlify), not for direct GitHub viewing. Use extensionless page links (e.g. `/tutorials/01-beads`, not `/tutorials/01-beads.md`). If something looks broken on GitHub but works on the live site, that's intentional.
 - [ ] `make test-acceptance` (`bazel test --config=acceptance //test/acceptance:acceptance_test`) if `gc` command behavior changed
 - [ ] `make test-integration` (`bazel test --config=integration ...`) if runtime, controller, or workflow behavior changed
 - [ ] Added or updated tests for behavior changes
