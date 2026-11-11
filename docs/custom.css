@@ -1,5 +1,5 @@
 /* Gas City docs — Art Deco dark gold theme
-   Matches gascityhall.com BaseLayout.astro */
+   Matches gascity.com BaseLayout.astro */
 
 /* Load Raleway bold — Mintlify only loads weight 400 from fonts config */
 @import url('https://fonts.googleapis.com/css2?family=Raleway:wght@700&display=swap');
@@ -85,7 +85,7 @@ a:hover {
 /* ── No CSS needed for logo text — baked into wordmark SVG ── */
 
 /* ── "Gas City Hall" text link styling ── */
-a[href="https://gascityhall.com"] {
+a[href="https://gascity.com"] {
   font-weight: 700 !important;
 }
 

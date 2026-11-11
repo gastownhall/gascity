@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -289,6 +292,89 @@ func TestDirtyScopeTablesCommitSQLQuotesDatabase(t *testing.T) {
 	got := dirtyScopeTablesCommitSQL("we`ird")
 	if !strings.HasPrefix(got, "USE `we``ird`;") {
 		t.Fatalf("commit SQL = %q, want the database identifier escaped", got)
+	}
+}
+
+// TestManagedDoltDirtyTablesWithPasswordUseDirectConnection pins that a
+// configured managed password sends the dirty-table count and commit through
+// the pooled driver connection, not the dolt CLI, where a `default` dolt
+// profile's password would outrank DOLT_CLI_PASSWORD (see
+// runManagedDoltSQLContext).
+func TestManagedDoltDirtyTablesWithPasswordUseDirectConnection(t *testing.T) {
+	doltInvocations := installFailingDoltRecorder(t)
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	prevCount, prevCommit := managedDoltDirtyTableCountDirectFn, managedDoltCommitDirtyTablesDirectFn
+	t.Cleanup(func() {
+		managedDoltDirtyTableCountDirectFn, managedDoltCommitDirtyTablesDirectFn = prevCount, prevCommit
+	})
+	var calls []string
+	managedDoltDirtyTableCountDirectFn = func(port, database string) (int, error) {
+		calls = append(calls, fmt.Sprintf("count %q %q", port, database))
+		return 3, nil
+	}
+	managedDoltCommitDirtyTablesDirectFn = func(port, database string) error {
+		calls = append(calls, fmt.Sprintf("commit %q %q", port, database))
+		return nil
+	}
+
+	if n, err := managedDoltDirtyTableCount("3311", "gsp"); err != nil || n != 3 {
+		t.Fatalf("managedDoltDirtyTableCount() = %d, %v; want 3 from the direct count", n, err)
+	}
+	if err := managedDoltCommitDirtyTables("3311", "gsp"); err != nil {
+		t.Fatalf("managedDoltCommitDirtyTables() error = %v", err)
+	}
+	want := []string{`count "3311" "gsp"`, `commit "3311" "gsp"`}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("direct calls = %q, want %q", calls, want)
+	}
+	if invocations := doltInvocations(); invocations != "" {
+		t.Fatalf("dolt CLI ran with GC_DOLT_PASSWORD set: %s", invocations)
+	}
+}
+
+// TestManagedDoltDirtyTablesWithPasswordAgainstRealServer counts and commits a
+// dirty working set on a real passworded server while a failing dolt is first
+// on PATH, so both can only have gone over the driver connection.
+func TestManagedDoltDirtyTablesWithPasswordAgainstRealServer(t *testing.T) {
+	realDolt, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt not installed")
+	}
+	t.Setenv("GC_DOLT_REAL_BINARY", realDolt)
+	doltInvocations := installFailingDoltRecorder(t)
+	_, port, _, cleanup := startPasswordedDoltServer(t, "",
+		"CREATE DATABASE `gsp`; USE `gsp`; CREATE TABLE dirty (k INT PRIMARY KEY); INSERT INTO dirty VALUES (1);")
+	defer cleanup()
+	portText := strconv.Itoa(port)
+
+	if n, err := managedDoltDirtyTableCount(portText, "gsp"); err != nil || n == 0 {
+		t.Fatalf("managedDoltDirtyTableCount() before the commit = %d, %v; want dirty tables", n, err)
+	}
+	if err := managedDoltCommitDirtyTables(portText, "gsp"); err != nil {
+		t.Fatalf("managedDoltCommitDirtyTables() error = %v", err)
+	}
+	if n, err := managedDoltDirtyTableCount(portText, "gsp"); err != nil || n != 0 {
+		t.Fatalf("managedDoltDirtyTableCount() after the commit = %d, %v; want 0", n, err)
+	}
+	db, err := managedDoltOpenDatabase("", portText, "root", "gsp")
+	if err != nil {
+		t.Fatalf("managedDoltOpenDatabase() error = %v", err)
+	}
+	var committer, message string
+	if err := db.QueryRow("SELECT committer, message FROM dolt_log LIMIT 1").Scan(&committer, &message); err != nil {
+		t.Fatalf("reading the recovery commit from dolt_log: %v", err)
+	}
+	if committer != "gascity-builder" || message != dirtyScopeTablesCommitMessage {
+		t.Fatalf("recovery commit = %q by %q, want %q by gascity-builder", message, committer, dirtyScopeTablesCommitMessage)
+	}
+	// commitDirtyScopeTablesViaManagedDolt reads "nothing to commit" as an
+	// already-clean database, so the driver error must still carry dolt's text.
+	err = managedDoltCommitDirtyTables(portText, "gsp")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+		t.Fatalf("managedDoltCommitDirtyTables() on a clean working set error = %v, want dolt's nothing-to-commit refusal", err)
+	}
+	if invocations := doltInvocations(); invocations != "" {
+		t.Fatalf("dolt CLI ran with GC_DOLT_PASSWORD set: %s", invocations)
 	}
 }
 

@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package integration
 
@@ -9,23 +9,23 @@ package integration
 // real systemctl --user invocation, the real SIGTERM + spawn cycle,
 // and the real /health round-trip after restart.
 //
-// Each test isolates GC_HOME / XDG_RUNTIME_DIR so a failing run on a
-// developer box does not corrupt the real supervisor; supervisors
-// started here listen on a per-test reserved loopback port.
+// Each test isolates GC_HOME / HOME / XDG_RUNTIME_DIR so a failing run on
+// a developer box does not corrupt the real supervisor, and gc never
+// installs a platform supervisor unit (GC_SUPERVISOR_ISOLATED_HOME; see
+// isolateGCHomeEnv). Supervisors started here listen on a per-test
+// reserved loopback port.
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,7 +33,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 const (
@@ -121,7 +123,7 @@ func TestStartDrift_SystemdManaged_RestartsToNewBuildID(t *testing.T) {
 	requireUserSystemd(t)
 	tc := setupDriftSystemdScenario(t)
 
-	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
+	out, exitCode, _ := runDriftCommandWithin(t, driftSystemdCommandTimeout, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
 	if exitCode != 0 {
 		t.Fatalf("gc start exit = %d, want 0\noutput:\n%s", exitCode, out)
 	}
@@ -294,18 +296,19 @@ func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
 // supervisor never serves /health within the 5s budget, gc start must
 // surface a descriptive error and exit 1 — never hang.
 //
-// We exercise this by replacing the supervisor binary with one that
-// exits immediately (it is /bin/true wrapped in a `gc supervisor run`
-// shim that just sleeps without binding the port). The kill+spawn
-// succeeds; PollReady cannot get a 200; the timeout fires.
+// The relaunched supervisor runs the same gc binary as the invoking
+// `gc start`: an in-place upgrade, the only drift gc start auto-restarts.
+// A supervisor whose relaunch binary is a different file than this gc is
+// refused as a different installation before any restart, so the stuck
+// replacement cannot come from swapping the binary on disk. Instead the
+// replacement's single-instance lock is made unacquirable (see
+// blockSupervisorRelaunch), so its `gc supervisor run` exits at startup.
+// The kill+spawn succeeds; PollReady cannot get a 200; the timeout fires.
 func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
-	// Replace the binary on disk with a no-op shim so the post-kill
-	// spawn never serves /health.
-	stuckShim := writeStuckSupervisorShim(t, tc.binaryPath)
-	defer os.Remove(stuckShim) //nolint:errcheck
+	blockSupervisorRelaunch(t, tc.gcHome)
 
 	out, exitCode, elapsed := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 		"start", tc.cityDir)
@@ -319,6 +322,15 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 	if !strings.Contains(out, "Last known pid=") {
 		t.Errorf("output missing %q (operator needs the pid to investigate)\n%s",
 			"Last known pid=", out)
+	}
+	// Pin the cause: the timeout must come from the induced startup
+	// failure of the relaunched supervisor, not from something else.
+	logData, err := os.ReadFile(filepath.Join(tc.gcHome, "supervisor.log"))
+	if err != nil {
+		t.Fatalf("reading supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logData), "opening supervisor lock") {
+		t.Errorf("relaunched supervisor did not fail on the blocked lock; the timeout has another cause\nsupervisor.log:\n%s", logData)
 	}
 	// The whole invocation must NOT hang — restart timeout (~5s) +
 	// detection (~0.1s) + kill/spawn (~0.5s); pin a generous outer
@@ -609,12 +621,38 @@ func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 	return gcHome, runtimeDir, env
 }
 
-// buildGCBinaryWithCommit compiles the gc binary at outPath with
-// `-X main.commit=commitID` so the supervisor's /health reports
-// build_id=commitID. Used to fabricate drift between the running
-// supervisor and the on-disk binary.
+// driftPrebuiltRunfiles maps each drift commit to the gc Bazel links with
+// that commit stamped (//cmd/gc:gc_drift_old and :gc_drift_new, data deps of
+// this target), relative to the main repository's runfiles root.
+var driftPrebuiltRunfiles = map[string]string{
+	driftHappyOldCommit: "cmd/gc/gc_drift_old_/gc_drift_old",
+	driftHappyNewCommit: "cmd/gc/gc_drift_new_/gc_drift_new",
+}
+
+// buildGCBinaryWithCommit puts a gc binary stamped with `-X
+// main.commit=commitID` at outPath, so the supervisor's /health reports
+// build_id=commitID. Used to fabricate drift between the running supervisor
+// and the on-disk binary.
+//
+// Under Bazel the binary is the prebuilt link from runfiles: a test action
+// has neither go.sum nor a module cache, and the fork pool has no network to
+// fill one. It is installed the way `go build -o` replaces a binary, through
+// a rename, so a supervisor running the previous bytes keeps its inode.
+// Outside Bazel it is compiled, as before.
 func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	t.Helper()
+	if bazeltest.IsBazel() {
+		rel, ok := driftPrebuiltRunfiles[commitID]
+		if !ok {
+			t.Fatalf("no Bazel-linked gc for drift commit %s; add a //cmd/gc:gc_drift_* target and map it here", commitID)
+		}
+		prebuilt := runfilesBinary(rel)
+		if prebuilt == "" {
+			t.Fatalf("Bazel-linked gc for drift commit %s (%s) is not in runfiles; is it a data dep of this target?", commitID, rel)
+		}
+		installDriftBinary(t, prebuilt, outPath)
+		return
+	}
 	cmd := exec.Command("go", "build",
 		"-buildvcs=false",
 		"-ldflags", "-X main.commit="+commitID,
@@ -625,6 +663,41 @@ func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building gc with commit=%s: %v\n%s", commitID, err, string(out))
+	}
+}
+
+// installDriftBinary copies src to dst through a temporary file in dst's
+// directory and a rename, like `go build -o` replacing an installed binary:
+// the replacement gets a new inode, so a supervisor still executing dst keeps
+// running the old bytes and the copy never fails with ETXTBSY.
+func installDriftBinary(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("opening prebuilt gc %s: %v", src, err)
+	}
+	defer in.Close() //nolint:errcheck
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		t.Fatalf("staging gc at %s: %v", dst, err)
+	}
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("copying prebuilt gc to %s: %v", tmp.Name(), err)
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("chmod %s: %v", tmp.Name(), err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("closing %s: %v", tmp.Name(), err)
+	}
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("installing gc at %s: %v", dst, err)
 	}
 }
 
@@ -775,13 +848,31 @@ func bootstrapDriftCity(t *testing.T, binary string, env []string, gcHome string
 	return cityDir
 }
 
+// driftCommandTimeout bounds one `gc start` invocation in the drift
+// scenarios. It is generous enough for the restart-loop guard test
+// (which runs four `gc start` cycles).
+const driftCommandTimeout = 60 * time.Second
+
+// driftSystemdCommandTimeout bounds `gc start` in the systemd-managed
+// scenario. The systemd restart alone took 31.1s on a loaded gate host, so
+// the default bound left no room for registration after it; a real hang
+// still fails at this limit.
+const driftSystemdCommandTimeout = 3 * time.Minute
+
 // runDriftCommand runs `binary args...` capturing combined output,
-// exit code, and wall-clock duration. The default timeout is 60s,
-// generous enough for the restart-loop guard test (which runs four
-// `gc start` cycles).
+// exit code, and wall-clock duration, bounded by driftCommandTimeout.
 func runDriftCommand(t *testing.T, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return runDriftCommandWithin(t, driftCommandTimeout, binary, env, cwd, args...)
+}
+
+// runDriftCommandWithin is runDriftCommand with an explicit bound. When the
+// command exits non-zero it appends one line to the output naming the exit
+// code, the elapsed time, whether the deadline fired, and the error text, so
+// a -1 (killed by the deadline) is told apart from any other failure.
+func runDriftCommandWithin(t *testing.T, timeout time.Duration, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = env
@@ -797,6 +888,12 @@ func runDriftCommand(t *testing.T, binary string, env []string, cwd string, args
 		} else {
 			exitCode = -1
 		}
+		deadline := "deadline not exceeded"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			deadline = "context deadline exceeded"
+		}
+		return fmt.Sprintf("%s\n[runDriftCommand] exit=%d after %s (timeout %s): %s: %v\n",
+			out, exitCode, elapsed.Round(time.Millisecond), timeout, deadline, err), exitCode, elapsed
 	}
 	return string(out), exitCode, elapsed
 }
@@ -1042,26 +1139,35 @@ func setDaemonKeyForTest(src, key, value string) string {
 	return strings.Join(next, "")
 }
 
-// writeStuckSupervisorShim overwrites binaryPath with a shell script
-// that, when invoked as `<binary> supervisor run`, sleeps without
-// binding the /health port. Used by the restart-timeout test.
-func writeStuckSupervisorShim(t *testing.T, binaryPath string) string {
+// blockSupervisorRelaunch makes every `gc supervisor run` started after it
+// under gcHome exit at startup, before binding /health, while the supervisor
+// already running keeps serving. The running supervisor holds its
+// single-instance flock on the open lock-file inode, so moving that file
+// aside leaves it untouched; a directory put at the lock path then makes a
+// new supervisor's open fail with EISDIR, which (unlike a permission change)
+// also holds when the test runs as root. The lock file is restored on
+// cleanup. Used by the restart-timeout test.
+func blockSupervisorRelaunch(t *testing.T, gcHome string) {
 	t.Helper()
-	script := "#!/bin/sh\nif [ \"$1\" = \"supervisor\" ] && [ \"$2\" = \"run\" ]; then\n  exec sleep 60\nfi\nexec '" + binaryPath + ".real' \"$@\"\n"
-	// Move the real binary aside so the shim can fall through for any
-	// non-`supervisor run` subcommand the drift code path needs.
-	realPath := binaryPath + ".real"
-	if err := os.Rename(binaryPath, realPath); err != nil {
-		t.Fatalf("moving real binary: %v", err)
+	lockPath := filepath.Join(gcHome, "supervisor.lock")
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("locating the running supervisor's lock file: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("supervisor lock %s is not a regular file (mode %s)", lockPath, info.Mode())
+	}
+	heldPath := lockPath + ".held"
+	if err := os.Rename(lockPath, heldPath); err != nil {
+		t.Fatalf("moving supervisor lock aside: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Remove(binaryPath)
-		_ = os.Rename(realPath, binaryPath)
+		_ = os.RemoveAll(lockPath)
+		_ = os.Rename(heldPath, lockPath)
 	})
-	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stuck shim: %v", err)
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatalf("blocking supervisor lock path: %v", err)
 	}
-	return binaryPath
 }
 
 // requireUserSystemd skips the test unless `systemctl --user
@@ -1121,20 +1227,10 @@ func secondaryUID(t *testing.T) uint32 {
 
 // expectedSupervisorSystemdUnit returns the systemd unit name the gc
 // binary will derive for a supervisor running under the supplied
-// GC_HOME. It mirrors supervisorSystemdServiceName() +
-// supervisorServiceSuffix() in cmd/gc/cmd_supervisor_lifecycle.go so
-// the test installs the unit at the name the binary's
-// `systemctl --user is-active` probe will look for.
-//
-// Algorithm: normalize gcHome (symlink-resolve + abs), sanitize its
-// basename to [a-z0-9-], hash the normalized path with sha1[:8], and
-// concatenate as `gascity-supervisor-<base>-<hash>.service`. Empty
-// basename falls back to `isolated-<hash>` per the binary.
-//
-// The two algorithms must stay in lockstep — when the binary changes
-// its naming, this helper must change with it or
-// TestStartDrift_SystemdManaged_RestartsToNewBuildID will revert to
-// the 'direct' branch silently.
+// GC_HOME: supervisorSystemdServiceName() in
+// cmd/gc/cmd_supervisor_lifecycle.go, built on the shared
+// supervisor.ServiceSuffix, so the test installs the unit at the name the
+// binary's `systemctl --user is-active` probe will look for.
 func expectedSupervisorSystemdUnit(gcHome string) string {
 	suffix := expectedSupervisorServiceSuffix(gcHome)
 	if suffix == "" {
@@ -1143,34 +1239,11 @@ func expectedSupervisorSystemdUnit(gcHome string) string {
 	return "gascity-supervisor-" + suffix + ".service"
 }
 
-// expectedSupervisorServiceSuffix replicates supervisorServiceSuffix()
-// from cmd/gc/cmd_supervisor_lifecycle.go. Returns "" for the
-// non-isolated (empty / default-home) case — the test never hits that
-// branch because newIsolatedEnvRoot always sets an isolated GC_HOME,
-// but the empty arm is preserved so the helper stays a faithful
-// mirror of the production function.
+// expectedSupervisorServiceSuffix is gc's own supervisorServiceSuffix() for
+// gcHome: both normalize the path and call supervisor.ServiceSuffix, so the
+// unit names here cannot drift from the binary's.
 func expectedSupervisorServiceSuffix(gcHome string) string {
-	gcHome = pathutil.NormalizePathForCompare(strings.TrimSpace(gcHome))
-	if gcHome == "" {
-		return ""
-	}
-	base := sanitizeSupervisorServiceName(filepath.Base(gcHome))
-	sum := sha1.Sum([]byte(gcHome))
-	hash := hex.EncodeToString(sum[:])[:8]
-	if base == "" {
-		return "isolated-" + hash
-	}
-	return base + "-" + hash
-}
-
-// sanitizeSupervisorServiceName mirrors sanitizeServiceName() from
-// cmd/gc/cmd_supervisor_lifecycle.go: lowercase, collapse non-alnum
-// runs to '-', trim leading/trailing '-'.
-func sanitizeSupervisorServiceName(name string) string {
-	name = strings.ToLower(name)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	name = re.ReplaceAllString(name, "-")
-	return strings.Trim(name, "-")
+	return supervisor.ServiceSuffix(pathutil.NormalizePathForCompare(strings.TrimSpace(gcHome)))
 }
 
 // systemdUserUnitDir returns the runtime unit directory of the user
@@ -1218,6 +1291,8 @@ Restart=no
 StandardOutput=append:%s/supervisor.log
 StandardError=append:%s/supervisor.log
 Environment=GC_HOME=%s
+Environment=HOME=%s
+Environment=%s=1
 Environment=XDG_RUNTIME_DIR=%s
 Environment=GC_DOLT=skip
 Environment=GC_BEADS=file
@@ -1225,10 +1300,23 @@ Environment=GC_SESSION=fake
 
 [Install]
 WantedBy=default.target
-`, binaryPath, gcHome, gcHome, gcHome, runtimeDir)
-	path := filepath.Join(dir, unitName)
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
-		t.Fatalf("writing systemd unit: %v", err)
+`, binaryPath, gcHome, gcHome, gcHome, integrationIsolatedHome(gcHome), supervisorIsolatedHomeEnv, runtimeDir)
+	// The manager finds the unit in the runtime directory, but gc's restart
+	// guard reads the installed service file at supervisorSystemdServicePath,
+	// $HOME/.local/share/systemd/user, and the gc subprocess runs under the
+	// isolated HOME. Mirror the unit there so the guard reads the same
+	// content the manager loaded; the copy lives under gcHome, so it is
+	// removed with the scenario and the manager never searches it.
+	guardDir := filepath.Join(integrationIsolatedHome(gcHome), ".local", "share", "systemd", "user")
+	if err := os.MkdirAll(guardDir, 0o755); err != nil {
+		t.Fatalf("creating isolated HOME systemd dir: %v", err)
+	}
+	// Mirror first: the runtime-dir copy is the one the manager loads, and
+	// the caller registers its cleanup only after this helper returns.
+	for _, path := range []string{filepath.Join(guardDir, unitName), filepath.Join(dir, unitName)} {
+		if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+			t.Fatalf("writing systemd unit: %v", err)
+		}
 	}
 	return unitName
 }

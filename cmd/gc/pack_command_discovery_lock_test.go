@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -174,6 +175,34 @@ func TestCompletionCandidatesDoNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("completion candidates blocked on a held repo-cache lock")
+	}
+}
+
+// gc start and gc reload print stage-1 MCP skip warnings after the supervisor
+// or controller has taken the request. The report is best effort, so it must
+// not queue behind a held repo-cache lock either: on gc reload, the holder can
+// be the controller's own pack fetch. It prints nothing instead.
+func TestStage1MCPSkipWarningsDoNotWaitOnHeldRepoCacheLock(t *testing.T) {
+	cityPath, cacheRoot := setupDiscoveryLockCity(t)
+	release := holdExclusiveRepoCacheLock(t, cacheRoot)
+
+	var stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		warnStage1MCPSkips(cityPath, stubLookPath, &stderr)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		// Join before failing: the woken load writes into the city.
+		release()
+		<-done
+		t.Fatal("the stage-1 MCP skip warnings blocked on a held repo-cache lock")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q with the repo cache busy, want nothing", stderr.String())
 	}
 }
 

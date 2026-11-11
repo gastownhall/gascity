@@ -46,9 +46,9 @@ type healOracleCase struct {
 // TestHealStatePatchWithRollbackInfo pins healStatePatchWithRollbackInfo against
 // explicit expected batches across every heal branch (drained fast path,
 // start-request, failed-create preserve/clear, stale-creating rollback,
-// reset-continuation clears, named-session mode guard, deferred-rollback). Each
-// row is load-bearing: a mutation of the corresponding non-trivial branch flips
-// the batch. The deferred-rollback row pins the corrected atomic transition:
+// reset-continuation clears, named-session mode guard, deferred-rollback, a
+// claimed active row kept active). Each row is load-bearing: a mutation of the
+// corresponding non-trivial branch flips the batch. The deferred-rollback row pins the corrected atomic transition:
 // state and lease remain together until rollback is available. The other
 // expected batches were captured from the WI-6-R2 raw healStatePatchWithRollback
 // before it was deleted in R3.
@@ -60,12 +60,18 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 	// clears.
 	resetBatch := map[string]string{
 		"continuation_reset_pending": "true", "pending_create_claim": "", "pending_create_started_at": "",
-		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "",
+		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "",
 		"session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep",
 	}
 
 	cases := []healOracleCase{
 		{name: "asleep-alive", meta: map[string]string{"state": "asleep"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
+		{name: "active-alive", meta: map[string]string{"state": "active"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
+		// A live active row whose claim outlived its commit stays active until
+		// the claim is cleared: awake would let the next tick roll it back.
+		// Dead, the claim requests its restart as for any other row.
+		{name: "active-claim-alive-keeps-active", meta: map[string]string{"state": "active", "pending_create_claim": "true"}, alive: true, rollback: true, want: nil},
+		{name: "active-claim-dead-requests-start", meta: map[string]string{"state": "active", "pending_create_claim": "true"}, alive: false, rollback: true, want: map[string]string{"state": "start-pending"}},
 		{name: "active-dead-drains", meta: map[string]string{"state": "active"}, alive: false, rollback: true, want: map[string]string{"state": "asleep"}},
 		{name: "asleep-dead-noop", meta: map[string]string{"state": "asleep", "sleep_reason": "idle"}, alive: false, rollback: true, want: nil},
 		{
@@ -145,7 +151,7 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			meta:     map[string]string{"state": "active", "configured_named_session": "true", "configured_named_identity": "mayor", "configured_named_mode": "singleton", "session_name": "mayor", "session_key": "sk", "started_config_hash": "h"},
 			alive:    false,
 			rollback: true,
-			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
+			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
 		},
 		{
 			// gascity#5121: a failed liveness probe (Observed=false) must not be
@@ -327,7 +333,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-recovers", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "sleep_intent": "idle-stop-pending", "sleep_policy_fingerprint": "fp"})
-		if !recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) == nil {
 			t.Fatal("recoverPendingIdleSleepInfo = false, want true")
 		}
 		persisted, _ := store.Get(b.ID)
@@ -340,7 +346,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) != nil {
 			t.Fatal("recoverPendingIdleSleepInfo = true, want false (no pending intent)")
 		}
 	})

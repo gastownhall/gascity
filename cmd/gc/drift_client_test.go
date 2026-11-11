@@ -8,19 +8,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestHTTPSupervisorClient_StatusRoundTrips confirms the client surfaces
 // the supervisor's reported buildID. This is the load-bearing field for
 // binary-drift detection in `gc start`.
 func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","build_id":"deadbeef-dirty","uptime_sec":12,"cities_total":1,"cities_running":1}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
 	c := newHTTPSupervisorClient(srv.URL)
@@ -31,6 +33,9 @@ func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
 	if got.BuildID != "deadbeef-dirty" {
 		t.Fatalf("BuildID = %q, want %q", got.BuildID, "deadbeef-dirty")
 	}
+	if got.Version != "v0" {
+		t.Fatalf("Version = %q, want %q", got.Version, "v0")
+	}
 }
 
 // TestHTTPSupervisorClient_StatusEmptyBuildID confirms the client tolerates
@@ -38,10 +43,10 @@ func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
 // without VCS info). DetectBinaryDrift treats empty as "unknown" rather
 // than asserting drift.
 func TestHTTPSupervisorClient_StatusEmptyBuildID(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
 	c := newHTTPSupervisorClient(srv.URL)
@@ -57,10 +62,10 @@ func TestHTTPSupervisorClient_StatusEmptyBuildID(t *testing.T) {
 // TestHTTPSupervisorClient_StatusNon200 confirms the client surfaces a
 // descriptive error when /health returns a non-2xx response.
 func TestHTTPSupervisorClient_StatusNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprint(w, `{"detail":"boom"}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
 	c := newHTTPSupervisorClient(srv.URL)
@@ -76,10 +81,10 @@ func TestHTTPSupervisorClient_StatusNon200(t *testing.T) {
 // TestHTTPSupervisorClient_PingOnSuccessful200 confirms Ping returns nil
 // when the supervisor is responsive.
 func TestHTTPSupervisorClient_PingOnSuccessful200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
 	c := newHTTPSupervisorClient(srv.URL)

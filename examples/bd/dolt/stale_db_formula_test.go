@@ -1,6 +1,9 @@
+//go:build unix
+
 package dolt_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +17,6 @@ import (
 func staleDBFilteredEnv(keys ...string) []string {
 	keys = append(keys,
 		"GC_BEAD_ID",
-		"GC_TRIGGER_BEAD_ID",
 		"GC_ESCALATE_SCRIPT",
 		"GC_ESCALATE_SEARCH_PACKS",
 		"GC_ESCALATION_RECIPIENT",
@@ -41,7 +43,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
@@ -74,6 +76,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`GC_BEAD_ID:-<work-bead>`,
 		`GC_BEAD_ID:?`,
 		`Dolt orphan(s) detected`,
+		`GC_TRIGGER_`,
 	} {
 		if strings.Contains(desc, bad) {
 			t.Errorf("formula step still contains retired or leaky pattern %q", bad)
@@ -89,7 +92,9 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
+		`if [ "$PROTECTED_NON_BASELINE" -ge "10" ]; then`,
+		`protected_non_baseline: ((.summary.protected_total // 0) - (.summary.protected_by_kind["active-rig"] // 0))`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("rendered script missing %q", want)
@@ -132,7 +137,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -174,9 +179,12 @@ esac
 		t.Fatalf("rendered script exited successfully; want apply errors to fail before success close\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	for _, want := range []string{
-		"bd update bead-1 --append-notes",
-		"## apply (--force, refused)",
+		staleDBReportWrite,
+		"gc.dolt_cleanup.apply_report=apply (--force, refused)",
 		"gc event emit mol-dog-stale-db.escalate",
+		// A distinct call site/blocker-kind from the dry-run force-blocker
+		// escalation; locks in that apply-path escalations dedup too.
+		"--dedup mol-dog-stale-db:bead-1:apply-errors",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
@@ -193,7 +201,7 @@ esac
 			t.Fatalf("rendered script logged forbidden success path %q despite apply errors\nlog:\n%s\noutput:\n%s", forbidden, log, out)
 		}
 	}
-	if strings.Contains(log, "bd close bead-1") {
+	if strings.Contains(log, staleDBCloseWrite("bead-1")) {
 		t.Fatalf("rendered script closed bead successfully despite apply errors\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
@@ -230,7 +238,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -271,13 +279,13 @@ esac
 	if err == nil {
 		t.Fatalf("rendered script exited successfully; want failed apply command to keep work open\nlog:\n%s\noutput:\n%s", log, out)
 	}
-	if !strings.Contains(log, "## apply (--force, failed)") {
+	if !strings.Contains(log, "gc.dolt_cleanup.apply_report=apply (--force, failed)") {
 		t.Fatalf("failed apply JSON was not appended to work bead\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	if !strings.Contains(log, `"stage":"drop"`) {
 		t.Fatalf("appended apply note missing JSON errors\nlog:\n%s\noutput:\n%s", log, out)
 	}
-	if strings.Contains(log, "bd close bead-1") {
+	if strings.Contains(log, staleDBCloseWrite("bead-1")) {
 		t.Fatalf("rendered script closed bead despite failed apply command\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
@@ -304,7 +312,7 @@ case "${1:-} ${2:-}" in
     cat "$GC_TEST_SCAN_JSON"
     exit 42
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -344,10 +352,16 @@ esac
 	if err == nil {
 		t.Fatalf("rendered script exited successfully; want dry-run failure to keep work open\nlog:\n%s\noutput:\n%s", log, out)
 	}
-	if !strings.Contains(log, "bd update bead-1 --append-notes") {
+	if !strings.Contains(log, staleDBReportWrite) {
 		t.Fatalf("dry-run failure did not append scan JSON to work bead\nlog:\n%s\noutput:\n%s", log, out)
 	}
-	if strings.Contains(log, "bd close bead-1") {
+	// The report is the stage title and timestamp, then the scan JSON verbatim
+	// on the following lines, under the scan stage's own metadata key.
+	if !strings.Contains(log, "gc.dolt_cleanup.scan_report=scan (dry-run failed) ") ||
+		!strings.Contains(log, "\n"+`{"schema":"gc.dolt.cleanup.v1",`) || !strings.Contains(log, `"errors_total":1}}`) {
+		t.Fatalf("dry-run failure report lost the scan JSON\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	if strings.Contains(log, staleDBCloseWrite("bead-1")) {
 		t.Fatalf("rendered script closed bead despite dry-run failure\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
@@ -382,7 +396,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -427,7 +441,7 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
-		"bd close bead-1 --actor dog-alpha",
+		staleDBCloseWrite("bead-1"),
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
@@ -438,16 +452,17 @@ esac
 	}
 }
 
-// TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool pins the close
-// actor chain for an unaliased pool dog, the shape every bd-pack dog has. Such
-// a session claims its wisp under its session bead ID (gc hook --claim records
-// alias > GC_SESSION_ID) and exports that same ID as BEADS_ACTOR, while
-// GC_SESSION_NAME stays the runtime name (<template>-<beadID>). bd fences the
-// close on actor == assignee byte for byte, so closing as the session name is
-// rejected and the successful run is left open (the #5716 shape). GC_ALIAS is
-// exported as an empty string rather than left unset, so every tier must use
-// `:-` (empty-or-unset) and not `-`.
-func TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool(t *testing.T) {
+// TestStaleDBFormulaCloseIsIndependentOfIdentityEnv pins that the close
+// no longer depends on the session's identity env. It used to be `bd close
+// --actor <chain>`, because bd fences a close on actor == assignee byte for
+// byte and an unaliased pool dog claims under its session bead ID (the #5716
+// shape). The close is now `gc bd close --reason` with no --actor: on a
+// single-store city gc runs bd's close as the identity that claimed the wisp
+// (the session's BEADS_ACTOR is that identity, and gc re-pins it for a close
+// of the session's own claim), and for a relocated wisp gc serves the close in
+// process, which refuses --actor. So every identity env below must produce the
+// same close and none may smuggle an --actor back in.
+func TestStaleDBFormulaCloseIsIndependentOfIdentityEnv(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		env  []string
@@ -456,17 +471,17 @@ func TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool(t *testing.T) {
 		{
 			name: "beads actor",
 			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=gc-dog7", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
-			want: "bd close bead-1 --actor gc-dog7",
+			want: staleDBCloseWrite("bead-1"),
 		},
 		{
 			name: "session id when beads actor absent",
 			env:  []string{"GC_ALIAS=", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
-			want: "bd close bead-1 --actor gc-dog7",
+			want: staleDBCloseWrite("bead-1"),
 		},
 		{
 			name: "session name last",
 			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_NAME=dog-session-7"},
-			want: "bd close bead-1 --actor dog-session-7",
+			want: staleDBCloseWrite("bead-1"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -506,7 +521,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -557,19 +572,57 @@ esac
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
 		}
 	}
+	if strings.Contains(log, "--actor") {
+		t.Fatalf("the close carries an --actor, which the in-process door refuses\nlog:\n%s\noutput:\n%s", log, out)
+	}
 	if strings.Contains(log, "mol-dog-stale-db.escalate") {
 		t.Fatalf("rendered script escalated at dropped.count == max_orphans_for_sql; want apply because threshold is >\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
 
 // TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain proves the formula
-// runs in a real pool shell, where neither GC_BEAD_ID nor GC_TRIGGER_BEAD_ID
-// is guaranteed: the bead-id chain must fall through to
-// `gc hook current --id-only`, the back-channel stamped by `gc hook --claim`.
-// Before this chain the formula required GC_BEAD_ID — an env var no session
-// shell has ever received — so even a correctly claiming dog aborted at the
-// WORK_BEAD guard (ga-2q2r0).
+// runs in a real pool shell, where GC_BEAD_ID is not guaranteed: the bead-id
+// chain must fall through to `gc hook current --id-only`, the back-channel
+// stamped by `gc hook --claim`. Before this chain the formula required
+// GC_BEAD_ID — an env var no session shell has ever received — so even a
+// correctly claiming dog aborted at the WORK_BEAD guard (ga-2q2r0).
 func TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain(t *testing.T) {
+	log, out := runStaleDBFormulaViaHookCurrent(t)
+	for _, want := range []string{
+		"gc hook current --id-only",
+		staleDBCloseWrite("bead-hook-1"),
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+}
+
+// Kills a bead-id chain that consults GC_TRIGGER_BEAD_ID: a shell that still
+// carries a foreign id there (an older gc exported the frozen demand stamp)
+// closes the bead its own claim names, never the foreign one
+// (gastownhall/gascity#5738).
+func TestStaleDBFormulaIgnoresForeignTriggerBeadID(t *testing.T) {
+	log, out := runStaleDBFormulaViaHookCurrent(t, "GC_TRIGGER_BEAD_ID=bead-foreign")
+	for _, want := range []string{
+		"gc hook current --id-only",
+		staleDBCloseWrite("bead-hook-1"),
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	if strings.Contains(log, "bead-foreign") {
+		t.Fatalf("command log names the foreign trigger id\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// runStaleDBFormulaViaHookCurrent runs the rendered formula with GC_BEAD_ID
+// unset, a fake gc whose `hook current --id-only` names bead-hook-1, and
+// extraEnv appended, returning the command log and the combined output.
+func runStaleDBFormulaViaHookCurrent(t *testing.T, extraEnv ...string) (string, string) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
 	}
@@ -603,7 +656,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -634,6 +687,7 @@ esac
 		"GC_TEST_SCAN_JSON="+scanPath,
 		"GC_TEST_APPLY_JSON="+applyPath,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
@@ -643,15 +697,7 @@ esac
 	if err != nil {
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
-	for _, want := range []string{
-		"gc hook current --id-only",
-		"bd close bead-hook-1",
-		"gc runtime drain-ack",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
-		}
-	}
+	return log, string(out)
 }
 
 // TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable pins the chain's
@@ -734,7 +780,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -778,7 +824,7 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 4096 bytes freed; 0 errors",
-		"bd close bead-1",
+		staleDBCloseWrite("bead-1"),
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
@@ -822,7 +868,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -865,15 +911,15 @@ esac
 	}
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
-		"bd update bead-1 --append-notes",
-		"## apply (--force, failed)",
+		staleDBReportWrite,
+		"gc.dolt_cleanup.apply_report=apply (--force, failed)",
 		`"stage":"purge"`,
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
 		}
 	}
-	if strings.Contains(log, "bd close bead-1") {
+	if strings.Contains(log, staleDBCloseWrite("bead-1")) {
 		t.Fatalf("rendered script closed bead despite SQL-backed apply failure\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
@@ -897,17 +943,19 @@ func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvent
 		"gc event emit mol-dog-stale-db.drop",
 		"gc event emit mol-dog-stale-db.purge",
 		"gc event emit mol-dog-stale-db.reap",
-		"bd close bead-1",
+		staleDBCloseWrite("bead-1"),
 	} {
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("exit-zero max-orphan refusal logged forbidden success path %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
 		}
 	}
 	for _, want := range []string{
-		"bd update bead-1 --append-notes",
-		"## apply (--force, refused)",
+		staleDBReportWrite,
+		"gc.dolt_cleanup.apply_report=apply (--force, refused)",
 		"apply refused by max-orphan safety guard",
 		"gc event emit mol-dog-stale-db.escalate",
+		// Its own stream, apart from the apply errors that share this site.
+		"--dedup mol-dog-stale-db:bead-1:apply-max-orphan-refusal\n",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
@@ -925,8 +973,8 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 	}
 
 	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
-		scanJSON: `{"schema":"gc.dolt.cleanup.v1","force_blockers":[{"kind":"rig-protection","name":"missing","error":"missing metadata"}],"dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
-		wantNote: "## scan (dry-run)",
+		scanJSON: staleDBForceBlockerScan,
+		wantNote: "gc.dolt_cleanup.scan_report=scan (dry-run)",
 		wantLog:  "force blocker",
 	})
 	if err == nil {
@@ -935,6 +983,10 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 	for _, want := range []string{
 		"gc event emit mol-dog-stale-db.escalate",
 		"gc mail send human -s",
+		// Dedup key must carry the blocker's own kind (not a static label) so a
+		// *different* force blocker still alerts while repeats of this one are
+		// suppressed; see pl-7etw2 (duplicate escalations ~7 minutes apart).
+		"--dedup mol-dog-stale-db:bead-1:rig-protection",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
@@ -947,11 +999,348 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 		"gc event emit mol-dog-stale-db.purge",
 		"gc event emit mol-dog-stale-db.reap",
 		"gc event emit mol-dog-stale-db.done",
-		"bd close bead-1",
+		staleDBCloseWrite("bead-1"),
 	} {
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("force-blocker path logged forbidden command %q\nlog:\n%s\noutput:\n%s", forbidden, log, out)
 		}
+	}
+}
+
+// staleDBForceBlockerScan is a dry-run report whose one force blocker sends
+// the dry-run escalation and leaves the wisp open.
+const staleDBForceBlockerScan = `{"schema":"gc.dolt.cleanup.v1","force_blockers":[{"kind":"rig-protection","name":"missing","error":"missing metadata"}],"dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`
+
+// staleDBForceBlockerSubject is the subject of the escalation
+// staleDBForceBlockerScan sends.
+const staleDBForceBlockerSubject = "ESCALATION: Dolt cleanup dry-run reported 0 error(s), 0 invalid stale database identifier(s), 1 force blocker(s)"
+
+// staleDBOverThresholdScan is a dry-run report with more stale databases than
+// max_orphans_for_sql: it sends the max-orphan escalation and closes the wisp.
+const staleDBOverThresholdScan = `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":21,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`
+
+// staleDBCoreEscalateScript is the core pack's escalate.sh, the hook a city
+// can point GC_ESCALATE_SCRIPT at.
+func staleDBCoreEscalateScript(t *testing.T) string {
+	t.Helper()
+	// repoRoot is examples/bd/dolt; the core pack lives three levels up.
+	return filepath.Join(repoRoot(t), "..", "..", "..", "internal", "bootstrap", "packs", "core", "assets", "scripts", "escalate.sh")
+}
+
+// TestStaleDBFormulaDryRunEscalationKeyIsTheSortedSetOfConditions pins the
+// dry-run escalation's dedup key to every condition the scan reports, sorted.
+// The scan appends blockers in a fixed order, so a key read from the first one
+// alone would suppress a kind found after it; scan errors and invalid
+// identifiers are conditions of their own.
+func TestStaleDBFormulaDryRunEscalationKeyIsTheSortedSetOfConditions(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	scan := func(blockers, skipped string, errs int) string {
+		return fmt.Sprintf(`{"schema":"gc.dolt.cleanup.v1","force_blockers":[%s],"dropped":{"count":1,"failed":[],"skipped":[%s]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":%d}}`, blockers, skipped, errs)
+	}
+	const (
+		legacyPort   = `{"kind":"legacy-fallback-port","error":"fell back to the legacy port"}`
+		probeFailed  = `{"kind":"live-session-probe-failed","error":"probe timed out"}`
+		rigA         = `{"kind":"rig-protection","name":"a","error":"missing metadata"}`
+		rigB         = `{"kind":"rig-protection","name":"b","error":"missing metadata"}`
+		invalidIdent = `{"name":"testdb_bad;drop","reason":"invalid-identifier"}`
+	)
+	for _, tc := range []struct {
+		name     string
+		scanJSON string
+		wantKind string
+	}{
+		{"one blocker", scan(legacyPort, "", 0), "legacy-fallback-port"},
+		{"a blocker found after the first", scan(legacyPort+","+probeFailed, "", 0), "legacy-fallback-port+live-session-probe-failed"},
+		{"the same blockers reordered", scan(probeFailed+","+legacyPort, "", 0), "legacy-fallback-port+live-session-probe-failed"},
+		{"one kind on two rigs", scan(rigA+","+rigB, "", 0), "rig-protection"},
+		{"scan errors", scan("", "", 1), "scan-errors"},
+		// The scan counts each invalid identifier as an error as well.
+		{"invalid identifiers", scan("", invalidIdent, 1), "scan-errors+invalid-identifiers"},
+		{"every condition", scan(rigA, invalidIdent, 1), "rig-protection+scan-errors+invalid-identifiers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{scanJSON: tc.scanJSON})
+			if err == nil {
+				t.Fatalf("rendered script exited successfully; want the dry-run escalation to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+			}
+			if want := "--dedup mol-dog-stale-db:bead-1:" + tc.wantKind + "\n"; !strings.Contains(log, want) {
+				t.Fatalf("dry-run escalation missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+			}
+		})
+	}
+}
+
+// TestStaleDBFormulaMaxOrphanEscalationKeyOutlivesTheWisp runs two cron cycles
+// over the orphan threshold. That branch closes its wisp, so each cycle runs a
+// new one, and a key naming the wisp would never repeat: the human would get
+// the same escalation every cycle.
+func TestStaleDBFormulaMaxOrphanEscalationKeyOutlivesTheWisp(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	for _, wisp := range []string{"wisp-a", "wisp-b"} {
+		log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{scanJSON: staleDBOverThresholdScan, beadID: wisp})
+		if err != nil {
+			t.Fatalf("%s: rendered script failed: %v\nlog:\n%s\noutput:\n%s", wisp, err, log, out)
+		}
+		for _, want := range []string{
+			"gc mail send human -s ESCALATION: 21 stale Dolt databases exceed max_orphans_for_sql=20",
+			"--dedup mol-dog-stale-db:max-orphan-threshold\n",
+			staleDBCloseWrite(wisp),
+		} {
+			if !strings.Contains(log, want) {
+				t.Fatalf("%s: command log missing %q\nlog:\n%s\noutput:\n%s", wisp, want, log, out)
+			}
+		}
+	}
+}
+
+// TestStaleDBFormulaEscalateHookKeepsARepeatQuiet runs the same escalation
+// twice through the core pack's escalate.sh, which keeps an incident quiet
+// only when the escalation names one: the repeat must not be mailed again.
+func TestStaleDBFormulaEscalateHookKeepsARepeatQuiet(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		scanJSON string
+		wisps    []string
+		incident string
+	}{
+		{"a re-run of the wisp a force blocker leaves open", staleDBForceBlockerScan, []string{"bead-1", "bead-1"}, "mol-dog-stale-db:bead-1:rig-protection"},
+		{"two cron cycles over the orphan threshold", staleDBOverThresholdScan, []string{"wisp-a", "wisp-b"}, "mol-dog-stale-db:max-orphan-threshold"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{
+				"GC_ESCALATE_SCRIPT=" + staleDBCoreEscalateScript(t),
+				"GC_ESCALATE_INCIDENT_DIR=" + t.TempDir(),
+			}
+			var transcript strings.Builder
+			mails := 0
+			lastOut := ""
+			for _, wisp := range tc.wisps {
+				log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{scanJSON: tc.scanJSON, beadID: wisp, env: env})
+				fmt.Fprintf(&transcript, "run on %s (exit: %v)\nlog:\n%s\noutput:\n%s\n", wisp, err, log, out)
+				mails += strings.Count(log, "gc mail send ")
+				lastOut = string(out)
+			}
+			if mails != 1 {
+				t.Fatalf("%d escalation mails over two runs, want 1\n%s", mails, transcript.String())
+			}
+			if want := "escalate: incident " + tc.incident + " unchanged since"; !strings.Contains(lastOut, want) {
+				t.Fatalf("second run output missing %q\n%s", want, transcript.String())
+			}
+		})
+	}
+}
+
+// TestStaleDBFormulaEscalateHookOverrides covers escalate.sh overrides. One
+// written before incident keys refuses --incident-key as a usage error, so the
+// escalation is sent to it again without the incident flags: it still
+// arrives, undeduplicated, and the run says so in one line. One that takes the
+// flags and fails to send is not sent the escalation again.
+func TestStaleDBFormulaEscalateHookOverrides(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	const keyedCall = "CALL --subject --message --incident-key --fingerprint\n"
+	for _, tc := range []struct {
+		name    string
+		refusal string
+		deliver string
+		// resent is whether the escalation is sent again without the flags.
+		resent bool
+	}{
+		{"1.5.0 escalate.sh parser, exit 2", escalateRefusalV150, escalateDelivers, true},
+		{"getopt parser naming the flag, exit 1", escalateRefusalGetopt, escalateDelivers, true},
+		{"usage error naming no flag, exit 2", escalateRefusalUsage, escalateDelivers, true},
+		{"takes the flags and fails to send", escalateSkipsUnknown, escalateSendFails, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script, overrideLog, env := writeEscalateOverride(t, tc.refusal, tc.deliver)
+
+			log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{scanJSON: staleDBForceBlockerScan, env: env})
+			if err == nil {
+				t.Fatalf("rendered script exited successfully; want the force blocker to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+			}
+			wantCalls, wantWarnings := keyedCall, 0
+			if tc.resent {
+				wantCalls += "CALL --subject --message\nSENT " + staleDBForceBlockerSubject + "\n"
+				wantWarnings = 1
+			} else if !strings.Contains(string(out), "escalate: pager unreachable") {
+				t.Fatalf("the override's error must reach the output\noutput:\n%s", out)
+			}
+			if got := readEscalateLog(t, overrideLog); got != wantCalls {
+				t.Fatalf("override calls:\n%s\nwant:\n%s\noutput:\n%s", got, wantCalls, out)
+			}
+			if got := strings.Count(string(out), "predates incident keys"); got != wantWarnings {
+				t.Fatalf("%d warnings that the override predates incident keys, want %d\noutput:\n%s", got, wantWarnings, out)
+			}
+			if tc.resent && !strings.Contains(string(out), script+" predates incident keys") {
+				t.Fatalf("the warning must name the override\noutput:\n%s", out)
+			}
+			if strings.Contains(log, "gc mail send ") {
+				t.Fatalf("an escalation the hook takes must not also be mailed directly\nlog:\n%s", log)
+			}
+		})
+	}
+}
+
+// TestStaleDBFormulaNeverResendsThroughTheCoreEscalateScript: the core
+// escalate.sh takes the incident flags, so its failure, even under the
+// usage-error status, is a failed send and the escalation is not sent again
+// without them.
+func TestStaleDBFormulaNeverResendsThroughTheCoreEscalateScript(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	core, err := os.ReadFile(staleDBCoreEscalateScript(t))
+	if err != nil {
+		t.Fatalf("read core escalate.sh: %v", err)
+	}
+	// The formula finds the core hook among the city's system packs.
+	packs := t.TempDir()
+	scripts := filepath.Join(packs, "core", "assets", "scripts")
+	if err := os.MkdirAll(scripts, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeTestFile(t, filepath.Join(scripts, "escalate.sh"), string(core), 0o755)
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON:     staleDBForceBlockerScan,
+		failContains: "gc mail send ",
+		failExit:     "2",
+		env:          []string{"GC_SYSTEM_PACKS_DIR=" + packs, "GC_ESCALATE_INCIDENT_DIR=" + t.TempDir()},
+	})
+	if err == nil {
+		t.Fatalf("rendered script exited successfully; want the force blocker to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	if got := strings.Count(log, "gc mail send "); got != 1 {
+		t.Fatalf("%d mail sends, want the one failed keyed escalation\nlog:\n%s\noutput:\n%s", got, log, out)
+	}
+	if strings.Contains(string(out), "predates incident keys") {
+		t.Fatalf("the core escalate.sh takes the incident flags\noutput:\n%s", out)
+	}
+}
+
+// staleDBReportWrite is the logged prefix of bead-1's per-stage report write. The
+// report rides the work bead's metadata through `gc bd update
+// --set-metadata`, the shape gc serves in process when the order wisp lives in
+// a relocated class store.
+const staleDBReportWrite = "gc bd update bead-1 --set-metadata gc.dolt_cleanup."
+
+// staleDBCloseWrite is the logged prefix of the successful close, `gc bd close
+// --reason`: the one spelling that keeps the reason as the wisp's close reason
+// both on a single-store city (bd's close_reason column) and where gc serves the
+// wisp in process from a relocated class store.
+func staleDBCloseWrite(bead string) string {
+	return "gc bd close " + bead + " --reason Stale DB scan complete"
+}
+
+// staleDBOutcomeWrite is the logged outcome write the successful close follows.
+func staleDBOutcomeWrite(bead string) string {
+	return "gc bd update " + bead + " --set-metadata gc.outcome=pass"
+}
+
+// staleDBOutcomeWithdrawal is the logged write that takes the outcome back
+// after a failed close, so the wisp left open carries no outcome.
+func staleDBOutcomeWithdrawal(bead string) string {
+	return "gc bd update " + bead + " --unset-metadata gc.outcome"
+}
+
+// TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts pins the work-bead
+// writes to the shapes both topologies take. On a city whose coordination
+// classes live in their own store, the order wisp this formula works is held by
+// that store: bare `bd` cannot see it (it reports the wisp missing), and gc
+// serves `gc bd update` and `gc bd close --reason` in process but refuses
+// `--append-notes` (the class store has no notes field) and `--actor`. On a
+// single-store city a status-closed update would close the wisp with bd's
+// close_reason column emptied, so the close must be the reasoned close and no
+// update may carry a status.
+func TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts(t *testing.T) {
+	script := renderStaleDBFormulaShell(t)
+	updates, closes := 0, 0
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(line, `"$WORK_BEAD"`) {
+			continue
+		}
+		if !strings.Contains(line, "bd ") {
+			continue
+		}
+		switch {
+		case strings.Contains(line, `gc bd update "$WORK_BEAD"`):
+			updates++
+		case strings.Contains(line, `gc bd close "$WORK_BEAD" --reason "`):
+			closes++
+		default:
+			t.Errorf("work-bead write is neither `gc bd update` nor `gc bd close --reason`: %s", trimmed)
+		}
+		if strings.Count(line, "bd ") != strings.Count(line, "gc bd ") {
+			t.Errorf("work-bead write runs bare bd, which cannot see a relocated wisp: %s", trimmed)
+		}
+		for _, refused := range []string{"--append-notes", "--notes", "--actor", "--force", "--status", " -s "} {
+			if strings.Contains(line, refused) {
+				t.Errorf("work-bead write uses %q, which one of the two topologies refuses or loses the close reason on: %s", refused, trimmed)
+			}
+		}
+	}
+	if updates < 2 || closes != 1 {
+		t.Fatalf("found %d work-bead updates and %d closes; want the report and outcome updates and one reasoned close", updates, closes)
+	}
+}
+
+// TestStaleDBFormulaRecordsTheOutcomeBeforeTheReasonedClose pins the success
+// close end to end: the outcome is written first, so the wisp is never closed
+// with no outcome, the close carries the scan summary as its reason, and only a
+// failed close takes the outcome back (TestStaleDBFormulaSuccessPathFailuresDrainAck).
+func TestStaleDBFormulaRecordsTheOutcomeBeforeTheReasonedClose(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
+	})
+	if err != nil {
+		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	outcome := strings.Index(log, staleDBOutcomeWrite("bead-1")+"\n")
+	closeAt := strings.Index(log, "gc bd close bead-1 --reason Stale DB scan complete (orphans=0, applied=0, escalated=0)\n")
+	if outcome < 0 || closeAt < 0 {
+		t.Fatalf("command log is missing the outcome write (at %d) or the reasoned close (at %d)\nlog:\n%s\noutput:\n%s", outcome, closeAt, log, out)
+	}
+	if outcome > closeAt {
+		t.Fatalf("the close ran before the outcome write\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	if strings.Contains(log, staleDBOutcomeWithdrawal("bead-1")) {
+		t.Fatalf("a close that succeeded took its outcome back\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
 
@@ -961,10 +1350,16 @@ type staleDBFailureCase struct {
 	applyJSON    string
 	applyExit    string
 	failContains string
+	// failExit is the status of the injected failure; empty means 70.
+	failExit     string
 	wantNote     string
 	wantLog      string
 	forbidLog    string
 	forbidOutput string
+	// beadID is the work bead the run claims; empty means bead-1.
+	beadID string
+	// env is appended to the run's environment.
+	env []string
 }
 
 func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
@@ -979,20 +1374,22 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		spec staleDBFailureCase
+		// wantDedup is the dedup key of the escalation mail the path sends.
+		wantDedup string
 	}{
 		{
 			name: "dry run command failure",
 			spec: staleDBFailureCase{
 				scanJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1}}`,
 				scanExit: "42",
-				wantNote: "## scan (dry-run failed)",
+				wantNote: "gc.dolt_cleanup.scan_report=scan (dry-run failed)",
 			},
 		},
 		{
 			name: "invalid scan JSON",
 			spec: staleDBFailureCase{
 				scanJSON: `{"schema":"wrong"}`,
-				wantNote: "## scan (invalid JSON)",
+				wantNote: "gc.dolt_cleanup.scan_report=scan (invalid JSON)",
 			},
 		},
 		{
@@ -1001,17 +1398,18 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 				scanJSON:  applyScanJSON,
 				applyJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[{"name":"dolt_tmp","error":"drop failed"}]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":1},"errors":[{"stage":"drop","error":"drop failed"}]}`,
 				applyExit: "42",
-				wantNote:  "## apply (--force, failed)",
+				wantNote:  "gc.dolt_cleanup.apply_report=apply (--force, failed)",
 				wantLog:   "gc dolt cleanup --server-down-ok",
 				forbidLog: "agent with --server-down-ok",
 			},
+			wantDedup: "mol-dog-stale-db:bead-1:apply-refused",
 		},
 		{
 			name: "invalid apply JSON",
 			spec: staleDBFailureCase{
 				scanJSON:  applyScanJSON,
 				applyJSON: `{"schema":"wrong"}`,
-				wantNote:  "## apply (--force, invalid JSON)",
+				wantNote:  "gc.dolt_cleanup.apply_report=apply (--force, invalid JSON)",
 			},
 		},
 		{
@@ -1019,7 +1417,7 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			spec: staleDBFailureCase{
 				scanJSON:     `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":4096},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":4096,"bytes_freed_rss":0,"errors_total":0}}`,
 				applyJSON:    `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"ok":true,"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
-				wantNote:     "## apply (--force)",
+				wantNote:     "gc.dolt_cleanup.apply_report=apply (--force)",
 				wantLog:      "apply missed 4096 reclaimable bytes",
 				forbidLog:    "apply reported",
 				forbidOutput: "apply reported",
@@ -1029,15 +1427,19 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			name: "invalid identifier skipped in scan",
 			spec: staleDBFailureCase{
 				scanJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[{"name":"testdb_bad;drop","reason":"invalid-identifier"}]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
-				wantNote: "## scan (dry-run)",
+				wantNote: "gc.dolt_cleanup.scan_report=scan (dry-run)",
 				wantLog:  "invalid stale database identifier",
 			},
+			wantDedup: "mol-dog-stale-db:bead-1:invalid-identifiers",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log, out, err := runStaleDBFormulaFailureCase(t, tc.spec)
 			if err == nil {
 				t.Fatalf("rendered script exited successfully; want failure path to keep work open\nlog:\n%s\noutput:\n%s", log, out)
+			}
+			if tc.wantDedup != "" && !strings.Contains(log, "--dedup "+tc.wantDedup+"\n") {
+				t.Fatalf("failure path did not escalate with dedup key %q\nlog:\n%s\noutput:\n%s", tc.wantDedup, log, out)
 			}
 			if !strings.Contains(log, "gc runtime drain-ack") {
 				t.Fatalf("failure path did not drain-ack before exit\nlog:\n%s\noutput:\n%s", log, out)
@@ -1054,8 +1456,8 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			if tc.spec.forbidOutput != "" && strings.Contains(string(out), tc.spec.forbidOutput) {
 				t.Fatalf("failure path output still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidOutput, log, out)
 			}
-			if strings.Contains(log, "bd close bead-1") {
-				t.Fatalf("failure path closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
+			if strings.Contains(log, staleDBCloseWrite("bead-1")) || strings.Contains(log, staleDBOutcomeWrite("bead-1")) {
+				t.Fatalf("failure path recorded a pass outcome or closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
 			}
 		})
 	}
@@ -1074,6 +1476,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 		name        string
 		fail        string
 		wantFailure bool
+		forbid      string
+		// then is a write that must follow the failed one.
+		then string
 	}{
 		{
 			name: "scan event failure",
@@ -1081,12 +1486,19 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 		},
 		{
 			name: "scan note failure",
-			fail: "bd update bead-1 --append-notes",
+			fail: staleDBReportWrite,
+		},
+		{
+			name:        "outcome write failure",
+			fail:        staleDBOutcomeWrite("bead-1"),
+			wantFailure: true,
+			forbid:      staleDBCloseWrite("bead-1"),
 		},
 		{
 			name:        "close failure",
-			fail:        "bd close bead-1",
+			fail:        staleDBCloseWrite("bead-1"),
 			wantFailure: true,
+			then:        staleDBOutcomeWithdrawal("bead-1"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1094,6 +1506,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 				scanJSON:     cleanScan,
 				failContains: tc.fail,
 			})
+			if tc.forbid != "" && strings.Contains(log, tc.forbid) {
+				t.Fatalf("%q ran after the failed %q\nlog:\n%s\noutput:\n%s", tc.forbid, tc.fail, log, out)
+			}
 			if tc.wantFailure && err == nil {
 				t.Fatalf("rendered script exited successfully; want %q failure to preserve non-zero status\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
@@ -1106,7 +1521,10 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			if !strings.Contains(log, tc.fail) {
 				t.Fatalf("command log missing injected failure %q\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
-			if !tc.wantFailure && !strings.Contains(log, "bd close bead-1") {
+			if tc.then != "" && strings.Index(log, tc.then) < strings.Index(log, tc.fail) {
+				t.Fatalf("%q did not follow the failed %q\nlog:\n%s\noutput:\n%s", tc.then, tc.fail, log, out)
+			}
+			if !tc.wantFailure && !strings.Contains(log, staleDBCloseWrite("bead-1")) {
 				t.Fatalf("%q path did not close work after nonessential failure\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
 		})
@@ -1128,6 +1546,9 @@ func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, 
 	if tc.applyJSON == "" {
 		tc.applyJSON = `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`
 	}
+	if tc.beadID == "" {
+		tc.beadID = "bead-1"
+	}
 	writeTestFile(t, scanPath, tc.scanJSON)
 	writeTestFile(t, applyPath, tc.applyJSON)
 	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
@@ -1135,7 +1556,7 @@ set -euo pipefail
 maybe_fail() {
   local rendered="$1"
   if [ -n "${GC_TEST_FAIL_CONTAINS:-}" ] && [[ "$rendered" == *"$GC_TEST_FAIL_CONTAINS"* ]]; then
-    exit 70
+    exit "${GC_TEST_FAIL_EXIT:-70}"
   fi
 }
 case "${1:-} ${2:-}" in
@@ -1152,7 +1573,7 @@ case "${1:-} ${2:-}" in
         ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     rendered="gc $*"
     echo "$rendered" >> "$GC_TEST_LOG"
     maybe_fail "$rendered"
@@ -1186,8 +1607,8 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
-		"GC_BEAD_ID=bead-1",
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS", "GC_TEST_FAIL_EXIT"),
+		"GC_BEAD_ID="+tc.beadID,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,
@@ -1196,7 +1617,9 @@ esac
 		"GC_TEST_APPLY_JSON="+applyPath,
 		"GC_TEST_APPLY_EXIT="+tc.applyExit,
 		"GC_TEST_FAIL_CONTAINS="+tc.failContains,
+		"GC_TEST_FAIL_EXIT="+tc.failExit,
 	)
+	cmd.Env = append(cmd.Env, tc.env...)
 	out, err := cmd.CombinedOutput()
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
@@ -1254,7 +1677,22 @@ func extractFirstBashFence(t *testing.T, markdown string) string {
 	if end <= start {
 		t.Fatal("closing code fence appears before bash body")
 	}
-	return markdown[start:end]
+	body := markdown[start:end]
+	// Readers of the rendered step (the dog agent, or a regex that does not
+	// anchor fences to line starts) end the fence at its first ```, not its
+	// last. TOML basic-string escapes such as \n can put one inside the script,
+	// which then runs truncated (gascity#7967).
+	if i := strings.Index(body, "```"); i >= 0 {
+		lineStart := strings.LastIndex(body[:i], "\n") + 1
+		lineEnd := strings.IndexByte(body[i:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += i
+		}
+		t.Fatalf("bash fence body contains ``` on line %q: readers end the fence there", body[lineStart:lineEnd])
+	}
+	return body
 }
 
 func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {

@@ -52,3 +52,53 @@ func TestRigFromRedirectedBeadsDirIgnoresCwdOutsideCity(t *testing.T) {
 		t.Fatalf("rigFromRedirectedBeadsDir() ok = true, want false; rig = %+v", rig)
 	}
 }
+
+// TestRigFromRedirectedBeadsDirTreatsCityStoreRedirectAsCityScope verifies
+// that a .beads/redirect naming the city's own HQ store resolves to city
+// scope instead of being refused as a foreign store. A city-scoped agent's
+// worktree of the city repo (.gc/worktrees/<city>/<agent>) carries exactly
+// this redirect, and its refusal broke every gc bd and gc formula call from
+// that cwd that did not name an existing bead (ga-k1e9yp, ga-8cvakw).
+func TestRigFromRedirectedBeadsDirTreatsCityStoreRedirectAsCityScope(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The same city reached through a symlink, as a pre_start templated from
+	// an aliased city path would write it.
+	cityAlias := filepath.Join(t.TempDir(), "city-alias")
+	if err := os.Symlink(cityDir, cityAlias); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name, agent, target string
+	}{
+		{name: "city path", agent: "pack-author", target: filepath.Join(cityDir, ".beads")},
+		{name: "symlinked city path", agent: "aliased", target: filepath.Join(cityAlias, ".beads")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worktree := filepath.Join(cityDir, ".gc", "worktrees", "demo", tc.agent)
+			if err := os.MkdirAll(filepath.Join(worktree, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(worktree, ".beads", "redirect"), []byte(tc.target+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rig, ok, err := rigFromRedirectedBeadsDir(cfg, cityDir, normalizePathForCompare(worktree))
+			if err != nil {
+				t.Fatalf("rigFromRedirectedBeadsDir() error = %v, want nil (redirect names the city store)", err)
+			}
+			if ok {
+				t.Fatalf("rigFromRedirectedBeadsDir() ok = true, want false (city scope); rig = %+v", rig)
+			}
+		})
+	}
+}

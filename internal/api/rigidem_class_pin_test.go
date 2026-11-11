@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -64,7 +65,7 @@ func (t *idemCreateRecorderTx) Create(b beads.Bead) (beads.Bead, error) {
 // no classifier arm keys on.
 func TestRigIdemRecordsStayWorkClass(t *testing.T) {
 	rec := &idemCreateRecorder{Store: beads.NewMemStore()}
-	if _, err := createIdemRecord(rec, "c1", "req-classpin1", "digestval", "7", "web", idemStateInFlight); err != nil {
+	if _, err := createIdemRecord(beadstest.Work(rec), "c1", "req-classpin1", "digestval", "7", "web", idemStateInFlight); err != nil {
 		t.Fatalf("createIdemRecord: %v", err)
 	}
 

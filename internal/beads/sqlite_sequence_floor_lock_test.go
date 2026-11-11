@@ -4,9 +4,10 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // sequenceFloorPersistDeadline bounds how long the serialized floor write may
@@ -90,15 +91,20 @@ func TestSequenceFloorLockStillExcludesConcurrentHolders(t *testing.T) {
 			return
 		}
 		probed = true
-		contender, openErr := os.Open(dir)
+		contender, contenderLabel, openErr := filelock.OpenDirectoryLock(dir)
 		if openErr != nil {
 			probeErr = openErr
 			return
 		}
 		defer contender.Close() //nolint:errcheck // probe descriptor
-		if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		lock, lockErr := filelock.Acquire(contender, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       contenderLabel,
+		})
+		if lockErr == nil {
 			uncontended = true
-			_ = syscall.Flock(int(contender.Fd()), syscall.LOCK_UN)
+			_ = lock.Release()
 		}
 	}
 

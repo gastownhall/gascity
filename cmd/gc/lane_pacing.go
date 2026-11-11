@@ -26,6 +26,17 @@ import (
 // A free-running ticker would add passes on its own grid; a wake that ignored
 // the duty cycle would run passes back to back.
 func startPacedLane(ctx context.Context, interval, minWakeGap time.Duration, wakeCh <-chan struct{}, pass func(wake bool)) <-chan struct{} {
+	return startGatedPacedLane(ctx, interval, minWakeGap, wakeCh, func(wake bool) bool {
+		pass(wake)
+		return true
+	})
+}
+
+// startGatedPacedLane is startPacedLane for a pass that may decline to run:
+// pass reports whether it ran, and a declined pass does not count toward the
+// duty cycle, so the wake that later runs it is not paced against a pass that
+// did nothing. The backstop restarts either way.
+func startGatedPacedLane(ctx context.Context, interval, minWakeGap time.Duration, wakeCh <-chan struct{}, pass func(wake bool) (ran bool)) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -52,8 +63,9 @@ func startPacedLane(ctx context.Context, interval, minWakeGap time.Duration, wak
 			}
 			wakePending = false
 			start := time.Now()
-			pass(wake)
-			pace.lastEnd, pace.lastRun, pace.passed = time.Now(), time.Since(start), true
+			if pass(wake) {
+				pace.lastEnd, pace.lastRun, pace.passed = time.Now(), time.Since(start), true
+			}
 			// Go 1.23+ timers: Reset discards any pending fire, so a timer that
 			// expired during the pass does not start one straight away.
 			timer.Reset(interval)

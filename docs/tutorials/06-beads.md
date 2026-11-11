@@ -27,6 +27,8 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+# ... yours also has an [imports] table for the packs gc init pulled in
+
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -36,15 +38,20 @@ $ cat city.toml
 [workspace]
 provider = "claude"
 
-... # content elided
+# ... yours also has [providers] and [defaults.rig.imports] tables
 
 [[rigs]]
-name = "my-project"
+name = "hello-world"   # from the Quickstart
+# ...
+
+[[rigs]]
+name = "my-project"    # from Tutorial 01
+# ...
 
 ~/my-city
 $ cat agents/reviewer/agent.toml
 dir = "my-project"
-provider = "codex"
+provider = "codex"     # or whichever provider you chose in Tutorial 02
 ```
 
 ## What is a bead
@@ -141,6 +148,14 @@ $ bd create "Update API docs"
   Status: open
 ```
 
+<Note>
+Bead IDs are generated, so yours will differ. Note the three IDs your
+`bd create` commands printed. For the rest of this page, use your ID wherever
+the examples show `mc-ykp` (Fix the login bug), `mc-a4l` (Refactor auth
+module), or `mc-xp7` (Update API docs). Do the same for the convoy IDs that
+`gc convoy create` prints later.
+</Note>
+
 The trailing lines (`Priority:`, `Status:`) vary by `bd` version — some builds
 print one, some both. The bead is created identically either way. The
 dependency and convoy examples below use all three of these beads.
@@ -167,25 +182,38 @@ $ bd close mc-ykp
 
 $ bd list --status open --flat
 ○ mc-a4l [P2] [feature] - Refactor auth module
-○ mc-xp7 [P2] [task]    - Update API docs
+○ mc-xp7 [P2] [task] - Update API docs
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state
 dimensions). As with the opening listing, the output here is trimmed to the
-beads this page created — yours will still include the open pancakes beads
-and the mayor's session bead.
+beads this page created. Yours also includes the mayor's session bead and
+any open beads from earlier tutorials, such as the pancakes steps.
 
 ## Beads as execution state
 
 The bead store is the execution state of the whole system — every running
 session, message in flight, and formula step is a bead with a status. To know
-what the city is doing right now, query the store:
+what the city is doing right now, query the store. Filter by type to see the
+session beads:
 
 ```shell
 ~/my-city
-$ bd list --status in_progress --flat
-◐ mc-io4 [P2] [session] - mayor
+$ bd list --type session --flat --include-infra
+○ mc-wisp-5o1 [P2] [session] [agent:mayor gc:session] - mayor
+...
 ```
+
+Session beads are infrastructure beads, which `bd list` hides unless you pass
+`--include-infra`. You'll see one per session in your city (the mayor, the
+control dispatcher, any pool workers), each with its own ID.
+
+A session bead's status stays `open` while the session exists; whether it is
+running, asleep, or suspended lives in the bead's metadata. `gc session list`
+reads that metadata and shows each session's state. Task beads are the ones
+that move to `in_progress` when an agent claims them, so
+`bd list --status in_progress --flat` shows the work that agents are doing
+right now.
 
 Because work lives in the store rather than in memory, agent sessions are
 disposable. If an agent dies its beads stay open; when it restarts, its hooks
@@ -208,7 +236,7 @@ $ bd label add mc-a4l frontend
 ✓ Added label 'frontend' to mc-a4l
 
 $ bd list --label priority:high --flat
-○ mc-a4l [P2] [feature] - Refactor auth module
+○ mc-a4l [P2] [feature] [frontend priority:high] - Refactor auth module
 ```
 
 `bd label add` takes a single label per call — apply multiples one at a time.
@@ -332,7 +360,8 @@ Landed convoy mc-0ud "Auth rewrite"
 ### Adding beads and checking convoys
 
 Work grows after a convoy is created — a bug surfaces mid-sprint. Add beads to
-an existing convoy:
+an existing convoy (`mc-xp7` is already a member, so this repeat is a harmless
+no-op; pass any other bead ID to grow the convoy):
 
 ```shell
 ~/my-city
@@ -341,14 +370,19 @@ Added mc-xp7 to convoy mc-d4g
 ```
 
 If a convoy should have auto-closed but didn't (a hook misfired), reconcile
-manually:
+manually. `gc convoy check` closes every convoy whose members are all closed,
+skipping owned convoys:
 
 ```shell
 ~/my-city
 $ gc convoy check
-Auto-closed convoy mc-d4g "Sprint 42"
-1 convoy(s) auto-closed
+0 convoy(s) auto-closed
 ```
+
+Nothing closes here: `Sprint 42` still has two open members (`mc-a4l` and
+`mc-xp7`). Once the last of them closes, the convoy closes on its own, and a
+`gc convoy check` that finds one the hook missed prints
+`Auto-closed convoy <id> "<title>"` for it before the count.
 
 ### Stranded work
 
@@ -362,6 +396,9 @@ CONVOY  ISSUE   TITLE
 mc-d4g  mc-a4l  Refactor auth module
 mc-d4g  mc-xp7  Update API docs
 ```
+
+Rows for convoys that earlier tutorials created by slinging work can appear
+here too.
 
 ### Convoy metadata
 
@@ -444,19 +481,21 @@ You rarely touch beads directly — `gc session`, `gc mail`, `gc sling`, and `gc
 formula` handle creation and management. You reach for `bd` when you want to
 query outstanding work across the city, create ad-hoc tasks, inspect a
 formula's dependency graph, or debug why an agent isn't picking up work.
-(Listings trimmed to this page's beads; open pancakes beads will show up in
-yours too.)
+(The listing is trimmed to this page's beads; open task beads from earlier
+tutorials show up in yours too.)
 
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
-○ mc-xp7 [P2] [task] - Update API docs
-○ mc-b8g [P2] [task] - Mix dry ingredients (blocks: mc-265)
+● mc-xp7 [P2] [task] - Update API docs (blocked by: mc-a4l)
 
 $ bd show mc-a4l
 ○ mc-a4l · Refactor auth module   [P2 · OPEN]
-Owner: dbox · Type: feature
+Created by: Your Name · Type: feature
 Created: 2026-04-08 · Updated: 2026-04-08
+
+DESCRIPTION
+  (none)
 
 LABELS: frontend, priority:high
 
@@ -466,14 +505,18 @@ METADATA
 
 BLOCKS
   ← ○ mc-xp7: Update API docs P2
+
+TRACKED BY
   ← ○ mc-d4g: Sprint 42 P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed
 ```
 
-The `Sprint 42` entry under `BLOCKS` is the convoy's incoming `tracks` edge —
-grouping, not a blocker.
+`mc-xp7` still matches `--status open`, but the `●` glyph and the
+`(blocked by: …)` note show that its `blocks` dependency on `mc-a4l` holds it
+back. `bd show` lists that edge under `BLOCKS` and the `Sprint 42` convoy's
+`tracks` edge separately under `TRACKED BY`: grouping, not a blocker.
 
 Beads are the ground truth of the city's running state. Sessions, mail, and
 convoys are beads; a formula materializes its work as beads when run.

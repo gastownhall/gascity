@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -30,6 +31,7 @@ func missingRequiredBuiltinImports(fs fsys.FS, cfg *config.City, cityPath string
 	if cfg == nil {
 		return nil
 	}
+	requiredBuiltinImportScans.Add(1)
 	reachable := config.ReachablePackNames(cfg, fs, cityPath)
 	var missing []string
 	for _, name := range requiredBuiltinPackNames(cityPath) {
@@ -39,6 +41,10 @@ func missingRequiredBuiltinImports(fs fsys.FS, cfg *config.City, cityPath string
 	}
 	return missing
 }
+
+// requiredBuiltinImportScans counts the import-graph walks
+// missingRequiredBuiltinImports performs (test seam).
+var requiredBuiltinImportScans atomic.Int64
 
 // builtinImportWarningCache dedups the missing-import warning to once per
 // city per process.
@@ -592,13 +598,13 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	}
 	lock, err := syncImports(c.cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
 		return err
 	}
 	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
+		return withCredentialFixHint(err)
 	}
 	return nil
 }

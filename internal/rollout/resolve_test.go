@@ -33,8 +33,8 @@ func TestResolvePrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if f.BeadsConditionalWrites() != Off || f.OriginOf(keyBeadsConditionalWrites) != OriginBuiltin {
-			t.Errorf("beads = %q/%q, want off/builtin", f.BeadsConditionalWrites(), f.OriginOf(keyBeadsConditionalWrites))
+		if f.BeadsConditionalWrites() != Auto || f.OriginOf(keyBeadsConditionalWrites) != OriginBuiltin {
+			t.Errorf("beads = %q/%q, want auto/builtin", f.BeadsConditionalWrites(), f.OriginOf(keyBeadsConditionalWrites))
 		}
 		if !f.FormulaV2() || f.OriginOf(keyDaemonFormulaV2) != OriginBuiltin {
 			t.Errorf("formula_v2 = %v/%q, want true/builtin", f.FormulaV2(), f.OriginOf(keyDaemonFormulaV2))
@@ -153,5 +153,43 @@ func TestParseMode(t *testing.T) {
 		if (err == nil) != tc.ok || (tc.ok && got != tc.want) {
 			t.Errorf("ParseMode(%q) = %q,%v; want %q,ok=%v", tc.in, got, err, tc.want, tc.ok)
 		}
+	}
+}
+
+// TestConditionalWritesDefaultsToAuto pins mc-dpo2b's default: an unset
+// beads.conditional_writes resolves auto, an explicit "off" stays off, and
+// GC_BEADS_CONDITIONAL_WRITES still wins over both.
+func TestConditionalWritesDefaultsToAuto(t *testing.T) {
+	t.Parallel()
+	K := envBeadsConditionalWrites
+	for _, tc := range []struct {
+		name, config string
+		env          map[string]string
+		want         Mode
+		origin       Origin
+	}{
+		{name: "unset", want: Auto, origin: OriginBuiltin},
+		{name: "explicit off", config: "off", want: Off, origin: OriginConfig},
+		{name: "explicit require", config: "require", want: Require, origin: OriginConfig},
+		{name: "env off over the default", env: map[string]string{K: "off"}, want: Off, origin: OriginEnv},
+		{name: "env off over config auto", config: "auto", env: map[string]string{K: "off"}, want: Off, origin: OriginEnv},
+		{name: "env auto over config off", config: "off", env: map[string]string{K: "auto"}, want: Auto, origin: OriginEnv},
+	} {
+		f, err := Resolve(cityWith(tc.config, nil), ResolveOptions{LookupEnv: envMap(tc.env)})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := f.BeadsConditionalWrites(); got != tc.want || f.OriginOf(keyBeadsConditionalWrites) != tc.origin {
+			t.Errorf("%s: beads = %q/%q, want %q/%q", tc.name, got, f.OriginOf(keyBeadsConditionalWrites), tc.want, tc.origin)
+		}
+	}
+	// The other mode gates keep their own defaults (guarded_release off,
+	// ops.content auto).
+	f, err := Resolve(cityWith("", nil), ResolveOptions{LookupEnv: envMap(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.BeadsGuardedRelease() != Off || f.OpsContent() != Auto {
+		t.Errorf("guarded_release/ops.content = %q/%q, want off/auto", f.BeadsGuardedRelease(), f.OpsContent())
 	}
 }

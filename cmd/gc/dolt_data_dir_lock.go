@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // Dolt holds an exclusive flock on each database's `.dolt/noms/LOCK` for the
@@ -85,14 +86,18 @@ func managedDoltDataDirHeldLocks(dataDir string) []string {
 			}
 			continue
 		}
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		lock, err := filelock.Acquire(f, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       path,
+		})
 		if err == nil {
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = lock.Release()
 			_ = f.Close()
 			continue
 		}
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if errors.Is(err, filelock.ErrBusy) {
 			held = append(held, path)
 			continue
 		}
@@ -169,7 +174,7 @@ func waitManagedDoltSIGKILLLockGateWithProcLocks(pid int, dataDir string, alive 
 				return fmt.Errorf("%s; could not measure lock ownership: %w", base, measureErr)
 			}
 			if len(blockerPIDs) == 0 {
-				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but %s has no matching FLOCK row", base, procLocksPath)
+				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but lock-holder inspection (%s) found no holder", base, procLocksPath)
 			}
 			otherPIDs := make([]int, 0, len(blockerPIDs))
 			for _, holderPID := range blockerPIDs {

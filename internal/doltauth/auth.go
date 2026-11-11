@@ -46,18 +46,21 @@ func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 // Projected BEADS_DOLT_PASSWORD is treated like an already-resolved fallback;
 // callers that switch auth scopes must clear stale projected passwords first.
 func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
-	return resolveFromEnv(scopeRoot, fallbackUser, env, true)
+	return resolveFromEnv(scopeRoot, fallbackUser, env, os.Getenv, true)
 }
 
 // ResolveScopedFromEnv returns effective Dolt auth for a GC-selected scope.
 // Unlike ResolveFromEnv, it does not fall back to ambient BEADS_DOLT_PASSWORD;
 // scoped GC projections must not let one external rig password contaminate
-// another scope's managed city/HQ connection.
-func ResolveScopedFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
-	return resolveFromEnv(scopeRoot, fallbackUser, env, false)
+// another scope's managed city/HQ connection. ambientBeadsEnv reads the ambient
+// BEADS_CREDENTIALS_FILE fallback: a caller that builds scope envs while native
+// opens project BEADS_* keys into the process env passes a read that sees the
+// ambient value rather than another scope's transient projection.
+func ResolveScopedFromEnv(scopeRoot, fallbackUser string, env map[string]string, ambientBeadsEnv func(key string) string) Resolved {
+	return resolveFromEnv(scopeRoot, fallbackUser, env, ambientBeadsEnv, false)
 }
 
-func resolveFromEnv(scopeRoot, fallbackUser string, env map[string]string, allowAmbientBeadsPassword bool) Resolved {
+func resolveFromEnv(scopeRoot, fallbackUser string, env map[string]string, ambientBeadsEnv func(key string) string, allowAmbientBeadsPassword bool) Resolved {
 	host := strings.TrimSpace(env["GC_DOLT_HOST"])
 	port, ok := projectedPort(env)
 	if host == "" && ok {
@@ -68,7 +71,7 @@ func resolveFromEnv(scopeRoot, fallbackUser string, env map[string]string, allow
 	}
 	overridePath := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
 	if overridePath == "" {
-		overridePath = strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
+		overridePath = strings.TrimSpace(ambientBeadsEnv("BEADS_CREDENTIALS_FILE"))
 	}
 	envPass := strings.TrimSpace(env["BEADS_DOLT_PASSWORD"])
 	return Resolved{

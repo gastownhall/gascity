@@ -28,17 +28,19 @@ type StorageBindingOutcomePayload struct {
 	// always populated once a binding exists.
 	Database string `json:"database"`
 	// Outcome names what was concluded, and it is FINER than the event type.
-	// Five types carry eight outcomes: not-configured, converged, genesis and
-	// uncheckable each have a type to themselves, while unconverged, stranded,
-	// born-split-blocked and genesis-blocked all arrive as
-	// storage.binding.unconverged.
+	// Six types carry the outcomes: not-configured, converged, genesis,
+	// uncheckable and stranded each have a type to themselves, while
+	// unconverged, born-split-blocked, genesis-blocked, retained-copies and
+	// identity-mismatch all arrive as storage.binding.unconverged.
 	//
-	// They share a type because a subscriber branches on "is this city serving"
-	// and all four answer no; they keep distinct outcomes because an operator
-	// reading one event needs to know which no it was. A consumer switching on
-	// this field must handle all eight — matching only the five type names would
-	// silently drop three real values — and Invariant is the sentence that
-	// explains whichever one arrived.
+	// Those share a type because a subscriber branches on "is this city
+	// serving" and all of them answer no; they keep distinct outcomes because an
+	// operator reading one event needs to know which no it was. Stranded has a
+	// type of its own because it answers both ways (Serving): a stranded city
+	// serves degraded unless a stranded id is held in the binding by a
+	// different bead. A consumer switching on this field must handle every
+	// outcome, and Invariant is the sentence that explains whichever one
+	// arrived.
 	Outcome string `json:"outcome"`
 	// ProvenBeads is the size of the proven-copy manifest a serving verdict
 	// rests on. "Converged" alone does not distinguish a city serving its whole
@@ -64,19 +66,86 @@ type StorageBindingOutcomePayload struct {
 	// printed, so a subscriber and a terminal never disagree about why a city
 	// did not start.
 	Invariant string `json:"invariant"`
+	// LostCrossEdges names the edges from work beads into beads the migration
+	// moved that the work store could not keep once those beads were cleared
+	// from it ("issue -[type]-> depends_on" with the store's reason). bd and
+	// native-Dolt work stores refuse an edge to a bead they no longer hold, so
+	// such an edge is dropped: a blocking one stops holding its work bead
+	// back, and a tracks or related one stops linking the two. It is carried
+	// on every verdict that reads the cleared note, so the record outlives the
+	// migrate run that dropped them.
+	LostCrossEdges []string `json:"lost_cross_edges,omitempty"`
+	// Serving is set only by the boot gate (a controller boot or a gc
+	// process resolving its routes) and says what that gate did: true when it
+	// serves the city — converged, genesis, not-configured, or a stranded city
+	// served degraded — false when it refuses. It is absent (null) on an
+	// operator command's event and on a recheck's, which serve nothing, and
+	// on every event an older build recorded; absent means "not stated", never
+	// false.
+	Serving *bool `json:"serving,omitempty"`
+	// Recheck marks an event the controller's periodic, read-only containment
+	// recheck published, rather than a boot or an operator command. The
+	// running controller keeps serving whatever a recheck finds.
+	Recheck bool `json:"recheck,omitempty"`
+	// Stranded names the stranded ids a storage.binding.stranded event is
+	// about, capped at the first StrandedCap in id order; StrandedCount is the
+	// whole count. HeldDifferent (the ids the binding holds for a different
+	// bead, any one of which makes the city refuse), PresumedReused (ids a
+	// legacy manifest lists by a bare id they are younger than) and Retained
+	// (retained copies of binding-owned beads beside the strand, which also
+	// make it refuse) are capped the same way, each with its whole count. All
+	// are empty on every other type.
+	Stranded            []string `json:"stranded,omitempty"`
+	StrandedCount       int      `json:"stranded_count,omitempty"`
+	HeldDifferent       []string `json:"held_different,omitempty"`
+	HeldDifferentCount  int      `json:"held_different_count,omitempty"`
+	PresumedReused      []string `json:"presumed_reused,omitempty"`
+	PresumedReusedCount int      `json:"presumed_reused_count,omitempty"`
+	Retained            []string `json:"retained,omitempty"`
+	RetainedCount       int      `json:"retained_count,omitempty"`
 }
+
+// StrandedCap bounds the ids a storage.binding.stranded payload lists.
+const StrandedCap = 50
 
 // IsEventPayload marks StorageBindingOutcomePayload as an events.Payload
 // variant.
 func (StorageBindingOutcomePayload) IsEventPayload() {}
 
+// StorageRigPayload is the shape of the storage.rig_import and
+// storage.rig_residue events: one rig's import outcome or residue verdict.
+type StorageRigPayload struct {
+	// Rig is the rig's name.
+	Rig string `json:"rig"`
+	// Binding is the city binding the rig's rows move into.
+	Binding string `json:"binding"`
+	// Outcome is what was concluded: for an import, imported, clean,
+	// "nothing to import", skipped, refused or failed; for residue,
+	// awaiting-import, retained or stranded.
+	Outcome string `json:"outcome"`
+	// Beads is the number of rows the import copied, or the residue counted.
+	Beads int `json:"beads"`
+	// Gates is the number of cross-store gates the import minted.
+	Gates int `json:"gates,omitempty"`
+	// Cleared is the number of rig copies the import removed.
+	Cleared int `json:"cleared,omitempty"`
+	// Detail is the operator-facing sentence: the refusal, failure or remedy.
+	Detail string `json:"detail,omitempty"`
+}
+
+// IsEventPayload marks StorageRigPayload as an events.Payload variant.
+func (StorageRigPayload) IsEventPayload() {}
+
 func init() {
+	events.RegisterPayload(events.StorageRigImport, StorageRigPayload{})
+	events.RegisterPayload(events.StorageRigResidue, StorageRigPayload{})
 	for _, eventType := range []string{
 		events.StorageBindingConverged,
 		events.StorageBindingGenesis,
 		events.StorageBindingUnconverged,
 		events.StorageBindingUncheckable,
 		events.StorageBindingNotConfigured,
+		events.StorageBindingStranded,
 	} {
 		events.RegisterPayload(eventType, StorageBindingOutcomePayload{})
 	}

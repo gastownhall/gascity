@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
@@ -46,7 +49,7 @@ func infraSplitConfig(path string) *config.City {
 // command's own preflights (source flag, controller probe, attestation, guard,
 // rig census), so the copy machinery below is exercised on its own rather than
 // through the flag parsing that gates it.
-func migrateInfraClasses(t *testing.T, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
+func migrateInfraClasses(t testing.TB, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
 	t.Helper()
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
@@ -144,6 +147,17 @@ func stubInfraControllerPing(t *testing.T, pid int) {
 	prev := infraMigrationControllerPing
 	infraMigrationControllerPing = func(string) int { return pid }
 	t.Cleanup(func() { infraMigrationControllerPing = prev })
+}
+
+// migrateInfraClassesRetainingSource migrates exactly as a build that kept
+// the work store's copies did (gc v1.5.0): copy, prove, mark, and stop. It is
+// the starting state of every repair path.
+func migrateInfraClassesRetainingSource(t *testing.T, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
+	t.Helper()
+	prev := clearRetainedInfraCopiesFn
+	clearRetainedInfraCopiesFn = func(string, infraBindingTarget, io.Writer) (infraClearResult, error) { return infraClearResult{}, nil }
+	defer func() { clearRetainedInfraCopiesFn = prev }()
+	return migrateInfraClasses(t, cityPath, cfg, stderr)
 }
 
 func mustCreateInfraBead(t *testing.T, store beads.Store, b beads.Bead) beads.Bead {
@@ -451,11 +465,29 @@ func TestEnsureInfraClassMigratedCopiesEveryInfraClass(t *testing.T) {
 		t.Fatalf("within-infra dep edge did not cross: %+v %v", deps, err)
 	}
 
-	// The source is retained verbatim: rollback is a config swap, not a restore.
-	for _, want := range []beads.Bead{root, step, session, message, order, nudge, closedOrder, work} {
-		if _, err := source.Get(want.ID); err != nil {
-			t.Fatalf("source bead %s was removed by the migration: %v", want.ID, err)
+	// Past the marker the work store's copies are cleared, each one first
+	// recorded in the proven backup; the work bead is untouched.
+	if _, err := source.Get(work.ID); err != nil {
+		t.Fatalf("the work bead %s was removed by the migration: %v", work.ID, err)
+	}
+	backup, present, err := readInfraRetainedBackup(target)
+	if err != nil || !present {
+		t.Fatalf("no retained-source backup after the migration: present=%v err=%v", present, err)
+	}
+	backedUp := map[string]beads.Bead{}
+	for _, e := range backup {
+		backedUp[e.Bead.ID] = e.Bead
+	}
+	for _, want := range []beads.Bead{root, step, session, message, order, nudge, closedOrder} {
+		if _, err := source.Get(want.ID); err == nil {
+			t.Fatalf("the work store still holds a copy of %s after the migration; every relocated bead must live in one store", want.ID)
 		}
+		if got, ok := backedUp[want.ID]; !ok || got.Title != want.Title {
+			t.Fatalf("the backup does not hold %s (%q): %+v", want.ID, want.Title, got)
+		}
+	}
+	if _, ok := backedUp[work.ID]; ok {
+		t.Fatalf("the backup holds the work bead %s; only cleared rows belong there", work.ID)
 	}
 
 	// The second boot re-proves containment rather than trusting the marker,
@@ -683,15 +715,57 @@ func TestEnsureInfraClassMigratedRerunsOnAStaleMarker(t *testing.T) {
 		t.Fatalf("the wipe removed the marker too; this test no longer exercises staleness: %v", err)
 	}
 
+	// The work store's copies were cleared, so re-copying from it would
+	// rebuild an empty binding and the marker would bless it. The work-source
+	// re-run refuses and names the backup re-copy instead.
+	log.Reset()
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationUncheckable {
+		t.Fatalf("work-source re-run outcome = %v, want uncheckable; log: %s", got.Outcome, log.String())
+	}
+	if !bytes.Contains(log.Bytes(), []byte("claims convergence")) || !bytes.Contains(log.Bytes(), []byte("--"+storageFromBackupFlag)) {
+		t.Fatalf("the stale marker refusal does not name the backup re-copy; log: %s", log.String())
+	}
+	if _, err := os.Stat(target.Database); !os.IsNotExist(err) {
+		t.Fatalf("the refused work-source re-run created the database anyway: %v", err)
+	}
+
+	log.Reset()
+	if got := runInfraClassMigrationFrom(cityPath, target, infraMigrationFromBackup, "gc storage migrate", &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("backup re-copy outcome = %v, want converged; log: %s", got.Outcome, log.String())
+	}
+	if _, err := openMigratedDestination(t, target).Get(session.ID); err != nil {
+		t.Fatalf("the wiped destination was blessed instead of re-copied: %v", err)
+	}
+}
+
+// TestEnsureInfraClassMigratedRerunsAStaleMarkerFromAnUnclearedSource is the
+// re-converge recipe on a city migrated by a build that kept its source: the
+// work store still holds the slice, so the work-source re-copy is the right
+// one, and it ends with the source cleared.
+func TestEnsureInfraClassMigratedRerunsAStaleMarkerFromAnUnclearedSource(t *testing.T) {
+	cityPath := t.TempDir()
+	storeDir := filepath.Join(cityPath, ".gc", "store")
+	source := stubInfraMigrationSource(t)
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
+
+	cfg := infraSplitConfig(storeDir)
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("first boot outcome = %v, want converged; log: %s", got.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	if err := os.RemoveAll(target.Dir); err != nil {
+		t.Fatal(err)
+	}
 	log.Reset()
 	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("re-run outcome = %v, want converged; log: %s", got.Outcome, log.String())
 	}
-	if !bytes.Contains(log.Bytes(), []byte("claims convergence")) {
-		t.Fatalf("the stale marker was not reported; log: %s", log.String())
-	}
 	if _, err := openMigratedDestination(t, target).Get(session.ID); err != nil {
 		t.Fatalf("the wiped destination was blessed instead of re-copied: %v", err)
+	}
+	if _, err := source.Get(session.ID); err == nil {
+		t.Fatal("the re-copy left the work store's copy in place")
 	}
 }
 
@@ -895,7 +969,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	destination := beads.NewMemStore()
 	bead := mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
 
-	if _, err := verifyInfraCopy(infraStoreOpener(destination), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(destination), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against an empty destination")
 	}
 
@@ -904,7 +978,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := destination.Create(drifted); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(infraStoreOpener(destination), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(destination), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against a drifted copy")
 	}
 
@@ -912,7 +986,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := faithful.Create(bead); err != nil {
 		t.Fatal(err)
 	}
-	proven, err := verifyInfraCopy(infraStoreOpener(faithful), source)
+	proven, _, err := verifyInfraCopy(infraStoreOpener(faithful), source, infraCopyPlan{})
 	if err != nil {
 		t.Fatalf("equality rejected a faithful copy: %v", err)
 	}
@@ -927,7 +1001,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := faithful.Create(beads.Bead{Title: "invented", Type: "session", Labels: []string{"gc:session"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(infraStoreOpener(faithful), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(faithful), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against a destination holding an extra row")
 	}
 
@@ -1011,6 +1085,7 @@ func TestEnsureInfraClassMigratedRefusesWhileAnotherControllerIsLive(t *testing.
 	if !strings.Contains(log.String(), "is live on this city") {
 		t.Fatalf("the refusal did not name the live controller; log: %s", log.String())
 	}
+	assertLiveControllerMessageClaimsNoWrites(t, log.String())
 	// Nothing may claim convergence, and nothing may have been written.
 	target := mustResolveInfraTarget(t, cityPath, cfg)
 	if _, err := os.Stat(target.MarkerPath()); !os.IsNotExist(err) {
@@ -1128,7 +1203,9 @@ func migratedThenCollectedCity(t *testing.T) (cityPath string, cfg *config.City,
 
 	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
 	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+	// A city migrated by a build that kept its source: the divergence between
+	// a GC'd binding and its retained copies is what these rows classify.
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("cutover outcome = %v, want converged; log: %s", got.Outcome, log.String())
 	}
 	target := mustResolveInfraTarget(t, cityPath, cfg)
@@ -1140,7 +1217,7 @@ func migratedThenCollectedCity(t *testing.T) (cityPath string, cfg *config.City,
 	}
 	// Past the TTL for every seeded row, so this sweep is the first post-cutover
 	// GC a real city would run rather than a no-op.
-	purged, err := gc.runGC(beads.GraphStore{Store: binding}, beads.SessionStore{}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
+	purged, err := gc.runGC(nil, beads.GraphStore{Store: binding}, beads.SessionStore{}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
 	if err != nil {
 		t.Fatalf("wisp gc: %v", err)
 	}
@@ -1172,15 +1249,34 @@ func migratedThenCollectedCity(t *testing.T) (cityPath string, cfg *config.City,
 // sweep onward, and a detector that reported it would be muted — taking the
 // real strand it exists to catch down with it.
 func TestEnsureInfraClassMigratedAcceptsWispGCDeletions(t *testing.T) {
-	cityPath, cfg, _, collected := migratedThenCollectedCity(t)
+	cityPath, cfg, source, collected := migratedThenCollectedCity(t)
 
+	// The boot check: the GC'd rows are retained copies to clear, never strands.
 	var log bytes.Buffer
+	report := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("boot outcome = %v, want retained-copies; the binding's own GC must not read as a stranded write. log: %s", report.Outcome, log.String())
+	}
+	for _, id := range collected {
+		if !slices.Contains(report.Retained, id) {
+			t.Fatalf("the GC-collected %s is not among the retained copies to clear: %v", id, report.Retained)
+		}
+	}
+
+	// The operator command clears them, GC'd zombies included.
+	log.Reset()
 	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("outcome = %v, want converged; the binding's own GC was reported as a stranded write. log: %s", got.Outcome, log.String())
 	}
-	if log.Len() != 0 {
-		t.Fatalf("a healthy garbage-collected city reported activity: %s", log.String())
+	if strings.Contains(log.String(), "stranded") {
+		t.Fatalf("a healthy garbage-collected city reported a strand: %s", log.String())
 	}
+	for _, id := range collected {
+		if _, err := source.Get(id); err == nil {
+			t.Fatalf("the clear left the GC-collected %s in the work store, where demand would serve it forever", id)
+		}
+	}
+	log.Reset()
 
 	// Every later boot too: the divergence is permanent, so a check that only
 	// tolerated it once would still block the city forever.
@@ -1397,14 +1493,21 @@ func infraRevertSentence() string {
 // decided. An outcome may now suppress the advice entirely — a converged or
 // unconfigured city has nothing to say — but no outcome can produce the revert
 // on its own.
+//
+// A stranded report that names ids, with nothing beside them that refuses the
+// city, serves degraded (servesDegraded). Its advice ends on that rather than
+// on "start again", and the decision is still the evidence's: a genesis city a
+// raw bd write stranded before anything wrote to the binding loses nothing to
+// the revert.
 func TestInfraMigrationRevertAdviceIsDecidedByEvidenceNotByOutcome(t *testing.T) {
 	revert := infraRevertSentence()
-	outcomes := []infraMigrationOutcome{
-		infraMigrationNotConfigured,
-		infraMigrationConverged,
-		infraMigrationUnconverged,
-		infraMigrationStranded,
-		infraMigrationUncheckable,
+	reports := []infraMigrationReport{
+		{Outcome: infraMigrationNotConfigured},
+		{Outcome: infraMigrationConverged},
+		{Outcome: infraMigrationUnconverged},
+		{Outcome: infraMigrationStranded},
+		{Outcome: infraMigrationStranded, Stranded: []string{"gc-1"}},
+		{Outcome: infraMigrationUncheckable},
 	}
 	// Outcomes that describe a city with nothing wrong say nothing at all;
 	// every other outcome must end with a revert decision, one way or the other.
@@ -1412,14 +1515,22 @@ func TestInfraMigrationRevertAdviceIsDecidedByEvidenceNotByOutcome(t *testing.T)
 		infraMigrationNotConfigured: true,
 		infraMigrationConverged:     true,
 	}
-	for _, outcome := range outcomes {
+	for _, base := range reports {
+		outcome := base.Outcome
 		for _, empty := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%v/binding-proven-empty=%v", outcome, empty), func(t *testing.T) {
-				report := infraMigrationReport{Outcome: outcome, BindingProvenEmpty: empty}
+			t.Run(fmt.Sprintf("%v/stranded=%d/binding-proven-empty=%v", outcome, len(base.Stranded), empty), func(t *testing.T) {
+				report := base
+				report.BindingProvenEmpty = empty
 				if !empty {
 					report.BindingProbe = fmt.Errorf("listing the infra binding: database is locked")
 				}
+				if len(report.Stranded) > 0 && !report.servesDegraded() {
+					t.Fatalf("precondition: %+v does not serve degraded, so the degraded advice is never rendered", report)
+				}
 				advice := infraMigrationOperatorAdvice(report, "gc start")
+				if report.servesDegraded() && !strings.HasSuffix(advice, " The rest of the city serves degraded meanwhile.") {
+					t.Fatalf("the advice for a city that serves degraded does not end on that: %q", advice)
+				}
 				if silent[outcome] {
 					if advice != "" {
 						t.Fatalf("a %v city was given boot advice it has no use for: %q", outcome, advice)
@@ -1541,8 +1652,11 @@ func (s undeppableInfraSource) DepList(id, direction string) ([]beads.Dep, error
 	if s.seen == nil {
 		return nil, s.err
 	}
-	s.seen[id]++
-	if s.seen[id] > 1 {
+	// Per direction: the source refusal reads each row's edges both ways
+	// once, and the import's second read down is the one that fails.
+	key := id + " " + direction
+	s.seen[key]++
+	if s.seen[key] > 1 {
 		return nil, s.err
 	}
 	return s.Store.DepList(id, direction)
@@ -1773,8 +1887,11 @@ func TestInfraMigrationRevertAdviceRequiresAProvablyEmptyBinding(t *testing.T) {
 		{
 			// The boot after that one, on a city that kept running: the copy is
 			// in the binding, the manifest records it, and no marker does.
+			// The cutover cleared the work store, so a missing marker cannot
+			// be read as "never migrated": the cleared note holds it as a
+			// check that could not decide.
 			name:        "a proven copy with no marker, refused again on the next boot",
-			wantOutcome: infraMigrationUnconverged,
+			wantOutcome: infraMigrationUncheckable,
 			setup: func(t *testing.T) (string, *config.City) {
 				cityPath, cfg, _ := freshCity(t)
 				var log bytes.Buffer
@@ -1860,7 +1977,7 @@ func TestInfraMigrationRevertAdviceRequiresAProvablyEmptyBinding(t *testing.T) {
 			// directory, and this city's infra state is sitting on that volume
 			// intact.
 			name:        "a converged city whose binding root has vanished wholesale",
-			wantOutcome: infraMigrationUnconverged,
+			wantOutcome: infraMigrationUncheckable,
 			setup: func(t *testing.T) (string, *config.City) {
 				cityPath, cfg, _, target := convergedInfraCity(t)
 				if err := os.RemoveAll(target.Root); err != nil {
@@ -2146,7 +2263,10 @@ func TestEnsureInfraClassMigratedSeparatesUnverifiableFromUnconverged(t *testing
 					t.Fatal(err)
 				}
 				stubInfraControllerPing(t, os.Getpid()+1)
-				return "is live on this city"
+				// The work store was cleared into the backup, so the re-copy
+				// refuses before it gets as far as the controller and names
+				// the source that still holds the slice.
+				return "--" + storageFromBackupFlag
 			},
 		},
 		{
@@ -2223,5 +2343,312 @@ func TestEnsureInfraClassMigratedConvergenceCheckAcceptsBindingGrowth(t *testing
 	}
 	if log.Len() != 0 {
 		t.Fatalf("a healthy converged city reported activity: %s", log.String())
+	}
+}
+
+// holdsTestBlockerResolver resolves cross-store gate blockers by id in one
+// work store, as the controller's gate lane does over every work store.
+func holdsTestBlockerResolver(work beads.Store) dispatch.CrossStoreBlockerResolver {
+	return func(ids []string) (dispatch.CrossStoreBlockerResolution, error) {
+		res := dispatch.CrossStoreBlockerResolution{Copies: map[string][]beads.Bead{}}
+		for _, id := range ids {
+			if b, err := work.Get(id); err == nil {
+				res.Copies[id] = append(res.Copies[id], b)
+			}
+		}
+		return res, nil
+	}
+}
+
+func readyIDsOf(t *testing.T, store beads.Store) []string {
+	t.Helper()
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := make([]string, 0, len(ready))
+	for _, b := range ready {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// TestTheCopyKeepsAnInfraBeadBlockedOnOpenWork is ga-1hncv0's first hold: an
+// infrastructure bead blocked by an OPEN work bead (a parked mol-dog wisp the
+// rehearsal found on every unsplit city) must arrive in the binding still
+// waiting, not ready. The copy used to carry only within-infra edges, so the
+// binding held it with no blocker and dispatched it at once.
+//
+// The hold crosses as a cross-store gate in the binding (the rig importer's and
+// the drain's mechanism): the bead waits on the gate through an ordinary
+// same-store edge, and the controller's gate lane releases the gate once the
+// work bead closes. A blocker that is already closed holds nothing and mints no
+// gate.
+func TestTheCopyKeepsAnInfraBeadBlockedOnOpenWork(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	parked := mustCreateInfraBead(t, source, beads.Bead{Title: "mol-dog-stale-db", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	free := mustCreateInfraBead(t, source, beads.Bead{Title: "wisp whose blocker is done", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	openWork := mustCreateInfraBead(t, source, beads.Bead{Title: "open work the wisp waits on", Type: "task"})
+	doneWork := mustCreateInfraBead(t, source, beads.Bead{Title: "finished work", Type: "task"})
+	if err := source.Close(doneWork.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range []beads.Dep{
+		{IssueID: parked.ID, DependsOnID: openWork.ID, Type: "blocks"},
+		{IssueID: free.ID, DependsOnID: doneWork.ID, Type: "blocks"},
+	} {
+		if err := source.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			t.Fatalf("seeding %v: %v", edge, err)
+		}
+	}
+	if slices.Contains(readyIDsOf(t, source), parked.ID) {
+		t.Fatalf("fixture: %s is ready in the work store before the copy", parked.ID)
+	}
+
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, cityPath, cfg, &log)
+	if report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+	}
+	if report.ProvenBeads != 2 {
+		t.Fatalf("proven beads = %d, want the 2 infrastructure beads (gates are not copies): %s", report.ProvenBeads, log.String())
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+
+	gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing gates: %v", err)
+	}
+	if len(gates) != 1 {
+		t.Fatalf("binding holds %d cross-store gate(s), want exactly one for %s -> %s: %+v", len(gates), parked.ID, openWork.ID, gates)
+	}
+	gate := gates[0]
+	if gate.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != parked.ID || gate.Metadata[beadmeta.CrossStoreBlockerMetadataKey] != openWork.ID || gate.Status != "open" {
+		t.Fatalf("gate = %+v, want an open gate owned by %s waiting on %s", gate, parked.ID, openWork.ID)
+	}
+	deps, err := binding.DepList(parked.ID, "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != gate.ID || deps[0].Type != "blocks" {
+		t.Fatalf("%s binding deps = %+v (%v), want one blocks edge onto its gate %s", parked.ID, deps, err, gate.ID)
+	}
+	ready := readyIDsOf(t, binding)
+	if slices.Contains(ready, parked.ID) {
+		t.Fatalf("%s is ready in the binding while the work bead it waits on is open: %v", parked.ID, ready)
+	}
+	if !slices.Contains(ready, free.ID) {
+		t.Fatalf("%s, whose blocker closed before the copy, is not ready in the binding: %v", free.ID, ready)
+	}
+
+	if err := source.Close(openWork.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatch.ReleaseCrossStoreGates(beads.GraphStore{Store: binding}, holdsTestBlockerResolver(source)); err != nil {
+		t.Fatalf("releasing gates: %v", err)
+	}
+	if ready := readyIDsOf(t, binding); !slices.Contains(ready, parked.ID) {
+		t.Fatalf("%s is not ready after the work bead it waited on closed and the gate lane ran: %v", parked.ID, ready)
+	}
+}
+
+// TestTheResumedCopyMintsEachGateOnce: a run killed after it minted its gates
+// leaves them stamped in the binding, as it leaves the rows it copied. The
+// rerun resumes over them and converges with exactly one gate per hold, its
+// owner still waiting on it; an unstamped gate would refuse the rerun, and a
+// kept stale one would hold the owner twice.
+func TestTheResumedCopyMintsEachGateOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	parked := mustCreateInfraBead(t, source, beads.Bead{Title: "mol-dog-stale-db", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	openWork := mustCreateInfraBead(t, source, beads.Bead{Title: "open work the wisp waits on", Type: "task"})
+	if err := source.DepAdd(parked.ID, openWork.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "verify" {
+			return errors.New("killed before the manifest")
+		}
+		return nil
+	}
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, cityPath, cfg, &log)
+	infraEngineCrashPoint = prev
+	if report.Outcome == infraMigrationConverged {
+		t.Fatalf("the kill did not stop the run: %s", log.String())
+	}
+
+	log.Reset()
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("resumed migrate = %s: %s", report.Outcome, log.String())
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing gates: %v", err)
+	}
+	if len(gates) != 1 || gates[0].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != parked.ID {
+		t.Fatalf("binding holds gates %+v after the resumed run, want exactly one owned by %s", gates, parked.ID)
+	}
+	deps, err := binding.DepList(parked.ID, "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != gates[0].ID {
+		t.Fatalf("%s binding deps = %+v (%v), want one edge onto its gate %s", parked.ID, deps, err, gates[0].ID)
+	}
+	if slices.Contains(readyIDsOf(t, binding), parked.ID) {
+		t.Fatalf("%s is ready in the binding after the resumed run while its work blocker is open", parked.ID)
+	}
+}
+
+// TestTheCopyRefusesHoldsItCannotCarry is ga-1hncv0's other holds: a hold the
+// binding cannot express is refused by id, before anything is copied, rather
+// than dropped. An indefinitely-deferred bead (bd status=deferred with no
+// defer_until) would arrive open and ready; so would a bead bd parks by status
+// (blocked, pinned, hooked, or a custom status), which every bd-backed read
+// folds to "open" and the binding stores as exactly that; a waits-for edge onto
+// open work has no gate to cross as. Preflight names the same refusal, so the
+// operator fixes it before taking the window.
+func TestTheCopyRefusesHoldsItCannotCarry(t *testing.T) {
+	future := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+	for _, tc := range []struct {
+		name  string
+		seed  func(t *testing.T, source beads.Store) string
+		wants []string
+	}{
+		{
+			name: "undated deferral",
+			seed: func(t *testing.T, source beads.Store) string {
+				b := mustCreateInfraBead(t, source, beads.Bead{Title: "parked wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, IndefinitelyDeferred: true})
+				return b.ID
+			},
+			wants: []string{"deferred", "bd defer"},
+		},
+		{
+			// bd's blocked status as every bd-backed read reports it: Gas City's
+			// folded "open", the raw status beside it (beads.Bead.SourceStatus).
+			name: "a status bd parks",
+			seed: func(t *testing.T, source beads.Store) string {
+				b := mustCreateInfraBead(t, source, beads.Bead{Title: "wisp an agent set blocked", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, SourceStatus: "blocked"})
+				return b.ID
+			},
+			wants: []string{`"blocked"`, "bd defer"},
+		},
+		{
+			// DoltliteReadStore reports bd's deferred status through the raw
+			// status alone, without IndefinitelyDeferred.
+			name: "a deferral only the raw status records",
+			seed: func(t *testing.T, source beads.Store) string {
+				b := mustCreateInfraBead(t, source, beads.Bead{Title: "deferred wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, SourceStatus: "deferred"})
+				return b.ID
+			},
+			wants: []string{"deferred", "bd defer"},
+		},
+		{
+			name: "waits-for onto open work",
+			seed: func(t *testing.T, source beads.Store) string {
+				b := mustCreateInfraBead(t, source, beads.Bead{Title: "waiting wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+				w := mustCreateInfraBead(t, source, beads.Bead{Title: "open work", Type: "task"})
+				if err := source.DepAdd(b.ID, w.ID, "waits-for"); err != nil {
+					t.Fatal(err)
+				}
+				return b.ID
+			},
+			wants: []string{"waits-for"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, cfg, _ := preflightReadyCity(t, 0)
+			source, err := openInfraMigrationSource(request.CityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := tc.seed(t, source)
+			// A dated deferral is carried as defer_until and needs nothing, and
+			// neither does a bead whose raw status the binding stores as is.
+			dated := mustCreateInfraBead(t, source, beads.Bead{Title: "dated wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, IndefinitelyDeferred: true, SourceStatus: "deferred", DeferUntil: &future})
+			rawOpen := mustCreateInfraBead(t, source, beads.Bead{Title: "open wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, SourceStatus: "open"})
+
+			var stdout, stderr bytes.Buffer
+			if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
+				t.Fatalf("preflight cleared a city whose copy would drop a hold on %s: %s", id, stdout.String())
+			}
+			for _, want := range append([]string{id}, tc.wants...) {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("preflight output does not name %q: %s", want, stdout.String())
+				}
+			}
+			for _, carried := range []beads.Bead{dated, rawOpen} {
+				if strings.Contains(stdout.String(), carried.ID) {
+					t.Errorf("preflight names %s (%s), whose hold the copy carries: %s", carried.ID, carried.Title, stdout.String())
+				}
+			}
+
+			var log bytes.Buffer
+			report := migrateInfraClasses(t, request.CityPath, cfg, &log)
+			if report.Outcome == infraMigrationConverged {
+				t.Fatalf("the migration converged over a hold it drops on %s: %s", id, log.String())
+			}
+			if !strings.Contains(log.String(), id) {
+				t.Errorf("the refusal does not name %s: %s", id, log.String())
+			}
+			target := mustResolveInfraTarget(t, request.CityPath, cfg)
+			if present, err := infraPathExists(target.MarkerPath()); err != nil || present {
+				t.Fatalf("a refused migration wrote the convergence marker (present=%v err=%v)", present, err)
+			}
+		})
+	}
+}
+
+// TestTheReCopyFromTheBackupKeepsTheHoldOnOpenWork is the re-converge recipe
+// for a cleared city carrying ga-1hncv0's gate: the binding's database is gone,
+// and the re-copy from the retained-source backup must hold the parked bead on
+// the work bead it waits for again, as the first copy did. The backup records
+// the bead's blocking edge onto the work bead; the work bead is read where it
+// still lives, the work store.
+func TestTheReCopyFromTheBackupKeepsTheHoldOnOpenWork(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	parked := mustCreateInfraBead(t, source, beads.Bead{Title: "mol-dog-stale-db", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	openWork := mustCreateInfraBead(t, source, beads.Bead{Title: "open work the wisp waits on", Type: "task"})
+	if err := source.DepAdd(parked.ID, openWork.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+	}
+	if _, err := source.Get(parked.ID); err == nil {
+		t.Fatalf("fixture: the clear left %s in the work store", parked.ID)
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	if err := os.RemoveAll(target.Dir); err != nil {
+		t.Fatal(err)
+	}
+
+	log.Reset()
+	if got := runInfraClassMigrationFrom(cityPath, target, infraMigrationFromBackup, "gc storage migrate", &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("backup re-copy = %s: %s", got.Outcome, log.String())
+	}
+	binding := openMigratedDestination(t, target)
+	gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing gates: %v", err)
+	}
+	if len(gates) != 1 || gates[0].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != parked.ID || gates[0].Metadata[beadmeta.CrossStoreBlockerMetadataKey] != openWork.ID || gates[0].Status != "open" {
+		t.Fatalf("re-copied binding gates = %+v, want one open gate holding %s on %s", gates, parked.ID, openWork.ID)
+	}
+	if ready := readyIDsOf(t, binding); slices.Contains(ready, parked.ID) {
+		t.Fatalf("%s is ready in the re-copied binding while %s is open: %v", parked.ID, openWork.ID, ready)
+	}
+	if err := source.Close(openWork.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatch.ReleaseCrossStoreGates(beads.GraphStore{Store: binding}, holdsTestBlockerResolver(source)); err != nil {
+		t.Fatalf("releasing gates: %v", err)
+	}
+	if ready := readyIDsOf(t, binding); !slices.Contains(ready, parked.ID) {
+		t.Fatalf("%s is not ready after %s closed and the gate lane ran: %v", parked.ID, openWork.ID, ready)
 	}
 }

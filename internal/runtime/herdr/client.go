@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
@@ -39,6 +41,9 @@ type client struct {
 	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
+	// unixListening is serverConfirmedDead's kernel listener check, a test
+	// override; nil selects runtime.UnixPathListening.
+	unixListening func(path string) (bool, error)
 }
 
 func newClient(session, cityRoot string) *client {
@@ -276,11 +281,15 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
-// the per-entry name field is emitted under the JSON key "agent", not "name"
-// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// agentInfo mirrors herdr's agent object (AgentInfo, src/api/schema/agents.rs).
+// Name is the registered agent name (`agent start <name>`, `agent rename`);
+// herdr omits it for a pane whose agent it detected or was told about but
+// nobody named. Kind is the effective agent label ("claude", "opencode", or a
+// reporting hook's --agent label): every pane running that kind shares it, so
+// it is never an identity.
 type agentInfo struct {
-	Name        string `json:"agent"`
+	Name        string `json:"name"`
+	Kind        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -567,9 +576,13 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     Enter would answer the dialog rather than do nothing. No keystroke —
 //     report it unconfirmed and let the caller record the strand.
 //
-// Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
-// path. A non-nil error means the turn could not be confirmed submitted.
-func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+// A pane with no named agent keeps the best-effort paste+settle+Enter path
+// only when mode is bindModeShell: a raw or bare-shell launch registers no
+// agent. A kind launch (bindModeAgent) registers its agent, so its pane with
+// no named agent is one whose agent exited, and the shell that outlived the
+// agent would run the turn as commands. A non-nil error means the turn could
+// not be confirmed submitted.
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode string) error {
 	args := []string{"agent", "prompt", paneID, text, "--wait"}
 	for _, s := range startupConfirmStates {
 		args = append(args, "--until", s)
@@ -580,9 +593,16 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 		return nil
 	}
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
+		if mode != bindModeShell {
+			return fmt.Errorf("%w; the agent launched on pane %s is gone, and the turn is not typed into the shell it left", err, paneID)
+		}
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
-	switch herdrErrorCode(err) {
+	// herdr reports both verdicts through a non-zero exit, which herdrErrorCode
+	// cannot see; reading only that shape left every stall unrecovered. Accept
+	// that stderr only as a bare error envelope (herdrAnswerCode): diagnostic
+	// text quoting a stall code must not authorize a keystroke.
+	switch herdrAnswerCode(err) {
 	case "timeout":
 		return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
 			startupConfirmStates, startupPromptConfirmTimeoutMS, err)
@@ -711,14 +731,19 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 	return err
 }
 
-// getAgent fetches one agent by target — an agent name or the pane id hosting
-// it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
-// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
-// get <target>` only resolves a pane id — passing an agent name returns
-// agent_not_found even though `agent list` lists that same agent under that
-// name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// getAgent fetches one agent by target — a registered agent name or the pane
+// id hosting it: (info, true, nil) if present, (zero, false, nil) if herdr
+// reports it absent, (_, false, err) on failure. It asks `agent get` first;
+// when that answers not-found it scans `agent list` for an agent registered
+// under target, which is how a name-shaped target is confirmed when `agent get`
+// does not resolve it. The scan matches registered names only: an agent kind
+// is shared by every pane running it, and a pane nobody named has no name, so
+// neither is ever an identity. An empty target names nothing and resolves
+// nothing.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	if target == "" {
+		return agentInfo{}, false, nil
+	}
 	res, err := c.run(ctx, "agent", "get", target)
 	if err == nil {
 		var wrap struct {
@@ -737,7 +762,7 @@ func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, 
 		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
 	for _, a := range agents {
-		if a.Name == target {
+		if a.Name != "" && a.Name == target {
 			return a, true, nil
 		}
 	}
@@ -909,28 +934,45 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // ── shared session-server lifecycle ──────────────────────────────────────────
 
 // socketPath is the unix socket for this client's herdr session. Must match
-// wherever the herdr binary itself resolves its config/state directory —
-// confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
-// "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
-// unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
-// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
-// plain os.UserHomeDir()+".config" join (the prior implementation) silently
-// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
-// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
-// this fleet's agent sandboxes do exactly that. The result: this client
-// dials a socket no herdr process ever binds, so serverAlive() reads false
-// against a perfectly healthy server ("did not become ready"), and every
-// retry launches a redundant herdr server contending for the same pane
-// ("agent_pane_busy") — ga-nqlb8q.
+// wherever the herdr binary itself binds the session server (herdr's
+// api_socket_path_for): <config>/herdr.sock for the unnamed/default session,
+// <config>/sessions/<name>/herdr.sock otherwise, with <config> resolved by
+// herdrConfigDir. Any divergence makes this client dial a socket no herdr
+// process ever binds, so serverAlive() reads false against a perfectly
+// healthy server ("did not become ready"), and every retry launches a
+// redundant herdr server contending for the same pane ("agent_pane_busy") —
+// ga-nqlb8q, and on macOS #5770, where the former os.UserConfigDir()
+// resolution named $HOME/Library/Application Support, a directory herdr
+// never uses.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
-	configDir, _ := os.UserConfigDir()
+	configDir := herdrConfigDir()
 	if c.session == "" || c.session == "default" {
-		return filepath.Join(configDir, "herdr", "herdr.sock")
+		return filepath.Join(configDir, "herdr.sock")
 	}
-	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
+	return filepath.Join(configDir, "sessions", c.session, "herdr.sock")
+}
+
+// herdrConfigDir is the directory herdr keeps its config and session sockets
+// in, resolved by herdr's own non-Windows rule (src/config/io.rs config_dir
+// and platform_config_dir), which does not vary by OS:
+// $XDG_CONFIG_HOME/herdr, else $HOME/.config/herdr, else <temp dir>/herdr.
+// os.UserConfigDir() is not that rule: on macOS it ignores XDG_CONFIG_HOME
+// and returns $HOME/Library/Application Support, a directory herdr never
+// uses (#5770). herdr reads each variable with std::env::var, so a variable
+// that is set counts even when it is empty or relative (filepath.Join("",
+// "herdr") is "herdr", as PathBuf::from("").join("herdr") is); startServer
+// refuses the relative socket path that results.
+func herdrConfigDir() string {
+	if dir, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
+		return filepath.Join(dir, "herdr")
+	}
+	if home, ok := os.LookupEnv("HOME"); ok {
+		return filepath.Join(home, ".config", "herdr")
+	}
+	return filepath.Join(os.TempDir(), "herdr")
 }
 
 // serverAlive reports whether the session-server is actually accepting
@@ -940,12 +982,44 @@ func (c *client) socketPath() string {
 // so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
 // dial to find out for real.
 func (c *client) serverAlive() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath(), 500*time.Millisecond)
+	conn, err := net.DialTimeout("unix", c.socketPath(), serverDialTimeout)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// serverDialTimeout bounds one connect to the session server's socket when
+// checking whether the server is there.
+const serverDialTimeout = 500 * time.Millisecond
+
+// serverConfirmedDead reports whether this session's herdr server is
+// confirmed dead, the proof tmux's ServerConfirmedDead makes for its own
+// server: the socket is missing or refuses the connection, and the kernel
+// lists no listener bound to the socket path. The second check refuses a live
+// server whose socket file was unlinked, which the dial alone reads as dead.
+// Every other observation is false: a socket that accepts, a dial that cannot
+// tell (a timeout, EACCES), an unreadable listener table. A dead server hosts
+// no pane, since its panes die with it.
+func (c *client) serverConfirmedDead(ctx context.Context) bool {
+	sock := c.socketPath()
+	dctx, cancel := context.WithTimeout(ctx, serverDialTimeout)
+	defer cancel()
+	conn, err := c.dialUnix(dctx, sock)
+	if err == nil {
+		_ = conn.Close()
+		return false
+	}
+	if runtime.ClassifyControlSocketDial(err) != runtime.ControlSocketAbsent {
+		return false
+	}
+	listening := c.unixListening
+	if listening == nil {
+		listening = runtime.UnixPathListening
+	}
+	bound, err := listening(sock)
+	return err == nil && !bound
 }
 
 // removeStaleSocket unlinks the socket inode when it exists but nothing live is
@@ -959,7 +1033,16 @@ func (c *client) removeStaleSocket() {
 
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
+//
+// It refuses a relative socket path before dialing, unlinking or launching
+// anything. Each process resolves such a path against its own working
+// directory: the server against the city root, gc and every herdr CLI call
+// against gc's ($HOME or / under the supervisor). The server would bind a
+// socket gc never dials, and every retry would launch another server.
 func (c *client) startServer() error {
+	if sock := c.socketPath(); !filepath.IsAbs(sock) {
+		return c.relativeSocketError(sock)
+	}
 	c.serverMu.Lock()
 	defer c.serverMu.Unlock()
 	if c.serverAlive() {
@@ -993,7 +1076,23 @@ func (c *client) startServer() error {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("herdr server for session %q did not become ready", c.session)
+	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// relativeSocketError is startServer's refusal of the relative socket path
+// sock. It names both working directories and the variables to fix.
+func (c *client) relativeSocketError(sock string) error {
+	gcDir, err := os.Getwd()
+	if err != nil {
+		gcDir = fmt.Sprintf("unknown (%v)", err)
+	}
+	serverDir := c.cityRoot
+	if serverDir == "" {
+		serverDir = gcDir // city-less construction: the server inherits gc's cwd
+	}
+	return fmt.Errorf("herdr server for session %q: socket path %q is relative because XDG_CONFIG_HOME, or HOME when XDG_CONFIG_HOME is unset, is set but not absolute; "+
+		"herdr would resolve it against the server's working directory %q and gc against its own, %q: set XDG_CONFIG_HOME to an absolute directory, or unset it and set HOME to one",
+		c.session, sock, serverDir, gcDir)
 }
 
 // stopServer stops this session's server (best-effort; tolerates not-running).

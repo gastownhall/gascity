@@ -4,18 +4,18 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
-	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 // updateLedgerDoc regenerates the TESTING.md checked runtime provider block
-// from the Go ledger when set. Run:
+// from the Go ledger when set. Run, from the repository root:
 //
-//	go test ./internal/testutil/providerledger -run TestCatalogMatchesProductionWiringAndDocumentation -update
+//	GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update
 var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked runtime provider ledger block from the Go ledger")
 
 func TestValidateRejectsInvalidContractClaims(t *testing.T) {
@@ -55,22 +55,6 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 			want: "exactly one of proof, waiver, or not-applicable reason",
 		},
 		{
-			name: "waiver is expired",
-			claim: ContractClaim{
-				Contract:    ContractRuntimeProvider,
-				Disposition: DispositionWaived,
-				Waiver: &Waiver{
-					Owner: "example-owner",
-					// A waiver is valid through the whole UTC day it names, so
-					// this has to be a prior day, not an earlier hour of the
-					// same one. See internal/testpolicy/waiverclock.
-					Expires: now.AddDate(0, 0, -1),
-					Reason:  "expired gap",
-				},
-			},
-			want: "waiver owned by example-owner expired",
-		},
-		{
 			name: "waiver has no owner",
 			claim: ContractClaim{
 				Contract:    ContractRuntimeProvider,
@@ -81,19 +65,6 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 				},
 			},
 			want: "waiver owner is required",
-		},
-		{
-			name: "waiver exceeds bounded horizon",
-			claim: ContractClaim{
-				Contract:    ContractRuntimeProvider,
-				Disposition: DispositionWaived,
-				Waiver: &Waiver{
-					Owner:   "example-owner",
-					Expires: now.Add(maxWaiverHorizon + time.Hour),
-					Reason:  "parked gap",
-				},
-			},
-			want: "waiver owned by example-owner exceeds",
 		},
 		{
 			name: "not applicable has no reason",
@@ -149,7 +120,7 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := validRuntimeEntry("runtime.fixture", "exact:fixture", tt.claim)
-			_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+			err := Validate([]Entry{entry})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, tt.want)
 			}
@@ -327,7 +298,6 @@ func TestProof(t *testalias.T) {
 }
 
 func TestValidateRequiresEveryPortContract(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -335,14 +305,13 @@ func TestValidateRequiresEveryPortContract(t *testing.T) {
 	})
 	entry.Claims = nil
 
-	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "missing required contract runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want missing required contract", err)
 	}
 }
 
 func TestValidateRejectsUnknownCatalogName(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -350,14 +319,13 @@ func TestValidateRejectsUnknownCatalogName(t *testing.T) {
 	})
 	entry.Catalog.Name = "runtime.typo"
 
-	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "unknown catalog") {
 		t.Fatalf("Validate() error = %v, want unknown-catalog error", err)
 	}
 }
 
 func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	claim := ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -390,7 +358,7 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Validate([]Entry{tt.entry}, now, waiverclock.ModeStrict)
+			err := Validate([]Entry{tt.entry})
 			if err == nil || !strings.Contains(err.Error(), "discovery binding requires role production_provider") {
 				t.Fatalf("Validate() error = %v, want production-role error", err)
 			}
@@ -399,12 +367,10 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 }
 
 func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
-
 	t.Run("role without type", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleType = nil
-		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a double type") {
 			t.Fatalf("Validate() error = %v, want missing-double-type error", err)
 		}
@@ -413,7 +379,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("role without boundary", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleBoundary = ""
-		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a repository-relative double boundary") {
 			t.Fatalf("Validate() error = %v, want missing-double-boundary error", err)
 		}
@@ -422,7 +388,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("type without role", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.Roles = []Role{RoleProductionProvider}
-		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "double type requires role reusable_double") {
 			t.Fatalf("Validate() error = %v, want missing-reusable-role error", err)
 		}
@@ -434,7 +400,7 @@ func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
 	entry.Roles = []Role{RoleReusableDouble}
 	entry.Catalog = nil
 
-	if _, err := Validate([]Entry{entry}, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC), waiverclock.ModeStrict); err != nil {
+	if err := Validate([]Entry{entry}); err != nil {
 		t.Fatalf("Validate(reusable-only entry): %v", err)
 	}
 	got := RenderMarkdown([]Entry{entry})
@@ -444,7 +410,6 @@ func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
 }
 
 func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	claim := ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -457,14 +422,13 @@ func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
 	second.Catalog = nil
 	second.Source = &SourceRef{File: "cmd/gc/./providers.go", Function: "newFixture", Reason: "same normalized source"}
 
-	_, err := Validate([]Entry{first, second}, now, waiverclock.ModeStrict)
+	err := Validate([]Entry{first, second})
 	if err == nil || !strings.Contains(err.Error(), "source binding cmd/gc/providers.go#newFixture is also owned") {
 		t.Fatalf("Validate() error = %v, want duplicate-source error", err)
 	}
 }
 
 func TestValidateRejectsContractNotRequiredByPort(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -477,14 +441,13 @@ func TestValidateRejectsContractNotRequiredByPort(t *testing.T) {
 		NotApplicableReason: "fixture",
 	})
 
-	_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "contract runtime.Unknown is not required by port runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want inapplicable-contract error", err)
 	}
 }
 
 func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	constructorA := SymbolRef{ImportPath: "example.test/provider", Name: "NewA"}
 	constructorB := SymbolRef{ImportPath: "example.test/provider", Name: "NewB"}
 	claim := func(constructor SymbolRef) ContractClaim {
@@ -509,7 +472,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	}
 
 	t.Run("missing pair", func(t *testing.T) {
-		_, err := Validate([]Entry{entry}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewB is missing required contract runtime.Provider") {
 			t.Fatalf("Validate() error = %v, want missing constructor-contract pair", err)
 		}
@@ -518,7 +481,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("duplicate pair", func(t *testing.T) {
 		duplicate := entry
 		duplicate.Claims = []ContractClaim{claim(constructorA), claim(constructorA), claim(constructorB)}
-		_, err := Validate([]Entry{duplicate}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{duplicate})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewA contract runtime.Provider is duplicated") {
 			t.Fatalf("Validate() error = %v, want duplicate constructor-contract pair", err)
 		}
@@ -527,7 +490,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("undeclared constructor", func(t *testing.T) {
 		undeclared := entry
 		undeclared.Claims = []ContractClaim{claim(constructorA), claim(constructorB), claim(SymbolRef{ImportPath: "example.test/provider", Name: "NewC"})}
-		_, err := Validate([]Entry{undeclared}, now, waiverclock.ModeStrict)
+		err := Validate([]Entry{undeclared})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewC is not declared by the entry") {
 			t.Fatalf("Validate() error = %v, want undeclared-constructor error", err)
 		}
@@ -653,7 +616,7 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 		}
 		for _, claim := range entry.Claims {
 			switch claim.Constructor {
-			case repoSymbol("internal/runtime/exec", "NewSeamBacked"):
+			case repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionProved {
 					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
@@ -668,13 +631,13 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 
 	if proof == nil {
-		t.Fatal("exec.NewSeamBacked proof is missing")
+		t.Fatal("exec.NewSeamBackedForCity proof is missing")
 	}
 	if proof.File != "internal/runtime/exec/exec_test.go" || proof.Test != "TestExecConformance" {
-		t.Errorf("exec.NewSeamBacked proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
+		t.Errorf("exec.NewSeamBackedForCity proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
 	}
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
-		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
+		t.Errorf("exec.NewSeamBackedForCity allowed calls = %q, want %q", got, want)
 	}
 	if t3Waiver == nil || t3Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("legacy T3 exec-prefix waiver = %+v, want %s ownership", t3Waiver, runtimeContractWaiverOwner)
@@ -1105,6 +1068,36 @@ func buildRuntimeRegistry() {
 	_, err := DiscoverRuntimeCatalog(source)
 	if err == nil || !strings.Contains(err.Error(), "fallback constructor set") {
 		t.Fatalf("DiscoverRuntimeCatalog() error = %v, want unledgered-fallback error", err)
+	}
+}
+
+func TestDiscoverRuntimeCatalogFallbackFactoryPrecedesOptions(t *testing.T) {
+	const prefix = `package main
+import (
+	registryalias "github.com/gastownhall/gascity/internal/runtime/registry"
+	tmuxalias "github.com/gastownhall/gascity/internal/runtime/tmux"
+)
+func buildRuntimeRegistry() {
+	r := registryalias.New()
+	tmuxFactory := func() { return tmuxalias.NewSeamBackedWithConfig(), nil }
+	host := registryalias.WithHostCapabilities(nil)
+	must(r.Register("tmux", tmuxFactory, host))
+`
+	withOptions, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory, host)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback with options) error = %v", err)
+	}
+	bare, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(bare SetFallback) error = %v", err)
+	}
+	if !reflect.DeepEqual(withOptions, bare) {
+		t.Fatalf("registration options changed the discovered catalog:\nwith options: %+v\nbare:         %+v", withOptions, bare)
+	}
+
+	_, err = DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback()\nreturn r\n}"))
+	if err == nil || !strings.Contains(err.Error(), "must have a factory") {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback without a factory) error = %v, want missing-factory error", err)
 	}
 }
 
@@ -1573,18 +1566,10 @@ func TestValidateSourceRefsBindsManualCompositionConstructor(t *testing.T) {
 func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	root := repoRoot(t)
 	entries := Catalog()
-	// This is the one call in the package that reads the wall clock, which makes
-	// it the one call a calendar rollover can turn red with no code change. The
-	// mode decides who pays for that: everyone, or the waiver's owner.
-	mode, err := waiverclock.FromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	warnings, err := Validate(entries, time.Now().UTC(), mode)
-	for _, warning := range warnings {
-		t.Logf("waiver clock: %s", warning)
-	}
-	if err != nil {
+	// Structure only: the waiver dates are judged against today by
+	// internal/testpolicy/waiverexpiry, the one never-cached date check, so
+	// this test's verdict cannot go stale on the calendar.
+	if err := Validate(entries); err != nil {
 		t.Fatalf("Validate(Catalog): %v", err)
 	}
 
@@ -1668,7 +1653,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Proof.File = "mutated-proof.go"
 	first[0].Claims[0].Proof.AllowedCalls[0].Name = "MutatedCall"
-	first[3].Claims[0].Waiver.Owner = "mutated-owner"
+	first[4].Claims[0].Waiver.Owner = "mutated-owner"
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1693,8 +1678,8 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
+	if second[4].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("Catalog() waiver leaked mutation: %q", second[4].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)

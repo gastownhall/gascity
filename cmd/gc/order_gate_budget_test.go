@@ -509,7 +509,7 @@ func TestOrderTrackingSweepStillReadsEveryLegTheGateNoLongerDoes(t *testing.T) {
 	var rec memRecorder
 	m := newSplitOrderDispatcher(t, cityPath, cfg, nil, work, binding, &rec)
 
-	gateStores, _ := m.gateStoresFor(cityPath, work, "city\x00"+cityPath, nil)
+	gateStores, _ := m.gateStoresFor(cityPath, work, "city\x00"+cityPath, nil, nil)
 	if storeListContains(gateStores, beads.Store(work)) {
 		t.Fatal("the gate still reads the work ledger; this control is testing the wrong build")
 	}
