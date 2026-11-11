@@ -11801,7 +11801,7 @@ func TestProcessWorkflowFinalizeStampsWorkDirReleasedAtOnPass(t *testing.T) {
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11860,7 +11860,7 @@ func TestProcessWorkflowFinalizeDoesNotStampWorkDirReleasedAtOnFailure(t *testin
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11900,7 +11900,7 @@ func TestProcessWorkflowFinalizeSkipsWorkDirReleasedAtWhenNoWorkDir(t *testing.T
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11965,7 +11965,7 @@ func TestProcessWorkflowFinalizeWorkDirReleaseStampFailureDoesNotAbortFinalize(t
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v, want finalize to succeed despite injected release-hint failure", err)
 	}

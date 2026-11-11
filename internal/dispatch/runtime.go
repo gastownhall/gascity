@@ -2213,7 +2213,7 @@ func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string) error {
 // remains the authoritative check before any worktree is reclaimed — so a
 // write failure here is traced and swallowed rather than propagated; it must
 // never abort finalize.
-func stampWorkDirReleasedAt(store beads.Store, rootID string, root beads.Bead, opts ProcessOptions) {
+func stampWorkDirReleasedAt(store beads.GraphStore, rootID string, root beads.Bead, opts ProcessOptions) {
 	if strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) == "" {
 		return
 	}
