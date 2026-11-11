@@ -744,14 +744,6 @@ func (c *fakeProbeConnector) knownTables() []string {
 	return tables
 }
 
-// namedArg renders the nth bound argument, or "" when it is absent.
-func namedArg(args []driver.NamedValue, n int) string {
-	if n >= len(args) {
-		return ""
-	}
-	return fmt.Sprint(args[n].Value)
-}
-
 // showColumnsTarget parses "SHOW COLUMNS FROM <table> LIKE '<column>'".
 func showColumnsTarget(query string) (table, column string) {
 	rest := strings.TrimSpace(query[len("SHOW COLUMNS FROM "):])
