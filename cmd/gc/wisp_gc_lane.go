@@ -115,8 +115,8 @@ func (cr *CityRuntime) startWispGCLane(ctx context.Context) (stop func()) {
 	}
 }
 
-// runWispGCLanePass is one lane pass: purge if a tick's wake asked for it and
-// the tracker is due. It sets
+// runWispGCLanePass is one lane pass: purge if a tick's wake asked for it, the
+// tracker is due, the city is not quiescent and it has a graph store. It sets
 // *ran just before the purge starts, so a purge that panics still counts
 // toward the lane's pacing.
 func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bool) {
@@ -128,6 +128,11 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 	defer lane.passMu.Unlock()
 	wg := lane.active
 	if !wake || wg == nil || !wg.shouldRun(time.Now()) {
+		return
+	}
+	if cr.beadsQuiescent.Load() {
+		// The city is suspended with nothing running: its stores are not
+		// touched until it resumes.
 		return
 	}
 	graphStore := cr.graphBeadStore()
