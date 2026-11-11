@@ -687,15 +687,18 @@ func blockersSatisfied(store activeStepReader, deps []beads.Dep, satisfied map[s
 	return true
 }
 
-// downEdges reads the DOWN edges of every id: in one round trip when there is
-// more than one and the reader reads them in a batch (a store does; the live
-// handle the controller passes does not), one DepList per id otherwise. An id
-// the batch answer leaves out is read on its own, because an absent anchor is
-// not proof of no edges: some stores omit an edge-free anchor, and bd answers a
-// batch it refuses with an empty map (sourceDepReader.prefetch).
+// downEdges reads the DOWN edges of every id. It reads them in one batch
+// whenever the reader supports it, even for a single id: BdStore.DepList on one
+// id prints the depended-on beads' rows, a join that drops edges to dangling or
+// cross-store targets, while DepListBatch returns the raw edge records. An id
+// the batch answer leaves out is re-read on its own, because an absent anchor
+// is not proof of no edges: some stores omit an edge-free anchor, and bd
+// answers a batch it refuses with an empty map (sourceDepReader.prefetch). The
+// controller's live reader has no batch method yet and still takes the per-id
+// path (follow-up).
 func downEdges(store activeStepReader, ids []string) (map[string][]beads.Dep, error) {
 	edges := make(map[string][]beads.Dep, len(ids))
-	if batch, ok := store.(beads.DependencyBatchLister); ok && len(ids) > 1 {
+	if batch, ok := store.(beads.DependencyBatchLister); ok && len(ids) > 0 {
 		got, err := batch.DepListBatch(ids)
 		if err != nil && !errors.Is(err, beads.ErrDepListBatchUnsupported) {
 			return nil, err

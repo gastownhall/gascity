@@ -612,3 +612,65 @@ func TestStepReminderNamesNoStepWhenTheBridgeCannotListClaimedWork(t *testing.T)
 		t.Errorf("the reminder names %s, want %s", describeStep(got), noReminder)
 	}
 }
+
+// joinDropDepListStore answers a single-id DepList the way bd's dep list does:
+// it prints the depended-on beads' rows, so an edge whose target has no row in
+// the store disappears. Its DepListBatch returns the raw edge records.
+type joinDropDepListStore struct{ beads.Store }
+
+func (s *joinDropDepListStore) DepList(id, direction string) ([]beads.Dep, error) {
+	deps, err := s.Store.DepList(id, direction)
+	if err != nil {
+		return nil, err
+	}
+	kept := deps[:0:0]
+	for _, dep := range deps {
+		if _, err := s.Get(dep.DependsOnID); err != nil {
+			continue
+		}
+		kept = append(kept, dep)
+	}
+	return kept, nil
+}
+
+func (s *joinDropDepListStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	out := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		deps, err := s.Store.DepList(id, "down")
+		if err != nil {
+			return nil, err
+		}
+		out[id] = deps
+	}
+	return out, nil
+}
+
+// A lone candidate's edges are read through the batch, which keeps the raw
+// edge to a blocker with no row. Read through bd's single-id join, that edge
+// would vanish and the candidate would look startable.
+func TestStepReminderSingleCandidateUsesRawEdges(t *testing.T) {
+	const ghost = "mc-ghost"
+	cases := []struct {
+		name   string
+		adjust func(t *testing.T, p *planBreakdown)
+	}{
+		{name: "routed", adjust: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+			p.workDeps = append(p.workDeps, beads.Dep{IssueID: planContent, DependsOnID: ghost, Type: "blocks"})
+		}},
+		{name: "single open step", adjust: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planRoot)
+			for _, id := range []string{planImport, planClarify, planDecompose} {
+				p.row(t, id).Status = "closed"
+			}
+			p.graphDeps = append(p.graphDeps, beads.Dep{IssueID: planIntake, DependsOnID: ghost, Type: "blocks"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanBreakdown()
+			tc.adjust(t, p)
+			assertStepReminderOver(t, p, func(s beads.Store) beads.Store { return &joinDropDepListStore{Store: s} }, noReminder)
+		})
+	}
+}
