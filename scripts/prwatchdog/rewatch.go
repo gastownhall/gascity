@@ -99,7 +99,12 @@ type RewatchResult struct {
 }
 
 // benignRerunRefusals are the only re-run refusals that end as a no-op. A
-// refusal matches when its status is equal and its body contains Body.
+// refusal matches when its status is equal and its body contains Body. Both
+// pins are quoted from public reports, not captured live: actions/runner#3872
+// ("This workflow is already running") and cli/cli#9989 ("Unable to retry
+// this workflow run because it was created over a month ago"). Every other
+// refusal, the one for the 50-run limit included, is deliberately unpinned: no
+// public source quotes it, so it ends as an error the step summary shows.
 var benignRerunRefusals = []struct {
 	Name   string
 	Status int
@@ -107,7 +112,6 @@ var benignRerunRefusals = []struct {
 }{
 	{"workflow already running", http.StatusForbidden, "This workflow is already running"},
 	{"run past the 30-day re-run limit", http.StatusForbidden, "created over a month ago"},
-	{"run past the 50-attempt re-run limit", http.StatusForbidden, "50 times"},
 }
 
 // benignRefusal names the benign refusal err is, or returns "".
