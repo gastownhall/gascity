@@ -217,6 +217,93 @@ func TestSyncDryRunExitCodeMatchesRealRunForDiverged(t *testing.T) {
 	}
 }
 
+// TestSyncDryRunExitCodeMatchesRealRunForUpToDate mirrors the diverged
+// regression test above for the up-to-date sub-case: run.sh's dry-run skip
+// branch (`return "$ff_rc"`) is shared by every classification outcome, so
+// an up-to-date DB (ff_rc=0) must show the same real-vs-dry-run exit code
+// parity, not just the diverged (ff_rc=1) case.
+func TestSyncDryRunExitCodeMatchesRealRunForUpToDate(t *testing.T) {
+	realBinDir := t.TempDir()
+	writeSyncFakeDoltClassify(t, realBinDir, 0, 0)
+	realOut, realExit := runFFSyncWithExit(t, realBinDir, "--db", "app")
+	if realExit != 0 {
+		t.Fatalf("precondition failed: real (non-dry-run) up-to-date sync should exit 0.\nout:\n%s", realOut)
+	}
+
+	dryBinDir := t.TempDir()
+	dryLogPath := writeSyncFakeDoltClassify(t, dryBinDir, 0, 0)
+	dryOut, dryExit := runFFSyncWithExit(t, dryBinDir, "--db", "app", "--dry-run")
+	if pushed(readLog(t, dryLogPath)) {
+		t.Fatalf("--dry-run must NEVER push.\nout:\n%s", dryOut)
+	}
+	if dryExit != realExit {
+		t.Fatalf("--dry-run exit code (%d) must match the real run's exit code (%d) for an up-to-date DB.\ndry out:\n%s\nreal out:\n%s",
+			dryExit, realExit, dryOut, realOut)
+	}
+}
+
+// TestSyncDryRunExitCodeMatchesRealRunForBehind is the behind-sub-case twin:
+// behind alone is a benign "pull needed" state (ff_rc=0), distinct from
+// diverged, and must show the same real-vs-dry-run parity.
+func TestSyncDryRunExitCodeMatchesRealRunForBehind(t *testing.T) {
+	realBinDir := t.TempDir()
+	writeSyncFakeDoltClassify(t, realBinDir, 0, 3)
+	realOut, realExit := runFFSyncWithExit(t, realBinDir, "--db", "app")
+	if realExit != 0 {
+		t.Fatalf("precondition failed: real (non-dry-run) behind sync should exit 0.\nout:\n%s", realOut)
+	}
+
+	dryBinDir := t.TempDir()
+	dryLogPath := writeSyncFakeDoltClassify(t, dryBinDir, 0, 3)
+	dryOut, dryExit := runFFSyncWithExit(t, dryBinDir, "--db", "app", "--dry-run")
+	if pushed(readLog(t, dryLogPath)) {
+		t.Fatalf("--dry-run must NEVER push.\nout:\n%s", dryOut)
+	}
+	if dryExit != realExit {
+		t.Fatalf("--dry-run exit code (%d) must match the real run's exit code (%d) for a behind DB.\ndry out:\n%s\nreal out:\n%s",
+			dryExit, realExit, dryOut, realOut)
+	}
+}
+
+// writeSyncFakeDoltClassifyFailed models classify_count's own fail-closed
+// path (run.sh: "BOTH range queries must succeed; if either fails, fail
+// closed"): fetch succeeds, but the ahead dolt_log range query itself errors,
+// distinct from a fetch timeout/error or a first-push signal.
+func writeSyncFakeDoltClassifyFailed(t *testing.T, dir string) string {
+	t.Helper()
+	branch := "main"
+	logPath := filepath.Join(dir, "dolt.log")
+	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*) exit 0 ;;\n" +
+		"  *\"" + aheadPat + "\"*) printf 'classify error\\n' >&2 ; exit 1 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// TestSyncDryRunExitCodeMatchesRealRunForClassifyFailed is the classify-failed
+// sub-case twin: an unresolvable range query fails closed (ff_rc=1, same as
+// diverged) and must show the same real-vs-dry-run parity.
+func TestSyncDryRunExitCodeMatchesRealRunForClassifyFailed(t *testing.T) {
+	realBinDir := t.TempDir()
+	writeSyncFakeDoltClassifyFailed(t, realBinDir)
+	realOut, realExit := runFFSyncWithExit(t, realBinDir, "--db", "app")
+	if realExit == 0 {
+		t.Fatalf("precondition failed: real (non-dry-run) classify-failed sync should exit non-zero.\nout:\n%s", realOut)
+	}
+
+	dryBinDir := t.TempDir()
+	dryLogPath := writeSyncFakeDoltClassifyFailed(t, dryBinDir)
+	dryOut, dryExit := runFFSyncWithExit(t, dryBinDir, "--db", "app", "--dry-run")
+	if pushed(readLog(t, dryLogPath)) {
+		t.Fatalf("--dry-run must NEVER push.\nout:\n%s", dryOut)
+	}
+	if dryExit != realExit {
+		t.Fatalf("--dry-run exit code (%d) must match the real run's exit code (%d) for a classify-failed DB.\ndry out:\n%s\nreal out:\n%s",
+			dryExit, realExit, dryOut, realOut)
+	}
+}
+
 func TestSyncUpToDateSkipsPush(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := writeSyncFakeDoltClassify(t, binDir, 0, 0)
