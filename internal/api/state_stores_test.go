@@ -148,13 +148,7 @@ var reviewedResidueCallers = map[string]int{
 	// Not the accessor: SeededCityDeps' field of the same name, read by the
 	// integration-tag dashport seam (OD-6). The guard matches by name.
 	"dashport_support.go newSeededState CityBeadStore":                    1,
-	"handler_convoy_dispatch.go workflowStoreByRef BeadStore":             1,
-	"handler_convoy_dispatch.go workflowStoreByRef CityBeadStore":         3,
-	"handler_convoy_dispatch.go workflowStoresWith BeadStore":             1,
-	"handler_convoy_dispatch.go workflowStoresWith BeadStores":            1,
-	"handler_convoy_dispatch.go workflowStoresWith CityBeadStore":         1,
-	"handler_convoys.go isGraphConvoyID BeadStores":                       1,
-	"handler_convoys.go isGraphConvoyID CityBeadStore":                    1,
+	"handler_convoy_dispatch.go workflowStoreByRef CityBeadStore":         1,
 	"handler_sling.go Server.sourceWorkflowStores BeadStores":             2,
 	"handler_sling.go Server.sourceWorkflowStores CityBeadStore":          1,
 	"handler_status.go Server.statusSessionSnapshot CityBeadStore":        1,
@@ -168,7 +162,6 @@ var reviewedResidueCallers = map[string]int{
 	"huma_handlers_beads.go Server.humaHandleBeadReady CityBeadStore":     1,
 	"huma_handlers_orders.go orderStoreInfosForState BeadStore":           1,
 	"huma_handlers_orders.go orderStoreInfosForState CityBeadStore":       1,
-	"rig_graph_legs.go workflowGraphStoreInfo CityBeadStore":              1,
 	"session_resolution.go Server.retiredSessionWorkStores BeadStores":    1,
 	"session_resolution.go Server.retiredSessionWorkStores CityBeadStore": 1,
 	"store_health.go Server.computeStoreHealth CityBeadStore":             1,

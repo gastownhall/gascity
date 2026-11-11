@@ -583,6 +583,9 @@ go_test(
         "worker_boundary_test.go",
         "worker_capability_guardrail_test.go",
         "worker_factory_test.go",
+        "workflow_legs_equivalence_test.go",
+        "workflow_legs_reference_test.go",
+        "workflow_legs_test.go",
         "writeauth_test.go",
     ],
     data = glob(
