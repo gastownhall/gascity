@@ -115,7 +115,7 @@ func checkBundle(makefile, record, nogoMod, moduleBazel string) []string {
 	rec, recProblems := parseBundleRecord(record)
 	problems = append(problems, recProblems...)
 	if rec.version != "" && rec.version != want {
-		problems = append(problems, fmt.Sprintf("%s is for golangci-lint %s but the Makefile pins GOLANGCI_LINT_VERSION := %s: edit %s (%s), or revert the Makefile", bundleRecordPath, rec.version, want, bundleRecordPath, regen))
+		problems = append(problems, fmt.Sprintf("%s is for golangci-lint %s but the Makefile pins GOLANGCI_LINT_VERSION := %s: %s (rewrites %s), or revert the Makefile", bundleRecordPath, rec.version, want, regen, bundleRecordPath))
 	}
 
 	gomod, err := modfile.Parse("tools/nogo/go.mod", []byte(nogoMod), nil)
