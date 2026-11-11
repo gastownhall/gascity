@@ -147,6 +147,115 @@ come from pinned data deps, not the host: a go_test passes their
 `internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
 env var the test reads with `bazeltest.DataPath` instead of `go build`.
 
+### Darwin compile and lint check
+
+A Go file that build constraints keep out of a Linux build (`_darwin.go`,
+`//go:build !linux`) is neither compiled nor linted by the unit lane, so a
+change can be green there and break the macOS tier. One test target closes
+that gap on Linux:
+
+```bash
+bazel test --config=ci //tools/darwincheck:darwin_check_test
+```
+
+It runs in the unit lane with the rest of `bazel test //...`. The test body is
+`exit 0`; the check happens while Bazel builds its inputs. Every first-party
+`go_library`, `go_binary` and `go_test` is built for `darwin_arm64` in rules_go's
+pure mode (no cgo, as the release build) and never linked, and the nogo
+validation of each compile (the type check plus every analyzer `tools/nogo`
+bundles) runs on the darwin file set. `go_darwin_check_test`
+(`tools/bazel/rules/go_darwin_check.bzl`) applies that configuration to its
+deps only, so the Linux build of the same targets is untouched and shares its
+cache with everything else.
+
+**Reading a red result.** A failure shows up as
+`//tools/darwincheck:darwin_check_test FAILED TO BUILD`, never as a test
+failure, and the build log above it names the file and line, for example
+`internal/hostboot/hostboot_darwin.go:21:24: unnecessary conversion (unconvert)`
+(an analyzer finding, from a `Validating nogo output for //pkg:pkg` error) or
+`internal/runtime/acp/proctable.go:117:58: not enough arguments in call to
+proctable.ProcessEnvValue` (a type error in a darwin-only file's caller). Fix
+the file, or its caller, as for any Linux nogo finding; `//nolint:<linter>`
+works the same way. To rebuild only the failing package for darwin:
+`bazel build --platforms=@rules_go//go/toolchain:darwin_arm64
+--@rules_go//go/config:pure //internal/hostboot:hostboot` (no `--config=ci`:
+that config is defined for `test` only; the build still prints the nogo finding).
+
+**The target list is generated.** `tools/darwincheck/BUILD.bazel` is written by
+`tools/bazel/darwin_check.py` (run by `make bazel-sync`, which the "BUILD files
+in sync" CI job checks, so a new Go package joins the check without a hand
+edit; `python3 tools/bazel/darwin_check.py --check` reports drift without
+writing). Its deps are every `go_library`, `go_binary` and `go_test` that is
+visible to `//tools/darwincheck`; `REPO.bazel` makes every target without
+explicit visibility visible to that package. A target that sets its own
+restricted visibility is left out, and the generated file lists it in a
+comment, only when something listed already builds it (a binary's `*_lib`
+library, a nogo analyzer's test-only internals) or it is one of the
+`//cmd/gc` test variants `//cmd/gc:gc` covers. Any other restricted target
+makes the generator exit 1 naming it: add `//tools/darwincheck:__pkg__` to its
+visibility. Never list a `go_test_run`, `go_variant_test` or a sim-corpus
+target by hand; the rule fails at analysis when a dep contributes no nogo
+validation, so a target of another kind cannot sit in the list unchecked.
+
+**What it covers, and what it does not.** It catches compile errors (types,
+undefined names, wrong arity) and every nogo finding in the darwin file set of
+a package: the class of failure behind ga-47doqg. It does not run anything
+darwin, so runtime behavior stays with the Mac tier (`mac-regression.yml`,
+`mac-quality`, on `needs-mac` PRs). It does not cover code behind cgo on darwin
+(pure mode compiles the no-cgo variant), a failure that only appears when
+linking, or `darwin_amd64`: a file named `*_darwin_amd64.go` or behind a
+`//go:build` pairing darwin with `amd64` is never compiled by it. The
+`dashboardspa` package embeds its committed `dist/` copy on darwin
+(`dist_in_sync_test` keeps it identical to the Bazel-built bundle) because the
+Vite build does not run under a darwin target platform.
+
+**Not in `make lint`.** `make lint` and `make lint-changed` build the
+`nogo_fix` output group, which `go_darwin_check_test` does not forward: an
+`aquery` of that group over `//tools/darwincheck:darwin_check_test` returns 6
+actions, none of them in a darwin configuration. The darwin check runs only
+through `bazel test` (the unit lane, `make test`, the pre-push hook). It is
+the Linux-hosted substitute for the macOS job's golangci-lint and `go vet`, not
+a replacement for them, so `.golangci.yml` and `tools/nogo/config.json` still
+have to be kept in step with each other as before. When you reproduce a
+golangci-lint result for a darwin file by hand
+(`GOOS=darwin GOARCH=arm64 golangci-lint run ./...`), give it a fresh cache,
+`GOLANGCI_LINT_CACHE=$(mktemp -d)`: it replays stale cached results and a
+cold run over the whole tree takes tens of minutes, which is why this check
+runs nogo in Bazel instead.
+
+**Beads and cgo.** `github.com/steveyegge/beads`' root library depends on its
+`embeddeddolt` package, whose cgo dependencies cannot cross-compile without a
+darwin C toolchain. `third_party/patches/beads_pure.patch` (listed in
+`MODULE.bazel`'s beads `go_deps.module_override`) makes that one dep a `select`
+on rules_go's `pure` flag, dropped in pure mode and kept everywhere else, so
+Linux builds are unchanged. A beads bump that moves the patched lines makes the
+patch fail to apply, which fails the whole Bazel build of the bump PR at
+repository fetch; that is intended (Bazel tolerates a moved hunk and a changed context line,
+but not a removed `-` line that no longer exists, which is what a bump that
+touches the `embeddeddolt` dep does), and the fix is to regenerate the patch:
+
+```bash
+# 1. Find the unpatched root BUILD.bazel gazelle generates for the new beads
+#    (it is under the repository's external directory after a fetch):
+d=$(bazel info output_base)/external/gazelle++go_deps+com_github_steveyegge_beads
+mkdir -p /tmp/beads-pure/a /tmp/beads-pure/b
+# 2. a/ is that file with the beads_pure.patch hunks reverted (or the file as
+#    fetched when the patch fails to apply), b/ the same file with:
+#    - a `config_setting(name = "pure_go", flag_values =
+#      {"@io_bazel_rules_go//go/config:pure": "true"})` above `go_library(name = "beads")`;
+#    - "//internal/storage/embeddeddolt" removed from that library's deps and
+#      added back as `+ select({":pure_go": [], "//conditions:default":
+#      ["//internal/storage/embeddeddolt"]})`.
+cp "$d/BUILD.bazel" /tmp/beads-pure/a/BUILD.bazel   # then edit b/BUILD.bazel
+(cd /tmp/beads-pure && diff -u a/BUILD.bazel b/BUILD.bazel) \
+  | sed -e '1s/\t.*//' -e '2s/\t.*//' > third_party/patches/beads_pure.patch
+```
+
+Inside beads' own repository the flag is `@io_bazel_rules_go//go/config:pure`;
+from this module it is `@rules_go//go/config:pure`. A `config_setting` on a
+flag needs `flag_values`, and `REPO.bazel`'s `default_visibility` reaches only
+targets that set no `visibility` of their own.
+
 ### Nightly fresh test run
 
 `bazel-nightly.yml` passes `fresh-test-results: true` to every `bazel.yml`
@@ -1997,7 +2106,7 @@ golangci-lint; staticcheck findings are suppressed by check name
 | --- | --- |
 | `make lint` (= `make vet`) | `bazel build --keep_going --output_groups=nogo_fix //...`: every package's nogo analysis, no linking. |
 | `make lint-changed` | The same for the Bazel packages of changed Go files (`LINT_CHANGED_SCOPE=staged\|tracked\|worktree`); pre-commit uses `staged`. |
-| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). |
+| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job. The Linux nogo build does not compile darwin-only files; `//tools/darwincheck:darwin_check_test` ("Darwin compile and lint check" above) does, in the unit lane, so these two are the macOS job's own whole-tree pass. |
 
 `tools/nogo/config.json` scopes the analyzers the way golangci-lint saw the
 tree (no external repos, generated `_gen.go` files, testdata) and carries the
