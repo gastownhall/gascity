@@ -87,7 +87,7 @@ func Order(store beads.Store, ids []string) ([]string, error) {
 // closeDependencies reads the DOWN edges of every id: in one round trip when
 // the store has a batched dep read, one DepList per id otherwise.
 func closeDependencies(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
-	if batch, ok := beads.DepListBatchFor(store); ok {
+	if batch, ok := beads.As[beads.DependencyBatchLister](store); ok {
 		deps, err := batch.DepListBatch(ids)
 		if err == nil {
 			return deps, nil

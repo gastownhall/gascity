@@ -53,7 +53,7 @@ func slingHandoffCase(t *testing.T, beadID, moleculeID, assignee string, agentMu
 	q.childrenOf[beadID] = []beads.Bead{mol}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{parent, mol}, nil)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(0, []beads.Bead{parent, mol}, nil))
 
 	return testOpts(a, beadID), deps, q, stdout, stderr
 }

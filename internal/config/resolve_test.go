@@ -2421,6 +2421,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
 		UpstreamEnv:            UpstreamEnvBinding{BaseURL: "X_BASE_URL", APIKey: "X_API_KEY", AuthToken: "X_AUTH_TOKEN"},
+		ProgramStatus:          ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, App: "custom", Relay: boolPtr(true), Env: map[string]string{"P": "1"}},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",

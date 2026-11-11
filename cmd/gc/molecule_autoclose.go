@@ -185,14 +185,16 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 // answer (a store that failed to answer is not proof the bead is elsewhere).
 // When first and second are the same store it is read once.
 func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
-	b, err := first.Get(id)
+	// A two-store residence probe: a miss on the first store is covered by
+	// the second.
+	b, err := beads.FederatedGet(first, id)
 	if err == nil {
 		return b, first, nil
 	}
 	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
 		return beads.Bead{}, first, err
 	}
-	b, err = second.Get(id)
+	b, err = beads.FederatedGet(second, id)
 	if err != nil {
 		return beads.Bead{}, second, err
 	}
@@ -239,7 +241,9 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 // bead elsewhere (a different gc.source_store_ref) must not be closed here. An
 // empty storeRef falls back to matching on bead ID alone (single-store path).
 func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer, run *autocloseRun) {
-	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, storeRef, storeRef)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
+	roots, err := sourceworkflow.ListLiveRoots(storeMolecule, sourceBeadID, storeRef, storeRef)
 	if err != nil {
 		run.note(err)
 		return
@@ -249,7 +253,7 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 		run.note(err)
 		if terminal {
 			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout, run) {
-				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
+				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
 			}
 		}
 	}
@@ -270,7 +274,8 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // subtreeTerminalOrErr is subtreeTerminalExcludingRoot that also returns the
 // walk error, for an autoclose run that reports what it could not read.
 func subtreeTerminalOrErr(store beads.Store, rootID string) (terminal bool, descendants int, err error) {
-	subtree, err := molecule.ListSubtree(store, rootID)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	subtree, err := molecule.ListSubtree(beads.GraphMolecule(beads.GraphStore{Store: store}), rootID)
 	if err != nil {
 		return false, 0, err
 	}

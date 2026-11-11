@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -168,22 +169,52 @@ func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) er
 	panic("metadata batch panic")
 }
 
-func TestSessionTriggerBeadEnv(t *testing.T) {
-	env := sessionTriggerBeadEnv(sessionpkg.Info{
+func TestSessionDemandSpawnEnv(t *testing.T) {
+	env := sessionDemandSpawnEnv(sessionpkg.Info{
 		TriggerBeadID:       "gp-59q",
 		TriggerBeadStoreRef: "rig:gascity-packs",
 	})
-	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+	if want := map[string]string{"GC_SPAWN_ORIGIN": "demand"}; !maps.Equal(env, want) {
+		t.Fatalf("stamped env = %v, want only %v", env, want)
 	}
-	if got := env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
+	if env := sessionDemandSpawnEnv(sessionpkg.Info{TriggerBeadStoreRef: "rig:gascity-packs"}); env != nil {
+		t.Fatalf("unstamped env = %v, want nil", env)
 	}
-	if got := env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
+}
+
+// assertEnvWithholds fails unless env withholds each key: present and empty,
+// never absent. A session env is an overlay on the environment the session
+// already inherits, so an absent key lets the controller's own copy through.
+func assertEnvWithholds(t *testing.T, label string, env map[string]string, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		if value, ok := env[key]; !ok || value != "" {
+			t.Errorf("%s: %s = (%q, present=%v), want withheld (present and empty)", label, key, value, ok)
+		}
 	}
-	if got := env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+}
+
+// assertEnvWithholdsTriggerIDs fails unless env withholds every trigger id
+// key and gives no GC_TRIGGER_* key a value: a session shell never learns a
+// trigger id (gastownhall/gascity#5738).
+func assertEnvWithholdsTriggerIDs(t *testing.T, label string, env map[string]string) {
+	t.Helper()
+	assertEnvWithholds(t, label, env, "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF")
+	for key, value := range env {
+		if strings.HasPrefix(key, "GC_TRIGGER_") && value != "" {
+			t.Errorf("%s: %s = %q, want no GC_TRIGGER_* value", label, key, value)
+		}
+	}
+}
+
+// setControllerDemandSpawnEnv gives this process, the controller, the
+// demand-spawn keys of an agent pane it was started from, so a session env
+// that omits a key rather than withholding it inherits a foreign value.
+func setControllerDemandSpawnEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_SPAWN_ORIGIN", demandSpawnOriginValue)
+	for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+		t.Setenv(key, "ga-foreign")
 	}
 }
 
@@ -324,15 +355,58 @@ func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 	return p.Fake.ListRunning(prefix)
 }
 
+// lateAsyncStartListProvider holds an async start open across the shutdown's
+// first stop snapshot: its first ListRunning releases the gated start and waits
+// for the runtime to come up, then returns the pre-start snapshot, so only a
+// forced shutdown's SECOND ListRunning (the late relist) sees the runtime.
+//
+// With a readRow, its Start runs to its end through a canceled context, as a
+// provider's Start that is launching the runtime does, and rowAtStop reports
+// the row as the runtime's first stop found it.
 type lateAsyncStartListProvider struct {
 	*gatedStartProvider
 	listCalls int
+	readRow   func() map[string]string
+	stopSeen  bool
+	stopRow   map[string]string
 }
 
-func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
+func newLateAsyncStartListProvider(readRow func() map[string]string) *lateAsyncStartListProvider {
 	return &lateAsyncStartListProvider{
 		gatedStartProvider: newGatedStartProvider(),
+		readRow:            readRow,
 	}
+}
+
+func (p *lateAsyncStartListProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.readRow != nil {
+		ctx = context.WithoutCancel(ctx)
+	}
+	return p.gatedStartProvider.Start(ctx, name, cfg)
+}
+
+func (p *lateAsyncStartListProvider) Stop(name string) error {
+	if p.readRow != nil && name == "worker" {
+		p.mu.Lock()
+		first := !p.stopSeen
+		p.stopSeen = true
+		p.mu.Unlock()
+		if first {
+			row := p.readRow()
+			p.mu.Lock()
+			p.stopRow = row
+			p.mu.Unlock()
+		}
+	}
+	return p.gatedStartProvider.Stop(name)
+}
+
+// rowAtStop is the row as the runtime's first stop found it, and whether the
+// runtime was stopped at all.
+func (p *lateAsyncStartListProvider) rowAtStop() (map[string]string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopRow, p.stopSeen
 }
 
 func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
@@ -2894,34 +2968,61 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 }
 
-func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+// lateAsyncStartShutdown is what forceShutdownLateAsyncStart leaves for its
+// test to read.
+type lateAsyncStartShutdown struct {
+	sp     *lateAsyncStartListProvider
+	cr     *CityRuntime
+	cfg    *config.City
+	store  beads.Store
+	rowID  string
+	city   string
+	stderr *syncBuffer
+}
+
+// forceShutdownLateAsyncStart runs a forced controller shutdown over an async
+// start of a row seeded with meta, whose runtime comes up after the first stop
+// snapshot (a forced shutdown abandons its async-start wait and re-lists), and
+// returns what it left, the shutdown's captured stderr with it, so a failure
+// can print what the stop actually said.
+//
+// With cancelFirst, the start's context is canceled before the shutdown runs,
+// as the supervisor cancels a city's context before its shutdown
+// (stopManagedCity), and the provider records the row its stop finds
+// (lateAsyncStartListProvider's readRow).
+func forceShutdownLateAsyncStart(t *testing.T, meta map[string]string, cancelFirst bool) lateAsyncStartShutdown {
+	t.Helper()
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
-		ID:     "gc-worker",
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: creatingMeta(map[string]string{
-			"session_name":         "worker",
-			"template":             "worker",
-			"generation":           "1",
-			"continuation_epoch":   "1",
-			"instance_token":       "tok-worker",
-			"pending_create_claim": "true",
-		}),
+		ID:       "gc-worker",
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp := newLateAsyncStartListProvider()
+	var readRow func() map[string]string
+	if cancelFirst {
+		readRow = func() map[string]string {
+			b, err := store.Get(session.ID)
+			if err != nil {
+				return map[string]string{"read_error": err.Error()}
+			}
+			return maps.Clone(b.Metadata)
+		}
+	}
+	sp := newLateAsyncStartListProvider(readRow)
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 	forceStop := &atomic.Bool{}
 	forceStop.Store(true)
+	stderr := newSyncBuffer()
 	cr := &CityRuntime{
 		cfg:                 cfg,
 		sp:                  sp,
@@ -2931,11 +3032,13 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		forceStopShutdown:   forceStop,
 		logPrefix:           "gc test",
 		stdout:              ioDiscard{},
-		stderr:              ioDiscard{},
+		stderr:              stderr,
 	}
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	t.Cleanup(cancelStart)
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
-		context.Background(),
+		startCtx,
 		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
@@ -2957,13 +3060,70 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 	}
 	sp.waitForStarts(t, 1)
 
-	cr.shutdown()
-
-	if sp.IsRunning("worker") {
-		t.Fatal("force shutdown missed late async-started runtime")
+	if cancelFirst {
+		cancelStart()
 	}
-	if sp.listCalls < 2 {
-		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+	cr.shutdown()
+	return lateAsyncStartShutdown{sp: sp, cr: cr, cfg: cfg, store: store, rowID: session.ID, city: testCity, stderr: stderr}
+}
+
+func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	run := forceShutdownLateAsyncStart(t, creatingMeta(map[string]string{
+		"session_name":         "worker",
+		"template":             "worker",
+		"generation":           "1",
+		"continuation_epoch":   "1",
+		"instance_token":       "tok-worker",
+		"pending_create_claim": "true",
+	}), false)
+
+	if run.sp.IsRunning("worker") {
+		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", run.stderr)
+	}
+	if run.sp.listCalls < 2 {
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", run.sp.listCalls)
+	}
+}
+
+// ga-fqdzdy in the stop's own order: the supervisor cancels the city's context
+// before its shutdown runs, so a start whose provider Start launched the
+// runtime never commits, and the forced shutdown's late relist reaches that
+// runtime while its row still reads creating. Suspend refused that row before
+// any teardown, so the stop errored and the live runtime survived it. The stop
+// writes nothing to the row: the start leaves it creating with its in-flight
+// marker, which the next start's stuck-creating reap keeps for the reconciler
+// to relaunch (TestSweepStopOfAnAbandonedStartKeepsItForTheNextStart).
+func TestCityRuntimeForceShutdownStopsALateStartItCanceled(t *testing.T) {
+	run := forceShutdownLateAsyncStart(t, map[string]string{
+		"session_name":       "worker",
+		"template":           "worker",
+		"session_origin":     "manual",
+		"state":              "asleep",
+		"generation":         "1",
+		"continuation_epoch": "1",
+		"instance_token":     "tok-worker",
+	}, true)
+
+	if run.sp.IsRunning("worker") {
+		t.Fatalf("force shutdown missed the late started runtime; stderr:\n%s", run.stderr)
+	}
+	if msg := run.stderr.String(); strings.Contains(msg, "illegal transition") {
+		t.Fatalf("force shutdown hit an illegal transition stopping a still-creating row; stderr:\n%s", msg)
+	}
+	row, stopped := run.sp.rowAtStop()
+	if !stopped || row["state"] != "creating" || row["last_woke_at"] == "" {
+		t.Fatalf("row as the late relist's stop found it = %v (stopped %v), want creating with its start's last_woke_at; stderr:\n%s", row, stopped, run.stderr)
+	}
+	if !run.cr.asyncStarts.wait(hangBudget) {
+		t.Fatal("the canceled start did not settle")
+	}
+	if settled := mustGetBead(t, run.store, run.rowID).Metadata; !maps.Equal(settled, row) {
+		t.Fatalf("row after the canceled start settled = %v, want it as the stop found it %v", settled, row)
+	}
+	reapClk := &clock.Fake{Time: time.Now().UTC().Add(2 * time.Minute)}
+	var log bytes.Buffer
+	if n := reapStaleSessionBeads(run.city, run.store, testSeatWork(run.city, run.cfg, run.store, nil), run.sp, newDrainTracker(), nil, reapClk, &log); n != 0 {
+		t.Fatalf("the next start's reap closed %d row(s) the stop left creating: %s", n, log.String())
 	}
 }
 
@@ -7073,7 +7233,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
 		Template: "worker",
@@ -9332,12 +9492,15 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
-// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// re-derives the demand marker from candidate.info via sessionDemandSpawnEnv,
 // so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
 // onto the candidate, the seat starting on the clearing tick still launches
-// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
-// catch that; only prepared.cfg.Env can.
+// marked demand-spawned for the parked bead. Asserting on the resolved
+// TemplateParams cannot catch that; only prepared.cfg.Env can.
 func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
+	// The controller carries a launching pane's demand-spawn keys too: the
+	// seat withholds them rather than inheriting that pane's marker.
+	setControllerDemandSpawnEnv(t)
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -9378,17 +9541,70 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
-	if got := prepared.cfg.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_BEAD_ID = %q, want cleared for a parked target", got)
-	}
-	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
-	}
+	assertEnvWithholdsTriggerIDs(t, "launch env for a parked target", prepared.cfg.Env)
+	assertEnvWithholds(t, "launch env once the stamp is cleared", prepared.cfg.Env, "GC_SPAWN_ORIGIN")
 	after, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("Get session bead after prepare: %v", err)
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// Kills a legacy named-session start that hands the shell the trigger id a
+// surviving stamp names, or the controller's own copy of one: the launch env
+// carries only the demand marker, and the durable stamp stays
+// (gastownhall/gascity#5738).
+func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDemandMarker(t *testing.T) {
+	setControllerDemandSpawnEnv(t)
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	blocked := false
+	work, err := store.Create(beads.Bead{Title: "workable work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    sessionName,
+			namedSessionMetadataKey:           "true",
+			namedSessionIdentityMetadata:      "worker",
+			namedSessionModeMetadata:          "on_demand",
+			beadmeta.TriggerBeadIDMetadataKey: work.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
+		order: 0,
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	assertEnvWithholdsTriggerIDs(t, "launch env for a workable target", prepared.cfg.Env)
+	if got := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want %q while the stamp survives", got, demandSpawnOriginValue)
+	}
+	after, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after prepare: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != work.ID {
+		t.Errorf("durable trigger stamp = %q, want kept as %q", v, work.ID)
 	}
 }

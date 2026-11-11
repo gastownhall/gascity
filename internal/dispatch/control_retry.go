@@ -59,7 +59,7 @@ type SemanticRetryState struct {
 //
 // A negative budget disables the bound (unbounded retry, pre-tier behavior); a
 // zero budget escalates on the first refusal.
-func RecordSemanticControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
+func RecordSemanticControlRetry(store beads.GraphStore, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
 	return recordControlRetry(store, beadID, cause, now, budget, semanticRetryKeys, "semantic retry")
 }
 
@@ -78,7 +78,7 @@ func RecordSemanticControlRetry(store beads.Store, beadID string, cause error, n
 // the anchor would let a long pending wait hand a later Tier-B refusal an
 // already-expired deadline, quarantining on its first refusal the bead that
 // pending kept open.
-func RecordPendingControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
+func RecordPendingControlRetry(store beads.GraphStore, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
 	return recordControlRetry(store, beadID, cause, now, budget, pendingRetryKeys, "pending retry")
 }
 
@@ -125,7 +125,7 @@ var pendingRetryKeys = controlRetryKeys{
 	firstSeen: beadmeta.ControlPendingFirstSeenMetadataKey,
 }
 
-func recordControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration, keys controlRetryKeys, label string) (SemanticRetryState, error) {
+func recordControlRetry(store beads.GraphStore, beadID string, cause error, now time.Time, budget time.Duration, keys controlRetryKeys, label string) (SemanticRetryState, error) {
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return SemanticRetryState{}, fmt.Errorf("reading control bead %s for its retry budget: %w", beadID, err)

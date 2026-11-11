@@ -115,6 +115,16 @@ build:fork-cache --nobuild_event_binary_file_path_conversion
 # The farm admits 16 connections per source IP, and Blacksmith runners share
 # egress IPs, so several concurrent fork jobs split that budget.
 build:fork-cache --remote_max_connections=4
+# zstd transfers (REAPI compressed-blobs) with rbe-cache, which advertises
+# zstd (infra anon.json: capabilities remote_cache_compression). Without it
+# contributors read identity: on 2026-11-03 all contributors' reads were
+# identity, about 0.5 TB that day, mostly Go archives, which zstd-3 shrinks
+# to 0.16.
+# Transport only: action keys are unchanged (bazel_key_parity_test.go). If
+# rbe-cache stops advertising zstd, Bazel refuses the remote and the two
+# fallback flags above make the build local, as when the endpoint is closed
+# (tools/rbe/cache-zstd-probe.sh checks); revert this line then.
+build:fork-cache --remote_cache_compression
 
 # --config=ci: what bazel.yml's lanes pass. Like remote-exec and fork-cache
 # it may not change an action key (bazel_key_parity_test.go): the pinned test
@@ -143,12 +153,16 @@ test:ci --experimental_use_validation_aspect
 # neither the pin nor any action key, and Bazel's test cache would never re-run a test
 # whose inputs and key are unchanged -- hiding a regression that minor
 # upgrade introduced behind every PR's and push's cached pass. Nightly
-# re-executes everything once a day instead. Like remote-exec, fork-cache and
-# ci, --nocache_test_results is result policy only (bazel_key_parity_test.go
-# classifies it transport-only), so a fresh run still hashes actions like
-# every other phase and still writes the shared cache from the workers that
-# ran it (--noremote_upload_local_results, build:remote-exec above, is
-# unaffected: this flag only stops a read, never a write).
+# re-executes everything once a day instead. It does not hash like the other
+# phases: Bazel 9 marks a test spawn that must not reuse a cached result
+# no-cache (StandaloneTestStrategy), which sets Action.do_not_cache, so a
+# fresh TestRunner action (and GoTestRun, below) has its own REAPI digest.
+# The workers still record each pass, under that digest, which no other
+# phase reads: fresh re-samples tests, it does not refresh the cached passes
+# other phases use. Only --config=fresh sets it, and only the nightly run
+# and bazel.yml's fresh dispatch input pass that config (never a PR, merge
+# group or push lane, nor pre-push). bazel_key_parity_test.go's classifier
+# would admit it in any non-key config: keep it out of the others.
 test:fresh --nocache_test_results
 # The v2 simulator corpus ranges run as GoTestRun build actions
 # (tools/bazel/rules/go_test_run.bzl), which --nocache_test_results does not
@@ -199,7 +213,3 @@ test:integration-packages --config=integration
 # filter equal to.
 test:integration-review-formulas --config=integration
 test:integration-review-formulas --test_filter=^(TestAdoptPRFormulaCompileAndRun|TestPersonalWorkFormulaCompileAndRun|TestAdoptPRFormulaRetriesTransientReviewerStep|TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries|TestReviewLoopApprovesInIterationTwoWithBodyRetry|TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash)$
-
-# No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
-# while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the
-# server decides and rollback needs no change here.

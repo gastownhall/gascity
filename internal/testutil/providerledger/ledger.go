@@ -187,7 +187,7 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 21, 0, 0, 0, 0, time.UTC),
 				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
 					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
 					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+
@@ -197,7 +197,7 @@ func Catalog() []Entry {
 					"failing mac-quality and skipping every downstream job including the packages-core shard "+
 					"this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h "+
 					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded."+
-					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -213,23 +213,25 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
+				"the production T3 bridge composition has focused tests but no full shared runtime contract."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
-				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
+				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
+				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC),
 				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
@@ -237,15 +239,15 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract."+
-					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
+				repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"),
 				"internal/runtime/exec/exec_test.go",
 				"TestExecConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
@@ -254,8 +256,9 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(

@@ -181,7 +181,7 @@ type wispGC interface {
 	//
 	// sessionLedger is the sessions-class store ONLY when the city has relocated
 	// that class off its work store onto a SQLite infra ledger (see
-	// relocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
+	// isRelocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
 	// session purge arm does nothing. Sessions on a work store belong to the
 	// reaper order's step 6, with its own pattern, backup and anomaly guards.
 	//
@@ -261,6 +261,23 @@ func newWispGCForCity(cfg *config.City, cityName string) wispGC {
 	return wg
 }
 
+// carryWispGCState hands a tracker rebuilt by a config reload the progress of
+// the one it replaces: lastRun, so the cadence counts from the last real pass
+// under the new interval, and sessionPurgeCursor, so the closed-session sweep
+// resumes where it stopped. Config-derived fields (interval, TTLs, cityName)
+// and notes stay on next. A nil next (GC disabled) stays nil; a nil prev
+// (GC newly enabled) leaves next due on its first tick, as at process start.
+func carryWispGCState(prev, next wispGC) wispGC {
+	p, pok := prev.(*memoryWispGC)
+	n, nok := next.(*memoryWispGC)
+	if !pok || !nok || p == nil || n == nil {
+		return next
+	}
+	n.lastRun = p.lastRun
+	n.sessionPurgeCursor = p.sessionPurgeCursor
+	return next
+}
+
 func newWispGCForConfig(cfg *config.City) wispGC {
 	if cfg == nil {
 		return nil
@@ -289,7 +306,7 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 	purged := 0
 	var deleteErr error
 	if m.ttl > 0 {
-		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(store, sourceworkflow.WorkflowSpecSidecarClosedReason)
+		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(beads.GraphMolecule(graphStore), sourceworkflow.WorkflowSpecSidecarClosedReason)
 		if specErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated spec sidecars for closed workflow roots: %w", specErr))
 		} else if closedSpecs > 0 {
@@ -398,7 +415,13 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 func enumerateWorkClassMoleculeRoots(store beads.Store, statuses ...string) ([]beads.Bead, error) {
 	sel := wispGCMoleculeRootSelector()
 	sel.query.TierMode = beads.TierIssues
-	roots, err := enumerateWispGCRootsWith(store, []wispGCRootSelector{sel}, statuses...)
+	// The work leg of the wisp GC root union: graph molecule roots (wisps)
+	// live in the graph store (closedWispGCEntries, openWispGCRootCandidates).
+	var roots []beads.Bead
+	err := beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRootsWith(store, []wispGCRootSelector{sel}, statuses...)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +517,8 @@ func closeGeneratedMembersForClosedRoots(store beads.Store) (int, error) {
 		if coordclass.Classify(root) == coordclass.ClassWork {
 			continue
 		}
-		n, err := molecule.CloseSubtreeWithMetadata(store, root.ID, map[string]string{
+		// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		n, err := molecule.CloseSubtreeWithMetadata(beads.GraphMolecule(beads.GraphStore{Store: store}), root.ID, map[string]string{
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
@@ -582,8 +606,14 @@ func enumerateWispGCRootsWith(store beads.Store, selectors []wispGCRootSelector,
 // here — not just molecule/wisp — is what lets a graph workflow root the
 // abandoned-root sweep closes (type=task) actually be collected rather than
 // linger as permanent closed residue.
-func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
-	return enumerateWispGCRoots(store, "closed")
+func closedWispGCEntries(store beads.Store) (roots []beads.Bead, err error) {
+	// The graph leg of the wisp GC root union: a v1 poured molecule root
+	// (work class) lives on a work leg (enumerateWorkClassMoleculeRoots).
+	err = beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRoots(store, "closed")
+		return err
+	})
+	return roots, err
 }
 
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
@@ -793,35 +823,34 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	return reaped, errors.Join(collectErr, deleteErr)
 }
 
-// relocatedSQLiteSessionLedger returns sessionStore — the sessions-class store
-// as resolveSessionStore / sessionsBeadStore() resolved it — when, and only
-// when, the storage routes relocate the sessions class off the work store onto
-// a SQLite Beads ledger (the whole-split infra binding). Anything else — no
-// routes, sessions left on the work binding, a relocated binding served by
-// another engine (a Dolt workspace), or a refused binding — returns nil, which
-// is what keeps the closed session purge off every store the reaper order
-// already governs.
+// isRelocatedSQLiteSessionLedger reports whether sessionStore — the
+// sessions-class store as sessionsBeadStore() resolved it — is the SQLite Beads
+// ledger the storage routes relocated the sessions class onto, off the work
+// store (the whole-split infra binding). Anything else — no routes, sessions
+// left on the work binding, a relocated binding served by another engine (a
+// Dolt workspace), or a refused binding — answers false, which is what keeps
+// the closed session purge off every store the reaper order already governs.
 //
-// The engine is identified under the controller's cache (bindingEngine), and
-// the store handed back is sessionStore itself, so on the controller the purge
-// deletes through that cache: the cache drops the rows and the deletes emit
-// bead.deleted like every other controller write to the binding.
-func relocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) beads.Store {
+// The engine is identified under the controller's cache (bindingEngine), so on
+// the controller the purge deletes through sessionStore, that cache: the cache
+// drops the rows and the deletes emit bead.deleted like every other controller
+// write to the binding.
+func isRelocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) bool {
 	routed, relocated := routes.storeFor(coordclass.ClassSessions) // residency:allow — asks whether the sessions class is relocated, to gate a purge; resolves no bead
 	if !relocated || routed == nil || sessionStore == nil {
-		return nil
+		return false
 	}
 	ledger, ok := bindingEngine(sessionStore).(*beads.SQLiteStore)
 	if !ok || ledger == nil {
-		return nil
+		return false
 	}
 	if routedLedger, ok := bindingEngine(routed).(*beads.SQLiteStore); !ok || routedLedger != ledger {
-		return nil
+		return false
 	}
 	if work, ok := bindingEngine(workStore).(*beads.SQLiteStore); ok && work == ledger {
-		return nil
+		return false
 	}
-	return sessionStore
+	return true
 }
 
 // purgeClosedInfraSessions deletes closed session beads that have been idle
@@ -834,7 +863,7 @@ func purgeClosedInfraSessions(store beads.Store, now time.Time, age time.Duratio
 
 // purgeClosedInfraSessionsPage deletes closed session beads that have been
 // idle longer than age. The store must be the relocated SQLite sessions ledger
-// (relocatedSQLiteSessionLedger), where agent sessions are minted as
+// (isRelocatedSQLiteSessionLedger), where agent sessions are minted as
 // gcg-session-* or the older gcs-* prefix. The Dolt reaper only sees
 // issue_type=session in a Dolt `issues` table, so this arm is what keeps the
 // sqlite ledger from retaining every closed session forever.
@@ -1374,10 +1403,16 @@ func sourceIsLiveIn(store beads.Store, root beads.Bead, src string) bool {
 // CLOSED on a query error.
 func storeHoldsLiveAttachmentSource(store beads.Store, rootID string) bool {
 	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
-		holders, err := store.List(beads.ListQuery{
-			Metadata:      map[string]string{key: rootID},
-			IncludeClosed: true,
-			TierMode:      beads.TierBoth,
+		// One leg of the holder walk (the graph store, then every work leg):
+		// a holder lives in exactly one of them.
+		var holders []beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			holders, err = store.List(beads.ListQuery{
+				Metadata:      map[string]string{key: rootID},
+				IncludeClosed: true,
+				TierMode:      beads.TierBoth,
+			})
+			return err
 		})
 		if err != nil {
 			log.Printf("wisp gc: cannot resolve %s holders for stepless root %s (%v); leaving it open", key, rootID, err)
@@ -1426,8 +1461,14 @@ func beadLastActivity(b beads.Bead) time.Time {
 // descendants invisible to the sweep — the exact lost-finalize leak this sweep
 // exists to close. The caller applies the IsWorkflowRoot / TTL / terminal /
 // exempt filters.
-func openWispGCRootCandidates(store beads.Store) ([]beads.Bead, error) {
-	return enumerateWispGCRoots(store, "open", "in_progress")
+func openWispGCRootCandidates(store beads.Store) (roots []beads.Bead, err error) {
+	// The graph leg of the wisp GC root union: a v1 poured molecule root
+	// (work class) lives on a work leg (enumerateWorkClassMoleculeRoots).
+	err = beads.FederatedRead(func() (err error) {
+		roots, err = enumerateWispGCRoots(store, "open", "in_progress")
+		return err
+	})
+	return roots, err
 }
 
 // purgeExpiredBeadClosures purges aged closed roots, deleting each root's full

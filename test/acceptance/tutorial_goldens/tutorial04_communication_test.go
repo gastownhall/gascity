@@ -107,8 +107,8 @@ func TestTutorial04Communication(t *testing.T) {
 	}
 	waitForMayorReady("during tutorial 04 seed bootstrap")
 
-	t.Run(`gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"`, func(t *testing.T) {
-		out, err := ws.runShell(`gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"`, "")
+	t.Run(`gc mail send mayor -s "Review needed" -m "Please have the my-project reviewer review hello.py"`, func(t *testing.T) {
+		out, err := ws.runShell(`gc mail send mayor -s "Review needed" -m "Please have the my-project reviewer review hello.py"`, "")
 		if err != nil {
 			t.Fatalf("gc mail send mayor: %v\n%s", err, out)
 		}
@@ -136,7 +136,7 @@ func TestTutorial04Communication(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc mail inbox mayor: %v\n%s", err, out)
 		}
-		for _, want := range []string{"Review needed", "auth module changes in my-project"} {
+		for _, want := range []string{"Review needed", "reviewer review hello.py"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("mail inbox missing %q:\n%s", want, out)
 			}
@@ -144,7 +144,7 @@ func TestTutorial04Communication(t *testing.T) {
 	})
 
 	communicationNudge := `Check mail and hook status, then act accordingly`
-	mailFocusedRecoveryNudge := `Prioritize the unread mail with subject Review needed: sling reviewer work for the auth module changes to my-project/reviewer. Ignore unrelated health/order work for this turn.`
+	mailFocusedRecoveryNudge := `Prioritize the unread mail with subject Review needed: sling the hello.py review to my-project/reviewer. Ignore unrelated health/order work for this turn.`
 	communicationPeekTimeout := 90 * time.Second
 	communicationRetryTimeout := 90 * time.Second
 	communicationRecordedLines := 100
@@ -171,8 +171,7 @@ func TestTutorial04Communication(t *testing.T) {
 		}
 		for _, bead := range beads {
 			text := strings.ToLower(bead.Title + "\n" + bead.Description)
-			if strings.Contains(text, "auth") &&
-				(strings.Contains(text, "review") || strings.Contains(text, "module")) {
+			if strings.Contains(text, "hello") && strings.Contains(text, "review") {
 				return true
 			}
 		}
@@ -183,21 +182,21 @@ func TestTutorial04Communication(t *testing.T) {
 		nudgeMayor("gc session nudge mayor", communicationNudge)
 	})
 
-	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
+	t.Run("gc session peek mayor", func(t *testing.T) {
 		var out string
-		peekShowsCommunication := func(lines int) bool {
+		peekShowsCommunication := func(command string) bool {
 			var err error
-			out, err = ws.runShell("gc session peek mayor --lines "+strconv.Itoa(lines), "")
+			out, err = ws.runShell(command, "")
 			if err != nil {
 				return false
 			}
 			return strings.Contains(out, "Review needed") ||
-				strings.Contains(out, "auth module changes in my-project") ||
-				strings.Contains(out, "Review the auth module changes") ||
-				(strings.Contains(out, "my-project/reviewer") && strings.Contains(out, "auth module"))
+				strings.Contains(out, "review hello.py") ||
+				strings.Contains(out, "Review hello.py") ||
+				(strings.Contains(out, "my-project/reviewer") && strings.Contains(out, "hello.py"))
 		}
 		mayorCommunicationVisible := func() bool {
-			return peekShowsCommunication(6)
+			return peekShowsCommunication("gc session peek mayor")
 		}
 		waitForRecordedCommunication := func(context string) bool {
 			t.Helper()
@@ -205,11 +204,11 @@ func TestTutorial04Communication(t *testing.T) {
 				if !reviewerHandoffExists() {
 					return false
 				}
-				return peekShowsCommunication(communicationRecordedLines)
+				return peekShowsCommunication("gc session peek mayor --lines " + strconv.Itoa(communicationRecordedLines))
 			}) {
 				return false
 			}
-			ws.noteWarning("tutorial 04 runtime workaround: the 6-line peek window slid past the routing text %s, so the page driver confirmed the same communication in a wider hidden %d-line peek window after proving the reviewer handoff bead existed", context, communicationRecordedLines)
+			ws.noteWarning("tutorial 04 runtime workaround: the default peek window slid past the routing text %s, so the page driver confirmed the same communication in a wider hidden %d-line peek window after proving the reviewer handoff bead existed", context, communicationRecordedLines)
 			return true
 		}
 		if waitForCondition(t, communicationPeekTimeout, 2*time.Second, mayorCommunicationVisible) {
@@ -239,6 +238,33 @@ func TestTutorial04Communication(t *testing.T) {
 		}
 		if !waitForCondition(t, 1*time.Second, 1*time.Second, mayorCommunicationVisible) {
 			t.Fatalf("peek mayor did not surface communication flow in time:\n%s", out)
+		}
+	})
+
+	t.Run("gc session list --template my-project/reviewer", func(t *testing.T) {
+		// The reviewer's session may already have finished and shut down, so
+		// the page only promises the command answers.
+		out, err := ws.runShell("gc session list --template my-project/reviewer", "")
+		if err != nil {
+			t.Fatalf("gc session list --template my-project/reviewer: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("grep -rn install_agent_hooks --include='*.toml' .    # prints nothing", func(t *testing.T) {
+		// grep exits 1 when nothing matches, which is the documented result.
+		out, _ := ws.runShell("grep -rn install_agent_hooks --include='*.toml' .", "")
+		if strings.TrimSpace(out) != "" {
+			t.Fatalf("a fresh city should carry no install_agent_hooks in TOML:\n%s", out)
+		}
+	})
+
+	t.Run("ls .gc/settings.json", func(t *testing.T) {
+		out, err := ws.runShell("ls .gc/settings.json", "")
+		if err != nil {
+			t.Fatalf("ls .gc/settings.json: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, ".gc/settings.json") {
+			t.Fatalf("gc init should write the managed Claude settings file:\n%s", out)
 		}
 	})
 

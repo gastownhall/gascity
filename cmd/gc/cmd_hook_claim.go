@@ -12,17 +12,23 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 const hookClaimCommandName = "hook"
@@ -201,6 +207,12 @@ type hookClaimOptions struct {
 	// built for subprocesses, and its inherited-secret filter drops
 	// GC_INSTANCE_TOKEN.
 	StartedFence hookStartedFence
+	// PoolSeat is where the controller placed this pool seat, read off the
+	// session row the claim fence verified (hookClaimPoolSeatFor). It is the
+	// zero value for a named, manual or session-less claimant and whenever the
+	// fence did not read the row, which turns the seat checks of the
+	// fresh-claim tier off (hookClaimSeatLeaves).
+	PoolSeat hookPoolSeat
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -244,13 +256,18 @@ type hookClaimOps struct {
 	// provider meta: reconciler-tracked drains never set GC_DRAIN, so provider
 	// meta does not cover the population this fence exists for.
 	DrainPending hookDrainPendingFunc
-	// InputDone reports whether the workflow a candidate belongs to has an
-	// input convoy whose tracked work is already terminal (closed/tombstone),
-	// returning the workflow root id so SkipDoneWorkflow can retire it.
-	InputDone hookInputDoneFunc
-	// SkipDoneWorkflow closes a workflow root and its open steps with
-	// gc.outcome=skipped after InputDone reported the input terminal.
-	SkipDoneWorkflow hookSkipDoneWorkflowFunc
+	// InputVerdict resolves a candidate to its workflow root and reports the
+	// state of that root's input convoy: pending, complete (tracked work
+	// terminal or handed off), or purged (proven absent by the prover it is
+	// handed). RetireWorkflow retires a root it reports complete or purged.
+	InputVerdict hookInputVerdictFunc
+	// RetireWorkflow closes a workflow root and its open steps as the
+	// verdict's state says: gc.outcome=skipped for complete input, a hard
+	// failure with gc.failure_reason=input_purged for purged input.
+	RetireWorkflow hookRetireWorkflowFunc
+	// ProveInputAbsent proves workflow input ids absent from every store of
+	// the city. Nil proves nothing, so no input is ever read as purged.
+	ProveInputAbsent workflowInputAbsenceProver
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -271,6 +288,11 @@ type hookClaimOps struct {
 	// until this claim). Empty result means nothing is knowable and nothing is
 	// stamped.
 	ResolveSessionWorkDir hookResolveSessionWorkDirFunc
+	// SeatInManagedWorktree reports whether a pool seat's directory is a
+	// managed worktree: the controller started the seat inside a bead's
+	// verified worktree (hookClaimSeatInManagedWorktree). An error means the
+	// probe could not tell.
+	SeatInManagedWorktree func(seatWorkDir string) (bool, error)
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -357,6 +379,10 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
+	// ReadSessionTrigger reads the session row's gc.trigger_bead_id stamp: the
+	// row the controller counted when it spawned the seat, read only by the
+	// demand/claim divergence diagnostics after the drain result is written.
+	ReadSessionTrigger hookReadSessionTriggerFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
 	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
 	// the class route took resides in the binding instead: the cells' key for
@@ -383,8 +409,8 @@ type (
 	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc              func(io.Writer) error
 	hookDrainPendingFunc          func(sessionID string) (bool, error)
-	hookInputDoneFunc             func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
-	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string) error
+	hookInputVerdictFunc          func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error)
+	hookRetireWorkflowFunc        func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
@@ -402,11 +428,13 @@ type (
 	// toAssignee.
 	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
 	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
-	// hook-claim-continuation nudge, keyed by the claim assignee.
-	hookEnqueueContinuationNudgeFunc func(assignee string)
+	// hook-claim-continuation nudge, keyed by the claim assignee, for the
+	// workflow root it claimed; it warns on stderr of a nudge it refused.
+	hookEnqueueContinuationNudgeFunc func(assignee, rootID string, stderr io.Writer)
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
+	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -447,6 +475,11 @@ type hookClaimResult struct {
 	// see-but-cannot-claim shape — is not laundered into an idle signal.
 	// Meaningless on a terminal result.
 	claimsErrored bool
+	// left is the claimable work a NON-terminal result's fresh-claim tier left
+	// to a session in another directory (hookClaimSeatLeaves). The caller names
+	// it only when the whole invocation claims nothing
+	// (reportHookClaimLeftToAnotherSession).
+	left []beads.Bead
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
@@ -454,6 +487,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if res.terminal {
 		return res.code
 	}
+	reportHookClaimLeftToAnotherSession(res.left, opts.PoolSeat, stderr)
 	return writeHookClaimNoWork(opts, ops, res.claimsErrored, dir, stdout, stderr)
 }
 
@@ -573,7 +607,8 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 
 	// Retire, before any tier looks at them, the candidates whose workflow has
-	// nothing left to do because its input convoy work is already terminal.
+	// nothing left to do because its input convoy work is already terminal or
+	// no longer exists anywhere.
 	candidates = retireDoneWorkflowCandidates(candidates, *opts, *ops, dir, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -642,11 +677,11 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.DrainPending == nil {
 		ops.DrainPending = hookSessionDrainPending
 	}
-	if ops.InputDone == nil {
-		ops.InputDone = hookInputDoneWithBdStore
+	if ops.InputVerdict == nil {
+		ops.InputVerdict = hookInputDoneWithBdStore
 	}
-	if ops.SkipDoneWorkflow == nil {
-		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
+	if ops.RetireWorkflow == nil {
+		ops.RetireWorkflow = hookRetireWorkflowWithBdStore
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -659,6 +694,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ResolveSessionWorkDir == nil {
 		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
+	}
+	if ops.SeatInManagedWorktree == nil {
+		ops.SeatInManagedWorktree = hookClaimSeatInManagedWorktree
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
@@ -710,6 +748,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkStarted == nil {
 		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.ReadSessionTrigger == nil {
+		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
@@ -1056,7 +1097,23 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	defer cancel()
 	claimsErrored := false
 	now := ops.nowOrWallClock()
+	seatManaged := sync.OnceValue(func() bool {
+		return hookSeatManaged(hookClaimLabel, opts.PoolSeat.WorkDir, ops.SeatInManagedWorktree, stderr)
+	})
+	// The claimable candidates left to a session in another directory, named
+	// on stderr only if the invocation then claims nothing.
+	var leftToAnotherSession []beads.Bead
 	for _, candidate := range candidates {
+		if hookClaimSeatLeaves(candidate, opts.PoolSeat, seatManaged) {
+			// Work placed for another directory belongs to the seat the
+			// controller starts there; this seat would run it in the wrong
+			// checkout. Checked first so the opt-in stale reclaim below never
+			// frees a bead this seat would then have to skip.
+			if hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+				leftToAnotherSession = append(leftToAnotherSession, candidate)
+			}
+			continue
+		}
 		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
@@ -1188,7 +1245,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, hookClaimMinted, landedAt, stdout, stderr)}
 	}
 
-	return hookClaimResult{claimsErrored: claimsErrored}
+	return hookClaimResult{claimsErrored: claimsErrored, left: leftToAnotherSession}
 }
 
 // mergeHookClaimCandidateMetadata retains work-query metadata when bd update
@@ -1281,7 +1338,8 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
-	stop, err := molecule.WorkflowStopReason(store, candidate)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
@@ -1497,7 +1555,9 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 // without this check it was returned by the existing/ready-assignment paths as work
 // ahead of any real routed work waiting in the same batch (#4419) -- not by
 // race, by construction, since this function runs before
-// claimFirstEligibleHookCandidate ever sees the routed candidates.
+// claimFirstEligibleHookCandidate ever sees the routed candidates. The
+// generated work query now withholds mail at the query layer (#5815), so this
+// check is the backstop for a custom work_query, which is run verbatim.
 func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }
@@ -1626,7 +1686,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
 	// session that now owns pinned sibling work.
 	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
-		ops.EnqueueContinuationNudge(opts.Assignee)
+		ops.EnqueueContinuationNudge(opts.Assignee, bead.ID, stderr)
 	}
 	return 0
 }
@@ -2142,7 +2202,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// same root. Siblings share the bead's root, so one ancestry read, made only
 	// once there is a sibling to pin, answers for all of them; a failed read
 	// fails open like the gate itself.
-	var workflowStore beads.Store
+	var workflowStore beads.MoleculeTarget
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
 	stoppedSibling := func(sibling beads.Bead) bool {
@@ -2151,7 +2211,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		}
 		if !ancestorRead {
 			ancestorRead = true
-			workflowStore = ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")
+			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
 			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
 				ancestorStop = stop
 			}
@@ -2175,6 +2236,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
 			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// A pin runs the sibling in this seat's directory, so a sibling
+			// whose evidence binds it to another managed worktree is left
+			// routed for a seat in that worktree, as a fresh claim leaves it.
+			hookClaimWorktreeHeldElsewhere(sibling, opts.PoolSeat.WorkDir) ||
 			stoppedSibling(sibling) {
 			continue
 		}
@@ -2200,7 +2265,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 // untouched, #2293) has a path to end it, so the claim path is where the
 // done-check belongs.
 func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) []beads.Bead {
-	if ops.InputDone == nil || ops.SkipDoneWorkflow == nil {
+	if ops.InputVerdict == nil || ops.RetireWorkflow == nil {
 		return candidates
 	}
 	kept := candidates[:0:0]
@@ -2212,7 +2277,7 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 		now := ops.nowOrWallClock()
 		served := hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateClaimable(candidate, opts.RouteTargets, now)
-		if served && hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
+		if served && hookRetireIfInputSettled(candidate, opts, ops, dir, stderr) {
 			continue
 		}
 		kept = append(kept, candidate)
@@ -2220,54 +2285,71 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 	return kept
 }
 
-// hookSkipIfInputDone reports whether candidate belongs to a workflow whose
-// input convoy work is already terminal and, if so, retires that workflow
-// (root + open steps closed with gc.outcome=skipped). Lookup and close
-// failures are logged and treated as not-done so a store hiccup can never
+// hookRetireIfInputSettled reports whether candidate belongs to a workflow
+// whose input convoy work is already terminal, or proven to exist in no store,
+// and, if so, retires that workflow (root + open steps closed as skipped, or
+// as a hard failure for purged input). Lookup and close failures, and an
+// absence proof that could not finish (a store that could hold the input left
+// unread), are logged and keep the candidate so a store hiccup can never
 // suppress real work.
-func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+func hookRetireIfInputSettled(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	rootID, done, err := ops.InputDone(ctx, dir, opts.Env, candidate, opts.IdentityCandidates)
+	verdict, err := ops.InputVerdict(ctx, dir, opts.Env, candidate, opts.IdentityCandidates, ops.ProveInputAbsent)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
 		return false
 	}
-	if !done {
+	switch verdict.State {
+	case workflowInputComplete:
+		if err := ops.RetireWorkflow(ctx, dir, opts.Env, verdict); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", verdict.RootID, err) //nolint:errcheck
+			return false
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input convoy work is already terminal or handed off to another lane; root and open steps closed as skipped\n", candidate.ID, verdict.RootID) //nolint:errcheck
+		return true
+	case workflowInputPurged:
+		missing := strings.Join(verdict.MissingIDs, ", ")
+		if err := ops.RetireWorkflow(ctx, dir, opts.Env, verdict); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input %s no longer exists in any store: %v\n", verdict.RootID, missing, err) //nolint:errcheck
+			return false
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input %s no longer exists in any store; root and open steps closed as failed (%s)\n", candidate.ID, verdict.RootID, missing, workflowInputPurgedFailureReason) //nolint:errcheck
+		return true
+	default:
 		return false
 	}
-	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", rootID, err) //nolint:errcheck
-		return false
-	}
-	fmt.Fprintf(stderr, "gc hook --claim: skipped %s: workflow %s input convoy work is already terminal or handed off to another lane; root and open steps closed as skipped\n", candidate.ID, rootID) //nolint:errcheck
-	return true
 }
 
-// workflowInputDone resolves candidate to its workflow root (itself when it
-// carries gc.input_convoy_id, else via gc.root_bead_id) and reports whether
-// every member the root's input convoy tracks is terminal, or non-terminal
-// but handed off to an assignee outside identityCandidates (no longer ours to
-// wait on). A member that is still unassigned, or still assigned to one of
-// identityCandidates, blocks. A root with no input convoy, or a convoy with
-// no resolvable members, is never "done".
-func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
+// workflowInputDone resolves candidate to its workflow root (through
+// gc.root_bead_id, or itself when it is a root that carries
+// gc.input_convoy_id) and reports the state of the root's input convoy. The
+// input is complete when every member the convoy tracks is terminal, or
+// non-terminal but handed off to an assignee outside identityCandidates (no
+// longer ours to wait on); a member that is still unassigned, or still
+// assigned to one of identityCandidates, keeps it pending. A root with no
+// input convoy, or a convoy with no resolvable members, is never complete. For
+// a live graph.v2 root, input that prove proves absent — the convoy itself, or
+// every member it tracks — is purged.
+func workflowInputDone(ctx context.Context, store beads.WorkStore, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+	return workflowInputDoneAcross(ctx, store, store, candidate, identityCandidates, prove)
 }
 
 // workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
-// candidate to: itself when it carries gc.input_convoy_id, else its
-// gc.root_bead_id. It returns "" for a candidate that is not part of a
-// workflow (no root, or its own root without an input convoy).
+// candidate to: its gc.root_bead_id when that names another bead, else itself
+// when it carries gc.input_convoy_id. A step's root decides even when the
+// formula's step metadata also stamps the input convoy id on the step: the
+// root holds the workflow's contract and is what retiring the workflow closes.
+// It returns "" for a candidate that is not part of a workflow (no root, or its
+// own root without an input convoy).
 func workflowRootIDForInputCheck(candidate beads.Bead) string {
+	if rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != candidate.ID {
+		return rootID
+	}
 	if strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
 		return candidate.ID
 	}
-	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-	if rootID == candidate.ID {
-		return ""
-	}
-	return rootID
+	return ""
 }
 
 // workflowInputDoneAcross is workflowInputDone with the workflow's two halves
@@ -2275,52 +2357,92 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // convoy and its members from work. On a single-store city both are the same
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
-func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+func workflowInputDoneAcross(ctx context.Context, graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+	rootID := workflowRootIDForInputCheck(candidate)
+	if rootID == "" {
+		return workflowInputVerdict{}, nil
+	}
 	root := candidate
-	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
-		rootID := workflowRootIDForInputCheck(candidate)
-		if rootID == "" {
-			return "", false, nil
-		}
+	if rootID != candidate.ID {
 		var err error
-		root, err = graph.Get(rootID)
-		if err != nil {
-			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
+		if root, err = graph.Get(rootID); err != nil {
+			return workflowInputVerdict{RootID: rootID}, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
 	}
+	pending := workflowInputVerdict{RootID: rootID, State: workflowInputPending}
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
-		return root.ID, false, nil
+		return pending, nil
 	}
-	members, err := convoy.Members(work, convoyID, true)
+	purgeable := prove != nil && workflowRootPurgeable(root)
+	// An absence proof reads the claim's own stores before the city: work,
+	// and graph when it is another store (an unrouted claim passes one store
+	// as both, graph through work's handle).
+	var graphLeg []workflowInputReader
+	if !beads.SameStore(graph, work) {
+		graphLeg = []workflowInputReader{graph}
+	}
+	if purgeable {
+		// The convoy's existence is settled before its membership: a convoy
+		// the work leg no longer holds is purged on a city-wide absence proof
+		// and pending without one, whatever membership edges survive it. This
+		// read is the work leg's answer for the convoy, so the proof starts at
+		// the graph handle.
+		if _, err := work.Get(convoyID); err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				return pending, fmt.Errorf("reading input convoy %s: %w", convoyID, err)
+			}
+			return purgedIfProven(ctx, pending, graphLeg, []string{convoyID}, prove)
+		}
+	}
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: work}, convoyID, true)
 	if err != nil {
-		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
+		return pending, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
 	if len(members) == 0 {
-		return root.ID, false, nil
+		return pending, nil
 	}
+	if missing := unresolvedMemberIDs(members); purgeable && len(missing) == len(members) {
+		return purgedIfProven(ctx, pending, append([]workflowInputReader{work}, graphLeg...), missing, prove)
+	}
+	settled, err := workflowInputMembersSettled(members, identityCandidates, func() ([]string, error) {
+		return workflowStepAssignees(graph, rootID)
+	})
+	if err != nil || !settled {
+		return pending, err
+	}
+	return workflowInputVerdict{RootID: rootID, State: workflowInputComplete}, nil
+}
+
+// workflowInputMembersSettled reports whether every one of members is
+// terminal, or non-terminal but handed off to an assignee outside
+// identityCandidates that is not one of the workflow's own seats. seats lists
+// those seats, and is read at most once, only for a member that needs it.
+func workflowInputMembersSettled(members []beads.Bead, identityCandidates []string, seats func() ([]string, error)) (bool, error) {
 	var workflowSeats []string
+	seatsRead := false
 	for _, m := range members {
 		if convoy.IsTerminalStatus(m.Status) {
 			continue
 		}
-		if strings.TrimSpace(m.Assignee) != "" && !hookClaimHasIdentity(m.Assignee, identityCandidates) {
-			// A seat that ran a step of this workflow is its own pool worker
-			// (typically dead, its steps reopened), not another lane: the
-			// member was never handed off (sys-pxryan.44).
-			if workflowSeats == nil {
-				workflowSeats, err = workflowStepAssignees(graph, root.ID)
-				if err != nil {
-					return root.ID, false, err
-				}
-			}
-			if !hookClaimHasIdentity(m.Assignee, workflowSeats) {
-				continue
-			}
+		if strings.TrimSpace(m.Assignee) == "" || hookClaimHasIdentity(m.Assignee, identityCandidates) {
+			return false, nil
 		}
-		return root.ID, false, nil
+		// A seat that ran a step of this workflow is its own pool worker
+		// (typically dead, its steps reopened), not another lane: the member
+		// was never handed off (sys-pxryan.44).
+		if !seatsRead {
+			var err error
+			if workflowSeats, err = seats(); err != nil {
+				return false, err
+			}
+			seatsRead = true
+		}
+		if hookClaimHasIdentity(m.Assignee, workflowSeats) {
+			return false, nil
+		}
 	}
-	return root.ID, true, nil
+	return true, nil
 }
 
 // workflowStepAssignees lists every seat recorded on any step (open or closed)
@@ -2355,38 +2477,18 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
 // with gc.outcome=skipped so pool demand and continuation claims drop.
 func skipDoneWorkflow(store beads.Store, rootID string) error {
-	steps, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return fmt.Errorf("listing steps of %s: %w", rootID, err)
-	}
-	ids := make([]string, 0, len(steps)+1)
-	seen := map[string]bool{}
-	for _, step := range steps {
-		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
-			continue
-		}
-		seen[step.ID] = true
-		ids = append(ids, step.ID)
-	}
-	ids = append(ids, rootID)
-	_, err = store.CloseAll(ids, map[string]string{
+	return retireWorkflowSubtree(context.Background(), store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              hookSkipDoneWorkflowCloseReason,
 	})
-	return err
 }
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
-func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDone(hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates)
-}
-
-func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+// hookInputDoneWithBdStore is the default InputVerdict seam: workflowInputDone
+// over the bd store at dir.
+func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+	return workflowInputDone(ctx, beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates, prove)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -3033,20 +3135,6 @@ func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaim
 	return trees
 }
 
-// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
-// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
-// gc.work_branch before it will treat a bead as a fully managed workspace.
-var worktreeOwnershipEvidenceKeys = []string{
-	beadmeta.WorktreeRepoMetadataKey,
-	beadmeta.WorktreeRootMetadataKey,
-	beadmeta.WorktreeBaseRefMetadataKey,
-	beadmeta.WorktreeBaseSHAMetadataKey,
-	beadmeta.WorktreeCreatorMetadataKey,
-	beadmeta.WorktreeOwnerMetadataKey,
-	beadmeta.WorktreeGenerationMetadataKey,
-	beadmeta.WorktreeLifecycleMetadataKey,
-}
-
 // hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
 // eight worktree-ownership keys are either all present or all absent. A claim
 // must not be the thing that first introduces a partial (1-7 of 8) ownership
@@ -3058,12 +3146,206 @@ var worktreeOwnershipEvidenceKeys = []string{
 // just keeping the branch in sync).
 func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 	present := 0
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) != "" {
 			present++
 		}
 	}
-	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+	return present == 0 || present == len(beadmeta.WorktreeOwnershipEvidenceKeys)
+}
+
+// hookClaimManagedWorktreeDir returns the checkout a bead's complete
+// managed-worktree evidence names: one agreeing gc.work_dir / work_dir path,
+// gc.work_branch, and all eight ownership keys. That is exactly the shape
+// worktreeSpecForBead turns into the verified spec the controller starts a
+// pool seat inside (verifiedPoolTriggerWorkDir), and the only shape the
+// controller places a seat for, so any other shape (no path, a path with no or
+// partial evidence, disagreeing spellings) reports false. It is a pure read:
+// worktreeSpecForBead is not called because it logs on the legacy shapes,
+// which a hook would repeat on every invocation.
+func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
+	canonical := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	legacy := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if canonical != "" && legacy != "" && canonical != legacy {
+		return "", false
+	}
+	path := canonical
+	if path == "" {
+		path = legacy
+	}
+	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
+		return "", false
+	}
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) == "" {
+			return "", false
+		}
+	}
+	return path, true
+}
+
+// hookPoolSeat is where the controller placed a pool session, read off the
+// session row the claim fence verified (hookClaimPoolSeatFor). The zero value
+// is no pool seat (a named, manual or session-less claimant, or a row the fence
+// did not read) and turns the seat checks off (hookClaimSeatLeaves).
+type hookPoolSeat struct {
+	// WorkDir is the gc.work_dir the controller started the session in: a
+	// bead's verified worktree (poolTriggerMetadata) or the pool's own
+	// directory.
+	WorkDir string
+	// PoolDir is the pool's own configured directory for this session, which
+	// the controller routes work bound to no managed worktree under
+	// (poolTriggerWorkDir), or "" when it does not resolve.
+	PoolDir string
+}
+
+// unboundWorkDir returns the directory the controller starts a session of
+// this seat's pool in for candidate, work bound to no managed worktree:
+// PoolDir, routed by the bead's pack and workspace as the controller routes
+// its demand (poolWorkDirUnder). It is "" when PoolDir is.
+func (s hookPoolSeat) unboundWorkDir(candidate beads.Bead) string {
+	poolDir := strings.TrimSpace(s.PoolDir)
+	if poolDir == "" {
+		return ""
+	}
+	return poolWorkDirUnder(poolDir, SessionRequest{
+		WorkPack:      strings.TrimSpace(candidate.Metadata[beadmeta.PackMetadataKey]),
+		WorkWorkspace: strings.TrimSpace(candidate.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+	})
+}
+
+// hookClaimSeatLeaves reports whether seat leaves candidate to a session the
+// controller starts in another directory: the candidate's own managed
+// worktree when that is not the seat's (hookClaimWorktreeHeldElsewhere), or the
+// pool's own directory when the candidate names no managed worktree and the
+// seat runs inside one somewhere else (hookClaimUnboundWorkOutsideSeat). The
+// fresh-claim tier, its stderr report and plain `gc hook`'s listing
+// (hookVisibility.leavesToAnotherSession) all ask this one predicate, so the
+// listing never shows work the claim would leave.
+func hookClaimSeatLeaves(candidate beads.Bead, seat hookPoolSeat, seatManaged func() bool) bool {
+	return hookClaimWorktreeHeldElsewhere(candidate, seat.WorkDir) || hookClaimUnboundWorkOutsideSeat(candidate, seat, seatManaged)
+}
+
+// reportHookClaimLeftToAnotherSession names on stderr each claimable bead the
+// fresh-claim tier left to a session in another directory, once, for an
+// invocation that then claims nothing from any store (claimHookWorkWithRunner,
+// doHookClaim). That is when the skip decided the outcome: work no session is
+// started for (its worktree was removed or moved, or the controller refused its
+// evidence) otherwise stays ready while every pool session drains no_work
+// without a word about it. An invocation that claims stays quiet, as a seat
+// skipping its siblings' beads on the way to its own is the normal case. A bead
+// two store legs both served is named once.
+func reportHookClaimLeftToAnotherSession(left []beads.Bead, seat hookPoolSeat, stderr io.Writer) {
+	seatWorkDir := strings.TrimSpace(seat.WorkDir)
+	named := make(map[string]bool, len(left))
+	for _, bead := range left {
+		if named[bead.ID] {
+			continue
+		}
+		named[bead.ID] = true
+		if dir, managed := hookClaimManagedWorktreeDir(bead); managed {
+			fmt.Fprintf(stderr, "%s: left %s to a session in its managed worktree %s; this session's work dir is %s\n", hookClaimLabel, bead.ID, dir, seatWorkDir) //nolint:errcheck
+			continue
+		}
+		where := "the pool's own directory"
+		if dir := seat.unboundWorkDir(bead); dir != "" {
+			where += " " + dir
+		}
+		fmt.Fprintf(stderr, "%s: left %s, which names no managed worktree, to a session in %s; this session's work dir %s is a managed worktree\n", hookClaimLabel, bead.ID, where, seatWorkDir) //nolint:errcheck
+	}
+}
+
+// hookClaimWorktreeHeldElsewhere reports whether a pool seat started in
+// seatWorkDir must leave candidate to another seat because the candidate's
+// complete managed-worktree evidence names a different checkout. For every
+// such bead it counts as demand, the controller starts a seat inside the
+// bead's own verified worktree, so that seat can claim it; a seat anywhere
+// else would run the bead's work in the wrong tree and on the wrong branch.
+// An empty seatWorkDir (not a pool seat, or a row the fence never read) turns
+// the check off.
+func hookClaimWorktreeHeldElsewhere(candidate beads.Bead, seatWorkDir string) bool {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	if seatWorkDir == "" {
+		return false
+	}
+	dir, managed := hookClaimManagedWorktreeDir(candidate)
+	return managed && !pathutil.SamePath(dir, seatWorkDir)
+}
+
+// hookClaimUnboundWorkOutsideSeat reports whether a pool seat must leave a
+// candidate that names no managed worktree because the seat runs inside one
+// the controller did not start that work's session in. The controller starts
+// a session for such work in the pool's own directory
+// (hookPoolSeat.unboundWorkDir), so a seat already there takes it even when
+// that directory is, or sits inside, a managed worktree. Any other seat
+// leaves it only when it runs in a managed worktree (seatManaged): the
+// controller started it in a bead's verified worktree. seatManaged is asked
+// only for a candidate whose session the controller starts elsewhere, and an
+// empty WorkDir turns the check off.
+func hookClaimUnboundWorkOutsideSeat(candidate beads.Bead, seat hookPoolSeat, seatManaged func() bool) bool {
+	seatWorkDir := strings.TrimSpace(seat.WorkDir)
+	if seatWorkDir == "" {
+		return false
+	}
+	if _, managed := hookClaimManagedWorktreeDir(candidate); managed {
+		return false
+	}
+	if dir := seat.unboundWorkDir(candidate); dir != "" && pathutil.SamePath(dir, seatWorkDir) {
+		return false
+	}
+	return seatManaged()
+}
+
+// hookSeatManaged asks probe whether a pool seat's work dir is a managed
+// worktree. A probe that could not tell is named on stderr under label and
+// answers false, which leaves unbound work claimable, as it was before the
+// check. Both doors ask it at most once per listing or claim tier, and only
+// when a candidate needs the answer, so a tier whose candidates all name a
+// managed worktree, or all route to this seat's own directory, spends no git
+// probe on it.
+func hookSeatManaged(label, seatWorkDir string, probe func(string) (bool, error), stderr io.Writer) bool {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	if probe == nil || seatWorkDir == "" {
+		return false
+	}
+	managed, err := probe(seatWorkDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: could not tell whether work dir %s is a managed worktree: %v; treating it as not managed\n", label, seatWorkDir, err) //nolint:errcheck
+		return false
+	}
+	return managed
+}
+
+// hookClaimSeatInManagedWorktree reports whether seatWorkDir is a managed
+// worktree: its private git directory holds the provenance a completed
+// `gc worktree ensure` published, which worktree.Verify checked before the
+// controller started a pool seat there (verifiedPoolTriggerWorkDir), and the
+// record names seatWorkDir itself as the worktree's root. The controller only
+// starts a seat for bound work at that root, so a directory nested inside a
+// managed worktree (a configured work_dir or pack workspace subdirectory)
+// shares its git directory but is not one. git finding no repository there, a
+// git directory without a record, and a record naming another path establish
+// that it is not. A git that timed out or could not run, and a record that
+// could not be read or decoded, establish nothing and return an error.
+func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
+	if strings.TrimSpace(seatWorkDir) == "" {
+		return false, nil
+	}
+	gitDir, probe := hookClaimRunGit(seatWorkDir, "rev-parse", "--absolute-git-dir")
+	switch probe {
+	case hookClaimProbeAbsent:
+		return false, nil
+	case hookClaimProbeUnavailable:
+		return false, fmt.Errorf("git rev-parse --absolute-git-dir gave no answer (timed out after %s, could not run, or printed nothing)", hookClaimGitProbeTimeout)
+	}
+	provenance, err := worktree.ReadProvenanceAt(gitDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(provenance.BeadID) != "" && pathutil.SamePath(provenance.Path, seatWorkDir), nil
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
@@ -3099,7 +3381,7 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 	}
 	// The hook's bd context owns both the claimed graph step and its workflow
 	// root; EmitLifecycle verifies the root is graph.v2 before recording.
-	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
+	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: hookClaimBdStore(dir, env, assignee)}, events.ExecutionStepStarted, step, eventActor())
 }
 
 // stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
@@ -3108,13 +3390,12 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 //
 // It exists because a claimed step id is otherwise UNREACHABLE from the step's
 // own shell: GC_BEAD_ID is set only in the dispatch condition-script
-// environment (internal/convergence/condition.go), and GC_TRIGGER_BEAD_ID —
-// exported to demand-spawned pool seats as a pool-level spawn marker
-// (build_desired_state.go) — is absent on other seats and is a presence
-// signal, not a claim directive, so a formula step that must close the bead it
-// is running had no reliable way to name it and silently skipped its own close
-// — work that did nothing reported green. `gc hook current` reads this stamp
-// back and closes that gap.
+// environment (internal/convergence/condition.go), and no session shell
+// carries a trigger bead id — a demand-spawned session sees only the
+// GC_SPAWN_ORIGIN=demand presence marker (sessionDemandSpawnEnv) — so a formula
+// step that must close the bead it is running had no way to name it and
+// silently skipped its own close — work that did nothing reported green.
+// `gc hook current` reads this stamp back and closes that gap.
 //
 // Unlike the work-bead session back-reference this is stamped for CONTROL beads
 // too: that exclusion exists because a control step must stay session-free by
@@ -3886,24 +4167,41 @@ func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssi
 // the root → step-1 transition without an external gc session nudge. The city
 // path is resolved from the environment so this call is self-contained — the
 // same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
-// error is swallowed so a nudge-queue failure never blocks the claim.
+// error is swallowed so a nudge-queue failure never blocks the claim, and a
+// lane notice the op journal refuses is only warned of on stderr
+// (continuationNudgeEnqueueAt).
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
 // daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
 // On a worker site it queues nothing and starts no poller: the box's nudge
 // queue is a local file the remote controller never reads, and the claimed
 // work is on the ledger either way.
 // See writeHookClaimWorkResultForBead for the call site.
-func hookContinuationNudgeEnqueue(assignee string) {
+func hookContinuationNudgeEnqueue(assignee, rootID string, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
 	}
-	continuationNudgeEnqueueAt(cityPath, assignee)
+	continuationNudgeEnqueueAt(cityPath, assignee, rootID, stderr)
 }
 
+// hookClaimContinuationPrincipal is the principal of a hook-claim
+// continuation notice on the conversation lane; its label is
+// hook-claim-continuation.
+const hookClaimContinuationPrincipal = "gc:hook-claim-continuation"
+
+// hookClaimContinuationText is the continuation notice's text.
+const hookClaimContinuationText = "Work slung. Check your hook."
+
 // continuationNudgeEnqueueAt is hookContinuationNudgeEnqueue for an
-// already-resolved city.
-func continuationNudgeEnqueueAt(cityPath, assignee string) {
+// already-resolved city. When [ops] authoritative lists message, the nudge
+// routes by the CLI's lane rules (routeCLILaneNotice): a session a lane
+// serves gets one lane notice from gc:hook-claim-continuation per claim,
+// under a minted key with the root as its causation, scoped to the session's
+// generation and delivered only while it runs (live_only), as the queue item
+// was. A notice the lane refuses, and a nudge store or session provider that
+// does not open, are warned of on stderr, and nothing is queued; a session
+// with no row, or one no lane serves, takes the queue path.
+func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Writer) {
 	if onWorkerSite(cityPath) {
 		return
 	}
@@ -3928,9 +4226,10 @@ func continuationNudgeEnqueueAt(cityPath, assignee string) {
 	// (see openOwnedNudgeBeadStore), and read session beads from the session
 	// class, not the nudges class.
 	store, opened := openOwnedNudgeBeadStore(cityPath)
+	var sessStore beads.Store
 	if opened != nil {
 		defer closeBeadStoreHandle(opened) //nolint:errcheck
-		sessStore := cliSessionStore(opened, cfg, cityPath)
+		sessStore = cliSessionStore(opened, cfg, cityPath)
 		if id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, assignee); err == nil {
 			if info, err := sessionFrontDoor(sessStore).Get(id); err == nil {
 				target = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
@@ -3940,16 +4239,62 @@ func continuationNudgeEnqueueAt(cityPath, assignee string) {
 			target = withNudgeTargetFence(sessStore, target)
 		}
 	}
+	if rootID != "" && (cliLaneMessageListed(cfg) || cliLaneExecutesMessage(cfg, sessStore)) {
+		// A lane that may serve the session takes the notice or refuses it;
+		// only a session no lane serves takes the queue path below.
+		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID, stderr) {
+			return
+		}
+	}
 	// The assignee is the right queue key: delivery
 	// (queuedNudgeClaimableForTarget and the supervisor dispatcher) matches
 	// item.Agent against nudgeTarget.queueKeys, which carries the alias,
 	// session ID, agent identity, and session name for the session.
-	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
+	item := newQueuedNudgeWithOptions(assignee, hookClaimContinuationText, "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		return
 	}
 	maybeStartNudgePoller(target)
 	_ = pokeController(cityPath)
+}
+
+// continuationLaneNoticeIn is continuationLaneNotice under the city's session
+// provider, and reports whether the lane handled the notice: true once it
+// proposed or refused it, the refusal warned of on stderr. city is the
+// city's store the claim opened, nil when it did not open. A session
+// provider that does not open is a refusal: without it the CLI cannot tell
+// whether a lane serves the session (laneServesSession).
+func continuationLaneNoticeIn(cityPath string, cfg *config.City, target nudgeTarget, city beads.Store, rootID string, stderr io.Writer) bool {
+	sp, err := newSessionProviderForCity(cfg, cityPath)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, cliLaneRefusal(fmt.Errorf("opening the session provider: %w", err)))
+		return true
+	}
+	handled, err := continuationLaneNotice(target, city, sp, rootID)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, err)
+	}
+	return handled
+}
+
+// warnContinuationRefused warns on stderr that the lane refused rootID's
+// continuation nudge for err.
+func warnContinuationRefused(stderr io.Writer, rootID string, err error) {
+	fmt.Fprintf(stderr, "gc hook --claim: warning: the continuation nudge for %s was not sent: %v\n", rootID, err) //nolint:errcheck // best-effort stderr
+}
+
+// continuationLaneNotice proposes the hook-claim continuation for rootID as a
+// lane notice to target's session (continuationNudgeEnqueueAt), routed by
+// routeCLILaneNotice over city, the city's store: handled false leaves the
+// legacy queue path, nothing written; an error is the lane's refusal,
+// nothing written either.
+func continuationLaneNotice(target nudgeTarget, city beads.Store, sp runtime.Provider, rootID string) (handled bool, err error) {
+	prod, err := routeCLILaneNotice(cliLaneNoticeRoute{
+		target: target, city: city, sp: sp,
+		req:           cliLaneNotice(hookClaimContinuationPrincipal, rootID, hookClaimContinuationText, opjournal.WakeLiveOnly),
+		sessionScoped: true,
+	})
+	return prod.handled, err
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

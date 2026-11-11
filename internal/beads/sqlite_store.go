@@ -59,6 +59,7 @@ type SQLiteStoreOptions struct {
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
 	readOnly                bool
+	readOnlyNoMmap          bool
 	privateRecovery         bool
 }
 
@@ -148,6 +149,17 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 func WithSQLiteStoreReadOnly() SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
 		o.readOnly = true
+	}
+}
+
+// WithSQLiteStoreReadOnlyNoMmap opens an existing database read-only, as
+// WithSQLiteStoreReadOnly, without the mmap window: for a reader that walks a
+// whole database once (a storage snapshot's JSONL), where mapping it counts
+// every page it touches, on every pooled connection, against the resident set.
+func WithSQLiteStoreReadOnlyNoMmap() SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.readOnly = true
+		o.readOnlyNoMmap = true
 	}
 }
 
@@ -309,6 +321,9 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// sqliteStorePerStoreConnections times, not once. sqliteStoreDSNWithMode
 	// keeps that budget honest.
 	dsn := sqliteStoreDSN(dbPath, cfg.readOnly)
+	if cfg.readOnlyNoMmap {
+		dsn = sqliteSnapshotSourceDSN(dbPath)
+	}
 	if cfg.privateRecovery {
 		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
 	}
@@ -1724,11 +1739,19 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 // excluded labels) and then sorts into the canonical ready order, so a
 // source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
+	return sqliteReadyCandidateSQL(q, projection, "NOT "+sqliteReadyBlockerExists("b.id"))
+}
+
+// sqliteReadyCandidateSQL is sqliteReadySQL with the blocking clause supplied:
+// Ready negates sqliteReadyBlockerExists, and ReadyBlockedByAbsent selects the
+// rows an absent target blocks (sqliteAbsentBlockerExists). Every other filter
+// is the same, so the two cannot disagree about what a ready candidate is.
+func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		"NOT " + sqliteReadyBlockerExists("b.id"),
+		blocking,
 	}
 	switch q.TierMode {
 	case TierWisps:

@@ -20,6 +20,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # create_submodule clones before validating the submodule path). There is no
 # 3.1.x backport, but mcp-agent-mail never creates or updates submodules, so the
 # advisory is unreachable and is waived in .trivyignore.yaml for this release.
+# 3.2.0 is likewise the only fix for GHSA-23mf-xhv8-69c2 (Head.checkout),
+# GHSA-f9j4-qggq-h239 (Remote.pull) and GHSA-w8jc-g24h-crhw (Git.ls_remote,
+# Repo.merge_base, IndexFile.move), none of which mcp-agent-mail calls, and for
+# GHSA-m64x-33q8-m5h7 (parse_actor_and_date regex DoS), which IS reachable and is
+# waived only for the shipped contrib/k8s/mcp-mail-deployment.yaml, which mounts
+# no workspace repos. All four are waived in .trivyignore.yaml for this release.
 # Lift the ceiling once a GitPython release fixes the commit-latency regression.
 gitpython>=3.1.62,<3.2
 
@@ -70,19 +76,27 @@ idna>=3.15
 # Header Injection) in litellm < 1.84.0. CVE-2026-84377 (MEDIUM) affects
 # litellm < 1.88.6 and each line from 1.89 through 1.96 before its patch
 # release (1.89.7, 1.90.7, 1.91.5, 1.92.2, 1.93.2, 1.94.3, 1.95.1, 1.96.2).
-# A bare floor cannot express that, so any litellm move must land on a
-# patched release. Drop once mcp-agent-mail's transitive constraint carries
+# The eMudhra intermediate-CA compromise
+# (https://emudhra.we-have-a-problem.com/) is fixed per line in 1.103.8,
+# 1.104.6, 1.105.4 and 1.106.3. GHSA-w4c7-34wj-hqm8 (CRITICAL, unauthenticated
+# file read leaks the master key on an Enterprise-licensed proxy) is fixed per
+# line in 1.103.10, 1.104.8, 1.105.6 and 1.106.5, so the floor is 1.106.5.
+# A bare floor cannot express per-line patches, so any litellm move must land
+# on a patched release. Drop once mcp-agent-mail's transitive constraint carries
 # the patched version itself. Before dropping it, move this note next to the
 # litellm lock-pin row in TestMCPMailImagePinsPatchedPythonDependencies
 # (scripts/container_tool_security_test.go). That exact pin, not this
 # floor, is what makes a re-lock onto an unpatched 1.90-1.96 release fail.
-litellm>=1.89.7
+litellm>=1.106.5
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
-# < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
-# authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# < 1.6.8, and GHSA-jpxq-7h8p-2q76 / CVE-2026-119283 (HIGH, an unbounded JWE
+# General JSON recipients array exhausts CPU in repeated private-key
+# decryption) in joserfc < 1.7.5. joserfc arrives transitively via authlib
+# (joserfc>=1.6.8) and fastmcp-slim (joserfc>=1.1.0); pin the floor until
+# their transitive constraints carry the patched version themselves.
+joserfc>=1.7.5
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated
@@ -93,6 +107,11 @@ joserfc>=1.6.8
 # floor at 1.30.0 to clear all four. Drop once fastmcp-slim's transitive
 # constraint carries the patched version itself.
 mcp>=1.30.0
+
+# Security floor: CVE-2026-114605 (HIGH, excessive CPU in
+# dns.name.from_wire_parser) in dnspython < 2.9.0. dnspython arrives via
+# email-validator; drop once its constraint carries the patched release.
+dnspython>=2.9.0
 
 # Ceiling: filelock 4.x can truncate the mail SQLite database at shutdown.
 # mcp-agent-mail's emergency fd cleanup (storage.cleanup_leaked_lockfile_fds)

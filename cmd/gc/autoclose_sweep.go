@@ -308,6 +308,9 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		if relic != nil {
 			stores = withRelicStore(stores, relic)
 		}
+		// The sweep's reads see the split-strict gate's views, like the
+		// event path's (identity in production).
+		stores, relic = splitStrictEventStores(id, stores, relic)
 		if len(stores) == 0 {
 			continue
 		}

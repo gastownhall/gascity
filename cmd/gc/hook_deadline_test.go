@@ -330,7 +330,7 @@ func TestInboxArchiveRetiresExactlyTheInjectedWindow(t *testing.T) {
 		}
 		seed("windowed handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel)
 		store := beads.NewMemStoreFrom(len(seeded), seeded, nil)
-		mp := beadmail.New(store)
+		mp := newTestBeadMail(store)
 		target := resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}}
 		if withRoutes {
 			target.session = &session.Info{ID: "mayor"}
@@ -426,7 +426,7 @@ func (p *deadlineAfterCloseProvider) ArchiveInjectedAutoHandoffsFromInbox(inbox 
 // is not written past the deadline.
 func TestArchiveSkipsTheLabelWhenTheDeadlineNearsAfterTheClose(t *testing.T) {
 	store := beads.NewMemStore()
-	mp := &deadlineAfterCloseProvider{Provider: beadmail.New(store), t: t}
+	mp := &deadlineAfterCloseProvider{Provider: newTestBeadMail(store), t: t}
 	handoff, err := store.Create(beads.Bead{
 		Title: "context cycle", Type: "message", Assignee: "mayor", From: "mayor",
 		Labels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},

@@ -19,17 +19,22 @@ package main
 // nudge and a mail notify under the caller's principal, the notify keyed by
 // its cause (mail:<message id>), and gc session submit under the operator on
 // its API and local paths alike. Submit mints its key before it calls the
-// API, which records the op as legacy:api; a fallback after a lost answer
-// proposes that op id locally, so it replays a closed op and reports an open
-// one as accepted rather than delivering again. A queued delivery closes its
-// op succeeded{via: legacy.queued} at enqueue (§8.5). The delivered text is
-// the legacy path's in every mode (I11).
+// API, which records the op as legacy:api, or proposes it as a lane op when
+// its lane host executes message; a fallback after a lost answer proposes
+// that op id locally, so it replays a closed op and reports an open one as
+// accepted rather than delivering again. That is submit's path only while
+// the CLI's config does not list message: in a city that lists it, submit
+// accepts the message as the API does (conversation_lane_submit.go), and
+// records nothing here. A queued delivery closes its op succeeded{via:
+// legacy.queued} at enqueue (§8.5). The delivered text is the legacy path's
+// in every mode (I11).
 //
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
 // op_id, key and replayed when an op backs the run. The key, minted when --key
 // is absent, is printed only in JSON and on failures, never on a successful
-// plain-text run, except submit's report that the API accepted the message,
-// which names the key a rerun reports its outcome under. A replayed success
+// plain-text run, except submit's report, on its legacy path, that the API
+// accepted the message, which names the key a rerun reports its outcome
+// under. A replayed success
 // prints the command's success output rebuilt from the op, so what only the
 // first run saw is absent from its JSON (close's and wake's
 // wait_nudges_withdrawn, suspend's mode), and names the op on stderr, with any
@@ -230,9 +235,20 @@ type cliOpRequest struct {
 	// after admission read it open: submit's local fallback after an API call
 	// whose answer was lost.
 	acceptsAPIOp bool
-	asJSON       bool
-	stdout       io.Writer
-	stderr       io.Writer
+	// lanePolicy, when set, is the policy the API proposes the request under
+	// as a lane op when its lane host executes message (lanesubmit.Policy).
+	// A lane op under the key is then the API's op: start admits again under
+	// this policy, so the op answers the request only when the request's
+	// digest under it is the op's, and an open one counts as the API's
+	// acceptance as an open legacy:api op does. gc session submit sets it on
+	// its legacy path, which runs only while the CLI's config does not list
+	// message: a lane op under its key is then one an API whose lane host
+	// still executes message wrote (W2, a rollback before the controller
+	// restarts). OJ-21 removes it with the legacy path.
+	lanePolicy *opjournal.Policy
+	asJSON     bool
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 // unrecordableCause is why the request cannot be recorded: its reason, with
@@ -414,6 +430,13 @@ func (o *cliOp) start() cliOpStart {
 		Scope:        o.req.scope,
 	}
 	adm, err := rec.Admit(areq)
+	if err != nil && o.laneOpUnderKey(err) {
+		// The key names the API's lane op, recorded under the lane's policy,
+		// which a follow_up or interrupt_now records differently: it is this
+		// request when the request's digest under that policy is the op's.
+		areq.Policy = *req.lanePolicy
+		adm, err = rec.Admit(areq)
+	}
 	if err != nil {
 		switch o.apiOpState(err) {
 		case cliAPIOpOpen:
@@ -493,7 +516,7 @@ func (o *cliOp) requestKey() string {
 }
 
 // cliAPIOp is what the op behind a busy refusal is to a request that accepts
-// an open legacy:api op (acceptsAPIOp).
+// an open legacy:api op (acceptsAPIOp), or a lane op (lanePolicy).
 type cliAPIOp int
 
 const (
@@ -501,15 +524,16 @@ const (
 	// accepts no API op, or the op does not read or another executor holds
 	// it.
 	cliAPIOpNone cliAPIOp = iota
-	// cliAPIOpOpen is the API's acceptance of the request: it runs the op.
+	// cliAPIOpOpen is the API's acceptance of the request: it runs the op,
+	// or its lane host does.
 	cliAPIOpOpen
 	// cliAPIOpClosed is an op the API closed after Admit read it open.
 	cliAPIOpClosed
 )
 
 // apiOpState reads the op behind err, a busy refusal, for a request that
-// accepts an open legacy:api op (acceptsAPIOp), and keeps it as apiOp when
-// the API holds it open.
+// accepts an open legacy:api op (acceptsAPIOp), or a lane op (lanePolicy),
+// and keeps it as apiOp when it is open.
 func (o *cliOp) apiOpState(err error) cliAPIOp {
 	var busy *legacyop.BusyError
 	if !o.req.acceptsAPIOp || !errors.As(err, &busy) {
@@ -521,13 +545,27 @@ func (o *cliOp) apiOpState(err error) cliAPIOp {
 	}
 	op, gerr := st.Get(busy.ID)
 	switch {
-	case gerr != nil || op.Executor != opjournal.ExecutorLegacyAPI:
+	case gerr != nil || !o.apiExecutes(op):
 		return cliAPIOpNone
 	case op.Status == opjournal.StatusClosed:
 		return cliAPIOpClosed
 	}
 	o.apiOp = op
 	return cliAPIOpOpen
+}
+
+// apiExecutes reports whether op is the API's for this request: a legacy:api
+// op, or a lane op when the request accepts one (lanePolicy).
+func (o *cliOp) apiExecutes(op opjournal.Op) bool {
+	return op.Executor == opjournal.ExecutorLegacyAPI || op.Executor == opjournal.ExecutorLane && o.req.lanePolicy != nil
+}
+
+// laneOpUnderKey reports whether err refuses the request's key as naming
+// another request, that request a lane op, for a request that accepts the
+// API's lane op (lanePolicy).
+func (o *cliOp) laneOpUnderKey(err error) bool {
+	var reuse *opjournal.KeyReuseError
+	return o.req.acceptsAPIOp && o.req.lanePolicy != nil && errors.As(err, &reuse) && reuse.Existing.Executor == opjournal.ExecutorLane
 }
 
 // rescopeRestartedKill scopes a kill under a client key to the earlier kill

@@ -509,6 +509,50 @@ func TestDispositionHoldsDeliberately(t *testing.T) {
 	}
 }
 
+// TestDispositionConsumeHoldsNamesEveryBlockingHold: over every seed and
+// every cell the table moves one to, ConsumeHolds names a hold exactly when
+// BlocksConsume counts one, and it names each kind of hold with the instant
+// a timer ends. Kills a name list that misses a hold BlocksConsume counts (a
+// reason naming nothing) and one that names a hold it does not count (an
+// expired timer, an idle stop).
+func TestDispositionConsumeHoldsNamesEveryBlockingHold(t *testing.T) {
+	n := 0
+	for _, s := range dispSeeds() {
+		ds := []Disposition{s.d}
+		for _, e := range dispEvents() {
+			if to, err := s.d.Apply(e.by, e.ev, StateAsleep, dispT0); err == nil {
+				ds = append(ds, to)
+			}
+		}
+		for _, d := range ds {
+			if holds, blocks := d.ConsumeHolds(dispT0), d.BlocksConsume(dispT0); (len(holds) > 0) != blocks {
+				t.Errorf("%s -> %s: ConsumeHolds = %q, BlocksConsume = %v", s.name, d.render(), holds, blocks)
+			}
+			n++
+		}
+	}
+	if n <= len(dispSeeds()) {
+		t.Fatalf("%d dispositions checked; want the seeds and their moves", n)
+	}
+	future, past := dispT0.Add(time.Hour).Format(time.RFC3339), dispT0.Add(-time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		meta map[string]string
+		want []string
+	}{
+		{map[string]string{}, nil},
+		{map[string]string{"sleep_intent": string(SleepReasonUserHold), "held_until": future, "wait_hold": "true"}, []string{"a suspend", "an agent's wait"}},
+		{map[string]string{"state": string(StateSuspended)}, []string{"a suspend"}},
+		{map[string]string{"held_until": future}, []string{"an agent's heartbeat until " + future}},
+		{map[string]string{"quarantined_until": future, "wait_hold": "true"}, []string{"an agent's wait", "a quarantine until " + future}},
+		{map[string]string{"quarantined_until": "later"}, []string{"an unreadable hold timer"}},
+		{map[string]string{"held_until": past, "quarantined_until": past, "sleep_intent": string(sleepIntentIdleStopPending)}, nil},
+	} {
+		if got := DecodeDisposition(c.meta).ConsumeHolds(dispT0); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%v: ConsumeHolds = %q, want %q", c.meta, got, c.want)
+		}
+	}
+}
+
 // TestDispositionHeartbeatHeld: only a live held_until under no sleep intent
 // is a heartbeat's; a bare wait_hold beside it does not stop it.
 func TestDispositionHeartbeatHeld(t *testing.T) {

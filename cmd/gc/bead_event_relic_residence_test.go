@@ -45,7 +45,10 @@ func newRelicEventFixture(t *testing.T, cached bool) relicEventFixture {
 	if !ok {
 		t.Fatalf("class leaf %T has no foreign-id door", leaf)
 	}
-	root, err := creator.CreateWithForeignID(beads.Bead{ID: hq + "-901", Title: "Formula: mol-pre-cutover", Type: "molecule"})
+	// A migrated root is graph class (the migration copies only
+	// infrastructure classes), so it carries its wisp marker: the fixture now
+	// matches what the production migration puts in the binding.
+	root, err := creator.CreateWithForeignID(beads.Bead{ID: hq + "-901", Title: "Formula: mol-pre-cutover", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
 	if err != nil {
 		t.Fatal(err)
 	}

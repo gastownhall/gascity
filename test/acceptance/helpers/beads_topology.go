@@ -1,7 +1,9 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -345,8 +347,11 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("create provisioning workspace: %v", err)
 	}
-	cmd := e.provisionCommand(env, bdPath, workspace, prefix)
+	cmd, ctx := e.provisionCommand(t, env, bdPath, workspace, prefix)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("provision beads database %q on %s exceeded %s:\n%s", e.Database, e.Addr(), acceptanceToolCommandTimeout, out)
+		}
 		t.Fatalf("provision beads database %q on %s: %v\n%s", e.Database, e.Addr(), err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(workspace, ".beads", "metadata.json"))
@@ -372,14 +377,14 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 // shared-server mode (a user-level `dolt.shared-server: true`) ignores the
 // explicit --server-host/--server-port and starts the host-wide server under
 // ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
-func (e *ExternalDolt) provisionCommand(env *Env, bdPath, workspace, prefix string) *exec.Cmd {
-	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
+func (e *ExternalDolt) provisionCommand(t *testing.T, env *Env, bdPath, workspace, prefix string) (*exec.Cmd, context.Context) {
+	cmd, ctx := boundedToolCommand(t, acceptanceToolCommandTimeout, bdPath, "init", "--server",
 		"--server-host", e.Host, "--server-port", e.Port,
 		"--database", e.Database, "-p", prefix,
 		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
 	cmd.Dir = workspace
 	cmd.Env = env.Clone().With("BEADS_DIR", filepath.Join(workspace, ".beads")).ToolList()
-	return cmd
+	return cmd, ctx
 }
 
 // BeadsTopologies returns the matrix in the order AC-M lists it.
@@ -643,15 +648,25 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 	if bdPath == "" {
 		MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--proxied-server") {
-		MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
-	}
-	doltPath, err = exec.LookPath("dolt")
+	requireProxiedServerSupport(t, t, bdPath, acceptanceToolCommandTimeout)
+	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		MissingTooling(t, "dolt is not installed")
 	}
 	return bdPath, doltPath
+}
+
+func requireProxiedServerSupport(t *testing.T, report skipOrFailer, bdPath string, timeout time.Duration) {
+	t.Helper()
+	cmd, ctx := toolCommand(t, timeout, bdPath, "init", "--help")
+	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		report.Fatalf("bd at %s: init --help exceeded %s:\n%s", bdPath, timeout, out)
+		return
+	}
+	if err != nil || !strings.Contains(string(out), "--proxied-server") {
+		skipOrFail(report, EnvRequireTooling, fmt.Sprintf("bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath))
+	}
 }
 
 var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
@@ -751,6 +766,11 @@ func LegacyInitEnv(env *Env) *Env {
 // real Dolt-backed bd store instead of the file store, and this run's bd and
 // dolt ahead of any host copies but behind the hermetic provider doubles, which
 // must stay first.
+//
+// It keeps base's bd mode: on an Env that runs the real bd (NewEnv's default)
+// gc runs bdPath itself, ahead of the wrapper; on a wrapped Env
+// (WithWrappedBD, WithHostHome) gc finds the wrapper first. StartTopology's
+// shapes run the wrapper (topologyRunEnv).
 func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	t.Helper()
 	linkDir := filepath.Join(root, "bin")
@@ -762,11 +782,15 @@ func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	// baseline is the flag-off lane, and an operator running the matrix with
 	// GC_BEADS_PROXIED_NATIVE exported would otherwise measure the other lane
 	// against flag-off expectations and read the result as a regression.
-	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
+	env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
 		Without("GC_BEADS_BACKEND").
 		Without(EnvProxiedNative)
+	if env.RunsRealBD() {
+		env.WithRealBD(bdPath)
+	}
+	return env
 }
 
 // NativeLaneEnv is r's environment with the proxied-native flag on.
@@ -778,23 +802,36 @@ func (r *TopologyRun) NativeLaneEnv() *Env {
 	return r.Env.Clone().With(EnvProxiedNative, "1")
 }
 
-// StartTopology builds one shape: its root, its environment, its upstream if it
-// has one, and the `gc init` that brings the city up. It registers the cleanup
-// that proves nothing survived.
-func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath string) *TopologyRun {
+// topologyRunEnv is the environment one topology shape runs under: TopologyEnv
+// on the tool-home wrapper (WithWrappedBD), with the shape's own variables.
+//
+// Every shape is a single-store city, and the matrix's rig add recovers a
+// proved lost backend port only from the dolt logs the wrapper prints after a
+// failed bd init (RigAddRecovery): gc rig add removes the rig's new .beads on
+// the way out, and a real bd prints nothing. A shape that runs a split city
+// needs the real bd (WithRealBD), which gives that recovery up.
+func topologyRunEnv(t *testing.T, base *Env, root string, topo BeadsTopology, bdPath, doltPath string) *Env {
 	t.Helper()
-	root := TempDir(t)
-	env := TopologyEnv(t, base, root, bdPath, doltPath)
+	env := TopologyEnv(t, base, root, bdPath, doltPath).WithWrappedBD()
 	for k, v := range topo.Env {
 		env.With(k, v)
 	}
-
 	if topo.LegacyInit {
 		// The whole shape, not just the legacy init: every scope this shape
 		// creates goes through gc's bd pack against a gc-managed server, and
 		// `gc rig add` runs under the binary being tested. See LegacyInitEnv.
 		env = LegacyInitEnv(env)
 	}
+	return env
+}
+
+// StartTopology builds one shape: its root, its environment, its upstream if it
+// has one, and the `gc init` that brings the city up. It registers the cleanup
+// that proves nothing survived.
+func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath string) *TopologyRun {
+	t.Helper()
+	root := TempDir(t)
+	env := topologyRunEnv(t, base, root, topo, bdPath, doltPath)
 
 	run := &TopologyRun{Topology: topo, Env: env, Root: root}
 	if topo.LegacyInit {

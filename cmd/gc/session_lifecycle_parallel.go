@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -443,6 +444,8 @@ type startExecutionOptions struct {
 	// Zero or negative leaves prepare unbounded.
 	prepareBudget      time.Duration
 	readyAssignedFlags []bool
+	// parkedSeats are the pass's park verdicts (withParkedSeats).
+	parkedSeats parkedSeats
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -456,14 +459,20 @@ type startExecutionOptions struct {
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
 	// dispatchOptionSources are the reads a pool session launched before it
-	// claims needs to apply its trigger bead's opt_* pins: the trigger resolved
-	// through the city's residency contract (newWarmClaimTriggerResolver), and a
-	// claimed-work probe across every leg the session can claim from. The zero
-	// value reads the session store only.
+	// claims needs to apply its trigger bead's opt_* pins: the trigger read live
+	// from the work leg that owns it (legsTriggerResolver), and a claimed-work
+	// probe across every leg the session can claim from. The zero value reads the
+	// session store only.
 	dispatchOptionSources dispatchOptionSources
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
 	capacityGuard *endpointCapacityGuard
+	// deferralMemo records the never-started creates this run deferred at a
+	// start gate. Nil records nothing.
+	deferralMemo *startDeferralMemo
+	// deferralSeen is the never-started pending creates the run's planning
+	// snapshot contained. Nil publishes nothing to the memo.
+	deferralSeen map[string]struct{}
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -619,6 +628,16 @@ func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	}
 }
 
+// withParkedSeats hands the reconciler the pass's park verdicts (parkSeats),
+// decided by the caller over its whole assigned-work read and readiness: the
+// pool-free branch holds a parked seat instead of stranding it. Without it
+// the reconciler parks nothing.
+func withParkedSeats(parked parkedSeats) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.parkedSeats = parked
+	}
+}
+
 // withAssignedWorkStores installs the index-aligned snapshot stores for this
 // reconcile pass: the legs the census read each assignedWorkBeads row through.
 // The orphan-close tie-break releases a held claim through the leg that read it,
@@ -640,6 +659,9 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// admitted counts the starts handed out by start and not yet finished, for
+	// busy. It is read without mu, from the controller's tick.
+	admitted atomic.Int64
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -652,7 +674,20 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.admitted.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.admitted.Add(-1)
+			t.wg.Done()
+		})
+	}, true
+}
+
+// busy reports whether any start handed out by start (an async session start
+// or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
+func (t *asyncStartTracker) busy() bool {
+	return t != nil && t.admitted.Load() > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -1159,9 +1194,9 @@ func refreshConfiguredNamedStartCandidate(
 	// Fold the resolver's Info too, not just the params: the resolve may have
 	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
 	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
-	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
-	// pre-call Info here would hand the seat starting on the clearing tick the
-	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	// launch env from candidate.info via sessionDemandSpawnEnv. Keeping the
+	// pre-call Info here would mark the seat starting on the clearing tick
+	// demand-spawned for the stamp the clear just removed.
 	candidate.info = refreshedInfo
 	return candidate
 }
@@ -1272,7 +1307,7 @@ func buildPreparedStartWithTranscript(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver, dispatchSources.trigger); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
@@ -1412,18 +1447,7 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		agentCfg.PromptSuffix = ""
-		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
-		if agentCfg.Env != nil {
-			delete(agentCfg.Env, startupPromptDeliveredEnv)
-		}
-		if strings.TrimSpace(tp.Prompt) != "" {
-			if agentCfg.Env == nil {
-				agentCfg.Env = map[string]string{}
-			}
-			agentCfg.Env[startupPromptDeliveredEnv] = "1"
-		}
+		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
@@ -1480,8 +1504,8 @@ func buildPreparedStartWithTranscript(
 	if gcProvider := sessionpkg.ProviderFamilyFromInfo(candidate.info, ""); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
-	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
-		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	if demandEnv := sessionDemandSpawnEnv(candidate.info); len(demandEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, demandEnv)
 	}
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
@@ -1641,27 +1665,19 @@ func samePreparedWorkDirPath(a, b string) bool {
 	return samePath(a, b)
 }
 
-// sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
-// (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. The trigger key IS mutated on the start-prep path —
-// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
-// clears a stamp whose target is no longer workable (gascity#4373) — so
-// coherence here depends on that refresh folding its returned Info onto
-// candidate.info, not on the key being immutable.
-func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
-	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
-	if triggerBeadID == "" {
+// sessionDemandSpawnEnv is the launch env a row's trigger stamp contributes:
+// the presence-only marker GC_SPAWN_ORIGIN=demand when info carries a stamp,
+// otherwise nil. It never exports the trigger id or its store ref. The stamp
+// names the row the controller counted, not the bead the seat claims (the pool
+// is pull), and a shell's copy is frozen at exec while the stamp keeps moving,
+// so an id-shaped variable would be one ${…:-} away from closing a foreign
+// bead (gastownhall/gascity#5738). A seat names its own bead through
+// `gc hook current --id-only`.
+func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
+	if strings.TrimSpace(info.TriggerBeadID) == "" {
 		return nil
 	}
-	env := map[string]string{
-		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
-		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
-	}
-	if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-	}
-	return env
+	return map[string]string{"GC_SPAWN_ORIGIN": demandSpawnOriginValue}
 }
 
 // parseSessionTemplateOverridesForLaunch decodes the per-session template_overrides
@@ -1710,20 +1726,31 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
+// trigger, when non-nil, is the residency-correct by-id reader the start path
+// reads trigger beads through (withTriggerBeadResolver). store is the SESSIONS
+// store: on a split city the trigger's drain source is a work bead on the work
+// ledger, and the item step and its root are graph rows, so only the resolver
+// reaches all three. Without one, store answers, as it always has on a
+// single-store city.
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
+	trigger warmClaimTriggerResolver,
 ) string {
 	// Prepared drain items only: the item step's copied metadata can still name
 	// the launcher checkout before prepare-worktree runs. Deliberately NOT the
 	// full resolveTaskBeadWorkDir chain — that would put the trigger bead ahead
 	// of the snapshot resolver for every pool session.
-	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && store != nil {
-		if trigger, err := store.Get(triggerID); err == nil {
-			if workDir := resolveDrainSourceWorkDir(cityPath, store, trigger); workDir != "" {
+	get := trigger
+	if get == nil && store != nil {
+		get = store.Get
+	}
+	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && get != nil {
+		if bead, err := get(triggerID); err == nil {
+			if workDir := resolveDrainSourceWorkDirWith(cityPath, get, bead); workDir != "" {
 				return workDir
 			}
 		}
@@ -2009,6 +2036,11 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2727,7 +2759,7 @@ func startPreparedStartCandidate(
 				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil
@@ -2847,17 +2879,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -2878,12 +2904,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
@@ -3091,7 +3117,9 @@ func confirmPendingStart(currentState string) bool {
 // the post-create demand floor (poolSessionWithinPostCreateProtection) for a
 // fresh pool worker — the first-run "orphaned" drain of a worker that had just
 // claimed its step. Both commit paths share this one predicate so they cannot
-// drift apart again.
+// drift apart again. The recovery commit also confirms an active row: there
+// it is the claimed residue of a commit that stopped part way, which heal
+// leaves active.
 //
 // It deliberately does NOT drive StartsAwakeInterval: re-confirming an
 // already-awake runtime must not reset its in-flight awake interval, so that
@@ -3760,8 +3788,12 @@ func recoverRunningPendingCreate(
 		// snapshot (Info.MetadataState is the raw state metadata verbatim, so the
 		// confirmPendingStart / StateAwake / sleep_reason checks are byte-identical
 		// to the former raw session.Metadata reads) — the two transitional W6
-		// lockstep mirrors that kept this raw read coherent are gone.
-		ConfirmState:     confirmStartCommitState(info.MetadataState),
+		// lockstep mirrors that kept this raw read coherent are gone. An active
+		// row is confirmed too: heal leaves the claimed residue of a commit that
+		// stopped part way active (healStatePatchWithRollbackInfo), and that
+		// commit may not have landed the state_reason the post-create demand
+		// floor reads.
+		ConfirmState:     confirmStartCommitState(info.MetadataState) || sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateActive,
 		ClearSleepReason: info.SleepReason != "",
 		// recoverRunningPendingCreate's caller (session_reconciler.go)
 		// already gates entry on shouldRollbackPendingCreateInfo(info), so
@@ -3881,10 +3913,10 @@ const (
 	// pendingCreateRuntimeForeign: the runtime is not this create's. It
 	// positively carries another session's ID or another incarnation's token,
 	// carries no attribution at all, or is gone (runtime.ErrSessionNotFound).
-	// No attribution is evidence of another owner only on a runtime that
-	// stamps identity before the name is visible (identityReadable); a close
-	// that frees the name of a row owning it tears such a runtime down first
-	// (releaseRowOwnedRuntime).
+	// No attribution is evidence of another owner only on a runtime whose
+	// GetMeta reads identity stamped before the name is visible
+	// (metaIdentityReadable); a close that frees the name of a row owning it
+	// tears such a runtime down first (releaseRowOwnedRuntime).
 	pendingCreateRuntimeForeign
 	// pendingCreateRuntimeUnknown: an identity read failed, and the keys that
 	// could be read do not decide the answer without it.
@@ -4233,7 +4265,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return
@@ -4343,15 +4375,18 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // name holds the row open for a later tick. A manual row whose name a
 // composite cannot route yet is held without taking the flock.
 //
-// For a manual row it decides again under the flock: info is the tick's
-// snapshot, and a start that committed the row (or a writer that closed or
-// re-woke it) after the snapshot and before the flock was free would have its
-// box stopped by a decision made from the older read. So it re-reads the row
-// from store and tears down only while the fresh row still matches the
-// snapshot (manualTeardownSnapshotCurrent); otherwise it holds without a stop,
-// and the next tick decides from a fresh snapshot. A read does not bump the
-// row's revision. The identity reads and the post-stop confirmation are held
-// to postStartObservationBound each, so a wedged backend costs a tick at most
+// It decides again under the flock: info is the tick's snapshot, and a start
+// that committed the row (or a writer that closed or re-woke it) after the
+// snapshot and before the flock was free would have its box stopped by a
+// decision made from the older read (#7751). So it re-reads the row from store
+// and tears down only while the fresh row still matches the snapshot
+// (teardownSnapshotCurrent); otherwise it holds without a stop, logs the hold
+// as row_moved_on, and the next tick decides from a fresh snapshot. A
+// bead-scoped pool row that has closed is still torn down: its name embeds
+// its bead ID, so no successor starts under it and nothing else addresses a
+// box left there (ga-vcjr9). A read does not bump the row's revision. The
+// identity reads and the post-stop confirmation are held to
+// postStartObservationBound each, so a wedged backend costs a tick at most
 // one unbounded Stop per held row; a read that does not answer in time holds.
 func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
 	if sp == nil {
@@ -4383,27 +4418,31 @@ func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessi
 		return false
 	}
 	defer release()
-	if !pool && store != nil {
+	if store != nil {
 		b, err := store.Get(info.ID)
 		if err != nil {
 			hold("row_reread_failed.pending_create_teardown", fmt.Sprintf(
 				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
 			return false
 		}
-		if !manualTeardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+		fresh := sessionInfoFromBead(b)
+		closedPoolRow := pool && fresh.Closed
+		if !closedPoolRow && !teardownSnapshotCurrent(info, fresh) {
+			hold("row_moved_on.pending_create_teardown", fmt.Sprintf(
+				"session reconciler: not tearing down runtime %q: pending create %s changed since this tick read it", name, info.ID))
 			return false
 		}
 	}
 	return releaseRowOwnedRuntime(info, sp, stderr, hold, boundedRowRuntimeProbes(cityPath))
 }
 
-// manualTeardownSnapshotCurrent reports whether fresh, the row re-read under
-// its name's flock, is still the incarnation snapshot was decided from: open,
+// teardownSnapshotCurrent reports whether fresh, the row re-read under its
+// name's flock, is still the incarnation snapshot was decided from: open,
 // not active, with the same instance token, generation, last_woke_at and
 // claim. A commit (state active, claim cleared), a close or a re-wake changes
 // one of them. Other state changes are not compared: heal can project an
 // advisory awake onto a pending create (PendingCreateLease.CanRollback).
-func manualTeardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
+func teardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
 	return !fresh.Closed &&
 		sessionpkg.State(strings.TrimSpace(fresh.MetadataState)) != sessionpkg.StateActive &&
 		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(snapshot.InstanceToken) &&
@@ -4462,12 +4501,16 @@ func (p *rowRuntimeProbes) confirmStopped(name string, sp runtime.Provider) erro
 //
 // It applies to a manual session (session_origin=manual or the legacy manual
 // marker) that is not a configured named session and has a session name,
-// served by a runtime that cannot vouch for identity (identityReadable). Only
-// tmux, acp and subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN before
-// the name is visible, so there a runtime carrying neither is another owner's.
-// Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the row's own start can
-// list a box before its identity reads, or never stamp one, so a box with no
-// identity under a name reserved to this row is most likely the row's own.
+// served by a runtime that cannot vouch for identity through GetMeta, which
+// is how the rollback reads it (metaIdentityReadable). Only tmux, acp and
+// subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN where GetMeta reads
+// them before the name is visible, so there a runtime carrying neither is
+// another owner's. Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the
+// row's own start can list a box before its identity reads, or never stamp
+// one, so a box with no identity under a name reserved to this row is most
+// likely the row's own. That holds for a v2-ready exec pack too: its
+// `observe` reports the identity its box was started with, but its
+// `get-meta` need not.
 // The pending-create rollback reads such a box as foreign
 // (pendingCreateIdentity.attribution) and frees the name without a stop; a
 // configured or pool row re-targets the same name and finds the box again,
@@ -4486,12 +4529,12 @@ func manualRowTearsDownUnattributedRuntime(info sessionpkg.Info, sp runtime.Prov
 	}
 	leaf, _, known := runtime.ResolveBackend(sp, name)
 	if known {
-		return leaf != nil && !identityReadable(leaf), true
+		return leaf != nil && !metaIdentityReadable(leaf), true
 	}
 	// A composite that cannot route the name yet may serve it from any of
 	// its leaves; only a leaf that cannot vouch for identity needs the route.
 	for _, l := range inventoryLeaves(sp, "") {
-		if !identityReadable(l.provider) {
+		if !metaIdentityReadable(l.provider) {
 			return true, false
 		}
 	}
@@ -4762,10 +4805,21 @@ func executePlannedStartsTraced(
 	trace *sessionReconcilerTraceCycle,
 	options ...startExecutionOption,
 ) int {
-	if len(candidates) == 0 {
+	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
-	if ctx != nil && ctx.Err() != nil {
+	startOpts := startExecutionOptions{}
+	for _, apply := range options {
+		if apply != nil {
+			apply(&startOpts)
+		}
+	}
+	// The run's start-gate deferrals publish when it ends, unless its context
+	// was canceled: a canceled run did not offer every candidate a start. A run
+	// with no candidates still publishes, so the memo drops a drained backlog.
+	deferrals := startOpts.deferralMemo.beginPass(startOpts.deferralSeen)
+	defer deferrals.finish(ctx)
+	if len(candidates) == 0 {
 		return 0
 	}
 	// Session front door constructed once from the same store and threaded to
@@ -4775,12 +4829,6 @@ func executePlannedStartsTraced(
 	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
-	}
-	startOpts := startExecutionOptions{}
-	for _, apply := range options {
-		if apply != nil {
-			apply(&startOpts)
-		}
 	}
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
 	sessionStaleKeyDetectionWaiter := startOpts.sessionStaleKeyDetectionWaiter
@@ -4850,6 +4898,7 @@ func executePlannedStartsTraced(
 		if wakeCount >= maxWakes {
 			for _, candidate := range waveCandidates {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+				deferrals.noteGateDeferred(candidate.info.ID)
 			}
 			continue
 		}
@@ -4878,6 +4927,7 @@ func executePlannedStartsTraced(
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+					deferrals.noteGateDeferred(candidate.info.ID)
 				}
 				break
 			}
@@ -4907,6 +4957,7 @@ func executePlannedStartsTraced(
 				// A planner call that has spent its prepare budget defers the
 				// rest before any slot, lease, ticket, breaker accounting or write.
 				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
+					deferrals.noteGateDeferred(candidate.info.ID)
 					continue
 				}
 				var release func()
@@ -4924,6 +4975,7 @@ func executePlannedStartsTraced(
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
+						deferrals.noteStartOutcome(outcome, candidate.info.ID)
 						continue
 					}
 				}
