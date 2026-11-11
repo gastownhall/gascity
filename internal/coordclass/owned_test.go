@@ -25,6 +25,8 @@ func TestControllerOwned(t *testing.T) {
 		{"startup-health episode", beads.Bead{Type: "startup-health-episode"}, true},
 		{"'STARTUP-HEALTH-EPISODE '", beads.Bead{Type: "STARTUP-HEALTH-EPISODE "}, true},
 		{"convergence", beads.Bead{Type: "Convergence"}, true},
+		{"worktree drift tracking record", beads.Bead{Type: "worktree_drift"}, true},
+		{"' WORKTREE_DRIFT '", beads.Bead{Type: " WORKTREE_DRIFT "}, true},
 		{"op row", beads.Bead{Type: "op", Labels: []string{"gc:op", "gc:op-conv:gc-7"}}, true},
 		{"fact row", beads.Bead{Type: "op", Status: "closed", Labels: []string{"gc:fact", "gc:fact-conv:gc-7"}}, true},
 		{"' OP '", beads.Bead{Type: " OP "}, true},

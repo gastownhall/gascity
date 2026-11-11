@@ -838,7 +838,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true, "convergence": true,
 		"step": true, "startup-health-episode": true,
-		"op": true,
+		"op": true, "worktree_drift": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {
