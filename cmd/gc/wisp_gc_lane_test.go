@@ -204,3 +204,72 @@ func TestWispGCLane_PrefixesEachJoinedErrorLine(t *testing.T) {
 		}
 	}
 }
+
+// notDueWispGC is a tracker whose interval has not elapsed.
+type notDueWispGC struct{ runs *atomic.Int32 }
+
+func (n notDueWispGC) shouldRun(time.Time) bool { return false }
+
+func (n notDueWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	n.runs.Add(1)
+	return 0, nil
+}
+
+// Kills: a purge on a pass that must decline. Each case is one lane pass that
+// starts no purge and does not count toward the lane's pacing.
+func TestWispGCLane_DeclinesWithoutPurge(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(cr *CityRuntime, runs *atomic.Int32)
+		ctx   func() context.Context
+		wake  bool
+	}{
+		{name: "canceled", wake: true, ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+		{name: "disabled", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.wg = nil }},
+		{name: "not-due", wake: true, setup: func(cr *CityRuntime, runs *atomic.Int32) { cr.wg = notDueWispGC{runs: runs} }},
+		{name: "city-quiescent", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.beadsQuiescent.Store(true) }},
+		{name: "no-graph-store", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.standaloneCityStore = nil }},
+		{name: "timer-only", wake: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var runs atomic.Int32
+			cr, _, _ := newWispGCLaneRuntime(t, countingWispGC{runs: &runs})
+			if tc.setup != nil {
+				tc.setup(cr, &runs)
+			}
+			ctx := context.Background()
+			if tc.ctx != nil {
+				ctx = tc.ctx()
+			}
+			ran := false
+			cr.runWispGCLanePass(ctx, tc.wake, &ran)
+			if got := runs.Load(); got != 0 || ran {
+				t.Fatalf("purges = %d, ran = %v; want no purge", got, ran)
+			}
+		})
+	}
+}
+
+// Kills: one purge per queued wake. Wakes that land before the lane delivers
+// one join it, and the pass that takes it purges once.
+func TestWispGCLane_RunsAtMostOnePurgePerWake(t *testing.T) {
+	wg := newBlockingWispGC()
+	cr, _, _ := newWispGCLaneRuntime(t, wg)
+	lane := cr.wispGCLaneOf()
+	for range 3 {
+		lane.wake()
+	}
+
+	stop := cr.startWispGCLane(context.Background())
+	wg.awaitPurgeStart(t)
+	close(wg.release)
+	stop()
+
+	if got := wg.runs.Load(); got != 1 {
+		t.Fatalf("purges = %d, want 1 for the coalesced wakes", got)
+	}
+}
