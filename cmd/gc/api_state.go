@@ -2730,6 +2730,7 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // clone narrow that window; they do not close it. Closing it needs an os.Root
 // backed fsys.FS and a post-clone containment re-verification. The destructive
 // path, TeardownPartialRig, is closed: its removal runs through an os.Root.
+//
 // The two passes are separate functions so each can be pinned on its own: a
 // test that only ever calls assertRigPathWithinCity cannot tell which pass
 // rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
@@ -3136,14 +3137,20 @@ var rigDirRemoveHook = func() {}
 
 // removeRigDirConfined removes createdDir through an os.Root anchored at the city
 // root, so no path component is re-resolved by the kernel outside the root: an
-// ancestor swapped for a symlink after assertRigPathWithinCity ran is refused
-// instead of followed. A missing target is a no-op (matching os.RemoveAll), and
-// the city root itself is never removable. Both paths are normalized first
-// because CreatedDir is stored symlink-resolved while cityPath may be the raw
-// linked path.
+// ancestor swapped for a symlink that escapes the city after
+// assertRigPathWithinCity ran is refused instead of followed. An ancestor that is
+// a symlink to another directory inside the city is followed, by this removal and
+// by the os.RemoveAll it replaced alike; the root confines, it does not forbid
+// links. The rig dir's own final component is never followed: a link there is
+// unlinked and its target is left alone, as os.RemoveAll did. A missing target is
+// a no-op (matching os.RemoveAll), and the city root itself is never removable.
+// Both paths are normalized first because CreatedDir is stored symlink-resolved
+// while cityPath may be the raw linked path; only the parent of createdDir is
+// resolved, so the final component keeps its own identity.
 func removeRigDirConfined(cityPath, createdDir string) error {
 	city := pathutil.NormalizePathForCompare(cityPath)
-	rel, err := filepath.Rel(city, pathutil.NormalizePathForCompare(createdDir))
+	created := filepath.Clean(createdDir)
+	rel, err := filepath.Rel(city, filepath.Join(pathutil.NormalizePathForCompare(filepath.Dir(created)), filepath.Base(created)))
 	if err != nil {
 		return fmt.Errorf("%w: rig path %s is not under the city root: %w", configedit.ErrValidation, createdDir, err)
 	}
@@ -3158,6 +3165,7 @@ func removeRigDirConfined(cityPath, createdDir string) error {
 		return fmt.Errorf("opening city root %s: %w", city, err)
 	}
 	defer root.Close() //nolint:errcheck // read-only handle; nothing to flush
+	rigDirRemoveHook()
 	if err := root.RemoveAll(rel); err != nil {
 		return fmt.Errorf("removing %s under %s: %w", rel, city, err)
 	}
