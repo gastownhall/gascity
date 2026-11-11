@@ -36,6 +36,7 @@ go_test(
         "//internal/runtime/acp:bazel_go_test_srcs",
         "//internal/runtime/auto:bazel_go_test_srcs",
         "//internal/runtime/exec:bazel_go_test_srcs",
+        "//internal/runtime/hybrid:bazel_go_test_srcs",
         "//internal/runtime/ssh:bazel_go_test_srcs",
         "//internal/runtime/subprocess:bazel_go_test_srcs",
         "//internal/runtime/tmux:bazel_go_test_srcs",
