@@ -58,6 +58,10 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
+//   - copilot: exact session_key plus matching workdir through the existing
+//     Copilot keyed finder. No key or keyed miss records nothing; there is no
+//     workdir-only fallback. The shared bounded cursor scan reads usage records,
+//     and pricing comes only from the registry, never Copilot's multiplier.
 //   - opencode: the session's own export, mirrored under the OpenCode
 //     transcript root as <session_key>.json. Resolved by that key alone via
 //     sessionlog.FindOpenCodeSessionFileByID; a keyed miss (or no key yet)
@@ -323,6 +327,10 @@ const codexInvocationDiscoveryWindow = 10 * time.Minute
 // by invocation telemetry. Families absent from this map are skipped before
 // any transcript discovery runs.
 var invocationUsageSpecs = map[string]invocationUsageSpec{
+	"copilot": {
+		discover: discoverCopilotInvocationTranscript,
+		extract:  SessionLogAdapter.CopilotTailUsage,
+	},
 	"claude": {
 		discover: discoverInvocationTranscriptViaManager,
 		extract:  SessionLogAdapter.TailUsage,
@@ -346,6 +354,8 @@ func invocationUsageFamily(provider string) string {
 		return "claude"
 	}
 	switch sessionlog.ProviderFamily(provider) {
+	case "copilot":
+		return "copilot"
 	case "codex":
 		return "codex"
 	case "opencode":
@@ -933,6 +943,10 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
 		return scanPath, scanClean, true
+	case "copilot":
+		// Captured identity only: never the manager's workdir-only fallback.
+		return sessionlog.FindCopilotSessionFileByID(f.searchPaths,
+			contract.WorkerDirFromMetadata(meta), strings.TrimSpace(meta["session_key"])), true, false
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
 		// named for the session_key, and the manager's workdir fallback could
@@ -960,7 +974,7 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 }
 
 // discoverClosedIntervalTranscript is discoverSweepTranscript for the interval
-// a session close ended. Codex and opencode already resolve from meta. Claude
+// a session close ended. Codex, Copilot and OpenCode resolve from meta. Claude
 // resolves by meta's session_key alone: the manager's lookup reads the row's
 // current key, which a reopen's fresh wake replaces, and on a keyed miss it
 // lists the session history of the work dir, a read a closed interval would
@@ -1011,4 +1025,11 @@ func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notA
 		notBefore = started
 	}
 	return notBefore, sessionpkg.UsageIntervalEnd(meta, notBefore, now)
+}
+
+// discoverCopilotInvocationTranscript resolves only the captured provider key.
+// No key or keyed miss means no attribution, even in a shared working directory.
+func discoverCopilotInvocationTranscript(h *SessionHandle, _ string, _ time.Time, meta map[string]string) string {
+	return sessionlog.FindCopilotSessionFileByID(h.adapter.SearchPaths,
+		contract.WorkerDirFromMetadata(meta), strings.TrimSpace(meta["session_key"]))
 }

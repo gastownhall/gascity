@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -394,6 +395,53 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, Persi
 		}
 	}
 	return false, nil
+}
+
+// CaptureCopilotSessionKey binds a Copilot hook's exact provider key to the
+// current managed incarnation. Every predicate is checked on the same fresh
+// row that UpdateRowFenced conditionally updates; a lost CAS rechecks them.
+// A matching resume is a no-op. Stale, conflicting, incomplete or unfenceable
+// captures return an error without changing the key. Errors never carry tokens.
+func (s *Store) CaptureCopilotSessionKey(id, name, generation, instanceToken, key string) (bool, error) {
+	epoch, err := strconv.ParseInt(generation, 10, 64)
+	if err != nil || epoch <= 0 || name == "" || instanceToken == "" || key == "" || key == id || strings.Contains(key, "..") || strings.ContainsAny(key, `/\\`) {
+		return false, fmt.Errorf("capturing Copilot session %q: incomplete hook identity", id)
+	}
+	var rejection error
+	matched := false
+	written, err := s.UpdateRowFenced(id, 5, func(info Info, _ PersistedResponse) (RowPatch, bool) {
+		matched = false
+		rejection = fmt.Errorf("capturing Copilot session %q: hook identity is not current", id)
+		if info.Closed || info.SessionNameMetadata != name || ProviderFamilyFromInfo(info, "") != "copilot" || info.Generation != generation || info.InstanceToken != instanceToken {
+			return RowPatch{}, false
+		}
+		switch State(info.MetadataState) {
+		case StateActive, StateAwake, StateCreating, StateStartPending:
+		default:
+			return RowPatch{}, false
+		}
+		if info.SessionKey != "" {
+			if info.SessionKey == key {
+				matched = true
+				rejection = nil
+			} else {
+				rejection = fmt.Errorf("capturing Copilot session %q: provider key already bound", id)
+			}
+			return RowPatch{}, false
+		}
+		rejection = nil
+		return RowPatch{Metadata: MetadataPatch{"session_key": key}}, true
+	})
+	if err != nil {
+		return false, err
+	}
+	if rejection != nil {
+		return false, rejection
+	}
+	if !written && !matched {
+		return false, fmt.Errorf("capturing Copilot session %q: conditional write contended", id)
+	}
+	return written, nil
 }
 
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the

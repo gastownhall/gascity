@@ -329,3 +329,156 @@ func TestUpdateRowFencedRepairsTypeInTheCAS(t *testing.T) {
 		})
 	}
 }
+
+// Copilot capture is an identity command, not an unfenced marker write.
+func TestCaptureCopilotSessionKeyLifecycle(t *testing.T) {
+	for _, backend := range rowFenceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store, backing := backend.open(t)
+			b := seedRowFenceSession(t, backing, "copilot-seat")
+			if err := backing.SetMetadataBatch(b.ID, map[string]string{"provider_kind": "copilot", "session_name": "copilot-seat", "generation": "2", "instance_token": "fixture-token"}); err != nil {
+				t.Fatal(err)
+			}
+			front := NewStore(beads.SessionStore{Store: store})
+			capture := func(key string) (bool, error) {
+				return front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", key)
+			}
+			if wrote, err := capture("provider-a"); err != nil || !wrote {
+				t.Fatalf("startup = (%v,%v)", wrote, err)
+			}
+			if wrote, err := capture("provider-a"); err != nil || wrote {
+				t.Fatalf("resume = (%v,%v)", wrote, err)
+			}
+			if wrote, err := capture("provider-b"); err == nil || wrote {
+				t.Fatalf("conflict = (%v,%v)", wrote, err)
+			}
+			if err := backing.SetMetadataBatch(b.ID, map[string]string{"generation": "3", "instance_token": "fresh-token", "session_key": ""}); err != nil {
+				t.Fatal(err)
+			}
+			if wrote, err := capture("provider-a"); err == nil || wrote {
+				t.Fatalf("stale capture = (%v,%v)", wrote, err)
+			}
+			front = NewStore(beads.SessionStore{Store: backing})
+			if wrote, err := front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "3", "fresh-token", "provider-b"); err != nil || !wrote {
+				t.Fatalf("fresh restart = (%v,%v)", wrote, err)
+			}
+		})
+	}
+}
+
+func TestCaptureCopilotSessionKeyRejectsUnprovenIdentity(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{"name", "session_name", "another-seat"}, {"provider", "provider_kind", "codex"},
+		{"state", "state", "suspended"}, {"closed", "__status", "closed"},
+		{"generation", "generation", "3"}, {"zero-generation", "generation", "0"},
+		{"token", "instance_token", "other-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := rowFenceBackends()[0].open(t)
+			meta := map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}
+			status := "open"
+			if tc.key == "__status" {
+				status = tc.value
+			} else {
+				meta[tc.key] = tc.value
+			}
+			b, err := store.Create(sessionBeadFixture("copilot-seat", status, meta))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status == "closed" {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			front := NewStore(beads.SessionStore{Store: store})
+			wrote, err := front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a")
+			if err == nil || wrote {
+				t.Fatalf("capture = (%v,%v)", wrote, err)
+			}
+			got, _ := store.Get(b.ID)
+			if got.Metadata["session_key"] != "" {
+				t.Fatal("rejected capture wrote a key")
+			}
+		})
+	}
+	for _, generation := range []string{"", "0", "-1", "bad"} {
+		store, _ := rowFenceBackends()[0].open(t)
+		if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotSessionKey("absent", "copilot-seat", generation, "fixture-token", "provider-a"); err == nil || wrote {
+			t.Fatalf("invalid epoch %q = (%v,%v)", generation, wrote, err)
+		}
+	}
+	// Even an ordinary store with conditional writes off must never write blind.
+	mem := beads.NewMemStore()
+	b, err := mem.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrote, err := NewStore(beads.SessionStore{Store: mem}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a")
+	if wrote || !beads.IsConditionalWriteUnsupported(err) {
+		t.Fatalf("unfenced backend = (%v,%v)", wrote, err)
+	}
+}
+
+type copilotCaptureInterleaving struct {
+	*rowWriteRecorder
+	before func()
+}
+
+func (s *copilotCaptureInterleaving) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if s.before != nil {
+		fn := s.before
+		s.before = nil
+		fn()
+	}
+	return s.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
+}
+
+func TestCaptureCopilotSessionKeyLostCAS(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "competing-first-capture", true: "fresh-restart"}[restart], func(t *testing.T) {
+			raw, _ := rowFenceBackends()[0].open(t)
+			b, err := raw.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			interleaved := &copilotCaptureInterleaving{rowWriteRecorder: &rowWriteRecorder{Store: raw}}
+			interleaved.before = func() {
+				patch := map[string]string{"session_key": "winner"}
+				if restart {
+					patch = map[string]string{"session_key": "", "generation": "3", "instance_token": "fresh-token"}
+				}
+				if err := raw.SetMetadataBatch(b.ID, patch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wrote, err := NewStore(beads.SessionStore{Store: interleaved}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "loser")
+			if wrote || err == nil {
+				t.Fatalf("lost CAS = (%v,%v)", wrote, err)
+			}
+			got, _ := raw.Get(b.ID)
+			want := "winner"
+			if restart {
+				want = ""
+			}
+			if got.Metadata["session_key"] != want {
+				t.Fatal("stale capture replaced the current key")
+			}
+		})
+	}
+}
+
+func TestCaptureCopilotSessionKeyPermittedStates(t *testing.T) {
+	for _, state := range []State{StateActive, StateAwake, StateCreating, StateStartPending} {
+		t.Run(string(state), func(t *testing.T) {
+			store, _ := rowFenceBackends()[0].open(t)
+			b, err := store.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": string(state), "generation": "2", "instance_token": "fixture-token"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a"); err != nil || !wrote {
+				t.Fatalf("capture = %v,%v", wrote, err)
+			}
+		})
+	}
+}

@@ -49,10 +49,11 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	Source         string `json:"source"`
-	SessionID      string `json:"session_id"`
-	ConversationID string `json:"conversation_id"`
-	HookEventName  string `json:"hook_event_name"`
+	Source           string `json:"source"`
+	SessionID        string `json:"session_id"`
+	CopilotSessionID string `json:"sessionId"`
+	ConversationID   string `json:"conversation_id"`
+	HookEventName    string `json:"hook_event_name"`
 }
 
 type primeHookContext struct {
@@ -814,6 +815,13 @@ func readPrimeHookContext() primeHookContext {
 		if providerSessionID == "" {
 			providerSessionID = strings.TrimSpace(input.ConversationID)
 		}
+		if copilotID := strings.TrimSpace(input.CopilotSessionID); copilotID != "" {
+			// Conflicting aliases cannot establish one authoritative provider key.
+			if providerSessionID != "" && providerSessionID != copilotID {
+				return ctx
+			}
+			providerSessionID = copilotID
+		}
 		if providerSessionID != "" {
 			ctx.ProviderSessionID = providerSessionID
 		}
@@ -942,6 +950,22 @@ func persistPrimeHookProviderSessionKeyAtCity(hookProviderSessionID, cityPath st
 		// The front-door Get already wraps with `loading session %q`, carrying the
 		// id — don't re-prefix (that would double-wrap the stderr).
 		warn("%v", err)
+		return
+	}
+	if sessionProviderFamily(info) == "copilot" {
+		// Copilot's SessionStart payload owns this ID, not generic provider env.
+		// The stock overlay supplies the event name missing from that payload.
+		if strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME")) != "SessionStart" {
+			warn("Copilot capture requires the managed SessionStart hook")
+			return
+		}
+		_, err := sessFront.CaptureCopilotSessionKey(gcSessionID,
+			strings.TrimSpace(os.Getenv("GC_SESSION_NAME")),
+			strings.TrimSpace(os.Getenv("GC_RUNTIME_EPOCH")),
+			os.Getenv("GC_INSTANCE_TOKEN"), strings.TrimSpace(hookProviderSessionID))
+		if err != nil {
+			warn("%v", err)
+		}
 		return
 	}
 	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) {

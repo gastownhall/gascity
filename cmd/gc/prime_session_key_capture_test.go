@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -337,5 +340,91 @@ func TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow(t *testing.T) {
 	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
 	if got := reloadSessionKey(t, cityDir, id); got != claudeSessionID {
 		t.Fatalf("session_key = %q, want the hook's id %q; stderr=%s", got, claudeSessionID, stderr.String())
+	}
+}
+
+func TestReadPrimeHookContextCopilotSessionID(t *testing.T) {
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	setPrimeHookStdinJSON(t, map[string]string{"sessionId": "copilot-session", "source": "startup"})
+	ctx := readPrimeHookContext()
+	if ctx.ProviderSessionID != "copilot-session" || !primeHookSessionStart(ctx) {
+		t.Fatalf("Copilot context = %#v", ctx)
+	}
+}
+
+func TestPersistPrimeHookCopilotIncarnation(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_CITY", cityDir)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"file\"\nconditional_writes = \"auto\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolateProviderSessionEnv(t)
+	id := createCaptureSessionBead(t, store, "copilot")
+	if err := store.SetMetadataBatch(id, map[string]string{"session_name": "copilot-seat", "state": "creating", "generation": "2", "instance_token": "fixture-token"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_SESSION_ID", id)
+	t.Setenv("GC_SESSION_NAME", "copilot-seat")
+	t.Setenv("GC_RUNTIME_EPOCH", "2")
+	t.Setenv("GC_INSTANCE_TOKEN", "fixture-token")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	// A generic inherited provider id cannot replace the Copilot hook's id.
+	t.Setenv("GC_PROVIDER_SESSION_ID", "unrelated-provider-key")
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("copilot-session", cityDir, &stderr)
+	if got := reloadSessionKey(t, cityDir, id); got != "copilot-session" {
+		t.Fatalf("captured %q; stderr=%s", got, stderr.String())
+	}
+	persistPrimeHookProviderSessionKeyAtCity("conflicting-session", cityDir, &stderr)
+	if got := reloadSessionKey(t, cityDir, id); got != "copilot-session" {
+		t.Fatalf("replaced key: %q", got)
+	}
+}
+
+func TestPrimeHookCopilotRelocatedSessionStore(t *testing.T) {
+	cityDir, work := primeCaptureTestStore(t)
+	binding := beads.NewMemStore()
+	if err := beads.StampOpenedStore(binding, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedSplitRoutes(t, cityDir, binding)
+	id := createCaptureSessionBead(t, binding, "copilot")
+	if err := binding.SetMetadataBatch(id, map[string]string{"session_name": "copilot-seat", "state": "active", "generation": "2", "instance_token": "fixture-token"}); err != nil {
+		t.Fatal(err)
+	}
+	isolateProviderSessionEnv(t)
+	for k, v := range map[string]string{"GC_SESSION_ID": id, "GC_SESSION_NAME": "copilot-seat", "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "fixture-token", "GC_HOOK_EVENT_NAME": "SessionStart"} {
+		t.Setenv(k, v)
+	}
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("copilot-session", cityDir, &stderr)
+	got, err := binding.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["session_key"] != "copilot-session" {
+		t.Fatalf("relocated capture = %q; stderr=%s", got.Metadata["session_key"], stderr.String())
+	}
+	if _, err := work.Get(id); err == nil {
+		t.Fatal("capture created a work-store copy")
+	}
+}
+
+func TestReadPrimeHookContextConflictingCopilotAliases(t *testing.T) {
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	setPrimeHookStdinJSON(t, map[string]string{"sessionId": "one", "session_id": "another"})
+	if ctx := readPrimeHookContext(); ctx.ProviderSessionID != "" {
+		t.Fatal("conflicting provider keys accepted")
 	}
 }

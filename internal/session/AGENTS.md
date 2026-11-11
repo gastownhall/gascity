@@ -170,3 +170,10 @@ clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
 resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
+
+## Copilot provider-key capture
+
+The stock Copilot SessionStart hook reaches `Store.CaptureCopilotSessionKey`
+through the session-class front door. Keep the exact runtime incarnation and
+empty-key checks inside `UpdateRowFenced`; never replace them with a marker
+write or a work-directory lookup. See `SESSION-ID-COPILOT-KEY`.

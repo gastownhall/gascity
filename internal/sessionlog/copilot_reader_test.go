@@ -324,3 +324,46 @@ func assertJSONHasInt(t *testing.T, raw json.RawMessage, key string, want int) {
 		t.Fatalf("field %q = %d, want %d in %s", key, got, want, raw)
 	}
 }
+
+// The fixture shape comes from gastownhall/gascity#9064; its values are synthetic.
+func TestExtractCopilotTailUsageAccounting(t *testing.T) {
+	path := writeCopilotJSONL(t,
+		`{"type":"session.start","data":{"selectedModel":"unrelated"}}`,
+		`{"type":"session.usage_record","id":"event-a","timestamp":"2026-11-10T21:22:22.735Z","data":{"usage":{"model":"fixture-model","inputTokens":100,"outputTokens":20,"cacheReadTokens":30,"cacheWriteTokens":10,"reasoningTokens":5,"cost":15.0,"apiCallId":"call-a"}}}`,
+		`{"type":"session.usage_record","id":"duplicate-event","data":{"usage":{"model":"fixture-model","inputTokens":999,"outputTokens":1,"apiCallId":"call-a"}}}`,
+		`{"type":"session.usage_record","id":"event-b","data":{"usage":{"model":"next-model","inputTokens":7,"outputTokens":3,"apiCallId":"call-b"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":1,"outputTokens":2,"cacheReadTokens":3,"apiCallId":"bad"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":1,"outputTokens":2}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":"no","outputTokens":2,"apiCallId":"bad"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":-1,"outputTokens":2,"apiCallId":"bad"}}}`,
+		`{malformed`,
+	)
+	got, err := ExtractCopilotTailUsageFromSearchPaths([]string{filepath.Dir(path)}, path, "")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("usage = %+v,%v", got, err)
+	}
+	a := got[0]
+	if a.MessageID != "call-a" || a.EntryUUID != "call-a" || a.Model != "fixture-model" || a.InputTokens != 60 || a.OutputTokens != 20 || a.CacheReadTokens != 30 || a.CacheCreationTokens != 10 || a.ReasoningTokens != 5 || a.Timestamp.IsZero() || a.HasReportedCost || a.ReportedCostUSD != 0 {
+		t.Fatalf("accounting = %+v", a)
+	}
+	if got[1].MessageID != "call-b" {
+		t.Fatalf("file order = %+v", got)
+	}
+	if _, err := ExtractCopilotTailUsageFromSearchPaths([]string{t.TempDir()}, path, ""); err == nil {
+		t.Fatal("escaped path accepted")
+	}
+	if _, err := ExtractCopilotTailUsageFromSearchPaths([]string{filepath.Dir(path)}, filepath.Join(filepath.Dir(path), "missing"), ""); err == nil {
+		t.Fatal("missing file accepted")
+	}
+}
+
+func TestExtractCopilotTailUsageCursorGrowth(t *testing.T) {
+	first := `{"type":"session.usage_record","data":{"usage":{"model":"fixture-model","inputTokens":1,"outputTokens":2,"apiCallId":"old-call"}}}`
+	padding := strings.Repeat(`{"type":"assistant.message","data":{"content":"padding"}}`+"\n", 2000)
+	last := `{"type":"session.usage_record","data":{"usage":{"model":"fixture-model","inputTokens":3,"outputTokens":4,"apiCallId":"new-call"}}}`
+	path := writeCopilotJSONL(t, first, padding, last)
+	got, err := ExtractCopilotTailUsageFromSearchPaths([]string{filepath.Dir(path)}, path, "old-call")
+	if err != nil || len(got) != 2 || got[0].MessageID != "old-call" || got[1].MessageID != "new-call" {
+		t.Fatalf("cursor growth = %+v,%v", got, err)
+	}
+}

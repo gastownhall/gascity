@@ -767,3 +767,63 @@ func copilotWorkspaceYAMLCWD(path string) string {
 func mergeCopilotSearchPaths(extraPaths []string) []string {
 	return mergePaths(DefaultCopilotSearchPaths(), extraPaths)
 }
+
+// ExtractCopilotTailUsageFromSearchPaths reads the persisted session.usage_record
+// shape reported in gastownhall/gascity#9064, bounded to a validated Copilot
+// transcript and the same cursor-growth limit as Claude usage. Only data.usage
+// with an exact apiCallId is accepted. Copilot cost is a billing multiplier,
+// never ReportedCostUSD. Malformed or unsupported rows are skipped, as in the
+// other JSONL usage readers; I/O and scanner failures are returned.
+func ExtractCopilotTailUsageFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
+	safePath, err := validateSearchPathFile(mergeCopilotSearchPaths(searchPaths), path)
+	if err != nil {
+		return nil, err
+	}
+	return extractUsageSince(safePath, cursorID, maxUsageScanBytes, parseCopilotUsage)
+}
+
+func parseCopilotUsage(data []byte) ([]TailUsage, error) {
+	var out []TailUsage
+	seen := make(map[string]bool)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxTailTokenBytes)
+	for scanner.Scan() {
+		var record struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Data      struct {
+				Usage struct {
+					Model      string `json:"model"`
+					APICallID  string `json:"apiCallId"`
+					Input      *int   `json:"inputTokens"`
+					Output     *int   `json:"outputTokens"`
+					CacheRead  int    `json:"cacheReadTokens"`
+					CacheWrite int    `json:"cacheWriteTokens"`
+					Reasoning  int    `json:"reasoningTokens"`
+				} `json:"usage"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil || record.Type != "session.usage_record" {
+			continue
+		}
+		u := record.Data.Usage
+		id, model := strings.TrimSpace(u.APICallID), strings.TrimSpace(u.Model)
+		if id == "" || model == "" || u.Input == nil || u.Output == nil || seen[id] {
+			continue
+		}
+		input, output := *u.Input, *u.Output
+		if input < 0 || output < 0 || u.CacheRead < 0 || u.CacheWrite < 0 || u.Reasoning < 0 || u.Reasoning > output || u.CacheRead > input || u.CacheWrite > input-u.CacheRead || (input == 0 && output == 0) {
+			continue
+		}
+		seen[id] = true
+		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
+		out = append(out, TailUsage{EntryUUID: id, MessageID: id, Model: model,
+			InputTokens: input - u.CacheRead - u.CacheWrite, OutputTokens: output,
+			CacheReadTokens: u.CacheRead, CacheCreationTokens: u.CacheWrite,
+			ReasoningTokens: u.Reasoning, Timestamp: timestamp})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning Copilot usage: %w", err)
+	}
+	return out, nil
+}

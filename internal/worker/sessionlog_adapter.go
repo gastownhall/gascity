@@ -168,6 +168,12 @@ func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlo
 	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// CopilotTailUsage reads usage only from a validated Copilot transcript. Its
+// apiCallId cursor uses the shared bounded JSONL scan growth policy.
+func (a SessionLogAdapter) CopilotTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	return sessionlog.ExtractCopilotTailUsageFromSearchPaths(a.SearchPaths, path, cursorID)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns

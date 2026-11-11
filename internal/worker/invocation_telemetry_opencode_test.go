@@ -250,3 +250,102 @@ func TestFactorySweepSessionModelUsageOpenCodeKeyedMissNoWorkdirFallback(t *test
 		t.Errorf("cursor = %q, want msg_c1", got)
 	}
 }
+
+func TestInvocationUsageFamilyCopilot(t *testing.T) {
+	for _, provider := range []string{"copilot", "github-copilot", "copilot/tmux-cli"} {
+		if family, ok := InvocationUsageFamily(provider); family != "copilot" || !ok {
+			t.Fatalf("%s = %s,%v", provider, family, ok)
+		}
+	}
+}
+
+func TestFactorySweepSessionModelUsageCopilotSharedWorkdir(t *testing.T) {
+	root, workDir := t.TempDir(), t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := beads.NewMemStore()
+	factory, err := NewFactory(FactoryConfig{CityPath: t.TempDir(), Store: store, Provider: runtime.NewFake(), SearchPaths: []string{root}, UsageSink: usage.NewLocalSink(sinkPath)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSession := func(key string) *SessionHandle {
+		t.Helper()
+		h, err := factory.Session(SessionSpec{Profile: Profile("copilot/tmux-cli"), Template: "probe", Title: key, Command: "copilot", WorkDir: workDir, Provider: "copilot"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(h.sessionID, map[string]string{"session_key": key, "molecule_id": "run-" + key}); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	a, b := newSession("seat-a"), newSession("seat-b")
+	write := func(key, calls string) {
+		t.Helper()
+		dir := filepath.Join(root, key)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		start := fmt.Sprintf(`{"type":"session.start","data":{"sessionId":%q,"context":{"cwd":%q}}}`+"\n", key, workDir)
+		if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(start+calls), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(id string) string {
+		return fmt.Sprintf(`{"type":"session.usage_record","id":%q,"timestamp":"2026-11-10T21:22:22.735Z","data":{"usage":{"model":"fixture-unpriced-model","inputTokens":100,"outputTokens":10,"cacheReadTokens":30,"cacheWriteTokens":20,"cost":15,"apiCallId":%q}}}`+"\n", "event-"+id, id)
+	}
+	write("seat-a", call("call-a1"))
+	write("seat-b", call("call-b1"))
+	// Prompt-operation accounting records A's latest completed invocation.
+	a.recordInvocationTelemetry(context.Background())
+	write("seat-a", call("call-a1")+call("call-a2")+call("call-a2"))
+	now := time.Now()
+	for _, tc := range []struct {
+		h    *SessionHandle
+		want int
+	}{{a, 1}, {b, 1}} {
+		row, err := store.Get(tc.h.sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now)
+		if err != nil || !settled || emitted != tc.want {
+			t.Fatalf("sweep = %d,%v,%v; want %d", emitted, settled, err, tc.want)
+		}
+	}
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil || len(warnings) != 0 || len(facts) != 1+2 {
+		t.Fatalf("facts = %+v,%v,%v", facts, warnings, err)
+	}
+	for _, fact := range facts {
+		wantID := a.sessionID
+		wantRun := "run-seat-a"
+		if fact.UpstreamReqID == "call-b1" {
+			wantID = b.sessionID
+			wantRun = "run-seat-b"
+		}
+		if fact.SessionID != wantID || fact.RunID != wantRun || fact.Provider != "copilot" || fact.InputTokens != 50 || fact.OutputTokens != 10 || fact.CacheReadTokens != 30 || fact.CacheCreationTokens != 20 || fact.CostUSDEstimate != 0 || !fact.Unpriced {
+			t.Fatalf("attribution = %+v", fact)
+		}
+	}
+	row, _ := store.Get(a.sessionID)
+	if row.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor] != "call-a2" {
+		t.Fatal("cursor did not advance")
+	}
+	// Repeated terminal sweeps do not emit previously recorded calls.
+	if emitted, _, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now); err != nil || emitted != 0 {
+		t.Fatalf("repeat = %d,%v", emitted, err)
+	}
+	// No key and a missing exact key must never borrow either same-cwd log.
+	for _, key := range []string{"", "missing"} {
+		if err := store.SetMetadata(a.sessionID, "session_key", key); err != nil {
+			t.Fatal(err)
+		}
+		row, _ := store.Get(a.sessionID)
+		if emitted, _, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now); err != nil || emitted != 0 {
+			t.Fatalf("key %q = %d,%v", key, emitted, err)
+		}
+	}
+}

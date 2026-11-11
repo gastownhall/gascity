@@ -4,7 +4,7 @@
     "sessionStart": [
       {
         "type": "command",
-        "bash": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook",
+        "bash": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_HOOK_EVENT_NAME=SessionStart GC_PROVIDER_SESSION_ID_REQUIRED=copilot \"${GC_BIN:-gc}\" prime --hook",
         "timeoutSec": 30
       }
     ],
