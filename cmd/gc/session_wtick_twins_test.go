@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -256,7 +257,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 
 	loserName := spec.SessionName + "-stale"
 	loadOpen := func(t *testing.T, store beads.Store) []beads.Bead {
-		all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+		all, err := session.ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 		if err != nil {
 			t.Fatalf("list sessions: %v", err)
 		}

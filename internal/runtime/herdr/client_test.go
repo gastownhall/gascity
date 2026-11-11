@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -163,6 +164,31 @@ func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
 			}
 			if calls := fake.logLines(t); len(calls) != 0 {
 				t.Errorf("startServer() ran herdr %q; want no launch", calls)
+			}
+		})
+	}
+}
+
+// TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane guards the other side
+// of matching by registered name only: a session whose registered name really
+// is a kind name resolves to its own pane, both when `agent get` answers for
+// it and when the lookup falls back to scanning `agent list`, where panes of
+// that kind nobody named and other sessions of that kind are listed first.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	const namedOpencode = `{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}`
+	listed := []string{unnamedOpencodePane, namedOpencodeAlpha, namedOpencodeBeta, namedOpencode}
+	for _, tc := range []struct {
+		name, getReply string
+	}{
+		{"agent get answers", `{"result":{"agent":` + namedOpencode + `}}`},
+		{"agent get answers not-found", agentGetNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, _ := lookupFake(t, tc.getReply, listed...)
+			c := &client{session: "gc-test", bin: bin}
+			a, ok, err := c.getAgent(context.Background(), "opencode")
+			if err != nil || !ok || a.PaneID != "w5:p1" || a.Name != "opencode" {
+				t.Errorf("getAgent(%q) = (%+v, %v, %v); want the session's own pane w5:p1", "opencode", a, ok, err)
 			}
 		})
 	}

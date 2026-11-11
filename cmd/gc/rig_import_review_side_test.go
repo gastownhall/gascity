@@ -60,7 +60,7 @@ func rigAddSplitCity(t *testing.T, cityPath, rigsToml, siteToml string) infraBin
 		t.Fatal(err)
 	}
 	_ = closeBeadStoreHandle(binding)
-	if err := writeInfraMigratedMarker(target); err != nil {
+	if err := writeInfraMigratedMarker(target, workStoreIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	return target

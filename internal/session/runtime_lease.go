@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -578,7 +577,7 @@ func (l *RuntimeLease) holdsRow(bead beads.Bead) bool {
 // row's reopen, mc-dkblm) flips it open, as
 // SetStatusOpen's own clear does: a reopened row holds no lease. A bead that is
 // not a session, or holds no record, is left alone.
-func ClearRuntimeLeaseForReopen(store beads.Store, id string) error {
+func ClearRuntimeLeaseForReopen(store beads.SessionStore, id string) error {
 	b, err := store.Get(id)
 	if err != nil || !IsSessionBeadOrRepairable(b) || strings.TrimSpace(b.Metadata[RuntimeLeaseHolderKey]) == "" {
 		return nil
@@ -604,10 +603,10 @@ func withRuntimeLeaseCleared(patch MetadataPatch) MetadataPatch {
 
 // freshBead reads the session row past any cache.
 func (s *Store) freshBead(id string) (beads.Bead, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
-	b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+	b, err := beads.LiveFor(s.store).Get(id)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, err)
 	}
@@ -667,11 +666,11 @@ func runtimeLeaseFlockIdentity(f *os.File, token string) string {
 	if err != nil {
 		return ""
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	dev, ino, ok := runtimeLeaseFileID(f, fi)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("%s/%d/%d/%s", boot, st.Dev, st.Ino, token)
+	return fmt.Sprintf("%s/%d/%d/%s", boot, dev, ino, token)
 }
 
 // runtimeLeaseMinTTL is RuntimeLeaseMargin; the cross-process tests shorten it.
@@ -694,9 +693,9 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 	if err != nil {
 		return nil, "", "", fmt.Errorf("%w: opening lock: %w", ErrRuntimeLeaseLocalFS, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if busy, err := tryLockRuntimeNameFile(f); err != nil {
 		f.Close() //nolint:errcheck // closing after a refused lock
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if busy {
 			body, _ := os.ReadFile(path)
 			_, holder, _ := strings.Cut(string(body), "\n")
 			return nil, "", "", &RuntimeLeaseBusyError{Name: name, Holder: strings.TrimSpace(holder), Local: true}
@@ -731,8 +730,8 @@ func unlockRuntimeNameFile(f *os.File) {
 	if f == nil {
 		return
 	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // close releases it too
-	f.Close()                                   //nolint:errcheck // best-effort cleanup
+	releaseRuntimeNameFileLock(f)
+	f.Close() //nolint:errcheck // best-effort cleanup
 }
 
 // newRuntimeLeaseHolder names one acquire: host/pid/nonce.

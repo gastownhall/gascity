@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: Documentation
-    url: https://docs.gascityhall.com
+    url: https://docs.gascity.com
     about: Start with installation, quickstart, tutorials, and guides.
   - name: Contributing
     url: https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md

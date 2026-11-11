@@ -7,31 +7,32 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // programStatusChecks are the checks of the landed WC-PSTAT rows, by code. A
 // row joins this map in the change that removes it from programStatusPending.
 var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{
 	RequirementProgramStatusSurfaces: checkProgramStatusSurfaces,
+	RequirementProgramStatusPhase:    checkProgramStatusPhase,
 }
 
 // providerDataProgramStatus returns the program-status declaration gc's
 // builtin provider data arms for profile's family under the shadow switch on
 // a terminal transport: the arm config.ProgramStatusBinding.Arm derives,
-// which is what a session of that family starts with.
+// which is what a session of that family starts with. The family comes from
+// the profile's provider, not a canonical worker identity: omp and grok
+// declare program status without one.
 func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDeclaration {
 	t.Helper()
-	identity, ok := workerbuiltin.CanonicalProfileIdentity(profile.Provider)
+	spec, ok := config.BuiltinProviders()[ProfileFamily(profile)]
 	if !ok {
-		t.Fatalf("profile %s: provider %q has no canonical identity", profile.ID, profile.Provider)
-	}
-	spec, ok := config.BuiltinProviders()[identity.ProviderFamily]
-	if !ok {
-		t.Fatalf("profile %s: family %q is not a builtin provider", profile.ID, identity.ProviderFamily)
+		t.Fatalf("profile %s: family %q is not a builtin provider", profile.ID, ProfileFamily(profile))
 	}
 	arm, _ := spec.ProgramStatus.Arm(runtime.ProgramStatusShadow, false)
-	return ProgramStatusDeclaration{Declared: arm.Capture, App: arm.App, Relay: arm.Relay}
+	return ProgramStatusDeclaration{
+		Declared: arm.Capture, App: arm.App, Relay: arm.Relay, HoldMidTurn: arm.HoldMidTurn,
+		DecideStartup: arm.DecideStartup, DecideSettle: arm.DecideSettle,
+	}
 }
 
 // TestProgramStatusConformance runs the WC-PSTAT rows for every profile: a
@@ -39,7 +40,7 @@ func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDecla
 // are recorded and skipped, and a landed row runs its check.
 func TestProgramStatusConformance(t *testing.T) {
 	reporter := NewSuiteReporter(t, "program_status", map[string]string{"tier": "worker-core"})
-	profiles, err := selectedProfiles()
+	profiles, err := filterProfiles(ProgramStatusProfiles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +75,7 @@ func TestProgramStatusCatalogRegistersWCPSTATRows(t *testing.T) {
 	want := []RequirementCode{
 		"WC-PSTAT-001", "WC-PSTAT-002", "WC-PSTAT-003", "WC-PSTAT-004",
 		"WC-PSTAT-005", "WC-PSTAT-006", "WC-PSTAT-007", "WC-PSTAT-008",
+		"WC-PSTAT-009",
 	}
 	var got []RequirementCode
 	for _, req := range catalog {
@@ -104,8 +106,9 @@ func TestProgramStatusCatalogRegistersWCPSTATRows(t *testing.T) {
 	}
 }
 
-// Kills a gate that lets a drifting declaration (declared, app or relay)
-// through, holds an undeclared profile to a row, runs a pending row, or
+// Kills a gate that lets a drifting declaration (declared, app, relay or
+// hold) through, holds an undeclared profile to a row, holds a profile not
+// declaring the mid-turn hold to the hold's row, runs a pending row, or
 // skips a landed row of a declared profile.
 func TestProgramStatusGate(t *testing.T) {
 	undeclared := Phase1Profiles()[0]
@@ -113,7 +116,7 @@ func TestProgramStatusGate(t *testing.T) {
 	declaration := ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true}
 	declared := undeclared
 	declared.ProgramStatus.ProgramStatusDeclaration = declaration
-	code := RequirementProgramStatusPhase
+	code := RequirementProgramStatusPendingKindOnly
 
 	for name, c := range map[string]struct {
 		profile        Profile
@@ -121,8 +124,11 @@ func TestProgramStatusGate(t *testing.T) {
 	}{
 		"provider data declares, profile does not": {undeclared, declaration},
 		"profile declares, provider data does not": {declared, ProgramStatusDeclaration{}},
-		"app drifts":   {declared, ProgramStatusDeclaration{Declared: true, App: "other", Relay: true}},
-		"relay drifts": {declared, ProgramStatusDeclaration{Declared: true, App: "agent"}},
+		"app drifts":            {declared, ProgramStatusDeclaration{Declared: true, App: "other", Relay: true}},
+		"relay drifts":          {declared, ProgramStatusDeclaration{Declared: true, App: "agent"}},
+		"hold drifts":           {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, HoldMidTurn: true}},
+		"startup opt-in drifts": {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, DecideStartup: true}},
+		"settle opt-in drifts":  {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, DecideSettle: true}},
 	} {
 		if r, run := ProgramStatusGate(c.profile, code, c.implementation); run || r.Status != ResultFail || !strings.Contains(r.Detail, "drift") {
 			t.Errorf("%s: %+v run=%t, want a drift failure", name, r, run)
@@ -132,8 +138,21 @@ func TestProgramStatusGate(t *testing.T) {
 		t.Fatalf("undeclared: %+v run=%t, want unsupported", r, run)
 	}
 	r, run := ProgramStatusGate(declared, code, declaration)
-	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.16" {
-		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.16", r, run)
+	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.22" {
+		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.22", r, run)
+	}
+	if r, run := ProgramStatusGate(declared, RequirementProgramStatusPhase, declaration); !run || r.Status != "" {
+		t.Fatalf("declared, WC-PSTAT-002 landed: %+v run=%t, want the row run", r, run)
+	}
+	if r, run := ProgramStatusGate(declared, RequirementProgramStatusHoldMidTurn, declaration); run || r.Status != ResultUnsupported || !strings.Contains(r.Detail, "mid-turn hold") {
+		t.Fatalf("declared without the hold, WC-PSTAT-009: %+v run=%t, want unsupported", r, run)
+	}
+	holding := declared
+	holding.ProgramStatus.HoldMidTurn = true
+	holdingDeclaration := declaration
+	holdingDeclaration.HoldMidTurn = true
+	if r, run := ProgramStatusGate(holding, RequirementProgramStatusHoldMidTurn, holdingDeclaration); !run || r.Status != "" {
+		t.Fatalf("declared with the hold, WC-PSTAT-009: %+v run=%t, want the row run", r, run)
 	}
 
 	slice := programStatusPending[code]
@@ -141,5 +160,27 @@ func TestProgramStatusGate(t *testing.T) {
 	t.Cleanup(func() { programStatusPending[code] = slice })
 	if r, run := ProgramStatusGate(declared, code, declaration); !run || r.Status != "" {
 		t.Fatalf("declared, row landed: %+v run=%t, want the row run", r, run)
+	}
+}
+
+// Kills a builtin family that declares program status without a WC-PSTAT
+// profile (its declaration would never be held to the rows), and a family
+// listed twice.
+func TestEveryDeclaredBuiltinHasProgramStatusProfile(t *testing.T) {
+	byFamily := map[string]Profile{}
+	for _, profile := range ProgramStatusProfiles() {
+		family := ProfileFamily(profile)
+		if _, dup := byFamily[family]; dup {
+			t.Errorf("family %q has two program-status profiles", family)
+		}
+		byFamily[family] = profile
+	}
+	for family, spec := range config.BuiltinProviders() {
+		if !spec.ProgramStatus.Declared() {
+			continue
+		}
+		if profile, ok := byFamily[family]; !ok || !profile.ProgramStatus.Declared {
+			t.Errorf("builtin %q declares program status but no WC-PSTAT profile expects it", family)
+		}
 	}
 }

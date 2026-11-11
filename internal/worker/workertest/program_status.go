@@ -1,17 +1,27 @@
 package workertest
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ProgramStatusDeclaration is a program-status declaration as gc arms it:
 // whether capture is declared, the program name the capture reader accepts
-// reports from, and whether the program runs under the probe-answering relay.
+// reports from, whether the program runs under the probe-answering relay,
+// whether input typed mid-turn aborts its turn (the mid-turn hold), and
+// whether the startup ladder and the interrupt settle decide with the
+// program's record under the switch on (decide_startup, decide_settle): a
+// family declares those only once a shadow measured its records against
+// that decision.
 type ProgramStatusDeclaration struct {
-	Declared bool
-	App      string
-	Relay    bool
+	Declared      bool
+	App           string
+	Relay         bool
+	HoldMidTurn   bool
+	DecideStartup bool
+	DecideSettle  bool
 }
 
 // ProgramStatusExpectation is a profile's OSC 7501 program-status
@@ -44,16 +54,77 @@ type ProgramStatusEmission struct {
 // it reports.
 const osc7501ProbeBELHex = "1b5d373530313b3f07"
 
+// osc7501TmuxPassthroughStep is an emitter raw step writing the OSC 7501
+// report body wrapped in a tmux DCS passthrough (ESC P tmux; ... ESC \, each
+// inner ESC doubled), the form a program that targets tmux directly writes.
+func osc7501TmuxPassthroughStep(body string) string {
+	seq := "\x1bPtmux;\x1b\x1b]7501;" + body + "\x1b\x1b\\\x1b\\"
+	return "raw " + hex.EncodeToString([]byte(seq))
+}
+
+// Profile IDs of families whose program status is held to the WC-PSTAT rows
+// but that have no phase-1 transcript fixtures and no canonical worker
+// profile identity.
+const (
+	ProfileOmpTmuxCLI  ProfileID = "omp/tmux-cli"  // Oh My Pi
+	ProfileGrokTmuxCLI ProfileID = "grok/tmux-cli" // Grok Build
+)
+
+// ProgramStatusProfiles returns the profiles held to the WC-PSTAT rows:
+// every phase-1 profile, then the families that declare program status
+// without phase-1 transcript fixtures.
+func ProgramStatusProfiles() []Profile {
+	return append(Phase1Profiles(),
+		// omp reports on any TTY without a probe while its
+		// terminal.programStatus setting is on (the default). Recorded under
+		// gc's tmux against a local mock API: ST-terminated reports.
+		Profile{
+			ID:       ProfileOmpTmuxCLI,
+			Provider: "omp/tmux-cli",
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "omp"},
+				Verified:                 "omp 18.14.1",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=omp"},
+					TurnStart:   []string{"report state=working:app=omp"},
+					TurnEnd:     []string{"report state=done:app=omp"},
+				},
+			},
+		},
+		// grok sends no probe inside tmux; its declared REX_SESSION=1 turns
+		// reports on there, written wrapped in tmux DCS passthrough. Recorded
+		// under gc's tmux with that env against a local mock API.
+		Profile{
+			ID:       ProfileGrokTmuxCLI,
+			Provider: "grok/tmux-cli",
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "grok-build"},
+				Verified:                 "grok 1.0.70",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{osc7501TmuxPassthroughStep("state=idle:app=grok-build")},
+					TurnStart:   []string{osc7501TmuxPassthroughStep("state=working:app=grok-build:msg=UmVzcG9uZGluZw==")},
+					TurnEnd:     []string{osc7501TmuxPassthroughStep("state=done:app=grok-build:msg=VHVybiBjb21wbGV0ZSBpbiAzLjFzLg==")},
+				},
+			},
+		},
+	)
+}
+
+// ProfileFamily returns the provider family a profile runs: its Provider up
+// to the first "/".
+func ProfileFamily(profile Profile) string {
+	family, _, _ := strings.Cut(profile.Provider, "/")
+	return family
+}
+
 // programStatusPending names, for each WC-PSTAT row whose worker behavior
 // has not landed, the slice that lands it. A row leaves this map in the
 // change that lands its behavior and registers its check.
 var programStatusPending = map[RequirementCode]string{
-	RequirementProgramStatusPhase:              "ga-f4ovjm.16",
 	RequirementProgramStatusPendingKindOnly:    "ga-f4ovjm.22",
 	RequirementProgramStatusQueueBehindBlocked: "ga-f4ovjm.22",
 	RequirementProgramStatusImmediateRefused:   "ga-f4ovjm.22",
 	RequirementProgramStatusReadiness:          "ga-f4ovjm.23",
-	RequirementProgramStatusShadowIdentical:    "ga-f4ovjm.17",
 	RequirementProgramStatusTranscriptTurn:     "ga-f4ovjm.24",
 }
 
@@ -67,8 +138,10 @@ func ProgramStatusPendingSlice(code RequirementCode) (string, bool) {
 // ProgramStatusGate classifies profile for WC-PSTAT row code before the
 // row's behavior runs. implementation is the declaration gc's provider data
 // arms for the profile's family. A declaration that drifts from the
-// profile's expectation (declared, app or relay) fails; an undeclared
-// profile is out of scope (Unsupported); a row whose behavior has not landed
+// profile's expectation (declared, app, relay, hold or a decision opt-in)
+// fails; an undeclared
+// profile is out of scope (Unsupported), as is a profile not declaring the
+// mid-turn hold for the hold's row; a row whose behavior has not landed
 // is pending (Unsupported, naming its slice). run is true only when the row
 // must be checked.
 func ProgramStatusGate(profile Profile, code RequirementCode, implementation ProgramStatusDeclaration) (result Result, run bool) {
@@ -81,6 +154,9 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	if implementation.Declared {
 		evidence["implementation_app"] = implementation.App
 		evidence["implementation_relay"] = strconv.FormatBool(implementation.Relay)
+		evidence["implementation_hold_mid_turn"] = strconv.FormatBool(implementation.HoldMidTurn)
+		evidence["implementation_decide_startup"] = strconv.FormatBool(implementation.DecideStartup)
+		evidence["implementation_decide_settle"] = strconv.FormatBool(implementation.DecideSettle)
 	}
 	switch slice, pending := ProgramStatusPendingSlice(code); {
 	case implementation != expected:
@@ -90,6 +166,9 @@ func ProgramStatusGate(profile Profile, code RequirementCode, implementation Pro
 	case !expected.Declared:
 		return Unsupported(profile.ID, code,
 			fmt.Sprintf("provider %q does not declare program status (out of scope)", profile.Provider)).WithEvidence(evidence), false
+	case code == RequirementProgramStatusHoldMidTurn && !expected.HoldMidTurn:
+		return Unsupported(profile.ID, code,
+			fmt.Sprintf("provider %q does not declare the mid-turn hold (out of scope)", profile.Provider)).WithEvidence(evidence), false
 	case pending:
 		evidence["pending_slice"] = slice
 		return Unsupported(profile.ID, code,

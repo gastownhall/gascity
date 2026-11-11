@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -540,19 +541,19 @@ func TestStopTurnWithRowLoadFailureIsNotSent(t *testing.T) {
 			}
 		}, ErrSessionClosed},
 		{"gone", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
-			}}
+			}})
 		}, beads.ErrNotFound},
 		{"not a session", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{ID: id, Type: "task", Status: "open"}, nil
-			}}
+			}})
 		}, ErrNotSession},
 		{"unreadable", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
 				return beads.Bead{}, errors.New("store: connection reset by peer")
-			}}
+			}})
 		}, nil},
 	} {
 		for _, stop := range []struct {
@@ -867,19 +868,19 @@ func TestInterruptTurnRowLoadFailureIsNotSent(t *testing.T) {
 			}
 		}, ErrSessionClosed},
 		{"gone", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
-			}}
+			}})
 		}, beads.ErrNotFound},
 		{"not a session", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
 				return beads.Bead{ID: id, Type: "task", Status: "open"}, nil
-			}}
+			}})
 		}, ErrNotSession},
 		{"unreadable", func(_ *testing.T, mgr *Manager, _ Info) {
-			mgr.store = rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
+			mgr.store = beadstest.Sessions(rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
 				return beads.Bead{}, errors.New("store: connection reset by peer")
-			}}
+			}})
 		}, nil},
 	} {
 		for _, restarts := range []bool{false, true} {

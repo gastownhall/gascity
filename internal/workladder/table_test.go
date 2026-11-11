@@ -33,9 +33,12 @@ func TestDecisionTable(t *testing.T) {
 		return e
 	}
 	rows := []row{
-		{"trigger/assigned, attempts < 3", ent(KindTrigger, RungAssigned, 2, nil), nil},
-		{"trigger/assigned, attempts >= 3", ent(KindTrigger, RungAssigned, 3, nil), nil},
-		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.RecycleAt = now.Add(-10 * time.Minute) }), nil},
+		{"trigger/assigned, attempts 0", ent(KindTrigger, RungAssigned, 0, nil), nil},
+		{"trigger/assigned, attempts 1", ent(KindTrigger, RungAssigned, 1, nil), nil},
+		{"trigger/assigned, attempts < 3, alerted", ent(KindTrigger, RungAssigned, 2, func(e *Entry) { e.Escalated = true }), nil},
+		{"trigger/assigned, attempts >= 3, alerted", ent(KindTrigger, RungAssigned, 3, func(e *Entry) { e.Escalated = true }), nil},
+		{"trigger/assigned, attempts >= 3, never alerted", ent(KindTrigger, RungAssigned, 3, nil), nil},
+		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.Escalated, e.RecycleAt = true, now.Add(-10*time.Minute) }), nil},
 		{"continuation/assigned, attempts < 6", ent(KindContinuation, RungAssigned, 5, nil), nil},
 		{"continuation/assigned, attempts >= 6", ent(KindContinuation, RungAssigned, 6, nil), nil},
 		{"continuation/assigned, >= 6, alerted", ent(KindContinuation, RungAssigned, 7, func(e *Entry) { e.Escalated = true }), nil},
@@ -46,6 +49,8 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil), nil},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 }), nil},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true }), nil},
+		{"claim/claimed, attempts >= 3, its seat waits on a person", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.AwaitsHuman = true }), nil},
+		{"claim/started, >= 6, recycles 0 < R, its seat waits on a person", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.AwaitsHuman = true }), nil},
 		{"claim/started, attempts < 6, its notice pending", ent(KindClaim, RungStarted, 5, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/claimed, attempts >= 3, its notice pending", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/started, attempts < 6, another's notice pending", ent(KindClaim, RungStarted, 5, nil), pendingOther(now)},
@@ -69,6 +74,14 @@ func TestDecisionTable(t *testing.T) {
 		{"quiet, newest turn failed, served since", workedSince(func(o *Observation) {
 			o.Turns = TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: o.Now.Add(-5 * time.Minute)}
 		})},
+		{"quiet, newest turn failed", reading(TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, newest turn completed", reading(TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: t0.Add(-time.Hour)})},
+		// A turn open reads, as the lane reduces it (ladderTurnReading),
+		// with no outcome of the newest ended turn: the same reading as an
+		// end with no status.
+		{"quiet, a turn open", reading(TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, newest turn ended with no status", reading(TurnReading{Read: true, Conv: 1, ServedAt: t0.Add(-time.Hour)})},
+		{"quiet, a reading of another conversation", reading(TurnReading{Read: true, Conv: 2, ServedAt: t0.Add(-time.Hour)})},
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
@@ -80,7 +93,7 @@ func TestDecisionTable(t *testing.T) {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "| %s |", r.name)
 		for _, c := range cols {
-			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind})
+			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind, AwaitsHuman: r.e.AwaitsHuman})
 			if r.e.Rung >= RungStarted {
 				o.Started[r.e.Key] = SrcAgent
 			}
@@ -102,7 +115,7 @@ func TestDecisionTable(t *testing.T) {
 			if len(d.Next.Entries) > 0 && !d.Next.Entries[0].Since.Equal(r.e.Since) {
 				reset = "count reset; "
 			}
-			fmt.Fprintf(&b, " %s%s; next %v |", reset, strings.Join(acts, " + "), nextLook(d, now, o.Provider.Degraded))
+			fmt.Fprintf(&b, " %s%s; next %v |", reset, strings.Join(acts, " + "), nextLook(d, o))
 		}
 		b.WriteString("\n")
 	}
@@ -135,6 +148,12 @@ func workedSince(mut func(*Observation)) func(*Observation) {
 			mut(o)
 		}
 	}
+}
+
+// reading is a column whose quiet seat's turns, read in its conversation
+// (1), say r.
+func reading(r TurnReading) func(*Observation) {
+	return func(o *Observation) { o.Conv, o.Turns = 1, r }
 }
 
 // pendingOther is a trigger the table's seat also holds, its nudge's notice
@@ -170,13 +189,15 @@ func render(a Action) string {
 	return fmt.Sprintf("%T", a)
 }
 
-// nextLook is when the table's entry is next due after this pass, from now:
-// "-" when the pass leaves it due (it waits on a hold).
-func nextLook(d Decision, now time.Time, degraded bool) string {
+// nextLook is when the table's entry is next due after this pass, on a pass
+// that observes what o did, from now: "-" when the pass leaves it due (it
+// waits on a hold).
+func nextLook(d Decision, o Observation) string {
+	now := o.Now
 	if len(d.Next.Entries) == 0 || (d.Next.Release != nil && d.Next.Release.Key == d.Next.Entries[0].Key) {
 		return "-"
 	}
-	at := p.dueAt(d.Next.Entries[0], degraded)
+	at := p.dueOn(d.Next.Entries[0], o, o.Provider.Degraded)
 	if !at.After(now) {
 		return "now"
 	}
@@ -235,6 +256,7 @@ func rateLimitTable(b *strings.Builder, now time.Time) {
 		{"answered, attached", with(answered, func(o *Observation) { o.RestartHold = RestartHoldAttached })},
 		{"answered, another seat on the provider restarted 10m ago", with(answered, func(o *Observation) { o.ProviderFreshAt = now.Add(-10 * time.Minute) })},
 		{"answered, a claim unread", with(answered, func(o *Observation) { o.Hold = map[ClaimKey]bool{key("x"): true} })},
+		{"answered, the seat's work not all listed", with(answered, func(o *Observation) { o.Partial = true })},
 		{"answered, no nudge delivered since it opened", func(r *Record, o *Observation) {
 			if !r.RateLimit.Since.IsZero() {
 				r.Delivered = minTime(r.Delivered, r.RateLimit.Since.Add(-time.Minute))
@@ -243,15 +265,18 @@ func rateLimitTable(b *strings.Builder, now time.Time) {
 		}},
 		{"refused x1", refused(1, now.Add(-time.Minute))},
 		{"refused x2 before the delivery", refused(2, delivered.Add(-time.Minute))},
-		{"refused x2 61m ago, past the evidence bound", func(r *Record, o *Observation) {
-			r.Delivered = now.Add(-65 * time.Minute)
-			refused(2, now.Add(-61*time.Minute))(r, o)
+		{"refused x2 71m ago, past the evidence bound", func(r *Record, o *Observation) {
+			r.Delivered = now.Add(-75 * time.Minute)
+			refused(2, now.Add(-71*time.Minute))(r, o)
 		}},
 		{"served 1m ago", func(_ *Record, o *Observation) {
 			o.Turns = TurnReading{Read: true, Conv: o.Conv, ServedAt: now.Add(-time.Minute)}
 		}},
-		{"no answer for 61m", func(r *Record, _ *Observation) {
+		{"no answer for 61m, within the evidence bound", func(r *Record, _ *Observation) {
 			r.RateLimit.Checked = minTime(r.RateLimit.Checked, now.Add(-61*time.Minute))
+		}},
+		{"no answer for 71m", func(r *Record, _ *Observation) {
+			r.RateLimit.Checked = minTime(r.RateLimit.Checked, now.Add(-71*time.Minute))
 		}},
 		{"conversation changed", func(_ *Record, o *Observation) { o.Conv++ }},
 		{"busy, answered", with(answered, func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} })},

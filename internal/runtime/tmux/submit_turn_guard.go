@@ -278,42 +278,26 @@ func heldCodexRollout(panePID int) string {
 }
 
 // selectHeldCodexRollout returns the one Codex rollout that root or any of
-// its descendants in records holds open, per openFiles. Two different
-// rollouts held in the tree, or a process whose open files cannot be read,
-// return "": a guess could judge this submit by another conversation's
-// record.
+// its descendants in records holds open, per openFiles, read as
+// treeHeldFiles reads the tree: a process whose open files the current user
+// may not read, such as a root-owned sandbox wrapper above Codex or a zombie,
+// is skipped. Two different rollouts held in the tree, or a process whose
+// open files cannot be read for any other reason, return "": a guess could
+// judge this submit by another conversation's record.
 func selectHeldCodexRollout(records []proctable.ProcessRecord, root int, openFiles func(int) ([]string, error)) string {
-	children := make(map[int][]int, len(records))
-	for _, r := range records {
-		if r.PID != root {
-			children[r.PPID] = append(children[r.PPID], r.PID)
-		}
+	files, err := treeHeldFiles(records, root, openFiles)
+	if err != nil {
+		return ""
 	}
 	held := ""
-	seen := map[int]bool{root: true}
-	queue := []int{root}
-	for len(queue) > 0 {
-		pid := queue[0]
-		queue = queue[1:]
-		files, err := openFiles(pid)
-		if err != nil {
+	for _, file := range files {
+		if !isCodexRolloutPath(file) {
+			continue
+		}
+		if held != "" {
 			return ""
 		}
-		for _, file := range files {
-			if !isCodexRolloutPath(file) || file == held {
-				continue
-			}
-			if held != "" {
-				return ""
-			}
-			held = file
-		}
-		for _, child := range children[pid] {
-			if !seen[child] {
-				seen[child] = true
-				queue = append(queue, child)
-			}
-		}
+		held = file
 	}
 	return held
 }

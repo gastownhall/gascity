@@ -11,12 +11,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 var (
@@ -170,33 +170,33 @@ func ValidateAlias(alias string) (string, error) {
 
 // EnsureAliasAvailable reports whether alias can be assigned to a live
 // session without colliding with another alias or runtime session name.
-func EnsureAliasAvailable(store beads.Store, alias, selfID string) error {
+func EnsureAliasAvailable(store beads.SessionStore, alias, selfID string) error {
 	return ensureSessionAliasAvailable(store, nil, alias, selfID, "")
 }
 
 // EnsureAliasAvailableWithConfig extends alias reservation checks with
 // configured named-session aliases so public targets cannot be squatted
 // before their managed session bead exists.
-func EnsureAliasAvailableWithConfig(store beads.Store, cfg *config.City, alias, selfID string) error {
+func EnsureAliasAvailableWithConfig(store beads.SessionStore, cfg *config.City, alias, selfID string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, "")
 }
 
 // EnsureAliasAvailableWithConfigForOwner extends alias reservation checks
 // with an explicit configured owner identity so callers creating a new
 // managed session bead can reserve that alias before a bead ID exists.
-func EnsureAliasAvailableWithConfigForOwner(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
+func EnsureAliasAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, alias, selfID, selfOwner string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, selfOwner)
 }
 
 // EnsureSessionNameAvailableWithConfig extends session-name reservation checks
 // with configured named-session runtime names.
-func EnsureSessionNameAvailableWithConfig(store beads.Store, cfg *config.City, name, selfID string) error {
+func EnsureSessionNameAvailableWithConfig(store beads.SessionStore, cfg *config.City, name, selfID string) error {
 	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "")
 }
 
 // EnsureSessionNameAvailableWithConfigForOwner extends session-name
 // reservation checks with an explicit configured named-session owner.
-func EnsureSessionNameAvailableWithConfigForOwner(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+func EnsureSessionNameAvailableWithConfigForOwner(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
 	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner)
 }
 
@@ -319,10 +319,11 @@ func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error)
 		return fmt.Errorf("opening session identifier lock: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // best-effort cleanup
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking session identifier %q: %w", identifier, err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	defer lock.Release() //nolint:errcheck // best-effort unlock
 	return fn()
 }
 
@@ -331,15 +332,15 @@ func sessionIdentifierLockFileName(identifier string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func ensureSessionNameAvailable(store beads.Store, name string) error {
+func ensureSessionNameAvailable(store beads.SessionStore, name string) error {
 	return ensureSessionNameAvailableForSelf(store, name, "")
 }
 
-func ensureSessionNameAvailableForSelf(store beads.Store, name, selfID string) error {
+func ensureSessionNameAvailableForSelf(store beads.SessionStore, name, selfID string) error {
 	return ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, "")
 }
 
-func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, selfOwner string) error {
+func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, selfID, selfOwner string) error {
 	if name == "" {
 		return nil
 	}
@@ -487,7 +488,7 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 	return identity
 }
 
-func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+func ensureConfiguredSessionNameAvailable(store beads.SessionStore, cfg *config.City, name, selfID, selfOwner string) error {
 	if err := ensureSessionNameAvailableForSelfAndOwner(store, name, selfID, selfOwner); err != nil {
 		// When a closed bead blocks the name and the caller is materializing
 		// a configured named session that owns this name, allow it. This
@@ -551,7 +552,7 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // fields. This mirrors the full collision check in
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
+func noLiveSessionNameCollisions(store beads.SessionStore, name, selfID, selfOwner string) bool {
 	all, err := ExactMetadataSessionCandidates(store, true,
 		map[string]string{"session_name": name},
 		map[string]string{"alias": name},
@@ -593,7 +594,7 @@ func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner stri
 	return true
 }
 
-func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
+func ensureSessionAliasAvailable(store beads.SessionStore, cfg *config.City, alias, selfID, selfOwner string) error {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil

@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"math"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,9 +59,13 @@ func (in bdClassGuardInput) checkIDs(ids []string, variants ...coordclass.Mutati
 		if refusal := in.readRefusal(id, result); refusal != "" {
 			return in.refuse("%s", refusal)
 		}
-		for _, m := range variants {
+		for i, m := range variants {
 			if flip := coordclass.CheckFlip(before, m.Apply(before), in.holds); flip != nil {
-				return in.refuse("%s", classFlipRefusalText(fmt.Sprintf("gc bd %s %s", in.path, id), flip))
+				note := ""
+				if i >= in.flipNoteFrom {
+					note = in.flipNote
+				}
+				return in.refuse("%s%s", classFlipRefusalText(fmt.Sprintf("gc bd %s %s", in.path, id), flip), note)
 			}
 		}
 	}
@@ -72,15 +75,26 @@ func (in bdClassGuardInput) checkIDs(ids []string, variants ...coordclass.Mutati
 // readRefusal is the refusal for a pre-read that did not find exactly the
 // bead id names, or "".
 func (in bdClassGuardInput) readRefusal(id string, result bdReadResult) string {
+	problem := bdReadProblem(id, result)
+	if problem == "" {
+		return ""
+	}
+	return fmt.Sprintf("gc bd %s %s: refused on this split city: %s. Nothing was written.", in.path, id, problem)
+}
+
+// bdReadProblem says why a pre-read that did not find exactly the bead id
+// names leaves a write unjudged, or "" when it found it. It is the cause
+// clause of readRefusal and of an edge endpoint's refusal.
+func bdReadProblem(id string, result bdReadResult) string {
 	switch result {
 	case bdReadFound:
 		return ""
 	case bdReadCollision:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("bd resolves %q to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id", id)
 	case bdReadNotFound:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: no bead %q in this store, so gc cannot judge what the write would do. Nothing was written.", in.path, id, id)
+		return fmt.Sprintf("no bead %q in this store, so gc cannot judge what the write would do", id)
 	default:
-		return fmt.Sprintf("gc bd %s %s: refused on this split city: gc could not read the bead to check the write. Retry once the store answers. Nothing was written.", in.path, id)
+		return "gc could not read the bead to check the write. Retry once the store answers"
 	}
 }
 
@@ -118,7 +132,7 @@ func (in bdClassGuardInput) checkEdgeEndpoints(ids ...string) string {
 			result = bdReadFailed
 		}
 		if result != bdReadFound {
-			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores, and %s. A dependency edge across stores is never written. Nothing was written.", in.path, strings.TrimPrefix(in.readRefusal(id, result), fmt.Sprintf("gc bd %s %s: refused on this split city: ", in.path, id)))
+			return fmt.Sprintf("gc bd %s: refused on this split city: an edge endpoint must be a bead of this city's work stores: %s. A dependency edge across stores is never written. Nothing was written.", in.path, bdReadProblem(id, result))
 		}
 	}
 	if in.held == nil {
@@ -131,6 +145,45 @@ func (in bdClassGuardInput) checkEdgeEndpoints(ids ...string) string {
 	for _, id := range check {
 		if held[id] {
 			return fmt.Sprintf("gc bd %s: refused on this split city: %s lives in the class binding, and a dependency edge across stores is never written. Nothing was written.", in.path, id)
+		}
+	}
+	return ""
+}
+
+// mintIDRefusal says why bd must not mint a new bead under one of ids, the
+// explicit ids a create names, or returns "". gc's by-id routing answers such
+// an id from a class binding rather than from this work store in two cases:
+// the id is inside a reserved namespace, or the binding holds a bead with that
+// id. The second is a migrated city's ordinary state: `gc storage migrate`
+// moves a bead with its id preserved and clears the work store's copy, so bd
+// would mint the id here afresh while every by-id gc command keeps answering
+// from the binding's bead. A binding gc cannot ask is a refusal, as it is for
+// an edge endpoint. Empty ids (bd mints its own) are skipped; the binding is
+// asked once for all the rest.
+func (in bdClassGuardInput) mintIDRefusal(ids ...string) string {
+	var ask []string
+	for _, id := range ids {
+		if id == "" || slices.Contains(ask, id) {
+			continue
+		}
+		if bdIDIsClassReserved(id) { // residency:allow — refuses minting a NEW bead inside a reserved namespace; resolves no bead
+			return fmt.Sprintf("id %s is inside a class binding's reserved namespace, so the bead would answer to a store that never holds it", id)
+		}
+		ask = append(ask, id)
+	}
+	if len(ask) == 0 {
+		return ""
+	}
+	if in.held == nil {
+		return fmt.Sprintf("gc cannot check whether the class binding holds %s", strings.Join(ask, ", "))
+	}
+	held, err := in.held(ask)
+	if err != nil {
+		return fmt.Sprintf("gc could not check whether the class binding holds %s (%v)", strings.Join(ask, ", "), err)
+	}
+	for _, id := range ask {
+		if held[id] {
+			return fmt.Sprintf("the class binding holds a bead with id %s (gc storage migrate keeps a moved bead's id), so every by-id gc command would answer from that bead and never reach the new one", id)
 		}
 	}
 	return ""
@@ -152,18 +205,22 @@ func bdDepsEndpoints(values []string) []string {
 	return out
 }
 
-// bdMetadataObject decodes a --metadata value as bd reads it back: an inline
-// JSON object, or @file (read relative to the scope root, where bd runs). bd
-// reads a file only for a value that starts with "@"; gc also judges the file
-// a space-padded "@" names, which bd rejects as JSON, but hands bd no copy of
-// it.
-func (in bdClassGuardInput) bdMetadataObject(value string) (map[string]string, string) {
+// bdMetadataReadings decodes a --metadata value as bd reads it (an inline JSON
+// object, or @file read relative to the scope root, where bd runs) into each
+// reading this city's stores give the object once bd has stored it
+// (beads.MetadataReadings). A write is judged under every reading: the bd CLI
+// reads a JSON null on gc.root_bead_id as "", but a native Dolt store reads it
+// as the text "null", a graph marker. bd reads a file only for a value that
+// starts with "@", and reads the path after it as written, spaces included;
+// gc also judges the file a space-padded "@" names, which bd rejects as JSON,
+// but hands bd no copy of it.
+func (in bdClassGuardInput) bdMetadataReadings(value string) ([]map[string]string, string) {
 	body := []byte(value)
 	if path, isFile := strings.CutPrefix(strings.TrimSpace(value), "@"); isFile {
 		var data []byte
 		var err error
-		if strings.HasPrefix(value, "@") {
-			data, err = in.readJudgedFile("--metadata", "@", path)
+		if exact, ok := strings.CutPrefix(value, "@"); ok {
+			data, err = in.readJudgedFile("--metadata", "@", exact)
 		} else {
 			data, err = in.readScopeFile(path)
 		}
@@ -172,11 +229,36 @@ func (in bdClassGuardInput) bdMetadataObject(value string) (map[string]string, s
 		}
 		body = data
 	}
-	var fields beads.StringMap
-	if err := json.Unmarshal(body, &fields); err != nil {
+	readings, err := beads.MetadataReadings(body)
+	if err != nil {
 		return nil, fmt.Sprintf("--metadata is not a JSON object (%v)", err)
 	}
-	return fields, ""
+	return readings, ""
+}
+
+// bdMetadataReadingsNote follows a class-flip refusal that reading i of a
+// write's metadata (bdMetadataReadings) produced and the bd CLI's reading,
+// reading 0, did not: it names every class-deciding key the two read
+// differently, since any of them may be the one that flips the class. It is
+// "" for reading 0 and when the readings agree on every such key.
+func bdMetadataReadingsNote(readings []map[string]string, i int) string {
+	if i <= 0 || i >= len(readings) {
+		return ""
+	}
+	var differ []string
+	for _, k := range coordclass.ClassifierMetadataKeys() {
+		if cli, other := readings[0][k], readings[i][k]; cli != other {
+			differ = append(differ, fmt.Sprintf("%s differently (%q as the bd CLI reads it, %q as a native Dolt store reads it)", k, cli, other))
+		}
+	}
+	switch len(differ) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s: write it as a JSON string, or leave it out.", differ[0])
+	default:
+		return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s: write each as a JSON string, or leave it out.", strings.Join(differ, " and "))
+	}
 }
 
 // judgeBdCreate classifies the bead `create` / `q` would mint and checks the
@@ -185,28 +267,28 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 	if len(in.args.Values("--file")) > 0 {
 		return in.refuse("gc bd %s --file: refused on this split city: bd's multi-issue markdown is not classified by gc. Create the beads one at a time with flags. Nothing was written.", in.path)
 	}
-	if id, ok := in.args.Last("--id"); ok && bdIDIsClassReserved(id) { // residency:allow — refuses minting a NEW bead inside a reserved namespace; resolves no bead
-		return in.refuse("gc bd %s --id %s: refused on this split city: that id is inside a class binding's reserved namespace, so the bead would answer to a store that never holds it. Nothing was written.", in.path, id)
+	if id, ok := in.args.Last("--id"); ok {
+		if why := in.mintIDRefusal(id); why != "" {
+			return in.refuse("gc bd %s --id %s: refused on this split city: %s. Omit --id to let bd mint one. Nothing was written.", in.path, id, why)
+		}
 	}
 	var shape beads.Bead
 	if t, ok := in.args.Last("--type"); ok {
 		shape.Type = strings.TrimSpace(t)
 	}
 	shape.Labels = normalizeBdLabels(append(slices.Clone(in.args.Values("--labels")), in.args.Values("--label")...))
+	readings := []map[string]string{nil}
 	if v, ok := in.args.Last("--metadata"); ok {
-		fields, problem := in.bdMetadataObject(v)
-		if problem != "" {
+		var problem string
+		if readings, problem = in.bdMetadataReadings(v); problem != "" {
 			return in.refuse("gc bd %s: refused: %s. Nothing was written.", in.path, problem)
 		}
-		shape.Metadata = map[string]string{}
-		maps.Copy(shape.Metadata, fields)
 	}
-	if _, ok := in.args.Last("--graph"); ok {
-		// bd applies every node of the plan, each with its own type, labels
-		// and metadata (decoded as raw JSON), plus parent links and edges.
-		// No shipped workflow uses `gc bd create --graph`, so it is refused
-		// rather than re-derived node by node.
-		return in.refuse("gc bd %s --graph: refused on this split city: a graph plan mints one bead per node, each with its own type, labels, metadata and edges, and gc does not re-derive bd's reading of the plan here. Instead: %s. Nothing was written.", in.path, bdSplitAltSling)
+	// An empty --graph is bd's single create (bd tests graphFile != ""), so
+	// it falls through to the flag judgment below. pflag keeps the last value
+	// of a repeated --graph, as bd does.
+	if plan, ok := in.args.Last("--graph"); ok && plan != "" {
+		return judgeBdCreateGraph(in, plan)
 	}
 	var endpoints []string
 	endpoints = append(endpoints, bdDepsEndpoints(in.args.Values("--deps"))...)
@@ -228,8 +310,11 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 		}
 		shape.Labels = normalizeBdLabels(append(shape.Labels, p.Labels...))
 	}
-	if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
-		return in.refuse("%s", classFlipRefusalText("gc bd "+in.path, flip))
+	for i, metadata := range readings {
+		shape.Metadata = metadata
+		if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+			return in.refuse("%s%s", classFlipRefusalText("gc bd "+in.path, flip), bdMetadataReadingsNote(readings, i))
+		}
 	}
 	return in.pass()
 }
@@ -237,7 +322,7 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 // judgeBdUpdate judges `gc bd update`: its class-field writes against the
 // bead, and a reparent as an edge.
 func judgeBdUpdate(in bdClassGuardInput) bdClassGuard {
-	variants, problem := in.bdUpdateMutation()
+	variants, readings, problem := in.bdUpdateMutation()
 	if problem != "" {
 		return in.refuse("gc bd update: refused on this split city: %s. Nothing was written.", problem)
 	}
@@ -246,62 +331,75 @@ func judgeBdUpdate(in bdClassGuardInput) bdClassGuard {
 			return in.refuse("%s", refusal)
 		}
 	}
+	// Variants of the bd CLI's reading come first; a refusal from a later one
+	// says why (bdMetadataReadingsNote).
+	in.flipNote, in.flipNoteFrom = bdMetadataReadingsNote(readings, 1), len(variants)/len(readings)
 	return in.checkIDs(in.args.positionals, variants...)
 }
 
 // bdUpdateMutation states a parsed `bd update` as the write it makes, in bd's
 // order (labels: replace, add, remove; metadata: merge/set, then unset — see
-// coordclass.Mutation.Apply). `--set-metadata k=null` is stored differently by
-// the bd builds the fleet runs (bd 1.3.2: JSON null, read back absent; 1.3.0
-// Enterprise: the string "null"), so it comes back as two variants and the
-// write must pass both.
-func (in bdClassGuardInput) bdUpdateMutation() ([]coordclass.Mutation, string) {
-	var m coordclass.Mutation
+// coordclass.Mutation.Apply), once for each reading this city's stores give a
+// --metadata object (bdMetadataReadings), which it also returns.
+// `--set-metadata k=null` is stored differently by the bd builds the fleet
+// runs (bd 1.3.2: JSON null, read back absent through the bd CLI and as the
+// text "null" from a native Dolt store; 1.3.0 Enterprise: the string "null"),
+// so each reading comes back as two variants and the write must pass all of
+// them.
+func (in bdClassGuardInput) bdUpdateMutation() ([]coordclass.Mutation, []map[string]string, string) {
+	var base coordclass.Mutation
 	if t, ok := in.args.Last("--type"); ok {
 		v := strings.TrimSpace(t)
-		m.Type = &v
+		base.Type = &v
 	}
-	m.AddLabels = normalizeBdLabels(in.args.Values("--add-label"))
-	m.RemoveLabels = normalizeBdLabels(in.args.Values("--remove-label"))
+	base.AddLabels = normalizeBdLabels(in.args.Values("--add-label"))
+	base.RemoveLabels = normalizeBdLabels(in.args.Values("--remove-label"))
 	if set, ok := in.args.flags["--set-labels"]; ok {
-		m.ReplaceLabels = true
-		m.SetLabels = normalizeBdLabels(set)
+		base.ReplaceLabels = true
+		base.SetLabels = normalizeBdLabels(set)
 	}
-	var nullKeys []string
+	readings := []map[string]string{nil}
 	if v, ok := in.args.Last("--metadata"); ok {
-		fields, problem := in.bdMetadataObject(v)
-		if problem != "" {
-			return nil, problem
-		}
-		m.SetMetadata = map[string]string{}
-		maps.Copy(m.SetMetadata, fields)
-	}
-	for _, kv := range in.args.Values("--set-metadata") {
-		key, v, ok := strings.Cut(kv, "=")
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, fmt.Sprintf("--set-metadata %q is not key=value", kv)
-		}
-		if m.SetMetadata == nil {
-			m.SetMetadata = map[string]string{}
-		}
-		m.SetMetadata[key] = v
-		if v == "null" {
-			nullKeys = append(nullKeys, key)
+		var problem string
+		if readings, problem = in.bdMetadataReadings(v); problem != "" {
+			return nil, nil, problem
 		}
 	}
-	m.UnsetMetadata = slices.Clone(in.args.Values("--unset-metadata"))
-	variants := []coordclass.Mutation{m}
-	if len(nullKeys) > 0 {
-		absent := m
-		absent.SetMetadata = maps.Clone(m.SetMetadata)
-		absent.UnsetMetadata = slices.Clone(m.UnsetMetadata)
-		for _, k := range nullKeys {
-			delete(absent.SetMetadata, k)
-			absent.UnsetMetadata = append(absent.UnsetMetadata, k)
+	sets := in.args.Values("--set-metadata")
+	for _, kv := range sets {
+		if key, _, ok := strings.Cut(kv, "="); !ok || strings.TrimSpace(key) == "" {
+			return nil, nil, fmt.Sprintf("--set-metadata %q is not key=value", kv)
 		}
-		variants = append(variants, absent)
 	}
-	return variants, ""
+	var variants []coordclass.Mutation
+	for _, reading := range readings {
+		m := base
+		m.SetMetadata = maps.Clone(reading)
+		var nullKeys []string
+		for _, kv := range sets {
+			key, v, _ := strings.Cut(kv, "=")
+			if m.SetMetadata == nil {
+				m.SetMetadata = map[string]string{}
+			}
+			m.SetMetadata[key] = v
+			if v == "null" {
+				nullKeys = append(nullKeys, key)
+			}
+		}
+		m.UnsetMetadata = slices.Clone(in.args.Values("--unset-metadata"))
+		variants = append(variants, m)
+		if len(nullKeys) > 0 {
+			absent := m
+			absent.SetMetadata = maps.Clone(m.SetMetadata)
+			absent.UnsetMetadata = slices.Clone(m.UnsetMetadata)
+			for _, k := range nullKeys {
+				delete(absent.SetMetadata, k)
+				absent.UnsetMetadata = append(absent.UnsetMetadata, k)
+			}
+			variants = append(variants, absent)
+		}
+	}
+	return variants, readings, ""
 }
 
 // judgeBdEdgeVerb applies the cross-store edge rule to the commands whose job
@@ -528,7 +626,8 @@ func judgeBdBatch(in bdClassGuardInput) bdClassGuard {
 // --skip-infra (gc's own flag), which imports a copy holding only the rows this
 // store holds and counts the rest. A dry run writes nothing, so it is reported.
 // A kept row's dependency must name a kept row of the file or a bead of this
-// work store no binding holds (the cross-store edge rule).
+// work store no binding holds (the cross-store edge rule), and a kept row's own
+// id must not be one a class binding holds (checkImportHeldIDs).
 func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	args, skipInfra := in.bdArgs, in.gcFlag
 	sources := append(slices.Clone(in.args.positionals), in.args.Values("--input")...)
@@ -556,10 +655,13 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	}
 	dryRun := in.args.Bool("--dry-run")
 	if split.skipped > 0 && !skipInfra && !dryRun {
-		return in.refuse("gc bd import: refused on this split city: %s holds %d row(s) of a class this store does not hold (%s). bd import would strand every one in the work store, and every later gc command would refuse until they were repaired. They are not routed to the class store either: it already holds the live copies, and replaying an archive over them would roll sessions and running graphs back. Re-run with %s to import only the %d row(s) this store holds; the rest are left out and counted. Nothing was written.",
+		return in.refuse("gc bd import: refused on this split city: %s holds %d row(s) of a class this store does not hold (%s). bd import would strand every one in the work store, where no class reader sees them and the city serves degraded until they are repaired. They are not routed to the class store either: it already holds the live copies, and replaying an archive over them would roll sessions and running graphs back. Re-run with %s to import only the %d row(s) this store holds; the rest are left out and counted. Nothing was written.",
 			source, split.skipped, formatClassCounts(split.byClass), bdImportSkipInfraFlag, len(split.keep))
 	}
 	if !dryRun {
+		if refusal := in.checkImportHeldIDs(source, split); refusal != "" {
+			return in.refuse("%s", refusal)
+		}
 		if refusal := in.checkImportEdges(split); refusal != "" {
 			return in.refuse("%s", refusal)
 		}
@@ -587,18 +689,64 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	}
 	// bd re-opens a named source, so it is handed a private copy of exactly
 	// the rows judged (bd_split_judged_files.go).
-	name, err := bdWriteJudgedCopy(body, "gc-bd-import-work-*.jsonl")
+	copyPath, remove, err := bdWriteJudgedCopy(body, source)
 	if err != nil {
 		return in.refuse("gc bd import: refused: could not write the judged copy of %s: %v. Nothing was written.", source, err)
 	}
-	redirected, ok := bdImportRedirect(args, source, name)
+	// The source is --input's last value or the one positional (bd refuses
+	// both). Either way the repointed argv is re-resolved under the pinned
+	// inventory and must differ from argv only in the source bd reads.
+	var redirected []string
+	var ok bool
+	if len(in.args.positionals) == 0 {
+		redirected, ok = bdRepointFlag(in.inv, args, "--input", copyPath)
+	} else {
+		redirected, ok = bdRepointPositional(in.inv, args, source, copyPath)
+	}
 	if !ok {
-		_ = os.Remove(name)
+		remove()
 		return in.refuse("gc bd import: refused on this split city: gc could not point bd at the judged copy of %s (spell the source as a plain argument or --input <file>). Nothing was written.", source)
 	}
 	out.args = redirected
-	out.cleanup = func() { _ = os.Remove(name) }
+	out.cleanup = remove
 	return out
+}
+
+// checkImportHeldIDs refuses kept rows whose id a class binding holds, as
+// create --id does (mintIDRefusal): gc storage migrate moves a bead with its id
+// and clears the work store's copy, so bd would write that id into the work
+// store again while every by-id gc command answers from the binding's bead.
+// The binding is asked once for every kept row's id; a binding gc cannot ask
+// is a refusal.
+func (in bdClassGuardInput) checkImportHeldIDs(source string, split bdImportSplit) string {
+	var ids []string
+	seen := map[string]bool{}
+	for _, id := range split.keptIDs {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	if in.held == nil {
+		return fmt.Sprintf("gc bd import: refused on this split city: gc cannot check whether the class binding holds the ids of the %d row(s) %s would write. Nothing was written.", len(ids), source)
+	}
+	held, err := in.held(ids)
+	if err != nil {
+		return fmt.Sprintf("gc bd import: refused on this split city: gc could not check whether the class binding holds the ids of the %d row(s) %s would write (%v). Retry once the binding answers. Nothing was written.", len(ids), source, err)
+	}
+	var hit []string
+	for _, id := range ids {
+		if held[id] {
+			hit = append(hit, id)
+		}
+	}
+	if len(hit) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("gc bd import: refused on this split city: the class binding holds a bead with the id of %d row(s) of %s (%s). gc storage migrate keeps a moved bead's id, so every by-id gc command would answer from the binding's bead and never reach the imported row. Leave those rows out of the file (the binding already holds the beads with those ids) and import again. Nothing was written.", len(hit), source, bdTruncateUTF8(strings.Join(hit, ", "), 200))
 }
 
 // checkImportEdges applies the cross-store edge rule to the kept rows'
@@ -620,70 +768,6 @@ func (in bdClassGuardInput) checkImportEdges(split bdImportSplit) string {
 		}
 	}
 	return ""
-}
-
-// bdImportRedirect points the token of argv that names source (the
-// positional, `-i x`, `-ix`, `-i=x`, `--input x`, `--input=x`) at path,
-// re-reading argv with import's flags so a flag value that happens to equal
-// source is never rewritten. --input is a string flag, whose last value pflag
-// keeps, so when it is given more than once the last one is the one bd reads
-// and the one pointed at path.
-func bdImportRedirect(argv []string, source, path string) ([]string, bool) {
-	out := slices.Clone(argv)
-	verbSeen := false
-	at, spelling := -1, ""
-	for i := 0; i < len(out); i++ {
-		tok := out[i]
-		if !strings.HasPrefix(tok, "-") || tok == "-" {
-			if !verbSeen {
-				verbSeen = tok == "import"
-				continue
-			}
-			if tok == source {
-				out[i] = path
-				return out, true
-			}
-			continue
-		}
-		name, _, inline := strings.Cut(tok, "=")
-		switch {
-		case name == "--input" || name == "-i":
-			switch {
-			case inline:
-				at, spelling = i, name+"="
-			case i+1 < len(out):
-				i++
-				at, spelling = i, ""
-			default:
-				return nil, false
-			}
-			continue
-		case strings.HasPrefix(tok, "-i") && !strings.HasPrefix(tok, "--"):
-			at, spelling = i, "-i"
-			continue
-		}
-		// Import's other flags are bools or globals; a global value flag
-		// consumes the next token.
-		if !inline && bdImportGlobalTakesValue(name) {
-			i++
-		}
-	}
-	if at < 0 {
-		return nil, false
-	}
-	out[at] = spelling + path
-	return out, true
-}
-
-// bdImportGlobalTakesValue reports whether a global flag consumes the next
-// token.
-func bdImportGlobalTakesValue(name string) bool {
-	for _, g := range bdflags.GlobalFlagSpecs() {
-		if g.Long == name || (g.Short != "" && g.Short == name) {
-			return g.TakesValue
-		}
-	}
-	return false
 }
 
 // judgeBdDelete judges `gc bd delete`. Every id (positional or from

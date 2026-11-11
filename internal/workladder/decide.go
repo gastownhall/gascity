@@ -18,7 +18,14 @@ import (
 // An entry whose live read could not tell (obs.Hold) waits, kept as it is,
 // and so does an entry whose last nudge's delivery is unsettled (a
 // NoticeMark), which also holds the seat's nudge slot (WN1). A mark ends with its episode:
-// a new generation, a rung rise and a progress reset clear it.
+// a new generation, a rung rise and a progress reset clear it. Work whose
+// seat waits on a person (Work.AwaitsHuman) is only ever nudged, a Cap after
+// its wait began and a Cap apart after that, a WaitCap instead on a pass
+// whose reading of the seat's turns shows the newest ended turn completed
+// (dueOn). Its pending release is dropped, and the wait's start and its end
+// each begin a new episode. A trigger still unclaimed when it is due after
+// TriggerAlert counted nudges raises AlertTriggerUnanswered, once per entry,
+// ahead of its recycle.
 //
 // Before acting, on a pass that may act on the seat, the seat's rate-limit
 // episode takes its step (rateLimit): it opens on an answered refusal, paces
@@ -62,6 +69,12 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 				}
 			}
 		}
+		if e.AwaitsHuman != w.AwaitsHuman { // a wait on a person begins or ends: a new episode
+			e.AwaitsHuman, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice = w.AwaitsHuman, 0, 0, now, false, false, 0, NoticeMark{}
+			if e.AwaitsHuman {
+				e.Last = now // the wait is paced from its start (dueAt)
+			}
+		}
 		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
@@ -75,14 +88,15 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
-	// unstarted, clear it once it is gone, alarm if it raced a start.
+	// unstarted, clear it once it is gone or its seat waits on a person,
+	// alarm if it raced a start.
 	if r := prev.Release; r != nil {
 		i := idx(r.Key)
 		_, named := obs.Started[r.Key]
 		switch {
 		case obs.StartedRead && (named || (i >= 0 && next.Entries[i].Rung >= RungStarted)):
 			acts = append(acts, Alert{Key: r.Key, Reason: AlertReleaseRacedStart})
-		case i < 0 || next.Entries[i].Kind != KindClaim:
+		case i < 0 || next.Entries[i].Kind != KindClaim || next.Entries[i].AwaitsHuman:
 		case !obs.StartedRead: // cannot re-prove unstarted; hold the mark, so the hook still refuses it
 			next.Release = r
 		default:
@@ -110,12 +124,12 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || !e.Notice.IsZero() {
 			continue // a read that could not tell, being released, or its last nudge's delivery not yet settled
 		}
-		if !p.dueAt(e, paused).After(now) {
+		if !p.dueOn(e, obs, paused).After(now) {
 			order = append(order, i)
 		}
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
-		return p.dueAt(d.Next.Entries[a], paused).Compare(p.dueAt(d.Next.Entries[b], paused))
+		return p.dueOn(d.Next.Entries[a], obs, paused).Compare(p.dueOn(d.Next.Entries[b], obs, paused))
 	})
 	// The seat's nudge slot: one per pass, none within Base of its last, and
 	// none while a nudge's delivery is unsettled (a notice mark, WN1).
@@ -138,13 +152,21 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			if !nudged {
 				nudge(true)
 			}
-		case e.Rung == RungEscalated || e.Attempts < t:
+		case e.AwaitsHuman || e.Rung == RungEscalated || e.Attempts < t: // a wait on a person is only ever nudged
 			if !nudged {
+				if e.Kind == KindTrigger && !e.AwaitsHuman && !e.Escalated && e.Attempts >= p.TriggerAlert {
+					e.Escalated = true
+					d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertTriggerUnanswered})
+				}
 				nudge(false)
 			}
 		case e.Kind == KindTrigger:
 			if nudged {
 				continue
+			}
+			if !e.Escalated { // a cell from before the trigger alert, or a TriggerAlert at or past the threshold
+				e.Escalated = true
+				d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertTriggerUnanswered})
 			}
 			if e.RecycleAt.IsZero() || now.Sub(e.RecycleAt) >= p.RecycleRepost {
 				e.RecycleAt, d.Next.RecycledGen = now, obs.Gen
@@ -243,6 +265,22 @@ func (obs Observation) progressAt() time.Time {
 	return obs.LastActivity
 }
 
+// waitRedrive reports whether a wait on a person keeps the hourly pace (Cap)
+// on this pass. It is left alone longer, a WaitCap (dueOn), only on
+// positive evidence that its seat is fine: this conversation's reading
+// shows the newest ended turn completed. Any other reading keeps the hourly
+// pace: the newest turn failed (the turn the person's answer started may
+// have died before it cleared the wait), was canceled or ended with no
+// status (an end inferred after its CLI went idle or died), a turn open (the
+// caller reads only a quiet seat's turns, so the turn may have died with no
+// end recorded, or stopped at a dialog its idle read cannot classify), no
+// turn at all, a reading of another conversation, or none (a family that
+// records no turn outcomes, a read that failed, no turn source).
+func (obs Observation) waitRedrive() bool {
+	t := obs.Turns
+	return !t.Read || t.Conv != obs.Conv || !t.LastCompleted
+}
+
 // clampEntry pulls e's times from a clock that ran ahead back to now, so a
 // skewed stamp cannot hold the entry back by its skew.
 func clampEntry(e Entry, now time.Time) Entry {
@@ -262,8 +300,16 @@ func minTime(t, now time.Time) time.Time {
 // its last nudge. While the seat is paced paused (a degraded provider, an
 // open rate-limit episode) the backoff is PausedCap, both floor and cap:
 // delivery goes on, at a steady pace. While the seat refuses nudges
-// (Refused) PausedCap is the floor.
+// (Refused) PausedCap is the floor. A wait on a person is due a Cap after it
+// began or after its last nudge (Last holds either), whatever a rung rise, a
+// new generation, the seat's progress, the provider's health or a rate-limit
+// episode do meanwhile: it paces a person, not the seat or the provider.
+// That is the earliest it is due: on a pass whose reading shows its seat's
+// newest turn completed, it is due a WaitCap after instead (dueOn).
 func (p Policy) dueAt(e Entry, paused bool) time.Time {
+	if e.AwaitsHuman {
+		return e.Last.Add(p.Cap)
+	}
 	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
@@ -275,6 +321,20 @@ func (p Policy) dueAt(e Entry, paused bool) time.Time {
 		iv = max(iv, p.PausedCap)
 	}
 	return e.Last.Add(iv)
+}
+
+// dueOn is when entry e is due on the pass that observes obs, paced paused
+// or not: dueAt, except that a wait on a person whose seat's reading shows
+// its newest turn completed (waitRedrive false) is due a WaitCap after it
+// began or after its last nudge. That reading says the seat is fine, but
+// not that the person's answer reached it: an answer that started no turn
+// (a reply that asks for none, a wake that failed) leaves the asking turn
+// the newest, completed, and only this nudge takes it up.
+func (p Policy) dueOn(e Entry, obs Observation, paused bool) time.Time {
+	if e.AwaitsHuman && !obs.waitRedrive() {
+		return e.Last.Add(p.WaitCap)
+	}
+	return p.dueAt(e, paused)
 }
 
 // settle stamps each entry's Next and decides whether the cell changed:
@@ -418,12 +478,31 @@ func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Recor
 	return r, recountPaused(&r.Entries[i], true), true
 }
 
+// NudgeDeferred is r after the runtime deferred the nudge of attempt about
+// key that landed at now, typing nothing (a turn its keys would interrupt is
+// running, runtime.ErrSessionBusy): the attempt is re-counted as paused, as
+// a nudge that never reached the seat, and no refusal is counted, so it
+// raises no nudge_refused alert. ok is false when r no longer holds that
+// attempt.
+func NudgeDeferred(r Record, key ClaimKey, attempt int, now time.Time) (out Record, ok bool) {
+	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
+	if i < 0 || !r.Entries[i].Last.Equal(now) || r.Entries[i].Attempts != attempt {
+		return r, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	recountPaused(&r.Entries[i], false)
+	return r, true
+}
+
 // NudgeDelivered is r after a direct nudge about key reached the seat at at
 // (the caller's clock at the delivery attempt's start: a refusal answering
 // the nudge may end before the delivery returns), in generation gen:
 // the entry's refusals end, and the seat's Delivered moves to at when r is
 // gen's cell and at is newer. A zero at moves nothing. ok is false when
-// nothing changed (no write needed).
+// nothing changed (no write needed). The caller stamps every delivery that
+// reached the seat, paused or not, one whose turn it never saw start
+// included: an open rate-limit episode is confirmed only by a refusal of a
+// nudge delivered after it opened, so an unstamped delivery confirms nothing.
 func NudgeDelivered(r Record, key ClaimKey, gen int64, at time.Time) (Record, bool) {
 	changed := false
 	if r.V != 0 && r.Gen == gen {

@@ -14,6 +14,11 @@ import (
 // ships next to gc.
 const CompanionName = "gc-osc7501"
 
+// RelayVersion is the relay protocol gc launches a relay-declared program
+// under (`gc-osc7501 relay -- <argv>`). gc never launches a program under a
+// companion that reports another relay version, 0 included.
+const RelayVersion = 1
+
 var (
 	// ErrCompanionNotFound is returned when the companion is neither next to
 	// the running executable nor on PATH.

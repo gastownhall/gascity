@@ -101,7 +101,7 @@ func TestRateLimitOpens(t *testing.T) {
 		}
 	}
 	t.Run("on a refusal at the evidence bound", func(t *testing.T) {
-		refusal := rlAt.Add(-DefaultCap)
+		refusal := rlAt.Add(-p.RateLimitEvidenceMaxAge)
 		d := Decide(rlSeat(refusal.Add(-time.Minute), RateLimit{}), rlPass(rlAt, 1, refusedTurns(1, 2, refusal)), p)
 		if want := (RateLimit{Phase: RateLimitOpen, Conv: 1, Since: refusal, Checked: refusal}); !reflect.DeepEqual(d.Next.RateLimit, want) {
 			t.Fatalf("episode %+v, want %+v", d.Next.RateLimit, want)
@@ -150,8 +150,8 @@ func TestRateLimitNearMisses(t *testing.T) {
 			return o
 		}()},
 		{
-			"a refusal older than the evidence bound answers nothing", rlSeat(rlAt.Add(-DefaultCap-2*time.Minute), RateLimit{}),
-			rlPass(rlAt, 1, refusedTurns(1, 3, rlAt.Add(-DefaultCap-time.Second))),
+			"a refusal older than the evidence bound answers nothing", rlSeat(rlAt.Add(-p.RateLimitEvidenceMaxAge-2*time.Minute), RateLimit{}),
+			rlPass(rlAt, 1, refusedTurns(1, 3, rlAt.Add(-p.RateLimitEvidenceMaxAge-time.Second))),
 		},
 		{"no outstanding work", rlSeat(delivered, RateLimit{}), func() Observation {
 			o := rlPass(rlAt, 1, refusedTurns(1, 3, refusal))
@@ -193,10 +193,11 @@ func TestRateLimitCloses(t *testing.T) {
 		{"restarted, the new conversation served", restarted, rlPass(rlAt, 2, servedTurns(2, rlAt.Add(-time.Minute))), RateLimitCauseServed},
 		{"restarted, served only before the restart", restarted, rlPass(rlAt, 2, servedTurns(2, fresh.Add(-time.Second))), ""},
 		{"restarted, the conversation moved (its own restart)", restarted, rlPass(rlAt, 2, TurnReading{}), ""},
-		{"open, no answered refusal past the evidence bound", open, rlPass(open.Checked.Add(DefaultCap+time.Second), 1, TurnReading{}), RateLimitCauseStale},
-		{"open, no answered refusal at the evidence bound", open, rlPass(open.Checked.Add(DefaultCap), 1, TurnReading{}), ""},
-		{"restarted, stale", restarted, rlPass(fresh.Add(DefaultCap+time.Second), 2, TurnReading{}), RateLimitCauseStale},
-		{"exhausted, stale while degraded", exhausted, degraded(rlPass(open.Checked.Add(DefaultCap+time.Second), 1, TurnReading{})), RateLimitCauseStale},
+		{"open, no answered refusal past the evidence bound", open, rlPass(open.Checked.Add(p.RateLimitEvidenceMaxAge+time.Second), 1, TurnReading{}), RateLimitCauseStale},
+		{"open, no answered refusal at the evidence bound", open, rlPass(open.Checked.Add(p.RateLimitEvidenceMaxAge), 1, TurnReading{}), ""},
+		{"open, no answered refusal for a Cap, inside the bound", open, rlPass(open.Checked.Add(DefaultCap+time.Minute), 1, TurnReading{}), ""},
+		{"restarted, stale", restarted, rlPass(fresh.Add(p.RateLimitEvidenceMaxAge+time.Second), 2, TurnReading{}), RateLimitCauseStale},
+		{"exhausted, stale while degraded", exhausted, degraded(rlPass(open.Checked.Add(p.RateLimitEvidenceMaxAge+time.Second), 1, TurnReading{})), RateLimitCauseStale},
 		{"busy judges nothing", open, func() Observation {
 			o := rlPass(rlAt, 1, servedTurns(1, rlAt.Add(-time.Minute)))
 			o.Quiet = Quiet{State: NotQuiet}
@@ -297,8 +298,8 @@ func TestRateLimitUndeliveredNudgesGoStale(t *testing.T) {
 	if closed.IsZero() {
 		t.Fatalf("the episode stood for a day on one refusal: %+v", r.RateLimit)
 	}
-	if late := closed.Sub(refusal); late <= DefaultCap || late > DefaultCap+step {
-		t.Fatalf("closed stale %v after the refusal, want just past %v", late, DefaultCap)
+	if late := closed.Sub(refusal); late <= p.RateLimitEvidenceMaxAge || late > p.RateLimitEvidenceMaxAge+step {
+		t.Fatalf("closed stale %v after the refusal, want just past %v", late, p.RateLimitEvidenceMaxAge)
 	}
 	if nudges < 100 {
 		t.Fatalf("the seat was nudged %d times in a day: silenced", nudges)
@@ -559,6 +560,9 @@ func TestRateLimitBlocked(t *testing.T) {
 		{"a claim's live read could not tell", func(_ *Record, o *Observation) {
 			o.Hold = map[ClaimKey]bool{key("s"): true}
 		}},
+		{"the seat's work not all listed", func(_ *Record, o *Observation) {
+			o.Partial = true
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev, o := confirmedPass(openSince(since))
@@ -642,8 +646,8 @@ func TestRateLimitAfterTheRestart(t *testing.T) {
 	// A restart that never landed (the same generation and conversation),
 	// its paused nudges not reaching the seat: the refusal from before the
 	// restart keeps answering the last delivery, but it neither exhausts the
-	// restarted episode nor keeps it standing: the episode closes stale an
-	// hour after the evidence it restarted on.
+	// restarted episode nor keeps it standing: the episode closes stale
+	// RateLimitEvidenceMaxAge after the evidence it restarted on.
 	t.Run("a refusal from before the restart keeps nothing standing", func(t *testing.T) {
 		r := rlSeat(fresh.Add(-2*time.Minute), restarted)
 		reading := refusedTurns(1, 2, fresh.Add(-time.Minute))
@@ -694,6 +698,94 @@ func TestRateLimitPacesPaused(t *testing.T) {
 		if got := p.dueAt(entry(t, d, "s"), true); !got.Equal(rlAt.Add(DefaultPausedCap)) {
 			t.Fatalf("%v: next due %v, want PausedCap", e, got.Sub(rlAt))
 		}
+	}
+}
+
+// A wait on a person keeps its Cap inside an episode: the episode paces the
+// seat's other work at PausedCap, but a waiting claim is nudged (paused,
+// counting nothing) only a Cap after its wait began or its last nudge.
+func TestRateLimitPacesAWaitOnAPersonAtCap(t *testing.T) {
+	since := rlAt.Add(-time.Minute)
+	last := rlAt.Add(-DefaultPausedCap)
+	prev := rec(1, Entry{Key: key("w"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: last, AwaitsHuman: true})
+	prev.RateLimit = RateLimit{Phase: RateLimitOpen, Conv: 1, Since: since, Checked: since}
+	o := startedBy1(quiet(rlAt, 1, Work{Key: key("w"), Kind: KindClaim, AwaitsHuman: true}), "w", SrcAgent)
+	o.Conv = 1
+	d := Decide(prev, o, p)
+	wantEffects(t, d)
+	if got := p.dueAt(entry(t, d, "w"), true); !got.Equal(last.Add(DefaultCap)) {
+		t.Fatalf("next due %v after its last nudge, want a Cap", got.Sub(last))
+	}
+	o.Now = last.Add(DefaultCap)
+	d = Decide(d.Next, o, p)
+	wantEffects(t, d, Nudge{Key: key("w"), Kind: KindClaim, Rung: RungStarted, Attempt: 2, Paused: true})
+	if e := entry(t, d, "w"); e.Attempts != 2 || e.Paused != 1 || !e.AwaitsHuman {
+		t.Fatalf("entry %+v, want the paused nudge counted as paused, still waiting", e)
+	}
+}
+
+// A seat whose only work waits on a person is nudged a Cap apart inside its
+// episode, so the episode's evidence must outlast that pace. Were the bound
+// the Cap itself, a pass landing later after a nudge's due time than the
+// provider took to refuse the last nudge would close the episode stale on
+// the very pass that sends the next one: never confirmed, the episode would
+// never raise the held alert, the one page for a refused answer to a
+// waiting step (review of #8624). Whatever the refusals' latency and the
+// passes' lag, the episode opens once and is held (awaiting a person), with
+// one alert, as soon as a refused probe confirms it, and the step is nudged
+// on the first pass a Cap after its last nudge.
+func TestRateLimitHoldsAWaitOnAPersonWhateverThePassLag(t *testing.T) {
+	for _, tc := range []struct{ latency, step time.Duration }{
+		{2 * time.Minute, 30 * time.Second}, // every due time lands on a pass
+		{time.Second, 30 * time.Second},
+		{time.Second, 37 * time.Second}, // passes drift past the due times
+		{200 * time.Millisecond, 59 * time.Second},
+		{time.Second, 7 * time.Minute},
+		{19 * time.Minute, 37 * time.Second},
+	} {
+		t.Run(tc.latency.String()+" refusals, passes "+tc.step.String()+" apart", func(t *testing.T) {
+			w := Work{Key: key("w"), Kind: KindClaim, AwaitsHuman: true}
+			r := rec(1, Entry{Key: w.Key, Kind: KindClaim, Rung: RungStarted, Since: rlAt, Last: rlAt, AwaitsHuman: true})
+			var refusals, nudged []time.Time // each nudge refused latency after it
+			var moves []RateLimitMove
+			var alerts []string
+			for now := rlAt; now.Before(rlAt.Add(8 * time.Hour)); now = now.Add(tc.step) {
+				o := startedBy1(quiet(now, 1, w), "w", SrcAgent)
+				o.Conv, o.RestartHold = 1, RestartHoldAwaitingHuman
+				switch n := len(refusals); {
+				case n > 0 && refusals[n-1].After(now): // the refused turn is still running
+					o.Quiet = Quiet{State: NotQuiet}
+				case n > 0:
+					o.Turns = refusedTurns(1, n, refusals[n-1])
+				}
+				d := Decide(r, o, p)
+				if freshRestarts(d) != 0 {
+					t.Fatalf("at +%v: restarted a seat whose work awaits a person", now.Sub(rlAt))
+				}
+				moves, alerts = append(moves, rlMoves(d)...), append(alerts, rlAlerts(d)...)
+				if d.Changed {
+					r = d.Next
+				}
+				for _, a := range d.Actions {
+					if n, ok := a.(Nudge); ok {
+						r, _ = NudgeDelivered(r, n.Key, 1, now)
+						nudged, refusals = append(nudged, now), append(refusals, now.Add(tc.latency))
+					}
+				}
+			}
+			if want := []RateLimitMove{move(RateLimitTransitionOpened, ""), move(RateLimitTransitionHeld, RateLimitCauseAwaitingHuman)}; !reflect.DeepEqual(moves, want) ||
+				!slices.Equal(alerts, []string{AlertRateLimitedHeld}) {
+				t.Fatalf("moves %+v, alerts %v: want the episode opened once and held at once, with one alert", moves, alerts)
+			}
+			if len(nudged) < 7 {
+				t.Fatalf("nudged at %v in 8h: want the step nudged hourly", nudged)
+			}
+			for i := 1; i < len(nudged); i++ {
+				if gap := nudged[i].Sub(nudged[i-1]); gap < DefaultCap || gap >= DefaultCap+tc.step {
+					t.Fatalf("nudges %v apart: want the first pass a Cap after the last", gap)
+				}
+			}
+		})
 	}
 }
 
@@ -883,7 +975,7 @@ func TestRateLimitStateIsWritten(t *testing.T) {
 		t.Fatalf("a workless seat's episode: changed %v, %+v", d.Changed, d.Next.RateLimit)
 	}
 	// It still closes stale.
-	o.Now = rlAt.Add(DefaultCap + time.Minute)
+	o.Now = rlAt.Add(p.RateLimitEvidenceMaxAge + time.Minute)
 	if d := Decide(prev, o, p); !d.Changed || d.Next.RateLimit.Phase != RateLimitClear {
 		t.Fatalf("a workless seat's episode did not close stale: %+v", d.Next.RateLimit)
 	}
