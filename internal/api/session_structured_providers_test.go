@@ -1244,21 +1244,31 @@ func testStructuredPromotionWithoutReconnect(t *testing.T, surface string, holdF
 		t.Fatalf("fallback body missing degraded diagnostic: %s", fallbackBody)
 	}
 
-	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+	writeNamedSessionJSONLAtomic(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"authoritative history"},"timestamp":"2025-01-01T00:00:00Z"}`,
 	)
 	if gate != nil {
 		gate.Release()
 	}
-	select {
-	case structuredPeekPoll <- time.Now():
-	case <-time.After(hangBudget):
-		t.Fatal("structured peek stream did not consume the injected poll tick")
+	// The handler checks history once right after its first fallback frame,
+	// before it first selects on the poll channel, so a transcript that is
+	// already complete promotes on that check and no tick is ever read. A
+	// transcript that lands later promotes on a tick. Offer ticks until the
+	// promotion frame is complete instead of requiring one to be consumed.
+	const promotionMarker = `"reset_reason":"stream_changed"`
+	deadline := time.Now().Add(hangBudget)
+	for !sseFrameComplete(rec.BodyString(), promotionMarker) {
+		if time.Now().After(deadline) {
+			t.Fatalf("structured peek stream never promoted to history; body:\n%s", rec.BodyString())
+		}
+		select {
+		case structuredPeekPoll <- time.Now():
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-
-	body := waitForRecorderSubstring(t, rec, `"reset_reason":"stream_changed"`, 10*time.Second)
 	cancel()
 	<-done
+	body := rec.BodyString()
 
 	var promoted *SessionStreamStructuredMessageEvent
 	for _, frame := range parseSSETestFrames(body) {
