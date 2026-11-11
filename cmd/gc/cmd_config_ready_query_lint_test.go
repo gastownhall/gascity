@@ -166,17 +166,34 @@ func TestReadyQueryLintChecksTheEffectiveOverlay(t *testing.T) {
 				base, overlay = overlay, base
 				want = 1
 			}
-			city := readyLintCity(t, true, "worker", "work_query", base)
+			// scale_check supports patches; work_query is authored on the agent.
+			city := readyLintCity(t, true, "worker", "scale_check", base)
 			configPath := filepath.Join(city, "city.toml")
 			body, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
 			writeLintFile(t, configPath, "include = ['overlay.toml']\n"+string(body))
-			writeLintFile(t, filepath.Join(city, "overlay.toml"), fmt.Sprintf("[[patches.agent]]\nname = 'worker'\nwork_query = '''%s'''\n", overlay))
+			writeLintFile(t, filepath.Join(city, "overlay.toml"), fmt.Sprintf("[[patches.agent]]\nname = 'worker'\nscale_check = '''%s'''\n", overlay))
+			cfg, _, err := loadConfigCommandCityConfig(city)
+			if err != nil {
+				t.Fatalf("loading overlay fixture: %v", err)
+			}
+			var effective string
+			for _, agent := range cfg.Agents {
+				if agent.Name == "worker" {
+					effective = agent.ScaleCheck
+				}
+			}
+			if effective != overlay {
+				t.Fatalf("fixture effective scale_check = %q, want overlay %q", effective, overlay)
+			}
 			warnings := readyLintValidation(t)
 			if len(warnings) != want {
 				t.Fatalf("advisories for effective overlay = %q, want %d", warnings, want)
+			}
+			if want == 1 && (!strings.Contains(warnings[0], "worker") || !strings.Contains(warnings[0], "scale_check")) {
+				t.Fatalf("advisory %q does not identify the patched worker scale_check", warnings[0])
 			}
 		})
 	}
