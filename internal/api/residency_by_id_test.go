@@ -24,7 +24,8 @@ import (
 // test file: reaching a plan's legs directly is exactly what the residency
 // boundary forbids of a consumer.
 func (s *Server) beadStoresForID(id string) []beads.Store {
-	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
+	st := s.state.Stores()
+	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s: s, st: st}}, st.Topology())
 	if err != nil {
 		return nil
 	}

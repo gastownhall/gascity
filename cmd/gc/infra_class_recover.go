@@ -218,6 +218,21 @@ what the binding does.
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
+A stranded row that only its metadata makes infrastructure (typically
+gc.root_bead_id on a task or bug: a work-shaped row) is NOT moved by
+default, --dry-run included: carrying ordinary work into the binding hands
+it to a workflow's ownership, out of every work reader's sight. Such rows
+are listed apart, each with its in-place repair, for example
+` + "`" + `gc bd update <id> --unset-metadata gc.root_bead_id` + "`" + `. If the row is
+ordinary work that names its workflow as a reference, run that on the running
+city; if it really is a workflow step an unfenced writer created, run this
+again with --move <id> (repeatable) to copy it into the binding. A run that
+leaves one behind exits 1: the city is still stranded. --move naming a
+stranded row that is not work-shaped (it moves anyway) or an id that is not
+stranded is refused, and nothing is written. This applies only to rows the
+proven-copy manifest does not list: a row it lists by id alone (below) is
+handled as that paragraph says, whatever its metadata.
+
 A manifest written by an older build may list a work-store row by id alone,
 with nothing that says whether it is the bead the copy carried: no time
 bounds the entry, the row carries no created_at, or the row is younger than
@@ -314,7 +329,7 @@ answers above refuse until the run is finished, restored or closed.`,
 	cmd.Flags().StringVar(&dumpPath, "dump", "",
 		"write every stranded bead and its source dep edges to this JSON file before any write")
 	cmd.Flags().StringSliceVar(&moveIDs, strandedMoveFlag, nil,
-		"for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated)")
+		"copy this stranded row into the binding: a work-shaped row (only its metadata makes it infrastructure; not moved by default), or a work-store row the manifest lists by id alone and the binding no longer holds (required for one that is not closed; a closed one is moved by default) (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&carriedIDs, strandedRecordCarriedFlag, nil,
 		"for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated)")
 	cmd.Flags().StringSliceVar(&replaceIDs, strandedReplaceBindingRowFlag, nil,
@@ -354,7 +369,9 @@ type strandedRecoveryOptions struct {
 	// work-store rows the manifest lists by id alone, with nothing that proves
 	// whether each is the bead the copy carried, and the binding no longer
 	// holds: copy it in, or record it as carried (the clear then deletes it).
-	// Nothing else may be named.
+	// Move also names a work-shaped stranded row (one only its metadata makes
+	// infrastructure, coordclass.ClassMetadataOnly), which is otherwise left
+	// in the work store. Nothing else may be named.
 	Move          map[string]bool
 	RecordCarried map[string]bool
 	// ReplaceBindingRow and DropWorkRow are the operator's per-id answers for
@@ -822,7 +839,7 @@ func reportInfraEdgePlan(stdout io.Writer, plan infraEdgePlan) {
 // answering the city's socket, or "".
 func strandedRecoveryControllerRefusal(cityPath, logPrefix string) string {
 	if pid := infraMigrationForeignControllerPID(cityPath); pid != 0 {
-		return fmt.Sprintf("%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid)
+		return fmt.Sprintf("%s: controller PID %d is live on this city; while it runs, any writer may change the work store, and a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid)
 	}
 	return ""
 }
@@ -1070,6 +1087,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// holds none, and moving the work-store row is what the choice asked.
 	var idOnlyOpen []beads.Bead
 	var recordCarried []beads.Bead
+	// workShaped are the stranded rows only metadata makes infrastructure,
+	// left where they are unless named with --move (see below).
+	var workShaped []beads.Bead
+	workShapedKeys := map[string][]string{}
 	// chosen maps each row a per-id flag answered to that flag.
 	chosen := map[string]string{}
 	choicesBefore, err := infraRecoverChoiceIDs(target)
@@ -1085,11 +1106,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			}
 			continue
 		}
+		listedByID := false
 		switch match {
 		case infraManifestCarried:
 			removedSinceCutover++
 			continue
 		case infraManifestLegacyUnbounded, infraManifestPresumedReused:
+			listedByID = true
 			switch {
 			case opts.Move[b.ID] && opts.RecordCarried[b.ID]:
 				fmt.Fprintf(stderr, "%s: %s is named by both --%s and --%s; choose one\n", logPrefix, b.ID, strandedMoveFlag, strandedRecordCarriedFlag) //nolint:errcheck // best-effort stderr
@@ -1114,6 +1137,36 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			default:
 				idOnlyOpen = append(idOnlyOpen, b)
 				continue
+			}
+		}
+		// A row metadata alone made infrastructure (gc.root_bead_id on a task
+		// or bug) is ordinary work as often as it is a workflow step, and
+		// carrying work into the binding hands it to a workflow's ownership:
+		// the substrate incident's three beads were force-closed as skipped by
+		// the workflow they named, could take no comment, and vanished from
+		// every work reader. So it moves only when the operator names it with
+		// --move; otherwise it stays in the work store and the run names the
+		// in-place repair. A row an earlier --replace-binding-row already
+		// resolved toward the binding is the operator's decision and is not
+		// asked again.
+		//
+		// Only a row the manifest does not list is judged this way: the set
+		// the gate offers the in-place repair for (Declassifiable). A row it
+		// lists by id alone keeps the per-id handling above, whatever its
+		// metadata. Nothing proves whether it is the bead a copy carried under
+		// that id, the gate counts an unbounded one retained rather than
+		// stranded, and the clear's refusal relies on this run to move a
+		// closed one, so withholding it here would leave the clear and this
+		// command each naming the other with no exit.
+		replacedBefore := opts.ReplaceBindingRow[b.ID] && choicesBefore[strandedReplaceBindingRowFlag][b.ID]
+		if !listedByID && !replacedBefore {
+			if keys, metadataOnly := coordclass.ClassMetadataOnly(b); metadataOnly {
+				if !opts.Move[b.ID] {
+					workShaped = append(workShaped, b)
+					workShapedKeys[b.ID] = keys
+					continue
+				}
+				chosen[b.ID] = strandedMoveFlag
 			}
 		}
 		stranded = append(stranded, b)
@@ -1217,7 +1270,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 	if len(misnamedLegacy) > 0 {
 		sort.Strings(misnamedLegacy)
-		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows that the manifest lists by id alone and the binding no longer holds; these are not: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strings.Join(misnamedLegacy, ", ")) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --%s/--%s name only work-store rows that the manifest lists by id alone and the binding no longer holds, and --%s also a stranded row only its metadata makes infrastructure (a work-shaped row); these are none of those: %s. Nothing was written\n", logPrefix, strandedMoveFlag, strandedRecordCarriedFlag, strandedMoveFlag, strings.Join(misnamedLegacy, ", ")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if len(misnamedHeld) > 0 {
@@ -1291,6 +1344,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath())                                                                     //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "source infrastructure beads: %d\nbinding beads: %d\nproven copy: %d\nremoved since cutover: %d\nstranded: %d\nin the binding, unrecorded: %d\nunder an id the binding holds for a different bead: %d\n", //nolint:errcheck // best-effort stdout
 		len(rows), len(held), len(proven), removedSinceCutover, len(stranded), len(unrecorded)-len(awaitingHeld), len(heldRows))
+	reportWorkShapedStranded(stdout, workShaped, workShapedKeys)
 
 	probeID := ""
 	if len(stranded) > 0 {
@@ -1345,10 +1399,11 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 
 	if opts.DumpPath != "" {
-		// The rows awaiting a per-id choice are dumped too: the dump is how an
-		// operator inspects them before choosing.
+		// The rows awaiting a per-id choice are dumped too, the work-shaped
+		// rows this run leaves for an in-place repair or --move among them:
+		// the dump is how an operator inspects them before choosing.
 		dumped := append(append([]beads.Bead(nil), stranded...), idOnlyOpen...)
-		dumped = append(append(append(dumped, replace...), drop...), awaitingHeld...)
+		dumped = append(append(append(append(dumped, replace...), drop...), awaitingHeld...), workShaped...)
 		if err := writeStrandedDump(opts.DumpPath, target, depReader, dumped); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1433,7 +1488,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(idOnlyOpen) > 0 || len(awaitingHeld) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(idOnlyOpen) > 0 || len(awaitingHeld) > 0 || len(workShaped) > 0 {
 			return 1
 		}
 		return 0
@@ -1446,10 +1501,14 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 
 	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 && len(recordCarried) == 0 && len(drop) == 0 {
-		fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record, with every within-infra edge between them.") //nolint:errcheck // best-effort stdout
+		if len(workShaped) > 0 {
+			fmt.Fprintf(stdout, "nothing was moved: the %d stranded row(s) left are work-shaped and each awaits the repair named above; the city is still stranded until each is repaired in place or moved.\n", len(workShaped)) //nolint:errcheck // best-effort stdout
+		} else {
+			fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record, with every within-infra edge between them.") //nolint:errcheck // best-effort stdout
+		}
 		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(workShaped) > 0 {
 			return 1
 		}
 		return 0
@@ -1724,18 +1783,23 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 	reportInfraEdgePlan(stdout, plan)
 	reportAmbiguous(stdout, ambiguous)
-	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 {
-		return 1
+	if len(workShaped) > 0 {
+		fmt.Fprintf(stdout, "still stranded by default: %d work-shaped row(s) were left in the work store; repair each in place or name it with --%s (listed above)\n", len(workShaped), strandedMoveFlag) //nolint:errcheck // best-effort stdout
 	}
 	// The recovered rows are now proven into the binding and still in the work
 	// store: second rows under ids the binding owns, which boot refuses until
 	// they are cleared. This command only ever adds, so it names the one that
-	// clears rather than doing it.
+	// clears rather than doing it — before any exit-1 return below, because a
+	// run that leaves work-shaped or ambiguous rows still left these copies,
+	// and a stranded city that holds them is refused, not served degraded.
 	if len(residual.Retained) > 0 {
 		// Retained counts every carried row, including the ones whose binding
 		// copy the binding's own GC has since collected; name the two apart.
 		held := len(residual.Retained) - residual.RemovedSinceCutover
 		fmt.Fprintf(stdout, "next: the work store still holds %d retained cop(ies) (%d of beads the binding holds, %d the binding has since collected); clear them with `%s`\n", len(residual.Retained), held, residual.RemovedSinceCutover, storageClearInstruction()) //nolint:errcheck // best-effort stdout
+	}
+	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 || len(workShaped) > 0 {
+		return 1
 	}
 	return 0
 }
@@ -1800,6 +1864,26 @@ func manifestIDsDropped(previous map[string]bool, replacement []string) []string
 	}
 	sort.Strings(dropped)
 	return dropped
+}
+
+// reportWorkShapedStranded lists the stranded rows only metadata makes
+// infrastructure, which this repair leaves in the work store unless each is
+// named with --move, and the two answers for each: the in-place declassify
+// (coordclass.DeclassifyCommand) when it is ordinary work, or --move when it
+// really is a workflow step. It prints nothing when there are none.
+func reportWorkShapedStranded(stdout io.Writer, rows []beads.Bead, keys map[string][]string) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "work-shaped, NOT moved: %d stranded row(s) are infrastructure class only because of their metadata, and are left in the work store.\n", len(rows))                                                                       //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  If a row is ordinary work that names its workflow as a reference, unset the key on the running city with the command shown; that write returns it to the work class its store holds, and it is no longer stranded.\n") //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "  If it really is a workflow step an unfenced writer created, run this again with --%s <id> (repeatable) to copy it into the binding.\n", strandedMoveFlag)                                                              //nolint:errcheck // best-effort stdout
+	for _, b := range rows {
+		fmt.Fprintf(stdout, "  %s  status=%s  type=%s  class=%s  by=%s  title=%q\n", //nolint:errcheck // best-effort stdout
+			b.ID, b.Status, b.Type, coordclass.Classify(b), strings.Join(keys[b.ID], ","), b.Title)
+		fmt.Fprintf(stdout, "    ordinary work:  %s\n", coordclass.DeclassifyCommand(b.ID, keys[b.ID])) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "    workflow step:  --%s %s\n", strandedMoveFlag, b.ID)                    //nolint:errcheck // best-effort stdout
+	}
 }
 
 // reportAmbiguous names the beads this repair declined to move, one per line,

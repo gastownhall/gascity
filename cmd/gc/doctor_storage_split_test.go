@@ -97,6 +97,28 @@ func TestStorageSplitDoctorAgreesWithStatus(t *testing.T) {
 			status: doctor.StatusError, want: "not serving",
 		},
 		{
+			// substrate 2026-11-09: a plain `bd create` carrying
+			// gc.root_bead_id. The city serves degraded, and doctor says so
+			// as an error, because nothing else stops it now.
+			name: "converged with a stranded raw write",
+			setup: func(t *testing.T) storageOperatorRequest {
+				request, _ := convergedSplitCity(t)
+				source, err := openInfraMigrationSource(request.CityPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-1"}})
+				// Tied to the gate: doctor's "degraded" is the gate's verdict.
+				routes, err := storageBootGate(request.CityPath, request.Cfg, "gc start", nil, io.Discard)
+				if err != nil || !routes.bootVerdict.servesDegraded() {
+					t.Fatalf("the gate does not serve this city degraded (err %v)", err)
+				}
+				_ = routes.close()
+				return request
+			},
+			status: doctor.StatusError, want: "the city serves degraded",
+		},
+		{
 			name: "legacy marker without identity",
 			setup: func(t *testing.T) storageOperatorRequest {
 				request, target := convergedSplitCity(t)

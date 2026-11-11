@@ -38,6 +38,14 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in (the server group). The
+suite runs it, and the sessions it checks it against, in a private city:
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
+never the city you run the suite from. A runtime that does not scope its
+server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
+only against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
 arguments are always the executable itself.

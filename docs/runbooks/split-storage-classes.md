@@ -589,7 +589,17 @@ literal:
 On a split city, `gc bd` is an allowlist. bd writes whatever it is told into
 the work store. A bead that lands there with an infrastructure class (a
 `gc:session` label, a `gc.root_bead_id`, a `message` type, and so on) is
-stranded, and every later routed `gc` command refuses until it is repaired.
+stranded: no reader of its class sees it until it is repaired. The city
+serves degraded around it and says so (see "Stranded writes: degraded
+serving" below).
+
+Plain `bd`, run in the city directory, is NOT judged by any of this. It
+writes the work store directly, so on a split city create every bead with
+`gc bd create`, and never put a class key on a bead you create
+(`gc.root_bead_id`, `gc.kind`, `gc.formula_contract`, `gc.synthetic*`, a
+`gc:*` label, or an infrastructure type). On 2026-11-09 an agent's plain
+`bd create` carrying `gc.root_bead_id` (copied from its claimed formula step
+as provenance) stranded three ordinary work beads on substrate.
 
 How a command gets through:
 
@@ -872,6 +882,62 @@ they are the frozen rows the demand surface would otherwise serve forever.
 If the city also holds a stranded write, the command names it and clears
 nothing; run `gc storage recover-stranded --from-work --fleet-stopped` first,
 then the migration again.
+
+## Stranded writes: degraded serving
+
+A converged city whose work store holds infrastructure beads the binding does
+not serve is stranded. Before this build, one stranded row refused every
+infrastructure class in every `gc` process: workers could not claim, close,
+drain-ack or send mail, while the controller (which checks only at boot) kept
+dispatching, and the writer that stranded the row, which never consults the
+gate, kept writing.
+
+Now the city serves degraded, as long as no stranded id is held in the binding
+by a different bead and the work store holds no retained copy of a bead the
+binding owns (and no clear is left unfinished):
+
+- the stranded rows stay invisible to their class readers until repaired; a
+  by-id read of one misses the binding and the work store answers with the
+  only copy;
+- every `gc` process prints one `WARNING: serving degraded` line naming the
+  ids;
+- `gc storage status` exits 1 and prints `serving: degraded`, with the repair;
+- `gc doctor` reports the city as an error;
+- the controller publishes `storage.binding.stranded` (see "Watching a cutover
+  from outside").
+
+A stranded id the binding holds for a different bead still refuses the whole
+city, with the ids in the refusal; resolve it with `recover-stranded`'s
+per-id choices (below). So do retained copies beside a strand, because a
+reader that reaches the work store first is served the frozen copy and
+re-dispatches finished steps (#5987): the refusal and `gc storage status`
+name the clear, `gc storage migrate --from-work --fleet-stopped`, and
+`recover-stranded` prints it even when it exits 1.
+
+### Repair in place: a work bead that carries a class key
+
+The common strand is ordinary work that a plain `bd create` stamped with
+`gc.root_bead_id`, naming the workflow the writer was running. When that is
+the row's only class key (no `gc.kind`, `gc.formula_contract` or other class
+key, no class-deciding type or label, and no `gc.step_id`, which marks a real
+formula step), `gc storage status` names it as infrastructure class "only
+because of metadata", with the exact repair. Run it on the running city; no
+stop is needed:
+
+```
+gc bd update <id> --unset-metadata gc.root_bead_id
+gc storage status   # exits 0 once nothing is left
+```
+
+`gc bd` judges that write and allows it, because it returns the bead to the
+work class its store holds. Do NOT copy such a row into the binding: it would
+become a member of that workflow, the workflow's cleanup would close it, it
+could take no comments, and work readers would stop seeing it.
+
+`gc storage recover-stranded` therefore leaves these work-shaped rows in the
+work store by default, lists them apart with the same repair, and exits 1
+while any is left. If one really is a workflow step a writer gc could not
+fence created, name it with `--move <id>` to copy it into the binding.
 
 ## Upgrading a city whose storage check refuses
 
@@ -1230,18 +1296,36 @@ size of the proven copy it rests on:
 | `storage.binding.genesis`        | Serving a binding created for a city with nothing to move. |
 | `storage.binding.unconverged`    | Refused: config and data disagree. `invariant` says how. |
 | `storage.binding.uncheckable`    | Refused: the check that would decide could not run.      |
+| `storage.binding.stranded`       | The work store holds infrastructure beads the binding does not serve. `serving` says whether the city serves degraded (true) or refuses because a stranded id is held in the binding by a different bead (false). |
 | `storage.binding.not_configured` | This city has no infrastructure split.                   |
 
 The last one is a verdict, not the absence of one, and it is why a subscriber
 can gate on these events at all: silence would otherwise be indistinguishable
 from a gate that crashed before deciding.
 
-`outcome` is finer than the event type. Five refusals — `unconverged`,
-`stranded`, `born-split-blocked`, `genesis-blocked` and `retained-copies` — all
-arrive as `storage.binding.unconverged`, because a subscriber branches on "is
-this city serving" and all five answer no. The `outcome` field says which no it
-was and `invariant` says why, so a consumer that switches on `outcome` must
-handle all nine values, not the five type names.
+`outcome` is finer than the event type. The refusals `unconverged`,
+`born-split-blocked`, `genesis-blocked`, `retained-copies` and
+`identity-mismatch` all arrive as `storage.binding.unconverged`, because a
+subscriber branches on "is this city serving" and all of them answer no. The
+`outcome` field says which no it was and `invariant` says why, so a consumer
+that switches on `outcome` must handle every value, not only the type names.
+`stranded` has its own type because it answers both ways. `serving` is set
+only by a boot gate (a controller boot, or a `gc` process resolving its
+routes) and says what that gate did; it is absent on operator-command and
+recheck events and on events older builds recorded, and absent means "not
+stated", never false. A stranded event also carries `stranded`,
+`held_different`, `presumed_reused` and `retained` (each up to 50 ids) with
+`stranded_count`, `held_different_count`, `presumed_reused_count` and
+`retained_count`.
+
+**Alert on `storage.binding.stranded`.** A stranded city no longer announces
+itself by refusing to start. The controller publishes the event at boot and
+from a read-only recheck it runs every 10 minutes (events marked
+`recheck: true`), whenever the definitive verdict changes, and publishes
+`storage.binding.converged` once the set is empty again. A recheck whose read
+fails transiently publishes nothing; one that cannot run for a standing
+reason publishes `storage.binding.uncheckable` once. Neither stops anything:
+the running controller keeps serving.
 
 `proven_beads` is zero on every refusal, where it means the size was not
 established rather than that the copy is empty. On `genesis` the zero is real.
@@ -1696,8 +1780,11 @@ holds no infrastructure bead, and classifies any it finds against the recorded
 proven-copy manifest.
 
 - A bead the copy **never carried** is a write that landed in the work store
-  after the equality proof. It becomes a blocked boot that names the ids, and
-  the beads are intact in the work store. It never becomes silence.
+  after the equality proof. The city serves degraded: the boot names the ids
+  in a `storage.binding.stranded` event and a warning, and the beads are
+  intact in the work store. It never becomes silence. If the binding holds
+  one of those ids for a DIFFERENT bead, the boot is refused instead, because
+  the id would name two beads.
 - A bead the copy delivered that the work store still holds — a city migrated
   by gc 1.5.0, or a clear that was interrupted — is a second row under an id
   the binding owns. It becomes a blocked boot that names the repair command.
