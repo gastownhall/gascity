@@ -2063,6 +2063,7 @@ go_test(
         "repro_ga_rble9w_test.go",
         "requalify_stability_test.go",
         "requalify_v2_test.go",
+        "reset_committed_at_consumers_test.go",
         "residency_leg_agreement_test.go",
         "residency_namespace_test.go",
         "residency_topology_test.go",

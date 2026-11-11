@@ -226,12 +226,14 @@ func exitAccrual(counterKey string, next, threshold int, sleepReason string, unt
 // ConversationResetPatch clears the runtime conversation binding so the next
 // wake starts a fresh conversation. Wake failures also clear
 // started_config_hash so the next start runs as a first start instead of
-// resuming a conversation that no longer exists; churn keeps the hash.
-func ConversationResetPatch(clearStartedConfigHash bool, now time.Time) MetadataPatch {
+// resuming a conversation that no longer exists; churn keeps the hash. It is a
+// passive re-arm, not a restart handoff, so it clears reset_committed_at
+// rather than inheriting an earlier handoff's stamp (gascity#4067).
+func ConversationResetPatch(clearStartedConfigHash bool, _ time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"session_key":                "",
 		"continuation_reset_pending": "true",
-		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+		ResetCommittedAtKey:          "",
 	}
 	ClearResumeRun(patch) // a new conversation's run starts anew (mc-bm1af)
 	if clearStartedConfigHash {

@@ -116,7 +116,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
-				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          "",
 			},
 		},
 		{
@@ -187,7 +187,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
-				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          "",
 			},
 		},
 		{
@@ -212,7 +212,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
-				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          "",
 			},
 		},
 		{
@@ -296,7 +296,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
-				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 				"session_key":                "new-session-key",
@@ -319,7 +319,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
-				ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 			},
@@ -895,28 +895,27 @@ func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
 	}
 }
 
-// TestFreshWakeReRearmRefreshesResetCommittedAt is a regression test for
-// gascity#4067: a session that re-arms continuation_reset_pending on a
-// second fresh-wake drain cycle must get a fresh ResetCommittedAtKey, not
-// inherit the timestamp from an earlier, unrelated restart. Without the
-// fix, the stall check in recordResetStallIfDue measures elapsed time
-// against the stale first-cycle timestamp and fires a false reset-stalled
-// diagnostic on a perfectly healthy session.
-func TestFreshWakeReRearmRefreshesResetCommittedAt(t *testing.T) {
+// TestFreshWakeReRearmClearsResetCommittedAt is a regression test for
+// gascity#4067: a session that re-arms continuation_reset_pending on a later
+// fresh-wake drain cycle must not inherit the reset_committed_at stamp of an
+// earlier restart handoff. The re-arm is passive, so it clears the stamp;
+// otherwise recordResetStallIfDue measures elapsed time against the stale
+// first-cycle stamp and fires a false reset-stalled diagnostic.
+func TestFreshWakeReRearmClearsResetCommittedAt(t *testing.T) {
 	firstRestart := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
 	secondDrainComplete := firstRestart.Add(3 * time.Hour)
 
-	first := RestartRequestPatch("session-key-1", firstRestart)
-	if got := first[ResetCommittedAtKey]; got != firstRestart.UTC().Format(time.RFC3339) {
-		t.Fatalf("first cycle ResetCommittedAtKey = %q, want %q", got, firstRestart.UTC().Format(time.RFC3339))
+	info := Info{ID: "gc-1", SessionKey: "session-key-0"}.ApplyPatch(RestartRequestPatch("session-key-1", firstRestart))
+	if want := firstRestart.UTC().Format(time.RFC3339); info.ResetCommittedAt != want {
+		t.Fatalf("after the restart handoff ResetCommittedAt = %q, want %q", info.ResetCommittedAt, want)
 	}
 
-	second := CompleteDrainPatch(secondDrainComplete, "idle", true)
-	if got := second[ResetCommittedAtKey]; got != secondDrainComplete.UTC().Format(time.RFC3339) {
-		t.Fatalf("second cycle ResetCommittedAtKey = %q, want %q (fresh), not the first cycle's stale value", got, secondDrainComplete.UTC().Format(time.RFC3339))
+	info = info.ApplyPatch(CompleteDrainPatch(secondDrainComplete, "idle", true))
+	if info.ResetCommittedAt != "" {
+		t.Fatalf("after the fresh-wake re-arm ResetCommittedAt = %q, want empty (the first cycle's stamp must not survive)", info.ResetCommittedAt)
 	}
-	if second["continuation_reset_pending"] != "true" {
-		t.Fatalf("second cycle continuation_reset_pending = %q, want %q", second["continuation_reset_pending"], "true")
+	if info.ContinuationResetPending != "true" {
+		t.Fatalf("after the fresh-wake re-arm ContinuationResetPending = %q, want %q", info.ContinuationResetPending, "true")
 	}
 }
 

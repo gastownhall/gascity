@@ -525,7 +525,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			}),
 		},
 		"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch": {
-			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
+			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true", session.ResetCommittedAtKey, ago(time.Hour)},
 			patchSite(func(session.Info) session.MetadataPatch {
 				return session.ConfigDriftAsleepResetPatch("key", now)
 			}),
@@ -676,8 +676,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			patchSite(func(info session.Info) session.MetadataPatch { return asleepHealPatch(info, now) }),
 		},
 		"internal/session/lifecycle_exits.go:ConversationResetPatch": {
-			[]string{"session_key", "k", "resume_failures", "2", "resume_launch", "true"},
+			[]string{"session_key", "k", "resume_failures", "2", "resume_launch", "true", session.ResetCommittedAtKey, ago(time.Hour)},
 			patchSite(func(session.Info) session.MetadataPatch { return session.ConversationResetPatch(false, now) }),
+		},
+		"internal/session/lifecycle_transition.go:ContinuationResetWakePatch": {
+			[]string{session.ResetCommittedAtKey, ago(time.Hour)},
+			patchSite(func(session.Info) session.MetadataPatch { return session.ContinuationResetWakePatch(now) }),
+		},
+		"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch": { // a fresh wake's drain-ack
+			[]string{session.ResetCommittedAtKey, ago(time.Hour)},
+			patchSite(func(session.Info) session.MetadataPatch { return session.AcknowledgeDrainPatch(now, true) }),
+		},
+		"internal/session/lifecycle_transition.go:CompleteDrainPatch": { // a fresh wake's completed drain
+			[]string{session.ResetCommittedAtKey, ago(time.Hour)},
+			patchSite(func(session.Info) session.MetadataPatch { return session.CompleteDrainPatch(now, "idle", true) }),
 		},
 		"cmd/gc/session_lifecycle_parallel.go:clearStaleResumeKeyMetadata": {
 			[]string{"session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true"},
@@ -686,7 +698,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			}),
 		},
 		"cmd/gc/session_reconcile.go:healStatePatchWithRollbackInfo": {
-			[]string{"state", "active", "session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true"},
+			[]string{"state", "active", "session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true", session.ResetCommittedAtKey, ago(time.Hour)},
 			patchSite(func(info session.Info) session.MetadataPatch {
 				return session.MetadataPatch(healStatePatchWithRollbackInfo(info, false, true, &clock.Fake{Time: now}, 0, true))
 			}),

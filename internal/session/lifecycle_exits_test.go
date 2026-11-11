@@ -379,17 +379,17 @@ func TestConversationResetPatch(t *testing.T) {
 	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
 	// Wake failures clear the config hash so the next start is a first
 	// start; churn clears only the conversation binding. Both re-arm
-	// continuation_reset_pending, so both must stamp a fresh
-	// ResetCommittedAtKey (gascity#4067 follow-up: a session that reaches
-	// this reset after an earlier RestartRequestPatch must not inherit its
-	// stale timestamp).
+	// continuation_reset_pending passively, so both clear ResetCommittedAtKey
+	// (gascity#4067: a session that reaches this reset after an earlier
+	// RestartRequestPatch must not inherit its stale timestamp, and a passive
+	// reset is no restart handoff).
 	assertPatch(t, ConversationResetPatch(true, now), MetadataPatch{
 		"session_key":                "",
 		"resume_failures":            "",
 		"resume_launch":              "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
-		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+		ResetCommittedAtKey:          "",
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2).
 		"primed_at":            "",
 		"priming_attempted_at": "",
@@ -400,7 +400,7 @@ func TestConversationResetPatch(t *testing.T) {
 		"resume_failures":            "",
 		"resume_launch":              "",
 		"continuation_reset_pending": "true",
-		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+		ResetCommittedAtKey:          "",
 	})
 }
 

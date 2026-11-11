@@ -2584,7 +2584,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"session_key":                  "",
 				"started_config_hash":          "",
 				"continuation_reset_pending":   "true",
-				sessionpkg.ResetCommittedAtKey: now.UTC().Format(time.RFC3339),
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",
@@ -2673,7 +2673,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"continuation_reset_pending":   "true",
 				"pending_create_claim":         "",
 				"pending_create_started_at":    "",
-				sessionpkg.ResetCommittedAtKey: now.UTC().Format(time.RFC3339),
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",

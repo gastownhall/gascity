@@ -276,13 +276,13 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 
 // ContinuationResetWakePatch records a controller-owned fresh wake for a
 // session whose pending continuation reset was observed while a stale runtime
-// was still alive.
+// was still alive. It clears reset_committed_at, as a passive re-arm.
 func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 	patch := RequestWakePatch("continuation-reset", now)
 	patch["session_key"] = ""
 	applyFreshWakeConversationReset(patch)
 	patch["continuation_reset_pending"] = "true"
-	patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
+	patch[ResetCommittedAtKey] = ""
 	return patch
 }
 
@@ -559,9 +559,9 @@ func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now
 // slept_at alongside clearing last_woke_at so a same-tick drain-ack falls
 // back to this fairness key instead of collapsing straight to CreatedAt
 // (#2574) — drain-ack is the dominant real-world drain path for
-// wake_mode=fresh roles. On a fresh wake it also stamps reset_committed_at
-// so the continuation-reset re-arm this drain-ack triggers is recorded as
-// durably committed, matching every other re-arm site.
+// wake_mode=fresh roles. On a fresh wake it clears reset_committed_at: the
+// continuation-reset re-arm is passive, not a restart handoff, so it must not
+// inherit an earlier handoff's stamp (gascity#4067).
 func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
@@ -575,12 +575,14 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
-		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
+		patch[ResetCommittedAtKey] = ""
 	}
 	return patch
 }
 
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
+// On a fresh wake it re-arms the continuation reset passively, clearing
+// reset_committed_at (gascity#4067).
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
 	patch["state_reason"] = ""
@@ -588,7 +590,7 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
-		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
+		patch[ResetCommittedAtKey] = ""
 	}
 	return patch
 }
@@ -661,16 +663,21 @@ func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
 }
 
 // configDriftReset is a config-drift reset into nextState, its pending
-// create claim (a start's) aside.
+// create claim (a start's) aside. A reset into creating or start-pending is a
+// restart handoff and stamps reset_committed_at at now; an asleep reset is
+// passive and clears it.
 func configDriftReset(nextState State, sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
-		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+		ResetCommittedAtKey:          "",
 		"pending_create_claim":       "",
 		"pending_create_started_at":  "",
+	}
+	if nextState == StateCreating || nextState == StateStartPending {
+		patch[ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 	}
 	applyFreshWakeConversationReset(patch)
 	if sessionKey != "" {
