@@ -421,6 +421,85 @@ func TestTeardownPartialRigRefusesCityDatabaseDrop(t *testing.T) {
 	}
 }
 
+// TestTeardownPartialRigGuardsLegacyHQForEveryCity proves the Dolt-drop guard
+// keeps the legacy default database name "hq" protected whatever the city's own
+// database is. "hq" is a real database that a legacy (un-minted) city shares on
+// the same Dolt server as a city that was minted a per-city id, so a rig-add
+// rollback in a minted-id city must never DROP it, whether the name arrives
+// through the manifest or only through the cloned repo's .beads/metadata.json.
+// The last case is the positive control: a rig-owned database still drops.
+func TestTeardownPartialRigGuardsLegacyHQForEveryCity(t *testing.T) {
+	const mintedID = "deadbeef"
+	cases := []struct {
+		name         string
+		mintedID     bool   // the city carries a minted .gc/dolt-database-id
+		cityMetadata string // the city's .beads/metadata.json, "" for none
+		manifestDB   string // the manifest's DoltDB
+		clonedDB     string // dolt_database in the cloned rig repo's metadata.json
+		wantRefused  bool
+		wantDropped  []string
+	}{
+		{name: "minted city stamped, manifest hq", mintedID: true, cityMetadata: `{"dolt_database":"city_deadbeef"}`, manifestDB: "hq", wantRefused: true},
+		{name: "minted city unstamped, manifest hq", mintedID: true, manifestDB: "hq", wantRefused: true},
+		{name: "minted city, manifest HQ in another case", mintedID: true, manifestDB: "HQ", wantRefused: true},
+		{name: "minted city, hq only in the cloned repo metadata", mintedID: true, clonedDB: "hq", wantRefused: true},
+		{name: "minted city, own city database", mintedID: true, manifestDB: "city_deadbeef", wantRefused: true},
+		{name: "legacy city unstamped, manifest hq", manifestDB: "hq", wantRefused: true},
+		{name: "legacy city stamped hq, manifest hq", cityMetadata: `{"dolt_database":"hq"}`, manifestDB: "hq", wantRefused: true},
+		{name: "minted city, rig-owned database still drops", mintedID: true, manifestDB: "xdb", wantDropped: []string{"xdb"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT", "") // the cloned-metadata case must not be skip-deferred
+			tmp := t.TempDir()
+			if tc.mintedID {
+				writeCityDoltDatabaseIDForTest(t, tmp, mintedID+"\n")
+			}
+			if tc.cityMetadata != "" {
+				if err := os.MkdirAll(filepath.Join(tmp, ".beads"), 0o755); err != nil {
+					t.Fatalf("mkdir city .beads: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(tmp, ".beads", "metadata.json"), []byte(tc.cityMetadata), 0o644); err != nil {
+					t.Fatalf("write city metadata: %v", err)
+				}
+			}
+			rigDir := filepath.Join(tmp, "rigs", "x")
+			writeRigStore(t, rigDir)
+			if tc.clonedDB != "" {
+				meta := []byte(`{"dolt_database":"` + tc.clonedDB + `"}`)
+				if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), meta, 0o644); err != nil {
+					t.Fatalf("write cloned metadata: %v", err)
+				}
+			}
+
+			var dropped []string
+			orig := controllerDropManagedDoltDatabase
+			controllerDropManagedDoltDatabase = func(_ *controllerState, _ context.Context, name string) error {
+				dropped = append(dropped, name)
+				return nil
+			}
+			defer func() { controllerDropManagedDoltDatabase = orig }()
+
+			cs := &controllerState{cityPath: tmp, cfg: &config.City{}}
+			err := cs.TeardownPartialRig(context.Background(), api.RigProvisionManifest{
+				RigName:    "x",
+				CreatedDir: rigDir,
+				DoltDB:     tc.manifestDB,
+			})
+			if tc.wantRefused {
+				if err == nil || !errors.Is(err, configedit.ErrValidation) {
+					t.Fatalf("teardown = %v, want a validation refusal", err)
+				}
+			} else if err != nil {
+				t.Fatalf("teardown = %v, want nil", err)
+			}
+			if len(dropped) != len(tc.wantDropped) || (len(dropped) > 0 && dropped[0] != tc.wantDropped[0]) {
+				t.Fatalf("dropped = %v, want %v", dropped, tc.wantDropped)
+			}
+		})
+	}
+}
+
 // TestTeardownPartialRigRefusesOtherRigDatabaseDrop proves the guard also
 // refuses a name belonging to a DIFFERENT rig's managed database (cross-tenant
 // protection), while still allowing this rig's own database to drop.
