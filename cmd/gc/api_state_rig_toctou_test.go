@@ -57,9 +57,10 @@ func TestRemoveRigDirConfinedMissingTargetIsNoOp(t *testing.T) {
 	}
 }
 
-// The deterministic stand-in for the race: the ancestor is swapped for a symlink
-// out of the city AFTER the containment check passed, i.e. before this helper
-// runs. The anchored removal must refuse to follow it.
+// The weaker of the two swap cases: the ancestor is already a symlink out of the
+// city when this helper runs, so any implementation that validates the path first
+// refuses it. TestRemoveRigDirConfinedRefusesAncestorSwappedAfterValidation is the
+// one that pins the os.Root anchoring.
 func TestRemoveRigDirConfinedRefusesAncestorSwappedToEscapingSymlink(t *testing.T) {
 	city := t.TempDir()
 	outside := t.TempDir()
@@ -82,6 +83,65 @@ func TestRemoveRigDirConfinedRefusesAncestorSwappedToEscapingSymlink(t *testing.
 	}
 	if b, err := os.ReadFile(precious); err != nil || string(b) != "outside" {
 		t.Fatalf("out-of-city file disturbed: ReadFile = %q, %v", b, err)
+	}
+}
+
+// The deterministic race: the ancestor is swapped for a symlink out of the city
+// AFTER the helper validated the path and opened its root, injected through
+// rigDirRemoveHook (no timing). A check-then-os.RemoveAll implementation follows
+// the swapped link and deletes the outside tree; the os.Root-anchored removal
+// refuses it, so this fails if the anchoring is reverted to a path-based removal.
+func TestRemoveRigDirConfinedRefusesAncestorSwappedAfterValidation(t *testing.T) {
+	city := t.TempDir()
+	outside := t.TempDir()
+	rigDir := filepath.Join(city, "rigs", "x")
+	mustWriteFile(t, filepath.Join(rigDir, "keep"), "in-city")
+	precious := filepath.Join(outside, "x", "precious")
+	mustWriteFile(t, precious, "outside")
+
+	orig := rigDirRemoveHook
+	t.Cleanup(func() { rigDirRemoveHook = orig })
+	rigDirRemoveHook = func() {
+		if err := os.Rename(filepath.Join(city, "rigs"), filepath.Join(city, "rigs.moved")); err != nil {
+			t.Errorf("rename: %v", err)
+			return
+		}
+		if err := os.Symlink(outside, filepath.Join(city, "rigs")); err != nil {
+			t.Errorf("symlink: %v", err)
+		}
+	}
+
+	if err := removeRigDirConfined(city, rigDir); err == nil {
+		t.Fatal("removeRigDirConfined followed an ancestor swapped after validation out of the city, want an error")
+	}
+	if b, err := os.ReadFile(precious); err != nil || string(b) != "outside" {
+		t.Fatalf("out-of-city file disturbed: ReadFile = %q, %v", b, err)
+	}
+}
+
+// A rig dir that is itself a symlink to another in-city directory must be
+// unlinked, not followed: os.RemoveAll only ever unlinked the link, so deleting
+// the target (<city>/.gc here) and leaving the link behind would be a regression.
+func TestRemoveRigDirConfinedUnlinksSymlinkedRigDirWithoutFollowing(t *testing.T) {
+	city := t.TempDir()
+	sibling := filepath.Join(city, ".gc")
+	mustWriteFile(t, filepath.Join(sibling, "state"), "keep")
+	rigDir := filepath.Join(city, "rigs", "x")
+	if err := os.MkdirAll(filepath.Dir(rigDir), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(sibling, rigDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := removeRigDirConfined(city, rigDir); err != nil {
+		t.Fatalf("removeRigDirConfined = %v, want nil", err)
+	}
+	if _, err := os.Lstat(rigDir); !os.IsNotExist(err) {
+		t.Errorf("rig dir link still present (lstat err = %v)", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(sibling, "state")); err != nil || string(b) != "keep" {
+		t.Fatalf("in-city link target disturbed: ReadFile = %q, %v", b, err)
 	}
 }
 

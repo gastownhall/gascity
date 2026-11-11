@@ -3129,6 +3129,11 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 	return errs
 }
 
+// rigDirRemoveHook runs inside removeRigDirConfined after the path is validated and
+// the city root is open, before the removal. It is a no-op in production; a test
+// swaps a path component for a symlink there to inject the race deterministically.
+var rigDirRemoveHook = func() {}
+
 // removeRigDirConfined removes createdDir through an os.Root anchored at the city
 // root, so no path component is re-resolved by the kernel outside the root: an
 // ancestor swapped for a symlink after assertRigPathWithinCity ran is refused
