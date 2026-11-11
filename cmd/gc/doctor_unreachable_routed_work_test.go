@@ -18,12 +18,12 @@ func runUnreachableRoutedWork(t *testing.T, cityBeads, rigBeads []beads.Bead) *d
 		cityDir: beads.NewMemStoreFrom(0, cityBeads, nil),
 		rigDir:  beads.NewMemStoreFrom(0, rigBeads, nil),
 	}
-	return newUnreachableRoutedWorkCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+	return newUnreachableRoutedWorkCheck(cfg, cityDir, func(path string, q beads.ListQuery) ([]beads.Bead, error) {
 		store, ok := stores[path]
 		if !ok {
 			return nil, fmt.Errorf("unexpected store path %q", path)
 		}
-		return store, nil
+		return store.List(q)
 	}).Run(&doctor.CheckContext{})
 }
 
@@ -92,7 +92,7 @@ func TestUnreachableRoutedWorkIsReportOnly(t *testing.T) {
 
 func TestUnreachableRoutedWorkReportsUnreadableStore(t *testing.T) {
 	cityDir := t.TempDir()
-	result := newUnreachableRoutedWorkCheck(nil, cityDir, func(string) (beads.Store, error) {
+	result := newUnreachableRoutedWorkCheck(nil, cityDir, func(string, beads.ListQuery) ([]beads.Bead, error) {
 		return nil, fmt.Errorf("dolt down")
 	}).Run(&doctor.CheckContext{})
 	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), "dolt down") {

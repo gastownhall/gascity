@@ -21,11 +21,15 @@ import (
 type unreachableRoutedWorkCheck struct {
 	cfg      *config.City
 	cityPath string
-	newStore func(string) (beads.Store, error)
+	list     routedBeadLister
 }
 
-func newUnreachableRoutedWorkCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *unreachableRoutedWorkCheck {
-	return &unreachableRoutedWorkCheck{cfg: cfg, cityPath: cityPath, newStore: newStore}
+// routedBeadLister reads the beads of the scope store at path. The check takes
+// beads rather than a store so it never holds a raw beads.Store (storeclass).
+type routedBeadLister func(path string, q beads.ListQuery) ([]beads.Bead, error)
+
+func newUnreachableRoutedWorkCheck(cfg *config.City, cityPath string, list routedBeadLister) *unreachableRoutedWorkCheck {
+	return &unreachableRoutedWorkCheck{cfg: cfg, cityPath: cityPath, list: list}
 }
 
 func (c *unreachableRoutedWorkCheck) Name() string { return "unreachable-routed-work" }
@@ -64,7 +68,7 @@ func (c *unreachableRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings
 	}
 	scanned := map[string]bool{}
 	for _, sc := range scopes {
-		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+		if c.list == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
 		if ctx.Canceled() {
@@ -76,14 +80,9 @@ func (c *unreachableRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings
 			continue
 		}
 		scanned[key] = true
-		store, err := c.newStore(sc.path)
+		items, err := c.list(sc.path, beads.ListQuery{AllowScan: true})
 		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
-			continue
-		}
-		items, err := store.List(beads.ListQuery{AllowScan: true})
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
+			skipped = append(skipped, fmt.Sprintf("%s skipped: reading beads: %v", sc.label, err))
 			continue
 		}
 		for _, b := range items {

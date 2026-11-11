@@ -500,7 +500,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
-			registerCityStoreCheck(newUnreachableRoutedWorkCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newUnreachableRoutedWorkCheck(cfg, cityPath, func(path string, q beads.ListQuery) ([]beads.Bead, error) {
+				store, err := storeFactory(path)
+				if err != nil {
+					return nil, fmt.Errorf("opening bead store: %w", err)
+				}
+				return store.List(q)
+			}))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
 			registerCityStoreCheck(newExecRuntimeIdentityCheck(cfg, cityPath, sessionSP, sessionSPErr))
