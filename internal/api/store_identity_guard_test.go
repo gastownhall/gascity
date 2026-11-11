@@ -17,13 +17,9 @@ import (
 // by the PR that hands it a class handle. The table only shrinks: a new
 // comparison uses SameStore.
 var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
-	"handler_beads.go sortedRigNames map-key":               {Count: 1, Reason: "dedupes the raw BeadStores() map by value; T7 (sortedRigNames is residue)"},
-	"handler_convoy_dispatch.go workflowStoreByRef eq":      {Count: 2, Reason: "graph/orders store == CityBeadStore(): raw unwraps; T7 workflow legs"},
-	"handler_convoy_dispatch.go workflowStoresWith eq":      {Count: 1, Reason: "Stores().Graph().Store != the raw city store; T7 workflow legs"},
-	"handler_convoys.go isGraphConvoyID eq":                 {Count: 1, Reason: "Stores().Graph().Store != CityBeadStore(): both raw; T7 (federated marker)"},
-	"handler_status.go Server.statusWorkCounts eq":          {Count: 1, Reason: "q.store == graph over raw work-count legs; T7 status federation"},
-	"huma_handlers_orders.go appendOrdersClassStoreInfo eq": {Count: 1, Reason: "info.store == ordersStore: raw legs and a raw unwrap; T7 orders legs"},
-	"rig_graph_legs.go workflowGraphStoreInfo eq":           {Count: 1, Reason: "graphStore == CityBeadStore(): both raw; T7 workflow legs"},
+	"handler_beads.go sortedRigNames map-key":          {Count: 1, Reason: "dedupes the raw BeadStores() map by value; T7 (sortedRigNames is residue)"},
+	"handler_convoy_dispatch.go workflowStoreByRef eq": {Count: 1, Reason: "orders store == CityBeadStore(): a raw unwrap; T7f orders legs"},
+	"handler_status.go Server.statusWorkCounts eq":     {Count: 1, Reason: "q.store == graph over raw work-count legs; T7 status federation"},
 }
 
 // TestStoreIdentityGuard holds internal/api's store comparisons to the
