@@ -54,7 +54,7 @@ func TestReapOrphans_ZeroProgressOrphanIsClosed(t *testing.T) {
 	rootID, stepIDs := orphanShape(t, store, 3)
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestReapOrphans_ZeroProgressOrphanIsClosed(t *testing.T) {
 	}
 
 	out.Reset()
-	results2, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
+	results2, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("second reapOrphanMolecules: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestReapOrphans_DryRunClosesNothing(t *testing.T) {
 	rootID, stepIDs := orphanShape(t, store, 2)
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{DryRun: true}, &out)
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{DryRun: true}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestReapOrphans_TouchedOpenStepIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestReapOrphans_NoTargetBeadIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestReapOrphans_OpenTargetIsNotReaped(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	results, err := reapOrphanMolecules(store, events.Discard, reapOrphansOptions{}, &out)
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, events.Discard, reapOrphansOptions{}, &out)
 	if err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestReapOrphans_PublishesClosedAndResolvedEvents(t *testing.T) {
 
 	rec := events.NewFake()
 	var out bytes.Buffer
-	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+	if _, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rec, reapOrphansOptions{}, &out); err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestReapOrphans_PublishesClosedAndResolvedEvents(t *testing.T) {
 	}
 
 	// A second run finds nothing, so it must publish nothing more.
-	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+	if _, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rec, reapOrphansOptions{}, &out); err != nil {
 		t.Fatalf("second reapOrphanMolecules: %v", err)
 	}
 	if n := len(rec.Events); n != 2 {
@@ -288,7 +288,7 @@ func TestReapOrphans_DryRunPublishesNoEvents(t *testing.T) {
 
 	rec := events.NewFake()
 	var out bytes.Buffer
-	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{DryRun: true}, &out); err != nil {
+	if _, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rec, reapOrphansOptions{DryRun: true}, &out); err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
 	if len(rec.Events) != 0 {
@@ -316,10 +316,58 @@ func TestReapOrphans_NonOrphanPublishesNoEvents(t *testing.T) {
 
 	rec := events.NewFake()
 	var out bytes.Buffer
-	if _, err := reapOrphanMolecules(store, rec, reapOrphansOptions{}, &out); err != nil {
+	if _, err := reapOrphanMolecules(beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rec, reapOrphansOptions{}, &out); err != nil {
 		t.Fatalf("reapOrphanMolecules: %v", err)
 	}
 	if len(rec.Events) != 0 {
 		t.Fatalf("non-orphan published %d events, want 0: %+v", len(rec.Events), rec.Events)
+	}
+}
+
+// TestReapOrphans_SplitStoresReadTargetsFromWorkStore pins the typed-handle
+// contract: the molecule root and its steps live in the graph store, while
+// the attached target beads (metadata.molecule_id) are work beads read from
+// the work store. With the two on distinct stores, a terminal target in the
+// work store makes the graph-store molecule an orphan; a reaper that looks
+// for targets in the graph store finds none and would skip it.
+func TestReapOrphans_SplitStoresReadTargetsFromWorkStore(t *testing.T) {
+	graphMem := beads.NewMemStore()
+	workMem := beads.NewMemStore()
+
+	root, err := graphMem.Create(beads.Bead{Title: "mol-tdd-build", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := graphMem.Create(beads.Bead{Title: "step", Type: "step", ParentID: root.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := workMem.Create(beads.Bead{
+		Title:    "target work item",
+		Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workMem.Close(target.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	results, err := reapOrphanMolecules(beads.GraphStore{Store: graphMem}, beads.WorkStore{Store: workMem}, events.Discard, reapOrphansOptions{}, &out)
+	if err != nil {
+		t.Fatalf("reapOrphanMolecules: %v", err)
+	}
+	if len(results) != 1 || results[0].RootID != root.ID {
+		t.Fatalf("results = %+v, want exactly root %s reaped (target is terminal in the work store)", results, root.ID)
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := graphMem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("graph bead %s status = %q, want closed", id, got.Status)
+		}
 	}
 }

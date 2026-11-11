@@ -51,15 +51,15 @@ type reapOrphanResult struct {
 // molecule is orphaned. Each closed root is announced on rec with the same
 // bead.closed / molecule.resolved pair the autoclose path records; a dry run
 // closes nothing and records nothing.
-func reapOrphanMolecules(store beads.Store, rec events.Recorder, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
-	candidates, err := store.List(beads.ListQuery{Type: "molecule"})
+func reapOrphanMolecules(graph beads.GraphStore, work beads.WorkStore, rec events.Recorder, opts reapOrphansOptions, stdout io.Writer) ([]reapOrphanResult, error) {
+	candidates, err := graph.List(beads.ListQuery{Type: "molecule"})
 	if err != nil {
 		return nil, fmt.Errorf("listing open molecules: %w", err)
 	}
 
 	var results []reapOrphanResult
 	for _, root := range candidates {
-		orphan, err := isOrphanMolecule(store, root)
+		orphan, err := isOrphanMolecule(graph, work, root)
 		if err != nil {
 			return nil, fmt.Errorf("checking molecule %s: %w", root.ID, err)
 		}
@@ -73,7 +73,7 @@ func reapOrphanMolecules(store beads.Store, rec events.Recorder, opts reapOrphan
 			continue
 		}
 
-		closed, err := molecule.CloseSubtreeWithMetadata(store, root.ID, map[string]string{
+		closed, err := molecule.CloseSubtreeWithMetadata(beads.GraphMolecule(graph), root.ID, map[string]string{
 			"close_reason": reapOrphanCloseReason,
 		})
 		if err != nil {
@@ -88,12 +88,12 @@ func reapOrphanMolecules(store beads.Store, rec events.Recorder, opts reapOrphan
 
 // isOrphanMolecule applies the crn-vbsr0 reap predicate to a single
 // candidate root. See reapOrphanMolecules for the full rationale.
-func isOrphanMolecule(store beads.Store, root beads.Bead) (bool, error) {
+func isOrphanMolecule(graph beads.GraphStore, _ beads.WorkStore, root beads.Bead) (bool, error) {
 	if root.Type != "molecule" || convoycore.IsTerminalStatus(root.Status) {
 		return false, nil
 	}
 
-	targets, err := store.ListByMetadata(map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	targets, err := graph.ListByMetadata(map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID}, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return false, fmt.Errorf("listing target beads for molecule %s: %w", root.ID, err)
 	}
@@ -108,7 +108,7 @@ func isOrphanMolecule(store beads.Store, root beads.Bead) (bool, error) {
 		}
 	}
 
-	subtree, err := molecule.ListSubtree(store, root.ID)
+	subtree, err := molecule.ListSubtree(beads.GraphMolecule(graph), root.ID)
 	if err != nil {
 		return false, fmt.Errorf("listing subtree for molecule %s: %w", root.ID, err)
 	}
@@ -165,7 +165,8 @@ orphaned subtree. Use --dry-run to preview without closing anything.
 			if err != nil {
 				return fmt.Errorf("opening store: %w", err)
 			}
-			results, err := reapOrphanMolecules(store, openCityRecorderAt(cityPath, stderr), reapOrphansOptions{DryRun: dryRun}, stdout)
+			stores := cliStores(cityPath, store)
+			results, err := reapOrphanMolecules(stores.Graph(), stores.Work(), openCityRecorderAt(cityPath, stderr), reapOrphansOptions{DryRun: dryRun}, stdout)
 			if err != nil {
 				return err
 			}
