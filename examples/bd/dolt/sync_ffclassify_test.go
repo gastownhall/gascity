@@ -68,6 +68,19 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	return out
 }
 
+// runFFSyncWithExit is runFFSync plus the process exit code, for tests that
+// assert on --dry-run vs real-run exit-status parity rather than just output.
+func runFFSyncWithExit(t *testing.T, binDir string, args ...string) (string, int) {
+	t.Helper()
+	out, err := runFFSyncEnv(t, binDir, nil, args...)
+	exitCode := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		exitCode = ee.ExitCode()
+	}
+	return out, exitCode
+}
+
 // fakeDoltHeader is the shared preamble: log argv and answer the remote-lookup
 // + active_branch metadata queries the sync path issues before classification.
 func fakeDoltHeader(logPath, branch string) string {
@@ -174,6 +187,33 @@ func TestSyncDivergedRefusesAndDoesNotPush(t *testing.T) {
 	}
 	if !strings.Contains(out, "diverged") {
 		t.Fatalf("expected a 'diverged' status.\nout:\n%s", out)
+	}
+}
+
+// TestSyncDryRunExitCodeMatchesRealRunForDiverged is the regression test for
+// ga-9mbkj4: a diverged database makes the real run exit non-zero (the driver
+// loop's `sync_database_sql "$name" || exit_code=1`, run.sh line ~624), but
+// --dry-run's early-return short-circuit ignored the same ff_rc and always
+// exited 0 — so `gc dolt sync --dry-run` could report success for a database
+// that would refuse to sync for real. --dry-run must answer "would this run
+// succeed?", not merely "what would it print?".
+func TestSyncDryRunExitCodeMatchesRealRunForDiverged(t *testing.T) {
+	realBinDir := t.TempDir()
+	writeSyncFakeDoltClassify(t, realBinDir, 2, 3)
+	realOut, realExit := runFFSyncWithExit(t, realBinDir, "--db", "app")
+	if realExit == 0 {
+		t.Fatalf("precondition failed: real (non-dry-run) diverged sync should exit non-zero.\nout:\n%s", realOut)
+	}
+
+	dryBinDir := t.TempDir()
+	dryLogPath := writeSyncFakeDoltClassify(t, dryBinDir, 2, 3)
+	dryOut, dryExit := runFFSyncWithExit(t, dryBinDir, "--db", "app", "--dry-run")
+	if pushed(readLog(t, dryLogPath)) {
+		t.Fatalf("--dry-run must NEVER push.\nout:\n%s", dryOut)
+	}
+	if dryExit != realExit {
+		t.Fatalf("--dry-run exit code (%d) must match the real run's exit code (%d) for a diverged DB.\ndry out:\n%s\nreal out:\n%s",
+			dryExit, realExit, dryOut, realOut)
 	}
 }
 
