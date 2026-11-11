@@ -175,7 +175,15 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 	if !wake || wg == nil || !wg.shouldRun(time.Now()) {
 		return
 	}
-	if cr.beadsQuiescent.Load() {
+	if cr.cs != nil {
+		// Counted as store work before the quiescence check and the store
+		// snapshot: a city or rig retired from here on keeps its stores
+		// until this purge returns (enterBeadsQuiescenceIfDue,
+		// tickRetireSuspendedRigScopes), and a city already quiescent is
+		// declined below.
+		defer cr.cs.beginStoreWork()()
+	}
+	if ctx.Err() != nil || cr.beadsQuiescent.Load() {
 		// The city is suspended with nothing running: its stores are not
 		// touched until it resumes.
 		return

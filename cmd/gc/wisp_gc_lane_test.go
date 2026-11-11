@@ -457,3 +457,92 @@ func TestWispGCLane_DisableThenEnableStartsAfresh(t *testing.T) {
 		})
 	}
 }
+
+// startLanePassAsync runs one woken lane pass on its own goroutine and
+// returns where it reports whether it purged.
+func startLanePassAsync(cr *CityRuntime) <-chan bool {
+	done := make(chan bool, 1)
+	go func() { done <- runLanePass(cr, true) }()
+	return done
+}
+
+// awaitLanePass waits for a pass startLanePassAsync started.
+func awaitLanePass(t *testing.T, done <-chan bool) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the lane pass did not finish after its purge was released")
+	}
+}
+
+// newQuiescenceLaneRuntime is quiescenceRuntime's city with a controller
+// state over a memory city store and wg as its wisp GC tracker.
+func newQuiescenceLaneRuntime(t *testing.T, rigExtra string, wg wispGC) (*CityRuntime, string) {
+	t.Helper()
+	cr, _, _, logPath := quiescenceRuntime(t, rigExtra)
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool), cityBeadStore: beads.NewMemStore()}
+	cr.wg = wg
+	return cr, logPath
+}
+
+// Kills: a purge the retirement does not wait for. A purge in flight when
+// the city is suspended with nothing running holds the stop of its stores
+// until it returns, and a pass after the stop declines.
+func TestWispGCLane_PurgeHoldsSuspendedCityRetirement(t *testing.T) {
+	wg := newBlockingWispGC()
+	cr, logPath := newQuiescenceLaneRuntime(t, "", wg)
+	passDone := startLanePassAsync(cr)
+	wg.awaitPurgeStart(t)
+
+	t.Setenv("GC_SUSPENDED", "1")
+	for range 3 {
+		if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+			t.Fatal("a suspended city with nothing running is not quiescent")
+		}
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops while a wisp GC purge was in flight = %q, want none", ops)
+	}
+
+	close(wg.release)
+	awaitLanePass(t, passDone)
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the purge finished", ops)
+	}
+	if runLanePass(cr, true) {
+		t.Fatal("a woken pass purged on a retired, quiescent city")
+	}
+	if got := wg.runs.Load(); got != 1 {
+		t.Fatalf("purges = %d, want 1", got)
+	}
+}
+
+// Kills: a suspended rig retired under a purge. A purge in flight when a rig
+// is suspended and its sessions have drained holds the stop of the rig's
+// store until it returns.
+func TestWispGCLane_PurgeHoldsSuspendedRigRetirement(t *testing.T) {
+	wg := newBlockingWispGC()
+	cr, logPath := newQuiescenceLaneRuntime(t, "suspended_on_start = true\n", wg)
+	t.Setenv("GC_SUSPENDED", "")
+	passDone := startLanePassAsync(cr)
+	wg.awaitPurgeStart(t)
+
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	for range 3 {
+		cr.tickRetireSuspendedRigScopes(p)
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("the suspended rig was stopped while a wisp GC purge was in flight: %q", ops)
+	}
+
+	close(wg.release)
+	awaitLanePass(t, passDone)
+	cr.tickRetireSuspendedRigScopes(p)
+	cr.tickRetireSuspendedRigScopes(p)
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the purge finished", ops)
+	}
+}
