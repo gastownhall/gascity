@@ -38,7 +38,7 @@ type client struct {
 	bin         string                                                   // herdr binary (default "herdr")
 	cityRoot    string                                                   // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
 	settleDelay time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
-	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → serverConfirmedDead → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
 	// unixListening is serverConfirmedDead's kernel listener check, a test
@@ -994,6 +994,11 @@ func (c *client) serverAlive() bool {
 // checking whether the server is there.
 const serverDialTimeout = 500 * time.Millisecond
 
+// serverUndecidedBackoff is how long startServer waits before each re-check
+// when the server is neither accepting nor confirmed dead (a busy server, an
+// unreadable listener table). Its length bounds the retries.
+var serverUndecidedBackoff = []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+
 // serverConfirmedDead reports whether this session's herdr server is
 // confirmed dead, the proof tmux's ServerConfirmedDead makes for its own
 // server: the socket is missing or refuses the connection, and the kernel
@@ -1023,8 +1028,9 @@ func (c *client) serverConfirmedDead(ctx context.Context) bool {
 }
 
 // removeStaleSocket unlinks the socket inode when it exists but nothing live is
-// listening, so a freshly launched server can bind. Guard with serverAlive
-// first — only call once liveness has already returned false.
+// listening, so a freshly launched server can bind. Guard with
+// serverConfirmedDead first — a refused dial alone does not show the server is
+// gone.
 func (c *client) removeStaleSocket() {
 	if fi, err := os.Stat(c.socketPath()); err == nil && fi.Mode()&os.ModeSocket != 0 {
 		_ = os.Remove(c.socketPath())
@@ -1033,6 +1039,8 @@ func (c *client) removeStaleSocket() {
 
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
+// A server that merely fails to answer is neither replaced nor duplicated: only
+// a confirmed-dead one is, and an inconclusive check ends in an error.
 //
 // It refuses a relative socket path before dialing, unlinking or launching
 // anything. Each process resolves such a path against its own working
@@ -1045,11 +1053,25 @@ func (c *client) startServer() error {
 	}
 	c.serverMu.Lock()
 	defer c.serverMu.Unlock()
-	if c.serverAlive() {
-		return nil
+	// A failed dial is not a dead server: a live one with a full accept queue
+	// fails it too, and unlinking that server's socket then launching another
+	// leaves two servers whose pane ids collide (workspace ids restart at w1
+	// per server). Only a server serverConfirmedDead proves dead is replaced;
+	// any other failure is retried, then reported.
+	for attempt := 0; ; attempt++ {
+		if c.serverAlive() {
+			return nil
+		}
+		if c.serverConfirmedDead(context.Background()) {
+			break
+		}
+		if attempt >= len(serverUndecidedBackoff) {
+			return fmt.Errorf("herdr server for session %q: socket %q refuses connections but the server is not confirmed dead; leaving it in place rather than launching a second server", c.session, c.socketPath())
+		}
+		time.Sleep(serverUndecidedBackoff[attempt])
 	}
-	// A prior server may have died leaving a stale socket inode; serverAlive
-	// just confirmed nothing live owns it, so clear it before launch or herdr
+	// A prior server may have died leaving a stale socket inode; the check
+	// above just confirmed nothing owns it, so clear it before launch or herdr
 	// cannot bind — the exact failure that stranded provider swaps (agent list
 	// → ECONNREFUSED → swap aborted → pool polecats stuck start-pending).
 	c.removeStaleSocket()
