@@ -615,3 +615,173 @@ func TestWispGCLane_PurgePanicIsRecoveredAndAbortsItsCycle(t *testing.T) {
 		t.Error("the lane recorded no pass after its purge panicked")
 	}
 }
+
+// TestWispGCLanePass_DeclineMatrix: everything a pass may not purge for
+// (#2604, PR #8431, AC-8): a timer-only pass (its wake delivered by the
+// pacing backstop, not a tick), a pass whose context is canceled, a pass
+// after the GC was disabled, a pass whose tracker is not yet due, a pass on
+// a quiescent city, and a pass with no graph store behind it. Every decline
+// leaves the purge unrun, holds no store work, and costs the duty cycle
+// nothing — a declined pass never paces the next wake against it.
+func TestWispGCLanePass_DeclineMatrix(t *testing.T) {
+	setup := func(t *testing.T) (*CityRuntime, *atomic.Int32) {
+		cr, _ := newPhaseFixtureRuntime(t, false, false)
+		var runs atomic.Int32
+		cr.wg = countingWispGC{runs: &runs}
+		return cr, &runs
+	}
+	declined := func(t *testing.T, cr *CityRuntime, runs *atomic.Int32, ran bool) {
+		t.Helper()
+		if ran {
+			t.Error("a declined pass reported a purge")
+		}
+		if got := runs.Load(); got != 0 {
+			t.Errorf("a declined pass ran the purge %d time(s), want 0", got)
+		}
+		if cr.cs != nil && cr.cs.storeWorkInFlight() {
+			t.Error("a declined pass left store work registered")
+		}
+	}
+
+	t.Run("due wake purges", func(t *testing.T) {
+		cr, runs := setup(t)
+		if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+			t.Error("a due, woken pass declined; the matrix needs it to purge")
+		}
+		if got := runs.Load(); got != 1 {
+			t.Errorf("the due pass ran %d purge(s), want 1", got)
+		}
+	})
+
+	t.Run("timer-only pass declines", func(t *testing.T) {
+		cr, runs := setup(t)
+		declined(t, cr, runs, cr.wispGCLanePass(context.Background(), time.Now(), false))
+	})
+
+	t.Run("canceled pass declines", func(t *testing.T) {
+		cr, runs := setup(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		declined(t, cr, runs, cr.wispGCLanePass(ctx, time.Now(), true))
+	})
+
+	t.Run("disabled GC declines", func(t *testing.T) {
+		cr, runs := setup(t)
+		lane := cr.wispGCLaneOf()
+		lane.stage(nil)
+		declined(t, cr, runs, cr.wispGCLanePass(context.Background(), time.Now(), true))
+		if lane.active != nil {
+			t.Errorf("the pass left tracker %T installed after a disable; a pass must install staged policy first", lane.active)
+		}
+	})
+
+	t.Run("not-due pass declines", func(t *testing.T) {
+		cr, _ := newPhaseFixtureRuntime(t, false, false)
+		lastRun := time.Now()
+		cr.wg = &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: lastRun}
+		declined(t, cr, new(atomic.Int32), cr.wispGCLanePass(context.Background(), time.Now(), true))
+		if m, ok := cr.wispGCLaneOf().active.(*memoryWispGC); !ok || !m.lastRun.Equal(lastRun) {
+			t.Error("a not-due pass stamped the tracker's lastRun; it must leave the cadence alone")
+		}
+	})
+
+	t.Run("quiescent city declines", func(t *testing.T) {
+		cr, runs := setup(t)
+		cr.beadsQuiescent.Store(true)
+		declined(t, cr, runs, cr.wispGCLanePass(context.Background(), time.Now(), true))
+	})
+
+	t.Run("absent graph store declines", func(t *testing.T) {
+		var runs atomic.Int32
+		cr := &CityRuntime{
+			cityPath:  t.TempDir(),
+			cityName:  "test-city",
+			cfg:       &config.City{},
+			sp:        runtime.NewFake(),
+			wg:        countingWispGC{runs: &runs},
+			rec:       events.Discard,
+			logPrefix: "test-city",
+			stdout:    io.Discard,
+			stderr:    io.Discard,
+			buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+				return DesiredStateResult{State: map[string]TemplateParams{}}
+			},
+		}
+		declined(t, cr, &runs, cr.wispGCLanePass(context.Background(), time.Now(), true))
+	})
+}
+
+// dueOnceGatedWispGC is due exactly for its first pass — a tracker that both
+// blocks in its one purge and turns itself off once it has run — so a pass
+// after the first is provably a decline. secondCheck closes on the second
+// shouldRun call: the queued wake's pass reaching the due-time check.
+type dueOnceGatedWispGC struct {
+	runs        atomic.Int32
+	started     chan struct{}
+	secondCheck chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	secondOnce  sync.Once
+}
+
+func (g *dueOnceGatedWispGC) shouldRun(time.Time) bool {
+	if g.runs.Load() > 0 {
+		g.secondOnce.Do(func() { close(g.secondCheck) })
+		return false
+	}
+	return true
+}
+
+func (g *dueOnceGatedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	g.runs.Add(1)
+	g.startOnce.Do(func() { close(g.started) })
+	<-g.release
+	return 0, nil
+}
+
+// TestWispGCLane_ABurstOfTicksIsNeverAQueueOfPurges: three ticks that reach
+// the wake slot while a purge runs leave one queued wake, not three: the
+// pass that runs on it purges at most once — here nothing, the tracker is
+// no longer due — so a burst of ticks costs one purge, never one per tick
+// (#2604, PR #8431, AC-8).
+func TestWispGCLane_ABurstOfTicksIsNeverAQueueOfPurges(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	tracker := &dueOnceGatedWispGC{
+		started:     make(chan struct{}),
+		secondCheck: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	cr.wg = tracker
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	laneDone := cr.startWispGCLane(ctx)
+
+	for i := 0; i < 3; i++ {
+		runFixtureTick(cr, "patrol")
+	}
+	select {
+	case <-tracker.started:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the first woken tick never started the purge")
+	}
+	close(tracker.release)
+
+	// The lone queued wake runs one more pass — it must not start another
+	// purge underneath three ticks each nudging the slot: the pass reached
+	// the due-time check with the tracker no longer due, and started none.
+	select {
+	case <-tracker.secondCheck:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the queued wake never ran its pass after the first purge finished")
+	}
+	if got := tracker.runs.Load(); got != 1 {
+		t.Fatalf("the queued wake started %d extra purge(s); a queued wake runs at most one", got-1)
+	}
+
+	cancel()
+	select {
+	case <-laneDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the lane did not stop after its pass finished")
+	}
+}
