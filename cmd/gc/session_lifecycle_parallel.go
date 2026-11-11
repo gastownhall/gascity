@@ -1492,6 +1492,14 @@ func buildPreparedStartWithTranscript(
 	}
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
+	// A hookless provider cannot run the SessionStart hook, so Core composes
+	// that hook's context into the launch payload. This is after every
+	// fingerprint above and after promptHash: PromptSuffix and Nudge are not
+	// hashed, so volatile mail can neither drift the config nor re-prime the
+	// session (S19). See hookless_prompt.go.
+	if hooklessStartupContextApplies(tp, &agentCfg) {
+		applyHooklessStartupContext(&agentCfg, hooklessStartupContext(agentCfg.Env, candidate.info, cityPath, agentCfg.WorkDir))
+	}
 	return &preparedStart{
 		candidate:              candidate,
 		cfg:                    agentCfg,
