@@ -203,10 +203,12 @@ indicate bugs.
   any reload where `workspace.name` changes. The city name is locked at
   startup; changing it requires a controller restart.
 
-- **Tracker rebuild is atomic per tick**: When config reloads, all four
-  trackers (crash, idle, wisp GC, order) are rebuilt in the same tick
-  before reconciliation runs. No tick ever uses a mix of old and new
-  tracker state.
+- **Tracker rebuild is atomic per tick**: When config reloads, the crash
+  and idle trackers are rebuilt in the same tick before reconciliation
+  runs, so no tick ever uses a mix of old and new tracker state. The
+  rebuilt wisp GC tracker and order dispatcher are staged for their lanes,
+  which install them between passes: a purge or dispatch in flight keeps
+  the one it started with, and the reload never waits for it.
 
 - **Dirty flag is edge-triggered, not level-triggered**: The `atomic.Bool`
   is set by the fsnotify goroutine and cleared by `dirty.Swap(false)` at

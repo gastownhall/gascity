@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -318,5 +320,102 @@ func TestWispGCLane_StoppedTickEnqueuesNoWake(t *testing.T) {
 	}
 	if got := runs.Load(); got != 0 {
 		t.Fatalf("purges = %d, want 0", got)
+	}
+}
+
+// firstListGateStore blocks its first List until the test releases it.
+type firstListGateStore struct {
+	beads.Store
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func newFirstListGateStore() *firstListGateStore {
+	return &firstListGateStore{Store: beads.NewMemStore(), started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *firstListGateStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.once.Do(func() {
+		close(s.started)
+		<-s.release
+	})
+	return s.Store.List(q)
+}
+
+// installedWispGC is the tracker the lane's next purge would use: it runs a
+// timer-only pass, which installs any policy a reload staged and purges
+// nothing, and reads the lane's tracker.
+func installedWispGC(cr *CityRuntime) wispGC {
+	runLanePass(cr, false)
+	lane := cr.wispGCLaneOf()
+	lane.passMu.Lock()
+	defer lane.passMu.Unlock()
+	return lane.active
+}
+
+// reloadWispGCConfigWithin rewrites the city config to
+// wispGCReloadCityBase+extra and applies it, failing unless the reload
+// completes within the wait, whatever a purge is doing, and is applied.
+func reloadWispGCConfigWithin(t *testing.T, cr *CityRuntime, tomlPath, extra string) {
+	t.Helper()
+	if err := os.WriteFile(tomlPath, []byte(wispGCReloadCityBase+extra), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var reply reloadControlReply
+	completesWithin(t, "a config reload", func() {
+		lastProviderName := "fake"
+		reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual)
+	})
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q (err %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+}
+
+// Kills: a reload that waits for a purge, that writes the tracker under it,
+// or whose policy never reaches the lane. A reload during a purge returns
+// while the purge is held in its store call, and the tracker the lane
+// installs next has the reloaded policy and the finished purge's lastRun and
+// session purge cursor.
+func TestWispGCLane_ReloadDuringPurgeCarriesItsProgress(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	store := newFirstListGateStore()
+	cr.cs.cityBeadStore = store
+	purging, ok := installedWispGC(cr).(*memoryWispGC)
+	if !ok {
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", installedWispGC(cr))
+	}
+	purging.sessionPurgeCursor = &beads.SeekBoundary{CreatedAt: time.Now().Add(-48 * time.Hour), ID: "gcg-session-p"}
+	passDone := make(chan bool, 1)
+	go func() { passDone <- runLanePass(cr, true) }()
+	select {
+	case <-store.started:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the purge never reached the store")
+	}
+
+	reloadWispGCConfigWithin(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \"2h\"\nwisp_ttl = \"48h\"\n")
+	close(store.release)
+	select {
+	case ran := <-passDone:
+		if !ran {
+			t.Fatal("the lane pass did not purge")
+		}
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the purge did not finish after its store call was released")
+	}
+
+	next, ok := installedWispGC(cr).(*memoryWispGC)
+	if !ok || next == purging {
+		t.Fatalf("installed tracker = %T (same as the purging one: %v), want the reloaded *memoryWispGC", installedWispGC(cr), next == purging)
+	}
+	if next.interval != 2*time.Hour || next.ttl != 48*time.Hour {
+		t.Fatalf("installed interval/ttl = %v/%v, want 2h/48h", next.interval, next.ttl)
+	}
+	if next.lastRun.IsZero() || !next.lastRun.Equal(purging.lastRun) {
+		t.Fatalf("installed lastRun = %v, want the finished purge's %v", next.lastRun, purging.lastRun)
+	}
+	if next.sessionPurgeCursor != purging.sessionPurgeCursor {
+		t.Fatalf("installed session purge cursor = %+v, want the finished purge's %+v", next.sessionPurgeCursor, purging.sessionPurgeCursor)
 	}
 }

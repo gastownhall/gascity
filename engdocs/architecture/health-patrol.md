@@ -104,7 +104,9 @@ A single controller tick proceeds as follows:
    (via fsnotify debounce on config directory changes),
    `tryReloadConfig()` re-parses `city.toml` with includes and patches.
    If the reload succeeds, the crash tracker, idle tracker, wisp GC, and
-   order dispatcher are all rebuilt from the new config.
+   order dispatcher are all rebuilt from the new config; the wisp GC
+   tracker and order dispatcher are staged for their lanes, which install
+   them before their next pass.
 
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.

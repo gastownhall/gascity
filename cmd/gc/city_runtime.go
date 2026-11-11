@@ -162,7 +162,7 @@ type CityRuntime struct {
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
 	adt                     assignedWorkDeferTracker
-	wg                      wispGC
+	wg                      wispGC // seeds the wisp GC lane; reloads stage on the lane
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -3045,7 +3045,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = carryWispGCState(cr.wg, newWispGCForCity(nextCfg, cr.cityName))
+	// The wisp GC lane owns its tracker; a purge in flight keeps the one it
+	// started with, and the next pass installs this one (wisp_gc_lane.go).
+	cr.wispGCLaneOf().stage(newWispGCForCity(nextCfg, cr.cityName))
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
