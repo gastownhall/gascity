@@ -1,14 +1,16 @@
 """The nogo analyzer set: golangci-lint's configured linters as go/analysis passes.
 
 This is the single list of analyzers `//tools/nogo` runs on every Go compile.
-It mirrors the linters .golangci.yml enabled (golangci-lint v2.14 defaults plus
-the configured extras); analyzers_test.go checks the staticcheck lists against
-honnef.co/go/tools so an upgrade cannot silently drop or add checks.
+It mirrors the linters .golangci.yml enabled (the defaults of the golangci-lint
+version the Makefile pins, plus the configured extras); analyzers_test.go checks
+the staticcheck lists against honnef.co/go/tools so an upgrade cannot silently
+drop or add checks.
 """
 
-# `go vet`'s suite (cmd/vet, Go 1.26). golangci-lint's govet default adds
-# `inline` (a `go fix` modernizer, not part of `go vet`); it is left out: it
-# panics computing facts for golang.org/x/tools/go/ast/astutil under nogo.
+# `go vet`'s suite (cmd/vet of the Go release in go.mod). golangci-lint's govet
+# default adds `inline` (a `go fix` modernizer, not part of `go vet`); it is
+# left out: it panics computing facts for golang.org/x/tools/go/ast/astutil
+# under nogo.
 VET_PASSES = [
     "appends",
     "asmdecl",

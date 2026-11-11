@@ -4,23 +4,23 @@ go 1.27.3
 
 require (
 	codeberg.org/polyfloyd/go-errorlint v1.9.0
-	github.com/go-critic/go-critic v0.14.3
+	github.com/go-critic/go-critic v0.15.0
 	github.com/golangci/misspell v0.8.0
 	github.com/golangci/unconvert v0.0.0-20250410112200-a129a6e6413e
 	github.com/gordonklaus/ineffassign v0.2.0
 	github.com/hashicorp/go-version v1.9.0
-	github.com/kisielk/errcheck v1.10.0
-	github.com/mgechev/revive v1.15.0
+	github.com/kisielk/errcheck v1.20.0
+	github.com/mgechev/revive v1.17.0
 	golang.org/x/mod v0.41.0
 	golang.org/x/tools v0.51.0
 	honnef.co/go/tools v0.8.1
-	mvdan.cc/unparam v0.0.0-20251027182757-5beb8c8f8f15
+	mvdan.cc/unparam v0.0.0-20260823230713-2fa3d841b0c8
 )
 
 require (
-	codeberg.org/chavacava/garif v0.2.0 // indirect
+	codeberg.org/chavacava/garif v0.2.1 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/fatih/color v1.18.0 // indirect
+	github.com/fatih/color v1.19.0 // indirect
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/go-toolsmith/astcast v1.1.0 // indirect
 	github.com/go-toolsmith/astcopy v1.1.0 // indirect

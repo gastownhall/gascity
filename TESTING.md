@@ -2006,6 +2006,21 @@ macOS job still runs golangci-lint. `unused` and `unparam` report only from
 compile units that include test files, because golangci-lint analyzes a tested
 package together with its tests; see `tools/nogo/analyzers/internal/testunit`.
 
+The analyzer modules in `tools/nogo/go.mod` equal what the golangci-lint
+release pinned in the Makefile (`GOLANGCI_LINT_VERSION`) compiles in. The
+bundle record `tools/nogo/golangci-lint-bundle.txt` lists those versions,
+including gofumpt's, which `MODULE.bazel` pins. It is generated, never edited
+by hand, and covers the pinned version only. `TestAnalyzerPinsMatchGolangciLintBundle`
+(`tools/nogo/bundle_test.go`) reads the record, the Makefile, `go.mod` and
+`MODULE.bazel` offline and fails on every disagreement, naming the file to
+edit; there is no waiver list. When Renovate or a person bumps
+`GOLANGCI_LINT_VERSION`, run `scripts/nogo-bundle-record.sh` to rewrite the
+record and print the `go mod edit` and `MODULE.bazel` edits it implies, apply
+them (then `go mod tidy` in `tools/nogo`), and fix what the newer analyzers
+now report. A reviewer re-derives the record online with
+`scripts/nogo-bundle-record.sh --check`. That script needs the network, so run
+it by hand and never under `bazel test`.
+
 `make test-ci-policy` runs the focused lint-placement and formatting-scope
 contracts. A self-binding test in the CI policy package rejects any Makefile
 change that removes this focused Go suite from the target.
