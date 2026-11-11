@@ -48,6 +48,7 @@ go_test(
         "authorship_test.go",
         "capture_test.go",
         "childstats_test.go",
+        "condition_actor_test.go",
         "condition_credentials_test.go",
         "condition_test.go",
         "condition_unlaunchable_test.go",

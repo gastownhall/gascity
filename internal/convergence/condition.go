@@ -169,6 +169,22 @@ func conditionToolLinksMatch(dir string, tools map[string]string) bool {
 	return true
 }
 
+// ConditionActor is the BEADS_ACTOR a condition script runs as when the
+// controller's environment names none. Condition scripts are run by the
+// controller, not by an agent session or a human, so gc attributes their
+// writes to the controller, as it does the controller's own bd calls.
+const ConditionActor = "controller"
+
+// conditionActor returns the actor a condition script's writes are
+// attributed to: the controller's ambient BEADS_ACTOR when set, otherwise
+// ConditionActor.
+func conditionActor() string {
+	if actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); actor != "" {
+		return actor
+	}
+	return ConditionActor
+}
+
 // ConditionEnv builds the environment variables for a gate condition script.
 // All bead-derived values are passed as env vars — never interpolated into commands.
 type ConditionEnv struct {
@@ -222,8 +238,9 @@ func conditionBeadsCredentialsFile() string {
 
 // Environ returns the environment variable slice for exec.Cmd.
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
-// vars, Dolt/Beads connection env, the resolved beads credentials file, and
-// GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
+// vars, BEADS_ACTOR (conditionActor), Dolt/Beads connection env, the resolved
+// beads credentials file, and GC_INTEGRATION_REAL_BD when present for
+// integration-test bd shims.
 func (ce ConditionEnv) Environ() []string {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
@@ -241,6 +258,7 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_HOME=" + conditionGCHome(),
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
+		"BEADS_ACTOR=" + conditionActor(),
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
