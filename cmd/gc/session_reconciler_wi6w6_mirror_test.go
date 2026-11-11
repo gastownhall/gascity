@@ -31,7 +31,7 @@ import (
 // A regression that reads a stale quarantine would report BlockerQuarantined (not pending) and
 // wrongly kill the aged session mid-interaction — a fail-safe violation.
 func TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
 	env.addDesired("witness", "witness", true) // running + alive
 	session := env.createSessionBead("witness", "witness")
@@ -86,7 +86,7 @@ func TestReconcileSessionBeads_ClearedQuarantineKeepsMaxAgePendingDeferral(t *te
 // the generic runtime-missing reason — erasing the terminal-error classification the pool-slot
 // reaper depends on.
 func TestReconcileSessionBeads_ZombieTerminalErrorSleepReasonSurvivesHeal(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
 	env.desiredState["witness"] = TemplateParams{
 		Command:      "true",

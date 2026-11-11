@@ -101,3 +101,24 @@ func AssertFileSizeStable(t *testing.T, path string, initialSize int64, stableFo
 		}
 	}
 }
+
+// WaitForFileGrowth waits up to a few seconds for the heartbeat file at path to
+// grow past size, which shows the process writing it is still running, and
+// fails t if it does not.
+func WaitForFileGrowth(t *testing.T, path string, size int64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat heartbeat file %s: %v", path, err)
+		}
+		if info.Size() > size {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("heartbeat file %s stopped growing at size %d: its writer is gone", path, info.Size())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

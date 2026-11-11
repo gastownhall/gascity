@@ -47,6 +47,7 @@ type options struct {
 	requestPermission bool
 	requestIDString   bool
 	permissionTimeout time.Duration
+	permissionAbandon bool
 	sigint            string
 	onCancel          string
 	cancelLatency     time.Duration
@@ -74,6 +75,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&o.requestPermission, "request-permission", false, "send session/request_permission before answering and act on the reply")
 	fs.BoolVar(&o.requestIDString, "request-id-string", false, "use string JSON-RPC ids (perm-1, fs-1) for fake-originated requests")
 	fs.DurationVar(&o.permissionTimeout, "permission-timeout", 0, "on expiry send $/cancel_request and treat the permission as rejected (0 = wait forever)")
+	fs.BoolVar(&o.permissionAbandon, "permission-abandon", false, "on --permission-timeout expiry, skip $/cancel_request and leave the request unanswered while the turn ends")
 	fs.StringVar(&o.sigint, "sigint", sigintIgnore, "SIGINT handling: ignore, exit (status 130), or cancel (answer the in-flight prompt canceled)")
 	fs.StringVar(&o.onCancel, "on-cancel", onCancelReply, "session/cancel handling: reply (answer the in-flight prompt canceled) or ignore")
 	fs.DurationVar(&o.cancelLatency, "cancel-latency", 0, "delay before answering a canceled prompt")

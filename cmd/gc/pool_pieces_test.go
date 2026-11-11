@@ -313,7 +313,7 @@ func TestComputeAwakeSetKeyedByIDKeepsRowsThatShareAName(t *testing.T) {
 	want := map[string]AwakeDecision{
 		"gc-live":    {ShouldWake: true, Reason: "assigned-work", HasAssignedWork: true, AssignedWorkBeadID: "w1", AssignedWorkClaimed: true},
 		"gc-stale-1": {Reason: "held"},
-		"gc-stale-2": {ShouldWake: true, Reason: "attached"},
+		"gc-stale-2": {ShouldWake: true, Reason: "attached", Attached: true},
 	}
 	if !reflect.DeepEqual(byID, want) {
 		t.Fatalf("bead-ID keying:\n got=%+v\nwant=%+v", byID, want)
@@ -925,7 +925,7 @@ func TestComputeNamedSessionDemandMatchesInlineBlock(t *testing.T) {
 			counts[tmpl] = r.IntN(3)
 		}
 		var gotErr, wantErr bytes.Buffer
-		got := computeNamedSessionDemand("city", f.cityPath, f.cfg, f.store, f.suspendedRigPaths, defaults, work, refs, ready, counts, &gotErr)
+		got := computeNamedSessionDemand("city", f.cityPath, f.cfg, f.store, nil, f.suspendedRigPaths, defaults, work, refs, ready, counts, &gotErr)
 		want := computeNamedSessionDemandPreRefactor("city", f.cityPath, f.cfg, f.store, f.suspendedRigPaths, defaults, work, refs, ready, counts, &wantErr)
 		// The block logs while ranging over a map, so compare log lines as a set.
 		if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(sortedLines(gotErr.String()), sortedLines(wantErr.String())) {

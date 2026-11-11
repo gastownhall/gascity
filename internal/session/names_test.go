@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -130,14 +131,14 @@ func TestEnsureSessionNameAvailable_RejectsOpenIdentifierCollisions(t *testing.T
 		t.Fatalf("Create(open): %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "worker"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "worker"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(open collision) error = %v, want %v", err, ErrSessionNameExists)
 	}
 
 	if err := store.Close(open.ID); err != nil {
 		t.Fatalf("Close(open): %v", err)
 	}
-	if err := ensureSessionNameAvailable(store, "worker"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "worker"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(closed collision) = %v, want nil", err)
 	}
 }
@@ -169,7 +170,7 @@ func TestEnsureSessionNameAvailable_AllowsBareVsQualifiedCoexistence(t *testing.
 
 	// City-scoped dispatcher with bare session_name must still be able to claim
 	// "control-dispatcher" despite the qualified identifiers above.
-	if err := ensureSessionNameAvailable(store, "control-dispatcher"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "control-dispatcher"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(bare vs qualified) = %v, want nil", err)
 	}
 
@@ -183,7 +184,7 @@ func TestEnsureSessionNameAvailable_AllowsBareVsQualifiedCoexistence(t *testing.
 	}); err != nil {
 		t.Fatalf("Create(bare template): %v", err)
 	}
-	if err := ensureSessionNameAvailable(store, "control-dispatcher"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "control-dispatcher"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(bare exact-match) error = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -214,7 +215,7 @@ func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsBareVsQualifiedCoexi
 		}
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "control-dispatcher", "", "control-dispatcher"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "control-dispatcher", "", "control-dispatcher"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(bare vs qualified) = %v, want nil", err)
 	}
 }
@@ -232,7 +233,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasCollisions(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "worker"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "worker"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(alias collision) error = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -251,7 +252,7 @@ func TestEnsureSessionNameAvailable_AllowsLiveAliasHistoryReuse(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "mayor"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "mayor"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(alias history reuse) = %v, want nil", err)
 	}
 }
@@ -279,7 +280,7 @@ func TestEnsureSessionNameAvailable_AllowsClosedConfiguredNamedSession(t *testin
 	// A closed configured named session should NOT block reuse of the
 	// session name. The design doc states: "Closed historical beads do not
 	// poison future canonical materialization of the reserved identity."
-	if err := ensureSessionNameAvailable(store, "witness"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "witness"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(closed configured named) = %v, want nil", err)
 	}
 }
@@ -303,7 +304,7 @@ func TestEnsureSessionNameAvailable_RejectsClosedAdHocSession(t *testing.T) {
 	}
 
 	// Ad-hoc session names remain permanent even after close.
-	if err := ensureSessionNameAvailable(store, "my-custom-session"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "my-custom-session"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(closed ad-hoc) = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -337,7 +338,7 @@ func TestEnsureSessionNameAvailable_AllowsClosedNamedSessionByIdentity(t *testin
 	// A closed configured named session — recognized by its identity even
 	// without the boolean flag — releases its runtime name so the reconciler
 	// can materialize a fresh canonical bead.
-	if err := ensureSessionNameAvailable(store, "gascity--gastown__refinery"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "gascity--gastown__refinery"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(closed named-by-identity) = %v, want nil", err)
 	}
 }
@@ -361,7 +362,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveNamedSessionByIdentity(t *testing
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "gascity--gastown__refinery"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "gascity--gastown__refinery"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(live named) = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -380,7 +381,7 @@ func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "mayor", ""); err != nil {
+	if err := EnsureAliasAvailable(beadstest.Sessions(store), "mayor", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable(history reuse) = %v, want nil", err)
 	}
 }
@@ -401,7 +402,7 @@ func TestEnsureAliasAvailable_AllowsClosedSessionNameReuse(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "sky", ""); err != nil {
+	if err := EnsureAliasAvailable(beadstest.Sessions(store), "sky", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable(closed session_name collision) = %v, want nil", err)
 	}
 }
@@ -419,7 +420,7 @@ func TestEnsureAliasAvailable_RejectsLiveSessionNameCollision(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "sky", ""); !errors.Is(err, ErrSessionAliasExists) {
+	if err := EnsureAliasAvailable(beadstest.Sessions(store), "sky", ""); !errors.Is(err, ErrSessionAliasExists) {
 		t.Fatalf("EnsureAliasAvailable(live session_name collision) error = %v, want %v", err, ErrSessionAliasExists)
 	}
 }
@@ -440,7 +441,7 @@ func TestEnsureAliasAvailable_AllowsFailedCreateIdentity(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "worker-1", ""); err != nil {
+	if err := EnsureAliasAvailable(beadstest.Sessions(store), "worker-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable(failed-create identity) = %v, want nil", err)
 	}
 }
@@ -461,7 +462,7 @@ func TestEnsureSessionNameAvailable_AllowsFailedCreateIdentity(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "worker-1"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "worker-1"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(failed-create identity) = %v, want nil", err)
 	}
 }
@@ -490,7 +491,7 @@ func TestEnsureAliasAvailableWithConfig_RejectsConfiguredSingletonAlias(t *testi
 		},
 	}
 
-	if err := EnsureAliasAvailableWithConfig(store, cfg, "myrig/polecat", ""); !errors.Is(err, ErrSessionAliasExists) {
+	if err := EnsureAliasAvailableWithConfig(beadstest.Sessions(store), cfg, "myrig/polecat", ""); !errors.Is(err, ErrSessionAliasExists) {
 		t.Fatalf("EnsureAliasAvailableWithConfig(reserved singleton) error = %v, want %v", err, ErrSessionAliasExists)
 	}
 }
@@ -517,7 +518,7 @@ func TestEnsureAliasAvailableWithConfig_AllowsConfiguredSingletonSelf(t *testing
 		},
 	}
 
-	if err := EnsureAliasAvailableWithConfig(store, cfg, "myrig/polecat", bead.ID); err != nil {
+	if err := EnsureAliasAvailableWithConfig(beadstest.Sessions(store), cfg, "myrig/polecat", bead.ID); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfig(self singleton) = %v, want nil", err)
 	}
 }
@@ -540,7 +541,7 @@ func TestEnsureAliasAvailableWithConfig_RejectsForkedSingletonSelf(t *testing.T)
 		},
 	}
 
-	if err := EnsureAliasAvailableWithConfig(store, cfg, "myrig/polecat", bead.ID); !errors.Is(err, ErrSessionAliasExists) {
+	if err := EnsureAliasAvailableWithConfig(beadstest.Sessions(store), cfg, "myrig/polecat", bead.ID); !errors.Is(err, ErrSessionAliasExists) {
 		t.Fatalf("EnsureAliasAvailableWithConfig(fork self) error = %v, want %v", err, ErrSessionAliasExists)
 	}
 }
@@ -554,10 +555,10 @@ func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredSingletonCreate(
 		},
 	}
 
-	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "worker", "", "worker"); err != nil {
+	if err := EnsureAliasAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "worker", "", "worker"); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(worker create) = %v, want nil", err)
 	}
-	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "myrig/polecat", "", "myrig/polecat"); err != nil {
+	if err := EnsureAliasAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "myrig/polecat", "", "myrig/polecat"); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(rig singleton create) = %v, want nil", err)
 	}
 }
@@ -582,7 +583,7 @@ func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredAliasAgainstOrdi
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "myrig/worker", "", "myrig/worker"); err != nil {
+	if err := EnsureAliasAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "myrig/worker", "", "myrig/worker"); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(named owner vs concrete identity) = %v, want nil", err)
 	}
 }
@@ -599,10 +600,10 @@ func TestEnsureSessionNameAvailableWithConfig_UsesResolvedWorkspaceName(t *testi
 		},
 	}
 
-	if err := EnsureSessionNameAvailableWithConfig(store, cfg, "test-city--mayor", ""); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfig(beadstest.Sessions(store), cfg, "test-city--mayor", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfig(resolved workspace name) error = %v, want %v", err, ErrSessionNameExists)
 	}
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city--mayor", "", "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "test-city--mayor", "", "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(self resolved workspace name) = %v, want nil", err)
 	}
 }
@@ -690,7 +691,7 @@ func TestEnsureSessionNameAvailable_RejectsClosedExplicitName(t *testing.T) {
 
 	// Closed explicit names are intentionally reserved — the higher-level
 	// reopen path handles restart by reopening the old bead.
-	err = ensureSessionNameAvailable(store, "my-worker")
+	err = ensureSessionNameAvailable(beadstest.Sessions(store), "my-worker")
 	if !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want ErrSessionNameExists (reopen path handles this)", err)
 	}
@@ -722,10 +723,10 @@ func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsClosedSelfReopen(t *
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "mayor", bead.ID, "mayor"); err != nil {
+	if err := EnsureAliasAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", bead.ID, "mayor"); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(reopen self alias) = %v, want nil", err)
 	}
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city--mayor", bead.ID, "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "test-city--mayor", bead.ID, "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(reopen self session_name) = %v, want nil", err)
 	}
 }
@@ -764,12 +765,12 @@ func TestEnsureConfiguredSessionNameAvailable_AllowsClosedLegacyBeadForOwner(t *
 	}
 
 	// Base check (no config) should still reject — ad-hoc semantics.
-	if err := ensureSessionNameAvailable(store, "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "mayor"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(legacy closed) = %v, want ErrSessionNameExists", err)
 	}
 
 	// Config-aware check with matching owner should allow reuse.
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(legacy closed, matching owner) = %v, want nil", err)
 	}
 }
@@ -804,7 +805,7 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsClosedLegacyBeadWrongOwner(
 	}
 
 	// "foreman" does not own "mayor" — should be rejected.
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(wrong owner) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -836,7 +837,7 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveLegacyBead(t *testing.T
 	}
 
 	// Even with matching owner, a live bead blocks.
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live bead) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -862,7 +863,7 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsWithoutConfig(t *testing.T)
 	}
 
 	// No config — should still reject.
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, nil, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), nil, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(nil config) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -896,7 +897,7 @@ func TestEnsureConfiguredSessionNameAvailable_AllowsClosedLegacyWithWorkspacePre
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, runtimeName, "", "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, runtimeName, "", "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(workspace-prefixed) = %v, want nil", err)
 	}
 }
@@ -943,7 +944,7 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasCollisionDespiteLe
 	}
 
 	// Must reject — live alias collision takes precedence over legacy bypass.
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias collision) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -989,7 +990,7 @@ func TestEnsureConfiguredSessionNameAvailable_AllowsLiveAliasHistoryReuseDespite
 		t.Fatalf("Create live alias history: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias history reuse) = %v, want nil", err)
 	}
 }
@@ -1033,7 +1034,7 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveIdentifierCollisionDesp
 		t.Fatalf("Create live identifier: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live identifier collision) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -1063,10 +1064,10 @@ func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsPoolManagedIdentifie
 		t.Fatalf("Create pool managed: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "mayor"); err != nil {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(pool identifier collision) = %v, want nil", err)
 	}
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, "mayor", "", "foreman"); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(wrong owner) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -1084,7 +1085,7 @@ func TestEnsureSessionNameAvailableUsesTargetedIdentifierLookups(t *testing.T) {
 		t.Fatalf("Create(alias holder): %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfig(store, nil, "sky", ""); !errors.Is(err, ErrSessionNameExists) {
+	if err := EnsureSessionNameAvailableWithConfig(beadstest.Sessions(store), nil, "sky", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("EnsureSessionNameAvailableWithConfig(alias collision) = %v, want ErrSessionNameExists", err)
 	}
 }
@@ -1102,7 +1103,7 @@ func TestEnsureAliasAvailableUsesTargetedIdentifierLookups(t *testing.T) {
 		t.Fatalf("Create(session_name holder): %v", err)
 	}
 
-	if err := EnsureAliasAvailableWithConfig(store, nil, "sky", ""); !errors.Is(err, ErrSessionAliasExists) {
+	if err := EnsureAliasAvailableWithConfig(beadstest.Sessions(store), nil, "sky", ""); !errors.Is(err, ErrSessionAliasExists) {
 		t.Fatalf("EnsureAliasAvailableWithConfig(session_name collision) = %v, want ErrSessionAliasExists", err)
 	}
 }
@@ -1189,14 +1190,14 @@ func TestEnsureSessionAliasAvailable_DrainedNamedPredecessorBlocksLiveSelfOwnerC
 
 	// The live session, claiming its own canonical alias, is not blocked by
 	// its own drained predecessor.
-	if err := ensureSessionAliasAvailable(store, nil, "perrin", live.ID, "perrin"); err != nil {
+	if err := ensureSessionAliasAvailable(beadstest.Sessions(store), nil, "perrin", live.ID, "perrin"); err != nil {
 		t.Fatalf("ensureSessionAliasAvailable(live self-owner vs drained predecessor) = %v, want nil", err)
 	}
 
 	// A third party (different selfOwner) must still be refused the alias:
 	// the drained bead still legitimately reserves the identity against
 	// anyone who is not that identity's own live holder.
-	if err := ensureSessionAliasAvailable(store, nil, "perrin", "gc-stranger", "siuan"); !errors.Is(err, ErrSessionAliasExists) {
+	if err := ensureSessionAliasAvailable(beadstest.Sessions(store), nil, "perrin", "gc-stranger", "siuan"); !errors.Is(err, ErrSessionAliasExists) {
 		t.Fatalf("ensureSessionAliasAvailable(different owner vs drained predecessor) = %v, want ErrSessionAliasExists", err)
 	}
 }
@@ -1282,7 +1283,7 @@ func TestEnsureSessionAliasAvailable_SelfOwnerExceptionRefusesUnqualifiedHolders
 				t.Fatalf("Create(live typed session): %v", err)
 			}
 
-			if err := ensureSessionAliasAvailable(store, nil, "perrin", live.ID, "perrin"); !errors.Is(err, ErrSessionAliasExists) {
+			if err := ensureSessionAliasAvailable(beadstest.Sessions(store), nil, "perrin", live.ID, "perrin"); !errors.Is(err, ErrSessionAliasExists) {
 				t.Fatalf("ensureSessionAliasAvailable(self-owner vs %s) = %v, want ErrSessionAliasExists", tc.name, err)
 			}
 		})
@@ -1315,7 +1316,7 @@ func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesConfiguredName(t *tes
 		t.Fatalf("Close(retired pool slot): %v", err)
 	}
 
-	if err := ensureSessionNameAvailableForSelfAndOwner(store, "loial", "gc-999", ""); err != nil {
+	if err := ensureSessionNameAvailableForSelfAndOwner(beadstest.Sessions(store), "loial", "gc-999", ""); err != nil {
 		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(retired pool slot holding configured name) = %v, want nil", err)
 	}
 }
@@ -1383,7 +1384,7 @@ func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testin
 				}
 			}
 
-			if err := ensureSessionNameAvailable(store, "loial"); !errors.Is(err, ErrSessionNameExists) {
+			if err := ensureSessionNameAvailable(beadstest.Sessions(store), "loial"); !errors.Is(err, ErrSessionNameExists) {
 				t.Fatalf("ensureSessionNameAvailable(%s) = %v, want %v", tc.name, err, ErrSessionNameExists)
 			}
 		})

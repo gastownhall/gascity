@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -95,7 +96,7 @@ func TestSessionHandleReadsCustomZCodeProviderTranscriptByKind(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
 	handle := newCustomKindHandle(t, root, workDir, "glm53", "zcode", sessionpkg.ProviderResume{})
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	mirror := filepath.Join(root, "sess_glm53.json")
@@ -142,7 +143,7 @@ func TestSessionHandleReadsClaudeKindTranscriptDespiteKimiName(t *testing.T) {
 		SessionIDFlag: "--session-id",
 		ResumeFlag:    "--resume",
 	})
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := handle.manager.Get(handle.sessionID)
@@ -195,7 +196,7 @@ func TestSessionHandleStateDerivesBusyFromZCodeMirrorByKind(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
 	handle := newCustomKindHandle(t, root, workDir, "glm53", "zcode", sessionpkg.ProviderResume{})
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	mirror := filepath.Join(root, "sess_glm53.json")
@@ -234,9 +235,9 @@ func newCustomKindHandle(t *testing.T, searchRoot, workDir, provider, kind strin
 	sp := runtime.NewFake()
 	// The stale-resume-key probe delay is production timing, not what these
 	// tests own; skip it so a keyed (session-id) start does not sleep.
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithStaleKeyDetectionWaiter(
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithStaleKeyDetectionWaiter(
 		func(context.Context, string) error { return nil },
-	))
+	), sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchRoot},

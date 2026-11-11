@@ -10,7 +10,7 @@ import (
 // the ledger. Dating only one of them would also trip comparePolicyFields, and
 // this file is about the dates, not about drift between the two.
 func lapsedPolicyAndLedger(expires string) (policy, ledger Ledger) {
-	policy = validLedger(Census{})
+	policy = validLedger()
 	policy.Debt[0].Expires = expires
 	ledger = cloneLedger(policy)
 	return policy, ledger
@@ -48,7 +48,7 @@ func TestValidateKeepsStructuralProblemsFatal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			policy := validLedger(Census{})
+			policy := validLedger()
 			ledger := cloneLedger(policy)
 			tc.mutate(&policy)
 			tc.mutate(&ledger)
@@ -68,7 +68,7 @@ func TestValidateKeepsStructuralProblemsFatal(t *testing.T) {
 func TestCollectExpiriesHandsEachRowToTheClockOnce(t *testing.T) {
 	t.Parallel()
 
-	ledger := validLedger(Census{})
+	ledger := validLedger()
 	ledger.Medium = []MediumOwner{{
 		PackageDir:      "internal/example",
 		PackageName:     "example",
@@ -104,7 +104,7 @@ func TestCollectExpiriesHandsEachRowToTheClockOnce(t *testing.T) {
 func TestCollectExpiriesSkipsMalformedRows(t *testing.T) {
 	t.Parallel()
 
-	ledger := validLedger(Census{})
+	ledger := validLedger()
 	ledger.Debt[0].Expires = "07/12/2026"
 	ledger.Debt[0].OwnerBead = ""
 	for _, expiry := range collectExpiries(ledger) {

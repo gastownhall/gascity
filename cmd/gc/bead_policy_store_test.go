@@ -8,10 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 type captureCreateStore struct {
@@ -768,4 +771,66 @@ func TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness(t *testing.T) {
 	if witness.SawRows() {
 		t.Fatal("SawRows() = true over a store that cannot witness itself")
 	}
+}
+
+// A beads nudge queue record stays in the history plane (DES-NQ D7, D-NQ): the
+// native store refuses Claim on wisp-plane rows, so the bead policy must never
+// route a gc:nudge-queue record to a storage tier the way it routes gc:nudge
+// shadows.
+func TestPolicyNameForBeadLeavesNudgeQueueRecordsInHistory(t *testing.T) {
+	memory := beads.NewMemStore()
+	memory.HonorExplicitIDs = true
+	store := policyClaimingMemStore{MemStore: memory}
+	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeQueue: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := queue.Enqueue(nudgequeue.Item{ID: "n-plane", Agent: "alpha/worker", Source: "test", Message: "hi", CreatedAt: now, DeliverAfter: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	all, err := memory.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 1 || !storebinding.IsNudgeQueueRecord(all[0]) {
+		t.Fatalf("store holds %+v, want exactly the one queue record", all)
+	}
+	if got := policyNameForBead(all[0]); got != "" {
+		t.Fatalf("policyNameForBead(queue record) = %q, want \"\" so the record stays in the history plane", got)
+	}
+
+	// The same record written through the bead policy front door takes the
+	// default (history) storage path, not a no-history tier.
+	backing := &captureCreateStore{Store: beads.NewMemStore()}
+	policy := wrapStoreWithBeadPolicies(backing, &config.City{})
+	record := all[0]
+	if _, err := policy.Create(beads.Bead{Title: record.Title, Type: record.Type, Labels: record.Labels, Metadata: record.Metadata}); err != nil {
+		t.Fatalf("Create through the bead policy: %v", err)
+	}
+	if len(backing.storages) != 1 || backing.storages[0] != beads.StorageDefault {
+		t.Fatalf("queue record storage = %v, want the default history path", backing.storages)
+	}
+}
+
+// policyClaimingMemStore is beads.MemStore with the two-argument assignment
+// claim the beads nudge queue requires.
+type policyClaimingMemStore struct {
+	*beads.MemStore
+}
+
+func (s policyClaimingMemStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	current, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if current.Assignee != "" && current.Assignee != assignee {
+		return beads.Bead{}, false, nil
+	}
+	inProgress := "in_progress"
+	if err := s.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	held, err := s.Get(id)
+	return held, err == nil, err
 }

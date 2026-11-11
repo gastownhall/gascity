@@ -8,7 +8,10 @@
     "target": { "type": "string" },
     "intent": { "type": "string" },
     "queued": { "type": "boolean" },
-    "outcome": { "type": "string", "enum": ["submitted", "queued", "interrupted"] }
+    "outcome": { "type": "string", "enum": ["submitted", "queued", "interrupted", "accepted"] },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "additionalProperties": true
 }

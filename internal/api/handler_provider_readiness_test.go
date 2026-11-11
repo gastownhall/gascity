@@ -405,6 +405,21 @@ func TestClaudeProbeCommandEnvForwardsConfigDirAndOAuthToken(t *testing.T) {
 	}
 }
 
+func TestClaudeProbeCommandEnvForwardsGatewayLogin(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+
+	env := claudeProbeCommandEnv()
+	for _, want := range []string{"ANTHROPIC_BASE_URL=https://gateway.example/api", "ANTHROPIC_AUTH_TOKEN=gateway-token"} {
+		if !slices.Contains(env, want) {
+			t.Fatalf("claudeProbeCommandEnv missing %s: %v", want, env)
+		}
+	}
+	// API-key auth stays unsupported for onboarding, so the key is not forwarded.
+	assertEnvOmitsPrefix(t, env, "ANTHROPIC_API_KEY=")
+}
+
 func TestClaudeProbeCommandEnvOmitsUnsetValues(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
@@ -947,6 +962,54 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstP
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForClaudeGatewayLogin(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// The stub answers as Claude Code 2.1.283 does: with ANTHROPIC_BASE_URL
+	// and ANTHROPIC_AUTH_TOKEN set, `claude auth status --json` reports a
+	// logged-in oauth_token/firstParty route; with neither, loggedIn false and
+	// exit status 1.
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+if [ "$ANTHROPIC_BASE_URL" != "https://gateway.example/api" ] || [ "$ANTHROPIC_AUTH_TOKEN" != "gateway-token" ]; then
+	printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty","analyticsDisabled":false}'
+	exit 1
+fi
+printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty","analyticsDisabled":false}'
+`)
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	for _, tc := range []struct {
+		name           string
+		baseURL, token string
+		wantStatus     string
+	}{
+		{name: "gateway login", baseURL: "https://gateway.example/api", token: "gateway-token", wantStatus: probeStatusConfigured},
+		{name: "no login", wantStatus: probeStatusNeedsAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_BASE_URL", tc.baseURL)
+			t.Setenv("ANTHROPIC_AUTH_TOKEN", tc.token)
+			state := newFakeState(t)
+			h := newTestCityHandler(t, state)
+			assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", tc.wantStatus)
+		})
+	}
 }
 
 func TestHandleProviderReadinessReturnsInvalidConfigurationForClaudeNonFirstPartyProvider(t *testing.T) {

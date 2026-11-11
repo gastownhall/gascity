@@ -7,3 +7,6 @@ formula = "mol-dog-stale-db"
 trigger = "cron"
 schedule = "0 */4 * * *"
 pool = "dog"
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

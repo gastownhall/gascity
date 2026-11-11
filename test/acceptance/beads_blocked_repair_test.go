@@ -151,7 +151,7 @@ var blockedRepairFinishedLine = regexp.MustCompile(`blocked-flag repair finished
 
 func TestBlockedRepairOnProxiedCityAndRig(t *testing.T) {
 	// Three proxied city restarts (about 4 minutes) do not fit the Tier A smoke
-	// budget; the Beads / topology acceptance job opts in and runs it by name.
+	// budget; Bazel's acceptance lane opts in (test/acceptance/BUILD.bazel).
 	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := helpers.RequireTopologyTooling(t)
 	helpers.RequireBDAtLeast(t, bdPath, "v1.1.0", "bd recompute-blocked")
@@ -166,7 +166,10 @@ func TestBlockedRepairOnProxiedCityAndRig(t *testing.T) {
 	}
 	run := helpers.StartTopology(t, testEnv, topo, bdPath, doltPath)
 	const rig = "blockedrig"
-	if out, err := run.GC("rig", "add", run.RigWorkspace(t, rig)); err != nil {
+	// RigAdd retries once when the pinned bd's Dolt child lost its port to
+	// another listener (helpers.RigAddRecovery). The failed attempt stops before
+	// the repair runs, so the one-event check below still holds.
+	if out, err := run.RigAdd(t, run.RigWorkspace(t, rig)); err != nil {
 		t.Fatalf("gc rig add: %v\n%s", err, out)
 	}
 	scopeID := map[string]string{"": "city", rig: "rig/" + rig}

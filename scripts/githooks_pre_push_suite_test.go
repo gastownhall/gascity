@@ -16,7 +16,9 @@ import (
 //	       executor (.bazelrc.local's build:remote-exec, or a machine rc
 //	       such as an agent host's ~/.bazelrc): --config=remote-exec; bazel
 //	       on PATH otherwise: --config=fork-cache (read-only cache, local
-//	       misses, nothing uploaded); no bazel: make test-fast-parallel.
+//	       misses, nothing uploaded) if pinned Go and the local runtime
+//	       are usable; otherwise make test-fast-parallel. The runtime matrix
+//	       lives in githooks_pre_push_local_runtime_test.go.
 //	rbe    --config=remote-exec.     cache  --config=fork-cache.
 //	go     make test-fast-parallel (the escape hatch).
 //
@@ -59,7 +61,8 @@ const (
 // withFakeBazel puts a `bazel` on the fixture's PATH. `bazel info` (the mode
 // probe) prints BAZEL_ANNOUNCE to stderr, exits BAZEL_INFO_EXIT (default 0)
 // and is recorded in the returned probe record; anything else is recorded
-// in the returned run record and exits BAZEL_EXIT (default 0).
+// in the returned run record and exits BAZEL_EXIT (default 0; "sigpipe"
+// kills it with SIGPIPE).
 func (f *prePushFixture) withFakeBazel(t *testing.T, announce string) (runs, probes string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -72,9 +75,13 @@ if [ "$1" = info ]; then
   exit "${BAZEL_INFO_EXIT:-0}"
 fi
 printf '%s\n' "$*" >> "$BAZEL_RECORD"
+[ "${BAZEL_EXIT:-}" = sigpipe ] && kill -PIPE $$
 exit "${BAZEL_EXIT:-0}"
 `)
 	f.env = append(f.env, "BAZEL_RECORD="+runs, "BAZEL_PROBE_RECORD="+probes, "BAZEL_ANNOUNCE="+announce)
+	// A remote run first checks the checkout's worker-env pin against
+	// origin's main (githooks_pre_push_worker_env_test.go): current here.
+	f.workerEnv = f.withWorkerEnv(t)
 	return runs, probes
 }
 
@@ -91,8 +98,9 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 		wantProbe bool
 		wantBazel string
 		wantMake  string
+		wantWhy   string
 	}{
-		{name: "no bazel falls back to go test", wantMake: prePushMakeArgs},
+		{name: "no bazel falls back to go test", wantMake: prePushMakeArgs, wantWhy: "bazel is not installed"},
 		{name: "bazel without an executor reads the cache", bazel: true, announce: announceNone, wantProbe: true, wantBazel: prePushBazelCacheArgs},
 		{name: "maintainer credential in .bazelrc.local executes remotely", bazel: true, announce: announceLocalDef, wantProbe: true, wantBazel: prePushBazelRBEArgs},
 		{name: "agent host executor in ~/.bazelrc executes remotely", bazel: true, announce: announceHome, wantProbe: true, wantBazel: prePushBazelRBEArgs},
@@ -115,7 +123,7 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 			name: "fork-cache reset does not hide a home executor", bazel: true, wantProbe: true, wantBazel: prePushBazelRBEArgs,
 			announce: announceHome + "INFO: Found applicable config definition build:fork-cache in file /repo/.bazelrc: --remote_cache=grpcs://cache.example:8443 --remote_executor= --remote_download_minimal\n",
 		},
-		{name: "go escape hatch", bazel: true, mode: "go", announce: announceHome, wantMake: prePushMakeArgs},
+		{name: "go escape hatch", bazel: true, mode: "go", announce: announceHome, wantMake: prePushMakeArgs, wantWhy: "GC_PREPUSH_SUITE=go"},
 		{name: "forced cache", bazel: true, mode: "cache", announce: announceHome, wantBazel: prePushBazelCacheArgs},
 		{name: "forced rbe", bazel: true, mode: "rbe", announce: announceHome, wantProbe: true, wantBazel: prePushBazelRBEArgs},
 		{name: "explicit auto", bazel: true, mode: "auto", announce: announceNone, wantProbe: true, wantBazel: prePushBazelCacheArgs},
@@ -135,6 +143,7 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 			if got := strings.TrimSpace(f.read(t, f.makeRuns)); got != tc.wantMake {
 				t.Errorf("make ran %q, want %q\n%s", got, tc.wantMake, out)
 			}
+			assertGoFallbackAnnounced(t, out, tc.wantMake != "", tc.wantWhy)
 			if !tc.bazel {
 				return
 			}
@@ -218,6 +227,62 @@ func TestPrePushSuitePropagatesBazelFailure(t *testing.T) {
 	}
 }
 
+// TestPrePushSuiteFailsClosedOnSIGPIPE: a suite that dies of SIGPIPE (141)
+// fails the push with a named error under both engines, including the go
+// suite auto picks when the local-runtime probe rules out bazel. Exit 141 is
+// "a writer hit a closed pipe", not a test verdict: it arrives after a
+// passing suite as readily as after a failing one, so it must never pass
+// through as the hook's only signal.
+func TestPrePushSuiteFailsClosedOnSIGPIPE(t *testing.T) {
+	sigpipeMake := func(t *testing.T, f *prePushFixture) {
+		writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$MAKE_RECORD"
+kill -PIPE $$
+`)
+	}
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		setup func(t *testing.T, f *prePushFixture)
+	}{
+		{
+			name: "bazel",
+			mode: "",
+			setup: func(t *testing.T, f *prePushFixture) {
+				f.withFakeBazel(t, announceHome)
+				// A real SIGPIPE death, not a plain `exit 141`.
+				f.env = append(f.env, "BAZEL_EXIT=sigpipe")
+			},
+		},
+		{name: "go", mode: "go", setup: sigpipeMake},
+		{
+			name: "auto go after a failed local-runtime probe",
+			mode: "",
+			setup: func(t *testing.T, f *prePushFixture) {
+				installLocalRuntimeProbe(t, repoRoot(t), f.repo, "missing libicuuc.so.74", filepath.Join(t.TempDir(), "runtime-probes"))
+				f.withFakeBazel(t, announceNone)
+				sigpipeMake(t, f)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			tc.setup(t, f)
+			f.env = append(f.env, "GC_PREPUSH_SUITE="+tc.mode)
+
+			code, out := f.run(t, f.pushRefLine())
+			if code != 1 {
+				t.Fatalf("pre-push exit = %d, want 1 (SIGPIPE fails closed)\n%s", code, out)
+			}
+			for _, want := range []string{"exited 141 (SIGPIPE)", "fail closed"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("pre-push output lacks %q\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // TestPrePushSuiteAutoNeedsGoOnPinnedPath: fork-cache misses run tests on
 // this machine with .bazelrc's pinned test PATH, and tests that exec `go`
 // fail there when Go lives elsewhere (Homebrew, asdf, ~/sdk). auto then runs
@@ -268,6 +333,27 @@ func TestPrePushSuiteAutoNeedsGoOnPinnedPath(t *testing.T) {
 			if tc.wantMake != "" && !strings.Contains(out, pinned) {
 				t.Errorf("fallback does not name the pinned PATH %s:\n%s", pinned, out)
 			}
+			assertGoFallbackAnnounced(t, out, tc.wantMake != "", "no go on .bazelrc's pinned test PATH")
 		})
+	}
+}
+
+// assertGoFallbackAnnounced: a push that runs plain `go test` instead of the
+// bazel suite says so loudly, with the reason, and says that CI gates on
+// bazel, so a green push is not mistaken for CI parity. A bazel run prints
+// no such banner.
+func assertGoFallbackAnnounced(t *testing.T, out string, fellBack bool, why string) {
+	t.Helper()
+	const banner = "NOT the bazel suite CI gates on"
+	if !fellBack {
+		if strings.Contains(out, banner) {
+			t.Errorf("bazel run printed the go-fallback banner:\n%s", out)
+		}
+		return
+	}
+	for _, want := range []string{banner, "why: " + why, "CI runs bazel test //..."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("go fallback output lacks %q:\n%s", want, out)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,9 +24,13 @@ import (
 // raw commands are typed into the pane and never register anything. State
 // files drive the scenario (registered / pane_gone / busy / name_taken /
 // agent_blocked, plus the startup-delivery verdicts prompt_stalled /
-// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// prompt_times_out / prompt_blocked and wait_times_out, and the startup-dialog
+// screens of startup_dialogs_test.go), and calls.log records every verb so
 // tests can assert what was — and crucially was NOT — issued (the spawn storm
-// was one placement per reconcile tick).
+// was one placement per reconcile tick). Like herdr, an `agent wait` that does
+// not name blocked holds while the agent is blocked on a dialog, until the
+// caller's ctx ends it: a test that can put a blocked agent in front of such a
+// wait gives Start a deadline.
 
 var paneBindSession int64
 
@@ -43,6 +48,12 @@ func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string) {
 	t.Helper()
 	state := t.TempDir()
+	// The FIFO an `agent wait` on a blocked agent holds on: nothing writes it,
+	// so the fake's read blocks until the caller's ctx kills the fake, with no
+	// child process left to outlive the kill.
+	if err := syscall.Mkfifo(filepath.Join(state, "wait_hold"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	metaDir := t.TempDir()
 	script := filepath.Join(t.TempDir(), "herdr")
 	fake := `#!/bin/sh
@@ -50,17 +61,41 @@ STATE='` + state + `'
 METADIR='` + metaDir + `'
 shift 2
 printf '%s\n' "$*" >> "$STATE/calls.log"
+# herdr ≥0.8.2 reads an agent on the untrusted trust dialog as blocked, unless
+# the scenario has it read that dialog as idle (dialog_reads_idle).
+blocked() { [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ] && [ ! -e "$STATE/dialog_reads_idle" ]; }
+# Real herdr reports a failed verb as the bare envelope on stderr with a
+# non-zero exit. prompt_error_stdout answers with the typed envelope on stdout
+# instead, and prompt_error_decorated quotes the envelope inside diagnostic
+# text ahead of a different error.
+prompt_error() {
+  if [ -e "$STATE/prompt_error_decorated" ]; then
+    printf 'invalid argument: %s\n' "$1" >&2
+    printf '%s\n' '{"error":{"code":"invalid_args","message":"invalid prompt argument"}}' >&2
+    exit 1
+  fi
+  if [ -e "$STATE/prompt_error_stdout" ]; then
+    printf '%s' "$1"
+    return
+  fi
+  printf '%s' "$1" >&2
+  exit 1
+}
 case "$1_$2" in
 agent_get)
   if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
-  elif [ -e "$STATE/agent_blocked" ]; then
+  elif [ -e "$STATE/agent_blocked" ] || blocked; then
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"blocked"}}}'
   else
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  if [ -e "$STATE/agents.json" ]; then
+    cat "$STATE/agents.json"
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -77,11 +112,23 @@ agent_start)
     rm -f "$STATE/pane_busy_once"
     echo '{"error":{"code":"agent_pane_busy","message":"agent target pane %5 is not an available shell"}}' >&2
     exit 1
+  elif [ -e "$STATE/start_not_ready_unregistered" ]; then
+    # agent_not_ready with no agent left registered on the pane.
+    echo '{"error":{"code":"agent_not_ready","message":"agent '"$3"' is blocked during startup and is not ready for prompts"}}' >&2
+    exit 1
   else
     : > "$STATE/agent_started"
     : > "$STATE/registered"
     if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
     if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
+    if blocked; then
+      # herdr ≥0.8.2: detection reads the new agent as blocked on its startup
+      # dialog, so the launch exits 1 with agent_not_ready on stderr and the
+      # agent stays registered on the pane.
+      : > "$STATE/started_blocked"
+      echo '{"error":{"code":"agent_not_ready","message":"agent '"$3"' is blocked during startup and is not ready for prompts"}}' >&2
+      exit 1
+    fi
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_wait)
@@ -89,21 +136,46 @@ agent_wait)
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   elif [ -e "$STATE/wait_times_out" ]; then
     printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  elif [ -p "$STATE/agent_wait_entered" ]; then
+    # A boot that never idles: tell the test the wait is in flight, then hold
+    # it until the caller's ctx kills it. Builtins only, so no child outlives
+    # the kill.
+    printf x > "$STATE/agent_wait_entered"
+    read -r held < "$STATE/agent_wait_entered"
+  elif blocked; then
+    # herdr matches only the states a wait names. A wait that does not name
+    # blocked holds while the agent sits on its dialog, until its bound or the
+    # caller's ctx ends it; Start's deadline is the shorter, so this holds
+    # until the ctx kills it (nothing writes wait_hold).
+    case "$*" in
+      *"--until blocked"*)
+        printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"blocked"}}}' ;;
+      *)
+        read -r held < "$STATE/wait_hold" ;;
+    esac
   else
+    # late_trust_dialog: the agent idles at its prompt first and then draws
+    # the trust dialog.
+    if [ -e "$STATE/late_trust_dialog" ]; then : > "$STATE/trust_dialog"; fi
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}'
   fi ;;
 agent_prompt)
   if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif blocked; then
+    # herdr ≥0.8.2 refuses a prompt to an agent waiting at a dialog and sends
+    # no text or Enter.
+    echo '{"error":{"code":"agent_blocked","message":"agent is waiting at a dialog"}}' >&2
+    exit 1
   elif [ -e "$STATE/prompt_stalled" ]; then
     # No state change inside herdr's fixed 5000ms window: the submit CR never
     # reached the TUI and the text sits unsubmitted in an idle input box.
-    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+    prompt_error '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif [ -e "$STATE/prompt_times_out" ]; then
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
     # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
-    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+    prompt_error '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
   elif [ -e "$STATE/prompt_blocked" ]; then
     # The first turn opened a confirmation dialog. herdr matches only the
     # requested --until states, so this settles iff the caller asked for
@@ -146,6 +218,41 @@ tab_list)
   fi ;;
 tab_create)
   printf '%s' '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"%5"}}}' ;;
+pane_read)
+  # Startup-dialog screens (startup_dialogs_test.go): the trust dialog holds
+  # until an enter lands; trust_stuck pins the cursor on "No, exit" and
+  # ignores movement keys. exit_dialog holds the frame the test wrote until an
+  # enter lands, and that answer ends the agent: its pane's shell, which
+  # outlives it, is back at its prompt (agent_exited). ready_prompt shows the
+  # agent's input prompt. pane read is a raw verb, so frames print verbatim.
+  if [ -e "$STATE/pane_read_fails" ]; then
+    echo '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2
+    exit 1
+  elif [ -p "$STATE/pane_read_entered" ]; then
+    # Tell the test this read is in flight, then hold it until Start's ctx
+    # kills it. Builtins only, so no child outlives the kill.
+    printf x > "$STATE/pane_read_entered"
+    read -r held < "$STATE/pane_read_entered"
+  elif [ -e "$STATE/agent_exited" ]; then
+    printf '%s\n' 'user@host:~/work$'
+  elif [ -e "$STATE/exit_dialog" ]; then
+    cat "$STATE/exit_dialog"
+  elif [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ]; then
+    if [ -e "$STATE/trust_stuck" ]; then
+      printf '%s\n' 'Quick safety check: Is this a project you created or one you trust?' '' '  1. Yes, I trust this folder' '❯ 2. No, exit'
+    else
+      printf '%s\n' 'Quick safety check: Is this a project you created or one you trust?' '' '❯ 1. Yes, I trust this folder' '  2. No, exit'
+    fi
+  elif [ -e "$STATE/trust_dialog" ] || [ -e "$STATE/late_trust_dialog" ] || [ -e "$STATE/ready_prompt" ]; then
+    printf '%s\n' '❯ '
+  fi ;;
+pane_send-keys)
+  case " $* " in
+    *" enter "*)
+      if [ -e "$STATE/trust_dialog" ]; then : > "$STATE/trusted"; fi
+      if [ -e "$STATE/exit_dialog" ]; then rm -f "$STATE/registered"; : > "$STATE/agent_exited"; fi ;;
+  esac
+  exit 0 ;;
 *)
   exit 0 ;;
 esac
@@ -491,6 +598,49 @@ func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 		if !want[n] {
 			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
 		}
+	}
+}
+
+// ListRunning lists sessions, and a registry entry with no registered name is
+// not one: it is a pane herdr detected an agent in. Listing it under its kind
+// invented a session the startup adoption barrier then adopted on every
+// supervisor start. Bound sessions still list through their bindings, and a
+// foreign agent registered under its own name still lists under it.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agents := `{"result":{"agents":[` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"` + herdrAgentName("alpha") + `","pane_id":"w1:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"` + herdrAgentName("beta") + `","pane_id":"w2:p1","agent_status":"working"},` +
+		`{"agent":"claude","name":"manual-1","pane_id":"w4:p1","agent_status":"idle"}]}}`
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(agents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	want := map[string]bool{"alpha": true, "beta": true, "manual-1": true}
+	if len(got) != len(want) {
+		t.Fatalf("ListRunning(\"\") = %q; want exactly alpha, beta, manual-1", got)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Fatalf("ListRunning(\"\") = %q; unexpected %q", got, n)
+		}
+	}
+
+	got, err = p.ListRunning("op")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ListRunning(\"op\") = %q, %v; want empty: no session is named like the kind", got, err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -220,8 +221,13 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
 		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
 	}
-	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
-		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(string(suite), "run_suite make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel, through run_suite")
+	}
+	for _, bare := range []string{"exec make", "exec bazel"} {
+		if strings.Contains(string(suite), bare) {
+			t.Fatalf("push-suite.sh must not %q: run_suite has to see a 141 (SIGPIPE) to fail it closed", bare)
+		}
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
@@ -632,6 +638,7 @@ func installBeadsChainForTempRepo(t *testing.T, repoRoot, tmpRepo string) {
 		t.Fatalf("mkdir .githooks/lib: %v", err)
 	}
 	writeExecutable(t, chainPath, string(chain))
+	installLocalRuntimeProbe(t, repoRoot, tmpRepo, "ok", "")
 }
 
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
@@ -650,9 +657,14 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 	// at parse time and prints a line when it fires; off, the dry run is the
 	// recipe alone on any host.
 	cmd.Env = append(os.Environ(), "SYS_USR_CGO_FALLBACK=0")
-	out, err := cmd.CombinedOutput()
+	// The recipe is on stdout. stderr carries parse-time noise such as the
+	// Makefile's $(shell go env ...) printing "go: downloading go1.x" on a
+	// fresh remote worker, which is not a command.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
+		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s%s", err, out, stderr.Bytes())
 	}
 	command := string(out)
 	if err := validateNativeDoltliteDryRun(command); err != nil {

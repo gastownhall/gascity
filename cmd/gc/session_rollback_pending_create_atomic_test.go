@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -82,7 +83,7 @@ func rollbackVariants(now time.Time) []rollbackVariant {
 		for k, v := range preClose {
 			out[k] = v
 		}
-		for k, v := range failedCreateClosePatch(now) {
+		for k, v := range failedCreateClosePatch(session.Info{ID: "want"}, now) {
 			out[k] = v
 		}
 		out["session_name"] = ""
@@ -286,8 +287,14 @@ func TestRollbackPendingCreateKeepsTheNameWhenTheCloseFails(t *testing.T) {
 			store, backing := backend.open(t)
 			created := createRollbackPendingSession(t, store)
 			race := &controllerCloseRaceStore{Store: store}
+			// Each interference is a real change: a store that commits
+			// nothing for a same-value write would let the fence hold.
+			interferences := 0
 			race.interfere = func(id string) error {
-				return backing.SetMetadata(id, "state", string(session.StateAwake))
+				interferences++
+				return backing.SetMetadataBatch(id, map[string]string{
+					"state": string(session.StateAwake), "synced_at": strconv.Itoa(interferences),
+				})
 			}
 			info := rollbackObserved(t, race, created.ID)
 

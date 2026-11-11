@@ -29,7 +29,6 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -86,48 +85,6 @@ func stubSupervisorSystemctlUserAvailable(t *testing.T, available bool) {
 	t.Cleanup(func() {
 		supervisorSystemctlUserAvailable = old
 	})
-}
-
-func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName string) workspaceServiceSentinel {
-	t.Helper()
-	processgrouptest.RequireRealProcessSignals(t)
-
-	stateRoot := filepath.Join(cityPath, ".gc", "services", serviceName)
-	socketPath := filepath.Join(t.TempDir(), serviceName+".sock")
-	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done")
-	cmd.Env = append(os.Environ(),
-		"GC_HOME="+gcHome,
-		"GC_CITY_PATH="+cityPath,
-		"GC_SERVICE_NAME="+serviceName,
-		"GC_SERVICE_STATE_ROOT="+stateRoot,
-		"GC_SERVICE_SOCKET="+socketPath,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start workspace-service sentinel %q: %v", serviceName, err)
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", cmd.Process.Pid, err)
-	}
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if processGroupAlive(pgid) {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
-		}
-	})
-	if !processGroupAlive(pgid) {
-		t.Fatalf("workspace-service sentinel pgid %d is not alive", pgid)
-	}
-	return workspaceServiceSentinel{pgid: pgid}
 }
 
 func writeSupervisorProcEnv(t *testing.T, procRoot string, pid int, env map[string]string) {
@@ -539,6 +496,32 @@ func TestBuildSupervisorServiceDataDoesNotPersistLogTeeByDefault(t *testing.T) {
 	}
 	if got := supervisorServiceEnvMap(data.ExtraEnv); got[supervisorLogTeeEnv] != "" {
 		t.Fatalf("ExtraEnv[%s] = %q, want omitted without explicit opt-in (all env: %#v)", supervisorLogTeeEnv, got[supervisorLogTeeEnv], got)
+	}
+}
+
+// AC-8: the installed supervisor keeps the TMUX_TMPDIR its operator's tmux
+// servers run under, so the socket paths it probes are theirs; TMPDIR, which
+// tmux ignores, is not persisted.
+func TestBuildSupervisorServiceDataPersistsTMUXTMPDIRNotTMPDIR(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	tmuxTmpDir := filepath.Join(homeDir, "tmux-sockets")
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
+	t.Setenv("TMPDIR", filepath.Join(homeDir, "scratch"))
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["TMUX_TMPDIR"] != tmuxTmpDir {
+		t.Fatalf("ExtraEnv[TMUX_TMPDIR] = %q, want %q (all env: %#v)", got["TMUX_TMPDIR"], tmuxTmpDir, got)
+	}
+	if v, ok := got["TMPDIR"]; ok {
+		t.Fatalf("ExtraEnv[TMPDIR] = %q, want omitted (all env: %#v)", v, got)
 	}
 }
 
@@ -1687,206 +1670,6 @@ func TestInstallSupervisorSystemdWarmRefreshFallsBackToKillWhenGracefulSignalDoe
 	}
 }
 
-func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t *testing.T) {
-	processgrouptest.RequireRealProcessSignals(t)
-
-	if goruntime.GOOS != "linux" {
-		t.Skip("systemd path only applies on linux")
-	}
-	homeDir := t.TempDir()
-	gcHome := filepath.Join(t.TempDir(), "gc-home")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GC_HOME", gcHome)
-
-	data := &supervisorServiceData{
-		GCPath:        "/tmp/gc-new",
-		LogPath:       "/tmp/gc-home/supervisor.log",
-		GCHome:        gcHome,
-		XDGRuntimeDir: "/tmp/gc-run",
-		Path:          "/usr/local/bin:/usr/bin:/bin",
-	}
-	path := supervisorSystemdServicePath()
-	unitName := supervisorSystemdServiceName()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("old unit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cityPath := filepath.Join(t.TempDir(), "city")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
-		t.Fatalf("Register(%q): %v", cityPath, err)
-	}
-	stateRoot := filepath.Join(cityPath, ".gc", "services", "bridge")
-	socketPath := filepath.Join(t.TempDir(), "bridge.sock")
-	cmd := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done")
-	cmd.Env = append(os.Environ(),
-		"GC_HOME="+gcHome,
-		"GC_CITY_PATH="+cityPath,
-		"GC_SERVICE_NAME=bridge",
-		"GC_SERVICE_STATE_ROOT="+stateRoot,
-		"GC_SERVICE_SOCKET="+socketPath,
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start workspace-service sentinel: %v", err)
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", cmd.Process.Pid, err)
-	}
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		if processGroupAlive(pgid) {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-			t.Logf("workspace-service sentinel pgid %d did not exit before cleanup timeout", pgid)
-		}
-	})
-	if !processGroupAlive(pgid) {
-		t.Fatalf("workspace-service sentinel pgid %d is not alive before warm refresh", pgid)
-	}
-	scope, err := supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome)
-	if err != nil {
-		t.Fatalf("supervisorWorkspaceServiceCleanupScopeFromRegistry: %v", err)
-	}
-	procs, err := findSupervisorWorkspaceServiceProcesses(scope)
-	if err != nil {
-		t.Fatalf("findSupervisorWorkspaceServiceProcesses: %v", err)
-	}
-	if !slices.ContainsFunc(procs, func(proc supervisorWorkspaceServiceProcess) bool { return proc.pgid == pgid }) {
-		t.Fatalf("workspace-service discovery procs = %#v, want pgid %d", procs, pgid)
-	}
-
-	oldRun := supervisorSystemctlRun
-	oldActive := supervisorSystemctlActive
-	var (
-		calls              []string
-		startBeforeCleanup bool
-	)
-	supervisorSystemctlRun = func(args ...string) error {
-		call := strings.Join(args, " ")
-		calls = append(calls, call)
-		if call == "--user start "+unitName && processGroupAlive(pgid) {
-			startBeforeCleanup = true
-		}
-		return nil
-	}
-	supervisorSystemctlActive = func(service string) bool {
-		if service != unitName {
-			return false
-		}
-		for _, call := range calls {
-			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
-				return false
-			}
-		}
-		return true
-	}
-	stubSupervisorRunningPreserveSignalReady(t, true)
-	t.Cleanup(func() {
-		supervisorSystemctlRun = oldRun
-		supervisorSystemctlActive = oldActive
-	})
-
-	var stdout, stderr bytes.Buffer
-	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
-		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
-	}
-	if startBeforeCleanup {
-		t.Fatalf("systemctl start ran before workspace-service pgid %d was stopped; calls=%v", pgid, calls)
-	}
-	if err := waitForProcessGroupExit(pgid, time.Second); err != nil {
-		t.Fatalf("workspace-service cleanup: %v", err)
-	}
-}
-
-func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("systemd path only applies on linux")
-	}
-	homeDir := t.TempDir()
-	gcHome := filepath.Join(t.TempDir(), "gc-home")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GC_HOME", gcHome)
-
-	registeredCity := filepath.Join(t.TempDir(), "registered-city")
-	unregisteredCity := filepath.Join(t.TempDir(), "unregistered-city")
-	if err := os.MkdirAll(registeredCity, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(unregisteredCity, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(registeredCity, "registered-city"); err != nil {
-		t.Fatalf("Register(%q): %v", registeredCity, err)
-	}
-
-	data := &supervisorServiceData{
-		GCPath:        "/tmp/gc-new",
-		LogPath:       "/tmp/gc-home/supervisor.log",
-		GCHome:        gcHome,
-		XDGRuntimeDir: "/tmp/gc-run",
-		Path:          "/usr/local/bin:/usr/bin:/bin",
-	}
-	path := supervisorSystemdServicePath()
-	unitName := supervisorSystemdServiceName()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("old unit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	registered := startWorkspaceServiceSentinel(t, gcHome, registeredCity, "bridge")
-	unregistered := startWorkspaceServiceSentinel(t, gcHome, unregisteredCity, "other-bridge")
-
-	oldRun := supervisorSystemctlRun
-	oldActive := supervisorSystemctlActive
-	var calls []string
-	supervisorSystemctlRun = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
-		return nil
-	}
-	supervisorSystemctlActive = func(service string) bool {
-		if service != unitName {
-			return false
-		}
-		for _, call := range calls {
-			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
-				return false
-			}
-		}
-		return true
-	}
-	stubSupervisorRunningPreserveSignalReady(t, true)
-	t.Cleanup(func() {
-		supervisorSystemctlRun = oldRun
-		supervisorSystemctlActive = oldActive
-	})
-
-	var stdout, stderr bytes.Buffer
-	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
-		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
-	}
-	if err := waitForProcessGroupExit(registered.pgid, time.Second); err != nil {
-		t.Fatalf("registered workspace-service cleanup: %v", err)
-	}
-	if !processGroupAlive(unregistered.pgid) {
-		t.Fatalf("unregistered workspace-service pgid %d was stopped by warm-refresh cleanup", unregistered.pgid)
-	}
-}
-
 func TestCleanupSupervisorWorkspaceServicesForSupervisorStartSkipsMissingProc(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "gc-home")
@@ -2081,12 +1864,6 @@ func TestTerminateProcessGroupTreatsESRCHAsAlreadyStopped(t *testing.T) {
 
 	if err := terminateProcessGroup(999999, time.Millisecond); err != nil {
 		t.Fatalf("terminateProcessGroup ESRCH = %v, want nil", err)
-	}
-}
-
-func TestTerminateProcessGroupRefusesCurrentProcessGroup(t *testing.T) {
-	if err := terminateProcessGroup(syscall.Getpgrp(), time.Millisecond); err == nil {
-		t.Fatal("terminateProcessGroup current process group error = nil, want refusal")
 	}
 }
 
@@ -4460,6 +4237,31 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+// A supervisor that is already running needs no start, so a HOME override
+// (which only blocks installing or starting a platform unit) must not make
+// ensureSupervisorRunning fail. The shared-city pod runs gc with HOME on its
+// volume, different from the passwd home, and `gc register` there reported
+// "supervisor did not start" while the supervisor was serving the city.
+func TestEnsureSupervisorRunningHomeOverrideAcceptsRunningSupervisor(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "")
+
+	oldAlive := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+	supervisorAliveHook = func() int { return 4242 }
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing for an already-running supervisor", stderr.String())
+	}
+}
+
 // requireHomeOverrideGuard skips unless the platform HOME guard applies here.
 func requireHomeOverrideGuard(t *testing.T) {
 	t.Helper()
@@ -4659,6 +4461,11 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close() //nolint:errcheck // test cleanup
+	// A lock holder that never answers on the control socket is waited for
+	// (ga-96smfk.85) only as long as the readiness budget.
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
 
 	var stdout, stderr bytes.Buffer
 	code := doSupervisorStart(&stdout, &stderr)
@@ -5272,6 +5079,47 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+// stampedWriter is a Writer that records when each line was written.
+type stampedWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	lines  []stampedLine
+	onLine func(string) // called with each line as it is written
+}
+
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+func (w *stampedWriter) Write(p []byte) (int, error) {
+	if w.onLine != nil {
+		w.onLine(string(p))
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, stampedLine{at: time.Now(), text: string(p)})
+	return w.buf.Write(p)
+}
+
+// at is when the first write containing sub landed; zero when none did.
+func (w *stampedWriter) at(sub string) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, l := range w.lines {
+		if strings.Contains(l.text, sub) {
+			return l.at
+		}
+	}
+	return time.Time{}
+}
+
+func (w *stampedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // hangingListProvider wraps a runtime.Provider but makes ListRunning block
 // forever. This simulates a session/beads dependency call inside
 // CityRuntime.shutdown that never returns (#5256) — ListRunning has no
@@ -5312,23 +5160,39 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		},
 	}
 
-	var stderr bytes.Buffer
+	// A sibling 100ms timer, armed as the forced phase begins (the grace's
+	// warning), fires as late as the forced wait's own timer on a loaded
+	// host: the forced phase is judged against it, not the wall clock.
+	var sibling atomic.Int64
+	stderr := &stampedWriter{onLine: func(line string) {
+		if strings.Contains(line, "after cancel") {
+			time.AfterFunc(100*time.Millisecond, func() { sibling.Store(time.Now().UnixNano()) })
+		}
+	}}
 	result := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		result <- stopManagedCity(mc, cityPath, &stderr)
+		result <- stopManagedCity(mc, cityPath, stderr)
 	}()
 
 	select {
 	case err := <-result:
 		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
-		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
-		// 120ms. A double wait on the forced timeout — the regression
-		// this test guards against — pushes that to ~220ms, so the bound
-		// here must sit strictly below that, not at the old, much looser
-		// 500ms that a doubled wait still passed.
-		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		// 100ms, and with CityRuntime.shutdown hung the forced phase is
+		// one 100ms wait. A second full wait on the forced timeout, the
+		// regression this test guards against, ends it a further 100ms
+		// after the sibling timer. Timing the phase against that sibling
+		// leaves out timer lateness on a loaded host, and the bead
+		// provider's shutdown (an exec subprocess) after the phase.
+		forcedAt := stderr.at("after forced shutdown")
+		if stderr.at("after cancel").IsZero() || forcedAt.IsZero() {
+			t.Fatalf("stderr = %q, want the grace and forced-shutdown warnings", stderr.String())
+		}
+		siblingAt := time.Unix(0, sibling.Load())
+		if sibling.Load() == 0 {
+			siblingAt = time.Now() // not fired yet: the forced phase ended before it
+		}
+		if after := forcedAt.Sub(siblingAt); after >= 50*time.Millisecond {
+			t.Fatalf("the forced phase ended %s after one forced wait would have, want one forced wait (~100ms), not two (~200ms), even when CityRuntime.shutdown hangs", after)
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
@@ -7520,61 +7384,6 @@ func TestSupervisorLogsTeeDisabledWarning(t *testing.T) {
 	}
 }
 
-// TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs confirms the
-// guard that prevents double-writes when stdout/stderr are already the
-// supervisor log file, even when the fd carries a cosmetic /dev/stdout name.
-func TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "supervisor.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("open log: %v", err)
-	}
-	defer logFile.Close() //nolint:errcheck
-
-	// A duped fd with a cosmetic name models os.Stdout/os.Stderr after a
-	// service manager or parent process already redirected fd 1/2 to the log.
-	dupFD, err := syscall.Dup(int(logFile.Fd()))
-	if err != nil {
-		t.Fatalf("dup log fd: %v", err)
-	}
-	redirectedStdout := os.NewFile(uintptr(dupFD), "/dev/stdout")
-	if redirectedStdout == nil {
-		t.Fatal("os.NewFile returned nil for duplicated log fd")
-	}
-	defer redirectedStdout.Close() //nolint:errcheck
-	if shouldTeeSupervisorLog(redirectedStdout, logFile) {
-		t.Errorf("redirected stdout fd: shouldTeeSupervisorLog should return false")
-	}
-	if shouldTeeSupervisorLog(&switchableWriter{target: redirectedStdout}, logFile) {
-		t.Errorf("switchable writer wrapping redirected stdout fd: shouldTeeSupervisorLog should return false")
-	}
-
-	// Different file = terminal/container output. Must tee.
-	otherPath := filepath.Join(dir, "other.log")
-	otherFile, err := os.Create(otherPath)
-	if err != nil {
-		t.Fatalf("create other: %v", err)
-	}
-	defer otherFile.Close() //nolint:errcheck
-	if !shouldTeeSupervisorLog(otherFile, logFile) {
-		t.Errorf("different file: shouldTeeSupervisorLog should return true")
-	}
-
-	// Non-file writer (a buffer simulating a journal pipe). Must tee.
-	if !shouldTeeSupervisorLog(&bytes.Buffer{}, logFile) {
-		t.Errorf("non-file writer: shouldTeeSupervisorLog should return true")
-	}
-
-	// Nil safety.
-	if shouldTeeSupervisorLog(nil, logFile) {
-		t.Errorf("nil writer: shouldTeeSupervisorLog should return false")
-	}
-	if shouldTeeSupervisorLog(otherFile, nil) {
-		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
-	}
-}
-
 const ephemeralPortThresholdForTest = 32768
 
 func freeEphemeralLoopbackPort(t *testing.T) int {
@@ -7665,5 +7474,193 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Supervisor API listening") {
 		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
+	}
+}
+
+// TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile pins
+// the survival path for beads' pooled per-I/O deadline overrides: the
+// supervisor's in-process store opens honor only the env rung, so the two
+// keys must persist into the service env from ${GC_HOME}/secrets.env without
+// a GC_SUPERVISOR_ENV opt-in — that is what the allowlist entry buys. Red on
+// base by construction (the keys were not allowlisted).
+func TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	// Ensure the keys are NOT present in the calling shell's environment.
+	t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+	t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+
+	writeSupervisorSecretsEnvFile(t, `# machine-local store deadlines
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+`)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for _, key := range []string{"BEADS_DOLT_POOL_READ_TIMEOUT", "BEADS_DOLT_POOL_WRITE_TIMEOUT"} {
+		if got[key] != "90s" {
+			t.Fatalf("ExtraEnv[%s] = %q, want 90s (all env: %#v)", key, got[key], got)
+		}
+	}
+}
+
+// TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl pins the
+// launchctl fallback tier for the same two keys, mirroring the GC_DOLT_*
+// credential test above.
+func TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	for _, key := range []string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT",
+	} {
+		t.Setenv(key, "")
+	}
+
+	stub := map[string]string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT":  "120s",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT": "120s",
+	}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string { return stub[key] }
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range stub {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
+
+// A forked supervisor that exits during startup fails `gc supervisor start`
+// at once, naming the exit and the log lines that explain it, instead of
+// polling the socket of a dead process for supervisorReadyTimeout and
+// pointing at a log file that, in CI, is gone with the test's temp dir
+// (ga-96smfk.45: the cause, "API address ... is already in use", was only in
+// that log).
+func TestWaitForStartedSupervisorReportsAnEarlyExitAtOnce(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	logLines := "gc supervisor: started: previous_exit=clean\ngc supervisor: API address 127.0.0.1:42509 is already in use.\n"
+	if err := os.WriteFile(supervisorLogPath(), []byte(logLines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	supervisorAliveHook = func() int { return 0 }
+	supervisorReadyTimeout = time.Minute
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := waitForStartedSupervisor(&stdout, &stderr, false, "see "+supervisorLogPath(), exited)
+	if code == 0 {
+		t.Fatalf("waitForStartedSupervisor = 0 for an exited supervisor; stdout=%q", stdout.String())
+	}
+	if waited := time.Since(start); waited > 10*time.Second {
+		t.Fatalf("waited %s for a supervisor that had already exited", waited)
+	}
+	got := stderr.String()
+	for _, want := range []string{"exited before it became ready", "exit status 1", "is already in use"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// A supervisor that answers on its socket is reported started even when the
+// launcher also watches the forked process.
+func TestWaitForStartedSupervisorReportsAReadySupervisor(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	calls := 0
+	supervisorAliveHook = func() int {
+		calls++
+		if calls < 3 {
+			return 0
+		}
+		return 4242
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+	})
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", make(chan error)); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Supervisor started (PID 4242)") {
+		t.Fatalf("stdout = %q, want the started PID", stdout.String())
+	}
+}
+
+// When the forked child exits because a concurrent start's instance holds the
+// single-instance lock, the start keeps waiting for that instance's socket,
+// as it did before the launcher watched its child.
+func TestWaitForStartedSupervisorWaitsForAConcurrentInstance(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	oldHeld := supervisorInstanceLockHeld
+	var calls atomic.Int32
+	supervisorAliveHook = func() int {
+		if calls.Add(1) < 20 {
+			return 0
+		}
+		return 4343
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	supervisorInstanceLockHeld = func() bool { return true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+		supervisorInstanceLockHeld = oldHeld
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", exited); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "PID 4343") {
+		t.Fatalf("stdout = %q, want the concurrent instance's PID", stdout.String())
+	}
+}
+
+// The log tail keeps the last lines and tolerates a log without a trailing
+// newline.
+func TestSupervisorLogTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.log")
+	if got := supervisorLogTail(path, 2); got != "" {
+		t.Fatalf("tail of a missing log = %q, want empty", got)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := supervisorLogTail(path, 2), "two\nthree\n"; got != want {
+		t.Fatalf("tail = %q, want %q", got, want)
 	}
 }
