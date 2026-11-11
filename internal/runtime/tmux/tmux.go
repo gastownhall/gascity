@@ -332,9 +332,11 @@ var (
 	// is NOT retryable -- every resend dies on the same banner, and requeueing
 	// burns bounded attempts against an account that cannot recover
 	// in-process. It deliberately wraps neither ErrNudgeSubmitUnconfirmed nor
-	// a runtime delivery sentinel, so no retry ladder picks it up and the
-	// startup nudge fails the start instead of warning. The session needs
-	// re-auth and a restart.
+	// a runtime delivery sentinel, so no startup retry ladder picks it up and
+	// the startup nudge fails the start instead of warning. The queued-nudge
+	// drain in cmd/gc is not a startup ladder: it requeues this error like any
+	// other failed delivery, charging one bounded attempt each time. The
+	// session needs re-auth and a restart.
 	ErrNudgeSubmitAuthFailed = errors.New("nudge: submit Enter delivered to tmux but pane shows a provider auth failure")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session

@@ -11,6 +11,7 @@ empty_server_liveness_integration_test.go
 exact_target_integration_test.go
 fence_integration_test.go
 hidden_attach_hook_test.go
+nudge_auth_submit_integration_test.go
 nudge_clear_before_paste_integration_test.go
 nudge_confirm_lag_integration_test.go
 nudge_poke_integration_test.go
