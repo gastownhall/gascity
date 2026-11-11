@@ -1354,3 +1354,33 @@ exit 0
 		t.Fatalf("a failed bd prune must be escalated with bd's error, not counted as 0:\n%s", gcLog)
 	}
 }
+
+// TestMaintenanceOrdersSkipStoresThatServeNoSQLQuietly covers a rig whose bd
+// store is in embedded mode (bd init): gc bd serves its verbs, but bd refuses
+// `bd sql` there. The store is reachable, so the orders must not report it
+// unreachable, and a fresh city must not mail an escalation for it (ga-ksebj).
+// The scope is still declared skipped, because neither order can select
+// from it.
+func TestMaintenanceOrdersSkipStoresThatServeNoSQLQuietly(t *testing.T) {
+	for _, script := range []string{"reaper.sh", "jsonl-export.sh"} {
+		t.Run(script, func(t *testing.T) {
+			f := newScopeFixture(t, "")
+			f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+			f.env["FAKE_SQL_UNSUPPORTED_SCOPES"] = "rig:api"
+			jsonlScopeEnv(t, f, filepath.Join(f.cityDir, "archive"))
+			runScript(t, coreScriptPath(script), f.env)
+
+			gcLog := f.read(t, f.gcLog)
+			if strings.Contains(gcLog, "ESCALATION") {
+				t.Fatalf("%s escalated a rig whose store serves no SQL:\n%s", script, gcLog)
+			}
+			if strings.Contains(gcLog, "unreachable") || strings.Contains(gcLog, "failed: rig:api") {
+				t.Fatalf("%s reported a reachable rig as unreachable or failed:\n%s", script, gcLog)
+			}
+			out, ok := f.outcome(t)
+			if !ok || out.Outcome != "partial" || !out.hasScope("rig:api", "bead store serves no SQL (bd embedded mode)") {
+				t.Fatalf("outcome = %+v (declared %v), want partial naming rig:api as serving no SQL", out, ok)
+			}
+		})
+	}
+}

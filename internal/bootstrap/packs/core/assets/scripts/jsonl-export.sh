@@ -1212,6 +1212,11 @@ while IFS= read -r SCOPE_SPEC; do
             order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
             continue
         fi
+        if [ "$SCOPE_SQL_UNSUPPORTED" -eq 1 ]; then
+            echo "jsonl-export: $SCOPE_LABEL is a bd store that serves no SQL (embedded mode); its database cannot be named for the archive"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "bead store serves no SQL (bd embedded mode)"
+            continue
+        fi
         echo "jsonl-export: $SCOPE_LABEL unreachable through gc bd: $SCOPE_LAST_ERROR" >&2
         TOTAL_DBS=$((TOTAL_DBS + 1))
         record_failed_db "$SCOPE_LABEL"
