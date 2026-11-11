@@ -3262,7 +3262,8 @@ report_unsatisfiable_pending_push() {
 # protects: never flatten, never push. A pending-GC marker (an earlier run
 # already flattened locally) still gets its local DOLT_GC --full, with the
 # deferred push dropped rather than re-recorded; a pending-push marker is held
-# for operator review; everything else gets a bare working-set GC.
+# for operator review, or reported unsatisfiable when its remote no longer
+# exists; everything else gets a bare working-set GC.
 compact_shared_history_database() {
   db="$1"
   guard_remote_count="$2"
@@ -3300,10 +3301,22 @@ compact_shared_history_database() {
 
   if has_compact_marker "$pending_push_dir" "$db"; then
     guard_pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
-    printf 'compact: db=%s pending_push=present remote=%s — NOT force-pushing: the shared-history guard holds %s for operator review. Reconcile the flattened local history manually, or re-run with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window to force-push it (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
-      "$db" "${guard_pending_remote:-<unknown>}" "$(compact_marker_path "$pending_push_dir" "$db")" >&2
-    if [ -z "$dry_run" ]; then
-      report_held_pending_push "$db" "${guard_pending_remote:-<unknown>}"
+    # The marker's remote is interpolated into the existence probe, so only a
+    # valid name is probed; anything else, like a probe that fails, is not
+    # "gone" and the marker stays held.
+    if [ -n "$guard_pending_remote" ] && valid_remote_name "$guard_pending_remote" &&
+      pending_push_remote_is_gone "$db" "$guard_pending_remote"; then
+      printf 'compact: db=%s pending_push=present but remote=%s no longer exists — unsatisfiable, manual review required\n' \
+        "$db" "$guard_pending_remote" >&2
+      if [ -z "$dry_run" ]; then
+        report_unsatisfiable_pending_push "$db" "$guard_pending_remote"
+      fi
+    else
+      printf 'compact: db=%s pending_push=present remote=%s — NOT force-pushing: the shared-history guard holds %s for operator review. Reconcile the flattened local history manually, or re-run with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window to force-push it (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
+        "$db" "${guard_pending_remote:-<unknown>}" "$(compact_marker_path "$pending_push_dir" "$db")" >&2
+      if [ -z "$dry_run" ]; then
+        report_held_pending_push "$db" "${guard_pending_remote:-<unknown>}"
+      fi
     fi
   fi
 

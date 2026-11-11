@@ -253,16 +253,18 @@ Markers left by runs from before this guard existed:
   reports the database as diverged until you reconcile it. Either re-clone
   from the remote, or push the flattened history during an announced window
   (see below).
-- **`compact-pending-push/<database>`**: the marker is held untouched, and
-  nothing is force-pushed. Compact reports it on stderr, emits a
+- **`compact-pending-push/<database>`**: when the marker's remote is still
+  configured, the marker is held untouched, and
+  nothing is force-pushed. (A marker whose remote was removed is reported as
+  unsatisfiable instead; see below.) Compact reports it on stderr, emits a
   `dolt.compact.quarantine` event of type `compact-pending-push-held`, and
   mails the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
   `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
   it the same way as a pending-GC marker.
 
 A `compact-pending-push` marker whose remote has since been removed can never
-be retried. Compact stops treating it as a stale-marker alert and reports it
-once, as a `dolt.compact.quarantine` event of type
+be retried, whether or not the database still has other remotes. Compact stops
+treating it as a stale-marker or held alert and reports it once, as a `dolt.compact.quarantine` event of type
 `compact-pending-push-unsatisfiable` plus one mail. The event repeats every
 run; the mail does not. The marker is left untouched and the database stays
 blocked. Restore the remote, or clear the marker after you reconcile the
