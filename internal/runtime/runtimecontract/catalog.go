@@ -228,6 +228,7 @@ const (
 	ReqFSHostLocal             Code = "RPP-FSHOST-003"
 	ReqFSHostRunsWhatItCarries Code = "RPP-FSHOST-004"
 	ReqFSHostAgentPIDOnHost    Code = "RPP-FSHOST-005"
+	ReqFSHostHomeView          Code = "RPP-FSHOST-006"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -296,8 +297,9 @@ var catalog = []Requirement{
 	{ReqFSHostSharedView, GroupFSHost, "a box's command reads a file the caller wrote into work_dir and writes its copy where the caller reads it back, at the same paths (declared fs.host only)", true},
 	{ReqFSHostSameUser, GroupFSHost, "a box's command runs as the caller's user: its id -u equals the caller's uid (declared fs.host only)", true},
 	{ReqFSHostLocal, GroupFSHost, "a handshake declaring fs.host also declares locality local, which fs.host narrows (declared fs.host only)", true},
-	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, and a failing pre_start fails start and leaves no box (declared fs.host only)", true},
+	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, a failing pre_start fails start and leaves no box, and a config carrying neither stages and runs nothing (declared fs.host only)", true},
 	{ReqFSHostAgentPIDOnHost, GroupFSHost, "observe reports a running box's agent_pid as a live host process the caller's user may signal (declared fs.host with observe.v1 only)", true},
+	{ReqFSHostHomeView, GroupFSHost, "a box's command reads a file the caller wrote under its HOME, at the same path: the box sees the caller's home directory, not only the work dir (declared fs.host only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

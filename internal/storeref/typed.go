@@ -232,3 +232,27 @@ func unionPlan[T any](p ResolvedPlan, id func(T) string, fn func(PlanLeg) ([]T, 
 	}
 	return out, nil
 }
+
+// BindLegs is p with each leg's store replaced by bind's answer for it: the
+// same federation read through other instances of its stores, such as a
+// request-bound clone of each (cmd/gc's step reminder over the controller's
+// stores; T7e's ScopedStoreLike). Ref, Role, OnError and Gate are kept, and
+// the legs are not deduped again: a plan's shape is decided over the stores
+// it was planned over, so a bind that answers one clone for two legs reads
+// both. The first error bind returns is returned, with the leg it was for.
+func BindLegs(p ResolvedPlan, bind func(beads.Store) (beads.Store, error)) (ResolvedPlan, error) {
+	out := p
+	out.Legs = make([]PlanLeg, len(p.Legs))
+	for i, l := range p.Legs {
+		store, err := bind(l.Leg.Store)
+		if err != nil {
+			return ResolvedPlan{}, fmt.Errorf("binding %s: %w", legName(l.Leg.Ref), err)
+		}
+		if beads.IsNilStore(store) {
+			return ResolvedPlan{}, fmt.Errorf("binding %s: the bind answered no store", legName(l.Leg.Ref))
+		}
+		l.Leg.Store = store
+		out.Legs[i] = l
+	}
+	return out, nil
+}

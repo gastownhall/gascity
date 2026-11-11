@@ -50,7 +50,7 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,
 		// The profile does not declare fs.host.
 		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
-		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true,
+		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true, runtimecontract.ReqFSHostHomeView: true,
 	}
 	for _, res := range report.Results {
 		switch {
