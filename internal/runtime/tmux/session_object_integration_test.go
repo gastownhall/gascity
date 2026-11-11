@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -333,6 +334,7 @@ func TestServerConfirmedDeadRealTmuxRemovedSocketDir(t *testing.T) {
 func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
 	p := newObjectServer(t)
 	pid := objectFormat(t, p, "keep", "#{pid}")
+	waitPaneExeced(t, pid, objectFormat(t, p, "keep", "#{pane_pid}"))
 	if err := p.tm.KillServer(); err != nil {
 		t.Fatalf("kill-server: %v", err)
 	}
@@ -349,6 +351,40 @@ func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
 	}
 	if !p.ServerConfirmedDead() {
 		t.Fatal("ServerConfirmedDead() = false for a server stopped by kill-server")
+	}
+}
+
+// waitPaneExeced waits until the pane process panePID no longer runs the
+// executable of the tmux server serverPID. A tmux built with systemd cgroup
+// support (tmux 3.8 on Fedora) moves each new pane into its own systemd scope
+// over D-Bus from the forked pane process, before that process closes the
+// server's descriptors and execs (spawn.c: systemd_move_to_new_cgroup, then
+// closefrom). Until then it holds the server's listening socket, which keeps a
+// listener bound to the socket path after the server exits (ga-qzxpqo). That
+// code is Linux-only, as is the /proc this reads.
+func waitPaneExeced(t *testing.T, serverPID, panePID string) {
+	t.Helper()
+	if goruntime.GOOS != "linux" {
+		return
+	}
+	serverExe, err := os.Stat(filepath.Join("/proc", serverPID, "exe"))
+	if err != nil {
+		t.Fatalf("read tmux server %s exe: %v", serverPID, err)
+	}
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		exe, err := os.Stat(filepath.Join("/proc", panePID, "exe"))
+		if err != nil || !os.SameFile(exe, serverExe) {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("pane %s still runs the tmux server's executable after 10s", panePID)
+		case <-ticker.C:
+		}
 	}
 }
 

@@ -88,6 +88,15 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 		}
 		_ = os.RemoveAll(socketRoot)
 	})
+	// A tmux built with systemd cgroup support (tmux 3.8 on Fedora) moves each
+	// new pane into its own systemd scope over D-Bus from the forked pane
+	// process, before that process closes the server's descriptors and execs
+	// (spawn.c: systemd_move_to_new_cgroup, then closefrom). Until it execs it
+	// holds the server's listening socket, so a listener stays bound to the
+	// socket path after the server is gone, and ServerConfirmedDead rightly
+	// refuses the dead-server suspend below (ga-qzxpqo).
+	serverExe := processExe(t, strconv.Itoa(serverPID))
+	waitFor(t, "the pane to exec its command", func() bool { return paneExeced(panePID, serverExe) })
 
 	if err := os.Remove(socketPath); err != nil {
 		t.Fatalf("delete live server socket: %v", err)
@@ -150,6 +159,25 @@ func processGone(pid int) bool {
 	}
 	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
 	return len(fields) > 0 && fields[0] == "Z"
+}
+
+// processExe returns the executable pid runs, from /proc.
+func processExe(t *testing.T, pid string) os.FileInfo {
+	t.Helper()
+	exe, err := os.Stat(filepath.Join("/proc", strings.TrimSpace(pid), "exe"))
+	if err != nil {
+		t.Fatalf("read /proc/%s/exe: %v", pid, err)
+	}
+	return exe
+}
+
+// paneExeced reports whether the pane process pid no longer runs the tmux
+// server's executable serverExe: it has exec'd its command, which it does
+// only after closing the descriptors it inherited from the server, or it has
+// exited.
+func paneExeced(pid string, serverExe os.FileInfo) bool {
+	exe, err := os.Stat(filepath.Join("/proc", strings.TrimSpace(pid), "exe"))
+	return err != nil || !os.SameFile(exe, serverExe)
 }
 
 // parentPID returns the parent of pid from /proc: a pane's parent is the tmux
