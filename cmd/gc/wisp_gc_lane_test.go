@@ -273,3 +273,50 @@ func TestWispGCLane_RunsAtMostOnePurgePerWake(t *testing.T) {
 		t.Fatalf("purges = %d, want 1 for the coalesced wakes", got)
 	}
 }
+
+// Kills: a purge that waits for the lane's timer, or a trigger that no longer
+// reaches it. The lane is paced at its 10m fallback, so only a tick's wake
+// can start the purge inside the wait: each kind of tick that used to reach
+// the purge starts exactly one.
+func TestWispGCLane_TickWakeStartsPurgeWithoutTimer(t *testing.T) {
+	for _, trigger := range []string{"startup-poke", "poke", "patrol"} {
+		t.Run(trigger, func(t *testing.T) {
+			wg := newBlockingWispGC()
+			cr, _, _ := newWispGCLaneRuntime(t, wg)
+			stop := cr.startWispGCLane(context.Background())
+
+			runBareTick(cr, trigger)
+			wg.awaitPurgeStart(t)
+			close(wg.release)
+			stop()
+
+			if got := wg.runs.Load(); got != 1 {
+				t.Fatalf("purges = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// Kills: a wake from a tick that stopped before the wake slot. A tick whose
+// context ends during the managed-Dolt preflight stops there and leaves no
+// wake queued for the lane.
+func TestWispGCLane_StoppedTickEnqueuesNoWake(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	var runs atomic.Int32
+	cr, _, _ := newWispGCLaneRuntime(t, countingWispGC{runs: &runs})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &tickPass{ctx: ctx, dirty: new(atomic.Bool), trigger: "patrol", prevPoolRunning: new(map[string]bool)}
+
+	if cr.runTickPhases(p, legacyTickPhases) {
+		t.Fatal("the tick ran past the preflight on an ended context")
+	}
+	select {
+	case <-cr.wispGCLaneOf().wakeCh:
+		t.Fatal("a tick stopped before the wake slot woke the wisp GC lane")
+	default:
+	}
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("purges = %d, want 0", got)
+	}
+}
