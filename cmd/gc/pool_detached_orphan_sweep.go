@@ -336,6 +336,14 @@ func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex,
 	// entirely when the list is partial, degrading to exact-gc.session_id recovery.
 	ambiguousNames := map[string]bool{}
 	for _, sb := range all {
+		if isNamedSessionBead(sb) {
+			// A configured named session's work is not its template pool's:
+			// the named identity serves it, and a bead it left open and
+			// unassigned was parked, not detached by a failed done sequence.
+			// Indexed, the template route re-stamped it and a pool instance
+			// the city never named claimed it.
+			continue
+		}
 		route := retiredSessionFallbackRoute(sb)
 		if route == "" {
 			continue // no template/agent_name → carries no recoverable route
