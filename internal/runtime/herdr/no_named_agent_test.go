@@ -309,7 +309,7 @@ func TestDeliverStartupTurnFallsBackWhenThePaneHasNoNamedAgent(t *testing.T) {
 		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
 	c := &client{session: "gc-test", bin: bin}
 
-	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeShell); err != nil {
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeShell, nil, ""); err != nil {
 		t.Fatalf("deliverStartupTurn on a pane with no named agent: %v", err)
 	}
 	assertPasted(t, trace, true)
@@ -325,7 +325,7 @@ func TestDeliverStartupTurnNeverPastesIntoAKindLaunchedPane(t *testing.T) {
 		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
 	c := &client{session: "gc-test", bin: bin}
 
-	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent); err == nil {
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent, nil, ""); err == nil {
 		t.Fatal("deliverStartupTurn reported the first turn delivered to a kind launch's pane with no agent on it")
 	}
 	assertPasted(t, trace, false)

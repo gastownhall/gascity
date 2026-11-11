@@ -16,6 +16,7 @@ go_library(
         "provider.go",
         "redaction.go",
         "startup_dialogs.go",
+        "startup_recovery_other.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/herdr",
     visibility = ["//:__subpackages__"],
