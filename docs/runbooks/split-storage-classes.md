@@ -1729,8 +1729,10 @@ back (`--to-work`) or gives the rig its relic legs back (`--to-rigs`), so it
 classifies the rig's rows as `gc storage status` does, leaves out the rows it
 wrote, and refuses:
 
-- an **open stranded row** in the rig. Close each one that must not come
-  back with `bd close <id>`, run from the rig's directory. Or carry them on:
+- an **open stranded row** in the rig of the graph, orders or sessions class:
+  an open session or wait would run again, and an open workflow or order row
+  would run again. Close each one that must not come back with `bd close
+  <id>`, run from the rig's directory. Or carry them on:
   `gc storage migrate --from-rigs --rig <rig> --fleet-stopped` copies them
   into the binding, and the reverse brings them back with the rig's other
   rows;
@@ -1738,8 +1740,11 @@ wrote, and refuses:
   class, open or closed: the reverse returns that bead under its id.
   Re-create the rig's row under a new id.
 
-A closed stranded row, and a row that is infrastructure class only because
-of metadata, stay in the rig as they are, and the plan names them. A rig
+A closed stranded row, a row that is infrastructure class only because of
+metadata, and open stranded mail or nudges stay in the rig as they are, and
+the plan names them. Mail, external messaging and the nudge queue read only
+the city's store, split or not, so nothing delivers a message or a nudge
+from a rig's store. A rig
 still awaiting import hides nothing, because its relic legs serve it, so the
 reverse does not check it.
 

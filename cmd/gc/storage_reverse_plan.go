@@ -112,6 +112,12 @@ type reverseLeftovers struct {
 	AsWork map[string][]string
 	// Closed are the closed ones.
 	Closed []string
+	// Unread are a rig's open mail and nudge rows (messaging and nudges
+	// class): mail, external messaging and the nudge queue read only the
+	// city's store (resolveMailMessagesStore, newCityExtMsgServices,
+	// openNudgeBeadStoreOwned), split or not, and no relic leg covers those
+	// classes, so nothing delivers them from a rig's store.
+	Unread []string
 }
 
 // reverseRow returns b as a reverse writes it: the forward stamp, the record
@@ -475,14 +481,14 @@ func planReverse(in reverseInput) reversePlan {
 	// record already holds it (a migration's gate: its owner's record, above).
 	// An edge whose restore would undo an operator's close of its gate
 	// refuses instead, as its record does.
-	for _, e := range reverseGateEdges(byID, waits, destOf, in.Payloads) {
+	for _, e := range reverseGateEdges(byID, waits, destOf) {
 		blockerDest, blocker, known := whereIs(e.dep.DependsOnID, e.dest)
 		switch {
 		case known && blockerDest == e.dest && overrides.undone(byID, []string{e.gate}, e.dep, blocker):
 			// Refused below.
 		case known && blockerDest == e.dest:
 			before := len(plan.Edges[e.dest])
-			addEdge(e.dest, e.dep, e.payload)
+			addEdge(e.dest, e.dep, "")
 			if len(plan.Edges[e.dest]) > before {
 				plan.Restored++
 			}
@@ -493,7 +499,7 @@ func planReverse(in reverseInput) reversePlan {
 				why = "it would cross stores (" + reverseDestNoun(blockerDest) + ")"
 			}
 			plan.Dropped = append(plan.Dropped, fmt.Sprintf("%s -[%s]-> %s: the edge closed gate %s stood for, and %s", e.dep.IssueID, e.dep.Type, e.dep.DependsOnID, e.gate, why))
-			record(e.dep.IssueID, e.dep, e.payload)
+			record(e.dep.IssueID, e.dep, "")
 		}
 	}
 
@@ -674,18 +680,19 @@ func reverseKeptGates(down map[string][]beads.Dep, gates map[string]bool, stays 
 }
 
 // reverseGateEdge is the edge a closed cross-store gate stood for, for one
-// moved row that waited on it: the row's edge onto the gate, its type and
-// payload kept, pointed at the gate's blocker.
+// moved row that waited on it: the row's edge onto the gate, its type kept,
+// pointed at the gate's blocker. It carries no payload: every writer of an
+// edge onto a gate (the drain's projection, ensureBlockingDependency; the
+// migrations' createRigImportGate callers) adds a plain blocks edge.
 type reverseGateEdge struct {
 	gate, dest string // the gate, and where the row lands
 	dep        beads.Dep
-	payload    string
 }
 
 // reverseGateEdges is the edge each gate of waits (reverseClosedGates) stood
 // for, for each row that waits on it and moves (destOf), by gate. A gate
 // that names no blocker stands for no other edge than the row's own onto it.
-func reverseGateEdges(byID map[string]beads.Bead, waits map[string][]beads.Dep, destOf map[string]string, payloads map[beads.DepPair]string) []reverseGateEdge {
+func reverseGateEdges(byID map[string]beads.Bead, waits map[string][]beads.Dep, destOf map[string]string) []reverseGateEdge {
 	var out []reverseGateEdge
 	for _, gate := range sortedMapKeys(waits) {
 		blocker := strings.TrimSpace(byID[gate].Metadata[beadmeta.CrossStoreBlockerMetadataKey])
@@ -698,7 +705,7 @@ func reverseGateEdges(byID map[string]beads.Bead, waits map[string][]beads.Dep, 
 			if blocker != "" {
 				d.DependsOnID = blocker
 			}
-			out = append(out, reverseGateEdge{gate: gate, dest: dest, dep: d, payload: payloads[beads.DepPair{IssueID: w.IssueID, DependsOnID: gate}]})
+			out = append(out, reverseGateEdge{gate: gate, dest: dest, dep: d})
 		}
 	}
 	return out

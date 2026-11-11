@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // killAbortAt runs --abort-reverse with a kill at point, which must stop it.
@@ -1008,5 +1010,128 @@ func TestReverseJudgesTheJournalUnderTheGuard(t *testing.T) {
 		moved(t, city, func(storageReverseJournal) storageReverseJournal {
 			return storageReverseJournal{Format: storageReverseJournalFormat, Mode: reverseToRigs, Rigs: []string{"packs"}, Phase: reverseR1, Run: "other", Stamp: "infra/other"}
 		})
+	})
+}
+
+// TestReverseToRigsClearRefusesAnOpenGateMintedAfterItBegan: the plan
+// refuses an open cross-store gate of a row it returns, but a gate the
+// runtime mints for that row once the clear has begun (a writer the fleet
+// attestation missed) is met only by the clear. It refuses, naming the gate
+// and the row, and removes nothing from the binding.
+func TestReverseToRigsClearRefusesAnOpenGateMintedAfterItBegan(t *testing.T) {
+	r := newReverseRigFixture(t)
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "reverse R4 clear recorded" {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	code, _, _ := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+	infraEngineCrashPoint = prev
+	if code == 0 {
+		t.Fatal("the kill did not stop the reverse")
+	}
+	binding, err := openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := binding.Get("gp-step1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := binding.Create(dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, owner, "gp-w1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	before := workStoreFingerprint(t, r.binding())
+	code, _, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}})
+	if code == 0 || !strings.Contains(stderr, "the binding holds "+gate.ID+", an open cross-store gate for gp-step1") || !strings.Contains(stderr, "nothing was removed") {
+		t.Fatalf("the clear over an open gate of a returned row = %d: %s", code, stderr)
+	}
+	if workStoreFingerprint(t, r.binding()) != before {
+		t.Fatal("the refused clear removed rows from the binding")
+	}
+}
+
+// TestReverseContainmentCheckReadsNoneOfItsOwnRows: once the copy is in the
+// work store, a resume's (or a dry run's) containment check leaves out the
+// rows this run wrote before it classifies, so it reads the binding for none
+// of them. The binding-born rows here are each one the check would
+// otherwise judge by the binding's row under its id: one read apiece.
+func TestReverseContainmentCheckReadsNoneOfItsOwnRows(t *testing.T) {
+	city := newReverseEngineCity(t, 60, "")
+	closeBindingGates(t, city)
+	for i := 0; i < 5; i++ {
+		createInBinding(t, city, beads.Bead{Title: fmt.Sprintf("born in the binding %d", i), Type: "task"}, true)
+	}
+	killReverseAt(t, city, "reverse phase "+reversePhaseName(reverseR2))
+	reads := 0
+	prev := getInfraHeldRow
+	getInfraHeldRow = func(destination beads.Store, id string) (beads.Bead, error) {
+		reads++
+		return prev(destination, id)
+	}
+	t.Cleanup(func() { getInfraHeldRow = prev })
+	if code, stdout, stderr := city.reverse(t, reverseOptions{DryRun: true}); code != 0 {
+		t.Fatalf("--dry-run after R2 = %d: %s%s", code, stdout, stderr)
+	}
+	if reads != 0 {
+		t.Fatalf("the dry run after R2 read the binding %d time(s) for rows this run wrote, want none", reads)
+	}
+	if code, stdout, stderr := city.reverse(t, reverseOptions{}); code != 0 {
+		t.Fatalf("the resume after R2 = %d: %s%s", code, stdout, stderr)
+	}
+	if reads != 0 {
+		t.Fatalf("the resume after R2 read the binding %d time(s) for rows this run wrote, want none", reads)
+	}
+}
+
+// TestReverseRetainedCopiesRemedyNamesWhatTheClearRefuses: the one refusal of
+// the retained copies names, before the clear, what the clear would refuse:
+// a stranded row the work store also holds (settle it first), and copies the
+// copy manifest does not record (record them with recover-stranded first).
+func TestReverseRetainedCopiesRemedyNamesWhatTheClearRefuses(t *testing.T) {
+	t.Run("a stranded row too", func(t *testing.T) {
+		city := newRetainedReverseEngineCity(t, 60)
+		closeBindingGates(t, city)
+		under, _, _ := unwrapBeadPolicyStore(city.source)
+		stray := mustCreateInfraBead(t, under, beads.Bead{Title: "mail the binding never served", Type: "message", Assignee: "worker"})
+		code, stdout, stderr := city.reverse(t, reverseOptions{DryRun: true})
+		if code == 0 || !strings.Contains(stderr, "retained pre-migration cop(ies)") || !strings.Contains(stderr, "the clear refuses while the work store holds a stranded row, so settle those first") || !strings.Contains(stderr, stray.ID) {
+			t.Fatalf("--to-work --dry-run over retained copies and a stranded row = %d: %s%s", code, stdout, stderr)
+		}
+	})
+	t.Run("copies the manifest does not record", func(t *testing.T) {
+		city := newRetainedReverseEngineCity(t, 60)
+		closeBindingGates(t, city)
+		m, recorded, err := readInfraCopyManifestRecord(city.target)
+		if err != nil || !recorded {
+			t.Fatalf("the copy manifest = %v, %v", recorded, err)
+		}
+		var dropped string
+		for _, id := range sortedMapKeys(m.IDs) {
+			if b, ok := city.before[id]; ok && isInfra(b) {
+				dropped = id
+				break
+			}
+		}
+		if dropped == "" {
+			t.Fatal("no retained copy to leave out of the manifest")
+		}
+		var ids []string
+		for _, id := range sortedMapKeys(m.IDs) {
+			if id != dropped {
+				ids = append(ids, id)
+			}
+		}
+		if err := writeInfraCopyManifestFileAt(city.target.Root, city.target.ManifestPath(), ids, m.Created, m.WrittenAt, m.LegacyBound, m.Generation, nil); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := city.reverse(t, reverseOptions{DryRun: true})
+		if code == 0 || !strings.Contains(stderr, "the copy manifest does not record 1 of them ("+dropped+")") || !strings.Contains(stderr, storageRecoveryInstruction()) {
+			t.Fatalf("--to-work --dry-run over an unrecorded retained copy = %d: %s%s", code, stdout, stderr)
+		}
 	})
 }

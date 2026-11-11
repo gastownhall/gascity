@@ -610,12 +610,13 @@ func TestReverseRefusesARigImportNotFinished(t *testing.T) {
 // split, --to-rigs gives the rig its relic legs), so each refuses, dry run
 // included, every open stranded row the rig would serve again, names the
 // rig's ways to settle it, and writes nothing. It refuses and reports exactly
-// the rows the census calls stranded: a closed one, and one that is
-// infrastructure class only because of metadata, stay in the rig as they
-// are, which the reverse reports. A rig awaiting import hides nothing, its
-// relic legs serving it, so its open row is not refused. Once the open rows
-// are closed, the reverse finishes and leaves the four as the writer left
-// them.
+// the rows the census calls stranded: a closed one, one that is
+// infrastructure class only because of metadata, and open mail, which
+// nothing reads from a rig's store (mail reads the city's), stay in the rig
+// as they are, which the reverse reports. A rig awaiting import hides
+// nothing, its relic legs serving it, so its open row is not refused. Once
+// the open session is closed, the reverse finishes and leaves the four as
+// the writer left them.
 func TestReverseRefusesTheStrandedRowsItWouldReviveInARig(t *testing.T) {
 	for _, mode := range []reverseMode{reverseToRigs, reverseToWork} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -655,17 +656,17 @@ func TestReverseRefusesTheStrandedRowsItWouldReviveInARig(t *testing.T) {
 				if code == 0 || !strings.Contains(stderr, "REFUSED — 1 shape(s)") {
 					t.Fatalf("--%s (dry run %v) over open stranded rig rows = %d: %s%s", mode, run.DryRun, code, stdout, stderr)
 				}
-				for _, want := range []string{mail.ID + " (message, open)", session.ID + " (session, open)", "rig packs holds", "bd close <id>", rigStoreRoot(r.request.CityPath, packs), rigImportInstruction("packs")} {
+				for _, want := range []string{session.ID + " (session, open)", "rig packs holds", "bd close <id>", rigStoreRoot(r.request.CityPath, packs), rigImportInstruction("packs")} {
 					if !strings.Contains(stderr, want) {
 						t.Fatalf("the refusal does not say %q: %s", want, stderr)
 					}
 				}
-				for _, id := range []string{read.ID, work.ID, awaiting.ID} {
+				for _, id := range []string{mail.ID, read.ID, work.ID, awaiting.ID} {
 					if strings.Contains(stderr, id+" (") {
 						t.Fatalf("the refusal names %s, which the reverse leaves as it is: %s", id, stderr)
 					}
 				}
-				for _, want := range []string{"1 closed row(s) the store of rig packs holds", read.ID, "1 row(s) the store of rig packs holds", work.ID, beadmeta.RootBeadIDMetadataKey} {
+				for _, want := range []string{"1 closed row(s) the store of rig packs holds", read.ID, "1 row(s) the store of rig packs holds", work.ID, beadmeta.RootBeadIDMetadataKey, "1 open mail or nudge row(s) the store of rig packs holds", "nothing delivers them from there: " + mail.ID} {
 					if !strings.Contains(stdout, want) {
 						t.Fatalf("the plan does not report %q: %s", want, stdout)
 					}
@@ -674,16 +675,14 @@ func TestReverseRefusesTheStrandedRowsItWouldReviveInARig(t *testing.T) {
 			if after := workStoreFingerprint(t, r.rig("packs")); after != before || fileExists(storageReverseJournalPath(r.request.CityPath)) {
 				t.Fatal("a refused reverse wrote to the rig or its journal")
 			}
-			for _, id := range []string{mail.ID, session.ID} {
-				if err := rig.Close(id); err != nil {
-					t.Fatal(err)
-				}
+			if err := rig.Close(session.ID); err != nil {
+				t.Fatal(err)
 			}
 			if code, stdout, stderr := r.reverse(t, opts); code != 0 {
-				t.Fatalf("--%s once the open stranded rows are closed = %d: %s%s", mode, code, stdout, stderr)
+				t.Fatalf("--%s once the open stranded session is closed = %d: %s%s", mode, code, stdout, stderr)
 			}
 			for store, want := range map[string]map[string]string{
-				"packs": {mail.ID: "closed", session.ID: "closed", read.ID: "closed", work.ID: "open"},
+				"packs": {mail.ID: "open", session.ID: "closed", read.ID: "closed", work.ID: "open"},
 				"other": {awaiting.ID: "open"},
 			} {
 				for id, status := range want {
@@ -741,6 +740,38 @@ func TestReverseRefusesARigRowUnderAnIDItsImportMoved(t *testing.T) {
 				}
 			})
 		}
+		// The binding no longer holds the original (its row was deleted
+		// there): the reverse returns nothing under the id, so the rig's row
+		// is not refused as a second bead under it.
+		t.Run(string(mode)+"/original gone from the binding", func(t *testing.T) {
+			r := newReverseRigFixture(t)
+			opts := reverseOptions{Mode: mode, Rigs: []string{"packs"}, DryRun: true}
+			if mode == reverseToWork {
+				r.writeSplitCityTOML(t)
+				opts.Rigs = nil
+			}
+			again := beads.Bead{ID: "gp-step1", Title: "a task minted again", Type: "task", Status: "open"}
+			again.CreatedAt = r.seeded["gp-step1"].CreatedAt.Add(time.Hour)
+			again.UpdatedAt = again.CreatedAt
+			if _, err := r.rig("packs").(beads.ForeignIDCreator).CreateWithForeignID(again); err != nil {
+				t.Fatal(err)
+			}
+			binding, err := openInfraDestination(r.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := binding.Delete("gp-step1"); err != nil {
+				t.Fatal(err)
+			}
+			_ = closeBeadStoreHandle(binding)
+			code, stdout, stderr := r.reverse(t, opts)
+			if strings.Contains(stderr, rigReusedIDRemedy) || strings.Contains(stderr, "minted each of these ids again") {
+				t.Fatalf("--%s --dry-run refused a rig row whose id the binding no longer holds = %d: %s%s", mode, code, stdout, stderr)
+			}
+			if code != 0 {
+				t.Fatalf("--%s --dry-run with the original gone from the binding = %d: %s%s", mode, code, stdout, stderr)
+			}
+		})
 	}
 }
 
@@ -760,10 +791,10 @@ func TestReverseRigCheckLeavesOutItsOwnRows(t *testing.T) {
 		stamp   string
 		refused bool
 	}{{stamp, false}, {"infra/20261109T000000.000000000Z-0a0b0c0d", true}} {
-		mail := beads.Bead{ID: "gp-mail", Title: "mail", Type: "message", Status: "open", Assignee: "worker", Metadata: beads.StringMap{beadmeta.InfraReversedFromMetadataKey: tc.stamp}}
-		in := reverseInput{Held: map[string]map[string]beads.Bead{rigImportStamp("packs"): {mail.ID: mail}}, Manifests: map[string]*infraCopyManifest{"packs": manifest}}
+		sess := beads.Bead{ID: "gp-sess", Title: "session", Type: "session", Status: "open", Labels: []string{"gc:session"}, Metadata: beads.StringMap{beadmeta.InfraReversedFromMetadataKey: tc.stamp}}
+		in := reverseInput{Held: map[string]map[string]beads.Bead{rigImportStamp("packs"): {sess.ID: sess}}, Manifests: map[string]*infraCopyManifest{"packs": manifest}}
 		refusals := run.rigStoreLeftovers(in, &reversePlan{})
-		if refused := len(refusals) == 1 && strings.Contains(refusals[0].String(), "gp-mail (message, open)"); refused != tc.refused || len(refusals) > 1 {
+		if refused := len(refusals) == 1 && strings.Contains(refusals[0].String(), "gp-sess (session, open)"); refused != tc.refused || len(refusals) > 1 {
 			t.Fatalf("a stranded open row stamped %q: refusals %v, want refused %v", tc.stamp, refusals, tc.refused)
 		}
 	}
@@ -776,7 +807,7 @@ func TestReverseRigCheckLeavesOutItsOwnRows(t *testing.T) {
 func TestReverseToWorkChecksARigRecordedClean(t *testing.T) {
 	r := newReverseRigFixture(t)
 	r.writeSplitCityTOML(t)
-	mail := mustCreateInfraBead(t, r.rig("other"), beads.Bead{Title: "mail", Type: "message", Assignee: "worker"})
+	sess := mustCreateInfraBead(t, r.rig("other"), beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
 	if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToWork, DryRun: true}); code != 0 || r.relicFree("other") {
 		t.Fatalf("--to-work --dry-run over an open row in a rig awaiting import (relic-free %v) = %d: %s%s", r.relicFree("other"), code, stdout, stderr)
 	}
@@ -786,7 +817,7 @@ func TestReverseToWorkChecksARigRecordedClean(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToWork, DryRun: true})
-	if code == 0 || !r.relicFree("other") || !strings.Contains(stderr, mail.ID+" (message, open)") || !strings.Contains(stderr, "rig other holds") {
+	if code == 0 || !r.relicFree("other") || !strings.Contains(stderr, sess.ID+" (session, open)") || !strings.Contains(stderr, "rig other holds") {
 		t.Fatalf("--to-work --dry-run over an open row in a rig recorded clean (relic-free %v) = %d: %s%s", r.relicFree("other"), code, stdout, stderr)
 	}
 }

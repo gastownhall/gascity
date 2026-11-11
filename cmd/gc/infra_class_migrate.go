@@ -2119,6 +2119,14 @@ func sortedSetKeys(set map[string]bool) []string {
 // work-store opener, and creates nothing: a converged city must not be mutated
 // by its own convergence check.
 func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, manifest infraCopyManifest) (infraContainmentGap, error) {
+	return classifyInfraContainmentGapLeaving(cityPath, target, manifest, nil)
+}
+
+// classifyInfraContainmentGapLeaving is classifyInfraContainmentGap without
+// the work-store rows leave reports, which it neither classifies nor judges
+// by the binding's row under their id: a reverse leaves out the rows it
+// wrote itself, which would otherwise cost one binding read each.
+func classifyInfraContainmentGapLeaving(cityPath string, target infraBindingTarget, manifest infraCopyManifest, leave func(beads.Bead) bool) (infraContainmentGap, error) {
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
@@ -2128,6 +2136,9 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 	rows, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		return infraContainmentGap{}, err
+	}
+	if leave != nil {
+		rows = slices.DeleteFunc(rows, leave)
 	}
 
 	// Opened even when the work store holds nothing to classify — the normal

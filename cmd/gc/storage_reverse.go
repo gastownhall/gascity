@@ -930,7 +930,7 @@ func (s *reverseStrands) add(id string, b beads.Bead, known, twice bool, asWork 
 
 // leave records in plan the rows the reverse leaves in dest.
 func (s reverseStrands) leave(plan *reversePlan, dest string) {
-	if len(s.left.AsWork) == 0 && len(s.left.Closed) == 0 {
+	if len(s.left.AsWork) == 0 && len(s.left.Closed) == 0 && len(s.left.Unread) == 0 {
 		return
 	}
 	if plan.Leftovers == nil {
@@ -975,21 +975,18 @@ func (r *reverseRun) workStoreLeftovers(workRows map[string]beads.Bead, plan *re
 		plan.StrandsUnchecked = true
 		return nil, nil
 	}
-	gap, err := classifyInfraContainmentGap(r.request.CityPath, r.target, manifest)
+	// The rows this run wrote carry its stamp: they are left out before the
+	// check, which would otherwise read the binding once for each.
+	gap, err := classifyInfraContainmentGapLeaving(r.request.CityPath, r.target, manifest, func(b beads.Bead) bool {
+		return b.Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
+	})
 	if err != nil {
 		return nil, err
 	}
-	ours := func(id string) bool {
-		return workRows[id].Metadata[beadmeta.InfraReversedFromMetadataKey] == r.journal.Stamp
-	}
 	heldDifferent := setOf(gap.HeldDifferent)
 	var strands reverseStrands
-	stranded := false
+	stranded := len(gap.Stranded) > 0
 	for _, id := range gap.Stranded {
-		if ours(id) {
-			continue
-		}
-		stranded = true
 		b, known := workRows[id]
 		strands.add(id, b, known, heldDifferent[id], gap.Declassifiable[id])
 	}
@@ -1011,19 +1008,8 @@ func (r *reverseRun) workStoreLeftovers(workRows map[string]beads.Bead, plan *re
 				storageRecoveryInstruction(), strandedReplaceBindingRowFlag, strandedDropWorkRowFlag)),
 		})
 	}
-	var retained, unrecorded []string
-	for _, id := range gap.Retained {
-		if !ours(id) {
-			retained = append(retained, id)
-		}
-	}
-	for _, id := range gap.Unrecorded {
-		if !ours(id) {
-			unrecorded = append(unrecorded, id)
-		}
-	}
-	if len(retained) > 0 {
-		refusal := reverseRetainedRefusal(retained, unrecorded, stranded)
+	if len(gap.Retained) > 0 {
+		refusal := reverseRetainedRefusal(gap.Retained, gap.Unrecorded, stranded)
 		refusal.Remedy = r.heldRemedy(refusal.Remedy)
 		refusals = append(refusals, refusal)
 	}
@@ -1041,8 +1027,11 @@ func (r *reverseRun) workStoreLeftovers(workRows map[string]beads.Bead, plan *re
 // rig's store serve every class, and a --to-rigs gives the rig its relic legs
 // back, so:
 //
-//   - an open stranded row would come back to life. It is refused and named,
-//     with the rig's ways to settle it.
+//   - an open stranded row of the graph, orders or sessions class would come
+//     back to life. It is refused and named, with the rig's ways to settle it.
+//   - an open stranded mail or nudge row stays in the rig as it is, and the
+//     plan reports it: those classes are read only from the city's store
+//     (reverseLeftovers.Unread), split or not, so nothing delivers it.
 //   - a row of any class under an id the rig's import moved for a different
 //     bead would share the id with that bead once the reverse returns it. It
 //     is refused with the import's own fix for such a row.
@@ -1081,12 +1070,26 @@ func (r *reverseRun) rigStoreLeftovers(in reverseInput, plan *reversePlan) []rig
 				continue
 			}
 			asWork, _ := coordclass.ClassMetadataOnly(held[id])
+			if asWork == nil && rigRowOpen(held[id]) && reverseUnreadInARig(held[id]) {
+				strands.left.Unread = append(strands.left.Unread, id)
+				continue
+			}
 			strands.add(id, held[id], true, false, asWork)
 		}
 		strands.leave(plan, dest)
 		refusals = append(refusals, r.rigStrandRefusals(rig, strands)...)
 	}
 	return refusals
+}
+
+// reverseUnreadInARig reports whether b is a row of a class nothing reads from
+// a rig's store (reverseLeftovers.Unread): mail and nudges.
+func reverseUnreadInARig(b beads.Bead) bool {
+	switch coordclass.Classify(b) {
+	case coordclass.ClassMessaging, coordclass.ClassNudges:
+		return true
+	}
+	return false
 }
 
 // rigStrandRefusals are the refusals of the stranded rows rig's store holds
@@ -1101,7 +1104,7 @@ func (r *reverseRun) rigStrandRefusals(rig string, strands reverseStrands) []rig
 		configured, _ := rigImportRigNamed(r.request.Cfg, rig)
 		refusals = append(refusals, rigImportRefusal{
 			IDs:    strands.reviving,
-			Reason: fmt.Sprintf("each is an open infrastructure row rig %s holds that its import never carried (stranded): no class reader sees it while the rig is relic-free, and %s, so an open message would be delivered and an open session or wait would come back to life", rig, served),
+			Reason: fmt.Sprintf("each is an open infrastructure row rig %s holds that its import never carried (stranded): no class reader sees it while the rig is relic-free, and %s, so an open session or wait would come back to life and an open workflow or order row would run again", rig, served),
 			Remedy: r.heldRemedy(fmt.Sprintf("close each one that must not come back with `bd close <id>`, run from the rig's directory %s (a closed one stays in the rig as it is); or carry them on (`%s` copies them into the binding, and the reverse brings them back with the rig's other rows); then re-run",
 				rigStoreRoot(r.request.CityPath, configured), rigImportInstruction(rig))),
 		})
@@ -1177,6 +1180,9 @@ func (r *reverseRun) reportLeftovers(plan reversePlan) {
 		}
 		if len(left.Closed) > 0 {
 			fmt.Fprintf(r.stdout, "%s: %d closed row(s) %s holds that the binding does not serve (stranded) stay there as they are: %s\n", r.logPrefix, len(left.Closed), where, infraStrandedIDList(left.Closed)) //nolint:errcheck // best-effort stdout
+		}
+		if len(left.Unread) > 0 {
+			fmt.Fprintf(r.stdout, "%s: %d open mail or nudge row(s) %s holds that the binding does not serve (stranded) stay there as they are: mail and nudges are read only from the city's store, so nothing delivers them from there: %s\n", r.logPrefix, len(left.Unread), where, infraStrandedIDList(left.Unread)) //nolint:errcheck // best-effort stdout
 		}
 	}
 	if plan.StrandsUnchecked {
