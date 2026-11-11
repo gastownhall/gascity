@@ -588,6 +588,7 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 
 	var rewrites []legacyPublicPackRewrite
 	targetBindings := make(map[string]wave1PublicPackImportTarget)
+	targetOwners := make(map[string]string)
 	for _, name := range legacyNames {
 		packName := legacy[name]
 		target, ok := targets[packName]
@@ -596,7 +597,16 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 		}
 		to := ""
 		if !target.Remove {
+			// The migration target supplies the durable source and pin, but
+			// the legacy declaration owns the composition options. Preserve
+			// those options (including agent narrowing) while relocating the
+			// source so --fix cannot silently widen the roster.
+			target.Import = preserveImportOptions(target.Import, imports[name])
+			if prior, seen := targetBindings[target.Binding]; seen && !sameImport(prior.Import, target.Import) {
+				return false, nil, fmt.Errorf("legacy imports %q and %q both migrate to %q with different options; reconcile by hand", targetOwners[target.Binding], name, target.Binding)
+			}
 			targetBindings[target.Binding] = target
+			targetOwners[target.Binding] = name
 			to = target.Binding
 		}
 		rewrites = append(rewrites, legacyPublicPackRewrite{From: name, To: to})
@@ -606,12 +616,6 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 			if _, legacyTarget := legacyPublicPackForSource(cityPath, existing.Source); !legacyTarget {
 				return false, nil, fmt.Errorf("refusing to overwrite existing %q import with source %q", binding, existing.Source)
 			}
-			// The migration target supplies the durable source and pin, but
-			// the existing legacy declaration owns the composition options.
-			// Preserve those options (including agent narrowing) while
-			// relocating the source so --fix cannot silently widen the roster.
-			target.Import = preserveImportOptions(target.Import, existing)
-			targetBindings[binding] = target
 		}
 	}
 	for _, name := range legacyNames {

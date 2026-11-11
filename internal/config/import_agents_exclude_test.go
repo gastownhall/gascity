@@ -231,6 +231,7 @@ schema = 1
 [imports.inner]
 source = "../inner"
 export = true
+transitive = false
 `)
 	writeTestFile(t, outerDir, "agents/keeper/agent.toml", "start_command = \"true\"\nscope = \"city\"\n")
 	writeTestFile(t, innerDir, "pack.toml", `[pack]
@@ -267,6 +268,68 @@ scope = "city"
 			if strings.Contains(warning, "agents_exclude") && strings.Contains(warning, "deep") {
 				t.Fatalf("matched selector produced warning: %q", warning)
 			}
+		}
+	}
+}
+
+func TestImportAgentsExcludeDeclaredOnNestedEdge(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	outerDir := filepath.Join(dir, "outer")
+	innerDir := filepath.Join(dir, "inner")
+	writeTestFile(t, cityDir, "city.toml", `[workspace]
+name = "test"
+
+[imports.outer]
+source = "../outer"
+`)
+	writeTestFile(t, outerDir, "pack.toml", `[pack]
+name = "outer"
+schema = 1
+
+[imports.inner]
+source = "../inner"
+export = true
+agents_exclude = ["deep"]
+`)
+	writeTestFile(t, outerDir, "agents/keeper/agent.toml", "start_command = \"true\"\nscope = \"city\"\n")
+	writeTestFile(t, innerDir, "pack.toml", `[pack]
+name = "inner"
+schema = 1
+
+[[agent]]
+name = "deep"
+scope = "city"
+start_command = "true"
+
+[[agent]]
+name = "shallow"
+scope = "city"
+start_command = "true"
+
+[[named_session]]
+template = "deep"
+scope = "city"
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	sawShallow := false
+	for _, agent := range cfg.Agents {
+		if agent.Name == "deep" {
+			t.Fatalf("agent excluded on nested edge survived: %#v", agent)
+		}
+		if agent.Name == "shallow" {
+			sawShallow = true
+		}
+	}
+	if !sawShallow {
+		t.Fatalf("sibling agent shallow was dropped; agents = %#v", cfg.Agents)
+	}
+	for _, session := range cfg.NamedSessions {
+		if strings.HasSuffix(session.Template, "deep") {
+			t.Fatalf("named session for nested-edge excluded agent survived: %#v", session)
 		}
 	}
 }

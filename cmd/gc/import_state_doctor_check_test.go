@@ -774,6 +774,79 @@ agents_exclude = ["worker"]
 	}
 }
 
+func TestRewriteLegacyPublicPackImportsPreservesOptionsFromDifferentBinding(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.legacy_gastown]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["worker"]
+`)
+
+	changed, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewriteLegacyPublicPackImportsFS: %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteLegacyPublicPackImportsFS reported no change, want pack.toml rewrite")
+	}
+	manifest, err := loadCityPackManifestFS(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	if _, ok := manifest.Imports["legacy_gastown"]; ok {
+		t.Fatalf("legacy_gastown import survived migration: %+v", manifest.Imports)
+	}
+	got, ok := manifest.Imports["gastown"]
+	if !ok {
+		t.Fatalf("gastown import missing after migration: %+v", manifest.Imports)
+	}
+	if got.Source != "https://packages.example/gastown.git" || got.Version != "^1.2" {
+		t.Fatalf("migrated import = %+v, want target source and version", got)
+	}
+	if len(got.AgentsExclude) != 1 || got.AgentsExclude[0] != "worker" {
+		t.Fatalf("migrated AgentsExclude = %#v, want [worker] from the legacy declaration", got.AgentsExclude)
+	}
+}
+
+func TestRewriteLegacyPublicPackImportsRejectsConflictingOptionsOnSameTarget(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.legacy_a]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["worker"]
+
+[imports.legacy_b]
+source = ".gc/system/packs/gastown"
+agents_exclude = ["keeper"]
+`)
+
+	_, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err == nil {
+		t.Fatal("rewriteLegacyPublicPackImportsFS succeeded, want conflicting-options error")
+	}
+	if !strings.Contains(err.Error(), "different options") || !strings.Contains(err.Error(), `"gastown"`) {
+		t.Fatalf("error = %v, want conflicting-options error naming gastown", err)
+	}
+}
+
 func TestSameImportComparesAllCompositionOptions(t *testing.T) {
 	base := config.Import{
 		Source:        "https://packages.example/gastown.git",
