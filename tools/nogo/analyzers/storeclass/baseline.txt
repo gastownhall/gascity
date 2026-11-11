@@ -295,7 +295,6 @@ cmd/gc/city_runtime.go	CityRuntime.shutdown	unwrap	3
 cmd/gc/city_runtime.go	CityRuntime.startupSweepProcessTableOrphans	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.tickAutoSuspendChatSessions	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.tickSweepProcessTableOrphans	unwrap	1
-cmd/gc/city_runtime.go	CityRuntime.tickWispGC	unwrap	1
 cmd/gc/city_runtime.go	CityRuntimeParams	raw-field	2
 cmd/gc/city_runtime.go	buildStandaloneRigStores	raw-result	1
 cmd/gc/city_runtime.go	buildStandaloneRigStoresWithConfig	raw-result	1
@@ -1671,6 +1670,7 @@ cmd/gc/wisp_gc.go	wispGCHolders.readHolders	raw-param	2
 cmd/gc/wisp_gc.go	wispGCHolders.sourceStore	raw-result	1
 cmd/gc/wisp_gc.go	wispGCLegs	raw-param	2
 cmd/gc/wisp_gc.go	wispGCLegs	raw-result	1
+cmd/gc/wisp_gc_lane.go	CityRuntime.runWispGCLanePass	unwrap	1
 cmd/gc/wisp_gc_work_lane.go	workArmLeg	raw-field	1
 cmd/gc/wisp_gc_work_lane.go	workMoleculeGC.pass	raw-param	2
 cmd/gc/wisp_step_api.go	activeWorkStepReader	raw-param	1
