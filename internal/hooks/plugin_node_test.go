@@ -11,10 +11,11 @@ import (
 // TestProviderPluginNodeSuite executes opencode_plugin.test.mjs under node so
 // the embedded OpenCode and MiMo Code plugins are exercised as the provider
 // loads them, not just string-matched. The suite drives a fake gc through
-// GC_BIN and pins the system-prompt shape the transform produces: the cached
-// prime stays attached to system[0] ahead of the provider's own text, and the
-// per-turn clock, nudge and mail lines trail every stable entry so the
-// provider's prompt-cache prefix survives across turns, including when
+// GC_BIN and pins where the plugins put each turn's clock, nudge and mail
+// lines so the provider's prompt-cache prefix survives across turns: the
+// cached prime stays attached to system[0] ahead of the provider's own text;
+// OpenCode's plugin adds the per-turn lines to the user message, and MiMo
+// Code's appends them after every stable system entry, including when
 // chat.message runs first and OpenCode's system-list fold is reproduced.
 func TestProviderPluginNodeSuite(t *testing.T) {
 	if runtime.GOOS == "windows" {

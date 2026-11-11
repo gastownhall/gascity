@@ -35,7 +35,7 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 10
-	managedOpenCodeHookVersion = 8
+	managedOpenCodeHookVersion = 9
 	managedMimoCodeHookVersion = 4
 	managedOmpHookVersion      = 2
 )
@@ -529,19 +529,14 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
 		!hookContains(src, "pending.child.stdin?.end();") ||
-		// Per-turn text must trail the stable system entries, not share
-		// system[0] with the prime, or the prompt-cache prefix ends at the
-		// prime on every turn (#5732).
-		!hookContains(src, "appendVolatileSystem") ||
-		// Consumptive queue draining must be scoped to a turn (#5552) and,
-		// because OpenCode instantiates one plugin per directory, the turn
-		// state must be keyed by session so a subagent's user message does
-		// not reopen the parent's turn.
-		!hookContains(src, "const turns = new Map()") ||
-		// A turn opens on a user-message id the session has not seen, not
-		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
-		// an id-order gate stops opening turns (#6629).
-		!hookContains(src, "state.userMessageIDs.has(messageID)") {
+		// Per-turn text must go into the user message, not the system
+		// prompt: OpenCode sends the system entries ahead of the
+		// conversation, so text that changes every turn there makes the
+		// provider's prompt cache miss on the whole conversation each turn
+		// (#8555). Draining from chat.message also drains once per user
+		// message, never per generation (#5552).
+		!hookContains(src, "appendVolatilePart") ||
+		!hookContains(src, `"chat.message"`) {
 		return true
 	}
 	for _, marker := range []string{
