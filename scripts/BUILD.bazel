@@ -88,6 +88,7 @@ go_test(
         "advisory_probes_workflow_test.go",
         "bazel_bep_summary_workflow_test.go",
         "bazel_callers_permissions_test.go",
+        "bazel_darwin_check_test.go",
         "bazel_fork_cache_test.go",
         "bazel_fresh_merge_test.go",
         "bazel_go_repository_tools_test.go",
