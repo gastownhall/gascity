@@ -100,10 +100,9 @@ func (c *unreachableRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings
 	// binding, which none of the scope stores above reaches.
 	if graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every routed workflow bead wherever it lives; the binding is the one scope the work-scope walk above cannot reach
 		const label = "graph binding"
-		switch items, err := graph.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth}); {
-		case err != nil:
+		if items, err := graph.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth}); err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: reading beads: %v", label, err))
-		default:
+		} else {
 			findings = append(findings, unreachableRoutedFindings(label, items)...)
 		}
 	}
