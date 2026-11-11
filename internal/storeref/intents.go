@@ -41,7 +41,7 @@ const (
 	// attachment holders live. The work legs are the caller's census, by ref,
 	// not the epoch's: the GC reads the legs every seat-work question reads
 	// (cmd/gc's WorkLegs), and only when the routes relocate graph, so with
-	// no refs it is the graph placement alone (tickWispGC,
+	// no refs it is the graph placement alone (purgeWispGC in wisp_gc_lane.go,
 	// wisp_gc_work_lane.go). A ref names a leg whatever its suspension: the
 	// census decides which rigs serve.
 	MoleculeRoots

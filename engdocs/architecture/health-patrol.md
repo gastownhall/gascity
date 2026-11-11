@@ -86,7 +86,7 @@ use):
                      │  └──────────────┬──────────────┘   │
                      │                 ▼                   │
                      │  ┌─────────────────────────────┐   │
-                     │  │ wispGC.runGC()              │   │
+                     │  │ wake wisp GC lane           │   │
                      │  └──────────────┬──────────────┘   │
                      │                 ▼                   │
                      │  ┌─────────────────────────────┐   │
@@ -113,8 +113,10 @@ A single controller tick proceeds as follows:
    For each desired agent, determines the correct action. See the
    Reconciliation State Machine below.
 
-4. **Wisp GC**. If enabled, purges expired closed molecules older than
-   `wisp_ttl`.
+4. **Wisp GC lane wake**. The tick wakes the wisp GC lane
+   (`cmd/gc/wisp_gc_lane.go`), which, if wisp GC is enabled and due,
+   purges expired closed molecules older than `wisp_ttl` on its own
+   goroutine. The tick does not wait for the purge.
 
 5. **Orders lane wake**. The tick no longer dispatches orders. It wakes
    the orders lane (`cmd/gc/orders_lane.go`), which runs dispatch on its
