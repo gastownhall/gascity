@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const beadParentProjectionWaitTimeout = 10 * time.Second
@@ -44,8 +45,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	index := s.latestIndex()
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -80,7 +81,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
-			freshness := cacheAgeSeconds(cityStore)
+			freshness := cacheAgeSeconds(work)
 			return &ListOutput[beads.Bead]{
 				Index:        hit.Index,
 				CacheAgeS:    freshness.ageS,
@@ -263,7 +264,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	freshness := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
@@ -424,7 +425,7 @@ func beadListFanOut(state State, stores map[string]beads.Store, rigNames []strin
 	if rigScoped {
 		return legs
 	}
-	if graph := relocatedGraphStore(state); graph != nil {
+	if graph, ok := relocatedGraphStore(state); ok {
 		legs = append(legs, beadListLeg{label: "graph", store: graph, graph: true})
 	}
 	return legs
@@ -473,7 +474,7 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 // the store implements no Counter or cannot count this query shape exactly
 // (ErrCountUnsupported).
 func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := store.(beads.Counter)
+	counter, ok := beads.As[beads.Counter](store)
 	if !ok {
 		return 0, false
 	}
@@ -623,14 +624,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// authoritative-looking 200. It runs LAST so the merged order stays a leg
 	// concatenation whose prefix is exactly what a legacy city serves, and it
 	// does NOT go through federate(): the graph leg has no partial tier.
-	if graph := relocatedGraphStore(s.state); graph != nil {
+	if graph, ok := relocatedGraphStore(s.state); ok {
 		pa.attempt()
 		ready, err := beads.ReadyPreferCache(graph, readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(s.state.Stores())}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
@@ -736,8 +737,8 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	index := s.latestIndex()
 	id := input.ID
 
-	cityStore := s.state.CityBeadStore()
-	if err := cacheLiveOr503(cityStore); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 
@@ -745,7 +746,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
-	freshness := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(work)
 	return &IndexOutput[beads.Bead]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -1016,7 +1017,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		return nil, err
 	}
 	if beadUpdateMutation(body).TouchesClass() {
-		if err := s.refuseClassFlip(id, store, current, after); err != nil {
+		if err := s.refuseClassFlip(id, storeref.StoreRef(store.Ref()), current, after); err != nil {
 			return nil, err
 		}
 	}
@@ -1050,7 +1051,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// CachingStore, read bd only after the wait.
 	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
-		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+		if waiter, ok := beads.As[beads.ParentProjectionWaiter](store); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
 				return nil, err
 			}
@@ -1246,41 +1247,22 @@ func beadUpdateMutation(body beadUpdateBody) coordclass.Mutation {
 // beads and a class binding only its classes, so a write that changes a bead's
 // class in place — a work bead given gc.root_bead_id, a wisp label or gc:rt; a
 // graph step whose only graph marker is blanked — strands it in a store its
-// class is never read from. One stranded row makes every later routed gc
-// command refuse. It is refused here with 422 and nothing is written.
+// class is never read from, and the city serves degraded until the row is
+// repaired. It is refused here with 422 and nothing is written.
 //
-// A single-store city holds every class in its one store, so storeClassHolds
-// answers nil there and the guard is silent: no behavior change.
-func (s *Server) refuseClassFlip(id string, store beads.Store, before, after beads.Bead) error {
-	flip := coordclass.CheckFlip(before, after, s.storeClassHolds(store))
+// The store is asked for by owner, the ref of the store the bead was resolved
+// in (storeref.Stores.Holds), never by comparing a handle with a leg: a
+// binding-resident bead's handle never equals the binding's store, and the
+// guard would judge it a work store's and refuse a legitimate PATCH. A
+// single-store city holds every class in its one store, so Holds answers nil
+// there and the guard is silent: no behavior change.
+func (s *Server) refuseClassFlip(id string, owner storeref.StoreRef, before, after beads.Bead) error {
+	flip := coordclass.CheckFlip(before, after, s.state.Stores().Holds(owner))
 	if flip == nil {
 		return nil
 	}
 	return apierr.ValidationFailed.With(fmt.Sprintf("bead %s: %s. %s", id, flip.Error(), flip.Guidance()),
 		&huma.ErrorDetail{Location: "body", Message: fmt.Sprintf("changes the bead's class from %s to %s", flip.Before, flip.After), Value: id})
-}
-
-// storeClassHolds returns the classes store holds on this city, or nil on a
-// single-store city (where the one store holds every class). A class binding
-// holds the classes it serves; a work store — the city's or a rig's — holds
-// work plus every class no binding serves.
-func (s *Server) storeClassHolds(store beads.Store) []coordclass.Class {
-	topo := s.residencyTopology()
-	if topo.IsSingleStore() {
-		return nil
-	}
-	for _, binding := range topo.Bindings {
-		if binding.Leg.Store == store { // residency:allow — identifies which binding the already-resolved owner store is, to read its classes; resolves no bead
-			return binding.Classes
-		}
-	}
-	holds := []coordclass.Class{coordclass.ClassWork}
-	for _, class := range coordclass.Classes() {
-		if _, served := topo.BindingFor(class); class.IsInfrastructure() && !served {
-			holds = append(holds, class)
-		}
-	}
-	return holds
 }
 
 // awaitBeadParentProjection waits, for at most

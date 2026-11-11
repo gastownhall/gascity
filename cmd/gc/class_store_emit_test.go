@@ -1507,7 +1507,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 			},
 			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
 		}
-		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+		result, err := molecule.Attach(context.Background(), beadstest.GraphMolecule(graph), recipe, control.ID, molecule.AttachOptions{
 			IdempotencyKey: control.ID + ":attempt:2",
 			ExpectedEpoch:  1,
 		})
@@ -1742,7 +1742,14 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 	want := map[reflect.Type][]string{
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
-			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
+			"ConditionalWritesModeSource",
+			// The batch create and edge write report beads.ErrBatchCopyUnsupported
+			// over native Dolt, and the copy then refuses the binding: the
+			// answer it gives when the wrapper lacks them.
+			"CreateWithForeignIDBatch", "CreateWithStorage", "DepAddBatch", "DepAddWithMetadata",
+			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
+			// neither engine declares one: ("", false), as its absence answers.
+			"DepMetadataAbsentByProtocol",
 			"HasResidentOutside", "NamespaceCensusHandle",
 			// ReadyBlockedByAbsent over native Dolt reports no rows, and
 			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
@@ -1753,7 +1760,8 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			"StrandsAbsentTargets",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
-			"ConditionalWritesModeSource", "Count", "DepListBatch",
+			"ConditionalWritesModeSource", "Count",
+			"DepMetadataAbsentByProtocol",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
 			// GetExactBatch over a SQLite binding reports
 			// beads.ErrExactBatchGetUnsupported, and the caller reads per id:
@@ -1809,5 +1817,45 @@ func TestEmittingClassStoreReadyOrderedOverSQLiteReadsWhole(t *testing.T) {
 	}
 	if ordered || len(rows) != 3 {
 		t.Fatalf("ReadyOrdered over SQLite = %d rows, ordered %v; want the whole set, unordered", len(rows), ordered)
+	}
+}
+
+// TestEmittingClassStoreRemovesEdgesInABatchAndEmitsForEachDependent (round 3
+// X3): the forwarded DepRemoveBatch removes every edge on the engine and emits
+// one bead.updated per issue side whose DepList changed, as DepRemove emits
+// one per edge, so a subscriber does not keep a stale view of a cleared graph.
+func TestEmittingClassStoreRemovesEdgesInABatchAndEmitsForEachDependent(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("opening the leaf store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(leaf) })
+	root := seedClassBead(t, leaf, "root")
+	one := seedClassBead(t, leaf, "one")
+	two := seedClassBead(t, leaf, "two")
+	for _, e := range [][2]string{{one.ID, root.ID}, {two.ID, root.ID}, {two.ID, one.ID}} {
+		if err := leaf.DepAdd(e[0], e[1], "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := splitClassRoutes(leaf).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	remover, ok := store.(beads.DepBatchRemover)
+	if !ok {
+		t.Fatalf("the emitting class store %T does not remove edges in batches", store)
+	}
+	if err := remover.DepRemoveBatch([]beads.DepPair{{IssueID: one.ID, DependsOnID: root.ID}, {IssueID: two.ID, DependsOnID: root.ID}, {IssueID: two.ID, DependsOnID: one.ID}}); err != nil {
+		t.Fatalf("DepRemoveBatch through the emitting store: %v", err)
+	}
+	if up, err := leaf.DepList(root.ID, "up"); err != nil || len(up) != 0 {
+		t.Fatalf("the dependents of %s after the batch = %+v (%v), want none", root.ID, up, err)
+	}
+	appended := beadEvents(readCityJournal(t, cityPath))
+	subjects := map[string]int{}
+	for _, e := range appended {
+		subjects[e.Subject]++
+	}
+	if len(appended) != 2 || subjects[one.ID] != 1 || subjects[two.ID] != 1 {
+		t.Fatalf("the batch appended %+v, want exactly one bead.* event for each of %s and %s", appended, one.ID, two.ID)
 	}
 }

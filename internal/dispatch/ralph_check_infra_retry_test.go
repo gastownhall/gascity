@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -34,7 +35,7 @@ func TestProcessRalphCheckInfraTimeoutDoesNotBurnAttempt(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	_, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl on GateTimeout = %v, want ErrControlPending (re-run without burning an attempt)", err)
 	}
@@ -72,7 +73,7 @@ func TestProcessRalphCheckInfraRetryBudgetExhaustionBurns(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestProcessRalphControlInfraTimeoutDoesNotBurnIteration(t *testing.T) {
 			}
 			beadsBefore := countAllBeads(t, store)
 
-			result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if !errors.Is(err, ErrControlPending) {
 				t.Fatalf("ProcessControl on GateTimeout = (%+v, %v), want ErrControlPending (re-run without spending the iteration)", result, err)
 			}
@@ -155,14 +156,14 @@ func TestProcessRalphControlInfraRetryThenPassClosesSameIteration(t *testing.T) 
 		t.Fatalf("set check timeout: %v", err)
 	}
 	beadsBefore := countAllBeads(t, store)
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}
 
-	if _, err := ProcessControl(store, mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("first ProcessControl error = %v, want ErrControlPending", err)
 	}
 
 	writeCheckScript(t, cityPath, "flaky-check.sh", "#!/bin/sh\nexit 0\n")
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl after the check recovered: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestProcessRalphControlInfraRetryBudgetExhaustionBurns(t *testing.T) {
 				t.Fatalf("prime infra-retry budget: %v", err)
 			}
 
-			result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -261,9 +262,9 @@ func TestProcessRalphControlInfraRetryTransientStoreErrorStaysPending(t *testing
 		key:   beadmeta.CheckInfraRetryMetadataKey,
 		err:   errors.New("failed to update metadata: invalid connection: i/o timeout"),
 	}
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}
 
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl = (%+v, %v), want ErrControlPending on a transient infra-retry write", result, err)
 	}
@@ -280,7 +281,7 @@ func TestProcessRalphControlInfraRetryTransientStoreErrorStaysPending(t *testing
 		}
 	}
 
-	if _, err := ProcessControl(store, mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second ProcessControl error = %v, want ErrControlPending", err)
 	}
 	if r := mustGet(t, store, control.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "1" {

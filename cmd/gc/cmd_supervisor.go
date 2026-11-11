@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -243,9 +244,9 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, errSupervisorLockHeld
 		}
 		return nil, fmt.Errorf("locking supervisor lock: %w", err)
@@ -1142,6 +1143,15 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			if ownership.Unit != "" {
 				payload["supervisor_unit"] = ownership.Unit
 			}
+		}
+		// api_url is the supervisor API base URL from supervisor.toml — the
+		// endpoint the CLI itself dials (supervisorAPIBaseURL) — reported
+		// whether or not the supervisor is running. It is absent, with a
+		// warning on stderr, when supervisor.toml cannot be read.
+		if apiURL, err := supervisorAPIBaseURL(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor status: warning: resolving API URL: %v\n", err) //nolint:errcheck
+		} else {
+			payload["api_url"] = apiURL
 		}
 		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
@@ -2319,7 +2329,7 @@ func startOneCity(
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
 	var reconcilerBoot strings.Builder
-	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, path, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
 	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
@@ -2361,6 +2371,11 @@ func startOneCity(
 			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		}
 	}()
+	// This process may have resolved the city through the one-shot funnel on
+	// an earlier boot, or while it was stopped and before a `gc storage
+	// migrate`. The pre-registration reads below (the provider snapshot, the
+	// v2 boot census) must not answer from that memo.
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
@@ -2956,6 +2971,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// Validate rigs.
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		return fmt.Errorf("validate rigs: %w", err)
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': warning: %s\n", cityName, w) //nolint:errcheck // best-effort stderr
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)

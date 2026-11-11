@@ -340,3 +340,54 @@ func TestRigListReportsSlingTargetsAndEffectiveConfig(t *testing.T) {
 		t.Errorf("GET /rig/myrig default_sling_target = %v, want myrig/claude", got)
 	}
 }
+
+// A rig whose every agent row runs a session marked suspended reads
+// suspended; one stopped row, which carries no session metadata, makes it
+// not suspended. Kills: rigSuspended answering from its loop's end without
+// every row checked, or a stopped row's metadata read as suspended.
+func TestRigSuspendedWhenEveryRunningRowIsMarkedSuspended(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		started    []string
+		unattested bool
+		want       bool
+	}{
+		{name: "every row running and marked", started: []string{"myrig--worker", "myrig--coder"}, want: true},
+		{name: "one row stopped", started: []string{"myrig--worker"}, want: false},
+		{name: "one row stopped, probed under an unattested listing", started: []string{"myrig--worker"}, unattested: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.sp.ListingUnattested = tc.unattested
+			state.cfg.Agents = []config.Agent{
+				{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+				{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+			}
+			state.cfg.NamedSessions = nil
+			for _, name := range tc.started {
+				if err := state.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatalf("Start %s: %v", name, err)
+				}
+			}
+			for _, name := range []string{"myrig--worker", "myrig--coder"} {
+				if err := state.sp.SetMeta(name, "suspended", "true"); err != nil {
+					t.Fatalf("SetMeta %s: %v", name, err)
+				}
+			}
+			h := newTestCityHandler(t, state)
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			var rig rigResponse
+			if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if rig.Suspended != tc.want {
+				t.Fatalf("Suspended = %v, want %v", rig.Suspended, tc.want)
+			}
+		})
+	}
+}

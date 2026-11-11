@@ -242,6 +242,10 @@ type scaleCheckDemand struct {
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
 	ParentSIDs map[string]string
+	// NameOnly reports that WorkBeadIDs only name the seats a custom
+	// scale_check count places (demandTargets.nameOnlyTemplates), so a
+	// request carrying one is SessionRequest.NameOnly.
+	NameOnly bool
 }
 
 var (
@@ -743,6 +747,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			UnassignedRoutedPartial: unassignedRoutedPartial,
 			ColdWakeTemplates:       targets.coldWakeTemplates,
 			NamedOnDemandTemplates:  targets.namedOnDemandTemplates,
+			NameOnlyTemplates:       targets.nameOnlyTemplates,
 		}
 		subPhaseStart = trace.demandNow()
 		collected.CustomCounts, collected.CustomPartials = evaluatePendingPoolsMap(cfg, targets.pendingPools, stderr, trace)
@@ -791,6 +796,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = merged.ReadyUnassignedRouted, merged.ReadyUnassignedRoutedRefs
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
+		}
+		for _, refused := range merged.NameRefusals {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q trigger bead %s: %v (naming no seat for it)\n", refused.Template, refused.WorkBeadID, refused.err()) //nolint:errcheck
 		}
 		subPhaseStart = trace.demandNow()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
@@ -1175,6 +1183,13 @@ type demandTargets struct {
 	// Their pool demand is clamped to 1 at the merge so one pool slot wakes the
 	// session without over-spawning {name}-N phantoms when N routed beads arrive.
 	namedOnDemandTemplates map[string]bool
+	// nameOnlyTemplates marks warm custom-scale_check pools that claim with
+	// the generated work query, whose default probe only names work: the
+	// merge takes their routed ready rows in claim order as the work bead ids
+	// of the custom count's seats, so a seat for a row bound to a managed
+	// worktree starts in that worktree. The probe never changes their count
+	// or partial retention.
+	nameOnlyTemplates map[string]bool
 }
 
 // probeEnvFunc builds a custom scale_check pool's probe env
@@ -1238,10 +1253,12 @@ func buildDemandTargets(
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
-	// activeStores is the set of stores a cold custom-scale_check pool is probed
+	nameOnlyTemplates := map[string]bool{}
+	// activeStores is the set of stores a custom-scale_check pool is probed
 	// against (city + every non-suspended rig store), so routed demand a sleeping
 	// rig pool can't see locally — e.g. work queued in the city store — still
-	// wakes it. Only consulted for the clamped cold-wake probe.
+	// wakes it. Only consulted for the clamped cold-wake probe and the warm
+	// pool's name-only probe (nameOnlyTemplates).
 	type activeStore struct {
 		store        beads.Store
 		ref          string
@@ -1509,18 +1526,32 @@ func buildDemandTargets(
 			}
 			continue
 		}
-		// Custom-scale_check pools deliberately KEEP the cold-only probe (unlike
+		// Custom-scale_check pools deliberately KEEP the cold-only count (unlike
 		// the default-probe branches above, which count cross-store demand warm
 		// or cold): the custom check is the authoritative count while the pool
-		// is awake, and this probe is clamped to 1 (coldWakeTemplates) so it can
-		// only wake a sleeping pool, never override the custom count. A custom
-		// scale_check that should scale on cross-store routed demand must count
-		// it itself, or the pool will churn at the warm/cold boundary.
-		if store != nil && isCold && !storeScopedControlDispatcher {
+		// is awake, and the cold probe is clamped to 1 (coldWakeTemplates) so it
+		// can only wake a sleeping pool, never override the custom count. A
+		// custom scale_check that should scale on cross-store routed demand
+		// must count it itself, or the pool will churn at the warm/cold
+		// boundary. A warm pool's probe only names the work its custom count's
+		// seats start for (nameOnlyTemplates): without a name a seat starts in
+		// the pool's own directory and leaves every row bound to a managed
+		// worktree, so such work would advance only through cold wakes. It
+		// names them only for a pool whose seats claim with the generated
+		// work query, whose routed tier the probe reads: a custom work_query
+		// selects its own work, and a seat named for a row it does not select
+		// would start in that row's worktree, where the unbound work the query
+		// does select is not claimable.
+		claimsGeneratedQuery := cfg.Agents[i].WorkQuery == ""
+		if store != nil && !storeScopedControlDispatcher && (isCold || claimsGeneratedQuery) {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding})
 			}
-			coldWakeTemplates[template] = true
+			if isCold {
+				coldWakeTemplates[template] = true
+			} else {
+				nameOnlyTemplates[template] = true
+			}
 		}
 		env, err := queryEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -1535,6 +1566,7 @@ func buildDemandTargets(
 		defaultNamedScaleTargets: defaultNamedScaleTargets,
 		coldWakeTemplates:        coldWakeTemplates,
 		namedOnDemandTemplates:   namedOnDemandTemplates,
+		nameOnlyTemplates:        nameOnlyTemplates,
 	}
 }
 
@@ -2450,8 +2482,20 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// legs is not that order. Name demand in the order the claim window
 		// serves it, so the seat placed for a bead finds it in its window.
 		beads.SortBeadsReadyOrder(rows)
-		for _, b := range rows {
+		for rank, b := range rows {
 			storeKey := rowStoreKeys[b.ID]
+			spec, specErr := worktreeSpecForBead(b, storeKey)
+			// A seat for a row bound to a managed worktree starts in that
+			// worktree and takes only that row, so it is useful only while
+			// the row is inside the claim window the seat reads. Behind the
+			// window it would be served only rows bound elsewhere, drain
+			// no_work, and be placed again next pass. Such a row is demand
+			// once claims advance the window to it. A row bound to no
+			// worktree stays demand at any rank: any seat in the pool's own
+			// directory can claim it.
+			if specErr == nil && spec != nil && rank >= config.RoutedReadyClaimWindow {
+				continue
+			}
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
@@ -2482,7 +2526,6 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				}
 				entry.BindingResident[b.ID] = true
 			}
-			spec, specErr := worktreeSpecForBead(b, storeKey)
 			if specErr != nil {
 				if entry.WorktreeErrors == nil {
 					entry.WorktreeErrors = make(map[string]string)
@@ -2526,6 +2569,9 @@ type collectedDemand struct {
 	// (demandTargets).
 	ColdWakeTemplates      map[string]bool
 	NamedOnDemandTemplates map[string]bool
+	// NameOnlyTemplates take default demand only as the work bead ids of
+	// their custom count's seats (demandTargets.nameOnlyTemplates).
+	NameOnlyTemplates map[string]bool
 	// UnassignedRouted, UnassignedRoutedRefs and UnassignedRoutedPartial are
 	// collectOpenUnassignedRoutedWork's index-aligned rows, after the route
 	// repairs the caller applies.
@@ -2537,8 +2583,8 @@ type collectedDemand struct {
 }
 
 // mergedDemand is one pass's demand: the merged scale-check counts and
-// demand provenance, each partial-template set, and the ready unassigned
-// routed work the counts selected.
+// demand provenance, each partial-template set, the ready unassigned routed
+// work the counts selected, and the rows it names no seat for.
 type mergedDemand struct {
 	ScaleCheckCounts          map[string]int
 	ScaleCheckDemand          map[string]scaleCheckDemand
@@ -2548,6 +2594,48 @@ type mergedDemand struct {
 	ScaleCheckPartial         map[string]bool
 	ReadyUnassignedRouted     []beads.Bead
 	ReadyUnassignedRoutedRefs []string
+	// NameRefusals are the rows a name-only template's seats are not named
+	// for because their worktree evidence is unusable, by template and in
+	// claim order (withoutUnplaceableNames). Each pass reports them as
+	// realization reports a named request whose evidence it refuses.
+	NameRefusals []unplaceableName
+}
+
+// unplaceableName is a row of a name-only template whose worktree evidence is
+// unusable (scaleCheckDemand.WorktreeErrors): a seat named for it could not
+// be placed, so the merge names none for it (mergedDemand.NameRefusals).
+type unplaceableName struct {
+	Template      string
+	WorkBeadID    string
+	WorktreeError string
+}
+
+// err is the refusal realization reports for a request naming the row
+// (verifiedPoolTriggerWorkDir).
+func (u unplaceableName) err() error {
+	return fmt.Errorf("%w invalid: %s", errPoolTriggerWorktreeEvidence, u.WorktreeError)
+}
+
+// withoutUnplaceableNames returns template's demand d without the rows whose
+// worktree evidence the probe found unusable (WorktreeErrors), and those rows:
+// a seat named for one could not be placed, so a name-only template names the
+// next row instead. A row whose worktree fails verification at realization
+// keeps its name; its seat then starts unnamed (nameOnlyFallback).
+func withoutUnplaceableNames(template string, d scaleCheckDemand) (scaleCheckDemand, []unplaceableName) {
+	if len(d.WorktreeErrors) == 0 {
+		return d, nil
+	}
+	var refused []unplaceableName
+	kept := make([]string, 0, len(d.WorkBeadIDs))
+	for _, id := range d.WorkBeadIDs {
+		if worktreeErr := strings.TrimSpace(d.WorktreeErrors[id]); worktreeErr != "" {
+			refused = append(refused, unplaceableName{Template: template, WorkBeadID: id, WorktreeError: worktreeErr})
+			continue
+		}
+		kept = append(kept, id)
+	}
+	d.WorkBeadIDs, d.Count = kept, len(kept)
+	return d, refused
 }
 
 // mergeCollectedDemand merges one pass's collected demand. It does no I/O and
@@ -2557,13 +2645,30 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	scaleCheckCounts := maps.Clone(in.CustomCounts)
 	poolScaleCheckPartialTemplates := maps.Clone(in.CustomPartials)
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
+	var nameRefusals []unplaceableName
 	if in.DefaultProbed {
-		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, in.DefaultPartials)
+		defaultPartials := in.DefaultPartials
+		if len(in.NameOnlyTemplates) > 0 {
+			defaultPartials = maps.Clone(defaultPartials)
+			maps.DeleteFunc(defaultPartials, func(template string, _ bool) bool { return in.NameOnlyTemplates[template] })
+		}
+		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, defaultPartials)
 		if scaleCheckCounts == nil {
 			scaleCheckCounts = make(map[string]int)
 		}
 		scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
 		for template, count := range in.DefaultCounts {
+			if in.NameOnlyTemplates[template] {
+				// The custom count is authoritative; the probe's rows, in
+				// claim order, only name the work of that many seats, and
+				// only rows a seat can be placed for.
+				placeable, refused := withoutUnplaceableNames(template, in.DefaultDemand[template])
+				named := mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], placeable, scaleCheckCounts[template])
+				named.NameOnly = true
+				scaleCheckDemandByTemplate[template] = named
+				nameRefusals = append(nameRefusals, refused...)
+				continue
+			}
 			// A cold-pool wake probe only wakes the pool from zero; clamp its
 			// contribution to 1 so it never overrides a custom scale_check's
 			// authoritative count for the same template.
@@ -2606,6 +2711,7 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	namedScaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, in.NamedPartials)
 	scaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, poolPartialRetentionTemplates)
 	scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
+	sort.SliceStable(nameRefusals, func(i, j int) bool { return nameRefusals[i].Template < nameRefusals[j].Template })
 	return mergedDemand{
 		ScaleCheckCounts:          scaleCheckCounts,
 		ScaleCheckDemand:          scaleCheckDemandByTemplate,
@@ -2615,6 +2721,7 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 		ScaleCheckPartial:         scaleCheckPartialTemplates,
 		ReadyUnassignedRouted:     ready,
 		ReadyUnassignedRoutedRefs: readyRefs,
+		NameRefusals:              nameRefusals,
 	}
 }
 
@@ -2993,9 +3100,7 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.Ready(query)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -3259,9 +3364,7 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store, leg string) 
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return c.liveSnapshot(store, leg)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -4079,6 +4182,11 @@ func realizePoolDesiredSessionsAt(
 				}
 			}
 			sessionInfo, slot, plan, err := seatsElsewhere.selectOrPlan(prefer, request, poolDecisionTime, used, usedSlots)
+			if unnamed, ok := nameOnlyFallback(request, err); ok {
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (starting the seat unnamed)\n", qualifiedName, err) //nolint:errcheck
+				item.request = unnamed
+				sessionInfo, slot, plan, err = seatsElsewhere.selectOrPlan(prefer, unnamed, poolDecisionTime, used, usedSlots)
+			}
 			if err != nil {
 				switch {
 				case errors.Is(err, errPoolSeatRunsElsewhere):
@@ -4223,6 +4331,17 @@ func realizePoolDesiredSessionsAt(
 		stats.bindAttempts++
 		segmentStart = bp.realizeNow()
 		bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request)
+		if unnamed, ok := nameOnlyFallback(item.request, err); ok && item.plan == nil {
+			// A reused seat binds unnamed: a live one where it runs, and one
+			// that is not alive in the pool's own directory
+			// (poolTriggerBindWorkDir). A seat this pass created was created
+			// in the work's worktree, so its refusal skips it below.
+			stats.bindErrors++
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (binding the seat unnamed)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+			item.request = unnamed
+			stats.bindAttempts++
+			bound, err = bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, unnamed)
+		}
 		stats.bind += bp.realizeNow().Sub(segmentStart)
 		if err != nil {
 			stats.bindErrors++
@@ -4371,6 +4490,25 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	return metadata
 }
 
+// poolSeatBindingPatch is the binding of the pool seat info for request over
+// workDir, as legacy's bind writes it and v2's start-candidate binding carries
+// it: computePoolTriggerBindingPatch, except that a seat whose name was
+// refused (SessionRequest.NameRefused) and that records a directory moves to
+// workDir, the pool's own directory. The unnamed request's clear alone keeps
+// the directory the seat's last binding recorded, such as that work's managed
+// worktree, where the seat would start and leave the pool's unbound work
+// (hookClaimUnboundWorkOutsideSeat). A seat that records none starts in the
+// pool's own directory already, as a fresh unnamed seat does, and no workDir
+// keeps the seat where it is: legacy passes none for a live seat
+// (poolTriggerBindWorkDir).
+func poolSeatBindingPatch(info session.Info, request SessionRequest, workDir string) session.MetadataPatch {
+	patch := computePoolTriggerBindingPatch(info, request, workDir)
+	if !request.NameRefused || workDir == "" || preparedStartSessionWorkDir(info) == "" {
+		return patch
+	}
+	return withRederivedWorkDir(patch, info, workDir)
+}
+
 // bindPoolSessionTriggerBead reconciles a pool session bead's trigger/pack/
 // workspace/work-dir cluster to its dispatch request. The SESSION side is typed
 // session.Info (WI-5 W3): it computes the byte-identical key diff via
@@ -4396,8 +4534,17 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if err != nil {
 		return info, err
 	}
-	patch := computePoolTriggerBindingPatch(info, request, workDir)
-	if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
+	patch := poolSeatBindingPatch(info, request, workDir)
+	cityPath := ""
+	if bp != nil {
+		cityPath = bp.cityPath
+	}
+	if sameTriggerWorkDirStale(cityPath, info, request, workDir) && !poolSeatAlive(bp, cfgAgent, info) {
+		if bp != nil && bp.stderr != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: trigger bead %s runs in its managed worktree %s, not the recorded work dir %s; binding the worktree\n", qualifiedName, info.ID, request.WorkBeadID, workDir, preparedStartSessionWorkDir(info)) //nolint:errcheck // best-effort stderr
+		}
+		patch = withRederivedWorkDir(patch, info, workDir)
+	} else if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
 		if err := parkedWorkDirUsable(bp.city, bp.cityPath, cfgAgent, kept, workDir); err != nil {
 			if bp.stderr != nil {
 				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: not resuming in its recorded work dir: %v; binding %s, where it starts fresh\n", qualifiedName, info.ID, err, workDir) //nolint:errcheck // best-effort stderr
@@ -4424,15 +4571,17 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	return boundInfo, nil
 }
 
-// bindWriteFailure marks a failed binding write on a managed-worktree
-// request. The verified workspace never reached the session bead, so the
-// stamped binding still names the previous bead's work dir and the caller
-// must skip the item rather than reuse it.
+// bindWriteFailure marks a failed binding write that was to place the seat
+// in a directory (errPoolTriggerBindWriteFailed): a managed-worktree
+// request's verified workspace, or the pool's own directory for a refused
+// name (SessionRequest.NameRefused). The directory never reached the session
+// bead, so the stamped binding still names the previous bead's work dir and
+// the caller must skip the item rather than reuse it.
 func bindWriteFailure(request SessionRequest, err error) error {
-	if request.WorktreeSpec == nil {
+	if request.WorktreeSpec == nil && !request.NameRefused {
 		return err
 	}
-	return fmt.Errorf("%w: binding write failed: %w", errPoolTriggerWorktreeEvidence, err)
+	return fmt.Errorf("%w: %w", errPoolTriggerBindWriteFailed, err)
 }
 
 // namedTriggerRefIsSameStore reports whether a named session's stamped
@@ -4523,6 +4672,25 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 // against whatever work dir its previous binding left behind.
 var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence")
 
+// errPoolTriggerBindWriteFailed marks a failed binding write that was to
+// place the seat in a directory (bindWriteFailure). It is
+// errPoolTriggerWorktreeEvidence, so the caller skips the item, but it
+// refuses no evidence, so no unnamed bind retries it (nameOnlyFallback).
+var errPoolTriggerBindWriteFailed = fmt.Errorf("%w: binding write failed", errPoolTriggerWorktreeEvidence)
+
+// nameOnlyFallback returns request unnamed (unnamedPoolRequest) and true when
+// it only names its seat (SessionRequest.NameOnly) and err refused its work's
+// worktree evidence (errPoolTriggerWorktreeEvidence): the custom count still
+// places the seat, which no longer starts in that work's worktree. A failed
+// binding write (errPoolTriggerBindWriteFailed) refuses no evidence: it skips
+// the seat, as it skips a named request's.
+func nameOnlyFallback(request SessionRequest, err error) (SessionRequest, bool) {
+	if !request.NameOnly || !errors.Is(err, errPoolTriggerWorktreeEvidence) || errors.Is(err, errPoolTriggerBindWriteFailed) {
+		return request, false
+	}
+	return unnamedPoolRequest(request), true
+}
+
 // errPlanOnlyEffect refuses an effect attempted with planOnly build params.
 var errPlanOnlyEffect = errors.New("plan-only build params refuse effects")
 
@@ -4601,8 +4769,13 @@ func canonicalEvidenceStoreRef(storeRef string) string {
 	}
 }
 
+// poolTriggerWorkDir is the directory a seat runs request's work in when that
+// work is bound to no managed worktree: the pool's own configured directory
+// for qualifiedName, routed by pack and workspace (poolWorkDirUnder). A
+// request with no work has none, except a refused name's
+// (SessionRequest.NameRefused): its seat runs in the pool's own directory.
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
-	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
+	if bp == nil || cfgAgent == nil || (strings.TrimSpace(request.WorkBeadID) == "" && !request.NameRefused) {
 		return ""
 	}
 	// Pure path computation: this feeds a metadata patch, so it must never
@@ -5374,11 +5547,12 @@ func selectOrPlanPoolSessionBeadAvoiding(
 		}
 	}
 	// Reuse an existing active/creating session bead. Skip drained and
-	// closed. Asleep is skipped too, with one carve-out: a
-	// lifecycle=one_shot session whose sleep reason is freeable and which
-	// holds no assigned work is reused through the wake path — see
-	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
-	// asleep beads; an earlier version of this comment claimed it did.
+	// closed. Asleep is skipped too, with two carve-outs, each only when the
+	// row holds no assigned work: a lifecycle=one_shot session whose sleep
+	// reason is freeable, and a restart handoff still waiting for its fresh
+	// start, are reused through the wake path — see reusablePoolSessionInfo.
+	// Nothing in the reconciler closes orphaned asleep beads; an earlier
+	// version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			if at, runsElsewhere := elsewhere[candidate.ID]; runsElsewhere {

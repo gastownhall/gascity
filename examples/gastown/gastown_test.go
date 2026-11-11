@@ -20,6 +20,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -990,7 +991,7 @@ func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) stri
 	t.Helper()
 
 	store := beads.NewMemStore()
-	result, err := molecule.Cook(context.Background(), store, "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
 		Title: "HW-42",
 		Vars:  vars,
 	})

@@ -83,7 +83,7 @@ const getManyFanOut = 8
 // It never lists. Neither bd (`bd list` has no --id) nor the native store can
 // narrow a listing to ids, so a listing by id walks the whole ledger, both
 // tiers, closed rows included (#8360 review, iteration 2).
-func GetMany(store Store, ids []string) (map[string]Bead, error) {
+func GetMany(store StoreReader, ids []string) (map[string]Bead, error) {
 	out := make(map[string]Bead, len(ids))
 	if store == nil || len(ids) == 0 {
 		return out, nil
@@ -97,7 +97,7 @@ func GetMany(store Store, ids []string) (map[string]Bead, error) {
 		seen[id] = true
 		unique = append(unique, id)
 	}
-	live := HandlesFor(store).Live
+	live := LiveFor(store)
 	getter, batched := live.(ExactBatchGetter)
 	for start := 0; start < len(unique); start += getManyChunk {
 		chunk := unique[start:min(start+getManyChunk, len(unique))]

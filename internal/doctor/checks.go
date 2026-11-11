@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -29,6 +28,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -115,7 +116,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -123,6 +124,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -140,6 +150,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK
@@ -1531,8 +1546,9 @@ func (c *EventsLogCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = "events.jsonl not found (events will not be logged)"
 		return r
 	}
-	// Check writable by opening for append.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
+	// Check writable by opening for append, without blocking a concurrent
+	// rotation of the log.
+	f, err := livefile.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("events.jsonl not writable: %v", err)
@@ -3063,12 +3079,17 @@ func IsControllerRunning(cityPath string) bool {
 	}
 	defer f.Close() //nolint:errcheck // probe only
 
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
 	if err != nil {
-		// EWOULDBLOCK means the lock is held — controller is running.
+		// A busy lock means the controller holds it; an unknown lock error is
+		// treated as running so fixers do not race a controller they cannot rule out.
 		return true
 	}
 	// We got the lock, release immediately — no controller running.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	lock.Release() //nolint:errcheck // best-effort unlock
 	return false
 }

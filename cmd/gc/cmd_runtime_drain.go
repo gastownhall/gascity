@@ -1496,13 +1496,13 @@ func cityRunsV2(cityPath string, cfg *config.City) bool {
 	if mode, ok := controllerLatchedReconcilerMode(cityPath, cfg); ok {
 		return mode == reconcilerV2
 	}
-	return cfg != nil && drainAckStrictConfig(cfg)
+	return cfg != nil && drainAckStrictConfig(cfg, cityPath)
 }
 
 // drainAckStrictConfig reports whether cfg latches the v2 reconciler, as the
 // controller latches it; a mode it would refuse to latch is legacy.
-func drainAckStrictConfig(cfg *config.City) bool {
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+func drainAckStrictConfig(cfg *config.City, cityPath string) bool {
+	mode, err := latchReconcilerMode(cfg, cityPath, reconcilerModeLookupEnv)
 	return err == nil && mode == reconcilerV2
 }
 
