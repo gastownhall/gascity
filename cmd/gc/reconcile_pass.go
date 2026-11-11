@@ -101,6 +101,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	}
 	rec.Alerts = a.Alerts
 	rec.IdleTraces = p.idleWants(&w, &a)
+	p.named.update(&w, &a, p.patrol())
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {

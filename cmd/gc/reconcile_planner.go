@@ -160,6 +160,9 @@ type planner struct {
 	// idle is A15's memory (idleState), lost on restart as legacy's
 	// trackers are.
 	idle idleMemory
+	// named is A20's confirm-window memory (namedAbsentMemory), lost on
+	// restart as legacy's drainTracker is.
+	named namedAbsentMemory
 	// idleProbes are the idle begins submitted to prove an agent idle, by
 	// row, which paceIdleProbes holds a patrol apart.
 	idleProbes map[rowKey]idleProbe

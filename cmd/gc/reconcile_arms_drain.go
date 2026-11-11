@@ -30,6 +30,7 @@ const (
 	decideFloorAckCancel = "drain-ack-cancel:min-floor" // DRAIN-010, PAR-FLOORACK
 	decideWakeGrace      = "undesired-wake-grace"       // INC-003
 	decideDrainWorkKept  = "drain-kept:assigned-work"
+	decideNamedConfirm   = "drain-kept:named-confirm"   // #3630, PAR-NAMEDGONE
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
 	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
 )
@@ -433,6 +434,8 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		// (DRAIN-046), so a session it keeps running is never drained (ruling
 		// at the C6a2 review: match legacy).
 		return intent{Reason: decideDrainWorkKept}, true
+	case r.namedAbsenceUnconfirmed():
+		return intent{Reason: decideNamedConfirm}, true
 	case e.Desired == desireDrain && wakeGracePreservesUndesiredRow(info, r.w.Now) && r.w.OperatorSuspend[r.k] == "":
 		woke, _ := parseRFC3339Metadata(info.LastWokeAt)
 		r.after(requeueUntil(r.w.Now, woke.Add(wakeUndesiredGrace)))
@@ -452,6 +455,16 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		patch["sleep_policy_fingerprint"] = r.w.SleepPolicies[info.ID].Fingerprint
 	}
 	return intent{Kind: kind, Reason: decideDrainBegin + reason, Basis: basis, Patch: patch}, true
+}
+
+// namedAbsenceUnconfirmed is legacy's confirm window (#3630) for a live
+// configured named session whose spec is absent: its drain begins only on the
+// namedSuspendConfirmTicks'th consecutive pass of absence, so a spec set that
+// shrinks for one pass and returns drains nothing. The count is planner memory
+// (namedAbsentMemory); it sits after the work holds, as legacy's window sits
+// after the assigned-work skip and the live-claim veto, and before the grace.
+func (r *rowFacts) namedAbsenceUnconfirmed() bool {
+	return r.w.NamedAbsent[r.k] != 0 && r.w.NamedAbsent[r.k] < namedSuspendConfirmTicks
 }
 
 // workKept is the hold of a drained row kept running for its open work
@@ -516,4 +529,43 @@ func (r *rowFacts) idleRespawnBegin(basis rowBasis) (intent, bool) {
 		it.Class = session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
 	}
 	return it, true
+}
+
+// namedAbsentMemory is A20's confirm-window memory (#3630): each live
+// configured named row's consecutive passes of spec absence (legacy's
+// drainTracker.suspendDeferrals), counted at most once a patrol. A pass that
+// finds the row present, held for work, or not alive clears it, as does a
+// restart.
+type namedAbsentMemory struct {
+	seen map[rowKey]namedAbsence
+}
+
+type namedAbsence struct {
+	count int
+	at    time.Time // the count's last step
+}
+
+// update advances the memory on the pass's allocation and sets w.NamedAbsent.
+// A row is absent when it is a live named row the allocation drains as
+// orphaned with no open work keeping it (the rows legacy's window gates:
+// the dead bead branch and the work holds come before it).
+func (m *namedAbsentMemory) update(w *World, a *allocDecision, patrol time.Duration) {
+	next := make(map[rowKey]namedAbsence)
+	view := make(map[rowKey]int)
+	for _, row := range w.Census.Canonical() {
+		e := a.Snapshot.Entries[row.Key]
+		if e == nil || e.Desired != desireDrain || e.OpenWork != nil || e.Liveness != livenessAlive ||
+			firstNonEmpty(e.DrainReason, drainOrphaned) != drainOrphaned || !isNamedSessionInfo(row.Info) {
+			continue
+		}
+		st, counted := m.seen[row.Key]
+		switch {
+		case !counted:
+			st = namedAbsence{count: 1, at: w.Now}
+		case w.Now.Sub(st.at) >= patrol:
+			st.count, st.at = st.count+1, w.Now
+		}
+		next[row.Key], view[row.Key] = st, st.count
+	}
+	m.seen, w.NamedAbsent = next, view
 }

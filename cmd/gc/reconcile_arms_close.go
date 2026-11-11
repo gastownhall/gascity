@@ -112,6 +112,13 @@ func armClose(r *rowFacts) (intent, bool) {
 		// agent's suspend keeps only a configured named row's work for its
 		// return, and legacy closes the rest as orphaned (SESS-082); a city
 		// suspend keeps every row's.
+		//
+		// A removed configured named session ends here closed, not archived
+		// as legacy's session.RetireNamedSessionPatch leaves it open: the
+		// close frees what the archive frees (the row stops holding its alias
+		// and session_name, so a same-name config added back starts under
+		// that identity), and its work is released through the same route
+		// (TestSimRemovedNamedSessionFreesItsIdentity, PAR-NAMEDGONE).
 		orphaned := e.DrainReason == drainOrphaned || !r.w.CitySuspended && !isNamedSessionInfo(info)
 		it.Reason, it.Patch = decideCloseOrphan, session.ClosePatch(now, e.DrainReason)
 		it.Closing = closeSpec{Kind: closeOrphan, Orphaned: orphaned, Template: e.Template}

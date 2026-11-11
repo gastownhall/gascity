@@ -107,6 +107,10 @@ type World struct {
 	// the defer streaks (SESS-575), the content clock's fires (ga-07mi8),
 	// and the rows' lifecycle settings.
 	Idle *idlePass
+	// NamedAbsent is each live configured named row's count of consecutive
+	// passes with its spec absent, this pass's included, from planner memory
+	// (namedAbsentMemory), for A20's confirm window (#3630).
+	NamedAbsent map[rowKey]int
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
