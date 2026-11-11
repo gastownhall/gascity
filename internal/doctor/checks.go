@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -29,7 +28,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -114,7 +116,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -122,6 +124,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -139,6 +150,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK
@@ -1530,8 +1546,9 @@ func (c *EventsLogCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = "events.jsonl not found (events will not be logged)"
 		return r
 	}
-	// Check writable by opening for append.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
+	// Check writable by opening for append, without blocking a concurrent
+	// rotation of the log.
+	f, err := livefile.OpenFile(path, os.O_WRONLY|os.O_APPEND, fi.Mode())
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("events.jsonl not writable: %v", err)
@@ -1787,14 +1804,15 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// Run walks the configured worktrees root (workdir.WorktreesRoot) and
+// verifies each .git pointer. Per-bead
 // worktrees at <rig>/worktrees/ are a separate population and are
 // covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1802,8 +1820,8 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 			// Name the directory. The bare "no worktrees directory"
 			// read as a claim about every worktree on the box, and was
 			// reported green against a rig whose own worktrees/ held
-			// tens of gigabytes. Sibling checks already say ".gc/".
-			r.Message = "no .gc/worktrees directory"
+			// tens of gigabytes.
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
@@ -1835,7 +1853,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no agent worktrees under .gc/worktrees"
+			r.Message = fmt.Sprintf("no agent worktrees under %s", wtRoot)
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}
@@ -3061,12 +3079,17 @@ func IsControllerRunning(cityPath string) bool {
 	}
 	defer f.Close() //nolint:errcheck // probe only
 
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
 	if err != nil {
-		// EWOULDBLOCK means the lock is held — controller is running.
+		// A busy lock means the controller holds it; an unknown lock error is
+		// treated as running so fixers do not race a controller they cannot rule out.
 		return true
 	}
 	// We got the lock, release immediately — no controller running.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	lock.Release() //nolint:errcheck // best-effort unlock
 	return false
 }

@@ -10,8 +10,9 @@ package conversationlane_test
 // of one recorded execution (K1 to K5), and the cell then checks what a
 // same-key retry, the op sweeper or a rerun makes of what the crash left.
 //
-// Two tiers. The gating subset runs in conversationlane_test on SQLite with
-// no 15-minute waits. The evidence variants (BUILD.bazel x12_evidence_*_test,
+// Two tiers. The gating subset runs in conversationlane_x12_test (the
+// integration build's X12 target, BUILD.bazel) on SQLite with no 15-minute
+// waits. The evidence variants (BUILD.bazel x12_evidence_*_test,
 // GC_X12_EVIDENCE=1) run, per backend, every cell at production timing,
 // waiting out every op's finish_by (the matrix part), or the six-round
 // fault-free load (the load part), and write the X12 report
@@ -47,8 +48,8 @@ const (
 	// input volume.
 	x12BackendEnv  = "GC_X12_BACKEND"
 	x12DailyOpsEnv = "GC_X12_DAILY_OPS"
-	// x12PartEnv names an evidence variant's part (matrix or load), for the
-	// report's file name.
+	// x12PartEnv names an evidence variant's part (matrix or load): which
+	// store arms it may run on (x12PartArms) and the report's file name.
 	x12PartEnv = "GC_X12_PART"
 	// The closers of a legacy op (its closing transition's By).
 	closerAPI   = "legacy:api"
@@ -78,20 +79,65 @@ var gatesOff = []string{"GC_OPS_CONTENT=off", "GC_OPS_CONTROL=off", "GC_OPS_LIFE
 // x12Evidence reports whether this binary runs X12's evidence tier.
 func x12Evidence() bool { return os.Getenv(x12EvidenceEnv) == "1" }
 
-// x12Backend is the store arm X12 runs on: the evidence variant's, else
-// SQLite, production's sessions backend.
-func x12Backend(t *testing.T) storeArm {
+// The evidence parts (x12PartEnv).
+const (
+	x12PartMatrix = "matrix"
+	x12PartLoad   = "load"
+)
+
+// x12PartArms are the store arms each evidence part runs on. The crash arms
+// (the matrix part, the incapable-store arm with it) run on SQLite and
+// embedded Dolt, whose one-process store a crash leaves exactly as the
+// killed gc wrote it; the maintainers' 2026-10-23 ruling on #8217 keeps
+// embedded Dolt for them only. The load runs on SQLite and on the bd-dolt
+// arm (harness_bddolt_test.go): a workspace bd provisioned on a dolt
+// sql-server, served natively, the store a direct-server city gets. That arm
+// stands in for the load arm the ruling asked for, a bd-served Dolt arm on
+// the topology real cities run, until a maintainer accepts the substitute or
+// ga-ve3tjw adds that arm: that topology serves sessions through BdStore,
+// which records no ops with the pinned bd. On embedded Dolt the load's six
+// rounds outlast any test timeout (ga-rqb904).
+var x12PartArms = map[string][]storeArm{
+	x12PartMatrix: {armSQLite, armDolt},
+	x12PartLoad:   {armSQLite, armBdDolt},
+}
+
+// x12ArmFor is the store arm the evidence part runs on backend, or why it
+// does not.
+func x12ArmFor(part, backend string) (storeArm, error) {
+	arms, ok := x12PartArms[part]
+	if !ok {
+		return "", fmt.Errorf("%s=%q: want %s or %s", x12PartEnv, part, x12PartMatrix, x12PartLoad)
+	}
+	if arm := storeArm(backend); slices.Contains(arms, arm) {
+		return arm, nil
+	}
+	return "", fmt.Errorf("%s=%q: the %s part runs on %v", x12BackendEnv, backend, part, arms)
+}
+
+// x12BackendFrom is the store arm a test of part runs on, read from getenv:
+// SQLite, production's sessions backend, outside the evidence tier; in it,
+// the variant's backend, provided the variant is part's. A variant's env
+// run on another part's test (its -test.run widened) is refused, not run on
+// an arm that part does not cover.
+func x12BackendFrom(getenv func(string) string, part string) (storeArm, error) {
+	if getenv(x12EvidenceEnv) != "1" {
+		return armSQLite, nil
+	}
+	if got := getenv(x12PartEnv); got != part {
+		return "", fmt.Errorf("%s=%q, but this is a %s-part test: run it from its own evidence variant", x12PartEnv, got, part)
+	}
+	return x12ArmFor(part, getenv(x12BackendEnv))
+}
+
+// x12Backend is the store arm X12's test of part runs on (x12BackendFrom).
+func x12Backend(t *testing.T, part string) storeArm {
 	t.Helper()
-	if !x12Evidence() {
-		return armSQLite
+	arm, err := x12BackendFrom(os.Getenv, part)
+	if err != nil {
+		t.Fatal(err)
 	}
-	switch b := storeArm(os.Getenv(x12BackendEnv)); b {
-	case armSQLite, armDolt:
-		return b
-	default:
-		t.Fatalf("%s=%q: want sqlite or dolt", x12BackendEnv, b)
-		return ""
-	}
+	return arm
 }
 
 // x12Modes are the recording modes X12 runs in. off is the baseline.
@@ -757,7 +803,7 @@ func (c *x12City) opsByID() map[string]opjournal.Op {
 }
 
 // pollGap is how often a wait re-reads the store: a fresh embedded-Dolt
-// handle is slow to open, so the Dolt arm polls less often.
+// handle is slow to open, so the embedded-Dolt arm polls less often.
 func (c *x12City) pollGap() time.Duration {
 	if c.arm == armDolt {
 		return time.Second
@@ -898,9 +944,9 @@ func x12Baselines(t *testing.T) map[string]x12Shape {
 }
 
 func learnBaselines(t *testing.T) map[string]x12Shape {
-	// Two on_demand sessions for the mail notify and spare, and two per
-	// surface for the lifecycle signatures.
-	c := newX12City(t, armSQLite, "off", 6, false)
+	// Two on_demand sessions for the mail notify and spare, two per surface
+	// for the lifecycle signatures, and one for the CLI's request-restart.
+	c := newX12City(t, armSQLite, "off", 7, false)
 	c.start("")
 	w := c.worker()
 	out := map[string]x12Shape{}
@@ -1019,6 +1065,12 @@ func learnLifecycle(t *testing.T, c *x12City, surface string, out map[string]x12
 		s.gen = generation(c.sessionRow(s.id))
 	}
 	learn(c.materialize(false), "close")
+	if surface == surfaceCLI {
+		// OJ-6's in-session restart requests: request-restart on its own
+		// session, a handoff on the always-on worker it restarts.
+		learn(c.materialize(false), "request-restart")
+		learn(c.worker(), "handoff")
+	}
 }
 
 // shapeReminderBatch is the framing of a batch of queued reminders, its
@@ -1088,5 +1140,40 @@ func (c *x12City) send(v x12Verb, s x12Session, key, payload string, extra []str
 	if v.surface == surfaceAPI {
 		return c.apiPost(v, s.id, key, payload)
 	}
-	return c.cliRun(extra, v.cliArgs(s, key, payload)...)
+	if v.inSession {
+		extra = append(append([]string(nil), extra...), c.inSessionEnv(s)...)
+	}
+	a := c.cliRun(extra, v.cliArgs(s, key, payload)...)
+	if v.noJSON && a.code == "" && a.status == 1 {
+		a.code = cliRefusalCode(a.stderr)
+	}
+	return a
+}
+
+// inSessionEnv is the environment of a process running inside session s:
+// its alias, its runtime name and its current incarnation's token, read
+// fresh from its row. GC_SESSION_ID stays unset, so the CLI's principal is
+// the operator, as operatorOpID derives.
+func (c *x12City) inSessionEnv(s x12Session) []string {
+	c.t.Helper()
+	row := c.sessionRow(s.id)
+	return []string{
+		"GC_ALIAS=" + s.name,
+		"GC_SESSION_NAME=" + row.Metadata["session_name"],
+		"GC_INSTANCE_TOKEN=" + row.Metadata["instance_token"],
+	}
+}
+
+// cliRefusalCode is the op refusal code a CLI verb with no --json names on
+// stderr, or "".
+func cliRefusalCode(stderr string) string {
+	switch {
+	case strings.Contains(stderr, " is in progress"):
+		return "op_in_progress"
+	case strings.Contains(stderr, " closed failed"):
+		return "op_already_failed"
+	case strings.Contains(stderr, "op journal cannot record this request"):
+		return "op_journal_unavailable"
+	}
+	return ""
 }

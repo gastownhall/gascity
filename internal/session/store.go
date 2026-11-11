@@ -680,7 +680,7 @@ func (s *Store) CloseWithoutReason(id string) error {
 // Callers use `if !sessFront.Backed() { return }` instead of reaching for the
 // raw embedded store to nil-check it.
 func (s *Store) Backed() bool {
-	return s != nil && s.store.Store != nil
+	return s != nil && s.store != (beads.SessionStore{})
 }
 
 // CircuitResetGeneration returns the persisted session-circuit-breaker reset
@@ -705,18 +705,21 @@ func (s *Store) CircuitResetGeneration(id string) (string, error) {
 // PersistedMarkers is a narrow typed view of the persisted session-attribute
 // markers the wait paths read off a session bead: the bead Title (used to build
 // the wait bead title), the tmux session_name, the continuation_epoch (stamped
-// onto wait beads as registered_epoch), and the sleep_reason (consulted when
-// clearing a wait-hold). It carries the raw bead fields verbatim.
+// onto wait beads as registered_epoch), the sleep_reason (consulted when
+// clearing a wait-hold), and the continuation_reset_pending marker (stamped
+// onto wait beads as registered_reset_pending). It carries the raw bead fields
+// verbatim.
 type PersistedMarkers struct {
-	Title             string
-	SessionName       string
-	ContinuationEpoch string
-	SleepReason       string
+	Title                    string
+	SessionName              string
+	ContinuationEpoch        string
+	SleepReason              string
+	ContinuationResetPending string
 }
 
 // PersistedMarkers returns the persisted Title / session_name /
-// continuation_epoch / sleep_reason markers for id, verbatim (each "" when
-// unset).
+// continuation_epoch / sleep_reason / continuation_reset_pending markers for
+// id, verbatim (each "" when unset).
 //
 // It is the front door for the raw store.Get(sessionID) + read .Title/.Metadata[...]
 // pattern in the wait registration (cmd_wait.go session-wait creation), the
@@ -731,10 +734,11 @@ func (s *Store) PersistedMarkers(id string) (PersistedMarkers, error) {
 		return PersistedMarkers{}, err
 	}
 	return PersistedMarkers{
-		Title:             b.Title,
-		SessionName:       b.Metadata["session_name"],
-		ContinuationEpoch: b.Metadata["continuation_epoch"],
-		SleepReason:       b.Metadata["sleep_reason"],
+		Title:                    b.Title,
+		SessionName:              b.Metadata["session_name"],
+		ContinuationEpoch:        b.Metadata["continuation_epoch"],
+		SleepReason:              b.Metadata["sleep_reason"],
+		ContinuationResetPending: b.Metadata["continuation_reset_pending"],
 	}, nil
 }
 
@@ -831,7 +835,7 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 // is returned unwrapped so Close can fall back. A non-nil guard vets every open
 // row the loop is about to close, the first read and each re-read alike; its
 // error aborts the close before the write.
-func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch, guard func(beads.Bead) error) (bool, error) {
+func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch, attempts int, guard func(beads.Bead) error) (bool, error) {
 	id := bead.ID
 	var conflict error
 	for attempt := 1; ; attempt++ {
@@ -850,8 +854,8 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 			return false, fmt.Errorf("closing session %q: %w", id, err)
 		}
 		conflict = err
-		if attempt == terminalCloseMaxAttempts {
-			return false, fmt.Errorf("closing session %q: %w %d times: %w", id, errCloseContended, terminalCloseMaxAttempts, conflict)
+		if attempt == attempts {
+			return false, fmt.Errorf("closing session %q: %w %d times: %w", id, errCloseContended, attempts, conflict)
 		}
 		bead, err = s.validatedBead(id)
 		if err != nil {
@@ -869,6 +873,15 @@ type CommitOpt func(*commitOpts)
 type commitOpts struct {
 	lease         *RuntimeLease
 	pastKillFence bool
+	attempts      int
+}
+
+// CommitAsOperator bounds a close's lost fences at operatorSuspendAttempts
+// instead of terminalCloseMaxAttempts: an operator's close stops the runtime
+// before it commits, so it competes with every controller write the tick
+// after the stop makes to the row, as an operator's suspend does.
+func CommitAsOperator() CommitOpt {
+	return func(o *commitOpts) { o.attempts = operatorSuspendAttempts }
 }
 
 // CommitUnder makes a close land only while every row it reads still records
@@ -898,8 +911,9 @@ func CommitPastKillFence() CommitOpt {
 // SQLite with a revision column, FileStore, a cache over one), terminal and
 // the closed status commit as ONE write fenced on the revision read, which
 // also clears the runtime lease record: a lost fence re-reads and checks
-// again, up to terminalCloseMaxAttempts, then CommitContended with the row
-// still open. It never degrades to a split write.
+// again, up to terminalCloseMaxAttempts (operatorSuspendAttempts under
+// CommitAsOperator), then CommitContended with the row still open. It never
+// degrades to a split write.
 //
 // Other stores (BdStore, the exec store, plain MemStore, a legacy SQLite
 // layout, conditional writes disabled), and a store that refuses the closer
@@ -920,7 +934,7 @@ func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, op
 			UnmintDisposition(d.info.ID, terminal) // the close did not land
 		}
 	}()
-	var o commitOpts
+	o := commitOpts{attempts: terminalCloseMaxAttempts}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -948,7 +962,7 @@ func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, op
 		return nil
 	}
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		closed, err := s.closeAtomically(closer, bead, terminal, guard)
+		closed, err := s.closeAtomically(closer, bead, terminal, o.attempts, guard)
 		switch {
 		case closeRefusals[err] != 0:
 			return closeRefusals[err], nil
@@ -1069,7 +1083,7 @@ func (s *Store) RollbackPendingCreateAtomicallyUnder(ctx context.Context, expect
 		if bead.Status == "closed" {
 			return nil
 		}
-		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
+		closed, err = s.closeAtomically(closer, bead, closePatch, terminalCloseMaxAttempts, func(open beads.Bead) error {
 			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) || (held != nil && !held.HoldsMeta(open.Metadata)) {
 				return errPendingCreateRollbackSuperseded
 			}

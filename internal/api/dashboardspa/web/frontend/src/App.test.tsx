@@ -1,5 +1,5 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -48,10 +48,7 @@ function LocationProbe() {
 function renderAt(path: string) {
   return render(
     <ThemeProvider>
-      <MemoryRouter
-        initialEntries={[path]}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <MemoryRouter initialEntries={[path]}>
         <App />
         <LocationProbe />
       </MemoryRouter>

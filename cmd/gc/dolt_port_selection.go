@@ -80,8 +80,35 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	if envPort != "" {
 		return envPort, nil
 	}
+	if port, ok := freeRecordedManagedDoltPort(cityPath, stateFile, layout); ok {
+		return strconv.Itoa(port), nil
+	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil
+}
+
+// freeRecordedManagedDoltPort returns the port the city last recorded for its
+// managed Dolt when no live server claimed it above and nothing else listens
+// on it now. Running sessions pin the port they were spawned with, so a
+// restart after the server died has to come back on it rather than re-walk
+// from the seed. The record is the provider state, or the published hint when
+// there is no provider state file; unlike validDoltRuntimeState it does not
+// require Running or a live pid.
+func freeRecordedManagedDoltPort(cityPath, stateFile string, layout managedDoltRuntimeLayout) (int, bool) {
+	state, err := readDoltRuntimeStateFile(stateFile)
+	if os.IsNotExist(err) {
+		hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath)
+		if hintErr != nil || !found {
+			return 0, false
+		}
+		state = hint
+	} else if err != nil {
+		return 0, false
+	}
+	if state.Port <= 0 || !samePath(strings.TrimSpace(state.DataDir), layout.DataDir) {
+		return 0, false
+	}
+	return state.Port, managedDoltPortAvailable(state.Port)
 }
 
 // liveOwnedDoltRuntimeState reports whether state still names the city's own

@@ -96,9 +96,9 @@ routing with `--on` satisfies that, because the sling normalizes the target into
 an **input convoy**, creating a one-item convoy that tracks your bead when the
 target is not already a convoy. That input convoy is not optional: `--no-convoy`
 suppresses only the ordinary routing auto-convoy, not the v2 input convoy. To run
-the workflow against a convoy you already have, pass that convoy as the target
-(`gc formula cook <formula> --attach <convoy-id>`). Launching such a formula bare
-with `-f` is rejected.
+the workflow against a convoy you already have, pass that convoy as the bead
+(`gc sling <agent> <convoy-id> --on <formula>`): a convoy target is used as the
+input convoy as is. Launching such a formula bare with `-f` is rejected.
 
 ## Formulas
 

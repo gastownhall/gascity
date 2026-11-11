@@ -2,14 +2,16 @@
 
 package conversationlane_test
 
-// X12's fault-free load (the OJ-8 design §9): one city per backend runs a
-// request mix in rounds off, auto, require, off, auto, require (embedded
-// Dolt and the gating tier: the first three; the gating tier with a small
-// mix), restarts its controller after
-// each recorded round and replays every request whose op closed. It asserts P4 (the op rows and the product's own replay
-// projection equal what the client saw), P1 and P5 over every request, and
-// measures R1 (refusals and unrecorded requests), R2 (latency on the 202
-// path) and R3 (op-row growth).
+// X12's fault-free load (the OJ-8 design §9): one city per backend (SQLite
+// and a bd-provisioned Dolt sql-server, served natively, x12PartArms) runs
+// a request mix in
+// rounds off, auto, require, off, auto, require (the gating tier: the first
+// three, with a small mix), restarts its controller after each recorded
+// round and replays every request whose op closed, within the load's budget.
+// It asserts P4 (the op rows and the product's own replay projection equal
+// what the client saw), P1 and P5 over every request, and measures R1
+// (refusals and unrecorded requests), R2 (latency on the 202 path) and R3
+// (op-row growth).
 
 import (
 	"fmt"
@@ -30,6 +32,77 @@ import (
 // x12StateWait bounds a load's wait for a session to reach a state; embedded
 // Dolt is slow to start one.
 const x12StateWait = 5 * time.Minute
+
+// x12LoadBudget is the wall time the evidence load must finish in, from its
+// city's creation to its last replay. The slowest bd-dolt load run alone
+// took 1h13m49s (2026-10-24), which leaves it about 16 minutes of headroom.
+// The evidence run command gives the binary 7200 s (BUILD.bazel), which
+// leaves the off baselines, the report and the cleanup the other 30
+// minutes; beside that load they took about 4.
+const x12LoadBudget = 90 * time.Minute
+
+// x12LoadBudgetFor is the wall-time budget of tier's load: x12LoadBudget
+// for the evidence load, none (0) for the gating tier's small one.
+func x12LoadBudgetFor(tier string) time.Duration {
+	if tier == "evidence" {
+		return x12LoadBudget
+	}
+	return 0
+}
+
+// x12LoadModes are the load's rounds: six on every evidence arm, three in
+// the gating tier.
+func x12LoadModes(evidence bool) []string {
+	modes := []string{"off", "auto", "require"}
+	if evidence {
+		modes = append(modes, modes...)
+	}
+	return modes
+}
+
+// x12RoundsProblem is why the rounds a load of tier ran are not the rounds
+// that tier runs (x12LoadModes), or "".
+func x12RoundsProblem(tier string, rounds []x12RoundGrowth) string {
+	want := x12LoadModes(tier == "evidence")
+	got := make([]string, len(rounds))
+	for i, r := range rounds {
+		got[i] = r.Mode
+	}
+	if slices.Equal(got, want) {
+		return ""
+	}
+	return fmt.Sprintf("the %s load ran the rounds %v, want %v", tier, got, want)
+}
+
+// x12BudgetProblem is why a load that took elapsed broke its wall-time
+// budget, or "" when it kept it or has none (the gating tier's 0).
+func x12BudgetProblem(budget, elapsed time.Duration) string {
+	if budget <= 0 || elapsed <= budget {
+		return ""
+	}
+	return fmt.Sprintf("the load took %s, over its %s budget", elapsed, budget)
+}
+
+// x12NotSucceeded is the report item of a well-formed request that did not
+// succeed, and whether it did not. A fault-free load provokes no failure,
+// so a well-formed request must succeed in every round: its client saw a
+// success class, and the op it recorded, once closed, did not fail. A
+// provoked cause is R1's.
+func x12NotSucceeded(r *x12LoadReq) (string, bool) {
+	if r.cause != "" {
+		return "", false
+	}
+	clientOK := strings.HasPrefix(r.class, classSucceeded)
+	opOK := !r.hasOp || r.op.Status != opjournal.StatusClosed || opClass(r.op, r.verb.message()) != classFailed
+	if clientOK && opOK {
+		return "", false
+	}
+	op := "no op"
+	if r.hasOp {
+		op = fmt.Sprintf("op %s %s (reason %q)", r.op.ID, outcomeText(r.op), r.op.Outcome.Reason)
+	}
+	return fmt.Sprintf("%s round %d %s key %q: client %s (%s); %s", r.mode, r.round+1, r.verb.name, r.key, r.class, r.orig, op), true
+}
 
 // x12LoadMix is one round's request counts.
 type x12LoadMix struct {
@@ -112,35 +185,29 @@ func TestX12FaultFreeLoad(t *testing.T) {
 		// alone, before the matrix's cities start.
 		t.Parallel()
 	}
-	arm := x12Backend(t)
-	baselines := x12Baselines(t)
+	arm := x12Backend(t, x12PartLoad)
+	// The evidence learns off's baselines first, alone, so a baseline
+	// failure stops it before rounds that run for up to an hour; the gating
+	// tier reads them only for its final checks.
+	var baselines map[string]x12Shape
+	if x12Evidence() {
+		baselines = x12Baselines(t)
+	}
 	mix := x12LoadMixFor()
 	tier := "gating"
 	if x12Evidence() {
 		tier = "evidence"
 	}
-	// The evidence runs each mode twice on SQLite. Embedded Dolt runs each
-	// once: a recorded round of the evidence mix takes over an hour there
-	// (2.5-28 s per recorded API request in the evidence run), so six
-	// rounds outlast any reasonable test timeout.
-	modes := []string{"off", "auto", "require"}
-	if x12Evidence() && arm == armSQLite {
-		modes = append(modes, modes...)
-	}
+	modes := x12LoadModes(x12Evidence())
+	began := time.Now()
 	c := newX12City(t, arm, "off", mix.sessionsNeeded()*len(modes), false)
 	c.start("")
-	record := x12LoadRecord{Tier: tier, Backend: string(arm), R1: map[string]map[string]int{}}
+	record := x12LoadRecord{Tier: tier, Backend: string(arm), R1: map[string]map[string]int{}, Budget: x12LoadBudgetFor(tier)}
 	fail := func(line, format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		record.Problem = append(record.Problem, "["+line+"] "+msg)
 		t.Errorf("[%s] %s", line, msg)
 	}
-	defer func() {
-		if t.Failed() && len(record.Problem) == 0 {
-			record.Problem = append(record.Problem, "[harness] "+t.Name()+" failed outside every recorded check; its log says why")
-		}
-		x12Report.addLoad(record)
-	}()
 	var all []*x12LoadReq
 	latency := map[string][]time.Duration{}
 	// R3 is measured over the recorded rounds: the op rows the store gained
@@ -149,6 +216,25 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	// round before it (the same mix, recording nothing).
 	opsBefore := -1
 	var rounds []x12RoundGrowth
+	// R3's retained measure: on an arm that collects, each round's growth is
+	// also read after a collection at its end, against the size the
+	// collection before it left.
+	var collected int64
+	if c.collectsGarbage() {
+		collected = c.collectGarbage()
+	}
+	defer func() {
+		if !record.Finished {
+			// The load stopped before its last round: its elapsed time is
+			// how far it got, and the harness item names the rounds it ran.
+			record.Elapsed = time.Since(began).Round(time.Second)
+			fail("harness", "%s", x12RoundsProblem(tier, rounds))
+		}
+		if t.Failed() && len(record.Problem) == 0 {
+			record.Problem = append(record.Problem, "[harness] "+t.Name()+" failed outside every recorded check; its log says why")
+		}
+		x12Report.addLoad(record)
+	}()
 	for round, mode := range modes {
 		c.setMode(mode)
 		c.restart("")
@@ -169,10 +255,24 @@ func TestX12FaultFreeLoad(t *testing.T) {
 			c.restart("")
 			c.replayRound(reqs, fail)
 		}
-		rounds = append(rounds, x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start})
+		rg := x12RoundGrowth{Mode: mode, Bytes: c.bindingSize() - start}
+		if c.collectsGarbage() {
+			after := c.collectGarbage()
+			retained := after - collected
+			rg.Retained, collected = &retained, after
+		}
+		rounds = append(rounds, rg)
 		all = append(all, reqs...)
 	}
+	record.Finished = true
+	record.Elapsed = time.Since(began).Round(time.Second)
 	newRows := len(c.allOps()) - opsBefore
+	if p := x12BudgetProblem(record.Budget, record.Elapsed); p != "" {
+		fail(x12LineBudget, "%s", p)
+	}
+	if p := x12RoundsProblem(tier, rounds); p != "" {
+		fail("harness", "%s", p)
+	}
 
 	// P4: every closed op of a well-formed recorded request; a mail
 	// notify has no replay surface (its key is its message's), so it is
@@ -226,10 +326,23 @@ func TestX12FaultFreeLoad(t *testing.T) {
 	x12Report.eval("P4", p4.Requests+p4.NotReplay)
 	record.P4 = p4
 
-	// P1 and P5 over every request; R1.
+	// P1 and P5 over every request; R1; and every well-formed request
+	// succeeds: the load provokes no fault. Only these checks read off's
+	// baselines, so the gating tier's rounds above do not wait for them:
+	// they run while another X12 test's city learns them (~110 s).
+	if baselines == nil {
+		baselines = x12Baselines(t)
+	}
 	x12Report.eval("R1", len(all))
 	for _, r := range all {
 		c.checkLoadRequest(r, baselines, fail)
+		if r.cause == "" {
+			record.WellFormed++
+		}
+		if item, bad := x12NotSucceeded(r); bad {
+			record.NotSucceeded = append(record.NotSucceeded, item)
+			fail(x12LineSucceeds, "%s", item)
+		}
 		surface := r.verb.surface
 		k := r.mode + " " + surface
 		if record.R1[k] == nil {
@@ -280,10 +393,14 @@ func retryableError(r *x12LoadReq) bool {
 }
 
 // x12RoundGrowth is one load round's physical growth of the sessions
-// binding, from its start to the end of its replays.
+// binding, from its start to the end of its replays, and, on an arm that
+// collects garbage at each round's end (x12City.collectsGarbage), Retained:
+// the binding's growth from the collection before the round to the one
+// after it.
 type x12RoundGrowth struct {
-	Mode  string `json:"mode"`
-	Bytes int64  `json:"bytes"`
+	Mode     string `json:"mode"`
+	Bytes    int64  `json:"bytes"`
+	Retained *int64 `json:"retained_bytes,omitempty"`
 }
 
 // loadRound runs one round's phase A.
@@ -749,14 +866,31 @@ func latencyRow(backend, mode, path string, ds []time.Duration) x12Latency {
 	return row
 }
 
-// bindingSize is the bytes on disk of the sessions binding.
-func (c *x12City) bindingSize() int64 {
-	root := filepath.Join(c.dir, ".gc", "lanes")
-	if c.arm == armDolt {
-		root = filepath.Join(c.workspaceRoot(), ".beads")
+// collectsGarbage reports whether R3 collects the binding's garbage at each
+// round's end: on the bd-dolt arm, whose server runs with automatic GC off
+// (doltServerConfig), every write leaves the chunks it replaced in the
+// server's journal until a collection, so its physical growth is mostly what
+// a collection frees.
+func (c *x12City) collectsGarbage() bool { return c.arm == armBdDolt }
+
+// collectGarbage stops the controller, runs DOLT_GC on the bd-dolt arm's
+// server with nothing writing, starts the controller again and returns the
+// binding's size after the collection.
+func (c *x12City) collectGarbage() int64 {
+	c.t.Helper()
+	c.stop()
+	if err := c.doltServer.collectGarbage(); err != nil {
+		c.t.Fatal(err)
 	}
+	size := c.bindingSize()
+	c.start("")
+	return size
+}
+
+// bindingSize is the bytes on disk under the sessions binding's dir.
+func (c *x12City) bindingSize() int64 {
 	var n int64
-	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(c.bindingDir(), func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
@@ -768,10 +902,96 @@ func (c *x12City) bindingSize() int64 {
 	return n
 }
 
+// x12Physical is one of R3's measures (x12Measure): the recorded rounds'
+// growth, that less each one's preceding off round, and that over the op
+// rows the store gained (PerOp), or, when no figure per op can be stated,
+// Note says why.
+type x12Physical struct {
+	RecordedBytes int64
+	OverOff       int64
+	PerOp         *float64
+	Note          string
+}
+
+// x12Measure is how R3 reads a round's growth: physical, the binding's
+// growth on disk over the round, or retained, what of it is left after a
+// garbage collection at the round's end (x12City.collectGarbage).
+type x12Measure struct {
+	name string
+	// shrank says why a round of this measure can shrink.
+	shrank string
+	bytes  func(x12RoundGrowth) int64
+}
+
+var (
+	x12MeasurePhysical = x12Measure{name: "physical", shrank: "so the store compacted mid-load", bytes: func(r x12RoundGrowth) int64 { return r.Bytes }}
+	x12MeasureRetained = x12Measure{name: "retained", shrank: "so the round's collection freed more than the round kept", bytes: func(r x12RoundGrowth) int64 { return *r.Retained }}
+)
+
+// x12PhysicalGrowth is R3's physical measure over the load's rounds, in
+// order, and the op rows the store gained over the recorded ones. A figure
+// per op needs every recorded round to follow an off round, no round to
+// have shrunk (a store that compacted itself mid-load measures its
+// compaction, not its ops), each recorded round to have grown no less than
+// the off round before it (an off round that grew more carried growth the
+// ops did not cause, such as a write-ahead log reaching its high-water
+// mark, and a total over off would only net rounds of opposite sign), and
+// op rows to divide by.
+func x12PhysicalGrowth(rounds []x12RoundGrowth, newRows int) x12Physical {
+	return x12GrowthBy(x12MeasurePhysical, rounds, newRows)
+}
+
+// x12RetainedGrowth is R3's retained measure, by x12PhysicalGrowth's rules,
+// over rounds that each carry one; on a load whose rounds carry none (an arm
+// that does not collect) it is the zero measure, with no note.
+func x12RetainedGrowth(rounds []x12RoundGrowth, newRows int) x12Physical {
+	if len(rounds) == 0 || slices.ContainsFunc(rounds, func(r x12RoundGrowth) bool { return r.Retained == nil }) {
+		return x12Physical{}
+	}
+	return x12GrowthBy(x12MeasureRetained, rounds, newRows)
+}
+
+// x12GrowthBy is x12PhysicalGrowth's rules applied to measure m.
+func x12GrowthBy(m x12Measure, rounds []x12RoundGrowth, newRows int) x12Physical {
+	var p x12Physical
+	var lastOff int64
+	haveOff, unpaired := false, false
+	below := ""
+	for i, rg := range rounds {
+		b := m.bytes(rg)
+		if b < 0 && p.Note == "" {
+			p.Note = fmt.Sprintf("no %s figure per op: round %d (%s) shrank by %d bytes, %s", m.name, i+1, rg.Mode, -b, m.shrank)
+		}
+		if rg.Mode == "off" {
+			lastOff, haveOff = b, true
+			continue
+		}
+		unpaired = unpaired || !haveOff
+		if haveOff && b < lastOff && below == "" {
+			below = fmt.Sprintf("no %s figure per op: round %d (%s) grew %d bytes less than the off round before it (%d bytes), so that off round carried growth the ops did not cause", m.name, i+1, rg.Mode, lastOff-b, lastOff)
+		}
+		p.RecordedBytes += b
+		p.OverOff += b - lastOff
+	}
+	switch {
+	case p.Note != "":
+	case unpaired:
+		p.Note = fmt.Sprintf("no %s figure per op: a recorded round has no off round before it to set it against", m.name)
+	case below != "":
+		p.Note = below
+	case newRows <= 0:
+		p.Note = fmt.Sprintf("no %s figure per op: the store gained no op rows", m.name)
+	default:
+		perOp := float64(p.OverOff) / float64(newRows)
+		p.PerOp = &perOp
+		p.Note = fmt.Sprintf("%.0f %s bytes per op over the off round", perOp, m.name)
+	}
+	return p
+}
+
 // growth is R3 over the load's recorded requests: newRows is how many op
 // rows the store gained over the recorded rounds, measured, not derived from
-// the requests; the physical figure per op is each recorded round's growth
-// less the growth of the off round before it, over newRows.
+// the requests; the physical measure is x12PhysicalGrowth's.
 func (c *x12City) growth(reqs []*x12LoadReq, newRows int, rounds []x12RoundGrowth) x12Growth {
 	g := x12Growth{LogicalByKind: map[string]x12Size{}, NewRows: newRows, Rounds: rounds}
 	seen := map[string]bool{}
@@ -782,16 +1002,10 @@ func (c *x12City) growth(reqs []*x12LoadReq, newRows int, rounds []x12RoundGrowt
 		g.Recorded++
 		seen[r.opID] = true
 	}
-	var lastOff int64
-	haveOff := false
-	for _, rg := range rounds {
-		if rg.Mode == "off" {
-			lastOff, haveOff = rg.Bytes, true
-			continue
-		}
-		g.PhysicalBytes += rg.Bytes
-		g.PhysicalOverOff += rg.Bytes - lastOff
-	}
+	physical := x12PhysicalGrowth(rounds, newRows)
+	g.PhysicalBytes, g.PhysicalOverOff, g.PhysicalPerOp, g.PhysicalNote = physical.RecordedBytes, physical.OverOff, physical.PerOp, physical.Note
+	retained := x12RetainedGrowth(rounds, newRows)
+	g.RetainedBytes, g.RetainedOverOff, g.RetainedPerOp, g.RetainedNote = retained.RecordedBytes, retained.OverOff, retained.PerOp, retained.Note
 	sizes := map[string][]int{}
 	c.mustStore(func(raw beads.Store, _ *opjournal.Store) error {
 		for id := range seen {
@@ -834,21 +1048,16 @@ func (c *x12City) growth(reqs []*x12LoadReq, newRows int, rounds []x12RoundGrowt
 		logicalRows += len(ns)
 		g.LogicalByKind[kind] = x12Size{N: len(ns), Mean: float64(sum) / float64(len(ns)), P95: ns[min(len(ns)-1, int(0.95*float64(len(ns))))]}
 	}
-	physical := "no off round to set it against"
-	if haveOff && g.NewRows > 0 {
-		g.PhysicalPerOp = float64(g.PhysicalOverOff) / float64(g.NewRows)
-		physical = fmt.Sprintf("%.0f physical bytes per op over the off round", g.PhysicalPerOp)
-	}
 	mean := 0.0
 	if logicalRows > 0 {
 		mean = float64(total) / float64(logicalRows)
 	}
-	g.DailyFormulaMD = fmt.Sprintf("bytes per day = ops per day × %.0f logical bytes per op (%s)", mean, physical)
+	g.DailyFormulaMD = fmt.Sprintf("bytes per day = ops per day × %.0f logical bytes per op", mean)
 	if v := os.Getenv(x12DailyOpsEnv); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			g.DailyOps = n
 			g.DailyBytes = float64(n) * mean
-			g.DailyFormulaMD = fmt.Sprintf("%d ops per day × %.0f logical bytes = %.0f bytes per day (%s)", n, mean, g.DailyBytes, physical)
+			g.DailyFormulaMD = fmt.Sprintf("%d ops per day × %.0f logical bytes = %.0f bytes per day", n, mean, g.DailyBytes)
 		}
 	}
 	return g

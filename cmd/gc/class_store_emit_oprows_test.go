@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/eventfact"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // recordJournalRings swaps the CLI emitter's controller doorbell for one
@@ -124,7 +125,7 @@ func TestCLIJournalRowWritesReachOpChangedThroughTheDoorbell(t *testing.T) {
 	}
 	f := newLaneFixtureOver(t, cache)
 	cs := &controllerState{cityBeadStore: cache, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
-	h := newConversationLaneHost(cs, nil)
+	h := newConversationLaneHost(cs, nil, session.StopRequestsLive)
 	h.state, h.reason = laneHostStateOff, "test: no lane runs"
 	registerLaneHost(ctx, f.dir, h)
 	var replies []string
@@ -206,7 +207,7 @@ func newDoorbellRig(t *testing.T, leaf, backing beads.Store, answer func(n int) 
 	r.cache = cache
 	r.f = newLaneFixtureOver(t, cache)
 	r.cs = &controllerState{cityBeadStore: cache, cfg: r.f.cfg, sp: r.f.sp, cityPath: r.f.dir, beadsQuiescent: new(atomic.Bool)}
-	r.h = newConversationLaneHost(r.cs, nil)
+	r.h = newConversationLaneHost(r.cs, nil, session.StopRequestsLive)
 	r.h.ctx = ctx
 	r.h.state, r.h.reason = laneHostStateOff, "test: no lane runs"
 	registerLaneHost(ctx, r.f.dir, r.h)

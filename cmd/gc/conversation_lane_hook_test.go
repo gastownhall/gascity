@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +39,12 @@ type hookLaneHarness struct {
 	// deadline is the hook deadline the pass releases a refused batch by.
 	deadline time.Time
 	// room is the room the hook context has for the lane text.
-	room    int
-	emitErr error
-	emitted []string
+	room int
+	// stopReading is the pass's reading of the row's stop request; the zero
+	// value reads it live, as an unknown controller mode does.
+	stopReading session.StopRequestReading
+	emitErr     error
+	emitted     []string
 	// leases are the leases of the ops open when each output was written.
 	leases []opjournal.Lease
 	stderr bytes.Buffer
@@ -87,6 +91,9 @@ func (h *hookLaneHarness) pass() hookLanePass {
 			return err
 		},
 		stampDelivered: true,
+		stopReading: func() (session.StopRequestReading, error) {
+			return h.stopReading, nil
+		},
 	}
 }
 
@@ -206,8 +213,8 @@ func TestHookLanePassJoinsTheTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, info := f.view(t)
-	rec := &hookLaneRecordingExec{hookLaneExec: &hookLaneExec{pass: h.pass(), info: info}}
+	view, row := f.view(t)
+	rec := &hookLaneRecordingExec{hookLaneExec: &hookLaneExec{pass: h.pass(), info: row.info, stop: row.stop}}
 	res, err := lane.Pass(context.Background(), view, rec)
 	if err != nil || res.Done != opjournal.DoneAccepted {
 		t.Fatalf("Pass = %+v, %v; want accepted", res, err)
@@ -508,15 +515,68 @@ func TestHookLanePassTokenlessRow(t *testing.T) {
 }
 
 // TestHookLanePassHonorsTheContentGate proves a row the content gate blocks
-// (draining) takes nothing in band.
+// takes nothing in band: a draining row, and a row v2 asked to stop at its
+// generation, which the hook, holding no latch, reads by the controller's
+// latched mode, live under v2 or when the mode is unknown (V2-18). Another
+// generation's request blocks nothing, and neither does a request read as
+// residue, as a controller that latched legacy has the hook read it.
 func TestHookLanePassHonorsTheContentGate(t *testing.T) {
-	h := newHookLaneHarness(t, func(meta map[string]string) { meta["state"] = string(session.StateDraining) })
-	op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
-	if out := h.run(t); out.emitted {
-		t.Fatalf("outcome = %+v; want nothing written into a draining session", out)
+	for _, tc := range []struct {
+		name    string
+		opt     laneFixtureOpt
+		reading session.StopRequestReading
+		emit    bool
+	}{
+		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, session.StopRequestsLive, false},
+		{"draining, stop requests read as residue", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }, session.StopRequestsIgnored, false},
+		{"stop requested at the row's generation", laneStopRequestedAt(1), session.StopRequestsLive, false},
+		{"stop request of another generation", laneStopRequestedAt(2), session.StopRequestsLive, true},
+		{"stop request read as residue", laneStopRequestedAt(1), session.StopRequestsIgnored, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookLaneHarness(t, tc.opt)
+			h.stopReading = tc.reading
+			op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
+			out := h.run(t)
+			if out.emitted != tc.emit {
+				t.Fatalf("outcome = %+v; want emitted %v", out, tc.emit)
+			}
+			if cur := h.f.get(t, h.st, op.ID); !tc.emit && cur.Attempt != 0 {
+				t.Fatalf("op attempt %d; want untouched", cur.Attempt)
+			}
+		})
 	}
-	if cur := h.f.get(t, h.st, op.ID); cur.Attempt != 0 {
-		t.Fatalf("op attempt %d; want untouched", cur.Attempt)
+}
+
+// TestHookLanePassHoldsTheDrainNotice (V2-18) pins the scope of the drain
+// notice's exemption from draining and stop_requested: it is the lane
+// executors' (the controller's lane host and the CLI's inline pass), which
+// admit the notice's class. The hook admits no class, so a draining or
+// stop-requested row holds the notice in band too, and the controller's
+// lane host, which proposes it only when it can type into the session,
+// delivers it.
+func TestHookLanePassHoldsTheDrainNotice(t *testing.T) {
+	drainNotice := func(r *opjournal.Request) {
+		r.Producer = opjournal.Producer{Principal: laneDrainNoticeClass.Principal, Actor: opjournal.ActorController}
+		r.Policy.Message = opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly}
+	}
+	for _, tc := range []struct {
+		name string
+		opt  laneFixtureOpt
+	}{
+		{"draining", func(meta map[string]string) { meta["state"] = string(session.StateDraining) }},
+		{"stop requested at the row's generation", laneStopRequestedAt(1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookLaneHarness(t, tc.opt)
+			op := h.f.propose(t, h.st, h.f.msg("drain", opjournal.RoleNotice, "wrap up", drainNotice))
+			if out := h.run(t); out.emitted {
+				t.Fatalf("outcome = %+v; want the drain notice held", out)
+			}
+			if cur := h.f.get(t, h.st, op.ID); cur.Status != opjournal.StatusSubmitted || cur.Attempt != 0 {
+				t.Fatalf("op %s attempt %d; want it submitted and untouched", cur.Status, cur.Attempt)
+			}
+		})
 	}
 }
 
@@ -765,6 +825,8 @@ func newHookLaneDrainFixture(t *testing.T) *hookLaneDrainFixture {
 	t.Cleanup(func() { hookLanePoke = prevPoke })
 	prevStore := hookLaneSessionStore
 	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store { return f.sessions }
+	// No controller answers by default: the mode is unknown.
+	setLaneControllerMode(t, reconcilerLegacy, false)
 	t.Cleanup(func() { hookLaneSessionStore = prevStore })
 	f.st, err = opjournal.NewLaneStore(beads.SessionStore{Store: f.sessions}, clock.Real{})
 	if err != nil {
@@ -887,7 +949,7 @@ func (f *hookLaneDrainFixture) maybeDeliver(t *testing.T, op opjournal.Op) opjou
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, _, _, err := readConversationLaneView(sessionFrontDoor(f.sessions), f.sessionID)
+	view, _, _, err := readConversationLaneView(sessionFrontDoor(f.sessions), f.sessionID, session.StopRequestsLive)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,6 +1305,103 @@ func TestHookLanePokeLeg(t *testing.T) {
 	}
 }
 
+// TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode (V2-18) drives
+// the injecting drain over a row carrying v2's stop request at its
+// generation. The hook holds no latch, so it reads the request by the mode
+// the city's controller latched: a legacy controller, as after a rollback,
+// has it read the request as residue at once, so the notice reaches the
+// model; under v2, or with no controller answering, it honors the request
+// and leaves the notice for the controller's lane host.
+func TestNudgeDrainInjectLaneReadsStopRequestsByTheLatchedMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      reconcilerMode
+		known     bool
+		delivered bool
+	}{
+		{"latched legacy", reconcilerLegacy, true, true},
+		{"latched v2", reconcilerV2, true, false},
+		{"mode unknown", reconcilerLegacy, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			row, err := f.sessions.Get(f.sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gen, err := strconv.ParseInt(row.Metadata["generation"], 10, 64)
+			if err != nil {
+				t.Fatalf("row generation %q: %v", row.Metadata["generation"], err)
+			}
+			for k, v := range stopBeginPatch(censusRow{Incarnation: gen}, drainIdle, laneT0) {
+				if err := f.sessions.SetMetadata(f.sessionID, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			asks := setLaneControllerMode(t, tc.mode, tc.known)
+			op := f.propose(t, "mail arrived")
+			run := f.drain(t)
+			if run.code != 0 {
+				t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+			}
+			if !slices.Equal(asks.cities, []string{f.cityDir}) || !slices.Equal(asks.legs, []time.Duration{laneHookPokeTimeout}) {
+				t.Fatalf("mode asks %+v; want one for the city %s with the doorbell's leg %s", asks, f.cityDir, laneHookPokeTimeout)
+			}
+			if noted := strings.Contains(run.stderr, "stop request is honored because the controller's session reconciler is unknown"); noted == tc.known {
+				t.Fatalf("stderr %q: unknown-mode note %v, want %v", run.stderr, noted, !tc.known)
+			}
+			cur, err := f.st.Get(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(run.stdout, "mail arrived"); got != tc.delivered {
+				t.Fatalf("hook output carries the notice: %v, want %v:\n%s", got, tc.delivered, run.stdout)
+			}
+			switch {
+			case tc.delivered && (cur.Outcome.Arm != opjournal.ArmSucceeded || cur.Outcome.Result.Via != laneViaHook):
+				t.Fatalf("op %s = %s %+v; want succeeded via hook", cur.ID, cur.Status, cur.Outcome)
+			case !tc.delivered && (cur.Status == opjournal.StatusClosed || cur.Attempt != 0):
+				t.Fatalf("op %s = %s attempt %d; want it left for the lane host", cur.ID, cur.Status, cur.Attempt)
+			}
+		})
+	}
+}
+
+// TestNudgeDrainInjectLaneAsksTheModeOnlyWhenDue (V2-18) proves the drain
+// asks the controller for its latched mode only once the in-band pass runs:
+// with nothing due it asks nothing.
+func TestNudgeDrainInjectLaneAsksTheModeOnlyWhenDue(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, false)
+	if run := f.drain(t); run.code != 0 {
+		t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+	}
+	if len(asks.cities) != 0 {
+		t.Fatalf("a drain with nothing due asked the controller's mode %d times, want none", len(asks.cities))
+	}
+	f.propose(t, "mail arrived")
+	if run := f.drain(t); run.code != 0 || !strings.Contains(run.stdout, "mail arrived") {
+		t.Fatalf("exit %d, stdout %q; stderr=%s", run.code, run.stdout, run.stderr)
+	}
+	if len(asks.cities) != 1 {
+		t.Fatalf("a drain with a notice due asked the controller's mode %d times, want once", len(asks.cities))
+	}
+}
+
+// TestNudgeDrainInjectLaneAsksTheModeWithinTheHookDeadline (V2-18) proves
+// the drain bounds its ask for the controller's latched mode by the hook's
+// own deadline: with little time left, the leg is shorter than the
+// doorbell's full timeout, never the fixed constant.
+func TestNudgeDrainInjectLaneAsksTheModeWithinTheHookDeadline(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
+	f.propose(t, "mail arrived")
+	withShortHookDeadline(t, func() { f.drain(t) })
+	if len(asks.legs) != 1 || asks.legs[0] <= 0 || asks.legs[0] >= laneHookPokeTimeout {
+		t.Fatalf("mode asks %+v; want one leg in (0, %s), bounded by the hook deadline", asks, laneHookPokeTimeout)
+	}
+}
+
 // TestNudgeDrainInjectLaneRingsLast proves the drain rings the lane host
 // once, after a Done, and only once the legacy nudge it carried is acked and
 // the session stamped: the doorbell never spends the time those need.
@@ -1492,8 +1651,12 @@ func TestNudgeDrainInjectLaneRunsNoPassWithoutRoom(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	resetHookBudgetProcessState(t)
+	asks := setLaneControllerMode(t, reconcilerLegacy, true)
 	op := f.propose(t, "mail arrived")
 	run := f.drain(t)
+	if len(asks.cities) != 0 {
+		t.Fatalf("a drain with no room asked the controller's mode %d times, want none: it asks only once the pass runs", len(asks.cities))
+	}
 	if strings.Contains(run.stdout, "mail arrived") || !strings.Contains(run.stdout, big) {
 		t.Fatalf("output carries the notice, or lost the legacy nudge:\n%.200s", run.stdout)
 	}
@@ -1712,10 +1875,14 @@ func TestNudgeDrainInjectLaneLeaseOutlivesTheHookDeadline(t *testing.T) {
 
 // doneStallingStore holds the guarded batch of a pass's Done until its
 // context ends, as a ledger too slow to settle in the hook's time would, and
-// records the deadline each held batch ran under.
+// records the deadline each held batch ran under. With returnAfter set, the
+// held batch returns only once the wall clock is past it: a slow ledger's
+// answer comes some time after the Done's context ended, never at the very
+// instant its timer fires.
 type doneStallingStore struct {
 	laneTestStore
-	deadlines *[]time.Time
+	deadlines   *[]time.Time
+	returnAfter time.Time
 }
 
 func (s doneStallingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
@@ -1723,12 +1890,13 @@ func (s doneStallingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
 	if !ok {
 		return nil, false
 	}
-	return doneStallingBatcher{inner: inner, deadlines: s.deadlines}, true
+	return doneStallingBatcher{inner: inner, deadlines: s.deadlines, returnAfter: s.returnAfter}, true
 }
 
 type doneStallingBatcher struct {
-	inner     beads.GuardedBatcher
-	deadlines *[]time.Time
+	inner       beads.GuardedBatcher
+	deadlines   *[]time.Time
+	returnAfter time.Time
 }
 
 // ApplyGuarded holds the batch the lane labels as its Done and applies every
@@ -1743,6 +1911,16 @@ func (b doneStallingBatcher) ApplyGuarded(ctx context.Context, batch beads.Guard
 	}
 	*b.deadlines = append(*b.deadlines, deadline)
 	<-ctx.Done()
+	// returnAfter carries no monotonic reading, so time.Until reads the wall
+	// clock, as the hook's deadline checks do; the timer runs on the
+	// monotonic clock, so the loop asks the wall clock again until it agrees.
+	for !b.returnAfter.IsZero() {
+		wait := time.Until(b.returnAfter.Round(0))
+		if wait < 0 {
+			break
+		}
+		<-time.NewTimer(wait + time.Millisecond).C
+	}
 	return beads.GuardedResult{}, ctx.Err()
 }
 
@@ -1756,12 +1934,6 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	f := newHookLaneDrainFixture(t)
 	f.queueNudge(t)
 	op := f.propose(t, "mail arrived")
-	var deadlines []time.Time
-	prev := hookLaneSessionStore
-	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
-		return doneStallingStore{laneTestStore: f.sessions, deadlines: &deadlines}
-	}
-	t.Cleanup(func() { hookLaneSessionStore = prev })
 	prevStart := hookProcessStart
 	hookProcessStart = time.Now().Add(-100 * time.Hour)
 	t.Cleanup(func() { hookProcessStart = prevStart })
@@ -1769,6 +1941,19 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	// well inside the 2s, and its Done is held past them.
 	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(hookDeadlineArchiveMarginMax+2*time.Second)))
 	settleBy := hookLaneSettleBy()
+	// The Done's context ends at the settle-by time, and the drain's ack
+	// check allows an ack with exactly the margin left, so a Done answered
+	// at that very instant leaves the ack its time. A Done that outlasts
+	// the margin answers after it: the held batch returns once the wall
+	// clock is past the settle-by time. Returning on the context's own
+	// (monotonic) timer let a wall clock a millisecond behind it, as on a
+	// macOS runner, read the margin as still left (ga-oucanw).
+	var deadlines []time.Time
+	prev := hookLaneSessionStore
+	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
+		return doneStallingStore{laneTestStore: f.sessions, deadlines: &deadlines, returnAfter: settleBy.Add(50 * time.Millisecond)}
+	}
+	t.Cleanup(func() { hookLaneSessionStore = prev })
 	run := f.drain(t)
 	if !strings.Contains(run.stdout, "review queued work") || !strings.Contains(run.stdout, "mail arrived") {
 		t.Fatalf("combined output missing a part:\n%s\nstderr=%s", run.stdout, run.stderr)

@@ -45,8 +45,8 @@ func (e recordingDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery)
 func probeSteer(t *testing.T, f *laneFixture) bool {
 	t.Helper()
 	st := f.laneStore(t)
-	v, info := f.view(t)
-	p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+	v, row := f.view(t)
+	p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
@@ -97,8 +97,8 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 		f.sp.SteerModeValue = runtime.SteerProtocol
 		st := f.laneStore(t)
 		stampHost(t, f, st, 1, opjournal.KindMessage)
-		v, info := f.view(t)
-		p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+		v, row := f.view(t)
+		p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 		if err != nil || p.Caps.Live || p.Caps.Steer {
 			t.Fatalf("Probe = %+v, %v; want neither live nor steer", p.Caps, err)
 		}
@@ -120,10 +120,10 @@ func TestLaneExecSteerCapAsksAboutTheProbedRow(t *testing.T) {
 		t.Run(fmt.Sprint(answer), func(t *testing.T) {
 			f := newLaneFixture(t, func(m map[string]string) { m["provider"], m["builtin_ancestor"] = "my-wrap", "codex" })
 			st := f.laneStore(t)
-			v, info := f.view(t)
+			v, row := f.view(t)
 			deps := f.deps(st)
 			deps.sp = steerModeForName{Fake: f.sp, name: f.name, mode: runtime.SteerKeystroke}
-			e := newConversationLaneExec(deps, info)
+			e := newConversationLaneExec(deps, row)
 			type ask struct {
 				info session.Info
 				mode runtime.SteerMode
@@ -233,8 +233,8 @@ func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 				t.Fatalf("session reads supports_steer = %v, want %v: the runtime's steer mode with the family, not gated on the lane", got, want)
 			}
 			st := f.laneStore(t)
-			v, info := f.view(t)
-			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+			v, row := f.view(t)
+			p, err := newConversationLaneExec(f.deps(st), row).Probe(context.Background(), v)
 			if err != nil || p.Caps.Live || p.Caps.Steer {
 				t.Fatalf("Probe = %+v, %v; want neither live nor steer", p.Caps, err)
 			}

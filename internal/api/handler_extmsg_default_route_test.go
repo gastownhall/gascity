@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
@@ -20,7 +22,7 @@ func TestHandleExtMsgInboundDefaultRouteBindsAndColdWakes(t *testing.T) {
 		},
 	}
 
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named agent should not have a session before the inbound message")
 	}
 
@@ -54,7 +56,7 @@ func TestHandleExtMsgInboundDefaultRouteBindsAndColdWakes(t *testing.T) {
 
 	// The notify fan-out cold-wakes the routed agent's named session.
 	srv.waitForBackground()
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id == "" {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err != nil || id == "" {
 		t.Fatalf("default-routed inbound did not cold-wake myrig/worker: id=%q err=%v", id, err)
 	}
 }

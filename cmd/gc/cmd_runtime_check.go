@@ -39,6 +39,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares server-lifecycle is sent server-stop,
+which ends every session of the city it runs in, twice. The check runs it,
+and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
+and GC_EXEC_CITY_PATH name a fresh temporary directory, never the city you
+run the check from. A runtime that does not scope its server by
+GC_EXEC_CITY_PATH ends every session the server holds, so check it only
+against a backend that no live city uses.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.<name>] entry from the current
 city's packs, the check runs against that pack's declared command.

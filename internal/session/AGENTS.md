@@ -40,10 +40,43 @@ evidence from tests, source, an issue, or a commit.
   extraction candidates unless they are tests, fixtures, or migration/doctor
   repair code.
 - Keep provider-specific runtime behavior behind `internal/runtime`.
+- An operator's submitted message under lane authority (message in `[ops]
+  authoritative`: POST /submit and /messages, and `gc session submit`'s
+  local fallback) is accepted only through `lanesubmit.Accept`
+  (`internal/session/lanesubmit`); the projections keep only their answers.
+  None of them previews that op, reads the op under its key, proposes it or
+  resumes the session for it itself (SESSION-START-025). The one exception
+  is `gc session submit` while its own config does not list message and an
+  API's lane host still does (a rollback before the controller restarts):
+  it answers from the API's lane op as #8399 did, until OJ-21.
 - Deferred submits go through the Manager's `DeferredSubmitQueue`
   (`WithDeferredSubmitQueue`); no non-test session file touches the
   state.json nudge queue directly. Enforced by
   `TestSessionReachesTheNudgeQueueOnlyThroughDeferredSubmitQueue`.
+- The v2 stop request's keys (`stop_request_keys.go`) are read by cmd/gc's
+  `activeStop`, inside the reconciler, by cmd/gc's `v2SignaledUnacked`, for
+  legacy's rollback guard, and by `ReadStopRequest`, for the content gate,
+  whose one caller is the conversation lane's row read. `ReadStopRequest`
+  takes the reading of the controller's latched mode: residue
+  (`StopRequestsIgnored`) under legacy, live under v2. The controller's lane
+  host reads its own latch; every reader outside the controller (the CLI's
+  inline pass, the prompt hook) asks the running controller
+  (`reconciler-mode` on the controller socket), never the on-disk config,
+  and reads live when the mode is unknown. Only cmd/gc's
+  `conversation_lane_view.go` turns a mode into a reading
+  (`laneStopReading`, `controllerStopReading`); no other caller names
+  `StopRequestsLive` or `StopRequestsIgnored`, and only the controller's
+  lane host start, with its own latch, calls `laneStopReading`. The drain-protocol notice
+  (`GateContentDrainNotice`) is exempt from `stop_requested`, as from
+  `draining`, permanently, for the conversation lane's executors (the
+  controller's lane host and the CLI's inline pass), which report it as
+  `Probe.ContentAdmit`; the prompt hook's in-band pass admits no class, so
+  it holds the notice for the lane host. The single reader, the single
+  reading chooser and the key owners are guarded by
+  `TestStopRequestKeysAreNewKeys` and
+  `TestSessionReadsTheStopRequestOnlyInReadStopRequest`; the reader's rule
+  by `TestReadStopRequestAgreesWithActiveStop`; the published mode by
+  `TestQueryControllerReconcilerModeReadsTheControllersAnswer`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.

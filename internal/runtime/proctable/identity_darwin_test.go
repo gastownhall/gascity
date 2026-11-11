@@ -46,6 +46,34 @@ func TestDarwinProcessRecordUsesOneKinfoIdentity(t *testing.T) {
 	}
 }
 
+func TestDarwinProcessRecordReportsSessionLeader(t *testing.T) {
+	const eprocControllingTerminal = 0x1 // EPROC_CTTY
+	for _, test := range []struct {
+		name string
+		flag int32
+		want bool
+	}{
+		{name: "session leader", flag: eprocSessionLeader, want: true},
+		{name: "session leader with a controlling terminal", flag: eprocControllingTerminal | eprocSessionLeader, want: true},
+		{name: "member with a controlling terminal", flag: eprocControllingTerminal},
+		{name: "member", flag: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := unix.KinfoProc{
+				Proc:  unix.ExternProc{P_pid: 42, P_starttime: unix.Timeval{Sec: 123, Usec: 456}},
+				Eproc: unix.Eproc{Ppid: 11, Pgid: 42, Flag: test.flag},
+			}
+			record, ok := darwinProcessRecord(process)
+			if !ok {
+				t.Fatal("valid KinfoProc was rejected")
+			}
+			if record.SessionLeader != test.want {
+				t.Fatalf("SessionLeader = %t for e_flag %#x, want %t", record.SessionLeader, test.flag, test.want)
+			}
+		})
+	}
+}
+
 func TestDarwinKinfoMissingErrorsRequireGoneProbe(t *testing.T) {
 	for _, test := range []struct {
 		name     string

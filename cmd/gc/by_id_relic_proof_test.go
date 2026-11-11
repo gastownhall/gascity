@@ -624,6 +624,7 @@ func passthroughFakeBd(t *testing.T, cityPath string) string {
 	t.Helper()
 	disableManagedDoltRecoveryForTest(t)
 	origCityFlag, origRigFlag := cityFlag, rigFlag
+	pinTestBdInventory(t)
 	t.Cleanup(func() { cityFlag, rigFlag = origCityFlag, origRigFlag })
 	cityFlag, rigFlag = "", ""
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {

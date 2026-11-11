@@ -38,14 +38,14 @@ func TestWispGCClosureUsesBatchedDelete(t *testing.T) {
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
 		{
 			ID:        "mol-1.1",
-			Status:    "open",
+			Status:    "closed",
 			Type:      "task",
 			CreatedAt: now.Add(-2 * time.Hour),
 			ParentID:  "mol-1",
 		},
 		{
 			ID:        "mol-1.2",
-			Status:    "open",
+			Status:    "closed",
 			Type:      "task",
 			CreatedAt: now.Add(-2 * time.Hour),
 			ParentID:  "mol-1.1",
@@ -60,7 +60,7 @@ func TestWispGCClosureUsesBatchedDelete(t *testing.T) {
 	store := &batchGCStore{gcTestStore: base}
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
-	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+	purged, err := wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}

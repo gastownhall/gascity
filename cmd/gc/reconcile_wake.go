@@ -24,7 +24,11 @@ import (
 // reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
-	planner                     *planner
+	// mode is the session reconciler the controller latched, set by
+	// newControllerWiring; the controller socket publishes it
+	// (reconcilerModeCommand). A directly-built legacy wake is legacy.
+	mode    reconcilerMode
+	planner *planner
 	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
 	waitDepClosed func(id string)
 	// wakeReads, set with planner, wakes the external-reads lane on the

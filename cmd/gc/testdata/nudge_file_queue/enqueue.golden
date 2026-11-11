@@ -30,7 +30,7 @@ state.json:
 
 ### enqueue n-a again is idempotent
 result: <nil>
-rewrote_state: true
+rewrote_state: false
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
 op List {label=nudge:n-a limit=21}
 state.json:
@@ -105,7 +105,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -113,8 +120,7 @@ state.json:
 ### claim n-b
 result: [n-b] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-a include_closed limit=21}
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -155,7 +161,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -166,7 +179,6 @@ rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
 op List {label=nudge:n-c limit=21}
 op Create BEAD-3
-op List {label=nudge:n-a include_closed limit=21}
 op SetMetadataBatch BEAD-2
 op Close BEAD-2
 state.json:
@@ -209,7 +221,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -228,7 +247,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -239,8 +265,6 @@ rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 1
 op List {label=nudge:n-z limit=21}
 op Create BEAD-4
-op List {label=nudge:n-a include_closed limit=21}
-op List {label=nudge:n-b include_closed limit=21}
 state.json:
 {
   "pending": [
@@ -295,7 +319,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -314,7 +345,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -325,8 +363,6 @@ rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
 op List {label=nudge:n-old limit=21}
 op Create BEAD-5
-op List {label=nudge:n-a include_closed limit=21}
-op List {label=nudge:n-b include_closed limit=21}
 state.json:
 {
   "pending": [
@@ -395,7 +431,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -414,7 +457,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -427,9 +477,6 @@ op List {label=nudge:n-d limit=21}
 op Create BEAD-6
 op SetMetadataBatch BEAD-5
 op Close BEAD-5
-op List {label=nudge:n-a include_closed limit=21}
-op List {label=nudge:n-b include_closed limit=21}
-op List {label=nudge:n-old include_closed limit=21}
 state.json:
 {
   "pending": [
@@ -498,7 +545,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -517,7 +571,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-old",
@@ -532,7 +593,14 @@ state.json:
       "last_error": "expired",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-9"
+      "dead_at": "T-9",
+      "shadow": {
+        "state": "expired",
+        "reason": "expired",
+        "at": "T-9",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -541,9 +609,6 @@ state.json:
 result: [n-z] err=<nil>
 rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-a include_closed limit=21}
-op List {label=nudge:n-b include_closed limit=21}
-op List {label=nudge:n-old include_closed limit=21}
 op SetMetadataBatch BEAD-4
 op Close BEAD-4
 state.json:
@@ -600,7 +665,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -619,7 +691,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-old",
@@ -634,7 +713,14 @@ state.json:
       "last_error": "expired",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-9"
+      "dead_at": "T-9",
+      "shadow": {
+        "state": "expired",
+        "reason": "expired",
+        "at": "T-9",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-z",
@@ -650,23 +736,24 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-10"
+      "dead_at": "T-10",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-10",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
 
 ### enqueue dead n-z again leaves an open shadow
 result: <nil>
-rewrote_state: true
+rewrote_state: false
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
 op List {label=nudge:n-z limit=21}
 op Create BEAD-7
-op List {label=nudge:n-a include_closed limit=21}
-op List {label=nudge:n-b include_closed limit=21}
-op List {label=nudge:n-old include_closed limit=21}
-op List {label=nudge:n-z include_closed limit=21}
-op SetMetadataBatch BEAD-4
-op Close BEAD-4
 state.json:
 {
   "pending": [
@@ -721,7 +808,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -740,7 +834,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-old",
@@ -755,7 +856,14 @@ state.json:
       "last_error": "expired",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-9"
+      "dead_at": "T-9",
+      "shadow": {
+        "state": "expired",
+        "reason": "expired",
+        "at": "T-9",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-z",
@@ -771,7 +879,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-10"
+      "dead_at": "T-10",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-10",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }
@@ -846,7 +961,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-3"
+      "dead_at": "T-3",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-3",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-b",
@@ -865,7 +987,14 @@ state.json:
       "last_error": "superseded",
       "claimed_at": "T-4",
       "lease_until": "T-5",
-      "dead_at": "T-6"
+      "dead_at": "T-6",
+      "shadow": {
+        "state": "superseded",
+        "reason": "superseded",
+        "at": "T-6",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-old",
@@ -880,7 +1009,14 @@ state.json:
       "last_error": "expired",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-9"
+      "dead_at": "T-9",
+      "shadow": {
+        "state": "expired",
+        "reason": "expired",
+        "at": "T-9",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-z",
@@ -896,7 +1032,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-10"
+      "dead_at": "T-10",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-10",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     }
   ]
 }

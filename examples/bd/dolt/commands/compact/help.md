@@ -4,7 +4,8 @@ Flatten Dolt commit history on managed databases to reduce storage, then run a
 full garbage collection to reclaim the orphaned chunks. Without flags, compact
 runs in scheduled mode: it skips any database with fewer new commits than the
 threshold (default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`), flattens the
-rest, verifies row preservation, and runs `CALL DOLT_GC('--full')`.
+rest, verifies row preservation, and runs
+`CALL DOLT_GC('--full', '--archive-level=0')`.
 
 ## Which databases compact touches
 
@@ -64,10 +65,12 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 - **Databases with a remote are never flattened.** Any configured Dolt remote
   (a team remote, bd's `refs/dolt/data`, a federated city) means other clones
   may share the history, and a flatten would have to be force-pushed over it.
-  Compact skips the flatten and the push, and runs a bare `CALL DOLT_GC()`
-  instead. `.no-sync`, `--skip-fetch`, and `--dry-run` do not bypass this.
+  Compact skips the flatten and the push, and runs a bare
+  `CALL DOLT_GC('--archive-level=0')` instead. `.no-sync`, `--skip-fetch`, and
+  `--dry-run` do not bypass this.
   - A pending-GC marker left by an earlier flatten still gets its local
-    `DOLT_GC('--full')`. The deferred push is dropped, and the log says so.
+    `DOLT_GC('--full', '--archive-level=0')`. The deferred push is dropped, and
+    the log says so.
     The log also records the marker's `compacted_from_head` (the pre-flatten
     HEAD) before the GC runs.
   - A pending-push marker is held untouched. It is not force-pushed. Compact
@@ -101,7 +104,8 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 
 ## Flags
 
-- `--gc-only` — Reclaim orphaned chunks via `CALL DOLT_GC('--full')` on each
+- `--gc-only` — Reclaim orphaned chunks via
+  `CALL DOLT_GC('--full', '--archive-level=0')` on each
   database **regardless of commit count**, skipping the flatten path entirely.
   This is the sanctioned reclaim path for a database stranded *below* the
   flatten threshold with orphaned `oldgen` archives — for example after a prior
@@ -138,20 +142,32 @@ gc dolt compact --gc-only --only-db hq
 gc dolt compact --gc-only --dry-run
 ```
 
+## Archive level
+
+Every GC the compactor issues passes `--archive-level=0`, which writes classic
+table files. Dolt 2.3.3 through 2.5.1 default to a SimpleArchive that
+duplicates its zstd dictionaries once an archive holds more than 256 of them,
+and each duplicate pins about 137 KB of C memory for the whole GC, so a large
+store runs out of memory mid-reclaim. To check a store, run
+`dolt admin storage` in its directory: it prints a "Dictionary Count" per
+archive, and a count past 256 is the bad state.
+
 ## The full GC and the listener read timeout
 
-`CALL DOLT_GC('--full')` runs as one statement over the sql-server, and the
+`CALL DOLT_GC('--full', '--archive-level=0')` runs as one statement over the
+sql-server, and the
 listener's `read_timeout_millis` caps any statement that produces no rows for
 that long. The GC produces none until it finishes, so a reclaim that needs
 longer than the ceiling fails with `context canceled`, `connection was closed`,
 or `row read wait bigger than connection timeout` however healthy the store is.
 The compactor names the setting and the live value when the GC ran as long as
 the ceiling, and says the timeout did not end it when the GC was canceled
-sooner. Only the full GC gets that line; a failed bare `CALL DOLT_GC()` prints
-the server error without it.
+sooner. Only the full GC gets that line; a failed bare
+`CALL DOLT_GC('--archive-level=0')` prints the server error without it.
 
 A GC that fails after a flatten leaves a pending-GC marker that retries
-`DOLT_GC('--full')` on every later run; `--gc-only` leaves no marker. When the
+`DOLT_GC('--full', '--archive-level=0')` on every later run; `--gc-only` leaves
+no marker. When the
 compactor blamed the ceiling, every retry hits the same ceiling until it moves;
 when it said the timeout did not end the GC, raising `read_timeout_millis` is
 not the remedy.
@@ -164,7 +180,51 @@ each call at `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that
 outruns that fails with `rc=124` and no server error. A reclaim that needs
 longer belongs offline: follow the Recovery Procedure in
 `docs/troubleshooting/dolt-bloat-recovery.md` with
-`dolt gc --full --archive-level=1` as step 3.
+`dolt gc --full --archive-level=0` as step 3.
+
+## Live-database gate
+
+A flatten or GC can leave the server answering SQL while the database it
+rewrote is gone from disk. Compact checks every database it rewrites. Before
+the first rewrite it records whether `<data_dir>/<db>/.dolt` exists. After the
+flatten and after each GC, whether that rewrite succeeded or failed, it checks
+the entry again and asks the server
+`SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` on that database. The answer
+must name the database (in any case) and a resolvable HEAD; the HEAD may
+differ from the one before the rewrite. The probe is tried up to
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds (default `2`) between tries,
+and each try gets at most 30 seconds. An empty setting means its default. Any
+other value must be a whole number of at most nine digits, read as decimal
+(`08` is 8), and the attempts must be at least 1; otherwise compact exits 2
+before it takes its lock or queries Dolt. A server that answers within those
+tries is live, and the rewrite's own result decides whether the database
+succeeded.
+When the entry existed before and is gone after, or every try fails, compact:
+
+- writes a quarantine marker with reason
+  `live database unavailable after compaction`, the steps that ran, the step
+  that failed, the probe's failure, the data-dir entry before and after, and
+  the pre-compaction HEAD;
+- emits the `dolt.compact.quarantine` event and mails the compactor alert
+  recipient, as for any quarantine;
+- writes no pending-GC marker for that database; and
+- stops the run with exit 1. It touches no other database, and its last line
+  names the step that failed and the selected databases it never reached
+  (`none` when that database was the last one).
+
+The gate covers every rewrite: the flatten and its full GC, `--gc-only`, bare
+GC, and pending-GC retries, on databases with a remote too, and it runs before
+a pending marker is cleared or a push starts. A pass whose first rewrite is a
+GC first probes the database for its HEAD. If that probe fails, the GC does not
+start and the database fails without a quarantine.
+
+Any other failure on a database that is still live is counted as before, and
+the run goes on to the next database.
+
+Compact never clears this marker on its own. Restore the database first; see
+"Compact Quarantine Reasons" in
+`docs/troubleshooting/dolt-bloat-recovery.md`.
 
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
 runbook, including quarantine marker evidence, the safe marker-clear procedure,

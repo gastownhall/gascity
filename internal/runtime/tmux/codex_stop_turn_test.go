@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -95,7 +96,7 @@ func newCodexPaneSessionRunning(t *testing.T, turn string) (*session.Manager, se
 	}
 	writeCodexRollout(t, pane.rollout, time.Now().Add(-time.Minute), rollout...)
 	cityPath := t.TempDir()
-	mgr := session.NewManagerWithOptions(beads.NewMemStore(), sp, session.WithCityPath(cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, session.WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)

@@ -20,8 +20,9 @@ import (
 const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
-	decideStaleCreate       = "stale-create-exit"             // v5 S7: a pending create's StaleSelf runtime
-	decideRollbackHeld      = "rollback-held:occupant-corpse" // v5.10i: a foreign corpse inside the lease
+	decideStaleCreate       = "stale-create-exit"              // v5 S7: a pending create's StaleSelf runtime
+	decideRollbackHeld      = "rollback-held:occupant-corpse"  // v5.10i: a foreign corpse inside the lease
+	decideRollbackLive      = "rollback-held:live-incarnation" // #2081: another incarnation of this session runs
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
@@ -58,15 +59,21 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // whose live runtime reads StaleSelf. At the row's generation it is the
 // row's own runtime: the effect stops it, then a configured named row the
 // allocation wants awake is kept for A18 to relaunch on the same bead
-// (Relaunch) and any other is rolled back. An older epoch is another
-// incarnation's, Foreign: rolled back without a stop.
+// (Relaunch) and any other is rolled back. An older or newer epoch is
+// another incarnation of the row's session (#2081): the row holds under any
+// desire while that session has work in flight (sessionWorking), and once it
+// has none an older one is the exit's like any StaleSelf occupant
+// (Workless).
 func armRollback(r *rowFacts) (intent, bool) {
 	e, info := r.entry, r.row.Info
 	if !info.PendingCreateClaim || e == nil {
 		return intent{}, false
 	}
 	reason, relaunch, occupant := decideRollback, false, false
+	working := r.sessionWorking()
 	switch {
+	case working && e.Liveness == livenessAlive && liveIncarnation(info, r.w.Observed[r.k].Identity):
+		return intent{Reason: decideRollbackLive}, true // its work runs there: never stopped by the rollback
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
 	case e.Liveness == livenessOccupied && r.occupantCorpseInLease():
@@ -82,7 +89,22 @@ func armRollback(r *rowFacts) (intent, bool) {
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch, Occupant: occupant}, true
+	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch, Occupant: occupant, Workless: !working}, true
+}
+
+// sessionWorking reports in-progress work assigned to the row's session,
+// the in-flight work of whichever incarnation of it runs (#2081), or a read
+// that cannot rule it out: a partial pass or a partial assigned-work read.
+// Ending the hold ends a live runtime, so the work is matched as a kill gate
+// matches it, under the seat's RefuseScope (O4, refuseScope), not its
+// ReleaseScope alone. The pass's demand read is cached, so this is only the
+// hold's pre-filter: a Workless rollback's effect reads the work again,
+// live, before it stops or closes over a live incarnation (rollbackNeeds). Open work is no incarnation's in
+// flight: one the row no longer names cannot claim it (gc hook --claim
+// refuses its token), and the rollback releases it to the session's next
+// incarnation.
+func (r *rowFacts) sessionWorking() bool {
+	return r.partial || r.w.Demand.StorePartial || r.inProgressWorkAssigned(refuseScope(r.row.Info, worldCfg(r.w)))
 }
 
 // occupantCorpseInLease reports a pending create whose name another

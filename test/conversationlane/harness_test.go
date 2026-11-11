@@ -4,7 +4,9 @@ package conversationlane_test
 
 // The harness the conversation-lane evidence runs on: a city with one named
 // session on a file-backed fake exec runtime, its sessions class bound to
-// SQLite or to an embedded-Dolt beads workspace, the controller run as
+// SQLite, to an embedded-Dolt beads workspace or to the bd-dolt arm's (a
+// workspace bd provisioned on a dolt sql-server, served natively; X12's
+// load, harness_bddolt_test.go), the controller run as
 // `gc start --foreground` by the test-hooks gc, and the evidence read back
 // from the city's own store and the fake's delivery log.
 
@@ -42,6 +44,10 @@ type storeArm string
 const (
 	armSQLite storeArm = "sqlite"
 	armDolt   storeArm = "dolt"
+	// armBdDolt is a beads workspace bd provisioned on a dolt sql-server the
+	// city does not own, served natively over SQL: a direct-server city's
+	// store, not the default topology's BdStore (harness_bddolt_test.go).
+	armBdDolt storeArm = "bd-dolt"
 )
 
 // Activity modes of the fake runtime (fakeruntime's activity-mode file).
@@ -88,9 +94,12 @@ func parallelCity(t *testing.T) {
 // cityOptions shapes a city beyond the lane evidence's default. The zero
 // value is the X2, X6 and X8 city.
 type cityOptions struct {
-	// legacyOps omits [ops] authoritative, so message requests take their
-	// O0 (legacy) paths.
+	// legacyOps writes [ops] authoritative = [], so message requests take
+	// their O0 (legacy) paths even where the default would run the lane.
 	legacyOps bool
+	// defaultOps omits [ops] authoritative, so the builtin default decides
+	// (OJ-21 21a: the lane's kinds over a SQLite sessions store).
+	defaultOps bool
 	// opsMode, when set, is written as [ops] content, control and
 	// lifecycle ("off", "auto" or "require").
 	opsMode string
@@ -98,11 +107,27 @@ type cityOptions struct {
 	apiPort int
 	// onDemand names extra on_demand named sessions of the worker template.
 	onDemand []string
-	// opTypeMissing provisions the Dolt arm's workspace without the op bead
+	// opTypeMissing provisions a Dolt arm's workspace without the op bead
 	// type, so the op journal cannot propose.
 	opTypeMissing bool
+	// provisionerSchemaBehind provisions the bd-dolt arm as a bd one schema
+	// migration behind the linked beads library would: the workspace's
+	// schema cursor is rewound one version after bd provisions it, the shape
+	// the enterprise release line meets with every provisioning (its public
+	// bd writes v66, its linked library is at v69).
+	provisionerSchemaBehind bool
 	// realCadences runs controllers without GC_TEST_BACKSTOP_SPEEDUP.
 	realCadences bool
+	// pool runs the city's sessions on real tmux, under a socket root of
+	// the city's own, so the v2 reconciler and its work ladder run (v2
+	// refuses the exec runtime), and adds a pool of one seat that writes
+	// what is typed into it to a file (ladder_lane_test.go).
+	pool bool
+	// claudeTUI runs the city's sessions on real tmux, under a socket root
+	// of the city's own, and the named session as a claude-family provider
+	// whose agent is the scripted Claude Code-like TUI fakeclaude
+	// (busy_turn_lane_test.go).
+	claudeTUI bool
 }
 
 // laneCity is one isolated city.
@@ -124,6 +149,15 @@ type laneCity struct {
 	// read once the controller started it.
 	conv  string
 	token string
+	// doltServer is the bd-dolt arm's dolt sql-server, stopped after the
+	// city's controllers.
+	doltServer *doltServer
+	// bdSchema is the schema cursor the bd-dolt arm's bd provisioned its
+	// workspace at.
+	bdSchema int
+	// tmuxRoot is a real-tmux city's TMUX_TMPDIR: its tmux servers'
+	// sockets live there and nowhere else, so the cleanup kills only those.
+	tmuxRoot string
 	// mu guards logs, procs, conv and token.
 	mu sync.Mutex
 	// doltMu serializes the test's own store handles on the Dolt arm:
@@ -163,12 +197,21 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 		}
 	}
 	t.Cleanup(c.cleanup)
+	if opts.pool {
+		c.preparePool()
+	}
+	if opts.claudeTUI {
+		c.prepareClaudeTUI()
+	}
 	wrapper := filepath.Join(c.dir, ".gc", "fake-runtime.sh")
 	c.writeFile(wrapper, fmt.Sprintf("#!/bin/sh\nexec %q --state %q \"$@\"\n", fake, c.state), 0o755)
 	c.setActivityMode(activity)
 	c.writeFile(filepath.Join(c.dir, "city.toml"), c.cityTOML(wrapper), 0o644)
-	if arm == armDolt {
+	switch arm {
+	case armDolt:
 		c.provisionWorkspace()
+	case armBdDolt:
+		c.provisionServedWorkspace()
 	}
 	c.env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -180,6 +223,9 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 		"GC_DOLT=skip",
 		"DO_NOT_TRACK=1",
 	}
+	if c.tmuxRoot != "" {
+		c.env = append(c.env, "TMUX_TMPDIR="+c.tmuxRoot)
+	}
 	return c
 }
 
@@ -190,20 +236,34 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 // add an [api] table and add on_demand named sessions.
 func (c *laneCity) cityTOML(wrapper string) string {
 	binding := "provider = \"sqlite-beads\"\npath = \".gc/lanes\"\n"
-	if c.arm == armDolt {
+	if c.arm == armDolt || c.arm == armBdDolt {
 		binding = "provider = \"beads-workspace\"\nconfig_ref = \"lanes\"\n"
 	}
 	ops := "[ops]\nauthoritative = [\"message\"]\n"
-	if c.opts.legacyOps {
-		ops = ""
+	switch {
+	case c.opts.legacyOps:
+		ops = "[ops]\nauthoritative = []\n"
 		if m := c.opts.opsMode; m != "" {
-			ops = fmt.Sprintf("[ops]\ncontent = %q\ncontrol = %q\nlifecycle = %q\n", m, m, m)
+			ops += fmt.Sprintf("content = %q\ncontrol = %q\nlifecycle = %q\n", m, m, m)
 		}
+	case c.opts.defaultOps:
+		ops = ""
 	}
 	if c.opts.apiPort > 0 {
 		ops += fmt.Sprintf("\n[api]\nport = %d\nbind = \"127.0.0.1\"\n", c.opts.apiPort)
 	}
+	provider := "exec:" + wrapper
+	launch := `start_command = "sleep 100000"`
 	var extra strings.Builder
+	if c.opts.pool {
+		provider = "tmux"
+		extra.WriteString(c.poolTOML())
+	}
+	if c.opts.claudeTUI {
+		provider = "tmux"
+		launch = fmt.Sprintf("provider = %q", fakeClaudeProvider)
+		extra.WriteString(c.claudeProviderTOML())
+	}
 	for _, name := range c.opts.onDemand {
 		fmt.Fprintf(&extra, "\n[[named_session]]\nname = %q\ntemplate = %q\nmode = \"on_demand\"\n", name, sessionName)
 	}
@@ -214,7 +274,7 @@ name = %q
 provider = "file"
 
 [session]
-provider = "exec:%s"
+provider = %q
 
 %s
 [storage.classes]
@@ -229,21 +289,35 @@ nudges = "lanes"
 %s
 [[agent]]
 name = %q
-start_command = "sleep 100000"
+%s
 
 [[named_session]]
 template = %q
 mode = "always"
-%s`, filepath.Base(c.root), wrapper, ops, binding, sessionName, sessionName, extra.String())
+%s`, filepath.Base(c.root), provider, ops, binding, sessionName, launch, sessionName, extra.String())
 }
 
-// workspaceRoot is the Dolt arm's beads workspace (beadsworkspace's
+// workspaceRoot is the Dolt arms' beads workspace (beadsworkspace's
 // <city>/.gc/storage/<config_ref>).
 func (c *laneCity) workspaceRoot() string { return filepath.Join(c.dir, ".gc", "storage", "lanes") }
 
+// bindingDir is where the sessions binding's data sits on disk: the SQLite
+// binding, the embedded workspace's .beads, or the bd-dolt arm's server
+// data dir (that arm's workspace holds only bd's configuration).
+func (c *laneCity) bindingDir() string {
+	switch c.arm {
+	case armDolt:
+		return filepath.Join(c.workspaceRoot(), ".beads")
+	case armBdDolt:
+		return c.doltServer.dataDir
+	default:
+		return filepath.Join(c.dir, ".gc", "lanes")
+	}
+}
+
 // provisionWorkspace gives the Dolt arm's workspace the configuration a
 // serving workspace needs: the embedded backend, the binding's id prefix and
-// the coordination bead types the library's own set does not carry.
+// its bead types (customTypes).
 func (c *laneCity) provisionWorkspace() {
 	c.t.Helper()
 	root := c.workspaceRoot()
@@ -257,11 +331,11 @@ func (c *laneCity) provisionWorkspace() {
 	if err := storage.SetConfig(ctx, "issue_prefix", laneIDPrefix); err != nil {
 		c.t.Fatalf("configuring the workspace id prefix: %v", err)
 	}
-	types := `["session","convoy","wisp","wait","op","message","molecule","order","nudge","gate","event","step"]`
-	if c.opts.opTypeMissing {
-		types = `["session","convoy","wisp","wait","message","molecule","order","nudge","gate","event","step"]`
+	encoded, err := json.Marshal(c.customTypes())
+	if err != nil {
+		c.t.Fatal(err)
 	}
-	if err := storage.SetConfig(ctx, "types.custom", types); err != nil {
+	if err := storage.SetConfig(ctx, "types.custom", string(encoded)); err != nil {
 		c.t.Fatalf("configuring the workspace bead types: %v", err)
 	}
 }
@@ -304,6 +378,10 @@ func (c *laneCity) cleanup() {
 			<-p.done
 		}
 	}
+	if c.doltServer != nil {
+		c.doltServer.stop()
+	}
+	c.killTmuxServers()
 	if c.t.Failed() {
 		c.dumpLogs()
 	}
@@ -314,7 +392,11 @@ func (c *laneCity) cleanup() {
 // case.
 func (c *laneCity) dumpLogs() {
 	logs, _ := filepath.Glob(filepath.Join(c.root, "ctl-*.log"))
-	for _, l := range append(logs, filepath.Join(c.state, "deliveries.jsonl")) {
+	logs = append(logs, filepath.Join(c.state, "deliveries.jsonl"))
+	if c.doltServer != nil {
+		logs = append(logs, c.doltServer.log)
+	}
+	for _, l := range logs {
 		data, _ := os.ReadFile(l)
 		if len(data) > 64<<10 {
 			data = data[len(data)-64<<10:]
@@ -546,6 +628,9 @@ func (c *laneCity) apiUp() bool {
 }
 
 func (c *laneCity) boxUp() bool {
+	if c.opts.pool || c.opts.claudeTUI {
+		return true // no fake runtime: the session's row says it is up
+	}
 	_, err := os.Stat(filepath.Join(c.state, "box."+sessionName))
 	return err == nil
 }
@@ -560,7 +645,7 @@ func (c *laneCity) withStore(fn func(raw beads.Store, st *opjournal.Store) error
 	var raw beads.Store
 	var closeFn func() error
 	switch c.arm {
-	case armDolt:
+	case armDolt, armBdDolt:
 		s, err := beads.OpenNativeDoltStoreAt(context.Background(), c.workspaceRoot(), nil)
 		if err != nil {
 			return fmt.Errorf("opening the workspace: %w", err)

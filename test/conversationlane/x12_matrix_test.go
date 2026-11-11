@@ -50,6 +50,20 @@ type x12Verb struct {
 	// points apply, and the CLI falls back to local delivery when the API
 	// dies under it.
 	viaAPI bool
+	// inSession CLI verbs run from inside their session (OJ-6's restart
+	// requests): the child carries the session's alias, runtime name and
+	// instance token.
+	inSession bool
+	// noJSON CLI verbs have no --json: a refusal's code is read from stderr.
+	noJSON bool
+	// keyNamespace prefixes --key in the client key the verb's op is stored
+	// under: OJ-6's restart requests each keep their own, apart from gc
+	// session reset's raw --key.
+	keyNamespace string
+	// replaysSwept verbs answer a rerun of an op the sweeper closed after an
+	// effected crash from the session row: a handoff's restart op whose
+	// notice succeeded replays once the row shows the restart ran.
+	replaysSwept bool
 }
 
 // recorder is the surface that records the verb's op.
@@ -58,6 +72,14 @@ func (v x12Verb) recorder() string {
 		return surfaceAPI
 	}
 	return v.surface
+}
+
+// storedKey is the client key the verb's op is stored under for --key key.
+func (v x12Verb) storedKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	return v.keyNamespace + key
 }
 
 // x12Verbs are the matrix's verbs.
@@ -81,6 +103,10 @@ var x12Verbs = []x12Verb{
 	{name: "cli-submit-api", surface: surfaceCLI, cli: []string{"session", "submit"}, kind: opjournal.KindMessage, shape: "api-submit", via: "legacy.delivered", viaAPI: true},
 	{name: "cli-submit-local", surface: surfaceCLI, cli: []string{"session", "submit"}, kind: opjournal.KindMessage, shape: "cli-submit-local", ctlDown: true, via: "legacy.delivered"},
 	{name: "cli-mail-notify", surface: surfaceCLI, cli: []string{"mail", "send", "--notify"}, kind: opjournal.KindMessage, shape: "cli-mail-notify", own: true, via: "legacy.queued"},
+	// OJ-6: the in-session restart requests. A handoff restarts only a
+	// session the controller restarts, so it runs on the always-on worker.
+	{name: "cli-request-restart", surface: surfaceCLI, cli: []string{"runtime", "request-restart"}, kind: opjournal.KindRestart, own: true, inSession: true, noJSON: true, via: "legacy", keyNamespace: "request-restart:"},
+	{name: "cli-handoff", surface: surfaceCLI, cli: []string{"handoff"}, kind: opjournal.KindRestart, inSession: true, via: "legacy", keyNamespace: "handoff:", replaysSwept: true},
 }
 
 // x12LoadOnlyVerbs are the load's message shapes the matrix does not run.
@@ -105,7 +131,20 @@ func (v x12Verb) message() bool { return v.kind == opjournal.KindMessage }
 // notify's payload is its subject; its key is its message's.
 func (v x12Verb) cliArgs(s x12Session, key, payload string) []string {
 	args := append([]string(nil), v.cli...)
-	args = append(args, "--json")
+	if !v.noJSON {
+		args = append(args, "--json")
+	}
+	if v.inSession {
+		// The session is the caller's own: a handoff's payload is its
+		// subject, and a request-restart takes no argument.
+		if key != "" {
+			args = append(args, "--key", key)
+		}
+		if v.name == "cli-handoff" {
+			args = append(args, payload)
+		}
+		return args
+	}
 	switch {
 	case v.name == "cli-mail-notify":
 		return append(args, "-s", payload, s.name, "x12 mail body")
@@ -190,6 +229,8 @@ func x12GatingCells() [][]x12CellSpec {
 			{v("reset"), "k1", true},
 		},
 		{ // CLI
+			{v("cli-request-restart"), "k3", true},
+			{v("cli-handoff"), "k4", true},
 			{v("cli-nudge-wait"), "k1", true},
 			{v("cli-nudge-wait"), "k3", true},
 			{v("cli-nudge-wait"), "k4", true},
@@ -229,7 +270,7 @@ func x12EvidenceCells() [][]x12CellSpec {
 
 func TestX12KillMatrix(t *testing.T) {
 	t.Parallel() // after the load, which measures latency alone
-	arm := x12Backend(t)
+	arm := x12Backend(t, x12PartMatrix)
 	baselines := x12Baselines(t)
 	groups := x12GatingCells()
 	tier := "gating"
@@ -455,13 +496,13 @@ func (c *x12City) runCell(cell *x12Cell, baselines map[string]x12Shape) {
 	if v.name == "cli-mail-notify" {
 		cell.key = "mail:" + c.mailMessageID(cell.payload)
 	}
-	cell.opID = operatorOpID(t, cell.sess.id, cell.key)
+	cell.opID = operatorOpID(t, cell.sess.id, v.storedKey(cell.key))
 	c.checkOriginalAnswer(cell)
 
 	// Settle what the first execution set going before the retry reads it.
 	if effected(point) {
 		switch v.endpoint + strings.Join(v.cli, " ") {
-		case "reset", "session reset":
+		case "reset", "session reset", "runtime request-restart", "handoff":
 			c.waitRow(cell.sess.id, "restarted", 2*time.Minute, func(b beads.Bead) bool { return generation(b) > cell.sess.gen && c.rowRunning(b) })
 		case "wake", "session wake":
 			c.waitRow(cell.sess.id, "running", 2*time.Minute, c.rowRunning)
@@ -501,9 +542,13 @@ func (c *x12City) checkOriginalAnswer(cell *x12Cell) {
 		// gc session submit through an API that dies. At K1, before it
 		// answers, the local fallback finds the API's op open and exits 0
 		// "accepted" without delivering: only a --key rerun or the sweeper
-		// settles the op. That is pinned as it is; the risk it carries is
-		// ga-qd9p6v item 3(a). At K2 the CLI holds the 202 and loses the
-		// outcome stream it waits on: it exits 1 naming the key to rerun with.
+		// settles the op. That is today's behaviour, pinned as it is by the
+		// maintainers' 2026-10-23 ruling; the risk it carries is ga-qd9p6v
+		// item 3(a), and ga-hap9c0 is the follow-up that makes the CLI exit
+		// non-zero and print the --key to retry with when it cannot confirm
+		// the API took the op (that change flips this case). At K2 the CLI
+		// holds the 202 and loses the outcome stream it waits on: it exits 1
+		// naming the key to rerun with.
 		switch {
 		case point == "k1" && (!cell.orig.ok() || cell.orig.outcome != "accepted" || cell.orig.opID != cell.opID):
 			cell.fail("P2", "k1: the CLI answered %s (outcome %q, op %q), want exit 0 \"accepted\" naming op %s", cell.orig, cell.orig.outcome, cell.orig.opID, cell.opID)
@@ -573,7 +618,7 @@ func (c *x12City) checkCell(cell *x12Cell, baselines map[string]x12Shape) {
 	x12Report.eval("P2 immediate", 1)
 	n := 0
 	for _, op := range c.allOps() {
-		if op.Conversation == cell.sess.id && op.ClientKey == cell.key {
+		if op.Conversation == cell.sess.id && op.ClientKey == v.storedKey(cell.key) {
 			n++
 		}
 	}
@@ -808,7 +853,7 @@ func (c *x12City) lifecycleTransition(v x12Verb, s x12Session) (string, func(bea
 		return "running", c.rowRunning
 	case "suspend":
 		return "stopped", c.rowStopped
-	case "reset":
+	case "reset", "request-restart", "handoff":
 		return "restarted", func(b beads.Bead) bool { return generation(b) > s.gen && c.rowRunning(b) }
 	case "kill":
 		return "killed", func(b beads.Bead) bool { return !c.rowRunning(b) || generation(b) != s.gen }
@@ -910,7 +955,14 @@ func (c *x12City) finalChecks(cells []*x12Cell, rec func(line, format string, ar
 		}
 		a := c.send(s.verb, cell.sess, cell.key, cell.payload, nil)
 		cell.evidenceRerun = &a
-		if a.status != 1 || a.code != "op_already_failed" {
+		switch {
+		case s.verb.replaysSwept && effected(s.point):
+			// The first run's mail landed and the controller restarted the
+			// session past the context its notice names.
+			if !a.ok() || !a.replayed {
+				cell.fail("P2", "the rerun after finish_by answered %s, want a replay of the restart the row shows", a)
+			}
+		case a.status != 1 || a.code != "op_already_failed":
 			cell.fail("P2", "the rerun after finish_by answered %s (code %q), want exit 1 op_already_failed", a, a.code)
 		}
 	}
