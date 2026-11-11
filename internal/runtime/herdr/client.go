@@ -1066,7 +1066,7 @@ func (c *client) startServer() error {
 			break
 		}
 		if attempt >= len(serverUndecidedBackoff) {
-			return fmt.Errorf("herdr server for session %q: socket %q refuses connections but the server is not confirmed dead; leaving it in place rather than launching a second server", c.session, c.socketPath())
+			return fmt.Errorf("herdr server for session %q: socket %q does not accept connections and is not confirmed dead; leaving it in place rather than launching a second server", c.session, c.socketPath())
 		}
 		time.Sleep(serverUndecidedBackoff[attempt])
 	}
