@@ -574,12 +574,14 @@ sync_database_sql() {
   if [ "$dry_run" = true ]; then
     if [ "$ff_decision" = "skip" ]; then
       echo "  $name: would skip $local_branch -> $remote_name:$remote_branch ($remote_url) [$ff_status]"
+      return "$ff_rc"
     elif [ "$force" = true ]; then
       echo "  $name: would force-push $local_branch -> $remote_name:$remote_branch ($remote_url)"
+      return 0
     else
       echo "  $name: would push $local_branch -> $remote_name:$remote_branch ($remote_url) [$ff_status]"
+      return 0
     fi
-    return 0
   fi
 
   if [ "$ff_decision" = "skip" ]; then
