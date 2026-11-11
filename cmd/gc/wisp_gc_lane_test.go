@@ -419,3 +419,41 @@ func TestWispGCLane_ReloadDuringPurgeCarriesItsProgress(t *testing.T) {
 		t.Fatalf("installed session purge cursor = %+v, want the finished purge's %+v", next.sessionPurgeCursor, purging.sessionPurgeCursor)
 	}
 }
+
+// Kills: a disable that leaves the lane purging, and a re-enable that
+// inherits the cadence and cursor from before the disable. With a tracker due
+// and mid-sweep, a disabling reload stops the next woken pass from purging,
+// and a later enabling reload, whether a pass installed the disable first or
+// both reloads land between passes, installs a fresh tracker: due at once,
+// with no session purge cursor.
+func TestWispGCLane_DisableThenEnableStartsAfresh(t *testing.T) {
+	const enabled = "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	const disabled = "\n[daemon]\nshutdown_timeout = \"1s\"\n"
+	for _, tc := range []struct {
+		name          string
+		passInBetween bool
+	}{
+		{name: "pass-between-reloads", passInBetween: true},
+		{name: "both-reloads-between-passes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, tomlPath := newWispGCReloadRuntime(t, enabled)
+			prev := stampWispGCLastRun(t, cr, time.Now().Add(-2*time.Hour))
+			prev.sessionPurgeCursor = &beads.SeekBoundary{CreatedAt: time.Now().Add(-48 * time.Hour), ID: "gcg-session-p"}
+
+			applyWispGCReload(t, cr, tomlPath, disabled)
+			if tc.passInBetween && runLanePass(cr, true) {
+				t.Fatal("a woken pass purged after a reload disabled wisp GC")
+			}
+			applyWispGCReload(t, cr, tomlPath, enabled)
+
+			next, ok := installedWispGC(cr).(*memoryWispGC)
+			if !ok || next == prev {
+				t.Fatalf("installed tracker = %T (same as before the disable: %v), want a new *memoryWispGC", installedWispGC(cr), next == prev)
+			}
+			if !next.lastRun.IsZero() || next.sessionPurgeCursor != nil {
+				t.Fatalf("re-enabled tracker lastRun/cursor = %v/%+v, want a fresh tracker (zero, nil)", next.lastRun, next.sessionPurgeCursor)
+			}
+		})
+	}
+}
