@@ -77,6 +77,26 @@ func TestRewriteBdReadyInternalArgs(t *testing.T) {
 			want: []string{"list", "--ready", "--skip-labels", excludeType},
 		},
 		{
+			name: "list --ready=true gains both exclusions",
+			args: []string{"list", "--ready=true"},
+			want: []string{"list", "--ready=true", excludeType, excludeLabel},
+		},
+		{
+			name: "list --ready=false is untouched",
+			args: []string{"list", "--ready=false"},
+			want: []string{"list", "--ready=false"},
+		},
+		{
+			name: "list --ready --skip-labels=true drops only the label half",
+			args: []string{"list", "--ready", "--skip-labels=true"},
+			want: []string{"list", "--ready", "--skip-labels=true", excludeType},
+		},
+		{
+			name: "list --ready --skip-labels=false gains both exclusions",
+			args: []string{"list", "--ready", "--skip-labels=false"},
+			want: []string{"list", "--ready", "--skip-labels=false", excludeType, excludeLabel},
+		},
+		{
 			name: "plain list is untouched",
 			args: []string{"list", "--type=session"},
 			want: []string{"list", "--type=session"},

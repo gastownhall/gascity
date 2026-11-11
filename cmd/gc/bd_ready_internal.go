@@ -1,7 +1,7 @@
 package main
 
 import (
-	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
@@ -42,7 +42,7 @@ func rewriteBdReadyInternalArgs(bdArgs []string) []string {
 	switch verb {
 	case "ready":
 	case "list":
-		if !slices.Contains(verbArgs, "--ready") {
+		if !bdBoolFlagEffective(verbArgs, "--ready") {
 			return bdArgs
 		}
 	default:
@@ -84,6 +84,14 @@ func bdReadyInternalExclusions(verb string, args []string) (addType, addLabel, p
 			}
 			continue
 		}
+		if boolFlags[name] && joined {
+			if name == "--skip-labels" {
+				if on, err := strconv.ParseBool(value); err == nil && on {
+					addLabel = false
+				}
+			}
+			continue
+		}
 		if !valueFlags[name] {
 			if joined {
 				// A joined unknown flag consumes nothing; keep scanning.
@@ -122,6 +130,25 @@ func bdReadyInternalExclusions(verb string, args []string) (addType, addLabel, p
 		}
 	}
 	return addType, addLabel, true
+}
+
+// bdBoolFlagEffective reports whether the boolean flag name ends up set in
+// args. A bare flag sets it; a joined "name=<v>" sets it to the parsed value,
+// and an unparseable value counts as unset so the caller fails open. The last
+// occurrence wins, as it does for bd's own flag parsing.
+func bdBoolFlagEffective(args []string, name string) bool {
+	set := false
+	for _, arg := range args {
+		if arg == name {
+			set = true
+			continue
+		}
+		if v, ok := strings.CutPrefix(arg, name+"="); ok {
+			b, err := strconv.ParseBool(v)
+			set = err == nil && b
+		}
+	}
+	return set
 }
 
 // csvContains reports whether want appears in a comma-separated bd flag

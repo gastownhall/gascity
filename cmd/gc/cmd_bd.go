@@ -114,7 +114,9 @@ order-tracking beads are open, unassigned and unblocked for their whole
 lifetime, so bd would list them as claimable work; claiming or closing one
 edits the reconciler's own state. Each exclusion is dropped when the argv
 already names what it would hide ("--type session", "--label
-order-tracking") or already excludes it. "heartbeat
+order-tracking") or already excludes it. The label exclusion is also
+dropped when "--skip-labels" is set, which bd will not combine with
+"--exclude-label". "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
