@@ -11679,7 +11679,7 @@ func TestJsonlExportHaltSendsSpikeAlertBeforeArchiveMaintenance(t *testing.T) {
 	if subject := f.headSubject(t); !strings.HasPrefix(subject, "[HALT]") {
 		t.Fatalf("HEAD subject = %q, want the [HALT] baseline commit", subject)
 	}
-	if mail := f.mail(t); !strings.Contains(mail, "ESCALATION: JSONL spike") {
+	if mail := f.mail(t); !strings.Contains(mail, "ESCALATION: JSONL row-count") {
 		t.Fatalf("spike alert must be sent before archive maintenance can fail the run; mail log:\n%s\noutput:\n%s", mail, out)
 	}
 }
@@ -11986,7 +11986,7 @@ func TestJsonlExportKeepsSpikeAlertWhileArchiveCannotBePacked(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected the run to fail while the archive cannot be packed:\n%s", out)
 	}
-	if mail := f.mail(t); strings.Count(mail, "ESCALATION: JSONL spike") != 2 {
+	if mail := f.mail(t); strings.Count(mail, "ESCALATION: JSONL row-count") != 2 {
 		t.Fatalf("want the failed spike alert and its retry in the mail log:\n%s\noutput:\n%s", mail, out)
 	}
 	if pending, ok := f.state(t)["pending_spike_alerts"]; ok {
