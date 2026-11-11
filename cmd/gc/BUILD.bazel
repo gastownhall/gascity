@@ -174,6 +174,7 @@ go_library(
         "cmd_citystatus.go",
         "cmd_commands.go",
         "cmd_config.go",
+        "cmd_config_ready_query_lint.go",
         "cmd_context.go",
         "cmd_converge.go",
         "cmd_convoy.go",

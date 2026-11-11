@@ -146,6 +146,7 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	// the rest of the city starts.
 	validationWarnings = append(validationWarnings, collectMCPCapabilityReport(cityPath, cfg).lines()...)
 	validationWarnings = append(validationWarnings, config.RigFederationWarnings(cfg.Rigs)...)
+	validationWarnings = append(validationWarnings, readyQueryLintWarnings(cfg)...)
 
 	if validate {
 		if asJSON {

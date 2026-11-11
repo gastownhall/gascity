@@ -1381,6 +1381,128 @@ Make sure the `gc` on every agent's `PATH` is the build that has `gc ready`:
 the generated work query shells out to it by name, and an older `gc` on `PATH`
 fails every hook with `running work query: exit status 1`.
 
+## Custom work queries on a split city
+
+An agent's `work_query` and `scale_check` are shell text that `gc` runs for you.
+A custom one written before the split may read only the work ledger, or may
+lose a reader failure, and nothing in the split boot check notices. After the
+split such a query returns a short or empty list instead of an error, so work
+in the relocated classes is never picked up.
+
+`gc config show --validate` reads each agent's resolved `work_query` and
+`scale_check` as text (imported packs, patches and overlays included) and prints
+an advisory for each unsafe shape. It never runs a query, never rewrites one,
+and never changes the exit status: an invalid config still exits 1, and a valid
+one with advisories still exits 0. The advisories are on stderr as
+`gc config show: warning: ...` and under `validation.warnings` with `--json`.
+Prompts and `start_command` are not scanned.
+
+```sh
+gc config show --validate
+gc config show --validate --json | jq -r '.validation.warnings[]'
+```
+
+Each advisory names the agent, the field and the shape:
+
+| Shape | Applies | Why it is unsafe |
+| --- | --- | --- |
+| `gc bd ... ready` or `gc bd list --ready` | Split cities only | bd reads the work ledger only. The relocated classes are not in the answer. |
+| A comma list in `--exclude-type` or `--exclude-label` | Every city | Each flag takes one value. A comma list is one literal and excludes nothing. |
+| `--rig` on `gc ready` | Split cities | `gc ready` selects by route and ignores `--rig`. |
+| `gc ready` with no `--limit` | Split cities | A converted reader states its bound. |
+| A `gc ready` reader whose exit status is lost | Split cities | A failed read looks like an empty queue. |
+
+The lint is advisory text matching, not a shell parser. A reader inside a
+double-quoted `$(...)` or one assembled at run time is not seen, so a clean
+`--validate` is not proof that a query is safe. Raw `bd ready` is not flagged:
+it is the deliberate city-ledger reader of the investigator and pack-author
+roles (S5), and it keeps its reopen triggers.
+
+### The route-keyed reader
+
+Replace a label reader with `gc ready` keyed on the agent's route. Copy the
+route from live routing evidence (`gc.routed_to` on the beads that agent
+claims), do not compose it by hand, and audit first: list the routes and labels
+in use, then compare what the old query returned with what the new one returns.
+Record each difference by bead ID. Expect deltas, such as work that is now
+eligible because the route is read across every store, label-only work the
+route no longer reaches, and ordering and limit changes. An empty queue is
+"not exercised", not a pass.
+
+```sh
+gc_out=$(gc ready --metadata-field "gc.routed_to=forge/worker" --unassigned \
+  --exclude-type step --exclude-type molecule --exclude-type convoy \
+  --exclude-label hold:mayor --exclude-label hold:external \
+  --exclude-label human --exclude-label parent-record \
+  --limit 100 --json) || {
+  gc_rc=$?
+  printf 'gc ready failed (exit %s)\n' "$gc_rc" >&2
+  exit "$gc_rc"
+}
+printf '%s\n' "$gc_out" | jq -c '[.[]|select((.metadata."gc.budget_deferred_until"//"")=="" and (.metadata."gc.rebuild_deferred_until"//"")=="")]' \
+  | if command -v quiet-window >/dev/null 2>&1; then quiet-window claim-filter; else cat; fi
+```
+
+What each part is for:
+
+- **Existing flags only.** `--metadata-field`, `--unassigned`, `--exclude-type`,
+  `--exclude-label`, `--limit` and `--json` are `gc ready` flags. Do not
+  reach for `--label`, `--label-any` or `--rig`: `gc ready` rejects the first
+  two and ignores the third.
+- **Repeated exclusions.** Give each excluded type and label its own flag.
+- **An explicit limit.** Name the bound. `--limit 0` is the explicit "no cap" for a
+  reader whose cap is applied later by a global filter.
+- **The capture exits at the top level.** `gc ready` exits non-zero naming the
+  leg it could not read. The guard turns that into the script's own exit
+  status. Do not put the reader at the end of a pipeline, behind `|| printf '[]'`,
+  inside `{ ...; } | cat`, or in an unguarded `$(...)`: each one reports a failed
+  read as an empty queue.
+- **Downstream stages stay after the reader.** Filters such as the `jq` deferral
+  filter and `quiet-window claim-filter` run on the captured text, in the same
+  order as before.
+
+A triager that keeps a global cap (S6) keeps its structure: the city-scope
+guard, a guarded `gc ready --limit 0 --json` capture, and the `jq` filter that
+applies the cap and the claim test.
+
+### Scans that are not dispatch
+
+`GC_BD_ALLOW_RELOCATED_CLASS_READ=1` makes `gc bd ready` run its one-ledger
+read on a split city anyway. It is a gate-blind work-class read: the answer is
+the work ledger's subset only, with the refusal that would have said so turned
+off. Use it for a one-off, non-dispatch scan whose answer is genuinely the
+work ledger. Never use it as a dispatch reader, in a `work_query` or a
+`scale_check`. The lint flags that form on purpose, because it is the same
+split-blind reader with its guard removed.
+
+Inventory the scans that are not hook queries (S7), and the ones in prompts or
+`start_command` (S8, which the lint does not scan). Convert each to a route
+reader or mark it split-exempt with the reason.
+
+### Evidence, in order
+
+Do the checks below in this order, and keep the output with the change:
+
+1. **E1.** The deployed binary identity at the controller and on the fresh
+   `PATH` of each agent class. The Graphviz `/usr/bin/gc` is not Gas City's.
+2. **E2.** A route probe in each E1 environment: exit 0, a JSON array, the
+   expected route and the exclusions.
+3. **E3.** Unsplit parity per converted role that has work, plus or minus the
+   recorded delta IDs.
+4. **E4.** The API route observed, and identical default-versus-local read IDs
+   from an environment the controller can reach.
+5. **P1.** The reviewed pack change has landed.
+6. **P2.** A hook tick selects a bead and a claim lands in the right ledger, per
+   converted rig and role that has work. Empty queues are not exercised.
+7. **T-A5.** The disposable split-fixture rehearsal succeeds. Only then is the
+   split itself an operator decision.
+
+The pack-side tests that run a converted query and fail loudly (the T-A6 cases:
+a failing `gc ready`, a comma list, an unguarded capture, a swallowed exit) are
+executable pack tests and belong to the pack suite, tracked at HQ bead
+`gm-0qegy3`. The lint's fixtures cover the same shapes as text. This runbook
+changes no selector, API, pack or runtime.
+
 ## Snapshots and restoring the binding
 
 `gc storage snapshot` writes a snapshot of the city's stores into a new
