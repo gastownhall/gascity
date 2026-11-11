@@ -23,11 +23,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -1060,6 +1062,7 @@ func (c *client) startServer() error {
 	defer func() { _ = devnull.Close() }()
 	cmd := exec.Command(c.bin, "--session", c.session, "server")
 	cmd.Stdout, cmd.Stderr = devnull, devnull
+	cmd.Env = serverEnv()
 	// Launch the shared daemon in the city root, not the inherited cwd (which is
 	// often $HOME when gc is invoked from a login shell). Sessions whose --cwd is
 	// empty/nonexistent fall back to this server cwd, so a $HOME-rooted server
@@ -1077,6 +1080,48 @@ func (c *client) startServer() error {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// serverStarterScopedEnvKeys are the variables the herdr server must not
+// inherit from the gc process that happens to start it. The shared daemon
+// outlives that process and every pane it spawns later inherits the daemon's
+// environment beneath the pane's own --env flags (cfg.Env), so a key the
+// starter carries would show up in panes of unrelated sessions: another
+// session's identity, working directory, or rig scope, or the pane, tab and
+// workspace a herdr pane exports to its own children (ga-bon9pea7, #8934).
+//
+// This is a deny-list: the daemon needs the rest of the environment (PATH to
+// find shells and agents, HOME and XDG_CONFIG_HOME for its config and socket
+// directory, locale, herdr's own session and socket settings), and a pane must
+// still see city-wide GC_* settings gc did not set per pane.
+var serverStarterScopedEnvKeys = []string{
+	// The starter agent's working directory and rig scope. A pane that sets
+	// none of these itself would otherwise resolve to the starter's rig.
+	"GC_DIR",
+	"GC_RIG",
+	"GC_RIG_ROOT",
+	"GC_BEADS_SCOPE_ROOT",
+	"BEADS_DIR",
+	// What a herdr pane exports to its own children. The server is not a pane.
+	"HERDR_PANE_ID",
+	"HERDR_WORKSPACE_ID",
+	"HERDR_TAB_ID",
+}
+
+// serverEnv is the environment the herdr server is launched with: this
+// process's, without the per-session identity keys (execenv.WithoutSessionIdentity)
+// and without serverStarterScopedEnvKeys.
+func serverEnv() []string {
+	env := execenv.WithoutSessionIdentity(execenv.Environ())
+	out := env[:0]
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if slices.Contains(serverStarterScopedEnvKeys, key) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // relativeSocketError is startServer's refusal of the relative socket path
