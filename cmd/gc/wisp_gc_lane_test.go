@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -223,5 +224,126 @@ func TestWispGCLane_WakeRunsThePurgeAtOnce(t *testing.T) {
 	case <-laneDone:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the lane did not stop after its released purge finished")
+	}
+}
+
+// blockedMoleculeStore pauses the purge's first molecule-root enumeration:
+// the wisp GC purge lists molecule roots almost as soon as it starts (see
+// wispGCRootSelectors / closeAbandonedRoots), so a List that parks there
+// leaves a purge in flight on the lane's goroutine.
+type blockedMoleculeStore struct {
+	beads.Store
+	entered chan struct{}
+	release chan struct{}
+	armed   atomic.Bool
+}
+
+func (s *blockedMoleculeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Type == "molecule" && s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+// TestWispGCLane_ReloadDuringAPurgeStagesWithoutWaiting: a config reload
+// that lands while a purge is in flight applies at once — it only stages the
+// rebuilt policy for the lane to install between passes, so it never waits
+// for the in-flight purge and never reads the tracker underneath it — and
+// the install after the purge carries the completed purge's lastRun and
+// session cursor onto the new policy.
+func TestWispGCLane_ReloadDuringAPurgeStagesWithoutWaiting(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	store := &blockedMoleculeStore{Store: beads.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	store.armed.Store(true)
+	cr.cs.mu.Lock()
+	cr.cs.cityBeadStore = store
+	cr.cs.mu.Unlock()
+
+	lane := cr.wispGCLaneOf()
+	old, ok := lane.active.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("active wisp GC tracker = %T, want *memoryWispGC", lane.active)
+	}
+	// The cursor the next install must carry: the purge on this fixture has no
+	// session arm (the sessions class is not relocated), so it leaves it alone.
+	cursor := &beads.SeekBoundary{CreatedAt: time.Now().Add(-48 * time.Hour), ID: "gcg-midpurge"}
+	old.sessionPurgeCursor = cursor
+
+	purgeNow := time.Now()
+	passDone := make(chan struct{})
+	go func() {
+		defer close(passDone)
+		if !cr.wispGCLanePass(context.Background(), purgeNow, true) {
+			close(store.release) // never block the fatal below
+		}
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the purge never reached its molecule enumeration")
+	}
+	if !old.lastRun.Equal(purgeNow) {
+		t.Fatalf("in-flight purge stamped lastRun=%v, want %v: purge not actually running", old.lastRun, purgeNow)
+	}
+
+	// The reload applies while the purge is still parked in the store.
+	reloadDone := make(chan struct{})
+	go func() {
+		defer close(reloadDone)
+		applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \"15m\"\nwisp_ttl = \"12h\"\n")
+	}()
+	select {
+	case <-reloadDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the reload waited for the in-flight purge; a reload must stage its policy without touching the lane's pass")
+	}
+	if !lane.stagedPending() {
+		t.Fatal("the applied reload left no staged policy for the lane to install")
+	}
+
+	// Let the purge finish; the lane installs the staged policy between
+	// passes, as the next pass would.
+	close(store.release)
+	select {
+	case <-passDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the purge never finished after its release")
+	}
+	newT := installedWispGC(t, cr, old)
+	if newT.interval != 15*time.Minute || newT.ttl != 12*time.Hour {
+		t.Errorf("installed tracker interval=%s ttl=%s, want 15m/12h from the reloaded policy", newT.interval, newT.ttl)
+	}
+	if !newT.lastRun.Equal(purgeNow) {
+		t.Errorf("installed tracker lastRun=%v, want %v (the completed purge's lastRun)", newT.lastRun, purgeNow)
+	}
+	if newT.sessionPurgeCursor != cursor {
+		t.Errorf("installed tracker sessionPurgeCursor=%v, want the carried cursor", newT.sessionPurgeCursor)
+	}
+}
+
+// TestWispGCLane_RejectedReloadStagesNothing: a reload that never validates
+// stages nothing — the next install leaves the deployed policy running,
+// exactly as it was.
+func TestWispGCLane_RejectedReloadStagesNothing(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	lane := cr.wispGCLaneOf()
+	before := lane.active
+	// An unparseable table header fails the reload outright (an invalid
+	// duration is only a non-strict warning, which still applies).
+	if err := os.WriteFile(tomlPath, []byte(wispGCReloadCityBase+"\n[daemon\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual)
+	if reply.Outcome == reloadOutcomeApplied {
+		t.Fatalf("reload applied an unparseable config (%+v)", reply)
+	}
+	if lane.stagedPending() {
+		t.Error("a reload that failed validation staged a policy for the lane")
+	}
+	lane.installStaged()
+	if lane.active != before {
+		t.Errorf("a rejected reload changed the deployed tracker: %T -> %T", before, lane.active)
 	}
 }
