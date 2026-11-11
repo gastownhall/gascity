@@ -101,6 +101,11 @@ func customTypesTestEnv(base []string, host, port string) []string {
 	return out
 }
 
+// customTypesServerInitEnv is a compile-only placeholder until GREEN.
+func customTypesServerInitEnv(base []string) []string {
+	return base
+}
+
 func customTypesTestServerPort(t testing.TB, initOutput string) string {
 	t.Helper()
 	for _, line := range strings.Split(initOutput, "\n") {
@@ -606,6 +611,40 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	}
 	if !slices.Equal(decoyTypes, []string{"decoy-only"}) {
 		t.Fatalf("ambient decoy types = %v, want unchanged [decoy-only]", decoyTypes)
+	}
+}
+
+// TestCustomTypesServerInitEnvSetsLoadTolerantReadyTimeout pins the readiness
+// budget the server-backed fixture hands bd (ga-8mj4m71b): exactly one
+// BEADS_DOLT_READY_TIMEOUT, in the whole-seconds form bd parses, replacing an
+// inherited value, well above bd's 10 s default, with every other entry kept.
+func TestCustomTypesServerInitEnvSetsLoadTolerantReadyTimeout(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "BEADS_DOLT_READY_TIMEOUT=1", "HOME=/home/test"}
+	env := customTypesServerInitEnv(base)
+
+	var values []string
+	for _, entry := range env {
+		if name, value, _ := strings.Cut(entry, "="); name == "BEADS_DOLT_READY_TIMEOUT" {
+			values = append(values, value)
+		}
+	}
+	if len(values) != 1 {
+		t.Fatalf("BEADS_DOLT_READY_TIMEOUT entries = %q, want exactly one", values)
+	}
+	secs, err := strconv.Atoi(values[0])
+	if err != nil {
+		t.Fatalf("BEADS_DOLT_READY_TIMEOUT=%q is not whole seconds, so bd would ignore it and use 10 s: %v", values[0], err)
+	}
+	if secs < 60 {
+		t.Fatalf("BEADS_DOLT_READY_TIMEOUT=%d s, want at least 60 s: bd's 10 s default is what a loaded host missed", secs)
+	}
+	for _, keep := range []string{"PATH=/usr/bin", "HOME=/home/test"} {
+		if !slices.Contains(env, keep) {
+			t.Errorf("env lost %q: %q", keep, env)
+		}
+	}
+	if !slices.Equal(base, []string{"PATH=/usr/bin", "BEADS_DOLT_READY_TIMEOUT=1", "HOME=/home/test"}) {
+		t.Errorf("customTypesServerInitEnv modified its input: %q", base)
 	}
 }
 
