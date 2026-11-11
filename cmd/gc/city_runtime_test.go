@@ -4641,7 +4641,10 @@ func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedW
 	}
 }
 
-func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
+// The two wisp GC log tests drive the lane pass the tick used to run inline:
+// the purge-count and per-line error output are the purge's, so they land
+// when the lane's pass runs, not when the tick reaches its wake slot.
+func TestWispGCLane_LogsPurgeCountWithNonFatalError(t *testing.T) {
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -4660,10 +4663,9 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 		},
 	}
 
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+		t.Fatal("a due wake on an idle lane ran no purge")
+	}
 
 	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
 		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
@@ -4673,7 +4675,7 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
+func TestWispGCLane_PrefixesEachJoinedGCErrorLine(t *testing.T) {
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -4696,10 +4698,9 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 		},
 	}
 
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+		t.Fatal("a due wake on an idle lane ran no purge")
+	}
 
 	got := stderr.String()
 	for _, want := range []string{
@@ -9462,24 +9463,28 @@ func applyWispGCReload(t *testing.T, cr *CityRuntime, tomlPath, extra string) {
 	}
 }
 
-// stampWispGCLastRun records a pass at lastRun on cr's tracker and returns it.
+// stampWispGCLastRun records a pass at lastRun on the lane's installed tracker
+// and returns it.
 func stampWispGCLastRun(t *testing.T, cr *CityRuntime, lastRun time.Time) *memoryWispGC {
 	t.Helper()
-	m, ok := cr.wg.(*memoryWispGC)
+	m, ok := cr.wispGCLaneOf().active.(*memoryWispGC)
 	if !ok {
-		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wg)
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wispGCLaneOf().active)
 	}
 	m.lastRun = lastRun
 	return m
 }
 
-// rebuiltWispGC returns cr's tracker after a reload, failing unless the reload
-// replaced prev with a new *memoryWispGC.
-func rebuiltWispGC(t *testing.T, cr *CityRuntime, prev *memoryWispGC) *memoryWispGC {
+// installedWispGC installs the policy a reload staged onto the lane and
+// returns the installed tracker, failing unless the reload replaced prev. The
+// lane does this between passes; the reload tests drive its pass sparsely,
+// so they install by hand.
+func installedWispGC(t *testing.T, cr *CityRuntime, prev *memoryWispGC) *memoryWispGC {
 	t.Helper()
-	m, ok := cr.wg.(*memoryWispGC)
+	cr.wispGCLaneOf().installStaged()
+	m, ok := cr.wispGCLaneOf().active.(*memoryWispGC)
 	if !ok {
-		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wg)
+		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wispGCLaneOf().active)
 	}
 	if m == prev {
 		t.Fatal("wisp GC tracker not rebuilt by the reload")
@@ -9504,11 +9509,11 @@ func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
 
 			applyWispGCReload(t, cr, tomlPath, tc.reload)
 
-			next := rebuiltWispGC(t, cr, prev)
-			if cr.wg.shouldRun(lastRun.Add(10 * time.Minute)) {
+			next := installedWispGC(t, cr, prev)
+			if next.shouldRun(lastRun.Add(10 * time.Minute)) {
 				t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
 			}
-			if !cr.wg.shouldRun(lastRun.Add(time.Hour)) {
+			if !next.shouldRun(lastRun.Add(time.Hour)) {
 				t.Fatal("wisp GC not due 1h after its last run; want the 1h cadence kept")
 			}
 			if next.ttl != tc.wantTTL {
@@ -9539,15 +9544,15 @@ func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
 
 			applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \""+tc.interval+"\"\nwisp_ttl = \""+tc.ttl+"\"\n\n[mail]\nretention_ttl = \""+tc.mailTTL+"\"\n")
 
-			next := rebuiltWispGC(t, cr, prev)
+			next := installedWispGC(t, cr, prev)
 			if next.interval != tc.want || next.ttl != tc.wantTTL || next.mailRetentionTTL != tc.wantMail {
 				t.Fatalf("rebuilt interval/ttl/mailRetentionTTL = %v/%v/%v, want %v/%v/%v",
 					next.interval, next.ttl, next.mailRetentionTTL, tc.want, tc.wantTTL, tc.wantMail)
 			}
-			if cr.wg.shouldRun(lastRun.Add(tc.notDueAt)) {
+			if next.shouldRun(lastRun.Add(tc.notDueAt)) {
 				t.Fatalf("wisp GC due %v after its last run on a %s interval; want the new interval counted from the last run", tc.notDueAt, tc.interval)
 			}
-			if !cr.wg.shouldRun(lastRun.Add(tc.dueAt)) {
+			if !next.shouldRun(lastRun.Add(tc.dueAt)) {
 				t.Fatalf("wisp GC not due %v after its last run on a %s interval", tc.dueAt, tc.interval)
 			}
 		})
@@ -9562,7 +9567,7 @@ func TestCityRuntimeReloadKeepsWispGCSessionPurgeCursor(t *testing.T) {
 
 	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\nshutdown_timeout = \"1s\"\n")
 
-	if got := rebuiltWispGC(t, cr, prev).sessionPurgeCursor; got != cursor {
+	if got := installedWispGC(t, cr, prev).sessionPurgeCursor; got != cursor {
 		t.Fatalf("session purge cursor after reload = %+v, want %+v (resume after the last examined candidate)", got, cursor)
 	}
 }
@@ -9574,17 +9579,87 @@ func TestCityRuntimeReloadWispGCFollowsEnablement(t *testing.T) {
 	stampWispGCLastRun(t, cr, lastRun)
 
 	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nshutdown_timeout = \"1s\"\n")
-	if cr.wg != nil {
-		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", cr.wg)
+	if !cr.wispGCLaneOf().stagedPending() {
+		t.Fatal("the disabling reload staged no wisp GC policy")
 	}
-	cr.tickWispGC(&tickPass{})
+	cr.wispGCLaneOf().installStaged()
+	if active := cr.wispGCLaneOf().active; active != nil {
+		t.Fatalf("wisp GC tracker after disabling reload = %#v, want an untyped nil interface", active)
+	}
+	// Disabled policy permits no purge, even from a due wake.
+	if ran := cr.wispGCLanePass(context.Background(), time.Now(), true); ran {
+		t.Fatal("the lane purged while wisp GC was disabled")
+	}
 
 	applyWispGCReload(t, cr, tomlPath, enabled)
-	if _, ok := cr.wg.(*memoryWispGC); !ok {
-		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", cr.wg)
+	cr.wispGCLaneOf().installStaged()
+	m, ok := cr.wispGCLaneOf().active.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("wisp GC tracker after enabling reload = %T, want *memoryWispGC", cr.wispGCLaneOf().active)
 	}
-	if !cr.wg.shouldRun(lastRun.Add(time.Minute)) {
+	if !m.shouldRun(lastRun.Add(time.Minute)) {
 		t.Fatal("newly enabled wisp GC not due on its first tick; want it due as at process start")
+	}
+	// The intervening disable ended the old cadence: the re-enabled tracker
+	// is fresh, carrying neither the retired tracker's last run nor its
+	// cursor.
+	if !m.lastRun.IsZero() {
+		t.Fatalf("re-enabled wisp GC carried lastRun = %v from the retired tracker; want fresh cadence", m.lastRun)
+	}
+	if m.sessionPurgeCursor != nil {
+		t.Fatal("re-enabled wisp GC carried the retired tracker's session purge cursor; want fresh cursor state")
+	}
+}
+
+type countingWispGC struct {
+	runs *atomic.Int32
+}
+
+func (c countingWispGC) shouldRun(time.Time) bool {
+	return true
+}
+
+func (c countingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	c.runs.Add(1)
+	return 0, nil
+}
+
+// TestTick_DoesNotRunWispGC pins that the serial controller tick never runs
+// the wisp GC purge, even when the purge is due: a long purge in the tick
+// delays every session decision that waits for the next tick (PR #8431). The
+// purge belongs to the lane (wisp_gc_lane.go), which the tick only wakes.
+func TestTick_DoesNotRunWispGC(t *testing.T) {
+	store := beads.NewMemStore()
+	var runs atomic.Int32
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "test-city",
+		cfg:                 &config.City{},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		wg:                  countingWispGC{runs: &runs},
+		rec:                 events.Discard,
+		logPrefix:           "test-city",
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("tick ran the wisp GC purge %d time(s); want 0 (the purge belongs on its own lane, off the tick)", got)
+	}
+	// The wake slot did fire: the lane holds the tick's queued wake.
+	select {
+	case <-cr.wispGCLaneOf().wakeCh:
+	default:
+		t.Fatal("the tick's wake_wisp_gc_lane slot left no wake for the lane")
 	}
 }
 

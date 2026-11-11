@@ -160,16 +160,27 @@ func laneRuntime(t *testing.T, split bool) (*CityRuntime, splitEnv) {
 	}, e
 }
 
-// Should-fix 6: the lane's wiring. The tick wakes it; a single-store city and
-// a quiescent one get no pass; a split city does.
+// Should-fix 6: the lane's wiring. The tick wakes the purge lane, whose pass
+// wakes the work arm in turn; a single-store city and a quiescent one get no
+// work-arm pass; a split city does.
 func TestWorkGCLaneWiring(t *testing.T) {
-	t.Run("tick-wakes-the-lane", func(t *testing.T) {
+	t.Run("tick-wakes-the-purge-lane-which-wakes-the-work-arm", func(t *testing.T) {
 		cr, _ := laneRuntime(t, true)
-		cr.tickWispGC(&tickPass{})
+		cr.tickWakeWispGCLane(&tickPass{})
+		select {
+		case <-cr.wispGCLaneOf().wakeCh:
+		default:
+			t.Fatal("the tick's wake slot left no wake for the wisp GC lane")
+		}
+		// The purge lane's pass runs the purge and wakes the work arm as it
+		// ends.
+		if !cr.wispGCLanePass(context.Background(), time.Now(), true) {
+			t.Fatal("a due wake on the split-city lane ran no purge")
+		}
 		select {
 		case <-cr.workGCLaneOf().wakeCh:
 		default:
-			t.Fatal("the wisp GC tick did not wake the work lane")
+			t.Fatal("the wisp GC lane's purge did not wake the work arm")
 		}
 	})
 	run := func(t *testing.T, cr *CityRuntime, e splitEnv) (purged bool) {

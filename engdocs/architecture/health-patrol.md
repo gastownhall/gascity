@@ -104,7 +104,9 @@ A single controller tick proceeds as follows:
    (via fsnotify debounce on config directory changes),
    `tryReloadConfig()` re-parses `city.toml` with includes and patches.
    If the reload succeeds, the crash tracker, idle tracker, wisp GC, and
-   order dispatcher are all rebuilt from the new config.
+   order dispatcher are all rebuilt from the new config; the wisp GC lane
+   stages its rebuilt tracker and installs it between purges
+   (`cmd/gc/wisp_gc_lane.go`), so a reload never waits on a purge.
 
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.
@@ -113,8 +115,16 @@ A single controller tick proceeds as follows:
    For each desired agent, determines the correct action. See the
    Reconciliation State Machine below.
 
-4. **Wisp GC**. If enabled, purges expired closed molecules older than
-   `wisp_ttl`.
+4. **Wisp GC lane wake**. The tick no longer purges. It wakes the wisp GC
+   lane (`cmd/gc/wisp_gc_lane.go`), which runs the purge — gated by
+   `shouldRun` when enabled — on its own goroutine. A wake runs a due
+   purge at once if the lane has idled as long as its previous purge ran,
+   and otherwise as soon as it has; a backstop timer fires once per
+   wisp-GC interval otherwise, and a timer-only pass declines, so only a
+   wake starts a purge. Through the same store routing the tick used, the
+   purge deletes closed molecules older than `wisp_ttl`, expired
+   read-message wisps past the mail retention TTL, and closed session
+   rows on a relocated SQLite sessions ledger.
 
 5. **Orders lane wake**. The tick no longer dispatches orders. It wakes
    the orders lane (`cmd/gc/orders_lane.go`), which runs dispatch on its

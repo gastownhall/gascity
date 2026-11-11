@@ -157,11 +157,15 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops                    drainOps
-	ct                      crashTracker
-	it                      idleTracker
-	mat                     maxSessionAgeTracker
-	adt                     assignedWorkDeferTracker
+	dops drainOps
+	ct   crashTracker
+	it   idleTracker
+	mat  maxSessionAgeTracker
+	adt  assignedWorkDeferTracker
+	// wg is the wisp GC tracker the constructor built for the boot config:
+	// the lane's initial policy, seeded when the lane is first created. From
+	// then on the lane (wisp_gc_lane.go) owns the tracker and successful
+	// reloads stage theirs there.
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
@@ -204,6 +208,11 @@ type CityRuntime struct {
 	// workGCLane runs the wisp GC's work arm off the tick (wisp_gc_work_lane.go).
 	workGCLane     *workGCLane
 	workGCLaneOnce sync.Once
+	// wispGCLane runs the wisp GC purge itself off the tick; the tick only
+	// wakes it at its wake_wisp_gc_lane slot (wisp_gc_lane.go). It owns the
+	// tracker wg below; created on first use.
+	wispGCLane     *wispGCLane
+	wispGCLaneOnce sync.Once
 
 	// inventoryLane lists runtimes at patrol cadence and publishes the
 	// observation cache (runtime_inventory_lane.go). run() creates it; it
@@ -685,8 +694,9 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 }
 
 // run executes the reconciliation loop until ctx is canceled. This is
-// the per-city main loop — it watches config, reconciles agents, runs
-// wisp GC, and dispatches orders.
+// the per-city main loop — it watches config, reconciles agents, wakes the
+// wisp GC and orders lanes, and dispatches nothing itself that a lane can
+// do off the tick.
 func (cr *CityRuntime) run(ctx context.Context) {
 	// Reaching run() means every init-failure/discard point is behind us:
 	// this runtime is the live owner of the city, so its shutdown() is the
@@ -909,6 +919,19 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	defer func() {
 		stopWorkGCLane()
 		<-workGCLaneDone
+	}()
+	// The wisp GC purge runs on its own lane too; the tick only wakes it at its
+	// wake_wisp_gc_lane slot (wisp_gc_lane.go). Its stop is registered after
+	// the work arm's so it joins FIRST, while the work arm's lane is still
+	// alive: a purge wakes the work arm as it ends, and that wake must land on
+	// a running lane. Every later return — a canceled startup step, a patrol
+	// loop exit, a shutdown — therefore joins a purge in flight before
+	// shutdown closes the stores and the trace the purge reads.
+	wispGCLaneCtx, stopWispGCLane := context.WithCancel(ctx)
+	wispGCLaneDone := cr.startWispGCLane(wispGCLaneCtx)
+	defer func() {
+		stopWispGCLane()
+		<-wispGCLaneDone
 	}()
 
 	// Recover ready work whose canonical pool route was lost or never written
@@ -1426,7 +1449,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
 	{name: "retire_suspended_rig_scopes", run: (*CityRuntime).tickRetireSuspendedRigScopes},
 	{name: "reconcile_execution_completions", run: (*CityRuntime).tickReconcileExecutionCompletions},
-	{name: "wisp_gc", run: (*CityRuntime).tickWispGC},
+	{name: "wake_wisp_gc_lane", run: (*CityRuntime).tickWakeWispGCLane},
 	{name: "workspace_service_tick", run: (*CityRuntime).tickWorkspaceService},
 	{name: "auto_suspend_chat_sessions", session: true, run: (*CityRuntime).tickAutoSuspendChatSessions},
 	{name: "process_convergence_requests", run: (*CityRuntime).tickProcessConvergenceRequests},
@@ -1451,8 +1474,9 @@ func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 }
 
 // tick performs one reconciliation tick: pool death detection, config
-// reload (if dirty), agent reconciliation, wisp GC, and order
-// dispatch. Its steps are legacyTickPhases, in order.
+// reload (if dirty), agent reconciliation, and the lane wakes — orders and
+// the wisp GC — where dispatch and the purge used to run inline. Its steps
+// are legacyTickPhases, in order.
 func (cr *CityRuntime) tick(
 	ctx context.Context,
 	dirty *atomic.Bool,
@@ -1920,50 +1944,6 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 		sweptAt, sweptReason, swept := completionsLane.lastSweep()
 		addBackstopAgeFields(completionFields, sweptAt, sweptReason, swept)
 		p.recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
-	}
-	return false
-}
-
-// tickWispGC purges expired closed molecules. The molecule/wisp/workflow
-// purge arm routes through the typed graph-class store; the read-message
-// retention arm through the typed messaging-class store. Both collapse to the
-// city store today, so the GC is byte-identical. The closed session purge arm
-// gets the sessions class only when it is relocated onto a SQLite infra
-// ledger; on an unsplit city it gets nothing and never touches the work store.
-func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
-		phaseStart := time.Now()
-		// On a city that relocates the graph class, the attachment holders and
-		// the v1 poured molecule roots live on the work legs, not the binding
-		// the GC sweeps (wispGCLegs). A single-store city hands none: its
-		// graph-class store is its work store.
-		var legs wispGCLegs
-		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
-			legs = cr.workLegs()
-		}
-		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
-		payload := map[string]any{"purged": purged}
-		if legs != nil {
-			// The work arm runs on its own lane; the tick only wakes it and
-			// records how stale its last pass is.
-			lane := cr.workGCLaneOf()
-			lane.wake()
-			if age, ran := lane.lastPassAge(time.Now()); ran {
-				payload["work_arm_last_pass_age_ms"] = age.Milliseconds()
-			}
-		}
-		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, payload)
-		if gcErr != nil {
-			for _, line := range strings.Split(gcErr.Error(), "\n") {
-				if line == "" {
-					continue
-				}
-				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
-			}
-		}
-		if purged > 0 {
-			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
-		}
 	}
 	return false
 }
@@ -3079,7 +3059,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = carryWispGCState(cr.wg, newWispGCForCity(nextCfg, cr.cityName))
+	// The wisp GC tracker belongs to its lane now (wisp_gc_lane.go): stage the
+	// tracker the reloaded config builds — nil is a disable — and the lane
+	// installs it between passes, carrying the last completed purge's cadence
+	// and session cursor onto the new policy, so a reload never reads the
+	// tracker a purge in flight is mutating, and never waits for one either.
+	cr.wispGCLaneOf().stage(newWispGCForCity(nextCfg, cr.cityName))
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
