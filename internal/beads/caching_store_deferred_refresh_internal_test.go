@@ -257,6 +257,104 @@ func TestLiveListRefreshStillRefreshesTimeDeferredBdRow(t *testing.T) {
 	}
 }
 
+// TestDeferredBdRowClosedElsewhereReadsClosedAfterEvent pins how a deferred row
+// that another writer closes reaches the cache once the live-list refresh no
+// longer reads it back. The live list stays silent about it (bd's --status
+// filter omitted the row before and after the close), so the close arrives as
+// bd's hook event, and Get must answer closed after that event.
+func TestDeferredBdRowClosedElsewhereReadsClosedAfterEvent(t *testing.T) {
+	const beadID = "ga-deferred2"
+
+	var mu sync.Mutex
+	status := "open"
+	showCalls := 0
+
+	issue := func(status string) []byte {
+		return []byte(`[{"id":"` + beadID + `","title":"deferrable work","status":"` + status +
+			`","issue_type":"task","assignee":"gascity/builder"}]`)
+	}
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			return []byte(`[]`), nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.3.0\n"), nil
+		case "list":
+			if hasArgPrefix(args, "--status=open") && status != "open" {
+				return []byte(`[]`), nil
+			}
+			return issue(status), nil
+		case "show":
+			showCalls++
+			return issue(status), nil
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStore(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	liveQuery := ListQuery{Status: "open", Live: true, TierMode: TierBoth}
+
+	// Someone defers it; the first live list learns that with one Get.
+	mu.Lock()
+	status = "deferred"
+	mu.Unlock()
+	if _, err := cache.List(liveQuery); err != nil {
+		t.Fatalf("live List after defer: %v", err)
+	}
+	cache.mu.RLock()
+	cached := cache.beads[beadID]
+	cache.mu.RUnlock()
+	if !cached.IndefinitelyDeferred {
+		t.Fatalf("cached %s IndefinitelyDeferred = false after the deferral was read; the fixture did not reach the skipped state", beadID)
+	}
+
+	// Another writer closes it, bypassing the cache. The status-filtered list
+	// is silent before and after, so the refresh has nothing to notice.
+	mu.Lock()
+	status = "closed"
+	showCalls = 0
+	mu.Unlock()
+	if _, err := cache.List(liveQuery); err != nil {
+		t.Fatalf("live List after close: %v", err)
+	}
+	mu.Lock()
+	shows := showCalls
+	mu.Unlock()
+	if shows != 0 {
+		t.Fatalf("live List after the close issued %d bd show calls for %s; the deferred skip is not in effect", shows, beadID)
+	}
+
+	// bd's hook delivers the close.
+	cache.ApplyEvent("bead.closed", []byte(`{"id":"`+beadID+`","status":"closed"}`))
+
+	got, err := cache.Get(beadID)
+	if err != nil {
+		t.Fatalf("Get after close event: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Get(%s).Status = %q after the close event, want closed", beadID, got.Status)
+	}
+	rows, err := cache.List(liveQuery)
+	if err != nil {
+		t.Fatalf("live List after close event: %v", err)
+	}
+	for _, row := range rows {
+		if row.ID == beadID {
+			t.Fatalf("live open List still returns %s after the close event", beadID)
+		}
+	}
+}
+
 func hasArgPrefix(args []string, prefix string) bool {
 	for _, a := range args {
 		if strings.HasPrefix(a, prefix) {
