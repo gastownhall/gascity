@@ -624,3 +624,28 @@ func TestStaleAllows(t *testing.T) {
 		t.Fatalf("staleAllows = %q, want %q", got, want)
 	}
 }
+
+// TestStaleTaggedAllows: a tagged allowlist entry (Allow.Tag) is judged
+// against the files its tag's build compiles, in its own package: one that
+// build compiles is kept, one only another build compiles, or no build, is
+// reported. An untagged entry is the nogo pass's to judge.
+func TestStaleTaggedAllows(t *testing.T) {
+	allow := []storeclass.Allow{
+		{Package: "internal/api", File: "dashport_support.go", Tag: "integration"},
+		{Package: "internal/api", File: "seed_*.go", Tag: "integration"},
+		{Package: "internal/api", File: "untagged.go", Tag: "integration"},
+		{Package: "internal/api", File: "gone.go", Tag: "integration"},
+		{Package: "internal/other", File: "dashport_support.go", Tag: "integration"},
+		{Package: "internal/api", File: "gone.go", Tag: "e2e"},
+		{Package: "internal/api", File: "untagged_gone.go"},
+	}
+	files := map[string]map[string]bool{
+		"":            {"internal/api/untagged.go": true},
+		"integration": {"internal/api/dashport_support.go": true, "internal/api/seed_city.go": true},
+	}
+	got := staleTaggedAllows(allow, files)
+	want := []string{"internal/api/gone.go (e2e)", "internal/api/gone.go (integration)", "internal/api/untagged.go (integration)", "internal/other/dashport_support.go (integration)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("staleTaggedAllows = %q, want %q", got, want)
+	}
+}

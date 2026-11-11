@@ -216,9 +216,17 @@ func AllRulesBut(rs ...Rule) []Rule {
 // like the baseline, so debt moved into an allowlisted file is a raise. A
 // File entry that matches no file of its package is stale and reports, and
 // the generator refuses an entry whose package the module does not have.
+//
+// Tag names the build tag that compiles File, for a file only a tagged build
+// compiles (a //go:build integration seam). A pass compiles its package under
+// one tag set it cannot name (rules_go hands nogo no ignored files), so it
+// cannot tell a tagged entry's file from a stale one and does not report it;
+// the generator, which loads every tag variant, refuses a tagged entry its
+// variant compiles no file for.
 type Allow struct {
 	Package string
 	File    string
+	Tag     string
 	Rules   []Rule
 	Reason  string
 }
@@ -442,6 +450,9 @@ func (c *checker) report(first *ast.File, bases []string) {
 			continue
 		}
 		if !slices.ContainsFunc(bases, func(b string) bool { return fileMatches(a, b) }) {
+			if a.Tag != "" {
+				continue // another variant's file: the generator judges it
+			}
 			stale = append(stale, fmt.Sprintf("storeclass[allowlist] allowlisted file %s/%s names nothing: drop it", c.rel, a.File))
 		}
 	}
