@@ -429,7 +429,7 @@ func TestRelayWrapInsideEnvUnsetInsideSlice(t *testing.T) {
 	}
 	relayed := shellquote.Join([]string{testCompanion, "relay", "--", "/bin/sh", "-c", "claude"})
 	want := shellquote.Join([]string{
-		"systemd-run", "--user", "--scope", "--slice=gascity-agents.slice", "--collect", "--quiet", "--",
+		"systemd-run", "--user", "--scope", "--slice=gascity-agents.slice", "--collect", "--quiet", "--expand-environment=no", "--",
 		"sh", "-c", "exec env -u LC_ALL " + relayed,
 	})
 	create := rec.calls[0]
