@@ -813,7 +813,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_exists_probe_failure)
+      remote_exists_probe_failure|multiple_remotes_probe_failure)
         printf 'remote existence probe unavailable\n' >&2
         exit 60
         ;;
@@ -852,7 +852,7 @@ case "$query" in
       remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote)
         print_cell 1
         ;;
-      multiple_remotes_with_origin|multiple_remotes_no_origin)
+      multiple_remotes_with_origin|multiple_remotes_no_origin|multiple_remotes_probe_failure)
         print_cell 2
         ;;
       explicit_backup_remote)
@@ -872,7 +872,7 @@ case "$query" in
     ;;
   *"SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"*)
     case "$mode" in
-      multiple_remotes_no_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
+      multiple_remotes_no_origin|multiple_remotes_probe_failure|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         # Real Dolt always names the first remote when any exist.
         print_cell backup
         ;;

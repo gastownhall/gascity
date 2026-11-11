@@ -112,6 +112,98 @@ func TestCompactScriptPendingPushToRemovedRemoteReportsUnsatisfiableOnce(t *test
 	}
 }
 
+// TestCompactScriptSharedHistoryGuardReportsPendingPushToRemovedRemoteUnsatisfiable
+// pins the round-1 review finding on ga-zvgiw5: the incident database still has
+// other remotes (upstream-ro, usb, ...) and no origin, so the shared-history
+// guard routes it to compact_shared_history_database, and a scheduled run never
+// sets GC_DOLT_COMPACT_ALLOW_FEDERATED. The marker's gone remote must be
+// reported once as unsatisfiable there too, not held with advice to force-push
+// to a remote that no longer exists.
+func TestCompactScriptSharedHistoryGuardReportsPendingPushToRemovedRemoteUnsatisfiable(t *testing.T) {
+	fixture, marker := stagePendingPushMarker(t, true)
+	markerBefore := readCompactFile(t, marker)
+
+	var outs []string
+	// multiple_remotes_no_origin: remotes exist, but not the marker's origin.
+	for cycle := 1; cycle <= 2; cycle++ {
+		out, err := fixture.run(t, "multiple_remotes_no_origin", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("cycle %d: the guard path keeps its bare GC and must not fail the run: %v\n%s", cycle, err, out)
+		}
+		outs = append(outs, out)
+	}
+
+	log := readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 1 {
+		t.Fatalf("two cycles over an unsatisfiable marker should send exactly one mail, got %d\nlog:\n%s", len(mailLines), log)
+	}
+	if !strings.Contains(mailLines[0], "compact-pending-push-unsatisfiable") || !strings.Contains(mailLines[0], "origin") {
+		t.Fatalf("mail should name the unsatisfiable defect and the removed remote\nline:\n%s", mailLines[0])
+	}
+	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
+	if len(eventLines) != 2 {
+		t.Fatalf("each cycle should emit one event, got %d\nlog:\n%s", len(eventLines), log)
+	}
+	for _, line := range eventLines {
+		if !strings.Contains(line, unsatisfiableEventType) {
+			t.Fatalf("event should carry %s\nline:\n%s", unsatisfiableEventType, line)
+		}
+	}
+	if strings.Contains(log, "compact-pending-push-held") {
+		t.Fatalf("a marker whose remote is gone must not be reported held:\n%s", log)
+	}
+	for i, out := range outs {
+		if strings.Contains(out, "force-push") {
+			t.Fatalf("cycle %d: no force-push advice for a remote that no longer exists:\n%s", i+1, out)
+		}
+	}
+	if got := readCompactFile(t, marker); got != markerBefore {
+		t.Fatalf("evidence marker must be left untouched\nbefore:\n%s\nafter:\n%s", markerBefore, got)
+	}
+}
+
+// TestCompactScriptSharedHistoryGuardKeepsPendingPushHeldWhileRemoteResolves
+// is the negative control for the test above: with the marker's remote still
+// configured, or its existence probe unanswered, nothing proves the push
+// unsatisfiable, so the guard keeps holding it.
+func TestCompactScriptSharedHistoryGuardKeepsPendingPushHeldWhileRemoteResolves(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+	}{
+		{"remote still configured", "remote_success"},
+		{"existence probe unanswered", "multiple_remotes_probe_failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, marker := stagePendingPushMarker(t, true)
+			markerBefore := readCompactFile(t, marker)
+
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err != nil {
+				t.Fatalf("a held pending push must not fail the run: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "NOT force-pushing") {
+				t.Fatalf("held marker keeps its operator guidance:\n%s", out)
+			}
+			log := readCompactGCLog(t, fixture)
+			if strings.Contains(log, "compact-pending-push-unsatisfiable") {
+				t.Fatalf("a remote that resolves (or an unanswered probe) is not unsatisfiable:\n%s", log)
+			}
+			eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
+			if len(eventLines) != 1 || !strings.Contains(eventLines[0], "type=compact-pending-push-held") {
+				t.Fatalf("expected one held event, got:\n%s", log)
+			}
+			if mails := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mails) != 1 || !strings.Contains(mails[0], "compact-pending-push-held") {
+				t.Fatalf("expected one held mail, got:\n%s", log)
+			}
+			if got := readCompactFile(t, marker); got != markerBefore {
+				t.Fatalf("evidence marker must be left untouched\nbefore:\n%s\nafter:\n%s", markerBefore, got)
+			}
+		})
+	}
+}
+
 // TestCompactScriptDryRunDoesNotReportUnsatisfiablePendingPush pins that a dry
 // run only reports what it would do: no mail, no event, marker left in place.
 func TestCompactScriptDryRunDoesNotReportUnsatisfiablePendingPush(t *testing.T) {
