@@ -249,6 +249,11 @@ pack's `docs/journal-corruption-recovery.md`).
    mv .beads/dolt/<db> .gc/runtime/packs/dolt/corrupt-aside/<db>.<timestamp>
    ```
 
+   The aside copy must stay outside `<data_dir>`: the managed server treats
+   every directory under it as a database, so a damaged copy left there, even
+   renamed, crash-loops the server (`root hash doesn't exist: <hash>` in
+   `gc dolt logs`).
+
    Repeat per corrupt database if more than one is affected, restoring each
    from its own source; each aside copy lands where start-time journal
    recovery keeps its own, and the `dolt-corrupt-aside` doctor check reports
@@ -281,6 +286,14 @@ pack's `docs/journal-corruption-recovery.md`).
    gc maintenance status
    bd list --json --limit 1
    ```
+
+   A restored store lacks bd's clone-local tables. `gc start` normally
+   recreates them by running `bd migrate schema`. If `bd list` reports
+   `table not found: leases`, run `gc bd migrate schema` with the managed
+   server up (not between `gc stop` and `gc start`). `Schema already at v<N>`
+   is the expected output when nothing is missing. A remote-backed scope is
+   refused; see "Step 4 (after a fresh clone)" in the dolt pack's
+   `docs/journal-corruption-recovery.md` before going further.
 
 If the most recent snapshot is also unreadable, repeat with the
 next-newest entry under `success/`. The retention policy keeps the

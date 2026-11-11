@@ -262,10 +262,22 @@ Markers left by runs from before this guard existed:
 
 > **Warning:** re-cloning from the remote discards every commit made to the
 > local database since the flatten. Those writes exist only locally. Before
-> you re-clone, take a copy of `.dolt`. Then export the local changes with
+> you re-clone, take a copy of `.dolt`, and keep that copy
+> outside the Dolt data directory: the managed server treats every directory
+> under it as a database, so a stray damaged copy crash-loops the server.
+> Then export the local changes with
 > `dolt diff <flatten-commit> HEAD`, where `<flatten-commit>` is the latest
 > `compaction: flatten history` commit, and re-apply them after the re-clone.
 > The `compacted_from_head` commit itself is gone after the full GC.
+
+A re-cloned database lacks bd's clone-local tables. `gc start` recreates them
+by running `bd migrate schema`. If `gc bd list` still reports
+`table not found: leases`, or the start warns that the migration was not
+applied to a remote-backed scope, run `gc bd migrate schema` with the server
+running. bd refuses to migrate a remote-backed database on its own, so ask
+whoever owns the remote which clone does it. The
+[journal corruption runbook](https://github.com/gastownhall/gascity/blob/main/examples/bd/dolt/docs/journal-corruption-recovery.md)
+covers the full sequence.
 
 To flatten a database that has a remote, first announce a compaction window to
 every clone of that history. Then run:

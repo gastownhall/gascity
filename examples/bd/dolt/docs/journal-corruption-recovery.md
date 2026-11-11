@@ -74,6 +74,19 @@ a path outside it that does not exist yet, where the corrupt store is kept. Unde
 not exist yet), as `<dbname>.<timestamp>`, the store sits with the ones automatic recovery
 preserves, and the `dolt-corrupt-aside` doctor check reports it until you remove it.
 
+**Keep every damaged store outside `<data_dir>`.** The managed Dolt server treats every
+directory under `<data_dir>` as a database, so a damaged store left there, even renamed
+(`<dbname>.broken`, `<dbname>.damaged-<timestamp>`), is loaded on the next start. The server
+dies and the watchdog restarts it: a crash loop that never mentions the stray directory.
+Its signature is this line in the Dolt log (`gc dolt logs`):
+
+```text
+root hash doesn't exist: <hash>
+```
+
+If the server is already crash-looping on it, stop the city (Step 3), move the stray
+directory out of `<data_dir>` to a `<somewhere-safe>` path, and start again.
+
 ---
 
 ## When to Use
@@ -99,7 +112,7 @@ Do **not** use this runbook for:
 # 1. Confirm server is down and identify the corrupt database
 gc dolt status 2>&1 || true
 gc dolt logs 2>&1 | tail -20
-ls -lh <data_dir>
+ls -lh <data_dir>    # every directory here is served as a database: no stray damaged copies
 
 # 2. Locate the corrupt journal files
 ls -lh <data_dir>/<dbname>/.dolt/noms/*.journal
@@ -146,6 +159,8 @@ gc bd backup init <backup_url>
 
 ```bash
 # 5. Start the city and verify
+#    (gc start finishes bd's schema migrations; if bd still reports
+#    "table not found: leases", see "Step 4 (after a fresh clone)")
 gc start
 gc dolt status
 gc doctor
@@ -394,6 +409,39 @@ gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 
 ---
 
+## Step 4 (after a fresh clone): Recreate the Clone-Local Tables
+
+A store that came from `dolt clone`, `dolt backup restore` or a re-clone lacks the
+clone-local tables bd keeps out of Dolt history (they are dolt-ignored). bd's ordinary open
+does not recreate them. The symptom is `table not found: leases` from `gc bd list`, and the
+supervisor cannot load session beads.
+
+`bd migrate schema` recreates them. `gc start` (Step 5) already runs it for the city and every
+rig, so you usually do not run it by hand. Run it yourself when:
+
+- bd ran against the restored store before `gc start`, for example after only `gc dolt start`.
+- `gc start` warned `pending bd schema migrations for '<db>' were not applied (remote-backed
+  scope; ...)`. bd refuses to migrate a remote-backed database on its own.
+- bd is older than 1.0.5, where `gc start` skips the migration with a warning.
+
+```bash
+# The managed server must be up, as it is during gc start. Do not run this between
+# gc stop and gc start.
+gc dolt start
+gc bd migrate schema            # city scope
+gc bd --rig <rig> migrate schema   # a rig scope, one per rig
+```
+
+`Schema already at v<N>` is the expected output when the tables are already there. It is not
+an error.
+
+If bd refuses with `refusing to migrate a remote-backed database`, stop. Migrating a
+remote-backed database changes shared state, and from bd 1.3.0 it also promotes the schema of a
+database on a shared server, which can lock out an older bd. The person who owns the remote
+decides which clone is the single migrator. Do not add `--force` to get past the refusal.
+
+---
+
 ## Step 5: Verify
 
 Confirm the database starts cleanly and the city is healthy before resuming work:
@@ -429,6 +477,9 @@ gc dolt compact
 - [ ] The corrupt store under `corrupt-aside/` (or `<somewhere-safe>`) is kept until the
       restored database is confirmed, then removed (the `dolt-corrupt-aside` doctor check
       reports it until then)
+- [ ] No damaged store, renamed or not, remains under `<data_dir>`
+- [ ] `gc bd list` runs without `table not found: leases` (otherwise see "Step 4 (after a
+      fresh clone)")
 - [ ] Open in-progress beads reviewed and state corrected if import was used
 - [ ] Root cause of journal growth identified (missing compaction schedule? high write volume?)
 - [ ] `gc dolt compact` scheduled or an order configured to prevent recurrence
