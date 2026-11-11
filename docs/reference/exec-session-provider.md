@@ -624,11 +624,11 @@ done again, as after a death under tmux). Into a name a running box holds,
 or one whose read fails, it does none of it and sends the full config.
 
 When gc relaunches the agent in a warm box (a script declaring
-`proc.provision` and `proc.exec`), it runs `session_setup` and
-`session_setup_script` on the host again after the launch, as the tmux
-runtime does. It does not stage the work dir or run `pre_start` again: the
-box is warm. A script without `proc.provision` is relaunched by a `stop`
-and a `start`, which do all of the host work again.
+`proc.provision` and `proc.exec`, without `carrier.ops`), it runs
+`session_setup` and `session_setup_script` on the host again after the
+launch, as the tmux runtime does. It does not stage the work dir or run
+`pre_start` again: the box is warm. Any other script is relaunched by a
+`stop` and a `start`, which do all of the host work again.
 
 gc runs no `session_live` for an exec runtime; the field stays in the start
 config. Commands there are typically tmux theming and keybindings, written

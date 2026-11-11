@@ -180,11 +180,20 @@ func HostFSBodies() map[string]string {
 	return b
 }
 
-// NonTmuxBodies returns a fully conformant carrier.ops variant. Generic exec
-// remains available, but rejects tmux so accidental default-carrier routing is
-// observable. The screen models the started command line, not its output.
-func NonTmuxBodies() map[string]string {
-	b := Bodies()
+// NonTmuxBodies returns Bodies for a reference that selects carrier.ops.
+// Generic exec remains available, but rejects tmux so accidental
+// default-carrier routing is observable. The screen models the started command
+// line, not its output.
+func NonTmuxBodies() map[string]string { return nonTmux(Bodies()) }
+
+// NonTmuxHostFSBodies returns HostFSBodies for a reference that selects
+// carrier.ops: with the host-filesystem tokens it declares every token the
+// catalog gates, so it exercises every requirement without tmux.
+func NonTmuxHostFSBodies() map[string]string { return nonTmux(HostFSBodies()) }
+
+// nonTmux turns the bodies b of a tmux-carrier reference into a carrier.ops
+// one (NonTmuxBodies).
+func nonTmux(b map[string]string) map[string]string {
 	b["protocol"] = strings.Replace(b["protocol"], `"idle-boundary"`, `"idle-boundary","carrier.ops"`, 1)
 	b["start"] = strings.Replace(b["start"], `mv "$box.tmp" "$box"`,
 		`printf %s "$cfg" | sed -n 's/.*"command":"\([^"]*\)".*/\1/p' > "$box.tmp/screen"; mv "$box.tmp" "$box"`, 1)

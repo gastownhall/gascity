@@ -20,7 +20,7 @@ const opsIdleCaps = `"carrier.ops","report-activity","report-attachment","idle-b
 
 var opsConstructors = map[string]func(string) runtime.Provider{
 	"raw":   func(s string) runtime.Provider { return NewProvider(s) },
-	"seams": NewSeamBacked,
+	"seams": func(s string) runtime.Provider { return NewSeamBacked(s) },
 }
 
 type opsPack struct{ dir, script string }

@@ -83,7 +83,7 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 }
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
-	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
+	for name, bodies := range map[string]map[string]string{"tmux": reference.HostFSBodies(), "ops": reference.NonTmuxHostFSBodies()} {
 		t.Run(name, func(t *testing.T) {
 			state := t.TempDir()
 			report := runGolden(t, writeScript(t, state, bodies))
@@ -701,15 +701,20 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 }
 
 // The base golden, which does not declare fs.host, fails nothing and skips
-// exactly the fshost group: fs.host adds a promise, it changes no other.
+// exactly the fshost group: fs.host adds a promise, it changes no other. The
+// same holds under either carrier.
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
-	report := runGolden(t, writeScript(t, t.TempDir(), reference.Bodies()))
-	for _, res := range report.Results {
-		switch {
-		case res.Status == StatusFail:
-			t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
-		case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
-			t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
-		}
+	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
+		t.Run(name, func(t *testing.T) {
+			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			for _, res := range report.Results {
+				switch {
+				case res.Status == StatusFail:
+					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
+				case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
+					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
+				}
+			}
+		})
 	}
 }
