@@ -114,12 +114,18 @@ func isTmuxProcess(root string, pid int) (bool, error) {
 }
 
 // isTmuxComm reports whether a /proc comm names tmux infrastructure for the
-// fence: what isInfrastructureCommand matches, or the "<name>: server" and
-// "<name>: client" titles tmux takes from its argv[0], so a tmux run under
-// another name (tmux3, a versioned build) is fenced too. The fence errs
-// toward reporting less, so it may read more names as tmux than the shared
-// scan's root test does.
+// fence: what isInfrastructureCommand matches, or a title tmux takes from
+// its argv[0], so a tmux run under another name (tmux3, a versioned build)
+// is fenced too. tmux titles itself "<name>: server (<socket>)" (or client)
+// and, when that overruns comm's 15 bytes, cuts it at its last space: a
+// name of up to 6 characters leaves "<name>: server" or "<name>: client",
+// a longer one "<name>:". Any process whose comm takes one of these forms
+// is read as tmux. The fence errs toward reporting less, so it may read
+// more names as tmux than the shared scan's root test does.
 func isTmuxComm(comm string) bool {
 	comm = strings.TrimSpace(comm)
-	return isInfrastructureCommand(comm) || strings.HasSuffix(comm, ": server") || strings.HasSuffix(comm, ": client")
+	return isInfrastructureCommand(comm) ||
+		strings.HasSuffix(comm, ": server") ||
+		strings.HasSuffix(comm, ": client") ||
+		strings.HasSuffix(comm, ":")
 }

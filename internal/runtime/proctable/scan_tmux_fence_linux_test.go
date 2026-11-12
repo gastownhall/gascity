@@ -177,3 +177,37 @@ func TestScanBySessionIDOutsideTmuxFencesARenamedTmux(t *testing.T) {
 		}
 	}
 }
+
+// On Linux tmux titles itself "<name>: server (<socket>)" and, when that
+// overruns comm's 15 bytes, cuts it at its last space, so a tmux run under
+// a name of 7 or more characters (tmux3.4) has the comm "<name>:" for both
+// its server and its clients. The fence recognizes that form too.
+func TestScanBySessionIDOutsideTmuxFencesARenamedTmuxWithATruncatedTitle(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	box := map[string]string{"GC_SESSION_ID": "sid-box"}
+	buildFakeProcUnder(t, root, 70, 1, "tmux3.4:", box)
+	buildFakeProcUnder(t, root, 71, 70, "bash", box)
+	buildFakeProcUnder(t, root, 72, 1, "sleep", box)
+	buildFakeProcUnder(t, root, 73, 72, "tmux3.4:", box)
+	buildFakeProcUnder(t, root, 74, 73, "agent", map[string]string{"GC_SESSION_ID": "sid-other"})
+	SetScanRootForTesting(t, root)
+	if all, err := ScanBySessionID("sid-box"); err != nil || !slices.Contains(rootPIDs(all), 70) {
+		t.Fatalf("ScanBySessionID = %v, %v; want the renamed server among its roots, or the case proves nothing", rootPIDs(all), err)
+	}
+	for _, tc := range []struct {
+		id   string
+		want []int
+	}{
+		{"sid-box", []int{72}},
+		{"sid-other", []int{}},
+	} {
+		found, err := ScanBySessionIDOutsideTmux(tc.id)
+		if err != nil {
+			t.Fatalf("ScanBySessionIDOutsideTmux(%q): %v", tc.id, err)
+		}
+		if got := rootPIDs(found); !slices.Equal(got, tc.want) {
+			t.Errorf("ScanBySessionIDOutsideTmux(%q) = %v, want %v: a tmux whose title was cut to \"<name>:\", its panes and its clients' children are fenced", tc.id, got, tc.want)
+		}
+	}
+}
