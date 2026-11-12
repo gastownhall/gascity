@@ -122,8 +122,8 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantReadyDelayMs:  8000,
 			wantProcessNames:  []string{"opencode", "node", "bun"},
 			wantAcceptDialogs: phase2BoolPtr(false),
-			overrideValue:     "opencode/deepseek-v4-flash-free",
-			wantOverrideArgs:  []string{"--model", "opencode/deepseek-v4-flash-free"},
+			overrideValue:     "opencode/deepseek-v4.1-flash-free",
+			wantOverrideArgs:  []string{"--model", "opencode/deepseek-v4.1-flash-free"},
 		},
 		{
 			profileID:        "mimocode/tmux-cli",

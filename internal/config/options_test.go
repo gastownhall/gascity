@@ -1155,8 +1155,8 @@ func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
 		args  []string
 	}{
 		{name: "Default"},
-		{name: "DeepSeek V4 Flash Free", model: "opencode/deepseek-v4-flash-free", args: []string{"--model", "opencode/deepseek-v4-flash-free"}},
-		{name: "Nemotron 3 Super Free", model: "opencode/nemotron-3-super-free", args: []string{"--model", "opencode/nemotron-3-super-free"}},
+		{name: "DeepSeek V4.1 Flash Free", model: "opencode/deepseek-v4.1-flash-free", args: []string{"--model", "opencode/deepseek-v4.1-flash-free"}},
+		{name: "Nemotron 3.5 Super VL Free", model: "opencode/nemotron-3.5-super-vl-free", args: []string{"--model", "opencode/nemotron-3.5-super-vl-free"}},
 		{name: "Big Pickle", model: "opencode/big-pickle", args: []string{"--model", "opencode/big-pickle"}},
 	}
 
