@@ -13,18 +13,22 @@ package api
 // statusWorkCounts is copied up to the point its queries are chosen: what it
 // does with them (concurrent per-store counts and ready reads, the tallies) is
 // not the plan's to change, and the table reads each query's store itself.
-// Everything else the copies call is live code T7b.3 leaves byte-identical:
-// State's accessors, Server.loadCacheColdRigs and cacheColdRigNames, and
-// the reassign functions the sweep runs over each store.
+// The reassign functions the sweep runs over each store are copied too, since
+// T7e.2 hands them the sweep's writable handles. Everything else the copies
+// call is live code T7e.2 leaves byte-identical: State's accessors,
+// Server.loadCacheColdRigs and cacheColdRigNames.
 //
 // The copies keep main's code, read markers included: markers in test files
 // are neither linted (storeclass) nor ledgered (reviewedMarkers).
 
 import (
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // frozenBeadListLeg is main's beadListLeg.
@@ -142,4 +146,49 @@ func frozenRetiredSessionWorkStores(s *Server, sessions beads.Store) []beads.Sto
 	add(s.state.Stores().Graph().Store)
 	add(sessions)
 	return out
+}
+
+// frozenReassignHeldOpenWorkAssignedToSession is main's
+// reassignHeldOpenWorkAssignedToSession.
+func frozenReassignHeldOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
+	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+		return nil
+	}
+	for _, status := range retiredSessionWorkStatuses {
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, TierMode: beads.TierBoth})
+		if err != nil {
+			return fmt.Errorf("looking up work held by retired session %s: %w", oldID, err)
+		}
+		held := func(item beads.Bead) bool {
+			parked := item.SourceStatus != "" && item.SourceStatus != status
+			return !parked && !session.IsSessionBeadOrRepairable(item)
+		}
+		if slices.ContainsFunc(work, held) {
+			return frozenReassignOpenWorkAssignedToSession(store, oldID, newID)
+		}
+	}
+	return nil
+}
+
+// frozenReassignOpenWorkAssignedToSession is main's
+// reassignOpenWorkAssignedToSession.
+func frozenReassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
+	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+		return nil
+	}
+	for _, status := range retiredSessionWorkStatuses {
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true, TierMode: beads.TierBoth})
+		if err != nil {
+			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
+		}
+		for _, item := range work {
+			if session.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			if err := store.Update(item.ID, beads.UpdateOpts{Assignee: &newID}); err != nil {
+				return fmt.Errorf("reassign work %s from retired session %s to %s: %w", item.ID, oldID, newID, err)
+			}
+		}
+	}
+	return nil
 }

@@ -45,7 +45,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	index := s.latestIndex()
 
-	work := s.state.Stores().Work()
+	// One epoch for the request: the cache gate, the legs and the freshness
+	// headers read the same stores.
+	st := s.state.Stores()
+	work := st.Work()
 	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
@@ -91,17 +94,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		}
 	}
 
-	stores := s.state.BeadStores()
-	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
-	var rigNames []string
-	if input.Rig != "" {
-		if _, ok := stores[input.Rig]; ok {
-			rigNames = []string{input.Rig}
-		}
-	} else {
-		rigNames = sortedRigNames(stores)
-	}
-	legs := beadListFanOut(s.state, stores, rigNames, input.Rig != "")
+	assigneeTerms := s.beadListAssigneeTerms(ctx, st, input.Assignee)
+	legs := beadListFanOut(st, s.state.CityName(), input.Rig)
 
 	var all []beads.Bead
 
@@ -182,13 +176,9 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			pa.attempt()
 			// One leg of the /beads fan-out (work legs, then the class
 			// binding): each lists only its own rows, so a type or label the
-			// other legs own misses here by design.
-			var list []beads.Bead
-			err := beads.FederatedRead(func() error {
-				var listErr error
-				list, listErr = leg.store.List(query)
-				return listErr
-			})
+			// other legs own misses here by design. The plan minted the leg
+			// federated, so the gate reads it that way.
+			list, err := leg.leg.Reader.List(query)
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
@@ -398,14 +388,19 @@ func mintNextCursor(page []beads.Bead, hasMore bool) string {
 type beadListLeg struct {
 	// label is what a degraded read is reported under in partial_errors.
 	label string
-	store beads.Store
+	leg   storeref.TypedLeg
 	// graph marks the relocated graph plane, which does not degrade: it either
 	// answers or the request fails loud (see graphPlaneUnavailable).
 	graph bool
 }
 
-// beadListFanOut builds the ordered leg list for a bead-list request: the work
-// stores in rigNames order, then the relocated graph store last.
+// beadListFanOut builds the ordered leg list for a bead-list request from one
+// epoch st (storeref.WorkList): the city and every rig the epoch opened, in
+// name order with the city under cityName (a rig of that name replaces it),
+// deduped by store, then the relocated graph store last. Suspended rigs are
+// listed, as BeadStores() listed them. A rig-scoped request reads the one
+// store rig names (storeref.WorkScope), or nothing for a name no store
+// answers to.
 //
 // Graph-class beads (gcg- molecule roots, steps, control beads) live in the
 // relocated graph store on a split city, and BeadStores() does not include it —
@@ -417,17 +412,34 @@ type beadListLeg struct {
 //
 // A rig-scoped request gets no graph leg: it is asking for one rig, and the
 // graph plane is not a rig.
-func beadListFanOut(state State, stores map[string]beads.Store, rigNames []string, rigScoped bool) []beadListLeg {
-	legs := make([]beadListLeg, 0, len(rigNames)+1)
-	for _, rigName := range rigNames {
-		legs = append(legs, beadListLeg{label: "rig " + rigName, store: stores[rigName]})
+//
+// The only error a plan over the epoch's own scopes returns is that it has no
+// store left to read, which is an empty fan-out: an empty 200, as an empty
+// BeadStores() served.
+func beadListFanOut(st storeref.Stores, cityName, rig string) []beadListLeg {
+	in := storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkReadsSuspendedRigs}
+	if rig != "" {
+		scope, ok := workScopeByName(st, cityName, rig)
+		if !ok {
+			return nil
+		}
+		in = storeref.WorkFederation{Kind: storeref.WorkScope, Scope: scope}
 	}
-	if rigScoped {
-		return legs
+	plan, err := st.Plan(in)
+	if err != nil {
+		return nil
 	}
-	if graph, ok := relocatedGraphStore(state); ok {
-		legs = append(legs, beadListLeg{label: "graph", store: graph, graph: true})
-	}
+	var legs []beadListLeg
+	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
+		switch {
+		case l.Role == storeref.RoleFederationTail:
+			legs = append(legs, beadListLeg{label: "graph", leg: l, graph: true})
+		case rig != "":
+			legs = append(legs, beadListLeg{label: "rig " + rig, leg: l})
+		default:
+			legs = append(legs, beadListLeg{label: "rig " + workLegName(l, cityName), leg: l})
+		}
+	})
 	return legs
 }
 
@@ -454,7 +466,7 @@ func beadListFanOut(state State, stores map[string]beads.Store, rigNames []strin
 func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, input *BeadListInput) (on bool, counts map[int]int, hydrate map[int]bool) {
 	counts = make(map[int]int, len(legs))
 	for i, leg := range legs {
-		n, ok := beadListLegCount(ctx, leg.store, assignee, input)
+		n, ok := beadListLegCount(ctx, leg.leg, assignee, input)
 		if ok {
 			counts[i] = n
 			continue
@@ -472,9 +484,11 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 
 // beadListLegCount returns one leg's exact un-seeked count, reporting false when
 // the store implements no Counter or cannot count this query shape exactly
-// (ErrCountUnsupported).
-func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := beads.As[beads.Counter](store)
+// (ErrCountUnsupported). The count is taken through the leg's strict reader,
+// as an unmarked count of the store was: the store's own Counter, which the
+// split-strict gate polices.
+func beadListLegCount(ctx context.Context, leg storeref.TypedLeg, assignee string, input *BeadListInput) (int, bool) {
+	counter, ok := beads.ReaderAs[beads.Counter](leg.Strict)
 	if !ok {
 		return 0, false
 	}
@@ -868,7 +882,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 // comes back as the bead's close_reason on GET and on bead.closed.
 func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	store, current, err := s.resolveBeadOwner(id)
+	// One epoch for the owner and the close gate's rig match.
+	st := s.state.Stores()
+	store, current, err := s.resolveBeadOwnerIn(st, id)
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +899,7 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if reason != "" {
 		submitted = map[string]string{"close_reason": reason}
 	}
-	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
+	if err := s.gateWorkRecordClose(ctx, st, id, store, current, submitted); err != nil {
 		return nil, err
 	}
 	// Only a close that happens stamps a reason. On a bead that is not closed,
@@ -1010,7 +1026,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		opts.ParentID = &parent
 	}
 
-	store, current, err := s.resolveBeadOwner(id)
+	// One epoch for the owner and, on a closing update, the close gate's rig
+	// match.
+	st := s.state.Stores()
+	store, current, err := s.resolveBeadOwnerIn(st, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1036,7 +1055,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		// This spelling closes the bead, so it answers to the same contract as
 		// the close route. body.Metadata rides along because the documented
 		// atomic close stamps the work record in this very request.
-		if err := s.gateWorkRecordClose(ctx, id, store, current, body.Metadata); err != nil {
+		if err := s.gateWorkRecordClose(ctx, st, id, store, current, body.Metadata); err != nil {
 			return nil, err
 		}
 	}

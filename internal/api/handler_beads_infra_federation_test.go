@@ -348,27 +348,14 @@ func TestBeadReadyWorkStoresDownButGraphUpIsPartial200(t *testing.T) {
 	}
 }
 
-// rigsOnlyBeadStoresState is a legacy city whose BeadStores leaves the city
-// store out, a shape production never serves (controllerState.BeadStores
-// carries the city under its name, and so does fakeState): it isolates the
-// list's graph arm, so a leg that arm minted at the city store is the only way
-// a city bead can reach the response.
-type rigsOnlyBeadStoresState struct{ *fakeState }
-
-func (s rigsOnlyBeadStoresState) BeadStores() map[string]beads.Store {
-	stores := s.fakeState.BeadStores()
-	delete(stores, s.cityName)
-	return stores
-}
-
-// TestBeadListLegacyCityDoesNotSmuggleCityStore is the mutation-killer for the
-// list arm's `graph != CityBeadStore()` identity guard. It pins the byte-identity
-// property directly: on a legacy city the graph arm must not change WHICH stores
-// the fan-out reads. Here BeadStores() deliberately does not carry the city
-// store (rigsOnlyBeadStoresState), so an unguarded arm would mint a synthetic
-// leg pointing at it and the city's beads would appear in a response that never
-// contained them.
-func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
+// TestBeadListLegacyCityHasNoGraphLeg is the mutation-killer for the list's
+// relocation guard (storeref's WorkList tail, by handle identity since T7e.2;
+// the arm's `graph != CityBeadStore()` guard before). It pins the
+// byte-identity property directly: on a legacy city the graph arm must not
+// change WHICH stores the fan-out reads, so the legs are the city and the rig
+// alone, and each bead is listed once.
+func TestBeadListLegacyCityHasNoGraphLeg(t *testing.T) {
+	t7dGateOff(t)
 	fs := newLegacyFederationState(t)
 	cityBead, err := fs.cityBeadStore.Create(beads.Bead{Type: "task", Title: "city work"})
 	if err != nil {
@@ -379,9 +366,20 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 		t.Fatalf("seed rig work: %v", err)
 	}
 
-	state := rigsOnlyBeadStoresState{fs}
+	legs := beadListFanOut(fs.Stores(), fs.cityName, "")
+	var labels []string
+	for _, leg := range legs {
+		labels = append(labels, leg.label)
+		if leg.graph {
+			t.Errorf("a legacy city's fan-out has a graph leg over %v: the graph arm minted a leg at the city store", leg.leg.Ref)
+		}
+	}
+	if len(legs) != 2 {
+		t.Fatalf("legacy fan-out legs = %v, want the city and the rig alone", labels)
+	}
+
 	rec := httptest.NewRecorder()
-	newTestCityHandler(t, state).ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/beads"), nil))
+	newTestCityHandler(t, fs).ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/beads"), nil))
 	if rec.Code != 200 {
 		t.Fatalf("GET /beads status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
@@ -389,14 +387,11 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode /beads: %v", err)
 	}
-	if !bodyContainsBeadID(body.Items, rigBead.ID) {
-		t.Fatalf("list items = %+v, want the rig bead %q", body.Items, rigBead.ID)
+	if !bodyContainsBeadID(body.Items, rigBead.ID) || !bodyContainsBeadID(body.Items, cityBead.ID) {
+		t.Fatalf("list items = %+v, want the city bead %q and the rig bead %q", body.Items, cityBead.ID, rigBead.ID)
 	}
-	if bodyContainsBeadID(body.Items, cityBead.ID) {
-		t.Fatalf("list items include city bead %q, which is not in BeadStores() — the graph arm minted a leg on a legacy city, so it is no longer byte-identical", cityBead.ID)
-	}
-	if body.Total != 1 {
-		t.Fatalf("list total = %d, want 1", body.Total)
+	if body.Total != 2 {
+		t.Fatalf("list total = %d, want 2", body.Total)
 	}
 }
 

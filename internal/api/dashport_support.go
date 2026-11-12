@@ -252,11 +252,11 @@ func (s *seededState) IsQuarantined(string) bool      { return false }
 func (s *seededState) ClearCrashHistory(string)       {}
 func (s *seededState) CityBeadStore() beads.Store     { return s.cityStore }
 
-// ScopedStoreLike returns (nil, nil): the seeded stores are in-memory, so there
-// is no bd-CLI subprocess to scope. Callers keep reading through the existing
-// store directly, matching the contract for non-bd-backed stores.
-func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store, error) {
-	return nil, nil
+// ScopedStoreLike returns leg unchanged and false: the seeded stores are
+// in-memory, so there is no bd-CLI subprocess to scope. Callers keep reading
+// through leg directly, matching the contract for non-bd-backed stores.
+func (s *seededState) ScopedStoreLike(_ context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
+	return leg, false, nil
 }
 
 // classStores mints the seeded city's handles: a single-store topology, so

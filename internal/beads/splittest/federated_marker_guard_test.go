@@ -100,10 +100,6 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"first-owner attachment probe (S3a): graph store or, for a v1 poured molecule, the work store",
 	},
-	"internal/api/huma_handlers_beads.go (*Server).humaHandleBeadList": {
-		"federated", 1,
-		"/beads fan-out leg: work legs and the class binding each list only their own rows",
-	},
 
 	// Relic legs: graph rows read from city and rig scope stores (S4).
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                 {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
