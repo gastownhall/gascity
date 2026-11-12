@@ -122,6 +122,19 @@ func TestOpenStartupHealthEpisodesPropagatesListError(t *testing.T) {
 	}
 }
 
+// TestOpenStartupHealthEpisodesKeepsPartialResultDetectable pins that a
+// partial-result list error survives the batch read's wrapping, so a caller
+// can tell a partial read (fall back to per-name loads) from a whole failure.
+func TestOpenStartupHealthEpisodesKeepsPartialResultDetectable(t *testing.T) {
+	partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("parse")}
+	s := NewStore(beads.SessionStore{Store: &erroringStore{Store: beads.NewMemStore(), listQueryErr: partial}})
+
+	_, err := s.OpenStartupHealthEpisodes()
+	if !beads.IsPartialResult(err) {
+		t.Fatalf("OpenStartupHealthEpisodes error = %v, want one beads.IsPartialResult recognizes", err)
+	}
+}
+
 // episodeListCountingStore counts List calls made through it.
 type episodeListCountingStore struct {
 	beads.Store

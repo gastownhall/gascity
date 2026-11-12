@@ -27,6 +27,9 @@ type episodeReadCountingStore struct {
 	mu      sync.Mutex
 	reads   int
 	listErr error // returned by every episode read when set
+	// partialOnUnfiltered makes the unfiltered batch episode read return its
+	// rows with a PartialResultError, as bd does when one row fails to parse.
+	partialOnUnfiltered bool
 }
 
 func (c *episodeReadCountingStore) started() bool {
@@ -53,6 +56,13 @@ func (c *episodeReadCountingStore) List(q beads.ListQuery) ([]beads.Bead, error)
 	if q.Type == sessionpkg.StartupHealthEpisodeType {
 		if err := c.note(); err != nil {
 			return nil, err
+		}
+		if c.partialOnUnfiltered && len(q.Metadata) == 0 {
+			rows, err := c.Store.List(q)
+			if err != nil {
+				return nil, err
+			}
+			return rows, &beads.PartialResultError{Op: "bd list", Err: errors.New("parse")}
 		}
 	}
 	return c.Store.List(q)
@@ -254,5 +264,34 @@ func TestReconcileSessionBeads_StartupHealthEpisodeIndexRefreshesEachTick(t *tes
 	env.reconcile([]beads.Bead{refreshed})
 	if !startedSessionNames(env.sp)["worker-0"] {
 		t.Fatalf("worker-0 not started on the second tick although its episode was cleared: the index outlived its tick")
+	}
+}
+
+// TestReconcileSessionBeads_StartupHealthPartialBatchReadFallsBackPerName pins
+// that a partial-result batch read (one malformed episode bead) does not fail
+// open every candidate: the index falls back to per-name loads for the tick,
+// so a quarantined candidate stays held and the others start.
+func TestReconcileSessionBeads_StartupHealthPartialBatchReadFallsBackPerName(t *testing.T) {
+	const candidates = 3
+	env, counting, sessions := downCandidatesEnv(t, candidates)
+	seedStartupHealthEpisodes(t, counting.Store,
+		sessionpkg.StartupHealthEpisode{SessionName: "worker-0", ConsecutiveCount: defaultMaxWakeAttempts, Kind: sessionpkg.FailureKindOther, QuarantinedUntil: env.clk.Now().Add(time.Hour)},
+	)
+	counting.partialOnUnfiltered = true
+
+	if woken := env.reconcile(sessions); woken != candidates-1 {
+		t.Fatalf("woken = %d, want %d (the quarantined worker-0 stays held)", woken, candidates-1)
+	}
+	started := startedSessionNames(env.sp)
+	for name, want := range map[string]bool{"worker-0": false, "worker-1": true, "worker-2": true} {
+		if started[name] != want {
+			t.Errorf("%s started = %t, want %t", name, started[name], want)
+		}
+	}
+	if got, want := counting.readCount(), 1+candidates; got != want {
+		t.Fatalf("episode reads in the wake loop = %d, want %d (one partial batch, then one per-name load per candidate)", got, want)
+	}
+	if strings.Contains(env.stderr.String(), "loading startup-health episode") {
+		t.Fatalf("stderr = %q, want no fail-open line: the per-name loads succeeded", env.stderr.String())
 	}
 }
