@@ -132,3 +132,63 @@ func TestRun_IdleBoundaryWarningFollowsTheCarrier(t *testing.T) {
 		})
 	}
 }
+
+// With carrier.ops and idle-boundary, gc keeps each session's ready prompt in
+// the pack's metadata, so the check requires that store: set-meta and
+// get-meta must round-trip a non-default prompt byte for byte, and an absent
+// op fails rather than skipping as the optional round-trip does.
+// Kills: a store check that skips an exit 2, trusts a lossy store, or runs
+// for a pack that did not declare both tokens.
+func TestRun_CarrierOpsRequiresTheReadyPromptStore(t *testing.T) {
+	if c := findCheck(t, checkOpsReference(t, nil, Options{}), readyPromptStoreCheck); c.Status != StatusPass {
+		t.Fatalf("golden store = %s, %s", c.Status, c.Detail)
+	}
+	for _, tc := range []struct{ name, op, body string }{
+		{"set-meta unimplemented", "set-meta", "cat >/dev/null; exit 2"},
+		{"get-meta unimplemented", "get-meta", "exit 2"},
+		{"set-meta fails", "set-meta", "cat >/dev/null; echo store-down >&2; exit 1"},
+		{"get-meta fails", "get-meta", "echo store-down >&2; exit 1"},
+		{"store drops the value", "set-meta", "cat >/dev/null"},
+		{"store trims the trailing space", "get-meta", `if [ -f "$box/meta.$3" ]; then printf %s "$(cat "$box/meta.$3")" | sed 's/ *$//'; fi`},
+		{"store re-encodes", "get-meta", "echo '_ '"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := checkOpsReference(t, map[string]string{tc.op: tc.body}, Options{})
+			if c := findCheck(t, r, readyPromptStoreCheck); c.Status != StatusFail {
+				t.Errorf("store = %s, %s", c.Status, c.Detail)
+			}
+			if !r.Failed() {
+				t.Error("run passed")
+			}
+		})
+	}
+	// A script that is not v2-ready, with no metadata ops at all: production
+	// reads their exit 2 as success, so only this check catches it, while the
+	// optional round-trip stays a skip.
+	r := checkOpsReference(t, map[string]string{
+		"protocol":    `echo '{"version":0,"capabilities":["carrier.ops","report-activity","report-attachment","idle-boundary"]}'`,
+		"set-meta":    "cat >/dev/null; exit 2",
+		"get-meta":    "exit 2",
+		"remove-meta": "exit 2",
+	}, Options{})
+	if c := findCheck(t, r, readyPromptStoreCheck); c.Status != StatusFail || !strings.Contains(c.Detail, "set-meta") {
+		t.Errorf("store = %s, %s", c.Status, c.Detail)
+	}
+	if c := findCheck(t, r, "optional: metadata round-trip"); c.Status != StatusSkip {
+		t.Errorf("optional round-trip = %s, want SKIP", c.Status)
+	}
+	if !r.Failed() {
+		t.Error("a carrier.ops pack without a ready-prompt store passed")
+	}
+	for _, caps := range []string{`"carrier.ops","report-activity","report-attachment"`, `"idle-boundary","report-activity","report-attachment"`} {
+		r := checkOpsReference(t, map[string]string{"protocol": `echo '{"version":0,"capabilities":[` + caps + `]}'`, "set-meta": "cat >/dev/null; exit 2"}, Options{})
+		if hasCheck(r, readyPromptStoreCheck) {
+			t.Errorf("%s: store required without both carrier.ops and idle-boundary", caps)
+		}
+	}
+	// A failed start reports the store as skipped, in its place.
+	r = checkOpsReference(t, map[string]string{"start": "cat >/dev/null; exit 1"}, Options{})
+	if c := findCheck(t, r, readyPromptStoreCheck); c.Status != StatusSkip {
+		t.Errorf("store after a failed start = %s", c.Status)
+	}
+}

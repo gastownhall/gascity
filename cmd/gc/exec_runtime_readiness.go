@@ -180,29 +180,36 @@ func (h execHandshake) fencesInput() bool {
 // execRuntimeDoctorDetail is the session reconciler check's line about the
 // exec session runtime the city runs: v2-ready; "" for any other runtime,
 // and for one that is not v2-ready, which the check's "v2 would refuse"
-// line already names with its fix; and warn, when v2 runs on it without fenced input (owner
+// line already names with its fix. warn and hint come from the same
+// handshake read, when v2 runs on the runtime without fenced input (owner
 // decision D2: not required, so v2 runs, but input gc fences to one
 // incarnation, a fenced turn stop or nudge, is refused on it rather than
-// sent unfenced).
-func execRuntimeDoctorDetail(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool), mode reconcilerMode) (detail, warn string) {
+// sent unfenced): warn says so, and hint is its fix, which for a runtime
+// that selects carrier.ops is not to declare input fencing, since that
+// carrier takes no fenced input whatever the handshake declares.
+func execRuntimeDoctorDetail(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool), mode reconcilerMode) (detail, warn, hint string) {
 	name := v2SessionRuntimeName(cfg, lookupEnv)
 	script, ok := execRuntimeScript(cfg, name)
 	if !ok {
-		return "", ""
+		return "", "", ""
 	}
 	h := execReadiness(script, cfg.EffectiveCityName(), cityPath)
 	if !h.ready() {
-		return "", ""
+		return "", "", ""
 	}
 	detail = fmt.Sprintf("exec session runtime %q: v2-ready (%s)", name, strings.Join(sessionexec.V2ProfileCapabilities(), ", "))
-	if mode == reconcilerV2 && !h.fencesInput() {
-		if h.info.Has(runtime.ProtocolCapabilityCarrierOps) {
-			warn = fmt.Sprintf("v2 runs on the exec session runtime %q, which selects carrier.ops: fenced input is refused on it, even with input-fence declared", name)
-		} else {
-			warn = fmt.Sprintf("v2 runs on the exec session runtime %q, whose handshake does not declare %s with %s: input gc fences to one incarnation (a fenced turn stop or nudge) is refused on it", name, runtime.ProtocolCapabilityInputFence, runtime.ProtocolCapabilityConnectionExec)
-		}
+	switch {
+	case mode != reconcilerV2 || h.fencesInput():
+		return detail, "", ""
+	case h.info.Has(runtime.ProtocolCapabilityCarrierOps):
+		return detail,
+			fmt.Sprintf("v2 runs on the exec session runtime %q, which selects carrier.ops: fenced input is refused on it, even with input-fence declared", name),
+			"a carrier.ops runtime takes no fenced input; use a runtime that supports input fencing for fenced turns or nudges"
+	default:
+		return detail,
+			fmt.Sprintf("v2 runs on the exec session runtime %q, whose handshake does not declare %s with %s: input gc fences to one incarnation (a fenced turn stop or nudge) is refused on it", name, runtime.ProtocolCapabilityInputFence, runtime.ProtocolCapabilityConnectionExec),
+			"declare proc.exec and input-fence in the script's handshake if it fences input"
 	}
-	return detail, warn
 }
 
 // cityPathOf is a doctor context's city path, "" without one.

@@ -10,7 +10,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
-	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
@@ -343,17 +342,11 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Message += "; " + note
 		r.FixHint = firstHint(r.FixHint, v2ExecOptInHint)
 	}
-	if detail, warn := execRuntimeDoctorDetail(c.cfg, cityPathOf(ctx), c.lookupEnv, mode); detail != "" && !fellBack {
+	if detail, warn, hint := execRuntimeDoctorDetail(c.cfg, cityPathOf(ctx), c.lookupEnv, mode); detail != "" && !fellBack {
 		r.Details = append(r.Details, detail)
 		if warn != "" {
 			r.Status = doctor.StatusWarning
 			r.Message += "; " + warn
-			hint := "declare proc.exec and input-fence in the script's handshake if it fences input"
-			if script, ok := execRuntimeScript(c.cfg, v2SessionRuntimeName(c.cfg, c.lookupEnv)); ok {
-				if h := execReadiness(script, c.cfg.EffectiveCityName(), cityPathOf(ctx)); h.info.Has(runtime.ProtocolCapabilityCarrierOps) {
-					hint = "a carrier.ops runtime takes no fenced input; use a runtime that supports input fencing for fenced turns or nudges"
-				}
-			}
 			r.FixHint = firstHint(r.FixHint, hint)
 		}
 	}

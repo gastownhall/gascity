@@ -34,9 +34,10 @@ const (
 	ProtocolCapabilityConnectionExec = "proc.exec"
 	// ProtocolCapabilityCarrierOps selects dedicated nudge, peek, send-keys,
 	// interrupt and clear-scrollback ops instead of tmux over exec. All five
-	// ops are required and gc sends no tmux commands after selection. With it,
-	// input-fence and proc.provision have no effect: fencing is none and start
-	// is welded. Tmux remains the undeclared default.
+	// ops are required, so an exit 2 from one is a failure rather than the
+	// unknown-op no-op, and gc sends no tmux commands after selection. With
+	// it, input-fence and proc.provision have no effect: fencing is none and
+	// start is welded. Tmux remains the undeclared default.
 	ProtocolCapabilityCarrierOps = "carrier.ops"
 	// ProtocolCapabilityInputFence declares that the box's tmux can take
 	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
@@ -48,11 +49,14 @@ const (
 	ProtocolCapabilityInputFence = "input-fence"
 	// ProtocolCapabilityIdleBoundary declares that the selected carrier can
 	// answer Peek for the agent. The default tmux carrier needs proc.exec and
-	// the in-box session `main`; carrier.ops reads through the peek op instead.
-	// With report-activity and report-attachment this enables WaitForIdle,
-	// ready-prompt recovery, the idle-proof budget and full idle sleep.
-	// RPP-CONN-002 proves the selected carrier's liveness and read, separately
-	// from production's prompt classification.
+	// the in-box session `main`; carrier.ops reads through the peek op instead,
+	// and keeps each session's ready prompt in the pack's metadata, so it also
+	// needs set-meta and get-meta to round-trip GC_READY_PROMPT_PREFIX byte
+	// for byte. With report-activity and report-attachment this enables
+	// WaitForIdle, ready-prompt recovery, the idle-proof budget and full idle
+	// sleep. RPP-CONN-002 proves the selected carrier's liveness and read (and
+	// the carrier.ops prompt store, which `gc runtime check` requires too),
+	// separately from production's prompt classification.
 	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from

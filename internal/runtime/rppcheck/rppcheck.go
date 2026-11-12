@@ -223,8 +223,9 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // idle-boundary migration warning names. fs.host is a promise about where a
 // box runs, checked by the conformance fshost group, so it maps to "" as
 // well; declared without locality local it draws a warning instead.
-// carrier.ops maps to "" too; its five driving ops are required checks
-// below, not a single capability-to-op map.
+// carrier.ops maps to "" too; its five driving ops, and with idle-boundary
+// its ready-prompt store, are required checks below, not a single
+// capability-to-op map.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -291,12 +292,8 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if len(unknown) > 0 {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
-	if missingIdleBoundary(info) {
-		if info.Has(runtime.ProtocolCapabilityCarrierOps) {
-			detail += "; " + opsIdleBoundaryMigrationWarning
-		} else {
-			detail += "; " + idleBoundaryMigrationWarning
-		}
+	if warning := idleBoundaryWarning(info); warning != "" {
+		detail += "; " + warning
 	}
 	if info.Has(runtime.ProtocolCapabilityFSHost) && !info.SharesHostFS() {
 		detail += "; " + fsHostWithoutLocalityWarning
@@ -317,6 +314,20 @@ const fsHostWithoutLocalityWarning = `warning: fs.host is declared without "loca
 const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary for tmux session main, or carrier.ops and idle-boundary if the pack's peek reads the agent's screen"
 
 const opsIdleBoundaryMigrationWarning = "warning: carrier.ops, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary if peek reads the agent's screen"
+
+// idleBoundaryWarning is the handshake check's warning for a script in the
+// missingIdleBoundary state, worded for the carrier it selects; "" for any
+// other script.
+func idleBoundaryWarning(info runtime.ProtocolInfo) string {
+	switch {
+	case !missingIdleBoundary(info):
+		return ""
+	case info.Has(runtime.ProtocolCapabilityCarrierOps):
+		return opsIdleBoundaryMigrationWarning
+	default:
+		return idleBoundaryMigrationWarning
+	}
+}
 
 // missingIdleBoundary reports whether the handshake declares a carrier's
 // needs, report-activity and report-attachment but not idle-boundary: the set the exec
@@ -523,6 +534,9 @@ func (c *checker) remainingCheckNames() []string {
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
 		names = append(names, c.drivingCheckName("send-keys"), c.drivingCheckName("clear-scrollback"))
 	}
+	if c.readyPromptStoreRequired() {
+		names = append(names, readyPromptStoreCheck)
+	}
 	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
 	if observe {
 		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
@@ -557,6 +571,9 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
 		c.checkDrivingOp(ctx, "send-keys", name, "Enter")
 		c.checkDrivingOp(ctx, "clear-scrollback", name)
+	}
+	if c.readyPromptStoreRequired() {
+		c.checkReadyPromptStore(ctx, name)
 	}
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
 		c.checkObserve(ctx, observeCheck, name, "running")
@@ -849,6 +866,58 @@ func (c *checker) checkMetadataRoundTrip(ctx context.Context, name string) {
 	default:
 		c.record(check, StatusPass, "")
 	}
+}
+
+// readyPromptStoreCheck is the name checkReadyPromptStore reports under.
+const readyPromptStoreCheck = "capability carrier.ops: ready-prompt metadata"
+
+// readyPromptStoreProbe is the ready prompt checkReadyPromptStore stores: not
+// the default one, non-ASCII and ending in a space, as codex's is, so a store
+// that drops, trims or re-encodes the value fails.
+const readyPromptStoreProbe = "› "
+
+// readyPromptStoreRequired reports a handshake declaring carrier.ops and
+// idle-boundary, whose sessions' ready prompts gc keeps in the pack's
+// metadata (checkReadyPromptStore).
+func (c *checker) readyPromptStoreRequired() bool {
+	return c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) &&
+		c.result.Protocol.Has(runtime.ProtocolCapabilityIdleBoundary)
+}
+
+// checkReadyPromptStore requires the store a carrier.ops pack with
+// idle-boundary keeps each session's ready prompt in. gc stores the prompt
+// with set-meta after start, and every provider instance that did not start
+// the session (a restarted orchestrator, a CLI process) reads it back with
+// get-meta and waits for what it recovers (sessionexec.ParseReadyPromptMeta).
+// Without a store that answers it byte for byte, those instances wait for the
+// default prompt, so a session whose agent shows another never reads as idle
+// although the pack reports full idle sleep. Unlike the optional metadata
+// round-trip, an absent op therefore fails.
+func (c *checker) checkReadyPromptStore(ctx context.Context, name string) {
+	key := sessionexec.ReadyPromptMetaKey
+	set := c.runOp(ctx, []byte(readyPromptStoreProbe), "set-meta", name, key)
+	switch {
+	case set.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but set-meta is not implemented (exit 2)")
+		return
+	case set.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, set.err.Error())
+		return
+	}
+	get := c.runOp(ctx, nil, "get-meta", name, key)
+	switch {
+	case get.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but get-meta is not implemented (exit 2)")
+		return
+	case get.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, get.err.Error())
+		return
+	}
+	if prefix, found := sessionexec.ParseReadyPromptMeta(get.stdout); !found || prefix != readyPromptStoreProbe {
+		c.record(readyPromptStoreCheck, StatusFail, fmt.Sprintf("get-meta %s answered %q after set-meta stored %q; other gc processes would not recover the session's ready prompt", key, get.stdout, readyPromptStoreProbe))
+		return
+	}
+	c.record(readyPromptStoreCheck, StatusPass, "")
 }
 
 // checkListRunning requires the conformance session to appear when the

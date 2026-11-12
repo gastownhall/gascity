@@ -116,9 +116,11 @@ const (
 	// ReqConnectionIdleBoundary is the idle-boundary capability's fidelity
 	// check for the selected carrier. The default tmux branch checks session
 	// main and capture over exec. carrier.ops checks is-running and peek 120
-	// showing the started agent's command line or output. Neither branch
-	// classifies an idle prompt. Optional when undeclared, otherwise required.
-	// See REQUIREMENTS.md (RUNTIME-RPP-016).
+	// showing the started agent's command line or output, and that set-meta
+	// and get-meta round-trip a non-default ready prompt byte for byte, the
+	// store gc recovers each session's prompt from. Neither branch classifies
+	// an idle prompt. Optional when undeclared, otherwise required. See
+	// REQUIREMENTS.md (RUNTIME-RPP-016).
 	ReqConnectionIdleBoundary Code = "RPP-CONN-002"
 
 	// ReqProvisionBoxWithoutAgent is the runtime/transport un-weld's RPP wire
@@ -238,7 +240,7 @@ var catalog = []Requirement{
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (generic exec is optional: absent = SKIP; output and command exit code are checked when present)", true},
-	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true and peek 120 shows the started agent's command line or output (undeclared = SKIP)", true},
+	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true, peek 120 shows the started agent's command line or output, and get-meta answers a non-default ready prompt set-meta stored, byte for byte (undeclared = SKIP)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
 

@@ -40,7 +40,7 @@ func runNonTmuxIdleOptions(t *testing.T, override map[string]string, opts Option
 }
 
 func TestNonTmuxIdleBoundaryIsGated(t *testing.T) {
-	if r := runNonTmuxIdle(t, nil); r.Status != StatusPass {
+	if r := runNonTmuxIdle(t, nil); r.Status != StatusPass || !strings.Contains(r.Detail, "get-meta answers the ready prompt") {
 		t.Fatalf("golden = %s, %s", r.Status, r.Detail)
 	}
 	for _, tc := range []struct{ op, body string }{
@@ -51,6 +51,13 @@ func TestNonTmuxIdleBoundaryIsGated(t *testing.T) {
 		{"peek", "exit 1"},
 		{"peek", "echo unrelated fixed text"},
 		{"peek", "exit 66"},
+		// The ready-prompt store gc recovers a session's prompt from.
+		{"set-meta", "cat >/dev/null; exit 2"},
+		{"get-meta", "exit 2"},
+		{"set-meta", "cat >/dev/null; exit 1"},
+		{"get-meta", "exit 1"},
+		{"set-meta", "cat >/dev/null"},
+		{"get-meta", "echo '_ '"},
 	} {
 		t.Run(tc.op+tc.body, func(t *testing.T) {
 			if r := runNonTmuxIdle(t, map[string]string{tc.op: tc.body}); r.Status != StatusFail {
@@ -76,6 +83,9 @@ func TestNonTmuxIdleBoundaryFailureDetails(t *testing.T) {
 		{"start-unsupported", "start", "exit 2", "start returned exit 2"},
 		{"last-screen", "peek", "echo still-rendering", "still-rendering"},
 		{"last-error", "peek", "echo peek-exploded >&2; exit 1", "peek-exploded"},
+		{"store-set-unsupported", "set-meta", "cat >/dev/null; exit 2", "set-meta GC_READY_PROMPT_PREFIX failed: set-meta returned exit 2"},
+		{"store-get-error", "get-meta", "echo get-exploded >&2; exit 1", "get-exploded"},
+		{"store-lossy", "get-meta", "echo '_ '", `answered "_ "`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := runNonTmuxIdle(t, map[string]string{tc.op: tc.body})

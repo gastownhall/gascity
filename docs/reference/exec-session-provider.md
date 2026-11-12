@@ -95,9 +95,10 @@ as the command's own exit code, and under `proc.provision`,
 `server-stop` report it as a failure.
 `start` cannot be unknown either, so its exit 2 (for example a helper's
 `grep` or `jq` exit status escaping a `set -e` script) is a failed start.
-The `carrier.ops` obligation is enforced by `gc runtime check`, not a new
-production exit rule. Its driving ops retain their existing exit-2 handling,
-including strict `peek` on a v2-ready script.
+Under `carrier.ops`, the five driving operations (`nudge`, `peek`,
+`send-keys`, `interrupt` and `clear-scrollback`) cannot be unknown either:
+gc has no other way to drive the script's sessions, so their exit 2 is a
+failure.
 
 ## Cancellation
 
@@ -184,14 +185,14 @@ exit code, never a fallback signal.
 
 Declare `carrier.ops` to select the existing `nudge`, `peek`, `send-keys`,
 `interrupt` and `clear-scrollback` ops directly, without tmux. All five are
-required for this carrier. `gc runtime check` exercises all five and fails
-unsupported or broken ops. `gc runtime conformance` checks only the `peek`
-read under `idle-boundary`, not the other four driving ops. In production,
-a missing `nudge`, `send-keys`, `interrupt` or `clear-scrollback` op that exits
-2 is a silent no-op under `carrier.ops`, and a missing `peek` on a script that
-is not v2-ready reads as an empty screen with no error; only
-`gc runtime check` enforces those op obligations. `watch-startup` stays a dedicated streaming op
-for either carrier.
+required for this carrier, so an exit 2 from one fails like any other
+non-zero exit: a nudge the script never delivered is not reported delivered,
+and a missing `peek` is not read as an empty screen. `gc runtime check`
+exercises all five and fails unsupported or broken ops. `gc runtime
+conformance` checks only the `peek` read under `idle-boundary`, not the other
+four driving ops. With `idle-boundary`, both checkers also require the
+[ready-prompt store](#idle-sleep). `watch-startup` stays a dedicated streaming
+op for either carrier.
 
 ### Protocol Handshake (`protocol`)
 
@@ -222,8 +223,8 @@ Capabilities:
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Does not select the carrier. Without `carrier.ops`, gc always tries tmux over `exec` first. Required for the default tmux carrier's full idle sleep. |
-| `carrier.ops` | Selects the five required dedicated driving ops, with no tmux commands. Start stays welded, even with `proc.provision`. Fenced input is refused, even with `input-fence`. No token means the tmux-first default; unknown tokens are ignored. |
-| `idle-boundary` | Declares that the selected carrier can answer `Peek`. Full idle sleep also needs `report-activity`, `report-attachment` and either `carrier.ops` or the default carrier's `proc.exec`. `RPP-CONN-002` checks tmux main and capture over `exec` for the default carrier; for `carrier.ops`, it checks `is-running` and `peek <name> 120` showing the started agent's command line or output. Neither probe classifies the ready prompt. |
+| `carrier.ops` | Selects the five required dedicated driving ops, with no tmux commands; an exit 2 from one is a failure. Start stays welded, even with `proc.provision`. Fenced input is refused, even with `input-fence`. With `idle-boundary`, the script also keeps each session's ready prompt with `set-meta` and `get-meta` (see [Idle sleep](#idle-sleep)). No token means the tmux-first default; unknown tokens are ignored. |
+| `idle-boundary` | Declares that the selected carrier can answer `Peek`. Full idle sleep also needs `report-activity`, `report-attachment` and either `carrier.ops` or the default carrier's `proc.exec`. `RPP-CONN-002` checks tmux main and capture over `exec` for the default carrier; for `carrier.ops`, it checks `is-running`, `peek <name> 120` showing the started agent's command line or output, and that `set-meta` and `get-meta` round-trip a non-default ready prompt byte for byte, which `gc runtime check` requires too. Neither probe classifies the ready prompt. |
 | `input-fence` | With `proc.exec` and without `carrier.ops`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the orchestrator provisions the box, then launches the agent over `exec`. Also requires `proc.exec` and the default tmux carrier. With `carrier.ops`, `start` always provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
@@ -254,7 +255,7 @@ depends on its handshake:
 | Handshake declares | `sleep_capability` | What sleeps |
 |---|---|---|
 | `report-activity`, `report-attachment`, `proc.exec` **and** `idle-boundary` | `full` | Every session class, interactive ones included. |
-| `report-activity`, `report-attachment`, `carrier.ops` and `idle-boundary` | `full` | Every session class, through `peek` rather than tmux. |
+| `report-activity`, `report-attachment`, `carrier.ops` and `idle-boundary` | `full` | Every session class, through `peek` rather than tmux. The script must also keep each session's ready prompt with `set-meta` and `get-meta` (see below). |
 | anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
 
 `full` needs a safe idle boundary, so an interactive session is never stopped
@@ -290,11 +291,26 @@ prompt using `set-meta <name> GC_READY_PROMPT_PREFIX` with the prefix on
 stdin. Another provider instance recovers it with `get-meta` under the wait's
 deadline. A missing key or failed read uses the default without caching, so
 the next wait retries. Publication is best effort and retried only on the
-next start. Pack metadata may outlive `stop`. If a new start's `set-meta`
+next start; a failed `set-meta` is reported on the orchestrator's stderr.
+Pack metadata may outlive `stop`. If a new start's `set-meta`
 fails, another provider instance can recover the previous incarnation's
 prompt. Packs should drop session metadata on `stop` to prevent stale prompt
 recovery. Trailing newlines and a trailing carriage return are trimmed from
 metadata, so prefixes ending in either cannot be recovered.
+
+A `carrier.ops` script that declares `idle-boundary` must therefore implement
+`set-meta` and `get-meta`, and `get-meta` must answer the stored prompt byte
+for byte, non-ASCII characters and a trailing space included (gc trims only
+the trailing newlines and carriage returns above). Without them,
+every gc process that did not start the session, such as a restarted
+orchestrator or a `gc` command, looks for the default prompt, so a session
+whose agent shows another prompt never reads as idle there, although the
+runtime reports `full`. `gc runtime check` (`capability carrier.ops:
+ready-prompt metadata`) and `gc runtime conformance` (`RPP-CONN-002`) store a
+non-default prompt and fail a script whose store does not return it. An
+unimplemented `set-meta` (exit 2) on a script that is not v2-ready reads as
+success at the orchestrator, like any unknown operation, so only the checkers
+catch it.
 
 For the default carrier, once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as

@@ -61,9 +61,29 @@ func idlePromptPrefix(configured string) string {
 	return configured
 }
 
+// ReadyPromptMetaKey is the session metadata key under which a carrier.ops
+// pack keeps a session's ready-prompt prefix: gc stores it with set-meta after
+// start and reads it back with get-meta. It is the name of the in-box tmux
+// environment variable the default carrier uses for the same prefix.
+const ReadyPromptMetaKey = tmux.ReadyPromptEnvKey
+
+// ParseReadyPromptMeta reads a get-meta answer for ReadyPromptMetaKey as
+// WaitForIdle does under carrier.ops. out is the op's stdout with its trailing
+// newlines removed, as every op's stdout is read; trailing carriage returns
+// are dropped as well, and a blank prefix reads as the default one. An empty
+// answer was never published, so found is false. `gc runtime check` and
+// `gc runtime conformance` accept a carrier.ops pack's prompt store only when
+// this recovers the prompt they stored byte for byte.
+func ParseReadyPromptMeta(out string) (prefix string, found bool) {
+	if out == "" {
+		return "", false
+	}
+	return idlePromptPrefix(strings.TrimRight(out, "\r")), true
+}
+
 // publishReadyPrompt writes the session's effective ready-prompt prefix (the
-// default one for a blank prefix) into the pack's metadata for carrier.ops,
-// otherwise the in-box tmux session environment
+// default one for a blank prefix) into the pack's metadata for carrier.ops
+// (publishOpsReadyPrompt), otherwise the in-box tmux session environment
 // (tmux.ReadyPromptEnvKey) once the session exists. The in-memory cache
 // only covers the provider instance that started the session; this copy lets
 // any other instance (a restarted orchestrator, a rebuilt provider, a CLI
@@ -71,21 +91,37 @@ func idlePromptPrefix(configured string) string {
 // never unset, so an absent variable means "never published" (a failed
 // publish, or a session started before publishing existed) rather than
 // "default prompt". Only a pack with an idle boundary publishes. Best effort:
-// on failure other instances fall back to the default prompt on each wait until a later Start
-// publishes it.
+// on failure other instances fall back to the default prompt on each wait
+// until a later Start publishes it.
 func (p *Provider) publishReadyPrompt(ctx context.Context, name string, cfg runtime.Config) {
 	if !p.idleBoundaryDeclared() {
 		return
 	}
+	prefix := idlePromptPrefix(cfg.ReadyPromptPrefix)
 	if p.opsCarrierSelected() {
-		_, _ = p.runWithContext(ctx, p.timeout, []byte(idlePromptPrefix(cfg.ReadyPromptPrefix)), "set-meta", name, tmux.ReadyPromptEnvKey)
+		p.publishOpsReadyPrompt(ctx, name, prefix)
 		return
 	}
 	// -u, as local tmux passes on every command: tmux otherwise treats the
 	// client as non-UTF-8 when the in-box exec environment sets no UTF-8
 	// locale.
-	argv := []string{"tmux", "-u", "set-environment", "-t", execTmuxSession, tmux.ReadyPromptEnvKey, idlePromptPrefix(cfg.ReadyPromptPrefix)}
+	argv := []string{"tmux", "-u", "set-environment", "-t", execTmuxSession, tmux.ReadyPromptEnvKey, prefix}
 	_, _, _ = p.Exec(ctx, name, argv)
+}
+
+// publishOpsReadyPrompt stores prefix under ReadyPromptMetaKey with set-meta,
+// a carrier.ops pack's ready-prompt store. A failed store leaves every other
+// provider instance waiting for the default prompt, so a session whose agent
+// shows another one never reads as idle there. The session itself started, so
+// the failure is reported on stderr (warnings), not returned. An
+// unimplemented set-meta (exit 2) on a script that is not v2-ready reads as
+// success here, as any unknown op does; `gc runtime check` and
+// `gc runtime conformance` fail a carrier.ops pack with idle-boundary whose
+// store does not round-trip the prompt.
+func (p *Provider) publishOpsReadyPrompt(ctx context.Context, name, prefix string) {
+	if _, err := p.runWithContext(ctx, p.timeout, []byte(prefix), "set-meta", name, ReadyPromptMetaKey); err != nil {
+		fmt.Fprintf(p.warnings(), "exec provider: session %q: publishing its ready prompt: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+	}
 }
 
 // readyPromptPrefix returns the ready-prompt prefix for name, running read
@@ -123,9 +159,9 @@ func (p *Provider) readyPromptPrefix(ctx context.Context, name string, limit tim
 // tests substitute slow or hung readers.
 type readyPromptReader func(ctx context.Context) (prefix string, found bool, err error)
 
-// readPublishedReadyPrompt reads the carrier.ops metadata key under the wait's
-// bounded context. Empty or failed reads fall back without caching. Otherwise
-// it reads tmux.ReadyPromptEnvKey from the in-box tmux
+// readPublishedReadyPrompt reads the prefix publishReadyPrompt wrote: for
+// carrier.ops from the pack's metadata (readOpsReadyPrompt), otherwise
+// tmux.ReadyPromptEnvKey from the in-box tmux
 // session over the exec connection. It lists the whole session environment
 // rather than asking for the one key, because tmux exits 1 both for an unset
 // key and for a missing session, and the exec op does not carry the stderr
@@ -139,11 +175,7 @@ type readyPromptReader func(ctx context.Context) (prefix string, found bool, err
 // with non-ASCII prompts.
 func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (string, bool, error) {
 	if p.opsCarrierSelected() {
-		out, err := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, tmux.ReadyPromptEnvKey)
-		if err != nil || out == "" {
-			return "", false, err
-		}
-		return idlePromptPrefix(strings.TrimRight(out, "\r")), true, nil
+		return p.readOpsReadyPrompt(ctx, name)
 	}
 	out, code, err := p.Exec(ctx, name, []string{"tmux", "-u", "show-environment", "-t", execTmuxSession})
 	if err != nil {
@@ -159,6 +191,19 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 		}
 	}
 	return "", false, nil
+}
+
+// readOpsReadyPrompt reads the prefix publishOpsReadyPrompt stored, with
+// get-meta under the wait's bounded context, as ParseReadyPromptMeta reads
+// it. An empty answer or a failed read is not found, so the wait falls back
+// to the default prompt without remembering it.
+func (p *Provider) readOpsReadyPrompt(ctx context.Context, name string) (string, bool, error) {
+	out, err := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, ReadyPromptMetaKey)
+	if err != nil {
+		return "", false, err
+	}
+	prefix, found := ParseReadyPromptMeta(out)
+	return prefix, found, nil
 }
 
 // WaitForIdle waits until the selected carrier shows the session's ready prompt
@@ -262,22 +307,17 @@ func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time
 		if remaining <= 0 {
 			break
 		}
-		reading, expired, err := bounded(ctx, remaining, func(ctx context.Context) (idleReading, error) {
-			return r.readIdle(ctx, name, promptPrefix)
-		})
-		if err != nil && expired {
-			err = fmt.Errorf("exec provider: capturing %q: %w", name, err)
-		}
+		reading, expired, err := boundedReading(ctx, r, name, promptPrefix, remaining)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		if expired || !now().Before(deadline) {
 			// The capture ran into the deadline: it was canceled there, and
 			// an observation finished at or past the bound does not count.
-			// Only capture errors belong in lastErr. bounded returns a zero
-			// reading for an abandoned read; a completed classification error
-			// must not replace the last capture error, even at the deadline.
-			if err != nil && (reading == readingCaptureError || (expired && reading == 0)) {
+			// Only capture errors belong in lastErr (boundedReading reads an
+			// abandoned read as one); a completed classification error must
+			// not replace the last capture error, even at the deadline.
+			if err != nil && reading == readingCaptureError {
 				lastErr = err
 			}
 			break
@@ -315,6 +355,23 @@ func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time
 		return fmt.Errorf("exec provider: %q not idle within %s: %w (last capture: %w)", name, timeout, timedOut, lastErr)
 	}
 	return fmt.Errorf("exec provider: %q not idle within %s: %w", name, timeout, timedOut)
+}
+
+// boundedReading takes one reading from r under a context that expires after
+// limit, and returns no later than that (see bounded). A read the limit cut
+// short is a capture error: bounded abandons it without a reading, and its
+// error names the capture.
+func boundedReading(ctx context.Context, r idleReader, name, prefix string, limit time.Duration) (idleReading, bool, error) {
+	reading, expired, err := bounded(ctx, limit, func(ctx context.Context) (idleReading, error) {
+		return r.readIdle(ctx, name, prefix)
+	})
+	if err != nil && expired {
+		err = fmt.Errorf("exec provider: capturing %q: %w", name, err)
+		if reading == 0 {
+			reading = readingCaptureError
+		}
+	}
+	return reading, expired, err
 }
 
 // unobservedTimeout is the timeout of a wait that read nothing showing the

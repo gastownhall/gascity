@@ -28,6 +28,7 @@ type opsPack struct{ dir, script string }
 func newOpsPack(t *testing.T, caps string) opsPack {
 	t.Helper()
 	dir := t.TempDir()
+	t.Cleanup(func() { removeOpsPackDir(t, dir) })
 	pk := opsPack{dir: dir}
 	pk.put(t, "handshake", `{"version":0,"capabilities":[`+caps+`]}`)
 	pk.put(t, "screen", idleClaudePane)
@@ -54,6 +55,28 @@ case "$1" in
 esac
 `, dir))
 	return pk
+}
+
+// opsPackRemovals is how many times removeOpsPackDir tries. An op a timed-out
+// wait abandoned makes at most two late writes (its OP line in log, then
+// peek.started), and each can spoil only the removal it lands in.
+const opsPackRemovals = 3
+
+// removeOpsPackDir removes a pack dir before t.TempDir's own single removal
+// does (cleanups run last registered first). A WaitForIdle that reaches its
+// deadline abandons its in-flight op (see bounded): the op is canceled, but
+// its script can still write into dir after the test returns, and a file it
+// re-creates while a removal empties dir fails that removal with "directory
+// not empty". Nothing can be created in a removed dir, so trying again
+// finishes the job without waiting for the op.
+func removeOpsPackDir(t *testing.T, dir string) {
+	var err error
+	for range opsPackRemovals {
+		if err = os.RemoveAll(dir); err == nil {
+			return
+		}
+	}
+	t.Errorf("removing ops pack dir: %v", err)
 }
 
 func (pk opsPack) put(t *testing.T, name, text string) {
@@ -514,6 +537,153 @@ func TestUndeclaredCarrierCompatibility(t *testing.T) {
 					t.Error("legacy path did not send tmux")
 				}
 			})
+		}
+	}
+}
+
+// The ready-prompt store's read, by which both checkers judge a pack's
+// store: trailing carriage returns go, a blank prefix is the default one, and
+// an empty answer was never published.
+// Kills: a read that keeps "\r", trims a trailing space, or reads "" as found.
+func TestParseReadyPromptMeta(t *testing.T) {
+	for _, tc := range []struct {
+		out, prefix string
+		found       bool
+	}{
+		{"", "", false},
+		{"› ", "› ", true},
+		{"› \r", "› ", true},
+		{"› \r\r", "› ", true},
+		{"›", "›", true},
+		{" ", "❯ ", true},
+		{"\r", "❯ ", true},
+	} {
+		if prefix, found := ParseReadyPromptMeta(tc.out); prefix != tc.prefix || found != tc.found {
+			t.Errorf("ParseReadyPromptMeta(%q) = %q, %t; want %q, %t", tc.out, prefix, found, tc.prefix, tc.found)
+		}
+	}
+}
+
+// A carrier.ops pack keeps each session's ready prompt in its metadata. The
+// instance that started a session remembers the prompt, and every other one
+// (a restarted orchestrator, a CLI process) recovers it with get-meta. With a
+// non-default prompt, a store that is missing, fails, or does not answer the
+// prompt byte for byte leaves those instances waiting for the default prompt,
+// so the session never reads as idle there: why both checkers require the
+// store under carrier.ops and idle-boundary.
+// Kills: a recovery that ignores the store, or reads it differently from the
+// checkers (ParseReadyPromptMeta).
+func TestOpsCarrierNonDefaultPromptNeedsTheStore(t *testing.T) {
+	fastIdlePoll(t)
+	for _, tc := range []struct {
+		name, op, body string
+		recovered      bool
+	}{
+		{"faithful", "", "", true},
+		{"crlf", "get-meta", `[ ! -f "$D/meta.$3" ] || printf '%s\r\n' "$(cat "$D/meta.$3")"`, true},
+		{"set-meta unimplemented", "set-meta", "cat >/dev/null; exit 2", false},
+		{"get-meta unimplemented", "get-meta", "exit 2", false},
+		{"get-meta fails", "get-meta", "echo store-down >&2; exit 1", false},
+		{"store re-encodes", "get-meta", "echo '_ '", false},
+	} {
+		for name, ctor := range opsConstructors {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				pk := newOpsPack(t, opsIdleCaps)
+				if tc.op != "" {
+					pk.put(t, tc.op+".body", tc.body)
+				}
+				starter := ctor(pk.script)
+				if err := starter.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› ", AcceptStartupDialogs: new(bool)}); err != nil {
+					t.Fatal(err)
+				}
+				pk.put(t, "screen", idleCodexPane)
+				if err := starter.(runtime.IdleWaitProvider).WaitForIdle(context.Background(), "s", time.Second); err != nil {
+					t.Fatalf("starting instance: %v", err)
+				}
+				err := ctor(pk.script).(runtime.IdleWaitProvider).WaitForIdle(context.Background(), "s", 300*time.Millisecond)
+				switch {
+				case tc.recovered && err != nil:
+					t.Errorf("other instance: %v", err)
+				case !tc.recovered && (!errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, runtime.ErrWaitUnobserved)):
+					t.Errorf("other instance = %v, want an unobserved timeout", err)
+				}
+				pk.noTmux(t)
+			})
+		}
+	}
+}
+
+// A failed carrier.ops ready-prompt publish is reported on the provider's
+// warnings (stderr in production) with the op's own error, and the start
+// still succeeds; a publish that works reports nothing.
+// Kills: a publish whose failure is discarded.
+func TestOpsCarrierReadyPromptPublishFailureIsReported(t *testing.T) {
+	for name, ctor := range opsConstructors {
+		for _, broken := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/broken=%t", name, broken), func(t *testing.T) {
+				pk := newOpsPack(t, opsIdleCaps)
+				if broken {
+					pk.put(t, "set-meta.body", "cat >/dev/null; echo store-down >&2; exit 1")
+				}
+				p := ctor(pk.script)
+				raw, ok := p.(*Provider)
+				if !ok {
+					raw = p.(*seamBackedProvider).raw
+				}
+				var warnings strings.Builder
+				raw.setupWarnings = &warnings
+				if err := p.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› ", AcceptStartupDialogs: new(bool)}); err != nil {
+					t.Fatal(err)
+				}
+				got := warnings.String()
+				reported := strings.Contains(got, `session "s": publishing its ready prompt`) && strings.Contains(got, "store-down")
+				if reported != broken || (!broken && got != "") {
+					t.Errorf("warnings = %q, want a publish report: %t", got, broken)
+				}
+			})
+		}
+	}
+}
+
+// Under carrier.ops the five driving ops are the only way to drive a session,
+// so an exit 2 from one (an op the script never implemented) is a failure,
+// not the unknown-op no-op: a nudge it never delivered is not reported
+// delivered, and a peek is not an empty screen. An undeclared pack's
+// dedicated-op fallback keeps the no-op.
+// Kills: a strict rule left to v2-ready scripts only, or one that also
+// reaches the undeclared fallback.
+func TestOpsCarrierDrivingOpExitTwoFails(t *testing.T) {
+	verbs := map[string]func(runtime.Provider) error{
+		"nudge": func(p runtime.Provider) error {
+			return p.Nudge("s", []runtime.ContentBlock{{Type: "text", Text: "x"}})
+		},
+		"peek": func(p runtime.Provider) error {
+			_, err := p.Peek("s", 10)
+			return err
+		},
+		"send-keys":        func(p runtime.Provider) error { return p.SendKeys("s", "Enter") },
+		"interrupt":        func(p runtime.Provider) error { return p.Interrupt("s") },
+		"clear-scrollback": func(p runtime.Provider) error { return p.ClearScrollback("s") },
+	}
+	for name, ctor := range opsConstructors {
+		for op, drive := range verbs {
+			for _, declared := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s/%s/carrier.ops=%t", name, op, declared), func(t *testing.T) {
+					caps := ""
+					if declared {
+						caps = `"carrier.ops"`
+					}
+					pk := newOpsPack(t, caps)
+					pk.put(t, op+".body", "cat >/dev/null; exit 2")
+					pk.put(t, "exec.code", "2")
+					if err := drive(ctor(pk.script)); (err != nil) != declared {
+						t.Errorf("%s exit 2 = %v, want an error only under carrier.ops", op, err)
+					}
+					if !strings.Contains(pk.log(t), "OP "+op+" s") {
+						t.Errorf("%s never ran: %s", op, pk.log(t))
+					}
+				})
+			}
 		}
 	}
 }

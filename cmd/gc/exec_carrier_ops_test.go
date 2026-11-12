@@ -45,9 +45,12 @@ func TestExecFencingPredicateLockstep(t *testing.T) {
 func TestExecInputFenceWarningUnderCarrierOps(t *testing.T) {
 	script := writeHandshakePack(t, `{"version":0,"capabilities":["observe.v1","report-attachment","proc.exec","input-fence","carrier.ops"]}`)
 	cfg := v2DefaultCity(func(c *config.City) { c.Session.Provider = "exec:" + script; c.Daemon.SessionReconciler = "v2" })
-	_, warn := execRuntimeDoctorDetail(cfg, "", nil, reconcilerV2)
+	_, warn, hint := execRuntimeDoctorDetail(cfg, "", nil, reconcilerV2)
 	if !strings.Contains(warn, "carrier.ops") || !strings.Contains(warn, "refused") {
 		t.Errorf("warning = %q", warn)
+	}
+	if !strings.Contains(hint, "carrier.ops runtime takes no fenced input") {
+		t.Errorf("hint = %q, want the one read with the warning", hint)
 	}
 	r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
 	if !strings.Contains(r.FixHint, "carrier.ops runtime takes no fenced input") || strings.Contains(r.FixHint, "declare proc.exec") {

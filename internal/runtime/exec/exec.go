@@ -62,7 +62,8 @@ type Provider struct {
 	// setupTimeout and setupMaxTimeout budget each host pre_start and
 	// session_setup command gc runs for a pack sharing the host filesystem
 	// (hoststage.go; WithSetupTimeouts). setupWarnings receives the non-fatal
-	// diagnostics of that work; nil is os.Stderr.
+	// diagnostics of that work and of a start's best-effort ready-prompt
+	// publish (warnings); nil is os.Stderr.
 	setupTimeout    time.Duration
 	setupMaxTimeout time.Duration
 	setupWarnings   io.Writer
@@ -281,9 +282,7 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	if len(args) > 0 {
 		op = args[0]
 	}
-	// Only the ops strictExitTwo names consult the handshake, so the
-	// `protocol` op's own failure never re-enters it.
-	strict := code == 2 && strictWhenReady(op) && p.v2Ready()
+	strict := code == 2 && p.exitTwoIsStrict(op)
 	base := &opExitError{op: op, code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
 	return classifyExecExit(op, code, errMsg, strict, base)
 }
@@ -311,11 +310,11 @@ func (e *opExitError) Unwrap() error { return e.err }
 // pack that declared report-attachment; [Provider.IsAttachedWithError]
 // reports its failure as "could not tell"), the observe.v1 ops, and
 // server-stop (it runs only for a pack that declared server-lifecycle). strict
-// is a v2-ready script's exit 2 from an op observe.v1 obliges it to
-// implement, which fails as strictExitTwo maps it. A start-op name collision
-// maps to [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail]
-// is an endpoint capacity refusal ([runtime.CapacityError]); everything else
-// is base unchanged.
+// is an exit 2 the pack's declarations oblige it not to give
+// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A
+// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
+// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
+// ([runtime.CapacityError]); everything else is base unchanged.
 func classifyExecExit(op string, code int, msg string, strict bool, base error) error {
 	switch {
 	case code == 2 && strict:
@@ -342,6 +341,20 @@ func exitTwoIsFailure(op string) bool {
 	}
 }
 
+// exitTwoIsStrict reports whether this pack's exit 2 from op is a failure
+// rather than the unknown-op no-op: from an op a v2-ready script must
+// implement (strictWhenReady), or from a driving op of a pack that selected
+// carrier.ops (opsCarrierDrivingOp), which declared the op and has no other
+// way to drive the session, so a nudge it never delivered is not reported
+// delivered. It reads the op's name before the handshake, so the `protocol`
+// op's own failure never re-enters the handshake it is answering.
+func (p *Provider) exitTwoIsStrict(op string) bool {
+	if strictWhenReady(op) && p.v2Ready() {
+		return true
+	}
+	return opsCarrierDrivingOp(op) && p.opsCarrierSelected()
+}
+
 // strictWhenReady reports an op a v2-ready script must implement, whose
 // exit 2 is therefore a failure rather than the unknown-op no-op.
 func strictWhenReady(op string) bool {
@@ -353,12 +366,24 @@ func strictWhenReady(op string) bool {
 	}
 }
 
-// strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
-// nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
-// ([runtime.ErrMetaUnsupported]), or a peek that read nothing (the op's
-// failure, never an empty screen). (is-running needs no entry: its exit 2
-// already reads as no answer. A v2-ready listing is `inventory`, whose
-// exit 2 is a failure like any other.)
+// opsCarrierDrivingOp reports one of the five driving ops carrier.ops
+// selects in place of tmux over exec.
+func opsCarrierDrivingOp(op string) bool {
+	switch op {
+	case "nudge", "peek", "send-keys", "interrupt", "clear-scrollback":
+		return true
+	default:
+		return false
+	}
+}
+
+// strictExitTwo is a strict exit 2 from op (Provider.exitTwoIsStrict): a stop
+// that stopped nothing ([runtime.ErrStopUnsupported]), a metadata op with no
+// store ([runtime.ErrMetaUnsupported]), or a driving op, a peek included,
+// that did nothing (the op's failure, never an empty screen or a delivered
+// nudge). (is-running needs no entry: its exit 2 already reads as no answer.
+// A v2-ready listing is `inventory`, whose exit 2 is a failure like any
+// other.)
 func strictExitTwo(op string, base error) error {
 	switch op {
 	case "stop":
@@ -912,13 +937,14 @@ func (p *Provider) carrier() runtime.Carrier {
 	return runtime.NewTmuxCarrier(p, execTmuxSession)
 }
 
-// The dedicated-wire-op driving helpers back carrier.ops directly. Without
-// that declaration, the public driving methods
-// (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
-// exec op first and fall back to these when the runtime does not implement exec
-// (ErrExecUnsupported): a pack that ships exec + tmux-in-box is
-// driven over the carrier, while a pack that only implements the older dedicated
-// driving ops (the gc-session-k8s reference) keeps working unchanged. The
+// The dedicated-wire-op driving helpers back carrier.ops directly, which
+// makes their exit 2 a failure (exitTwoIsStrict). Without that declaration,
+// the public driving methods (Nudge/Peek/SendKeys/Interrupt/ClearScrollback)
+// try the tmux carrier over the exec op first and fall back to these when the
+// runtime does not implement exec (ErrExecUnsupported): a pack that ships
+// exec + tmux-in-box is driven over the carrier, while a pack that only
+// implements the older dedicated driving ops (the gc-session-k8s reference)
+// keeps working unchanged, its exit 2 still the unknown-op no-op. The
 // startup readiness + dialog-dismissal subsystem calls the same public methods,
 // so it inherits the same carrier-then-fallback behavior. (watch-startup, a
 // streaming op the request/response exec connection cannot carry, remains a
