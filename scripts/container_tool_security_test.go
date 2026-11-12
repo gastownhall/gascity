@@ -579,6 +579,7 @@ var mcpMailUpgradeGroups = []struct {
 	}},
 	{"openssl", []string{"libssl3t64", "openssl", "openssl-provider-legacy"}},
 	{"systemd", []string{"libsystemd0", "libudev1"}},
+	{"apt, CVE-2026-109518", []string{"apt", "libapt-pkg7.0"}},
 }
 
 // mcpMailUpgradePackages returns the names in Dockerfile.mail's --only-upgrade stanza,
