@@ -1636,6 +1636,16 @@ resource = "subprocess"
 calls = 11
 
 [[count]]
+path = "examples/gastown/jsonl_archive_settle_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "examples/gastown/jsonl_archive_settle_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "examples/gastown/maintenance_bd_integration_test.go"
 resource = "fixed_sleep"
 calls = 1

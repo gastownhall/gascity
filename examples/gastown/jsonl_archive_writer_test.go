@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -188,10 +187,11 @@ func TestJsonlExportKeepPackRepackCarriesTheNewArguments(t *testing.T) {
 	writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
 	f.seedLargePackAndBacklog(t)
 	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
-	// Free space that holds the archive less its largest pack, but not all of it.
-	freeKB := dfFreeKB(t, f.archiveRepo)
-	stats := readArchiveObjectStats(t, f.archiveRepo)
-	f.env["GC_JSONL_GC_MIN_FREE_KB"] = strconv.Itoa(freeKB - (stats.packKB+stats.looseKB)/2)
+	// Free space that holds the archive less its largest pack plus the floor,
+	// but not all of it; df is stubbed because the real free space moves under
+	// a shared host while the run goes on.
+	f.env["GC_JSONL_GC_MIN_FREE_KB"] = "512"
+	writeArchiveFreeSpaceDFStub(t, f.binDir, "non-largest", 512)
 
 	out, err := f.run(t)
 	if err != nil {
@@ -203,15 +203,6 @@ func TestJsonlExportKeepPackRepackCarriesTheNewArguments(t *testing.T) {
 	if !strings.Contains(line, "-c core.bigFileThreshold=4g -c pack.windowMemory=256m -c pack.threads=1 repack -d -l -q --geometric=2 --keep-pack=") {
 		t.Fatalf("the keep-pack repack = %q, want the new arguments before --keep-pack=:\n%s", line, run.argv)
 	}
-}
-
-func dfFreeKB(t *testing.T, dir string) int {
-	t.Helper()
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		t.Fatalf("Statfs(%s): %v", dir, err)
-	}
-	return int(st.Bavail * uint64(st.Bsize) / 1024)
 }
 
 // A pin is used verbatim, the scan still runs once, and a pin under 4 x the
