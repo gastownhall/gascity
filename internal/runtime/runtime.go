@@ -1282,6 +1282,20 @@ type ServerLifecycleProvider interface {
 	TeardownServer() error
 }
 
+// StateCacheStalenessProvider is an optional interface for providers that read
+// session state through a refreshing cache. It reports how long that cache has
+// failed to refresh, so the controller can tell that it is acting on a view of
+// the runtime it cannot update. Providers without such a cache do not
+// implement it, and composite providers forward it with
+// [MaxStateCacheStaleness].
+type StateCacheStalenessProvider interface {
+	// StateCacheStaleness returns how long ago the cache last refreshed
+	// successfully, counted only while its most recent refresh has failed; a
+	// cache whose latest refresh succeeded reports zero. known is false when
+	// there is no primed cache to report on.
+	StateCacheStaleness() (age time.Duration, known bool)
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {

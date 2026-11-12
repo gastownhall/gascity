@@ -56,6 +56,7 @@ var (
 	_ runtime.DialogProvider                  = (*Provider)(nil)
 	_ runtime.EnvironmentBatchProvider        = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
+	_ runtime.StateCacheStalenessProvider     = (*Provider)(nil)
 	_ runtime.SessionRosterProvider           = (*Provider)(nil)
 	_ runtime.TurnEventProvider               = (*Provider)(nil)
 	_ runtime.TurnFenceProvider               = (*Provider)(nil)
@@ -627,6 +628,12 @@ func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
 // ConfigureServer configures the server of every backend that has one.
 func (p *Provider) ConfigureServer() error {
 	return runtime.ConfigureServers(p.Backends())
+}
+
+// StateCacheStaleness reports the longest state-cache staleness among the
+// backends that keep one.
+func (p *Provider) StateCacheStaleness() (time.Duration, bool) {
+	return runtime.MaxStateCacheStaleness(p.Backends())
 }
 
 // TeardownServer tears down the server of every backend that has one, so a

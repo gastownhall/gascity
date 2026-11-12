@@ -357,6 +357,7 @@ var stateWriters = map[string]string{
 	"cmd/gc/cmd_registry_auth.go:registryBrowserLogin":                        "OAuth state, not a row",
 	"cmd/gc/cmd_session_wake.go:doSessionWake":                                "operator: gc session wake",
 	"cmd/gc/endpoint_capacity.go:endpointCapacityGuard.recordTick":            "trace payload, not a row",
+	"cmd/gc/fleet_start_breaker.go:fleetStartGuard.recordTick":                "trace payload, not a row",
 	"cmd/gc/session_bead_cycle.go:cycleAliveSessionForFreshReassign":          "legacy reconciler",
 	"cmd/gc/session_beads.go:reopenNamedSessionBatch":                         "legacy reconciler",
 	"cmd/gc/session_identity.go:desiredSessionIdentity":                       "create's initial metadata",

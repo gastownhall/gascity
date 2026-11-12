@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 217,
+  "next_id": 219,
   "permanent_ids": [
     {
       "name": "help",
@@ -364,6 +364,54 @@
       "classification": "beads-show",
       "owner": "immediate",
       "id": 16
+    },
+    {
+      "path": "gc breaker",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "shape": "runnable-group",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "deferred",
+      "resolver": "group-dispatch",
+      "deferred_default": "help",
+      "id": 1
+    },
+    {
+      "path": "gc breaker reset",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "shape": "runnable",
+      "classification": "breaker-reset",
+      "owner": "immediate",
+      "id": 217
+    },
+    {
+      "path": "gc breaker status",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "shape": "runnable",
+      "classification": "breaker-status",
+      "owner": "immediate",
+      "id": 218
     },
     {
       "path": "gc build-image",

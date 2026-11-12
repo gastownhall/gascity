@@ -80,6 +80,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SharedListing":                   reflect.TypeFor[runtime.SharedListing](),
 	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
 	"StartupNudgeHandbackProvider":    reflect.TypeFor[runtime.StartupNudgeHandbackProvider](),
+	"StateCacheStalenessProvider":     reflect.TypeFor[runtime.StateCacheStalenessProvider](),
 	"SteerCapabilityProvider":         reflect.TypeFor[runtime.SteerCapabilityProvider](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),

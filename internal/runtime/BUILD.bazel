@@ -128,6 +128,7 @@ go_test(
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
+        "state_cache_staleness_test.go",
         "steer_test.go",
         "testenv_import_test.go",
         "tmux_activity_test.go",

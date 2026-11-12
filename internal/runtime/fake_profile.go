@@ -82,6 +82,7 @@ type ProfileBackend interface {
 	SessionObjectKiller
 	SessionRosterProvider
 	StartupNudgeHandbackProvider
+	StateCacheStalenessProvider
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
@@ -133,6 +134,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			SessionObjectKiller:           b,
 			SessionRosterProvider:         b,
 			StartupNudgeHandbackProvider:  b,
+			StateCacheStalenessProvider:   b,
 			TurnRunningProvider:           b,
 			UnattendedSessionStopper:      b,
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
@@ -271,6 +273,7 @@ type (
 		SessionObjectKiller
 		SessionRosterProvider
 		StartupNudgeHandbackProvider
+		StateCacheStalenessProvider
 		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait
@@ -772,6 +775,10 @@ func (f FullFake) TeardownServer() error {
 	}
 	return nil
 }
+
+// StateCacheStaleness implements [StateCacheStalenessProvider]: a fake keeps
+// no refreshing cache, so there is nothing to report.
+func (FullFake) StateCacheStaleness() (time.Duration, bool) { return 0, false }
 
 // StopUnattendedSession implements [UnattendedSessionStopper] as Stop.
 func (f FullFake) StopUnattendedSession(name, _ string) error {

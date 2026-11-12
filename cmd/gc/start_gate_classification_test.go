@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/resilience"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -37,8 +38,11 @@ import (
 //
 //	(a) it declines a ready candidate this pass for a reason independent of
 //	    the candidate's own state: shared throughput, not anything about it;
-//	(b) it refuses nothing: the candidate is re-offered next pass, and at
-//	    least one candidate is admitted per pass, so the queue drains;
+//	(b) it refuses nothing: the candidate is re-offered next pass. A gate
+//	    may admit none for a while (an open fleet breaker admits only
+//	    probes); the hold is bounded by startDeferralHoldCeiling, so a
+//	    create a gate keeps waiting is released at the ceiling rather
+//	    than held for good;
 //	(c) it writes nothing to any bead.
 //
 // A gate with a hold of its own (endpoint capacity) does not record: its hold
@@ -60,6 +64,10 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"deferred_by_wake_budget":       {records: true},
 	"deferred_by_async_start_limit": {records: true},
 	"deferred_by_prepare_budget":    {records: true},
+	// The fleet breaker admits only probes while open, so a create it holds
+	// back waits on the breaker, not on anything about itself; the memo's
+	// ceiling bounds the wait.
+	"deferred_by_fleet_start_breaker": {records: true},
 
 	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
@@ -667,6 +675,8 @@ func startGateRecordingDrivers() map[string]func(t *testing.T) {
 		"deferred_by_wake_budget":       driveWakeBudgetRecords,
 		"deferred_by_async_start_limit": driveAsyncLimitRecords,
 		"deferred_by_prepare_budget":    drivePrepareBudgetRecords,
+
+		"deferred_by_fleet_start_breaker": driveFleetBreakerRecords,
 	}
 }
 
@@ -968,4 +978,27 @@ func driveEndpointCapacityRecordsNothing(t *testing.T) {
 		t.Fatalf("premise: a was not deferred by its endpoint:\n%s", e.log.String())
 	}
 	requireCommitted(t, memo)
+}
+
+// An open fleet breaker admits only probes, so the executor's Admit denial
+// defers a create for a reason that has nothing to do with the create: shared
+// start health. The create has no hold of its own, so the memo keeps it.
+func driveFleetBreakerRecords(t *testing.T) {
+	e := newCapacityEnv(t, false, "a")
+	guard := newFleetStartGuard(e.clk.Now, fleetTestStartupTimeout)
+	memo := newStartDeferralMemo()
+	e.startOptions = append(e.startOptions, withFleetStartGuard(guard), withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
+	failFleetStart(t, guard, "x1", "x")
+	failFleetStart(t, guard, "y1", "y")
+	failFleetStart(t, guard, "z1", "z")
+	if got := fleetState(guard); got != resilience.StateOpen {
+		t.Fatalf("premise: breaker = %v, want open", got)
+	}
+	a := e.pendingCreate(t, "a", "", nil)
+
+	e.start(context.Background(), a)
+	if e.sp.IsRunning("a") || !strings.Contains(e.log.String(), "outcome=deferred_by_fleet_start_breaker") {
+		t.Fatalf("premise: a was not deferred by the fleet breaker:\n%s", e.log.String())
+	}
+	requireCommitted(t, memo, a.info.ID)
 }

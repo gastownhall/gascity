@@ -22,6 +22,7 @@ config-valid
 bd-command-inventory
 legacy-suspended-field
 daemon-session-reconciler
+fleet-start-breaker
 beads-ledger-feed
 rollout:beads.conditional_writes
 rollout:beads.guarded_release

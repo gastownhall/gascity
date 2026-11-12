@@ -348,6 +348,7 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 			SuspendedSessions: v.SessionCounts.Suspended,
 		},
 	}
+	snapshot.FleetBreaker = fleetBreakerNote(snapshot.Controller, cityPath)
 	for _, a := range v.Agents {
 		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
 			Agent: StatusAgentJSON{

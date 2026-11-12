@@ -243,6 +243,8 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
+		case strings.HasPrefix(line, fleetBreakerCommandPrefix):
+			handleFleetBreakerSocketCmd(conn, cityPath, line[len(fleetBreakerCommandPrefix):], wake.runsV2())
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):

@@ -226,7 +226,9 @@
               "storage-remote-stage-mark",
               "storage-remote-stage-unmark",
               "storage-snapshot",
-              "storage-snapshot-restore"
+              "storage-snapshot-restore",
+              "breaker-reset",
+              "breaker-status"
             ]
           },
           "event_id": {

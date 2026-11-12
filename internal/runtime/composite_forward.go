@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // ErrSessionRosterUnsupported reports that no backend of a composite provider
@@ -31,6 +32,20 @@ func ConfigureServers(backends []Backend) error {
 // [ServerLifecycleProvider], as [ConfigureServers] does.
 func TeardownServers(backends []Backend) error {
 	return eachServer(backends, ServerLifecycleProvider.TeardownServer)
+}
+
+// MaxStateCacheStaleness reports the longest [StateCacheStalenessProvider]
+// staleness across backends that implement it. known is false when none does.
+func MaxStateCacheStaleness(backends []Backend) (age time.Duration, known bool) {
+	for _, b := range backends {
+		if sp, ok := b.Provider.(StateCacheStalenessProvider); ok {
+			if a, ok := sp.StateCacheStaleness(); ok {
+				known = true
+				age = max(age, a)
+			}
+		}
+	}
+	return age, known
 }
 
 func eachServer(backends []Backend, op func(ServerLifecycleProvider) error) error {

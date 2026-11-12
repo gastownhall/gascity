@@ -67,6 +67,7 @@ var (
 	_ runtime.BackgroundWorkStopper         = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.StateCacheStalenessProvider   = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
@@ -1503,6 +1504,12 @@ func (p *Provider) Tmux() *Tmux {
 // ConfigureServer applies tmux server-level configuration.
 func (p *Provider) ConfigureServer() error {
 	return p.tm.ConfigureServer()
+}
+
+// StateCacheStaleness reports how long the state cache has failed to refresh;
+// see [runtime.StateCacheStalenessProvider].
+func (p *Provider) StateCacheStaleness() (time.Duration, bool) {
+	return p.cache.StaleFor()
 }
 
 // TeardownServer terminates the tmux server after all sessions are drained.

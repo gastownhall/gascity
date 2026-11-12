@@ -310,6 +310,25 @@ func (c *StateCache) currentState() runtimeStateSnapshot {
 	return obs.state
 }
 
+// StaleFor reports how long ago the cache last refreshed successfully while
+// its most recent refresh has failed, and zero when the latest refresh
+// succeeded. known is false until the cache has been primed, and while it holds
+// only the empty snapshot of a city that never had a tmux server: there is no
+// refresh to be stale against. It reads state only: it never triggers a refresh.
+func (c *StateCache) StaleFor() (age time.Duration, known bool) {
+	if c == nil {
+		return 0, false
+	}
+	obs := c.observation()
+	if !obs.primed() || obs.primedByNoServer {
+		return 0, false
+	}
+	if obs.lastErr == nil {
+		return 0, true
+	}
+	return c.clock().Sub(obs.fetchedAt), true
+}
+
 // observe returns the published snapshot with its refresh outcome, running
 // the same refresh trigger as currentState but never applying the staleTTL
 // cliff: the caller decides what a stale or failed observation means.

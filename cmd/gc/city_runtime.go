@@ -289,6 +289,12 @@ type CityRuntime struct {
 	// reload, like asyncStartLimiter.
 	capacityGuard *endpointCapacityGuard
 
+	// fleetGuard is the fleet start breaker, built by ensureFleetStartGuard
+	// from the config in force (nil while [daemon] fleet_start_breaker is
+	// off). fleetGuardTimeout is the startup_timeout it was built with. It is
+	// process-local and survives config reload unless the timeout changes.
+	fleetGuard        *fleetStartGuard
+	fleetGuardTimeout time.Duration
 	// startDeferrals remembers which never-started pending creates the last
 	// main-tick start-executor run deferred at a start gate, built on first
 	// use by ensureStartDeferralMemo. It is process-local and survives config
@@ -3572,6 +3578,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withFleetStartGuard(cr.ensureFleetStartGuard()),
 		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
@@ -4015,6 +4022,26 @@ func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
 		cr.capacityGuard = newEndpointCapacityGuard(clock.Real{}.Now)
 	}
 	return cr.capacityGuard
+}
+
+// ensureFleetStartGuard returns the city's fleet start breaker, building it on
+// first use. It returns nil, leaving automatic starts ungated, while the
+// [daemon] fleet_start_breaker kill switch is off. A changed startup_timeout
+// rebuilds the guard (its half-open window derives from it), which closes a
+// breaker that was open; the next failures re-open it.
+func (cr *CityRuntime) ensureFleetStartGuard() *fleetStartGuard {
+	if cr.cfg == nil || !cr.cfg.Daemon.FleetStartBreakerEnabled() {
+		cr.fleetGuard = nil
+		publishFleetGuard(cr.cityPath, nil)
+		return nil
+	}
+	timeout := cr.cfg.Session.StartupTimeoutDuration()
+	if cr.fleetGuard == nil || cr.fleetGuardTimeout != timeout {
+		cr.fleetGuard = newFleetStartGuard(clock.Real{}.Now, timeout)
+		cr.fleetGuardTimeout = timeout
+		publishFleetGuard(cr.cityPath, cr.fleetGuard)
+	}
+	return cr.fleetGuard
 }
 
 // ensureStartDeferralMemo returns the city's start-deferral memo, building it
@@ -4463,6 +4490,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// The dispatcher's starts hit the same endpoints; without the guard
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withFleetStartGuard(cr.ensureFleetStartGuard()),
 		// No start-deferral memo: this run covers the control-dispatcher
 		// rows only, and a completed run would replace the main tick's
 		// record of deferred pool creates. The cost is that a
