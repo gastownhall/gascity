@@ -894,7 +894,7 @@ func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 		if id := readCityDoltDatabaseID(cityPath); id != "" {
 			return sanitizeDoltDatabaseName("city_" + id)
 		}
-		return "hq"
+		return legacySharedDoltDatabase
 	}
 	return sanitizeDoltDatabaseName(prefix)
 }

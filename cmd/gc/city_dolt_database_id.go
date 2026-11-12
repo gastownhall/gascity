@@ -5,13 +5,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// legacySharedDoltDatabase is the database name every city used before cities
+// minted a per-city id, and the one a city without an id still uses. Other
+// cities on the same Dolt server may own it, so rig teardown never drops it.
+const legacySharedDoltDatabase = "hq"
 
 // cityDoltDatabaseIDRE is the only shape mintCityDoltDatabaseID writes and
 // the only shape readCityDoltDatabaseID accepts.
@@ -27,7 +31,9 @@ func cityDoltDatabaseIDPath(cityPath string) string {
 // defaultScopeDoltDatabase turns into a city-unique database name. It is
 // write-once and does nothing for a city that already has a persisted beads
 // identity: such a city keeps whatever database it is stamped with (or "hq"
-// if its metadata is lost), and is never renamed.
+// if its metadata is lost), and is never renamed. Concurrent mints converge on
+// one id: the file is published with a hard link, which fails if another mint
+// got there first.
 func mintCityDoltDatabaseID(cityPath string) error {
 	initialized, err := scopeHasPersistedBeadsIdentity(cityPath)
 	if err != nil {
@@ -38,6 +44,8 @@ func mintCityDoltDatabaseID(cityPath string) error {
 	}
 	path := cityDoltDatabaseIDPath(cityPath)
 	if _, err := os.Stat(path); err == nil {
+		// An existing file is kept even when malformed; readCityDoltDatabaseID
+		// warns about it.
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect %s: %w", path, err)
@@ -46,24 +54,52 @@ func mintCityDoltDatabaseID(cityPath string) error {
 	if _, err := rand.Read(raw[:]); err != nil {
 		return fmt.Errorf("minting city dolt database id: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(hex.EncodeToString(raw[:])+"\n"), 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".dolt-database-id-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	_, werr := tmp.WriteString(hex.EncodeToString(raw[:]) + "\n")
+	cerr := tmp.Close()
+	if werr != nil {
+		return fmt.Errorf("writing %s: %w", tmpPath, werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("closing %s: %w", tmpPath, cerr)
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+	}
+	// Link, not rename: a rename would replace an id a concurrent mint just
+	// published, leaving two callers holding different ids.
+	if err := os.Link(tmpPath, path); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
 }
 
 // readCityDoltDatabaseID returns the city's minted id, or "" when there is
-// none or the file is not in the shape mint writes.
+// none or the file is not in the shape mint writes. A file that exists but
+// cannot be read, or is not in that shape, also yields "" (the city then uses
+// the legacy "hq" database) and logs a warning, since the fallback would
+// otherwise bind the city to the shared database without any sign of why.
 func readCityDoltDatabaseID(cityPath string) string {
-	data, err := os.ReadFile(cityDoltDatabaseIDPath(cityPath))
+	path := cityDoltDatabaseIDPath(cityPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("gc: ignoring city dolt database id %s: %v; falling back to the legacy %q database", path, err, legacySharedDoltDatabase)
+		}
 		return ""
 	}
 	id := strings.TrimSpace(string(data))
 	if !cityDoltDatabaseIDRE.MatchString(id) {
+		log.Printf("gc: ignoring city dolt database id %s: content is not 8 lowercase hex digits; falling back to the legacy %q database", path, legacySharedDoltDatabase)
 		return ""
 	}
 	return id

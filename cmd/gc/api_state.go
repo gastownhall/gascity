@@ -2964,12 +2964,20 @@ func (cs *controllerState) provisionedManagedDoltDatabase(rigPath string) string
 }
 
 // assertDroppableManagedDoltDatabase refuses to drop a managed Dolt database
-// name that collides with a reserved system database, the city's own database,
-// or any OTHER rig's managed database. The teardown's DoltDB comes from the
-// cloned repo's .beads/metadata.json (provisionedManagedDoltDatabase), so a
-// crafted repo could name "hq" or a cross-tenant DB; a mismatch is a hard error,
-// never a silent drop, so the caller leaves the record in_flight rather than
-// marking it clean over a database it must not have touched.
+// name that collides with a reserved system database, the legacy shared
+// database "hq", the city's own database, or any OTHER rig's managed database.
+// The teardown's DoltDB comes from the cloned repo's .beads/metadata.json
+// (provisionedManagedDoltDatabase), so a crafted repo could name "hq" or a
+// cross-tenant DB; a mismatch is a hard error, never a silent drop, so the
+// caller leaves the record in_flight rather than marking it clean over a
+// database it must not have touched.
+//
+// "hq" stays protected in every city, including one that minted a per-city id
+// (city_<8hex>): the legacy name is the shared database that other cities on
+// the same Dolt server may still own, so it is never this rig's to drop, and
+// the city's own canonical name no longer covers it once the city has an id.
+// The guard checks the literal here, not through isReservedManagedDoltDatabase,
+// which six other call sites share.
 //
 // TODO(remote-gc C4c): prefer deriving the managed DB name deterministically
 // from (city, prefix) for a fresh git_url add instead of trusting the cloned
@@ -2981,6 +2989,9 @@ func (cs *controllerState) assertDroppableManagedDoltDatabase(rigName, dbName st
 	}
 	if isReservedManagedDoltDatabase(db) {
 		return fmt.Errorf("%w: refusing to drop reserved dolt database %q during rig %q teardown", configedit.ErrValidation, db, rigName)
+	}
+	if strings.EqualFold(db, legacySharedDoltDatabase) {
+		return fmt.Errorf("%w: refusing to drop dolt database %q during rig %q teardown: it is the legacy shared city database", configedit.ErrValidation, db, rigName)
 	}
 	cfg := cs.Config()
 	cityDB := canonicalScopeDoltDatabase(cs.cityPath, cs.cityPath, config.EffectiveHQPrefix(cfg))

@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -270,5 +273,80 @@ func TestFinalizeInitDoesNotMintForCityWithBeadsIdentity(t *testing.T) {
 	}
 	if got := canonicalScopeDoltDatabase(cityPath, cityPath, "bl"); got != "hq" {
 		t.Fatalf("existing city's database = %q, want hq", got)
+	}
+}
+
+// Concurrent mints for one fresh city converge on a single id: the write-once
+// contract holds under a race, not just across sequential calls.
+func TestMintCityDoltDatabaseIDConcurrentMintsConverge(t *testing.T) {
+	cityPath := t.TempDir()
+
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	ids := make(chan string, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := mintCityDoltDatabaseID(cityPath); err != nil {
+				errs <- err
+				return
+			}
+			ids <- readCityDoltDatabaseID(cityPath)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(ids)
+	for err := range errs {
+		t.Fatalf("mintCityDoltDatabaseID: %v", err)
+	}
+	final := readCityDoltDatabaseID(cityPath)
+	if final == "" {
+		t.Fatal("no id was published")
+	}
+	for id := range ids {
+		if id != final {
+			t.Fatalf("a mint observed id %q, but the city ended with %q", id, final)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(cityPath, ".gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf(".gc holds %d entries after the mints, want only dolt-database-id (temp files leaked)", len(entries))
+	}
+}
+
+// A malformed id file still falls back to "hq" (the city keeps working), but
+// the fallback is logged instead of silent.
+func TestReadCityDoltDatabaseIDWarnsOnMalformedFile(t *testing.T) {
+	cityPath := t.TempDir()
+	path := cityDoltDatabaseIDPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not-an-id\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	if got := readCityDoltDatabaseID(cityPath); got != "" {
+		t.Fatalf("readCityDoltDatabaseID = %q, want \"\" for a malformed file", got)
+	}
+	if got := defaultScopeDoltDatabase(cityPath, cityPath, "gc"); got != "hq" {
+		t.Fatalf("defaultScopeDoltDatabase = %q, want the legacy hq fallback", got)
+	}
+	if !strings.Contains(buf.String(), "ignoring city dolt database id") {
+		t.Fatalf("no warning logged for a malformed id file; log = %q", buf.String())
 	}
 }

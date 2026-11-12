@@ -109,7 +109,8 @@ func bootCityStoreFor(cityPath string) cityStoreRecord {
 // parseCityStoreBinding reads a binding out of metadata.json content. Missing,
 // unreadable, torn, null, and non-object files are refused, as is metadata
 // that names no store at all (an empty object or pre-Dolt bd metadata): the
-// lifecycle would read any of them as "fresh city" and fall back to "hq". A
+// lifecycle would read any of them as "fresh city" and fall back to the default
+// database (city_<id> for a city with a minted id, else "hq"). A
 // binding field holding a non-string value is refused too, since the
 // lifecycle's own readers (canonicalScopeDoltDatabase,
 // scopeHasCompleteStorageBinding) would read it differently.
@@ -203,7 +204,8 @@ func reloadCityStoreDatabase(cityPath string, rec cityStoreRecord) (string, erro
 //
 // The lifecycle's city init step is idempotent only while metadata.json names
 // the store: with it missing or rewritten, init falls back to the default
-// "hq", stamps metadata naming it, and lets bd init create an empty database
+// (city_<id> for a city with a minted id, else "hq"), stamps metadata naming
+// it, and lets bd init create an empty database
 // the city is rebound to (mc-s8duk, where a git fast-forward in the city
 // checkout deleted a once-tracked metadata.json). A reload therefore checks
 // the metadata against the binding recorded at boot before any lifecycle step,
