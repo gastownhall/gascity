@@ -1811,10 +1811,10 @@ func writeSyncCLIDatabase(t *testing.T, cityPath, name, remotesJSON string) {
 func TestSyncDeclaresSkippedOutcomeWhenNoDatabaseHasUsableRemote(t *testing.T) {
 	t.Parallel()
 	const (
-		hqLine     = "hq: skipped (no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote)"
+		hqLine     = "hq: skipped (no local remote; set GC_DOLT_REMOTE_HQ and GC_DOLT_SYNC_ALLOW_REMOTE_HQ=1 to push to a non-local remote)"
 		mpaLine    = "mpa: skipped (no remote)"
-		wantLast   = "sync: 2/2 database(s) skipped, nothing synced: hq (no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote); mpa (no remote);"
-		hqReason   = "no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote"
+		wantLast   = "sync: 2/2 database(s) skipped, nothing synced: hq (no local remote; set GC_DOLT_REMOTE_HQ and GC_DOLT_SYNC_ALLOW_REMOTE_HQ=1 to push to a non-local remote); mpa (no remote);"
+		hqReason   = "no local remote; set GC_DOLT_REMOTE_HQ and GC_DOLT_SYNC_ALLOW_REMOTE_HQ=1 to push to a non-local remote"
 		mpaReason  = "no remote"
 		allSkipped = "no database was synced to a remote"
 	)
@@ -1881,7 +1881,7 @@ func TestSyncSQLDeclaresSkippedOutcomeForUnusableRemote(t *testing.T) {
 		{
 			name:       "no local remote",
 			remoteRows: []string{"origin,git+ssh://example.invalid/org/app"},
-			wantReason: "no local remote; set GC_DOLT_REMOTE_APP to push to a non-local remote",
+			wantReason: "no local remote; set GC_DOLT_REMOTE_APP and GC_DOLT_SYNC_ALLOW_REMOTE_APP=1 to push to a non-local remote",
 		},
 	}
 	for _, tc := range tests {
@@ -1944,7 +1944,7 @@ func TestSyncDeclaresPartialOutcomeWhenSomeDatabasesSkip(t *testing.T) {
 				t.Fatalf("a run that synced a database must not print the all-skipped summary:\n%s", out)
 			}
 			assertSyncRemoteSkipOutcome(t, outcomeFile, orders.ExecOutcomePartial, "some databases were not synced to a remote",
-				orders.ExecOutcomeScope{Scope: "hq", Reason: "no local remote; set GC_DOLT_REMOTE_HQ to push to a non-local remote"},
+				orders.ExecOutcomeScope{Scope: "hq", Reason: "no local remote; set GC_DOLT_REMOTE_HQ and GC_DOLT_SYNC_ALLOW_REMOTE_HQ=1 to push to a non-local remote"},
 			)
 		})
 	}
