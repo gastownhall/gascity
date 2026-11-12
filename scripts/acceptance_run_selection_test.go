@@ -2,9 +2,11 @@ package scripts_test
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -236,6 +238,104 @@ func TestAcceptancePerfGateHasALane(t *testing.T) {
 	if !strings.Contains(recipe, gate+"=") {
 		t.Errorf("`make test-acceptance-go` does not pass %s through its env -i allowlist, so exporting it "+
 			"runs the suite with the perf gate silently off:\n%s", gate, recipe)
+	}
+}
+
+// x6PerfLanes lists the "<workflow>:<job>" of every job that both sets
+// GC_LANE_X6_PERF=1 and selects TestX6FanIn: through its env blocks or a
+// --test_env flag, and in one step, because the gate only counts where the
+// test that reads it runs. workflows maps a workflow file to its text.
+func x6PerfLanes(workflows map[string]string) ([]string, error) {
+	const (
+		gate     = "GC_LANE_X6_PERF"
+		testName = "TestX6FanIn"
+	)
+	envSets := func(values ...map[string]any) bool {
+		for _, env := range values {
+			if value, ok := env[gate]; ok && strings.TrimSpace(fmt.Sprint(value)) == "1" {
+				return true
+			}
+		}
+		return false
+	}
+	var lanes []string
+	for _, name := range slices.Sorted(maps.Keys(workflows)) {
+		var doc acceptanceWorkflowDoc
+		if err := yaml.Unmarshal([]byte(workflows[name]), &doc); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		for job, def := range doc.Jobs {
+			for _, step := range def.Steps {
+				sets := envSets(doc.Env, def.Env, step.Env) || strings.Contains(step.Run, "--test_env="+gate+"=1")
+				if sets && strings.Contains(step.Run, testName) {
+					lanes = append(lanes, name+":"+job)
+					break
+				}
+			}
+		}
+	}
+	slices.Sort(lanes)
+	return lanes, nil
+}
+
+// TestX6PerfLanes pins the guard's reading of a workflow: a job counts only
+// when one step sets the gate to 1 and selects TestX6FanIn.
+func TestX6PerfLanes(t *testing.T) {
+	const filter = `--test_filter='^TestX6FanIn$/^steady$' //test/conversationlane:conversationlane_test`
+	for _, tc := range []struct {
+		name string
+		yml  string
+		want []string
+	}{
+		{"a flag on the command", "jobs:\n  perf:\n    steps:\n      - run: bazel test --test_env=GC_LANE_X6_PERF=1 " + filter + "\n", []string{"w.yml:perf"}},
+		{"a step env", "jobs:\n  perf:\n    steps:\n      - env:\n          GC_LANE_X6_PERF: \"1\"\n        run: bazel test " + filter + "\n", []string{"w.yml:perf"}},
+		{"a job env", "jobs:\n  perf:\n    env:\n      GC_LANE_X6_PERF: 1\n    steps:\n      - run: bazel test " + filter + "\n", []string{"w.yml:perf"}},
+		{"a workflow env", "env:\n  GC_LANE_X6_PERF: \"1\"\njobs:\n  perf:\n    steps:\n      - run: bazel test " + filter + "\n", []string{"w.yml:perf"}},
+		{"the gate off", "jobs:\n  perf:\n    steps:\n      - run: bazel test --test_env=GC_LANE_X6_PERF=0 " + filter + "\n", nil},
+		{"the gate empty", "jobs:\n  perf:\n    env:\n      GC_LANE_X6_PERF: \"\"\n    steps:\n      - run: bazel test " + filter + "\n", nil},
+		{"no gate", "jobs:\n  perf:\n    steps:\n      - run: bazel test " + filter + "\n", nil},
+		{"the gate without the test", "jobs:\n  perf:\n    steps:\n      - run: bazel test --test_env=GC_LANE_X6_PERF=1 //test/conversationlane:other_test\n", nil},
+		{"the gate and the test in different jobs", "jobs:\n  a:\n    steps:\n      - run: echo --test_env=GC_LANE_X6_PERF=1\n  b:\n    steps:\n      - run: bazel test " + filter + "\n", nil},
+		{"the gate and the test in different steps", "jobs:\n  a:\n    steps:\n      - run: echo --test_env=GC_LANE_X6_PERF=1\n      - run: bazel test " + filter + "\n", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := x6PerfLanes(map[string]string{"w.yml": tc.yml})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("x6PerfLanes = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := x6PerfLanes(map[string]string{"w.yml": "jobs: [unterminated"}); err == nil {
+		t.Error("x6PerfLanes accepted a workflow that is not YAML")
+	}
+}
+
+// TestX6PerfGateHasALane is TestAcceptancePerfGateHasALane's sibling for
+// GC_LANE_X6_PERF (#8240): TestX6FanIn/steady asserts its wall-clock p99 and
+// max only where the variable is 1, so the assertion is enforced only if some
+// workflow job both sets it and selects the test. #8719 shipped the gate with
+// no job setting it; this fails when the nightly perf lane goes away.
+func TestX6PerfGateHasALane(t *testing.T) {
+	root := repoRoot(t)
+	paths, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.y*ml"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no workflows under .github/workflows (err %v); the scan is broken", err)
+	}
+	workflows := map[string]string{}
+	for _, path := range paths {
+		workflows[filepath.Base(path)] = readRepoFile(t, root, filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator))))
+	}
+	lanes, err := x6PerfLanes(workflows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) == 0 {
+		t.Error("no workflow job sets GC_LANE_X6_PERF=1 and selects TestX6FanIn, so the X6 steady phase's " +
+			"wall-clock p99 and max (x6SteadyP99, x6SteadyMax) are asserted nowhere: add the variable to the " +
+			"job that is meant to be its lane (the nightly X6 perf lane)")
 	}
 }
 

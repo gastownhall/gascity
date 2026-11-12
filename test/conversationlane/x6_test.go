@@ -491,3 +491,196 @@ func TestX6Assess(t *testing.T) {
 		})
 	}
 }
+
+// x6At is a time x ms after a fixed origin, for the attribution tables.
+func x6At(ms int) time.Time {
+	return time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC).Add(time.Duration(ms) * time.Millisecond)
+}
+
+// x6Ats maps x6At over ms.
+func x6Ats(ms ...int) []time.Time {
+	out := make([]time.Time, len(ms))
+	for i, m := range ms {
+		out[i] = x6At(m)
+	}
+	return out
+}
+
+// TestX6LongestGap pins the longest spacing of consecutive times, in any input
+// order: the producers' longest gap between op.CreatedAt, and the largest
+// interval between the fake runtime's invocations.
+func TestX6LongestGap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   []time.Time
+		want time.Duration
+	}{
+		{"none", nil, 0},
+		{"one", x6Ats(100), 0},
+		{"even pacing", x6Ats(0, 50, 100, 150), 50 * time.Millisecond},
+		{"one stall", x6Ats(0, 50, 100, 2100, 2150), 2 * time.Second},
+		{"unsorted", x6Ats(2150, 0, 2100, 50, 100), 2 * time.Second},
+		{"a tie", x6Ats(0, 50, 100), 50 * time.Millisecond},
+		{"the stall at the end", x6Ats(0, 50, 5050), 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := slices.Clone(tc.at)
+			if got := x6LongestGap(tc.at); got != tc.want {
+				t.Errorf("x6LongestGap = %s, want %s", got, tc.want)
+			}
+			if !slices.Equal(tc.at, before) {
+				t.Errorf("x6LongestGap reordered its input: %v, was %v", tc.at, before)
+			}
+		})
+	}
+}
+
+// TestX6NoticeAges pins the age of an injection's oldest and newest notice at
+// the moment it was injected, from the notices' op.CreatedAt in any order.
+func TestX6NoticeAges(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		created        []time.Time
+		oldest, newest time.Duration
+	}{
+		{"none", nil, 0, 0},
+		{"one notice", x6Ats(1000), 2 * time.Second, 2 * time.Second},
+		{"a batch", x6Ats(100, 600, 1500, 3000), 2900 * time.Millisecond, 0},
+		{"unsorted", x6Ats(3000, 100, 1500), 2900 * time.Millisecond, 0},
+		{"the newest just before", x6Ats(0, 2999), 3 * time.Second, time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldest, newest := x6NoticeAges(x6At(3000), tc.created)
+			if oldest != tc.oldest || newest != tc.newest {
+				t.Errorf("x6NoticeAges = %s, %s; want %s, %s", oldest, newest, tc.oldest, tc.newest)
+			}
+		})
+	}
+	t.Run("a notice created after its injection", func(t *testing.T) {
+		// Clocks are the host's own, so this does not happen; a negative age
+		// is reported as it is, not clamped.
+		oldest, newest := x6NoticeAges(x6At(1000), x6Ats(900, 1100))
+		if oldest != 100*time.Millisecond || newest != -100*time.Millisecond {
+			t.Errorf("x6NoticeAges = %s, %s; want 100ms, -100ms", oldest, newest)
+		}
+	})
+}
+
+// TestX6InStreamGap pins which gap is the longest in-stream one: the final gap
+// is the drain's, so it never counts, as logTail's "longest in-stream gap".
+func TestX6InStreamGap(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		at       []time.Time
+		from, to int
+		ok       bool
+	}{
+		{"none", nil, 0, 0, false},
+		{"one injection", x6Ats(0), 0, 0, false},
+		{"two: only the final gap", x6Ats(0, 3000), 0, 0, false},
+		{"three: the one in-stream gap", x6Ats(0, 3000, 9000), 0, 3000, true},
+		{"the longest in-stream gap", x6Ats(0, 3000, 9000, 12000, 15000), 3000, 9000, true},
+		{"the final gap is longer", x6Ats(0, 3000, 6100, 20000), 3000, 6100, true},
+		{"a tie keeps the first", x6Ats(0, 3000, 6000, 9000), 0, 3000, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			from, to, ok := x6InStreamGap(tc.at)
+			if ok != tc.ok {
+				t.Fatalf("x6InStreamGap ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && (!from.Equal(x6At(tc.from)) || !to.Equal(x6At(tc.to))) {
+				t.Errorf("x6InStreamGap = %s..%s, want %s..%s", from, to, x6At(tc.from), x6At(tc.to))
+			}
+		})
+	}
+}
+
+// TestX6Within pins the times strictly inside a window: an injection's own
+// runtime call lands on its edge and is not inside the gap it ends or starts.
+func TestX6Within(t *testing.T) {
+	at := x6Ats(0, 1000, 3000, 3000, 5000, 6000, 9000)
+	for _, tc := range []struct {
+		name     string
+		from, to int
+		want     int
+	}{
+		{"the gap", 3000, 9000, 2},
+		{"the edges are out", 1000, 5000, 2},
+		{"an empty window", 6000, 6000, 0},
+		{"an inverted window", 9000, 3000, 0},
+		{"a window with nothing", 6000, 9000, 0},
+		{"the whole stream", -1, 10000, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := x6Within(at, x6At(tc.from), x6At(tc.to))
+			if len(got) != tc.want {
+				t.Errorf("x6Within(%d, %d) = %v, want %d times", tc.from, tc.to, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestX6InvocationTimes pins the read of the fake runtime's ops.jsonl: every
+// line's `at`, in file order; a line being appended is the next read's, and a
+// complete line that is not an invocation is an error.
+func TestX6InvocationTimes(t *testing.T) {
+	line := func(at, op string) string {
+		return `{"at":"` + at + `","pid":1,"ppid":2,"op":"` + op + `"}` + "\n"
+	}
+	for _, tc := range []struct {
+		name    string
+		data    string
+		want    []time.Time
+		wantErr bool
+	}{
+		{"empty", "", nil, false},
+		{
+			"two lines", line("2026-11-12T09:00:00.5Z", "protocol") + line("2026-11-12T09:00:01Z", "nudge"),
+			[]time.Time{x6At(500), x6At(1000)},
+			false,
+		},
+		{
+			"a trailing partial line", line("2026-11-12T09:00:00Z", "nudge") + `{"at":"2026-11-12T09:00:0`,
+			[]time.Time{x6At(0)},
+			false,
+		},
+		{
+			"a blank line", line("2026-11-12T09:00:00Z", "nudge") + "\n" + line("2026-11-12T09:00:02Z", "nudge"),
+			[]time.Time{x6At(0), x6At(2000)},
+			false,
+		},
+		{"a bad time", line("yesterday", "nudge"), nil, true},
+		{"a bad line", "not json\n" + line("2026-11-12T09:00:00Z", "nudge"), nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := x6InvocationTimes([]byte(tc.data))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("x6InvocationTimes error = %v, want error %v", err, tc.wantErr)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("x6InvocationTimes = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if !got[i].Equal(tc.want[i]) {
+					t.Errorf("time %d = %s, want %s", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestX6WallClockLine pins the line that names the wall-clock assertion, its
+// two limits and whether the gate is on.
+func TestX6WallClockLine(t *testing.T) {
+	for _, tc := range []struct {
+		gated bool
+		want  string
+	}{
+		{true, "x6 steady wall-clock line: p99 <= 5s and max <= 7s, asserted (GC_LANE_X6_PERF=1)"},
+		{false, "x6 steady wall-clock line: p99 <= 5s and max <= 7s, not asserted (GC_LANE_X6_PERF is not 1)"},
+	} {
+		if got := x6WallClockLine(tc.gated); got != tc.want {
+			t.Errorf("x6WallClockLine(%v) = %q, want %q", tc.gated, got, tc.want)
+		}
+	}
+}
