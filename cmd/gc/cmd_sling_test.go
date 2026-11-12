@@ -7653,7 +7653,7 @@ func TestSlingReroutesAssignedSingleSessionBead(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
 		{
 			ID:       "BL-42",
@@ -7664,7 +7664,7 @@ func TestSlingReroutesAssignedSingleSessionBead(t *testing.T) {
 			Assignee: "mayor",
 			Metadata: map[string]string{"gc.routed_to": "reviewers"},
 		},
-	}, nil)
+	}, nil))
 
 	opts := testOpts(a, "BL-42")
 	code := doSling(opts, deps, deps.Store, stdout, stderr)
@@ -9691,7 +9691,7 @@ func TestSlingDryRunClaimedBeadRoutedElsewhereShowsRerouteOnly(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = claimedRoutedElsewhereStore("BL-1")
+	deps = slingDepsWithStore(deps, claimedRoutedElsewhereStore("BL-1"))
 	opts := testOpts(a, "BL-1")
 	opts.DryRun = true
 	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
