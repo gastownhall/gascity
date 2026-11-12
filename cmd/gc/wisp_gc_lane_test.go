@@ -697,3 +697,37 @@ func TestWispGCLane_ReportsPurgeInItsOwnTraceCycle(t *testing.T) {
 		t.Errorf("purge cycle %q did not complete", purgeOp.TickID)
 	}
 }
+
+// drainWispGCWakes removes every wake queued on the lane and reports how
+// many there were.
+func drainWispGCWakes(lane *wispGCLane) int {
+	n := 0
+	for {
+		select {
+		case <-lane.wakeCh:
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// Kills: a trigger whose tick no longer reaches the wake slot, or a tick that
+// wakes the lane more than once. Every controller tick that reaches the slot
+// the purge used to run in hands the lane exactly one wake, whatever trigger
+// ran it and without the lane running to receive it.
+func TestWispGCLane_TickReachingTheSlotEnqueuesOneWake(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	lane := cr.wispGCLaneOf()
+	if n := drainWispGCWakes(lane); n != 0 {
+		t.Fatalf("a fresh lane queued %d wakes before any tick, want 0", n)
+	}
+	for _, trigger := range []string{"patrol", "poke", "startup-poke", "control-dispatcher", "reload"} {
+		t.Run(trigger, func(t *testing.T) {
+			runFixtureTick(cr, trigger)
+			if n := drainWispGCWakes(lane); n != 1 {
+				t.Errorf("a %s tick reaching the wake slot enqueued %d wakes, want 1", trigger, n)
+			}
+		})
+	}
+}
