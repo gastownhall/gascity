@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // entryErrors builds per-entry failures for pids the way a scan does: one
@@ -137,5 +139,83 @@ func TestScanErrorShapeIgnoresCountsAndPIDs(t *testing.T) {
 	}
 	if ScanErrorShape(b) == ScanErrorShape(c) || ScanErrorShape(b) == ScanErrorShape(d) {
 		t.Fatal("a new kind, or a whole-scan failure, left the shape unchanged")
+	}
+}
+
+// ownerUnreadable is a per-entry failure of another kind than environDenied.
+func ownerUnreadable(pid int) error {
+	return fmt.Errorf("reading owner for pid %d: open /proc/%d/status: no such device", pid, pid)
+}
+
+// TestScanErrorLogPacesUnreadableEntries (mc-ygved): a zero-value
+// ScanErrorLog reports a scan of unreadable entries once per shape, again
+// after ScanErrorLogRepeat or when the shape changes, per key; a failure of
+// the whole scan is reported every time, alone or joined to entry failures.
+func TestScanErrorLogPacesUnreadableEntries(t *testing.T) {
+	var l ScanErrorLog
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	perm := entryErrors([]int{11, 12}, environDenied)
+	whole := errors.New("enumerating /proc: permission denied")
+	steps := []struct {
+		name string
+		key  string
+		err  error
+		at   time.Time
+		want bool
+	}{
+		{"first", "/c", perm, t0, true},
+		{"same shape, other pids and count", "/c", entryErrors([]int{13, 14, 15}, environDenied), t0.Add(time.Minute), false},
+		{"another key", "/d", perm, t0.Add(time.Minute), true},
+		{"a new kind", "/c", entryErrors([]int{16}, ownerUnreadable), t0.Add(2 * time.Minute), true},
+		{"the new kind again", "/c", entryErrors([]int{17}, ownerUnreadable), t0.Add(3 * time.Minute), false},
+		{"just inside the repeat window", "/c", entryErrors([]int{18}, ownerUnreadable), t0.Add(2*time.Minute + ScanErrorLogRepeat - time.Nanosecond), false},
+		{"at the end of the repeat window", "/c", entryErrors([]int{18}, ownerUnreadable), t0.Add(2*time.Minute + ScanErrorLogRepeat), true},
+		{"a whole-scan failure", "/c", whole, t0.Add(13 * time.Minute), true},
+		{"the whole-scan failure again", "/c", whole, t0.Add(13*time.Minute + time.Second), true},
+		{"a whole-scan failure joined to entries", "/c", errors.Join(whole, perm), t0.Add(14 * time.Minute), true},
+		{"the joined failure again", "/c", errors.Join(whole, perm), t0.Add(14*time.Minute + time.Second), true},
+	}
+	for _, s := range steps {
+		if got := l.Report(s.key, s.err, s.at); got != s.want {
+			t.Fatalf("%s: Report = %t, want %t", s.name, got, s.want)
+		}
+	}
+}
+
+// AC-7: each ScanErrorLog keeps its own state, so the orphan sweep's and the
+// session start path's instances never suppress each other's first line, and
+// one instance is safe for concurrent callers: of many simultaneous reports
+// of one shape for one key, exactly one is logged.
+func TestScanErrorLogInstancesAreIndependentAndConcurrent(t *testing.T) {
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	perm := entryErrors([]int{11, 12}, environDenied)
+	var sweep, start ScanErrorLog
+	if !sweep.Report("/c", perm, t0) || sweep.Report("/c", perm, t0.Add(time.Second)) {
+		t.Fatal("sweep instance: want the first report logged and its repeat suppressed")
+	}
+	if !start.Report("/c", perm, t0.Add(time.Second)) {
+		t.Fatal("start instance: first report suppressed by another instance's state")
+	}
+
+	var shared ScanErrorLog
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		logged int
+	)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if shared.Report("/c", perm, t0) {
+				mu.Lock()
+				logged++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if logged != 1 {
+		t.Fatalf("concurrent reports logged %d times, want once", logged)
 	}
 }
