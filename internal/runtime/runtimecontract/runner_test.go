@@ -706,13 +706,19 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
 		t.Run(name, func(t *testing.T) {
-			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			state := t.TempDir()
+			report := runGolden(t, writeScript(t, state, bodies))
 			for _, res := range report.Results {
 				switch {
 				case res.Status == StatusFail:
 					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
 				case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
 					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
+				}
+			}
+			if name == "ops" {
+				if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
+					t.Error("ops golden received tmux")
 				}
 			}
 		})

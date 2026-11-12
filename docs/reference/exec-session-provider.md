@@ -550,8 +550,10 @@ Scripts may handle these hints or ignore them:
   the agent is ready. gc does not send it through the `nudge` operation
   when `start` returns, so a script that wants the agent to receive it
   types it in itself, in `start`, once the agent is ready. Later nudges,
-  such as `gc session nudge`, go through the `nudge` operation, or over
-  `exec` when the runtime implements it.
+  such as `gc session nudge`, use the selected carrier. Under `carrier.ops`
+  that is the `nudge` operation. Otherwise gc types them through tmux over
+  `exec`, and uses the `nudge` operation when the runtime does not implement
+  `exec`.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory

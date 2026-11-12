@@ -218,7 +218,7 @@ func (a *execAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content as input to the in-box tmux session.
+// Nudge delivers content as input through the selected carrier.
 func (a *execAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }
