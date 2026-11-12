@@ -123,6 +123,21 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		trace("start", nil)
 
 		timeout := bdCommandTimeoutFor(name, args)
+
+		// Bound concurrent bd children (bd_concurrency.go): the queue wait is
+		// budgeted separately, so the exec context below always starts with
+		// the command's full timeout rather than the post-queue remainder.
+		var releaseSlot func()
+		if name == "bd" {
+			release, err := acquireBDSubprocessSlot(parent, args)
+			if err != nil {
+				trace("concurrency_limit", err)
+				return nil, err
+			}
+			releaseSlot = release
+			defer releaseSlot()
+		}
+
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 
