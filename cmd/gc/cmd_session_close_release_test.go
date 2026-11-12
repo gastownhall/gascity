@@ -487,6 +487,11 @@ func TestClosedNamedSessionKeptAssignees(t *testing.T) {
 		Agents:        []config.Agent{{Name: "worker", BindingName: "ops"}},
 		NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker", BindingName: "ops"}},
 	}
+	templated := &config.City{
+		Workspace:     config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}-{{.Agent}}"},
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker"}},
+	}
 	removed := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker"}},
@@ -515,7 +520,9 @@ func TestClosedNamedSessionKeptAssignees(t *testing.T) {
 		{name: "identity removed from config", cfg: removed, bead: row(true, "reviewer", "reviewer")},
 		{name: "backing template missing", cfg: noBacking, bead: row(true, "reviewer", "reviewer")},
 		{name: "exact identity", cfg: plain, bead: row(true, "reviewer", "reviewer"), want: []string{"reviewer"}},
-		{name: "exact bound identity", cfg: bound, bead: row(true, "ops.reviewer", "ops__reviewer"), want: []string{"ops.reviewer"}},
+		{name: "exact bound identity", cfg: bound, bead: row(true, "ops.reviewer", "ops__reviewer"), want: []string{"ops.reviewer", "ops__reviewer"}},
+		{name: "distinct current runtime name", cfg: templated, bead: row(true, "reviewer", "test-city-reviewer"), want: []string{"reviewer", "test-city-reviewer"}},
+		{name: "obsolete stored runtime name", cfg: templated, bead: row(true, "reviewer", "old-reviewer"), want: []string{"reviewer", "test-city-reviewer"}},
 		{name: "bare name resolving only through the bound fallback", cfg: bound, bead: row(true, "reviewer", "reviewer")},
 	}
 	for _, tt := range tests {
@@ -534,4 +541,22 @@ func TestClosedNamedSessionKeptAssignees(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCmdSessionCloseKeepsConfiguredNamedRuntimeNameClaims pins the runtime
+// name half of gastownhall/gascity#8179: work routed to a named session is
+// claimed under its runtime name, which the re-materialized canonical bead
+// carries too, so a close keeps it as it keeps the identity's.
+func TestCmdSessionCloseKeepsConfiguredNamedRuntimeNameClaims(t *testing.T) {
+	cityTOML := strings.Replace(namedCloseCityTOML, `name = "test-city"`, "name = \"test-city\"\nsession_template = \"{{.City}}-{{.Agent}}\"", 1)
+	cityDir, store, sessionBead := seedNamedCloseSession(t, cityTOML, "reviewer", "test-city-reviewer")
+	runtimeWork := seedCloseClaim(t, store, "test-city-reviewer", "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "reviewer"})
+	identityWork := seedCloseClaim(t, store, "reviewer", "open", map[string]string{beadmeta.RoutedToMetadataKey: ""})
+	control := seedCloseClaim(t, store, sessionBead.ID, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+
+	reopened := runSessionCloseAndReopen(t, cityDir, sessionBead.ID)
+
+	assertCloseClaimKept(t, reopened, runtimeWork)
+	assertCloseClaimKept(t, reopened, identityWork)
+	assertCloseClaimReleased(t, reopened, control.ID, "worker")
 }

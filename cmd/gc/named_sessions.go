@@ -278,11 +278,12 @@ func namedSessionIdentityInfo(i session.Info) string {
 // closedNamedSessionKeptAssignees returns the assignees a manual close of
 // the configured named session row b leaves on their work: the identity the
 // controller re-materializes into a fresh canonical bead, which serves the
-// same assignees. It is b's configured named identity when that identity
-// still names a configured named session exactly; the resolver's bare-name
-// fallback does not count, since the fresh bead serves only the qualified
-// form. A nil set keeps nothing, and b's own ID is never kept: the fresh bead
-// has a new one.
+// same assignees. They are b's configured named identity and the runtime name
+// current config gives it, when that identity still names a configured named
+// session exactly; the resolver's bare-name fallback does not count, since
+// the fresh bead serves only the qualified form, and neither does a runtime
+// name b stored under config that has since changed. A nil set keeps
+// nothing, and b's own ID is never kept: the fresh bead has a new one.
 func closedNamedSessionKeptAssignees(b beads.Bead, cfg *config.City, cityName string) map[string]struct{} {
 	if cfg == nil || !isNamedSessionBead(b) {
 		return nil
@@ -295,7 +296,7 @@ func closedNamedSessionKeptAssignees(b beads.Bead, cfg *config.City, cityName st
 	if !ok || spec.Named.QualifiedName() != identity {
 		return nil
 	}
-	return assigneePreserveSet([]string{identity})
+	return assigneePreserveSet([]string{identity, spec.SessionName})
 }
 
 func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName string) bool {
