@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/platform/filelock"
@@ -883,7 +884,8 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	}
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -897,7 +899,8 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	// Don't start any sessions.
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -923,7 +926,8 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	// Suspended agent has no session — that's fine.
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "worker", Suspended: true}},
+		Agents:        []config.Agent{{Name: "worker", Suspended: true}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -947,7 +951,8 @@ func TestAgentSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint(t *testing.T)
 	}
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -981,7 +986,8 @@ func TestAgentSessionsCheck_TimeoutYieldsProbeIncomplete(t *testing.T) {
 	sp := &fakeBoundedLivenessProvider{Fake: runtime.NewFake(), delay: release}
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	c.livenessTimeout = 20 * time.Millisecond
@@ -1026,8 +1032,9 @@ func TestAgentSessionsCheck_SkipsRigSuspendedViaState(t *testing.T) {
 	// Don't start any sessions — would be confirmed-missing if not skipped.
 
 	cfg := &config.City{
-		Rigs:   []config.Rig{{Name: "alpha"}},
-		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+		Rigs:          []config.Rig{{Name: "alpha"}},
+		Agents:        []config.Agent{{Name: "worker", Dir: "alpha"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Dir: "alpha", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{CityPath: cityDir})
@@ -1053,12 +1060,176 @@ func TestAgentSessionsCheck_SkipsCitySuspendedViaState(t *testing.T) {
 	// Don't start any sessions — would be confirmed-missing if not skipped.
 
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}}, // city-scoped: empty Dir
+		Agents:        []config.Agent{{Name: "mayor"}}, // city-scoped: empty Dir
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (city suspended via runtime state); msg = %s", r.Status, r.Message)
+	}
+}
+
+// fakeLivenessResultProvider answers every liveness observation with a fixed
+// Liveness and error, so tests can force a Complete observation that still
+// carries a non-nil error not wrapping runtime.ErrRuntimeUnavailable.
+type fakeLivenessResultProvider struct {
+	*runtime.Fake
+	liveness runtime.Liveness
+	err      error
+}
+
+func (p *fakeLivenessResultProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return p.liveness, p.err
+}
+
+// writeCorruptSuspensionState leaves an unparseable suspension-state overlay
+// in cityDir, so suspensionstate.Load fails with a decode error.
+func writeCorruptSuspensionState(t *testing.T, cityDir string) {
+	t.Helper()
+	p := citylayout.SuspensionStateFile(cityDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func detailsContain(r *CheckResult, subs ...string) bool {
+	for _, d := range r.Details {
+		ok := true
+		for _, s := range subs {
+			if !strings.Contains(d, s) {
+				ok = false
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAgentSessionsCheck_OnlyAlwaysModeNamedSessionsAreTargets covers FR1 /
+// issue #5742: the target set is each configured always-mode named session.
+// An idle on-demand named session, or an agent template with no named session
+// at all, has no session by design and must not turn a healthy city red.
+func TestAgentSessionsCheck_OnlyAlwaysModeNamedSessionsAreTargets(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}, {Name: "worker"}, {Name: "pool"}},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "on_demand"},
+			{Template: "worker"}, // mode omitted: defaults to on_demand
+		},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake())
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (no always-mode named session configured); msg = %s details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// TestAgentSessionsCheck_AlwaysNamedSessionProbedByNamedRuntimeName covers the
+// session-name half of FR1: the probe uses the named session's own runtime
+// name (config.NamedSessionRuntimeName), not its backing template's name.
+func TestAgentSessionsCheck_AlwaysNamedSessionProbedByNamedRuntimeName(t *testing.T) {
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Name: "boss", Template: "mayor", Mode: "always"}},
+	}
+	bossName := config.NamedSessionRuntimeName("test", cfg.Workspace, "boss")
+
+	t.Run("running", func(t *testing.T) {
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), bossName, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Errorf("status = %d, want OK (named session %q is running); msg = %s", r.Status, bossName, r.Message)
+		}
+	})
+
+	t.Run("template session running but named session missing", func(t *testing.T) {
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+		if r.Status != StatusError {
+			t.Fatalf("status = %d, want Error (named session %q confirmed missing); msg = %s", r.Status, bossName, r.Message)
+		}
+		if !strings.Contains(r.FixHint, "boss") {
+			t.Errorf("FixHint = %q, want it to name the missing named session %q", r.FixHint, "boss")
+		}
+		if !detailsContain(r, "boss", "confirmed missing") {
+			t.Errorf("Details = %v, want a line naming %q as confirmed missing", r.Details, "boss")
+		}
+	})
+}
+
+// TestAgentSessionsCheck_PathFormDirRigSuspendedViaState covers FR3 / AF2:
+// the owning rig is resolved path-aware (workdir.ConfiguredRigName), so an
+// agent whose Dir is a filesystem path inside a runtime-suspended rig is
+// skipped, matching the production predicate (isAgentEffectivelySuspendedWith).
+func TestAgentSessionsCheck_PathFormDirRigSuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		Rigs: map[string]suspensionstate.Override{"alpha": {Suspended: boolPtr(true)}},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs:          []config.Rig{{Name: "alpha", Path: filepath.Join(cityDir, "rigs", "alpha")}},
+		Agents:        []config.Agent{{Name: "worker", Dir: "rigs/alpha"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Dir: "rigs/alpha", Mode: "always"}},
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake()).Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (path-form Dir inside a suspended rig); msg = %s details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// TestAgentSessionsCheck_ObservationErrorIsIncomplete: a Complete observation
+// that carries an error not wrapping ErrRuntimeUnavailable is not a confirmed
+// answer; it must resolve to probe-incomplete, never "confirmed missing".
+func TestAgentSessionsCheck_ObservationErrorIsIncomplete(t *testing.T) {
+	sp := &fakeLivenessResultProvider{Fake: runtime.NewFake(), err: errors.New("provider exploded")}
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (observation error is not a confirmed answer); msg = %s", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — nothing was confirmed missing", r.FixHint)
+	}
+}
+
+// TestAgentSessionsCheck_UnreadableSuspensionStateIsSurfaced: a doctor run that
+// cannot read the suspension overlay must say so rather than silently treating
+// every runtime-suspended agent as not suspended.
+func TestAgentSessionsCheck_UnreadableSuspensionStateIsSurfaced(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCorruptSuspensionState(t, cityDir)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{CityPath: cityDir})
+	if r.Status == StatusOK {
+		t.Errorf("status = OK, want Warning or worse: the suspension-state overlay could not be read; msg = %s", r.Message)
+	}
+	if !detailsContain(r, "suspension") && !strings.Contains(r.Message, "suspension") {
+		t.Errorf("Message = %q, Details = %v, want the unreadable suspension state named", r.Message, r.Details)
 	}
 }
 
@@ -1168,6 +1339,135 @@ func TestZombieSessionsCheck_SkipsCitySuspendedViaState(t *testing.T) {
 	r := c.Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (city suspended via runtime state); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestZombieSessionsCheck_PathFormDirRigSuspendedViaState: the zombie twin of
+// TestAgentSessionsCheck_PathFormDirRigSuspendedViaState.
+func TestZombieSessionsCheck_PathFormDirRigSuspendedViaState(t *testing.T) {
+	cityDir := t.TempDir()
+	st := suspensionstate.State{
+		Rigs: map[string]suspensionstate.Override{"alpha": {Suspended: boolPtr(true)}},
+	}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "alpha", Path: filepath.Join(cityDir, "rigs", "alpha")}},
+		Agents: []config.Agent{{Name: "worker", Dir: "rigs/alpha", ProcessNames: []string{"claude"}}},
+	}
+	sn := agent.SessionNameFor("test", cfg.Agents[0].QualifiedName(), "")
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), sn, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Zombies[sn] = true // would be a confirmed zombie if not skipped
+
+	r := NewZombieSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (path-form Dir inside a suspended rig); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestZombieSessionsCheck_ObservationErrorIsIncomplete: a Complete observation
+// carrying an error not wrapping ErrRuntimeUnavailable is not a confirmed
+// zombie.
+func TestZombieSessionsCheck_ObservationErrorIsIncomplete(t *testing.T) {
+	sp := &fakeLivenessResultProvider{
+		Fake:     runtime.NewFake(),
+		liveness: runtime.Liveness{Running: true, Alive: false},
+		err:      errors.New("provider exploded"),
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}},
+	}
+	r := NewZombieSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (observation error is not a confirmed zombie); msg = %s", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — nothing was confirmed", r.FixHint)
+	}
+}
+
+// TestZombieSessionsCheck_UnreadableSuspensionStateIsSurfaced: see the
+// AgentSessionsCheck twin.
+func TestZombieSessionsCheck_UnreadableSuspensionStateIsSurfaced(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCorruptSuspensionState(t, cityDir)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}},
+	}
+	r := NewZombieSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{CityPath: cityDir})
+	if r.Status == StatusOK {
+		t.Errorf("status = OK, want Warning or worse: the suspension-state overlay could not be read; msg = %s", r.Message)
+	}
+	if !detailsContain(r, "suspension") && !strings.Contains(r.Message, "suspension") {
+		t.Errorf("Message = %q, Details = %v, want the unreadable suspension state named", r.Message, r.Details)
+	}
+}
+
+// TestZombieSessionsCheck_FixSkipsRuntimeSuspended: Fix applies the same
+// runtime-suspension predicate as Run, so `gc doctor --fix` never stops a
+// session Run did not report because its rig or city is suspended.
+func TestZombieSessionsCheck_FixSkipsRuntimeSuspended(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state suspensionstate.State
+		cfg   func(cityDir string) *config.City
+	}{
+		{
+			name:  "rig",
+			state: suspensionstate.State{Rigs: map[string]suspensionstate.Override{"alpha": {Suspended: boolPtr(true)}}},
+			cfg: func(string) *config.City {
+				return &config.City{
+					Rigs:   []config.Rig{{Name: "alpha"}},
+					Agents: []config.Agent{{Name: "worker", Dir: "alpha", ProcessNames: []string{"claude"}}},
+				}
+			},
+		},
+		{
+			name:  "rig via path-form Dir",
+			state: suspensionstate.State{Rigs: map[string]suspensionstate.Override{"alpha": {Suspended: boolPtr(true)}}},
+			cfg: func(cityDir string) *config.City {
+				return &config.City{
+					Rigs:   []config.Rig{{Name: "alpha", Path: filepath.Join(cityDir, "rigs", "alpha")}},
+					Agents: []config.Agent{{Name: "worker", Dir: "rigs/alpha", ProcessNames: []string{"claude"}}},
+				}
+			},
+		},
+		{
+			name:  "city",
+			state: suspensionstate.State{City: suspensionstate.Override{Suspended: boolPtr(true)}},
+			cfg: func(string) *config.City {
+				return &config.City{Agents: []config.Agent{{Name: "worker", ProcessNames: []string{"claude"}}}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := suspensionstate.Save(fsys.OSFS{}, cityDir, tc.state); err != nil {
+				t.Fatal(err)
+			}
+			cfg := tc.cfg(cityDir)
+			sn := agent.SessionNameFor("test", cfg.Agents[0].QualifiedName(), "")
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), sn, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies[sn] = true
+
+			if err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: cityDir}); err != nil {
+				t.Fatalf("Fix() error: %v", err)
+			}
+			if !sp.IsRunning(sn) {
+				t.Error("Fix stopped a session of a runtime-suspended agent that Run does not report")
+			}
+		})
 	}
 }
 
