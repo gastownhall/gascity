@@ -431,14 +431,11 @@ func beadListFanOut(st storeref.Stores, cityName, rig string) []beadListLeg {
 	}
 	var legs []beadListLeg
 	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
-		switch {
-		case l.Role == storeref.RoleFederationTail:
+		if l.Role == storeref.RoleFederationTail {
 			legs = append(legs, beadListLeg{label: "graph", leg: l, graph: true})
-		case rig != "":
-			legs = append(legs, beadListLeg{label: "rig " + rig, leg: l})
-		default:
-			legs = append(legs, beadListLeg{label: "rig " + workLegName(l, cityName), leg: l})
+			return
 		}
+		legs = append(legs, beadListLeg{label: "rig " + workLegName(l, cityName), leg: l})
 	})
 	return legs
 }

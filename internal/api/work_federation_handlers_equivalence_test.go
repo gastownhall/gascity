@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"runtime"
 	"slices"
 	"sort"
@@ -60,9 +61,17 @@ func t7e2Variants() []t7e2Variant {
 			v(t, fx, fs)
 		}})
 	}
-	return append(out, t7e2Variant{name: "configured rig with no store", set: func(_ *testing.T, fs *fakeState, _ t7dFixture, _ string) {
-		fs.cfg.Rigs = append([]config.Rig{{Name: "ghost", Path: "/nonexistent/ghost"}}, fs.cfg.Rigs...)
-	}})
+	return append(out,
+		t7e2Variant{name: "configured rig with no store", set: func(_ *testing.T, fs *fakeState, _ t7dFixture, _ string) {
+			fs.cfg.Rigs = append([]config.Rig{{Name: "ghost", Path: "/nonexistent/ghost"}}, fs.cfg.Rigs...)
+		}},
+		// Every rig cold: on an unrelocated city with a rig named like the
+		// city, which replaces the city in the work list, the status WorkList
+		// plan has no leg left, and the city's ready leg must still be read.
+		t7e2Variant{name: "every rig cold", set: func(_ *testing.T, fs *fakeState, _ t7dFixture, _ string) {
+			t7bSuspend(fs, slices.Sorted(maps.Keys(fs.stores))...)
+		}},
+	)
 }
 
 // t7e2Op is one reader, frozen and live: each renders what it answered.
@@ -446,8 +455,10 @@ func TestWorkLegCountsReadStrict(t *testing.T) {
 }
 
 // t7e2EpochStates are an epoch swapped after its first read: from a split
-// city with rig alpha to one with neither the binding nor the rig. A reader
-// that read Stores() twice would lose the graph leg or the rig.
+// city with rig alpha and a sessions store holding one active session, to one
+// with neither the binding nor the rig, and a sessions store of its own that
+// holds none. A reader that read Stores() twice would lose the graph leg, the
+// rig or the session.
 func t7e2EpochStates(t *testing.T) (*t7dEpochSwapState, *beads.MemStore, *beads.MemStore) {
 	t.Helper()
 	mem := func() *beads.MemStore { return &beads.MemStore{HonorExplicitIDs: true} }
@@ -461,9 +472,16 @@ func t7e2EpochStates(t *testing.T) (*t7dEpochSwapState, *beads.MemStore, *beads.
 	before.cityName = t7dCity
 	before.cityBeadStore, before.graphBeadStore = city, binding
 	before.stores = map[string]beads.Store{"alpha": alpha}
+	before.sessionsBeadStore = mem()
+	if _, err := before.sessionsBeadStore.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"session_name": "s-worker", "template": "worker", "agent_name": "worker", "state": "active",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	after := newFakeState(t)
 	after.cityName = t7dCity
 	after.cityBeadStore = city
+	after.sessionsBeadStore = mem()
 	return &t7dEpochSwapState{fakeState: before, first: before.Stores(), later: after.Stores()}, alpha, binding
 }
 
@@ -482,15 +500,18 @@ func TestBeadListReadsOneEpoch(t *testing.T) {
 	}
 }
 
-// TestStatusWorkCountsReadTheRequestsEpoch pins that a status build counts
-// work over the epoch it read first: the session snapshot's, not one read
-// again for the counts.
+// TestStatusWorkCountsReadTheRequestsEpoch pins that a status build reads
+// its session snapshot and counts its work over the one epoch it read first,
+// not over one read again for either.
 func TestStatusWorkCountsReadTheRequestsEpoch(t *testing.T) {
 	t7dGateOff(t)
 	state, _, _ := t7e2EpochStates(t)
 	body := New(state).buildStatusBody(t.Context(), false)
 	if body.Work.Open != 2 {
 		t.Errorf("status over a swapped epoch counted %d open items; want 2, the city's and alpha's (the graph binding is a ready leg only)", body.Work.Open)
+	}
+	if got := body.SessionCountsDetail; got == nil || got.Active != 1 {
+		t.Errorf("status over a swapped epoch counted sessions %+v; want the first epoch's one active session", got)
 	}
 }
 

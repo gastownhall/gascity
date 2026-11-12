@@ -76,7 +76,8 @@ var t7bVariants = []t7bVariant{
 // from the name map before sortedRigNames dedupes it, so a store it shares
 // with a warm rig or the city stays counted through that name; every such
 // rig is excluded; and a cold name the state opened no rig under (a
-// configured rig whose store did not open, named like the city) no longer
+// suspended configured rig named like the city that buildStores skipped for
+// having no path; a failed open still opens an unavailableStore) no longer
 // drops the city's alias. Every other line is main's.
 func q2StatusWorkQueries(s *Server, cacheColdRigs map[string]bool) ([]frozenWorkQuery, int) {
 	stores := s.state.BeadStores()
@@ -427,9 +428,12 @@ func TestStatusWorkLegsDropColdRigsBeforeDedupe(t *testing.T) {
 			live:    "excluded=1 city:city rig a0:beta rig alpha:alpha rig test-city:city",
 		},
 		{
-			// A configured rig named like the city whose store did not open:
-			// main's cold name hid the city's alias, so the city's stored
-			// counts went uncounted; it names no opened rig now.
+			// A suspended configured rig named like the city that buildStores
+			// skipped (it has no path), so the epoch opened no rig under that
+			// name: main's cold name hid the city's alias, so the city's
+			// stored counts went uncounted; it names no opened rig now. A rig
+			// whose store failed to open is still opened (an unavailableStore
+			// replaces the city under its name), so it does not move.
 			variant: "cold rig named like the city",
 			frozen:  "excluded=1 city:city rig alpha:alpha rig beta:beta",
 			live:    "excluded=0 city:city rig alpha:alpha rig beta:beta rig test-city:city",

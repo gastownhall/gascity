@@ -424,34 +424,46 @@ func TestAppendMetadataAttachedChildrenWithoutAnOwner(t *testing.T) {
 	}
 }
 
-// TestBeadCloseGateReadsTheOwnersEpoch pins that a close resolves its owner
-// and matches it to a rig in one Stores() epoch (T7e.2). The epoch is swapped
-// after the first read, from one where rig beta holds the store the bead is
-// read from to one where it holds another: a gate that read the epoch again
-// would match no rig and judge the bead against the city checkout.
+// TestBeadCloseGateReadsTheOwnersEpoch pins that a close, through the close
+// route and through a closing update (PATCH or POST /bead/{id}/update with
+// status closed), resolves its owner and matches it to a rig in one Stores()
+// epoch (T7e.2). The epoch is swapped after the first read, from one where rig
+// beta holds the store the bead is read from to one where it holds another: a
+// gate that read the epoch again would match no rig and judge the bead
+// against the city checkout, and an owner resolved in the later epoch would
+// not be found.
 func TestBeadCloseGateReadsTheOwnersEpoch(t *testing.T) {
 	t7dGateOff(t)
 	t.Setenv(workrecord.EnforceEnvVar, "1")
-	alpha, beta, other := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
-	bead, err := beta.Create(beads.Bead{Title: "shipped", Type: "task", Metadata: t7eShipped})
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := newFakeState(t)
-	before.cityBeadStore = beads.NewMemStore()
-	before.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
-	before.cfg.Rigs = []config.Rig{{Name: "alpha", Path: "/nonexistent/alpha"}, {Name: "beta", Path: "/nonexistent/beta"}}
-	after := newFakeState(t)
-	after.cityBeadStore = before.cityBeadStore
-	after.stores = map[string]beads.Store{"alpha": alpha, "beta": other}
-	state := &t7dEpochSwapState{fakeState: before, first: before.Stores(), later: after.Stores()}
+	closed := "closed"
+	for name, closeBead := range map[string]func(s *Server, id string) error{
+		"close": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadClose(t.Context(), &BeadCloseInput{ID: id})
+			return err
+		},
+		"closing update": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadUpdate(t.Context(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Status: &closed}})
+			return err
+		},
+	} {
+		alpha, beta, other := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+		bead, err := beta.Create(beads.Bead{Title: "shipped", Type: "task", Metadata: t7eShipped})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := newFakeState(t)
+		before.cityBeadStore = beads.NewMemStore()
+		before.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+		before.cfg.Rigs = []config.Rig{{Name: "alpha", Path: "/nonexistent/alpha"}, {Name: "beta", Path: "/nonexistent/beta"}}
+		after := newFakeState(t)
+		after.cityBeadStore = before.cityBeadStore
+		after.stores = map[string]beads.Store{"alpha": alpha, "beta": other}
+		state := &t7dEpochSwapState{fakeState: before, first: before.Stores(), later: after.Stores()}
 
-	got := t7eGateCall(t, func() error {
-		_, err := New(state).humaHandleBeadClose(t.Context(), &BeadCloseInput{ID: bead.ID})
-		return err
-	})
-	if !strings.Contains(got, `asked ["/nonexistent/beta"]`) {
-		t.Errorf("the close over a swapped epoch: %s; want rig beta's checkout asked", got)
+		got := t7eGateCall(t, func() error { return closeBead(New(state), bead.ID) })
+		if !strings.Contains(got, `asked ["/nonexistent/beta"]`) {
+			t.Errorf("%s over a swapped epoch: %s; want rig beta's checkout asked", name, got)
+		}
 	}
 }
 

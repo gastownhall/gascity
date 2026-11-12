@@ -348,12 +348,15 @@ func TestBeadReadyWorkStoresDownButGraphUpIsPartial200(t *testing.T) {
 	}
 }
 
-// TestBeadListLegacyCityHasNoGraphLeg is the mutation-killer for the list's
-// relocation guard (storeref's WorkList tail, by handle identity since T7e.2;
-// the arm's `graph != CityBeadStore()` guard before). It pins the
-// byte-identity property directly: on a legacy city the graph arm must not
-// change WHICH stores the fan-out reads, so the legs are the city and the rig
-// alone, and each bead is listed once.
+// TestBeadListLegacyCityHasNoGraphLeg pins the byte-identity property of the
+// list's relocation guard (storeref's WorkList tail, by handle identity since
+// T7e.2; the arm's `graph != CityBeadStore()` guard before): on a legacy city
+// the graph arm must not change WHICH stores the fan-out reads, so the legs
+// are the city and the rig alone, and each bead is listed once. It does not
+// kill a graph tail kept on an unrelocated city by itself: there the tail is
+// the city store, which the plan's dedupe drops. The equivalence tables
+// (work_federation_legs_*, work_federation_handlers_*), whose gate shapes
+// read the graph through a view of its own, do.
 func TestBeadListLegacyCityHasNoGraphLeg(t *testing.T) {
 	t7dGateOff(t)
 	fs := newLegacyFederationState(t)
