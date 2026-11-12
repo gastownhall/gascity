@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -275,5 +276,107 @@ func TestFleetBreakerPublishedTextDescribesTheOperatorRequestedExemption(t *test
 	}
 	if !strings.Contains(long, exemption) {
 		t.Errorf("gc breaker --help does not state the %q exemption:\n%s", exemption, long)
+	}
+}
+
+// A probe ticket in flight across `gc breaker reset` belongs to the episode the
+// reset cleared. Its failure must not count against the fresh breaker: three
+// such stragglers landing on one closed breaker would otherwise trip it on
+// consecutive failures, outside the sessions-and-templates rule.
+func TestFleetGuard_ProbeFailureAfterResetRecordsNothing(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	var stale []*fleetTicket
+	for i := 0; i < 3; i++ {
+		tripFleet(t, g, clk)
+		stale = append(stale, admitFleetProbe(t, g, clk, fmt.Sprintf("p%d", i)))
+		if !g.Reset() {
+			t.Fatalf("round %d: Reset() = false, want true for a half-open breaker", i)
+		}
+	}
+	for i, ticket := range stale {
+		ticket.Resolve(fleetStartFailed)
+		if got := fleetState(g); got != resilience.StateClosed {
+			t.Fatalf("after stale probe %d failed: breaker = %v, want closed", i, got)
+		}
+	}
+	for i := range stale {
+		if got := g.episodeFailures(fmt.Sprintf("p%d", i)); got != 0 {
+			t.Errorf("episodeFailures(p%d) = %d, want 0: a stale probe counts for no episode", i, got)
+		}
+	}
+}
+
+// A probe ticket in flight across a reset that resolves OK afterwards is no
+// longer the probe of any episode: when its session later stays up, it must
+// not close a newer half-open episode before that episode's own probe has
+// proven stable.
+func TestFleetGuard_StaleProbeConfirmationDoesNotCloseANewerEpisode(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	tripFleet(t, g, clk)
+	old := admitFleetProbe(t, g, clk, "old")
+	if !g.Reset() {
+		t.Fatal("Reset() = false, want true for a half-open breaker")
+	}
+	old.Resolve(fleetStartOK)
+
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s4", "a")
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s5", "a")
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s6", "b")
+	if got := fleetState(g); got != resilience.StateOpen {
+		t.Fatalf("premise: breaker = %v, want open again", got)
+	}
+	fresh := admitFleetProbe(t, g, clk, "fresh")
+	if got := fleetState(g); got != resilience.StateHalfOpen {
+		t.Fatalf("premise: breaker = %v, want half-open with the fresh probe out", got)
+	}
+
+	clk.Advance(stabilityThreshold)
+	g.ObserveLiveness("old", true)
+	if got := fleetState(g); got != resilience.StateHalfOpen {
+		t.Fatalf("breaker after the stale probe's session stayed up = %v, want still half-open", got)
+	}
+	fresh.Resolve(fleetStartOK)
+	clk.Advance(stabilityThreshold)
+	g.ObserveLiveness("fresh", true)
+	if got := fleetState(g); got != resilience.StateClosed {
+		t.Fatalf("breaker after the fresh probe stayed up = %v, want closed", got)
+	}
+}
+
+// A probe whose half-open window expired is replaced by a fresh one. The
+// expired probe failing afterwards must not re-open the breaker under the
+// replacement, which still owns the probe slot.
+func TestFleetGuard_ExpiredProbeFailureDoesNotReopenUnderItsReplacement(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	tripFleet(t, g, clk)
+	first := admitFleetProbe(t, g, clk, "p1")
+	clk.Advance(g.halfOpenInterval + time.Second)
+	second, ok := g.Admit("p2", "b")
+	if !ok || !second.Probe() {
+		t.Fatalf("Admit(p2) after the first probe's window expired = (%v, probe %v), want the replacement probe", ok, second.Probe())
+	}
+	trips := g.Status().Trips
+
+	first.Resolve(fleetStartFailed)
+
+	st := g.Status()
+	if st.State != resilience.StateHalfOpen || st.Trips != trips {
+		t.Fatalf("after the expired probe failed: state %v trips %d (was %d), want half-open and no new trip", st.State, st.Trips, trips)
+	}
+	g.probeMu.Lock()
+	owner := g.probe
+	g.probeMu.Unlock()
+	if owner != second {
+		t.Fatalf("probe slot owner = %p, want the replacement %p", owner, second)
+	}
+	if got := g.episodeFailures("p1"); got != 0 {
+		t.Errorf("episodeFailures(p1) = %d, want 0: the expired probe's failure is not counted", got)
+	}
+	second.Resolve(fleetStartFailed)
+	if got := fleetState(g); got != resilience.StateOpen {
+		t.Fatalf("after the replacement probe failed: breaker = %v, want open", got)
 	}
 }

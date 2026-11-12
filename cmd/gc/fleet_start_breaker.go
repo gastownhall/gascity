@@ -227,10 +227,12 @@ type fleetFailure struct {
 	template string
 }
 
-// fleetStart is a start being confirmed: whose it is and whether it is a probe.
+// fleetStart is a start being confirmed: whose it is, whether it is a probe,
+// and the probe generation it was admitted under.
 type fleetStart struct {
 	template string
 	probe    bool
+	gen      uint64
 	at       time.Time
 }
 
@@ -251,6 +253,11 @@ type fleetStartGuard struct {
 
 	probeMu sync.Mutex
 	probe   *fleetTicket
+	// gen is the probe generation, guarded by probeMu. It advances on every
+	// Reset and every probe Admit issues (a replacement for an expired probe
+	// included), so a probe ticket or confirmation from an earlier episode or
+	// an earlier probe slot cannot act on the breaker as it is now.
+	gen uint64
 
 	// flushMu serializes flushes across drain and emit, so transitions are
 	// emitted in the order the breaker made them.
@@ -403,7 +410,10 @@ func (g *fleetStartGuard) Admit(sessionID, template string) (*fleetTicket, bool)
 	allowed, probe := g.breaker().AllowProbe()
 	var t *fleetTicket
 	if allowed {
-		t = &fleetTicket{guard: g, sessionID: sessionID, template: template, probe: probe}
+		if probe {
+			g.gen++
+		}
+		t = &fleetTicket{guard: g, sessionID: sessionID, template: template, probe: probe, gen: g.gen}
 		if probe {
 			g.probe = t
 		}
@@ -423,6 +433,8 @@ type fleetTicket struct {
 	sessionID string
 	template  string
 	probe     bool
+	// gen is the guard's probe generation when the ticket was admitted.
+	gen uint64
 
 	once sync.Once
 }
@@ -440,20 +452,30 @@ func (t *fleetTicket) Resolve(o fleetOutcome) {
 
 // resolve applies a ticket's outcome to the breaker. A probe resolves the
 // half-open state: failure re-opens it, a started session is confirmed later
-// (ObserveLiveness), and an inconclusive end frees the probe.
+// (ObserveLiveness), and an inconclusive end frees the probe. A probe ticket
+// that no longer owns the probe slot of the current generation (a reset came
+// between, or its half-open window expired and a replacement was admitted) is
+// stale: its failure records nothing, and its start is confirmed as an
+// ordinary start.
 func (g *fleetStartGuard) resolve(t *fleetTicket, o fleetOutcome) {
 	switch o {
 	case fleetStartFailed:
 		if t.probe {
-			g.dropProbe(t)
+			// Lock order: probeMu, then the breaker, then mu.
+			g.probeMu.Lock()
+			defer g.probeMu.Unlock()
+			if g.probe != t || t.gen != g.gen {
+				return
+			}
+			g.probe = nil
 			g.countAttempt(t.sessionID)
 			g.breaker().RecordFailure()
 			return
 		}
 		g.noteFailure(t.sessionID, t.template)
 	case fleetStartOK:
-		g.dropProbe(t)
-		g.beginConfirm(t.sessionID, t.template, t.probe)
+		probe := t.probe && g.takeProbe(t)
+		g.beginConfirm(t.sessionID, t.template, probe, t.gen)
 	default:
 		g.releaseProbe(t)
 	}
@@ -466,8 +488,9 @@ func (g *fleetStartGuard) countAttempt(sessionID string) {
 	g.attempts[sessionID]++
 }
 
-// beginConfirm starts watching a started session for stabilityThreshold.
-func (g *fleetStartGuard) beginConfirm(sessionID, template string, probe bool) {
+// beginConfirm starts watching a started session for stabilityThreshold; gen
+// is the probe generation its ticket was admitted under.
+func (g *fleetStartGuard) beginConfirm(sessionID, template string, probe bool, gen uint64) {
 	g.confirm.Begin(sessionID)
 	now := g.now()
 	g.mu.Lock()
@@ -479,7 +502,7 @@ func (g *fleetStartGuard) beginConfirm(sessionID, template string, probe bool) {
 			delete(g.starts, id)
 		}
 	}
-	g.starts[sessionID] = fleetStart{template: template, probe: probe, at: now}
+	g.starts[sessionID] = fleetStart{template: template, probe: probe, gen: gen, at: now}
 }
 
 // noteFailure records an automatic-start failure and trips the breaker when
@@ -536,17 +559,17 @@ func (g *fleetStartGuard) releaseProbe(t *fleetTicket) {
 	}
 }
 
-// dropProbe forgets t's probe ownership when its outcome resolves the
-// half-open state itself.
-func (g *fleetStartGuard) dropProbe(t *fleetTicket) {
-	if !t.probe {
-		return
-	}
+// takeProbe forgets t's probe ownership when its outcome resolves the
+// half-open state itself. It reports whether t still owned the probe slot of
+// the current generation.
+func (g *fleetStartGuard) takeProbe(t *fleetTicket) bool {
 	g.probeMu.Lock()
 	defer g.probeMu.Unlock()
+	owned := g.probe == t && t.gen == g.gen
 	if g.probe == t {
 		g.probe = nil
 	}
+	return owned
 }
 
 // ObserveLiveness feeds one session's liveness to the start confirmation. A
@@ -580,6 +603,15 @@ func (g *fleetStartGuard) ObserveLiveness(sessionID string, alive bool) {
 	g.mu.Unlock()
 	if !ok {
 		return
+	}
+	if start.probe {
+		// Lock order: probeMu, then the breaker, then mu. A probe confirmation
+		// from an earlier generation is stale and dropped.
+		g.probeMu.Lock()
+		defer g.probeMu.Unlock()
+		if start.gen != g.gen {
+			return
+		}
 	}
 	b := g.breaker()
 	switch {
@@ -643,6 +675,7 @@ func (g *fleetStartGuard) Reset() bool {
 	defer g.probeMu.Unlock()
 	prev := g.breaker().State()
 	g.probe = nil
+	g.gen++
 	g.registry.Remove(fleetBreakerScope, resilience.OpClassSessionStart)
 	g.mu.Lock()
 	defer g.mu.Unlock()
