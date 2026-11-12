@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,7 +23,10 @@ const holdLabelClearedValue = "cleared"
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
 // gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
 // the sole persisted routing key (ga-eld2x); a hold:<value> label with no
-// matching gc.routed_to has silently drifted from its intended route.
+// matching gc.routed_to has silently drifted from its intended route. When
+// <value> is the short form of a binding-qualified route
+// (boundRoutedToAliases), that canonical route also matches, since it is the
+// form v2-routed-to-namespace requires.
 // --fix backfills gc.routed_to from the label value.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
@@ -68,6 +72,7 @@ type holdRouteTarget struct {
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -103,7 +108,7 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 				continue
 			}
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			if got == want {
+			if got == want || slices.Contains(aliases[want], got) {
 				continue
 			}
 			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
