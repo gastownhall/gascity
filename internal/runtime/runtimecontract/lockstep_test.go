@@ -81,11 +81,11 @@ var contractCoverage = map[string]classification{
 
 	// --- Signaling group (deferred) ---
 	"SendKeys_RunningSession":  {Deferred: "signaling group not yet ported"},
-	"SendKeys_MissingSession":  {Deferred: "signaling group not yet ported"},
+	"SendKeys_MissingSession":  {Code: ReqInputKeysAbsentGone},
 	"Interrupt_RunningSession": {Deferred: "signaling group not yet ported"},
-	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
-	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
-	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+	"Interrupt_MissingSession": {Code: ReqInputKeysAbsentGone},
+	"Nudge_RunningSession":     {Code: ReqInputNudgeDelivered},
+	"Nudge_MissingSession":     {Code: ReqInputNudgeAbsentGone},
 
 	// --- Fenced input (deferred: an optional in-process capability) ---
 	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
@@ -120,6 +120,18 @@ var wireOnlyCodes = map[Code]bool{
 	ReqObserveCityScoped:           true,
 	ReqObserveInventoryHasActivity: true,
 	ReqObservePeekNoScreen:         true,
+
+	// The input group's typed answers under the faults, the per-op words and
+	// the exit-code shapes (input-outcome): no runtime.Provider method states
+	// them; gc reads them in the exec provider. The missing-session and
+	// running-session nudges back the signaling cases.
+	ReqInputWordsAllowedOnOp:    true,
+	ReqInputBlockedNotTyped:     true,
+	ReqInputUnavailable:         true,
+	ReqInputLostReplyUnknown:    true,
+	ReqInputExitZeroIsDelivered: true,
+	ReqInputHeldSendTypedOnce:   true,
+	ReqInputExit80OneLine:       true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

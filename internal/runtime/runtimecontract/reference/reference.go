@@ -93,6 +93,8 @@ be() { if [ "${GC_RPP_FAULT:-}" = unavailable ]; then echo "backend unavailable"
 ident() { printf '{'; sep=''; for k in GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES; do if [ -f "$box/meta.$k" ]; then printf '%s"%s":"%s"' "$sep" "$k" "$(cat "$box/meta.$k")"; sep=','; fi; done; printf '}'; }
 alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")" ]; then return 0; fi; done; return 1; }
 reap() { if [ -f "$1/pid" ]; then p=$(cat "$1/pid"); pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; fi; return 0; }
+out() { printf '{"outcome":"%s"}\n' "$1"; exit 80; }
+release() { if [ "${GC_RPP_FAULT:-}" != hold_send ] && [ -f "$box/held" ]; then cat "$box/held" >> "$box/typed"; rm -f "$box/held"; fi; }
 `
 
 // Bodies returns the op bodies of the golden reference: a
@@ -205,6 +207,44 @@ func nonTmux(b map[string]string) map[string]string {
 			b[op] += `cat >/dev/null`
 		}
 	}
+	return b
+}
+
+// The input-outcome op bodies (InputOutcomeBodies). Every driving op reads
+// the backend first (be: unavailable under GC_RPP_FAULT=unavailable), answers
+// a name no box holds with gone, and releases any held nudge (release) before
+// it types. The box's typed-input log is $box/typed, which peek shows after
+// the screen, as a terminal echoes what is typed into it. The fault knobs,
+// all under conformance-faults: blocked (the box's agent waits on a pending
+// interaction, which a nudge's text would answer), lose_reply (the input is
+// typed, then the reply is lost: a nudge is unconfirmed, any other op exit
+// 1) and hold_send (a nudge is held unresolved in $box/held, and a second
+// identical one while it is held is unconfirmed again without being held
+// twice; the held text is typed once the fault is gone).
+const (
+	goldenInputEntry = `F=${GC_RPP_FAULT:-}; be || out unavailable; [ -d "$box" ] || out gone; release; `
+
+	goldenInputNudge = `txt=$(cat); ` + goldenInputEntry +
+		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
+		`if [ "$F" = hold_send ]; then if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; printf '%s\n' "$txt" >> "$box/held"; out unconfirmed; fi; ` +
+		`printf '%s\n' "$txt" >> "$box/typed"; ` +
+		`if [ "$F" = lose_reply ]; then out unconfirmed; fi`
+
+	goldenInputKeys = goldenInputEntry +
+		`printf '%s\n' "$*" >> "$box/typed"; ` +
+		`if [ "$F" = lose_reply ]; then echo "reply lost" >&2; exit 1; fi`
+)
+
+// InputOutcomeBodies returns b for a reference that declares input-outcome:
+// its four driving ops answer typed outcomes (exit 0 delivered, exit 80 and
+// one outcome line otherwise), and its peek shows the box's typed input.
+func InputOutcomeBodies(b map[string]string) map[string]string {
+	b["protocol"] = strings.Replace(b["protocol"], `"server-lifecycle"`, `"server-lifecycle","input-outcome"`, 1)
+	b["nudge"] = goldenInputNudge
+	for _, op := range []string{"send-keys", "interrupt", "clear-scrollback"} {
+		b[op] = goldenInputKeys
+	}
+	b["peek"] += `; release; if [ -f "$box/typed" ]; then cat "$box/typed"; fi`
 	return b
 }
 

@@ -107,7 +107,107 @@ const (
 	// it, gc stages the work dir and runs pre_start and session_setup on the
 	// host itself and leaves that work out of the start config.
 	ProtocolCapabilityFSHost = "fs.host"
+	// ProtocolCapabilityInputOutcome declares that the executable answers
+	// the four driving ops (nudge, send-keys, interrupt and clear-scrollback)
+	// with a typed input outcome: exit 0 when the input was delivered (one
+	// optional stdout line may refine a nudge to delivered_unobserved), and
+	// [ExitCodeInputOutcome] with exactly one JSON outcome line naming every
+	// other outcome. The words are [InputOutcome]s, each the projection of
+	// one runtime sentinel. A gc that does not read the token sees exit 80 as
+	// an ordinary failure, so a refusal never reads as delivered.
+	ProtocolCapabilityInputOutcome = "input-outcome"
 )
+
+// InputOutcome is one word of the input-outcome wire
+// ([ProtocolCapabilityInputOutcome]). Each word names exactly one existing
+// runtime sentinel ([InputOutcome.Sentinel]); the wire adds no meaning of
+// its own.
+type InputOutcome string
+
+// The input-outcome words. The two delivered words travel on exit 0, every
+// other word on [ExitCodeInputOutcome].
+const (
+	// InputOutcomeDelivered is input the runtime delivered: nil.
+	InputOutcomeDelivered InputOutcome = "delivered"
+	// InputOutcomeDeliveredUnobserved is a nudge delivered without the
+	// runtime observing the turn start: [ErrNudgeDeliveredUnobserved].
+	InputOutcomeDeliveredUnobserved InputOutcome = "delivered_unobserved"
+	// InputOutcomeUnconfirmed is a nudge whose submit may or may not have
+	// taken: [ErrNudgeDeliveryUnconfirmed].
+	InputOutcomeUnconfirmed InputOutcome = "unconfirmed"
+	// InputOutcomeNotSent is input that never reached the session and a
+	// retry may get past: [ErrNudgeNotSent].
+	InputOutcomeNotSent InputOutcome = "not_sent"
+	// InputOutcomeRejected is input the runtime will never accept as given:
+	// [ErrNudgeRejected].
+	InputOutcomeRejected InputOutcome = "rejected"
+	// InputOutcomeBusy is a nudge deferred because the session is running a
+	// turn its submit would interrupt: [ErrSessionBusy].
+	InputOutcomeBusy InputOutcome = "busy"
+	// InputOutcomePendingInteraction is a nudge refused because the session
+	// waits on an interaction the text would answer:
+	// [ErrNudgeRefusedPendingInteraction].
+	InputOutcomePendingInteraction InputOutcome = "pending_interaction"
+	// InputOutcomeUnavailable is input the runtime could not deliver because
+	// it could not reach its backend: [ErrRuntimeUnavailable].
+	InputOutcomeUnavailable InputOutcome = "unavailable"
+	// InputOutcomeGone is input to a session the runtime does not hold:
+	// [ErrSessionNotFound].
+	InputOutcomeGone InputOutcome = "gone"
+)
+
+// inputOutcomeSentinels is the projection: each word and the sentinel it
+// names, in wire order.
+var inputOutcomeSentinels = []struct {
+	word     InputOutcome
+	sentinel error
+}{
+	{InputOutcomeDelivered, nil},
+	{InputOutcomeDeliveredUnobserved, ErrNudgeDeliveredUnobserved},
+	{InputOutcomeUnconfirmed, ErrNudgeDeliveryUnconfirmed},
+	{InputOutcomeNotSent, ErrNudgeNotSent},
+	{InputOutcomeRejected, ErrNudgeRejected},
+	{InputOutcomeBusy, ErrSessionBusy},
+	{InputOutcomePendingInteraction, ErrNudgeRefusedPendingInteraction},
+	{InputOutcomeUnavailable, ErrRuntimeUnavailable},
+	{InputOutcomeGone, ErrSessionNotFound},
+}
+
+// InputOutcomes returns every input-outcome word, in wire order.
+func InputOutcomes() []InputOutcome {
+	out := make([]InputOutcome, len(inputOutcomeSentinels))
+	for i, e := range inputOutcomeSentinels {
+		out[i] = e.word
+	}
+	return out
+}
+
+// Known reports whether o is a word of the vocabulary.
+func (o InputOutcome) Known() bool {
+	for _, e := range inputOutcomeSentinels {
+		if e.word == o {
+			return true
+		}
+	}
+	return false
+}
+
+// Sentinel returns the runtime sentinel o names: nil for
+// [InputOutcomeDelivered] and for a word outside the vocabulary.
+func (o InputOutcome) Sentinel() error {
+	for _, e := range inputOutcomeSentinels {
+		if e.word == o {
+			return e.sentinel
+		}
+	}
+	return nil
+}
+
+// Success reports whether o is a delivered word, the only words an exit 0
+// may carry.
+func (o InputOutcome) Success() bool {
+	return o == InputOutcomeDelivered || o == InputOutcomeDeliveredUnobserved
+}
 
 // ProtocolLocalityLocal is the handshake locality of an executable whose
 // boxes run on the controller's host. Any other value, or none, reads as

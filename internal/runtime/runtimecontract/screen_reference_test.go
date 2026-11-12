@@ -68,8 +68,11 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		t.Errorf("handshake: v2-ready %v (missing %v), locality %q; want v2-ready and local", report.V2Ready, report.V2Missing, report.Protocol.Locality)
 	}
 	// The script owns no server of its own (each box is its own screen
-	// session), so it does not declare server-lifecycle.
+	// session), so it does not declare server-lifecycle; nor does it type
+	// outcomes (input-outcome).
 	wantSkip := map[Code]bool{
+		ReqInputNudgeDelivered: true, ReqInputNudgeAbsentGone: true, ReqInputKeysAbsentGone: true, ReqInputWordsAllowedOnOp: true, ReqInputBlockedNotTyped: true,
+		ReqInputUnavailable: true, ReqInputLostReplyUnknown: true, ReqInputExitZeroIsDelivered: true, ReqInputHeldSendTypedOnce: true, ReqInputExit80OneLine: true,
 		ReqConnectionExec: true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
 		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true, ReqFSHostHomeView: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,

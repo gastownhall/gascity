@@ -129,6 +129,9 @@ type outcome struct {
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2 (stderr included)
 	exitCode    int   // the op's process exit code (0 on success; set for non-2 exit errors)
+	// failedStdout is a failed op's stdout (trailing newlines trimmed): an
+	// exit 80's outcome line under input-outcome.
+	failedStdout string
 }
 
 func (o outcome) ok() bool { return o.err == nil && !o.unsupported }
@@ -186,7 +189,7 @@ func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string,
 		case msg == "":
 			msg = err.Error()
 		}
-		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), failedStdout: strings.TrimRight(stdout.String(), "\n")}
 		if isExit {
 			res.exitCode = exitErr.ExitCode()
 		}
