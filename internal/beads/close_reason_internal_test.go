@@ -53,6 +53,10 @@ func TestBdCloseReasonDropsBdDefault(t *testing.T) {
 		{"closed with no reason", "closed", "", ""},
 		{"closed with a real reason", "closed", testCloseReason, testCloseReason},
 		{"closed with a reason that merely starts with the default", "closed", "Closed as a duplicate", "Closed as a duplicate"},
+		{"closed with the default in lower case", "closed", "closed", "closed"},
+		{"closed with the default in upper case", "closed", "CLOSED", "CLOSED"},
+		{"closed with the default and a trailing period", "closed", "Closed.", "Closed."},
+		{"closed with the default and a trailing space", "closed", "Closed ", "Closed "},
 		{"open with the bd default", "open", "Closed", ""},
 		{"open with a stale real reason", "open", testCloseReason, ""},
 	} {
