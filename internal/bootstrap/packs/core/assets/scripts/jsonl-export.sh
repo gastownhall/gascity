@@ -22,6 +22,8 @@ CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 . "$SCRIPT_DIR/scope_bd.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/jsonl_archive_common.sh"
 
 # jq is a hard dependency: count_jsonl_rows below relies on it, and a missing
 # jq would silently zero every record count and could mask spikes on a stale
@@ -62,7 +64,32 @@ MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
 # the archive's large pack is left as it is.
 GC_LOOSE_OBJECT_LIMIT="${GC_JSONL_GC_LOOSE_OBJECTS:-2000}"
 GC_LOOSE_KB_LIMIT="${GC_JSONL_GC_LOOSE_KB:-262144}"
-GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
+# pack.windowMemory for the repack: unset, it is measured from the archive
+# (max(256 MiB, 6 x the largest blob), see archive_window_memory) on every
+# repack; set, it is used as given and a value under 4 x the largest blob is
+# called out on the maintenance line. GC_WINDOW_MEMORY holds the value the
+# repack uses once resolve_archive_window_memory has run.
+GC_WINDOW_MEMORY_PIN="${GC_JSONL_GC_WINDOW_MEMORY:-}"
+GC_WINDOW_MEMORY="$GC_WINDOW_MEMORY_PIN"
+# Blobs under this size are delta-compressed; git's own default (512 MiB) sits
+# above the archive's large export files, so a repack leaves the biggest
+# snapshots whole instead of trying them against their predecessors.
+BIG_FILE_THRESHOLD="${GC_JSONL_BIG_FILE_THRESHOLD:-4g}"
+# The settle check (read-only) looks for deltas that are as large as the
+# object they encode, at most once per interval seconds (0: on every
+# maintenance pass) and for at most the timeout. A delta is flagged when its
+# on-disk size is at least max(min-disk KiB, min-ratio percent of its logical
+# size).
+SETTLE_CHECK_INTERVAL="${GC_JSONL_SETTLE_CHECK_INTERVAL:-86400}"
+SETTLE_CHECK_TIMEOUT_SECS="${GC_JSONL_SETTLE_CHECK_TIMEOUT_SECS:-120}"
+SETTLE_MIN_DISK_KB="${GC_JSONL_SETTLE_MIN_DISK_KB:-256}"
+SETTLE_MIN_RATIO_PCT="${GC_JSONL_SETTLE_MIN_RATIO_PCT:-1}"
+# Alarms, at most one alert per condition per 24 hours; 0 turns one off. The
+# size alarm compares the archive's object database (packs, loose objects and
+# garbage); the settle alarm compares the flagged deltas' on-disk size.
+ARCHIVE_ALERT_KB="${GC_JSONL_ARCHIVE_ALERT_KB:-8388608}"
+SETTLE_ALERT_KB="${GC_JSONL_SETTLE_ALERT_KB:-1048576}"
+ARCHIVE_ALERT_INTERVAL_SECS=86400
 # A repack writes new packs before it removes the old ones, so it only starts
 # when the archive's filesystem can hold the copy and still keep this many KiB
 # free (default 500 MiB, the managed Dolt floor). When it cannot hold a copy
@@ -97,15 +124,30 @@ require_non_negative_integer() {
 require_non_negative_integer GC_JSONL_GC_LOOSE_OBJECTS "$GC_LOOSE_OBJECT_LIMIT"
 require_non_negative_integer GC_JSONL_GC_LOOSE_KB "$GC_LOOSE_KB_LIMIT"
 require_non_negative_integer GC_JSONL_GC_MIN_FREE_KB "$GC_MIN_FREE_KB"
-# Git reads pack.windowMemory as a byte count with an optional unit suffix,
-# takes 0 to mean no limit and a leading 0 as octal; reject all of those now
-# rather than on the first packing run.
-case "${GC_WINDOW_MEMORY%[kKmMgG]}" in
-    ''|0*|*[!0-9]*)
-        echo "jsonl-export: GC_JSONL_GC_WINDOW_MEMORY must be a positive byte count, without leading zeros, with an optional k, m or g suffix in either case (e.g. 256m)" >&2
-        exit 1
-        ;;
-esac
+require_non_negative_integer GC_JSONL_SETTLE_CHECK_INTERVAL "$SETTLE_CHECK_INTERVAL"
+require_non_negative_integer GC_JSONL_SETTLE_CHECK_TIMEOUT_SECS "$SETTLE_CHECK_TIMEOUT_SECS"
+require_non_negative_integer GC_JSONL_SETTLE_MIN_DISK_KB "$SETTLE_MIN_DISK_KB"
+require_non_negative_integer GC_JSONL_SETTLE_MIN_RATIO_PCT "$SETTLE_MIN_RATIO_PCT"
+require_non_negative_integer GC_JSONL_ARCHIVE_ALERT_KB "$ARCHIVE_ALERT_KB"
+require_non_negative_integer GC_JSONL_SETTLE_ALERT_KB "$SETTLE_ALERT_KB"
+# Git reads pack.windowMemory and core.bigFileThreshold as a byte count with an
+# optional unit suffix, takes 0 to mean no limit and a leading 0 as octal;
+# reject all of those now rather than on the first packing run.
+require_git_size() {
+    local name="$1"
+    local value="$2"
+
+    case "${value%[kKmMgG]}" in
+        ''|0*|*[!0-9]*)
+            echo "jsonl-export: $name must be a positive byte count, without leading zeros, with an optional k, m or g suffix in either case (e.g. 256m)" >&2
+            exit 1
+            ;;
+    esac
+}
+if [ -n "$GC_WINDOW_MEMORY_PIN" ]; then
+    require_git_size GC_JSONL_GC_WINDOW_MEMORY "$GC_WINDOW_MEMORY_PIN"
+fi
+require_git_size GC_JSONL_BIG_FILE_THRESHOLD "$BIG_FILE_THRESHOLD"
 
 resolve_escalate_script() {
     local candidate
@@ -603,6 +645,113 @@ retry_pending_spike_alert() {
     fi
 }
 
+# Archive alarms. An alarm is one condition ("size" or "settle") that holds
+# over the archive. Its state lives in the export state file, next to the
+# spike alerts', so it survives a corrupt primary through the backup:
+#   archive_alerts.<condition>.sent_at   epoch seconds of the last delivery;
+#                                        gone once the condition clears
+#   pending_archive_alerts.<condition>   {subject, message} of an alert whose
+#                                        delivery failed; retried at startup
+send_archive_alert() {
+    local subject="$1"
+    local message="$2"
+
+    "$ESCALATE_SCRIPT" --subject "$subject" --message "$message" 2>/dev/null
+}
+
+mark_archive_alert_sent() {
+    local condition="$1"
+
+    write_state_json "$(
+        read_state_json \
+            | jq -c --arg c "$condition" --argjson now "$(date +%s)" '
+                .archive_alerts[$c] = {sent_at: $now} |
+                del(.pending_archive_alerts[$c]) |
+                if (.pending_archive_alerts // {}) == {} then del(.pending_archive_alerts) else . end
+            '
+    )"
+}
+
+set_pending_archive_alert() {
+    local condition="$1"
+    local subject="$2"
+    local message="$3"
+
+    write_state_json "$(
+        read_state_json \
+            | jq -c --arg c "$condition" --arg subject "$subject" --arg message "$message" \
+                '.pending_archive_alerts[$c] = {subject: $subject, message: $message}'
+    )"
+}
+
+# Forget a condition that no longer holds, so it alerts again when it returns.
+# Writes nothing when there is nothing to forget.
+clear_archive_alarm() {
+    local condition="$1"
+    local state_json
+
+    state_json=$(read_state_json)
+    if [ "$(printf '%s\n' "$state_json" | jq -r --arg c "$condition" '(.archive_alerts[$c] != null) or (.pending_archive_alerts[$c] != null)')" != "true" ]; then
+        return 0
+    fi
+    write_state_json "$(
+        printf '%s\n' "$state_json" \
+            | jq -c --arg c "$condition" '
+                del(.archive_alerts[$c], .pending_archive_alerts[$c]) |
+                if (.archive_alerts // {}) == {} then del(.archive_alerts) else . end |
+                if (.pending_archive_alerts // {}) == {} then del(.pending_archive_alerts) else . end
+            '
+    )"
+}
+
+# Alert when a condition holds and none went out within 24 hours; a failed
+# delivery is kept for the next run's retry. Returns 0 when an alert was sent
+# or queued, 1 when none was due.
+raise_archive_alarm() {
+    local condition="$1"
+    local subject="$2"
+    local message="$3"
+    local state_json
+    local sent_at
+    local now
+
+    state_json=$(read_state_json)
+    if [ "$(printf '%s\n' "$state_json" | jq -r --arg c "$condition" '.pending_archive_alerts[$c] != null')" = "true" ]; then
+        return 1
+    fi
+    sent_at=$(printf '%s\n' "$state_json" | jq -r --arg c "$condition" '.archive_alerts[$c].sent_at // 0')
+    now=$(date +%s)
+    if [ "$sent_at" -le "$now" ] && [ "$((now - sent_at))" -lt "$ARCHIVE_ALERT_INTERVAL_SECS" ]; then
+        return 1
+    fi
+    if send_archive_alert "$subject" "$message"; then
+        mark_archive_alert_sent "$condition"
+    else
+        echo "jsonl-export: archive $condition alert delivery failed; will retry" >&2
+        set_pending_archive_alert "$condition" "$subject" "$message"
+    fi
+}
+
+retry_pending_archive_alerts() {
+    local condition
+    local subject
+    local message
+
+    while IFS= read -r condition; do
+        [ -n "$condition" ] || continue
+        subject=$(read_state_json | jq -r --arg c "$condition" '.pending_archive_alerts[$c].subject // empty')
+        message=$(read_state_json | jq -r --arg c "$condition" '.pending_archive_alerts[$c].message // empty')
+        [ -n "$subject" ] || continue
+        if send_archive_alert "$subject" "$message"; then
+            mark_archive_alert_sent "$condition"
+        else
+            echo "jsonl-export: pending archive $condition alert delivery failed" >&2
+        fi
+    # A here-string, not process substitution: bash 3.2 (macOS) rejects <(...)
+    # in POSIX mode (POSIXLY_CORRECT).
+    done <<< "$(read_state_json | jq -r '.pending_archive_alerts // {} | keys[]')"
+}
+
 # Retain only the last ~20 lines of stderr so an extremely chatty failure
 # doesn't drown the escalation body.
 truncate_stderr_context() {
@@ -776,6 +925,7 @@ commit_archive_snapshot() {
 run_archive_repack() {
     local -a repack_command=(
         git -C "$ARCHIVE_REPO"
+        -c "core.bigFileThreshold=$BIG_FILE_THRESHOLD"
         -c "pack.windowMemory=$GC_WINDOW_MEMORY"
         -c pack.threads=1
         repack -d -l -q --geometric=2
@@ -838,12 +988,13 @@ check_archive_gc_free_space() {
         fi
     fi
     echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and repacking the ${archive_kb} KiB archive (${rest_kb} KiB without its largest pack) would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
-    printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
+    printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c core.bigFileThreshold=%s -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2\n' "$ARCHIVE_REPO" "$BIG_FILE_THRESHOLD" "$GC_WINDOW_MEMORY" >&2
     return 1
 }
 
-# Sets ARCHIVE_LOOSE_OBJECTS, ARCHIVE_LOOSE_KB, ARCHIVE_PACKS and
-# ARCHIVE_PACK_KB from git count-objects.
+# Sets ARCHIVE_LOOSE_OBJECTS, ARCHIVE_LOOSE_KB, ARCHIVE_PACKS,
+# ARCHIVE_PACK_KB and ARCHIVE_GARBAGE_KB (0 when git reports none) from git
+# count-objects.
 read_archive_object_stats() {
     local object_stats
     local key
@@ -853,6 +1004,7 @@ read_archive_object_stats() {
     ARCHIVE_LOOSE_KB=""
     ARCHIVE_PACKS=""
     ARCHIVE_PACK_KB=""
+    ARCHIVE_GARBAGE_KB=0
     object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
         echo "jsonl-export: reading archive object statistics failed" >&2
         return 1
@@ -863,6 +1015,7 @@ read_archive_object_stats() {
             size) ARCHIVE_LOOSE_KB="$value" ;;
             packs) ARCHIVE_PACKS="$value" ;;
             size-pack) ARCHIVE_PACK_KB="$value" ;;
+            size-garbage) ARCHIVE_GARBAGE_KB="$value" ;;
         esac
     done <<< "$object_stats"
 
@@ -876,20 +1029,161 @@ read_archive_object_stats() {
             return 1
             ;;
     esac
+    case "$ARCHIVE_GARBAGE_KB" in
+        ''|*[!0-9]*)
+            echo "jsonl-export: archive object statistics were malformed" >&2
+            return 1
+            ;;
+    esac
+}
+
+# The lock the settle tool (jsonl-archive-settle.sh --apply) holds for its
+# whole transaction: a kernel flock on a zero-byte file under the archive's
+# .git, taken here without waiting. Nothing is ever written into the file and
+# nothing removes it; children inherit the descriptor, so a repack started
+# under the lock keeps it until the repack ends.
+ARCHIVE_LOCK_FILE="$ARCHIVE_REPO/.git/jsonl-archive.lock"
+
+# Takes the lock without waiting. Returns 1 only when the settle holds it;
+# without flock or a writable lock file there is nothing to coordinate with, so
+# the pass says so and goes on.
+acquire_archive_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "jsonl-export: flock not found; archive maintenance cannot coordinate with jsonl-archive-settle.sh" >&2
+        return 0
+    fi
+    if ! ( : >> "$ARCHIVE_LOCK_FILE" ) 2>/dev/null; then
+        echo "jsonl-export: cannot open $ARCHIVE_LOCK_FILE; archive maintenance cannot coordinate with jsonl-archive-settle.sh" >&2
+        return 0
+    fi
+    exec 9>> "$ARCHIVE_LOCK_FILE"
+    if flock -n 9; then
+        return 0
+    fi
+    exec 9>&-
+    return 1
+}
+
+release_archive_lock() {
+    exec 9>&-
+}
+
+# The settle check: a read-only look for deltas as large as the objects they
+# encode, plus the two alarms. It runs at most once per
+# GC_JSONL_SETTLE_CHECK_INTERVAL and never fails the export: an error or a
+# timeout is logged and the run goes on. Needs the object statistics
+# (read_archive_object_stats) of the archive as it is now.
+check_archive_settle() {
+    local last_check
+    local now
+    local archive_kb
+    local flagged_out
+    local rc=0
+    local flagged=0
+    local flagged_kb=0
+    local status=ok
+    local alerted=0
+    local size_message
+    local settle_message
+
+    now=$(date +%s)
+    if [ "$SETTLE_CHECK_INTERVAL" -gt 0 ]; then
+        last_check=$(read_state_json | jq -r '.last_settle_check_at // 0')
+        case "$last_check" in
+            ''|*[!0-9]*) last_check=0 ;;
+        esac
+        if [ "$last_check" -le "$now" ] && [ "$((now - last_check))" -lt "$SETTLE_CHECK_INTERVAL" ]; then
+            return 0
+        fi
+    fi
+    write_state_json "$(read_state_json | jq -c --argjson now "$now" '.last_settle_check_at = $now')" \
+        || echo "jsonl-export: recording the settle check time failed" >&2
+
+    archive_kb=$((ARCHIVE_PACK_KB + ARCHIVE_LOOSE_KB + ARCHIVE_GARBAGE_KB))
+
+    flagged_out=$(archive_flagged_deltas "$ARCHIVE_REPO" "$SETTLE_MIN_DISK_KB" "$SETTLE_MIN_RATIO_PCT" "$SETTLE_CHECK_TIMEOUT_SECS") || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        echo "jsonl-export: archive settle check timed out after ${SETTLE_CHECK_TIMEOUT_SECS}s (GC_JSONL_SETTLE_CHECK_TIMEOUT_SECS); the export goes on" >&2
+    elif [ "$rc" -ne 0 ]; then
+        echo "jsonl-export: archive settle check failed (exit $rc); the export goes on" >&2
+    else
+        flagged=$(printf '%s' "$flagged_out" | awk 'NF { n++ } END { print n + 0 }')
+        flagged_kb=$(printf '%s' "$flagged_out" | awk 'NF { b += $3 } END { printf "%.0f\n", (b + 1023) / 1024 }')
+        if [ "$flagged" -gt 0 ]; then
+            status=waste
+        fi
+    fi
+
+    if [ "$ARCHIVE_ALERT_KB" -gt 0 ]; then
+        if [ "$archive_kb" -gt "$ARCHIVE_ALERT_KB" ]; then
+            size_message="Archive: $ARCHIVE_REPO holds ${archive_kb} KiB of objects, over GC_JSONL_ARCHIVE_ALERT_KB=${ARCHIVE_ALERT_KB}. Run jsonl-archive-settle.sh --archive $ARCHIVE_REPO (a dry run unless given --apply) to see what it would reclaim; the archive keeps all history, so free disk space if it holds nothing to reclaim."
+            raise_archive_alarm size "ESCALATION: JSONL archive size over limit [HIGH]" "$size_message" || true
+        else
+            clear_archive_alarm size
+        fi
+    fi
+    if [ "$rc" -eq 0 ] && [ "$SETTLE_ALERT_KB" -gt 0 ]; then
+        if [ "$flagged_kb" -gt "$SETTLE_ALERT_KB" ]; then
+            settle_message="Archive: $ARCHIVE_REPO holds oversized deltas: flagged=${flagged} flagged_kb=${flagged_kb}, over GC_JSONL_SETTLE_ALERT_KB=${SETTLE_ALERT_KB}. Run jsonl-archive-settle.sh --archive $ARCHIVE_REPO (a dry run unless given --apply) to see the reclaim; --apply needs the operator's go-ahead."
+            if raise_archive_alarm settle "ESCALATION: JSONL archive oversized deltas [HIGH]" "$settle_message"; then
+                alerted=1
+            fi
+        else
+            clear_archive_alarm settle
+        fi
+    fi
+    if [ "$alerted" -eq 1 ]; then
+        status=alerted
+    fi
+    if [ "$rc" -eq 0 ]; then
+        echo "jsonl-export: archive settle check: flagged=$flagged flagged_kb=$flagged_kb archive_kb=$archive_kb status=$status" >&2
+    fi
+}
+
+# Sets ARCHIVE_LARGEST_BLOB_KB, GC_WINDOW_MEMORY and ARCHIVE_WINDOW_NOTE for a
+# repack that is about to run. The window is measured from the archive's
+# largest blob (rule in archive_window_memory) unless GC_JSONL_GC_WINDOW_MEMORY
+# pins it; a pin under 4 x the largest blob is noted for the maintenance line.
+# Fails when the scan fails or reads as nothing: no repack runs under a window
+# that was not measured.
+resolve_archive_window_memory() {
+    local largest
+
+    ARCHIVE_LARGEST_BLOB_KB=unknown
+    GC_WINDOW_MEMORY="${GC_WINDOW_MEMORY_PIN:-unknown}"
+    ARCHIVE_WINDOW_NOTE=""
+    if ! largest=$(archive_largest_blob_bytes "$ARCHIVE_REPO"); then
+        echo "jsonl-export: scanning the archive for its largest blob failed; not packing without knowing the delta window it needs" >&2
+        return 1
+    fi
+    ARCHIVE_LARGEST_BLOB_KB=$(((largest + 1023) / 1024))
+    if [ -n "$GC_WINDOW_MEMORY_PIN" ]; then
+        if ! archive_window_guard "$GC_WINDOW_MEMORY_PIN" "$largest" >/dev/null 2>&1; then
+            ARCHIVE_WINDOW_NOTE=" WARNING=pin_below_4x_largest_blob"
+        fi
+        return 0
+    fi
+    GC_WINDOW_MEMORY=$(archive_window_memory "$largest")
+}
+
+# The repack's telemetry fields, appended after the fields that line has always
+# had: what the window rule saw and chose.
+archive_window_fields() {
+    printf ' largest_blob_kb=%s window_memory=%s%s' "$ARCHIVE_LARGEST_BLOB_KB" "$GC_WINDOW_MEMORY" "$ARCHIVE_WINDOW_NOTE"
 }
 
 # Pack the archive once its loose objects reach either limit, and report what
 # the pass did. Callers treat a non-zero return as a failed run; call it in a
 # condition so the explicit returns below, not set -e, decide the outcome.
-maintain_archive_repository() {
+run_archive_maintenance_pass() {
     local loose_objects
     local loose_kb
     local packs_before
     local mode=geometric
     local started
-    local wall
 
     read_archive_object_stats || return 1
+    check_archive_settle
     if [ "$ARCHIVE_LOOSE_OBJECTS" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
         && [ "$ARCHIVE_LOOSE_KB" -lt "$GC_LOOSE_KB_LIMIT" ]; then
         return 0
@@ -898,6 +1192,11 @@ maintain_archive_repository() {
     loose_kb="$ARCHIVE_LOOSE_KB"
     packs_before="$ARCHIVE_PACKS"
 
+    started=$SECONDS
+    if ! resolve_archive_window_memory; then
+        echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed$(archive_window_fields)" >&2
+        return 1
+    fi
     check_archive_gc_free_space "$((ARCHIVE_PACK_KB + loose_kb))" || return 1
     if [ -n "$ARCHIVE_KEEP_PACK" ]; then
         mode=geometric-keep-largest
@@ -905,13 +1204,28 @@ maintain_archive_repository() {
     echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
     started=$SECONDS
     if ! run_archive_repack; then
-        echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed" >&2
+        echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed$(archive_window_fields)" >&2
         echo "jsonl-export: archive object database maintenance failed (repack --geometric needs git 2.32 or newer)" >&2
         return 1
     fi
-    wall=$((SECONDS - started))
+    local wall=$((SECONDS - started))
     read_archive_object_stats || return 1
-    echo "jsonl-export: archive maintenance: mode=$mode wall=${wall}s loose_before=$loose_objects loose_after=$ARCHIVE_LOOSE_OBJECTS packs_before=$packs_before packs_after=$ARCHIVE_PACKS pack_kb_after=$ARCHIVE_PACK_KB" >&2
+    echo "jsonl-export: archive maintenance: mode=$mode wall=${wall}s loose_before=$loose_objects loose_after=$ARCHIVE_LOOSE_OBJECTS packs_before=$packs_before packs_after=$ARCHIVE_PACKS pack_kb_after=$ARCHIVE_PACK_KB$(archive_window_fields)" >&2
+}
+
+# One archive maintenance pass under the settle lock. While a settle holds the
+# lock the pass is skipped, and the run succeeds: the snapshot is already
+# committed and pushed, and the next run packs whatever is left.
+maintain_archive_repository() {
+    local rc=0
+
+    if ! acquire_archive_lock; then
+        echo "jsonl-export: archive maintenance skipped: settle in progress" >&2
+        return 0
+    fi
+    run_archive_maintenance_pass || rc=$?
+    release_archive_lock
+    return "$rc"
 }
 
 # Maintenance runs after the export and its push, so a failed pass never holds
@@ -989,12 +1303,14 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 log_archive_mode_if_needed
 retry_pending_spike_alert
+retry_pending_archive_alerts
 
 # The first export in the bd format moves a scope's snapshot files from the
 # old `dolt sql -r json` layout ({"rows":[...]} issues.jsonl, the flat
 # <db>.jsonl mirror and the per-table comments/config/dependencies/labels/
 # metadata files) into <db>/legacy/ with `git mv`. History is kept and nothing
-# is deleted; normal archive retention ages the legacy copies out.
+# is deleted; the legacy copies stay in the archive until an operator removes
+# them (nothing ages them out).
 LEGACY_TABLE_FILES="issues comments config dependencies labels metadata"
 
 archived_file_is_legacy_format() {

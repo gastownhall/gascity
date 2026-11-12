@@ -917,16 +917,28 @@ archive. The same pass runs when a run has nothing new to export, so a
 backlog left by an earlier failure is packed on the next run. It needs Git 2.32
 or newer; on an older Git the pass fails with a message that says so.
 
-Packing is deliberately single-threaded and uses
-`GC_JSONL_GC_WINDOW_MEMORY=256m` (a positive byte count, without leading
-zeros, with an optional `k`, `m`, or `g` suffix in either case) to avoid
-competing with the Dolt server and worker sessions for memory. These values
-can be lowered for small hosts.
+Packing is deliberately single-threaded, to avoid competing with the Dolt
+server and worker sessions for CPU. Its delta window is sized to the archive's
+largest blob: git keeps every object of the window in memory and stops
+comparing a blob with its predecessors once the window holds more than
+`pack.windowMemory`, so a blob larger than a quarter of the window is stored
+whole or against an unrelated file. Each pass that packs measures the largest
+blob and uses `max(256 MiB, 6 x that blob)`, rounded up to whole MiB, and
+appends `largest_blob_kb=` and `window_memory=` to its line below. A scan that
+fails means no pack and `status=failed`, not a guess.
+
+`GC_JSONL_GC_WINDOW_MEMORY` (a positive byte count, without leading zeros,
+with an optional `k`, `m`, or `g` suffix in either case) pins the window to
+that value instead. A pin under 4 x the largest blob appends
+`WARNING=pin_below_4x_largest_blob`; unset it unless the host cannot spare the
+memory. `GC_JSONL_BIG_FILE_THRESHOLD=4g` is the size above which git stops
+trying to delta a file at all; it must stay above the largest blob, and it is
+passed to each pass rather than written to the archive's config.
 
 Each pass that packs prints one line to stderr:
 
 ```text
-jsonl-export: archive maintenance: mode=geometric wall=12s loose_before=2410 loose_after=0 packs_before=3 packs_after=2 pack_kb_after=41200
+jsonl-export: archive maintenance: mode=geometric wall=12s loose_before=2410 loose_after=0 packs_before=3 packs_after=2 pack_kb_after=41200 largest_blob_kb=256400 window_memory=1503m
 ```
 
 A failed pass prints the fields it has plus `status=failed`. Watch
@@ -972,10 +984,14 @@ git -C "$ARCHIVE" count-objects -vH
 git -C "$ARCHIVE" fsck --connectivity-only
 ```
 
-To pack the backlog once by hand with less memory:
+To pack the backlog once by hand, size the window to the largest blob the
+same way (6 x the largest blob in bytes, in MiB; `largest_blob_kb` on the
+maintenance line gives it in KiB). A window under 4 x the largest blob is the
+cause of the oversized deltas described below:
 
 ```bash
-git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 repack -d -l -q --geometric=2
+# 1503m for a 262.5 MB largest blob; a smaller archive needs at least 256m.
+git -C "$ARCHIVE" -c core.bigFileThreshold=4g -c pack.windowMemory=1503m -c pack.threads=1 repack -d -l -q --geometric=2
 ```
 
 To rewrite the whole archive into one pack (the full rewrite that geometric
@@ -983,8 +999,53 @@ packing postpones), run `git gc`. It writes the archive's full size again, so
 check the free space first:
 
 ```bash
-git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
+git -C "$ARCHIVE" -c core.bigFileThreshold=4g -c pack.windowMemory=1503m -c pack.threads=1 gc
 ```
+
+### Archive grows faster than the exports
+
+A delta that takes as many bytes on disk as the file it encodes is a whole-file
+copy: git picked a base from another file because the delta window was too
+small. The archive's size then grows with every snapshot even though few rows
+change, and a pack can pass GitHub's 100 MiB file limit, which blocks a push.
+The export looks for these at most once per `GC_JSONL_SETTLE_CHECK_INTERVAL`
+seconds (default 86400) and logs:
+
+```text
+jsonl-export: archive settle check: flagged=3 flagged_kb=30210 archive_kb=412300 status=waste
+```
+
+`flagged` counts deltas whose on-disk size is at least
+`max(GC_JSONL_SETTLE_MIN_DISK_KB=256 KiB, GC_JSONL_SETTLE_MIN_RATIO_PCT=1 percent
+of the object's size)`. When `flagged_kb` passes `GC_JSONL_SETTLE_ALERT_KB`, or
+the archive passes `GC_JSONL_ARCHIVE_ALERT_KB`, the export sends one escalation
+mail per day (`GC_JSONL_ARCHIVE_ALERT_INTERVAL_SECS`) until the condition
+clears. Nothing is rewritten for you.
+
+`jsonl-archive-settle.sh` repairs the waste without dropping any history. It
+ships beside `jsonl-export.sh` in the core pack's `assets/scripts` directory
+(`$PACK_DIR` in the order's `exec` line). It is a dry run unless you pass
+`--apply`:
+
+```bash
+SETTLE="<core pack directory>/assets/scripts/jsonl-archive-settle.sh"
+"$SETTLE" --archive "$ARCHIVE"           # report only: groups, memory, free space
+"$SETTLE" --archive "$ARCHIVE" --apply   # rewrite the packs that hold the waste
+```
+
+The report names the flagged files, the memory the rewrite is expected to peak
+at (about 9 x the largest blob, compared with `MemAvailable`; a warning, not a
+refusal), and the disk it needs while old and new packs coexist. `--apply`
+packs the flagged deltas and everything they depend on afresh, copies the rest
+of the packs that held them with their deltas as they are, checks that every
+object is still present, and only then deletes the old packs. It takes
+`.git/jsonl-archive.lock`, so an export that runs meanwhile still commits and
+pushes but skips its packing (`archive maintenance skipped: settle in
+progress`). It refuses, with status `refused` and nothing changed, when the
+lock is held, `flock` is missing, free disk is short, or a pack to retire has a
+`.keep` file. An interrupted run leaves an archive that passes `git fsck`;
+rerun it to finish. It never runs `gc` or `repack`, commits, pushes, or writes
+the archive's config.
 
 ### Enabling off-box backup
 

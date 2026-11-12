@@ -70,6 +70,8 @@ go_library(
         "skills/gc-rigs/SKILL.md",
         "skills/gc-work/SKILL.md",
         "template-fragments/claim-protocol.template.md",
+        "assets/scripts/jsonl-archive-settle.sh",
+        "assets/scripts/jsonl_archive_common.sh",
         "assets/scripts/order_outcome.sh",
         "assets/scripts/scope_bd.sh",
         "orders/binding-snapshot.toml",

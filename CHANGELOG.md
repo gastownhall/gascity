@@ -1266,6 +1266,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The JSONL archive no longer packs with a delta window too small for its
+  largest blob, and `jsonl-archive-settle.sh` repairs the oversized deltas
+  already there.** Packing used a fixed `pack.windowMemory=256m`, so a bead
+  export blob over 64 MiB was stored against an unrelated file and cost about
+  its own size on disk with every snapshot. Each pass now sizes the window to
+  `max(256 MiB, 6 x the largest blob)` (`GC_JSONL_GC_WINDOW_MEMORY` still
+  pins it), passes `core.bigFileThreshold=4g` (`GC_JSONL_BIG_FILE_THRESHOLD`),
+  and appends `largest_blob_kb=` and `window_memory=` to its maintenance line.
+  The export also checks the archive for oversized deltas daily and mails an
+  escalation, at most once a day, when the waste or the archive size passes
+  `GC_JSONL_SETTLE_ALERT_KB` or `GC_JSONL_ARCHIVE_ALERT_KB`. The new
+  `jsonl-archive-settle.sh [--archive PATH] [--apply]` is a dry run by
+  default; `--apply` re-chains the flagged deltas into new packs, verifies
+  them and retires the old packs under `.git/jsonl-archive.lock` without
+  dropping an object. See Troubleshooting, "Archive object maintenance".
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
