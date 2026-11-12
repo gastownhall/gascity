@@ -483,8 +483,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, the CI workflows'
   `DOLT_VERSION` pins (macOS regression, nightly, RC Gate, Ollama,
   fork-verify), the Bazel test Dolt (`dolt_bin_v2_6_0`), the agent base image
-  (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
-  requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
+  (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.4; Dolt 2.6.0 needs
+  Go 1.27.3 or newer) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
   2.6.0, the first Dolt release patched for the eMudhra CA distrust. Moving
   from 2.2.0 to 2.6.0 crosses several behaviour changes (release notes for
   [2.3.3](https://github.com/dolthub/dolt/releases/tag/v2.3.3),
@@ -507,7 +507,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Treat the upgrade as one-way: back up the data directory first; going back
   means restoring that backup, not reverting the image.
 
-- **gc is now built with Go 1.27.3.** On macOS and Windows, a set
+- **gc is now built with Go 1.27.4.** On macOS and Windows, a set
   `SSL_CERT_FILE` or `SSL_CERT_DIR` now replaces the system trust store
   (the keychain, the Windows certificate store) for gc's HTTPS connections,
   as it already did on Linux. If you export either variable for other tools
@@ -1163,13 +1163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running turn is not steered; it waits for that boundary and is reported
   queued (`queued: true`).
 
-- **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
-  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
-  the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
-  now needs Go 1.27.3 or newer. The rbe-west worker host moves with it: its
+- **Go toolchain 1.27.4.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
+  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.4,
+  the first release that fixes the `net/http` advisory GO-2026-6859 (Go
+  1.27.3 left the Go module vulnerabilities check red on every pull
+  request). Dolt 2.6.0 and beads `main` build with Go 1.27.3 or newer.
+  Building from source now needs Go 1.27.4 or newer. The rbe-west worker host moves with it: its
   workers install `go.mod`'s Go and, from rbe-worker `80d70774`, Dolt 2.6.0.
   Contributors: a golangci-lint built with Go 1.26 refuses this module, which
-  breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
+  breaks the pre-commit formatter. Rebuild it with Go 1.27.4:
   `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
 - **`gc init` pins the gastown pack to registry release 0.1.13 and the
