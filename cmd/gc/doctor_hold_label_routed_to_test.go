@@ -640,6 +640,84 @@ func TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched(t *testing.T) {
 	}
 }
 
+// TestHoldLabelRoutedToCheckUnboundShadow covers ga-tkxbic AC-5: a hold
+// value config does not bind must keep the verbatim backfill contract, even
+// when another agent binds the same name — boundRoutedToAliases's
+// unbound-owner rule shadows the binding, so the bare hold value stays the
+// canonical route and --fix must not qualify it. A hold value with no config
+// entry at all backfills verbatim the same way. The namespace check reports
+// OK for the backfilled short forms.
+func TestHoldLabelRoutedToCheckUnboundShadow(t *testing.T) {
+	cityDir := t.TempDir()
+	// An unbound planner shadows the bound one in boundRoutedToAliases, and
+	// scribe has no config entry at all.
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "planner"},
+			{Name: "planner", BindingName: "ops"},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Shadowed value, missing route: backfill the bare hold value.
+		{ID: "US-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		// Shadowed value, unrelated route: rewrite to the bare hold value.
+		{
+			ID: "US-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "reviewer"},
+		},
+		// Value absent from config entirely: same verbatim contract.
+		{ID: "US-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:scribe"}},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead US-1 has hold:planner but gc.routed_to=""; use "planner"`,
+		`city bead US-2 has hold:planner but gc.routed_to="reviewer"; use "planner"`,
+		`city bead US-3 has hold:scribe but gc.routed_to=""; use "scribe"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for id, wantRoute := range map[string]string{
+		"US-1": "planner",
+		"US-2": "planner",
+		"US-3": "scribe",
+	} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != wantRoute {
+			t.Errorf("%s gc.routed_to = %q, want %q (verbatim backfill, not qualified)", id, got, wantRoute)
+		}
+	}
+
+	// The hold check converges, and the backfilled short forms are the
+	// canonical routes the namespace check requires.
+	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix hold-label-routed-to status = %v, want OK: %#v", res2.Status, res2)
+	}
+	if nsRes := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); nsRes.Status != doctor.StatusOK {
+		t.Fatalf("post-fix v2-routed-to-namespace status = %v, want OK (shadowed and absent values are canonical short): %#v", nsRes.Status, nsRes)
+	}
+}
+
 // TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace covers ga-tkxbic:
 // before the fix, hold-label-routed-to's --fix backfilled the bare hold value
 // while v2-routed-to-namespace rewrote short forms to the binding-qualified
