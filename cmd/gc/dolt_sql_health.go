@@ -465,17 +465,30 @@ func runManagedDoltSQLContext(parent context.Context, host, port, user string, a
 	if user == "" {
 		user = "root"
 	}
+	// A configured password never goes in argv (world-readable
+	// /proc/<pid>/cmdline); it travels only in the environment (owner-only
+	// /proc/<pid>/environ). dolt reads DOLT_CLI_PASSWORD only when argv has no
+	// --password, and a `default` CLI profile that stores a password injects its
+	// own --password first, outranking the variable. So every caller with a
+	// configured password takes the pooled driver connection (managedDoltOpenDB,
+	// managedDoltOpenDatabase) instead of this runner. An empty password is
+	// passed as an explicit empty --password, which discloses nothing and masks
+	// that profile. The variable is exported either way so dolt never falls
+	// back to an interactive password prompt.
+	password := managedDoltPassword()
 	baseArgs := []string{
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", managedDoltPassword(),
-		"--no-tls",
-		"sql",
 	}
+	if password == "" {
+		baseArgs = append(baseArgs, "--password", "")
+	}
+	baseArgs = append(baseArgs, "--no-tls", "sql")
 	ctx, cancel := context.WithTimeout(parent, managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
+	cmd.Env = withEnvValue(os.Environ(), "DOLT_CLI_PASSWORD", password)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := strings.TrimSpace(string(out))

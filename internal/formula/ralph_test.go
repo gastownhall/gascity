@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -818,5 +819,38 @@ func TestApplyRalph_NamespacesNestedControlForAcrossBody(t *testing.T) {
 	}
 	if got != wantCF {
 		t.Fatalf("nested attempt gc.control_for = %q, want %q (must equal inner control gc.step_ref)", got, wantCF)
+	}
+}
+
+func TestApplyRalph_RejectsUnresolvedMaxAttemptsVar(t *testing.T) {
+	steps := []*Step{{
+		ID:    "implement",
+		Title: "Implement",
+		Ralph: &RalphSpec{MaxAttemptsVar: "attempts", Check: &RalphCheckSpec{Mode: "exec", Path: "check.sh"}},
+	}}
+
+	if _, err := ApplyRalph(steps); err == nil || !strings.Contains(err.Error(), `max_attempts var "attempts" is unresolved`) {
+		t.Fatalf("ApplyRalph error = %v, want an unresolved max_attempts var error", err)
+	}
+}
+
+func TestBindCheckMaxAttemptsVars_KeepsFirstBinding(t *testing.T) {
+	steps := []*Step{{
+		ID:    "phase",
+		Title: "Phase",
+		Children: []*Step{{
+			ID:    "implement",
+			Title: "Implement",
+			Ralph: &RalphSpec{MaxAttemptsVar: "attempts", Check: &RalphCheckSpec{Mode: "exec", Path: "check.sh"}},
+		}},
+	}}
+
+	bindCheckMaxAttemptsVars(steps, map[string]string{"attempts": "2"})
+	bindCheckMaxAttemptsVars(steps, map[string]string{"attempts": "9"})
+	if err := ResolveCheckMaxAttemptsVars(steps, map[string]string{"attempts": "5"}); err != nil {
+		t.Fatalf("ResolveCheckMaxAttemptsVars: %v", err)
+	}
+	if got := steps[0].Children[0].Ralph; got.MaxAttempts != 2 || got.MaxAttemptsVar != "" {
+		t.Fatalf("resolved check = %+v, want MaxAttempts 2 from the first binding", got)
 	}
 }

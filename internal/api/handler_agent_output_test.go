@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -103,7 +105,7 @@ func newGeminiAgentOutputStreamFixture(t *testing.T) *geminiAgentOutputStreamFix
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -354,7 +356,7 @@ func TestResolveAgentTranscriptUsesBeadSessionIDWhenRuntimeMetaMissing(t *testin
 	}
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(state.cityBeadStore), state.sp, session.WithCityPath(state.cityPath))
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude/tmux-cli", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -559,7 +561,7 @@ func TestAgentOutputStreamStoppedAgentCommitsStatusHeader(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamHeaderCommitTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(state, "/agent/myrig/worker/output/stream"), nil)
 	if err != nil {
@@ -742,7 +744,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 
 func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T) {
 	state := newSessionFakeState(t)
-	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(state.cityBeadStore), state.sp, session.WithCityPath(state.cityPath))
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})

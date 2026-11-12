@@ -9,7 +9,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
-	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // packRuntimesDoctorCheck verifies every pack-declared runtime
@@ -40,7 +39,7 @@ func (*packRuntimesDoctorCheck) WarmupEligible() bool { return false }
 func (*packRuntimesDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // Run implements doctor.Check.
-func (c *packRuntimesDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *packRuntimesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if c.cfg == nil || len(c.cfg.Runtimes) == 0 {
 		return okCheck("pack-runtimes", "no pack-declared runtimes")
 	}
@@ -50,15 +49,29 @@ func (c *packRuntimesDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	}
 	sort.Strings(names)
 
-	var failures []string
+	var failures, readiness []string
 	for _, name := range names {
 		rt := c.cfg.Runtimes[name]
 		if detail := packRuntimeInstallFailure(rt); detail != "" {
 			failures = append(failures, detail)
 			continue
 		}
-		if _, err := sessionexec.NewProvider(rt.Command).Protocol(); err != nil {
-			failures = append(failures, fmt.Sprintf("runtime %q (pack %q): protocol handshake failed: %v", rt.Name, rt.PackName, err))
+		// One handshake, as the latch reads it (execReadiness, bounded at
+		// 10s): its failure makes the runtime unusable; its v2 readiness is
+		// reported once every runtime is usable, as the check's details. The
+		// bound is the admission probe's, not the provider's 30s op timeout:
+		// a handshake slower than 10s is one the latch refuses, so doctor
+		// reports it as the latch reads it, and the answer is shared with
+		// the session reconciler check in the same run.
+		h := execReadiness(rt.Command, c.cfg.EffectiveCityName(), cityPathOf(ctx))
+		if h.err != nil {
+			failures = append(failures, fmt.Sprintf("runtime %q (pack %q): protocol handshake failed: %v", rt.Name, rt.PackName, h.err))
+			continue
+		}
+		if h.ready() {
+			readiness = append(readiness, fmt.Sprintf("runtime %q (pack %q): v2-ready", rt.Name, rt.PackName))
+		} else {
+			readiness = append(readiness, fmt.Sprintf("runtime %q (pack %q): not v2-ready: %s", rt.Name, rt.PackName, h.fix(rt.Command)))
 		}
 	}
 	if len(failures) > 0 {
@@ -67,7 +80,9 @@ func (c *packRuntimesDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			"install the runtime executable (the pack's install step) or fix the [runtimes.<name>] command in pack.toml",
 			failures)
 	}
-	return okCheck("pack-runtimes", fmt.Sprintf("%d pack runtime(s) installed and handshaking", len(names)))
+	ok := okCheck("pack-runtimes", fmt.Sprintf("%d pack runtime(s) installed and handshaking", len(names)))
+	ok.Details = readiness
+	return ok
 }
 
 // packRuntimeInstallFailure reports why a declared runtime executable is

@@ -52,7 +52,8 @@
 #      differ across the flatten. Drift is benign only when every named table
 #      is either already verified or a table the -Am first-committed whose
 #      content diff is added-only; anything else quarantines.
-#   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
+#   5. Run CALL DOLT_GC('--full', '--archive-level=0') to reclaim chunks orphaned
+#      by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
@@ -61,15 +62,22 @@
 # no remote phase at all: it is never fetched or pushed, never gets a
 # pending-push marker, and an existing one is cleared so it cannot block flatten.
 #
-# History protection (#5958). The compactor only rewrites history it can show
-# this city grew:
+# History protection (#5958). The compactor protects history that may be
+# shared through a Dolt remote and history from before it first saw the
+# database. The watermark is a position, not an author: every commit after it
+# is squashed, whichever city wrote it, so a database several cities write to
+# is flattened for all of them when this city's managed runtime holds it or
+# this city reaches it over loopback. An external endpoint on a non-loopback
+# host is skipped before connecting (no flatten, no GC, no watermark); the
+# managed runtime is compacted whatever GC_DOLT_HOST names it. See #7896.
 #   * Shared-history guard: a database with ANY configured Dolt remote may share
 #     its history with other clones (a team remote, bd's refs/dolt/data, a
 #     federated city), so it is never flattened or force-pushed. It gets a bare
-#     working-set CALL DOLT_GC() instead. .no-sync and --skip-fetch do not
-#     bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does (announced windows
-#     only). A pending-GC retry still runs its local DOLT_GC --full but drops the
-#     deferred push; a pending-push marker is held for operator review.
+#     working-set CALL DOLT_GC('--archive-level=0') instead. .no-sync and
+#     --skip-fetch do not bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does
+#     (announced windows only). A pending-GC retry still runs its local
+#     DOLT_GC --full but drops the deferred push; a pending-push marker is held
+#     for operator review.
 #   * Provenance watermark: the Dolt tag gc-compact-base, stamped the first time
 #     the compactor sees a database (never under --dry-run). It goes on the root
 #     commit when root's child is a "compaction: flatten history" commit (a
@@ -109,6 +117,12 @@
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
 #                     repair but do not fail local compaction.
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — how many times the live-database gate asks the server
+#                   for a rewritten database's HEAD before quarantining it.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds the live-database gate waits between those
+#                   attempts.
 #   GC_DOLT_RIG_LIST_TIMEOUT_SECS
 #     (default: 30) — wall-clock bound for `gc rig list --json` rig
 #                     discovery. Shared with the health command; the
@@ -150,8 +164,9 @@
 #                                         skip the commit-count threshold
 #                                         AND the flatten/full-GC path
 #                                         entirely, and run a bare
-#                                         CALL DOLT_GC() on each
-#                                         discovered database. Decouples
+#                                         CALL DOLT_GC('--archive-level=0')
+#                                         on each discovered database.
+#                                         Decouples
 #                                         the working-set GC pass (which
 #                                         resets the NBS journal range
 #                                         index that grows with write
@@ -174,18 +189,45 @@ set -eu
 # onto the GC_DOLT_COMPACT_* environment defaults (and the gc_only mode) read
 # below, giving operators a discoverable, sanctioned reclaim path without
 # exporting environment variables. --help is intercepted by the bridge.
-#   --gc-only          reclaim orphaned chunks via CALL DOLT_GC('--full') on
+#   --gc-only          reclaim orphaned chunks via
+#                      CALL DOLT_GC('--full', '--archive-level=0') on
 #                      each database, bypassing the commit-count threshold and
 #                      the flatten path — recovery for a database stranded below
 #                      the threshold with orphaned oldgen archives.
-#   --only-db <name>   restrict to the named database (repeatable; augments
-#                      GC_DOLT_COMPACT_ONLY_DBS).
+#   --only-db <name>   restrict to the named database (repeatable, a repeat is
+#                      ignored; augments GC_DOLT_COMPACT_ONLY_DBS).
 #   --dry-run          print intended actions without mutating Dolt.
 #   --skip-fetch       bypass CALL DOLT_FETCH for every database (sets
 #                      GC_DOLT_COMPACT_SKIP_FETCH=1) — opt-out for cities whose
 #                      remote is uncredentialed, where the fetch would crash the
 #                      managed dolt server. Compaction proceeds from the local
 #                      source of truth and any remote push is deferred.
+
+# disk_preflight grants pending-GC recovery under critical disk only to a
+# selection made entirely with --only-db, so keep the scope the environment (or
+# an order override) set before the flags below augment it.
+only_dbs_env_input="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+
+# select_only_db NAME appends one --only-db name to GC_DOLT_COMPACT_ONLY_DBS. A
+# repeated name is ignored, so one database selected twice is still a
+# single-database selection.
+select_only_db() {
+  if [ -z "$1" ]; then
+    printf 'compact: --only-db requires a database name\n' >&2
+    exit 2
+  fi
+  case ",${GC_DOLT_COMPACT_ONLY_DBS:-}," in
+    *,"$1",*)
+      ;;
+    ,,)
+      GC_DOLT_COMPACT_ONLY_DBS="$1"
+      ;;
+    *)
+      GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},$1"
+      ;;
+  esac
+}
+
 gc_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -198,24 +240,11 @@ while [ "$#" -gt 0 ]; do
         printf 'compact: --only-db requires a database name\n' >&2
         exit 2
       fi
-      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
-        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},$2"
-      else
-        GC_DOLT_COMPACT_ONLY_DBS="$2"
-      fi
+      select_only_db "$2"
       shift 2
       ;;
     --only-db=*)
-      only_db_flag_value="${1#--only-db=}"
-      if [ -z "$only_db_flag_value" ]; then
-        printf 'compact: --only-db requires a database name\n' >&2
-        exit 2
-      fi
-      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
-        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},${only_db_flag_value}"
-      else
-        GC_DOLT_COMPACT_ONLY_DBS="${only_db_flag_value}"
-      fi
+      select_only_db "${1#--only-db=}"
       shift
       ;;
     --dry-run)
@@ -342,11 +371,19 @@ host="${GC_DOLT_HOST:-127.0.0.1}"
 threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
+live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
+live_probe_delay="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
 pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
 compact_renotify_backstop_secs="${GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS:-86400}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+pending_gc_recovery_only=0
+disk_critical=0
+disk_critical_reason=""
+disk_held_scopes=""
+compact_gc_ran=0
+recovery_marker_gone_hold="pending-GC marker disappeared, recovery-only run held other work"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
@@ -422,6 +459,39 @@ case "$push_timeout" in
     exit 2
     ;;
 esac
+
+# live_probe_setting NAME VALUE MIN RULE validates a live-probe setting and
+# leaves it in live_probe_setting_value without leading zeros, so 08 reads as
+# decimal. A value with more than nine digits is refused so the retry
+# arithmetic cannot overflow.
+live_probe_setting() {
+  live_probe_setting_value=$(printf '%s' "$2" | sed 's/^0*//')
+  case "$2" in
+    ''|*[!0-9]*) live_probe_setting_value=invalid ;;
+  esac
+  [ -n "$live_probe_setting_value" ] || live_probe_setting_value=0
+  if [ "$live_probe_setting_value" = invalid ] || [ "${#live_probe_setting_value}" -gt 9 ] ||
+    [ "$live_probe_setting_value" -lt "$3" ]; then
+    printf 'compact: invalid %s=%s (%s)\n' "$1" "$2" "$4" >&2
+    exit 2
+  fi
+}
+
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS "$live_probe_attempts" 1 "must be a positive integer"
+live_probe_attempts="$live_probe_setting_value"
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS "$live_probe_delay" 0 "must be a non-negative integer"
+live_probe_delay="$live_probe_setting_value"
+
+# The live-database probe is a single cheap SELECT, so it gets at most 30s even
+# when the per-call ceiling is the GC-sized default. The comparison runs on the
+# value without leading zeros and only when it has at most two digits, so a long
+# call timeout can never overflow the shell's arithmetic.
+live_probe_timeout=30
+_live_probe_call_timeout=$(printf '%s' "$call_timeout" | sed 's/^0*//')
+if [ -n "$_live_probe_call_timeout" ] && [ "${#_live_probe_call_timeout}" -le 2 ] &&
+  [ "$_live_probe_call_timeout" -lt 30 ]; then
+  live_probe_timeout="$_live_probe_call_timeout"
+fi
 
 case "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" in
   ''|*[!0-9]*|0)
@@ -652,11 +722,211 @@ emit_database_name() {
   printf '%s\n' "$db"
 }
 
+# Scope endpoints. Discovery collects a database name from every scope's
+# metadata.json, but this run compacts exactly one server: $host:$GC_DOLT_PORT.
+# A rig pinned to another Dolt endpoint (`gc rig set-endpoint --external` or
+# --self, [[rigs]] dolt_host/dolt_port, or bd's own binding to a remote host)
+# keeps its database there, not here. Asking this server for it fails with
+# Error 1049, and a same-named database this server does hold is not that
+# rig's store. Such scopes are skipped, as a non-local GC_DOLT_HOST skips the
+# whole run: gc never compacts a server it does not manage. The test below is
+# compact's own approximation of the endpoint policy that `gc dolt cleanup`
+# (rigSharesResolvedDoltServer in cmd/gc) and
+# contract.ResolveDoltConnectionTarget apply, not the same rule;
+# scope_pinned_endpoint lists where it differs. See gascity#7994.
+
+# compact_unknown_endpoint stands in for the endpoint of a scope whose
+# config.yaml cannot be read.
+compact_unknown_endpoint='<unknown>'
+
+# compact_same_dolt_host A B — succeed when A and B name the same Dolt host:
+# both loopback or unspecified spellings, or equal ignoring case.
+compact_same_dolt_host() {
+  if compact_dolt_host_is_local "$1" && compact_dolt_host_is_local "$2"; then
+    return 0
+  fi
+  [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ]
+}
+
+# scope_pinned_endpoint META — print the endpoint of the Dolt server that the
+# scope owning META is pinned to, when that server is not this run's target.
+# Print nothing when the scope follows the city endpoint. The evidence:
+#   1. gc's pin, gc.endpoint_origin=explicit in config.yaml: its dolt.socket,
+#      or dolt.host (default 127.0.0.1) and dolt.port. The pin names this
+#      target only when the port matches and the host is the same.
+#   2. No gc.endpoint_origin, so gc never claimed the scope: a legacy
+#      config.yaml dolt.socket or dolt.host, else bd's dolt_server_host
+#      binding in metadata.json. A loopback host follows the city on any port,
+#      since it may be a stale copy of gc's own server. Any other host counts
+#      unless it is the target's host with the target's port or no port.
+# A socket always counts: this run reaches its target over TCP and cannot
+# tell which server owns a socket. Every other origin follows the city
+# endpoint, and so does the city's scope.
+# A config.yaml that cannot be read leaves the endpoint unknown: warn and
+# print $compact_unknown_endpoint, so the scope is skipped like a pinned one
+# rather than risk compacting a same-named copy, and set -e does not end the
+# whole run on one rig's file.
+#
+# The Go side draws these lines differently. `gc dolt cleanup` compares only
+# the resolved port, where this also compares hosts. The resolver treats a
+# loopback legacy host on another port as an explicit pin and honors bd's
+# binding to one, where this lets both follow. It lets a legacy socket that
+# mirrors a city_canonical city's own socket follow the city, where this
+# skips every socket. It also reads dolt_mode and sends a proxied-server
+# scope to the server bd's sidecar names; compact reads neither, so such a
+# scope follows the city here unless it carries a pin (help.md lists it among
+# the shapes compact does not yet recognize). bindingNamesForeignServer
+# ignores a bd binding's port, where this also skips the target's host on
+# another port.
+scope_pinned_endpoint() {
+  _spe_scope=$(dirname "$(dirname "$1")")
+  [ "$_spe_scope" = "$GC_CITY_PATH" ] && return 0
+  _spe_cfg="$(dirname "$1")/config.yaml"
+  if ! _spe_origin=$(beads_config_value "$_spe_cfg" gc.endpoint_origin); then
+    printf 'compact: scope=%s WARN: cannot read %s, so its Dolt endpoint is unknown\n' \
+      "$_spe_scope" "$_spe_cfg" >&2
+    printf '%s\n' "$compact_unknown_endpoint"
+    return 0
+  fi
+  case "$_spe_origin" in
+    explicit|'') ;;
+    *) return 0 ;;
+  esac
+  _spe_socket=$(beads_config_value "$_spe_cfg" dolt.socket)
+  if [ -n "$_spe_socket" ]; then
+    printf 'unix:%s\n' "$_spe_socket"
+    return 0
+  fi
+  _spe_host=$(beads_config_value "$_spe_cfg" dolt.host)
+  _spe_port=$(beads_config_value "$_spe_cfg" dolt.port)
+  if [ "$_spe_origin" = explicit ]; then
+    [ -n "$_spe_host" ] || _spe_host="127.0.0.1"
+    if [ "$_spe_port" = "$GC_DOLT_PORT" ] && compact_same_dolt_host "$_spe_host" "$host"; then
+      return 0
+    fi
+  else
+    if [ -z "$_spe_host" ]; then
+      _spe_host=$(read_runtime_state_string "$1" dolt_server_host)
+      _spe_port=$(read_runtime_state_number "$1" dolt_server_port)
+    fi
+    [ -n "$_spe_host" ] || return 0
+    compact_dolt_host_is_local "$_spe_host" && return 0
+    if compact_same_dolt_host "$_spe_host" "$host"; then
+      case "$_spe_port" in
+        ''|"$GC_DOLT_PORT") return 0 ;;
+      esac
+    fi
+  fi
+  printf '%s:%s\n' "$_spe_host" "${_spe_port:-<unset>}"
+  return 0
+}
+
+# compact_endpoint_doubt ENDPOINT — print why ENDPOINT, a pinned endpoint as
+# scope_pinned_endpoint prints it, may still lead to this run's target: a
+# socket may be this server's, and another port on this run's host may be a
+# stale record of it. Print nothing when ENDPOINT names another host.
+compact_endpoint_doubt() {
+  case "$1" in
+    unix:*)
+      printf 'a Unix socket that may belong to this server\n'
+      return 0
+      ;;
+  esac
+  if compact_same_dolt_host "${1%:*}" "$host"; then
+    printf 'another port on this host and may be stale\n'
+  fi
+  return 0
+}
+
+# emit_scope_database_name META DB — emit DB unless the scope owning META is
+# pinned to another Dolt endpoint or its endpoint is unknown. Such a scope is
+# logged and its claim on the name recorded, so the server-side passes can
+# tell its same-named copy apart from a database this server owns.
+emit_scope_database_name() {
+  _esd_endpoint=$(scope_pinned_endpoint "$1")
+  if [ -z "$_esd_endpoint" ]; then
+    if valid_database_name "$2"; then
+      case "$compact_target_dbs" in
+        *" $2 "*) ;;
+        *) compact_target_dbs="$compact_target_dbs$2 " ;;
+      esac
+    fi
+    emit_database_name "$2"
+    return 0
+  fi
+  _esd_scope=$(dirname "$(dirname "$1")")
+  if [ "$_esd_endpoint" = "$compact_unknown_endpoint" ]; then
+    printf 'compact: db=%s scope=%s has an unknown Dolt endpoint, which may not be this compaction target %s:%s — skip\n' \
+      "$2" "$_esd_scope" "$host" "$GC_DOLT_PORT" >&2
+  else
+    printf 'compact: db=%s scope=%s is pinned to Dolt endpoint %s, not this compaction target %s:%s — skip\n' \
+      "$2" "$_esd_scope" "$_esd_endpoint" "$host" "$GC_DOLT_PORT" >&2
+  fi
+  valid_database_name "$2" || return 0
+  compact_pinned_dbs="$compact_pinned_dbs$2$compact_tab$_esd_scope$compact_tab$_esd_endpoint
+"
+}
+
+# emit_server_database_name DB [PATH] — emit a database this server holds (a
+# data-dir entry at PATH) or one named by --only-db, unless only pinned or
+# unknown-endpoint scopes claim its name. Then it is not, or may not be, their
+# store: warn and skip it. A scope pinned to a socket, or to another port on
+# this host, may still keep its live store here: the socket may be this
+# server's, and the port may be stale, as bd's binding is once gc's server
+# restarts on a new one. Then the warning says to check before dropping the
+# database rather than calling it a copy.
+emit_server_database_name() {
+  case "$compact_target_dbs" in
+    *" $1 "*)
+      emit_database_name "$1"
+      return 0
+      ;;
+  esac
+  _esn_claim=$(printf '%s' "$compact_pinned_dbs" | awk -F '\t' -v db="$1" '$1 == db { print $2 "\t" $3; exit }')
+  if [ -z "$_esn_claim" ]; then
+    emit_database_name "$1"
+    return 0
+  fi
+  _esn_scope=${_esn_claim%%"$compact_tab"*}
+  _esn_endpoint=${_esn_claim#*"$compact_tab"}
+  if [ "$_esn_endpoint" = "$compact_unknown_endpoint" ]; then
+    if [ -n "${2:-}" ]; then
+      printf 'compact: db=%s WARN: %s on this server may not be the store of scope=%s, whose Dolt endpoint is unknown — skip until its config.yaml can be read\n' \
+        "$1" "$2" "$_esn_scope" >&2
+    else
+      printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, whose Dolt endpoint is unknown — skip until its config.yaml can be read\n' \
+        "$1" "$_esn_scope" >&2
+    fi
+    return 0
+  fi
+  _esn_doubt=$(compact_endpoint_doubt "$_esn_endpoint")
+  if [ -n "$_esn_doubt" ]; then
+    if [ -n "${2:-}" ]; then
+      printf 'compact: db=%s WARN: %s on this server may still be the live store of scope=%s, whose Dolt endpoint %s is %s — skip; check which server the scope uses before you drop it\n' \
+        "$1" "$2" "$_esn_scope" "$_esn_endpoint" "$_esn_doubt" >&2
+    else
+      printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, whose Dolt endpoint %s is %s; this server, %s:%s, may still hold its live store — skip; check which server the scope uses first\n' \
+        "$1" "$_esn_scope" "$_esn_endpoint" "$_esn_doubt" "$host" "$GC_DOLT_PORT" >&2
+    fi
+    return 0
+  fi
+  if [ -n "${2:-}" ]; then
+    printf 'compact: db=%s WARN: %s on this server is not the store of scope=%s, which is pinned to Dolt endpoint %s — skip; drop or archive the copy if it is stale\n' \
+      "$1" "$2" "$_esn_scope" "$_esn_endpoint" >&2
+  else
+    printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, which is pinned to Dolt endpoint %s; gc compacts only %s:%s — skip\n' \
+      "$1" "$_esn_scope" "$_esn_endpoint" "$host" "$GC_DOLT_PORT" >&2
+  fi
+}
+
 discover_database_names() {
+  compact_target_dbs=" "
+  compact_pinned_dbs=""
+  compact_tab=$(printf '\t')
   while IFS= read -r meta; do
     [ -n "$meta" ] || continue
     db=$(metadata_db "$meta")
-    emit_database_name "$db"
+    emit_scope_database_name "$meta" "$db"
   done < "$_meta_tmp"
 
   if [ -d "$DOLT_DATA_DIR" ]; then
@@ -665,7 +935,7 @@ discover_database_names() {
       db=${d%/}
       db=${db##*/}
       is_system_database "$db" && continue
-      emit_database_name "$db"
+      emit_server_database_name "$db" "${d%/}"
     done
   fi
 
@@ -673,7 +943,7 @@ discover_database_names() {
     printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
       db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       [ -n "$db" ] || continue
-      emit_database_name "$db"
+      emit_server_database_name "$db"
     done
   fi
 }
@@ -684,12 +954,18 @@ discover_database_names() {
 dolt_query() {
   db="$1"
   query="$2"
+  dolt_query_bounded "$call_timeout" "$db" "$query"
+}
+
+# dolt_query_bounded TIMEOUT DB QUERY runs QUERY like dolt_query under its own
+# per-call TIMEOUT, without touching the caller's db/query globals.
+dolt_query_bounded() {
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$call_timeout" \
+  run_bounded "$1" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
-    --use-db "$db" \
-    sql -r tabular -q "$query"
+    --use-db "$2" \
+    sql -r tabular -q "$3"
 }
 
 emit_error_file() {
@@ -1652,7 +1928,7 @@ write_compact_marker() {
     printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
     return 1
   fi
-  tmp=$(mktemp "$dir/$db.tmp.XXXXXX") || {
+  tmp=$(mktemp "$dir/.$db.tmp.XXXXXX") || {
     umask "$old_umask"
     printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
     return 1
@@ -1906,7 +2182,7 @@ ensure_compact_marker_writable() {
     printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
     return 1
   fi
-  probe=$(mktemp "$dir/$db.probe.XXXXXX") || {
+  probe=$(mktemp "$dir/.$db.probe.XXXXXX") || {
     umask "$old_umask"
     printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
     return 1
@@ -2000,7 +2276,7 @@ print_existing_quarantine_marker() {
   reason="$3"
   created_at="$4"
 
-  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
     "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
@@ -2008,7 +2284,17 @@ print_existing_quarantine_marker() {
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_pre_reset_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_failed_step)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_failure)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_probe_failure)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_data_dir_entry_after)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_pre_compaction_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
+  if [ "$reason" = "$live_gate_quarantine_reason" ]; then
+    printf 'compact: db=%s quarantine recovery: restore the database from a backup only if %s is gone; if it is still on disk, restart the Dolt server (gc dolt restart) instead. Confirm the server serves it with gc dolt sql -q "USE %s; SELECT HASHOF('"'"'HEAD'"'"')" (compare that HEAD with the pre-compaction HEAD=%s) and gc bd list --rig <rig> --limit 1, then remove %s and any pending-GC or pending-push marker that predates the restore, and rerun gc dolt compact --dry-run --only-db %s; see "Compact Quarantine Reasons" in docs/troubleshooting/dolt-bloat-recovery.md\n' \
+      "$db" "$(live_gate_data_dir_entry "$db")" "$db" "$(compact_marker_value "$quarantine_dir" "$db" live_gate_pre_compaction_head || true)" "$marker" "$db" >&2
+    return 0
+  fi
   printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
     "$db" "$marker" "$db" >&2
 }
@@ -2172,26 +2458,294 @@ clear_compact_marker() {
   rm -f "$(compact_marker_path "$dir" "$db")"
 }
 
+# explain_full_gc_cancellation DB ERR_FILE ELAPSED
+#   One extra stderr line after a failed
+#   CALL DOLT_GC('--full', '--archive-level=0') that ended the
+#   way a sql-server read deadline ends a statement. The sql-server reports a
+#   statement that outran listener.read_timeout_millis as `connection was
+#   closed` or `row read wait bigger than connection timeout` (the pair
+#   mol-dog-backup.sh classifies for `dolt backup sync`); DOLT_GC also surfaces
+#   the kill as `context canceled` through its own context, so this set is a
+#   superset of that one. DOLT_GC produces no rows until it finishes, so the
+#   timeout caps the whole reclaim.
+#
+#   The signature alone cannot tell the deadline from another cancellation (a
+#   server stop or restart, a dropped connection). ELAPSED is the statement's
+#   wall time, measured from before it started, so a deadline kill always has
+#   ELAPSED >= ceiling - 1s; the ceiling is blamed only when ELAPSED reached it.
+#   Both managed config writers render the file right before they launch the
+#   server, so it holds the running server's value. GC_DOLT_READ_TIMEOUT_MILLIS
+#   in this command's env is not read: it carries city.toml's current value,
+#   which an edit makes differ from the running server's until gc dolt restart.
+#   With no readable config the line is hedged. An explicit external-local
+#   target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and
+#   gets a target-neutral remedy.
+explain_full_gc_cancellation() {
+  db="$1"
+  err_file="$2"
+  gc_elapsed="$3"
+  [ -s "$err_file" ] || return 0
+  gc_stderr=$(tr '\n' ' ' <"$err_file")
+  case "$gc_stderr" in
+    *"connection was closed"*|*"row read wait bigger than connection timeout"*|*"context canceled"*) ;;
+    *) return 0 ;;
+  esac
+  if [ "$explicit_external_local_dolt" = "1" ]; then
+    gc_server="sql-server"
+    gc_server_config="${GC_DOLT_CONFIG_FILE:-}"
+    gc_remedy="raise it in that sql-server's own config, then restart the server"
+  else
+    gc_server="managed sql-server"
+    gc_server_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
+    gc_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
+  fi
+  gc_ceiling=""
+  if [ -n "$gc_server_config" ] && [ -r "$gc_server_config" ]; then
+    gc_ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$gc_server_config" | sed -n '1p')
+  fi
+  if [ -z "$gc_ceiling" ]; then
+    printf 'compact: db=%s DOLT_GC was canceled after %ss, most likely by the %s at its listener.read_timeout_millis ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim; if the sql-server log shows an i/o timeout on that connection, %s\n' \
+      "$db" "$gc_elapsed" "$gc_server" "$gc_remedy" >&2
+    return 0
+  fi
+  if [ "$(( (gc_elapsed + 1) * 1000 ))" -lt "$gc_ceiling" ]; then
+    printf 'compact: db=%s DOLT_GC was canceled after %ss, before the listener.read_timeout_millis=%s ceiling in %s, so that timeout did not end it — look in the sql-server log for a stop, restart, or dropped connection\n' \
+      "$db" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" >&2
+    return 0
+  fi
+  printf 'compact: db=%s the %s ended DOLT_GC after %ss at its listener.read_timeout_millis=%s ceiling in %s — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the next full GC hits the same ceiling; %s\n' \
+    "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
+}
+
+# Live-database gate. A flatten or DOLT_GC rewrites a live database's storage
+# under the running sql-server, and a rewrite that goes wrong can leave the
+# database out of the data dir while the statement itself reports success. Every
+# per-database pass that reaches a storage rewrite arms the gate immediately
+# before its first rewrite and checks it after each one: a database whose
+# <data_dir>/<db>/.dolt directory was present before the pass must still be
+# present, and the server must still serve the database with a resolvable HEAD.
+# A failed check quarantines the database, sets live_gate_failed, and makes the
+# pass return 1 before any further statement touches the database.
+#
+# The gate state is shared shell globals (POSIX sh has no locals), so every
+# helper uses an _lg_ prefix and must run in the current shell, never in a
+# pipeline or command substitution.
+live_gate_quarantine_reason="live database unavailable after compaction"
+live_probe_query="SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"
+
+# live_gate_reset clears the gate state at the start of each database pass.
+live_gate_reset() {
+  live_gate_armed=0
+  live_gate_failed=0
+  live_gate_failed_step=""
+  live_gate_steps=""
+  live_gate_dir_before=""
+  live_gate_pre_head=""
+  live_probe_head=""
+  live_probe_failure=""
+}
+
+# live_gate_data_dir_entry DB prints the local data-dir entry the gate watches.
+live_gate_data_dir_entry() {
+  printf '%s/%s/.dolt\n' "$DOLT_DATA_DIR" "$1"
+}
+
+# live_gate_dir_state DB prints present or absent for the watched entry.
+live_gate_dir_state() {
+  if [ -d "$(live_gate_data_dir_entry "$1")" ]; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+# live_gate_probe DB asks the server which database it serves under DB and the
+# HEAD it resolves there. It returns 0 with live_probe_head set when the answer
+# names DB (case-insensitively) and a non-empty alphanumeric HEAD, and 1 with a
+# single-line live_probe_failure otherwise. The HEAD may differ from the
+# pre-rewrite HEAD: a flatten moves it on purpose.
+live_gate_probe() {
+  _lg_db="$1"
+  live_probe_head=""
+  live_probe_failure=""
+  _lg_out=$(mktemp)
+  _lg_err=$(mktemp)
+  _lg_rc=0
+  dolt_query_bounded "$live_probe_timeout" "$_lg_db" "$live_probe_query" >"$_lg_out" 2>"$_lg_err" || _lg_rc=$?
+  _lg_cell=$(awk 'NR==4 {gsub(/[| ]/, ""); print; exit}' "$_lg_out")
+  _lg_detail=$(tr '\n\r\t' '   ' < "$_lg_err" | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-300)
+  rm -f "$_lg_out" "$_lg_err"
+  if [ "$_lg_rc" -eq 124 ]; then
+    live_probe_failure="probe timed out after ${live_probe_timeout}s"
+    return 1
+  fi
+  if [ "$_lg_rc" -ne 0 ]; then
+    live_probe_failure="probe failed rc=$_lg_rc: ${_lg_detail:-no server error}"
+    return 1
+  fi
+  case "$_lg_cell" in
+    *:*) ;;
+    *)
+      live_probe_failure="probe returned no database:HEAD answer (got '$_lg_cell')"
+      return 1
+      ;;
+  esac
+  _lg_served_db="${_lg_cell%%:*}"
+  _lg_served_head="${_lg_cell#*:}"
+  if [ "$(printf '%s' "$_lg_served_db" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$_lg_db" | tr '[:upper:]' '[:lower:]')" ]; then
+    live_probe_failure="probe served database '$_lg_served_db', not '$_lg_db'"
+    return 1
+  fi
+  case "$_lg_served_head" in
+    ''|*[!0-9A-Za-z]*)
+      live_probe_failure="probe returned unresolvable HEAD '$_lg_served_head'"
+      return 1
+      ;;
+  esac
+  live_probe_head="$_lg_served_head"
+  return 0
+}
+
+# live_gate_probe_served DB runs live_gate_probe up to live_probe_attempts
+# times, waiting live_probe_delay seconds between attempts, so a server that
+# recovers from a brief stall after a rewrite is not quarantined. It logs each
+# failed attempt and a recovery, and leaves live_probe_failure set to the last
+# failure when every attempt fails.
+live_gate_probe_served() {
+  _lg_attempt=1
+  while :; do
+    if live_gate_probe "$1"; then
+      if [ "$_lg_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live probe recovered on attempt %s/%s\n' \
+          "$1" "$_lg_attempt" "$live_probe_attempts" >&2
+      fi
+      return 0
+    fi
+    printf 'compact: db=%s live probe attempt %s/%s failed: %s\n' \
+      "$1" "$_lg_attempt" "$live_probe_attempts" "$live_probe_failure" >&2
+    if [ "$_lg_attempt" -ge "$live_probe_attempts" ]; then
+      return 1
+    fi
+    sleep "$live_probe_delay"
+    _lg_attempt=$((_lg_attempt + 1))
+  done
+}
+
+# live_gate_arm DB STEP PRE_HEAD records the pre-rewrite evidence the first
+# time a pass arms the gate; later arms in the same pass keep that baseline and
+# only append STEP to the list of rewrites the pass ran. A pass whose first
+# rewrite is a GC has no preflight HEAD, so an empty PRE_HEAD makes the gate
+# probe for one. A database the server does not serve before the GC is an
+# ordinary failure: the arm returns 1, the GC never starts, and nothing is
+# quarantined.
+live_gate_arm() {
+  _lg_db="$1"
+  _lg_step="$2"
+  if [ "$live_gate_armed" = "1" ]; then
+    live_gate_steps="$live_gate_steps,$_lg_step"
+    return 0
+  fi
+  live_gate_dir_before=$(live_gate_dir_state "$_lg_db")
+  live_gate_pre_head="$3"
+  if [ -z "$live_gate_pre_head" ]; then
+    if ! live_gate_probe_served "$_lg_db"; then
+      printf 'compact: db=%s live database baseline probe failed before %s: %s — not starting the rewrite\n' \
+        "$_lg_db" "$_lg_step" "$live_probe_failure" >&2
+      return 1
+    fi
+    live_gate_pre_head="$live_probe_head"
+  fi
+  live_gate_steps="$_lg_step"
+  live_gate_armed=1
+  return 0
+}
+
+# live_gate_check DB STEP runs after the rewrite STEP, whatever its exit
+# status. It returns 0 when the database is still live and 1, after
+# quarantining it, when it is not.
+live_gate_check() {
+  _lg_db="$1"
+  _lg_step="$2"
+  _lg_entry=$(live_gate_data_dir_entry "$_lg_db")
+  _lg_dir_after=$(live_gate_dir_state "$_lg_db")
+  if [ "$live_gate_dir_before" = "present" ] && [ "$_lg_dir_after" != "present" ]; then
+    # Probe anyway so the marker records what the server says about it.
+    live_gate_probe "$_lg_db" || true
+    live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "data-dir entry $_lg_entry disappeared"
+    return 1
+  fi
+  if live_gate_probe_served "$_lg_db"; then
+    return 0
+  fi
+  live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "served-HEAD probe failed"
+  return 1
+}
+
+# live_gate_fail DB STEP ENTRY DIR_AFTER WHY records the failed gate and writes
+# the quarantine marker; write_compact_marker raises the quarantine event and
+# mail. The run aborts on live_gate_failed even when the marker cannot be
+# written, so the evidence then goes to stderr instead.
+live_gate_fail() {
+  _lg_db="$1"
+  _lg_step="$2"
+  _lg_entry="$3"
+  _lg_dir_after="$4"
+  _lg_why="$5"
+  live_gate_failed=1
+  live_gate_failed_step="$_lg_step"
+  _lg_probe_failure="${live_probe_failure:-none (served $_lg_db:$live_probe_head)}"
+  printf 'compact: db=%s live database gate failed after %s: %s (probe=%s data_dir_entry=%s before=%s after=%s pre_compaction_head=%s) — quarantining\n' \
+    "$_lg_db" "$_lg_step" "$_lg_why" "$_lg_probe_failure" "$_lg_entry" "$live_gate_dir_before" "$_lg_dir_after" "${live_gate_pre_head:-<unknown>}" >&2
+  if ! write_compact_marker "$quarantine_dir" "$_lg_db" "$live_gate_quarantine_reason" \
+    "live_gate_steps=$live_gate_steps" \
+    "live_gate_failed_step=$_lg_step" \
+    "live_gate_failure=$_lg_why" \
+    "live_gate_probe_failure=$_lg_probe_failure" \
+    "live_gate_data_dir_entry=$_lg_entry" \
+    "live_gate_data_dir_entry_before=$live_gate_dir_before" \
+    "live_gate_data_dir_entry_after=$_lg_dir_after" \
+    "live_gate_pre_compaction_head=$live_gate_pre_head" \
+    "decision=preserve_marker_manual_review_required" \
+    "clear_decision=clear_only_after_restoring_the_database_and_verifying_resolvable_head_and_healthy_bead_data"; then
+    printf 'compact: db=%s unable to write the live-database quarantine marker; the run still aborts — restore the database before compacting it again\n' \
+      "$_lg_db" >&2
+  fi
+  return 0
+}
+
+# Every GC here passes --archive-level=0: Dolt 2.3.3-2.5.1 default to
+# SimpleArchive, which duplicates its zstd dictionaries once an archive holds
+# more than 256, and each duplicate pins about 137 KB of C memory for the whole
+# GC, enough to OOM a large store (ga-rgwfyg4). Level 0 writes classic table
+# files instead.
 run_full_gc() {
   db="$1"
   failure_prefix="$2"
   success_prefix="$3"
   start="$4"
+  gc_step="$5"
 
-  printf 'compact: db=%s — running DOLT_GC --full...\n' "$db"
+  live_gate_arm "$db" "$gc_step" "" || return 1
+  printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
   gc_err_tmp=$(mktemp)
-  dolt_query "$db" "CALL DOLT_GC('--full')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  gc_start=$(date +%s)
+  dolt_query "$db" "CALL DOLT_GC('--full', '--archive-level=0')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
 
   elapsed=$(( $(date +%s) - start ))
+  gc_elapsed=$(( $(date +%s) - gc_start ))
   if [ "$gc_rc" -ne 0 ]; then
     printf 'compact: db=%s %s DOLT_GC failed rc=%s duration=%ss\n' \
       "$db" "$failure_prefix" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
+    explain_full_gc_cancellation "$db" "$gc_err_tmp" "$gc_elapsed"
     rm -f "$gc_err_tmp"
+    live_gate_check "$db" "$gc_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
+  compact_gc_ran=1
+  live_gate_check "$db" "$gc_step" || return 1
 
   printf 'compact: db=%s %s duration=%ss — ok\n' \
     "$db" "$success_prefix" "$elapsed"
@@ -2482,10 +3036,11 @@ defer_writer_race_after_flatten() {
 
 # --- History protection (#5958) ---------------------------------------------
 #
-# The compactor may only squash history this city grew. The boundary is the
-# Dolt tag gc-compact-base, stored IN the database: it survives runtime-state
-# wipes, travels with dolt backups, and keeps the protected history reachable
-# through DOLT_GC --full. Branch pushes never carry it.
+# The compactor may only squash history after its watermark, the Dolt tag
+# gc-compact-base. The watermark is a position, not an author: commits from any
+# writer after it are squashed. The tag is stored IN the database: it survives
+# runtime-state wipes, travels with dolt backups, and keeps the protected
+# history reachable through DOLT_GC --full. Branch pushes never carry it.
 compact_base_tag="gc-compact-base"
 compact_flatten_message="compaction: flatten history"
 
@@ -2612,23 +3167,28 @@ resolve_compact_base() {
   return 0
 }
 
-# run_bare_gc runs a working-set CALL DOLT_GC(): it reclaims journal and
-# working-set garbage without touching history.
+# run_bare_gc runs a working-set CALL DOLT_GC('--archive-level=0'): it reclaims
+# journal and working-set garbage without touching history.
 run_bare_gc() {
   db="$1"
+  gc_step="$2"
+  live_gate_arm "$db" "$gc_step" "" || return 1
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
-  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  dolt_query "$db" "CALL DOLT_GC('--archive-level=0')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
   elapsed=$(( $(date +%s) - start ))
   if [ "$gc_rc" -ne 0 ]; then
     printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
       "$db" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
+    live_gate_check "$db" "$gc_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
+  compact_gc_ran=1
+  live_gate_check "$db" "$gc_step" || return 1
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
   return 0
@@ -2671,7 +3231,11 @@ compact_shared_history_database() {
   printf 'compact: db=%s remote=%s remotes=%s — history may be shared with other clones; skipping flatten and remote push (set GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during a compaction window announced to every clone)\n' \
     "$db" "$guard_remote" "$guard_remote_count"
 
-  if has_compact_marker "$pending_gc_dir" "$db"; then
+  if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ] && has_compact_marker "$pending_gc_dir" "$db"; then
+    printf 'compact: db=%s pending_gc=present — skipping full GC under critical disk; working-set GC only, marker kept; select it alone with --only-db %s to recover\n' \
+      "$db" "$db" >&2
+    record_disk_hold "$db" "pending-GC full GC held below the disk floor, working-set GC only"
+  elif has_compact_marker "$pending_gc_dir" "$db"; then
     guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
     guard_pending_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
     # The marker is the operator's only record of the pre-flatten HEAD, and
@@ -2684,7 +3248,7 @@ compact_shared_history_database() {
     fi
     printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full locally; deferred push dropped by shared-history guard\n' "$db"
     start=$(date +%s)
-    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start" "shared-history pending-GC retry"; then
       return 1
     fi
     clear_compact_marker "$pending_gc_dir" "$db"
@@ -2708,7 +3272,7 @@ compact_shared_history_database() {
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
   fi
-  run_bare_gc "$db"
+  run_bare_gc "$db" "shared-history bare GC"
 }
 
 flatten_database() {
@@ -2744,6 +3308,12 @@ flatten_database() {
     esac
   fi
 
+  if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
+    printf 'compact: db=%s pending_gc marker disappeared — skipping under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
+    return 0
+  fi
+
   if has_compact_marker "$quarantine_dir" "$db"; then
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
@@ -2776,6 +3346,12 @@ flatten_database() {
     esac
   fi
 
+  if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
+    printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
+    return 0
+  fi
+
   # Shared-history guard (#5958; remote guard adapted from #6052). Any
   # configured remote means other clones may share this history, and a flatten
   # would have to be force-pushed over it. Checked independently of remote
@@ -2799,6 +3375,18 @@ flatten_database() {
       compact_shared_history_database "$db" "$guard_remote_count" "$guard_remote"
       return $?
     fi
+  fi
+
+  if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ]; then
+    if has_compact_marker "$pending_gc_dir" "$db"; then
+      printf 'compact: db=%s pending_gc=present — skipping full GC under critical disk, marker kept; select it alone with --only-db %s to recover\n' \
+        "$db" "$db" >&2
+      record_disk_hold "$db" "pending-GC full GC held below the disk floor"
+    else
+      printf 'compact: db=%s skipping history rewrite under critical disk\n' "$db" >&2
+      record_disk_hold "$db" "compaction held below the disk floor"
+    fi
+    return 0
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
@@ -2866,7 +3454,7 @@ flatten_database() {
     fi
     printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full\n' "$db"
     start=$(date +%s)
-    if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+    if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start" "pending-GC retry"; then
       push_rc=0
       push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch" || push_rc=$?
       if [ "$push_rc" -eq 0 ] || { [ -n "$pending_remote" ] && has_compact_marker "$pending_push_dir" "$db"; }; then
@@ -2875,6 +3463,12 @@ flatten_database() {
       return "$push_rc"
     fi
     return 1
+  fi
+
+  if [ "$pending_gc_recovery_only" = "1" ]; then
+    printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
+    return 0
   fi
 
   if has_compact_marker "$pending_push_dir" "$db" && no_sync_database "$db"; then
@@ -2984,7 +3578,7 @@ flatten_database() {
   fi
 
   # Provenance watermark: stamped on first sight at any commit count, so the
-  # threshold below only ever counts history this city grew after the stamp.
+  # threshold below only ever counts history written after the stamp.
   resolve_compact_base "$db" "$root" || return 1
   flatten_base="$compact_base"
   if [ "$flatten_base" = "$root" ]; then
@@ -3191,7 +3785,7 @@ flatten_database() {
     return 1
   fi
 
-  table_count=$(wc -l < "$preflight_tmp")
+  table_count=$(($(wc -l < "$preflight_tmp")))
   printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
     "$db" "$count" "$flatten_target_detail" "$table_count"
 
@@ -3206,6 +3800,8 @@ flatten_database() {
   # probe leaves head_before_reset empty, which the writer-race gate treats as
   # "unproven" and therefore falls back to the safe quarantine behavior.
   head_before_reset=$(head_commit "$db" || true)
+
+  live_gate_arm "$db" "flatten" "$head"
 
   # Soft-reset to the watermark + commit-everything is the flatten
   # transaction. Both run in a single dolt sql invocation so the session keeps
@@ -3225,9 +3821,14 @@ flatten_database() {
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
     restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
+    live_gate_check "$db" "flatten" || return 1
     return 1
   fi
   rm -f "$reset_err_tmp"
+  if ! live_gate_check "$db" "flatten"; then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
 
   flatten_head=$(head_commit "$db" || true)
   if [ -z "$flatten_head" ]; then
@@ -3564,12 +4165,12 @@ flatten_database() {
 
   after_count=$(commit_count "$db" || true)
 
-  # CALL DOLT_GC() alone only reclaims working-set chunks — the bulk of
-  # the orphaned history lives in noms/oldgen/ archives that require
-  # --full to rewrite. Since flatten always orphans the entire prior
+  # A bare CALL DOLT_GC('--archive-level=0') only reclaims working-set chunks —
+  # the bulk of the orphaned history lives in noms/oldgen/ archives that
+  # require --full to rewrite. Since flatten always orphans the entire prior
   # commit graph, --full is always appropriate here.
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
-    "commits=$count->${after_count:-?}" "$start"; then
+    "commits=$count->${after_count:-?}" "$start" "post-flatten full GC"; then
     clear_compact_marker "$pending_gc_dir" "$db"
     primary_push_rc=0
     push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch" || primary_push_rc=$?
@@ -3577,6 +4178,9 @@ flatten_database() {
       reconcile_backup_remotes "$db" "$remote" "$compacted_from_head" "$local_branch" "$remote_branch" || true
     fi
     return "$primary_push_rc"
+  fi
+  if [ "$live_gate_failed" = "1" ]; then
+    return 1
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \
@@ -3610,17 +4214,19 @@ bare_gc_database() {
     return 0
   fi
 
-  run_bare_gc "$db"
+  run_bare_gc "$db" "bare GC"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full
-# CALL DOLT_GC('--full'), with no flatten and no commit-count threshold. This is
+# CALL DOLT_GC('--full', '--archive-level=0'), with no flatten and no
+# commit-count threshold. This is
 # the operator-invoked reclaim path (--gc-only) for a database stranded below
 # the flatten threshold with orphaned oldgen archives: a prior flatten dropped
 # its commit count below the threshold but the post-flatten full GC was
 # deferred, quarantined-then-cleared, or otherwise never ran, so the scheduled
 # threshold-gated compactor skips it forever and never reclaims the orphaned
-# chunks. Unlike bare-GC (working-set CALL DOLT_GC()), --full rewrites oldgen so
+# chunks. Unlike bare-GC (working-set CALL DOLT_GC('--archive-level=0')),
+# --full rewrites oldgen so
 # the orphaned history is actually reclaimed (see
 # docs/troubleshooting/dolt-bloat-recovery.md). Honors GC_DOLT_COMPACT_ONLY_DBS,
 # GC_DOLT_COMPACT_DRY_RUN, and the per-db quarantine marker; does NOT write
@@ -3651,7 +4257,7 @@ gc_only_database() {
   fi
 
   start=$(date +%s)
-  run_full_gc "$db" "gc-only reclaim" "gc-only reclaim" "$start"
+  run_full_gc "$db" "gc-only reclaim" "gc-only reclaim" "$start" "gc-only reclaim"
 }
 
 # shellcheck disable=SC2317
@@ -3740,6 +4346,116 @@ clear_stale_lock_dir() {
   rmdir "$lock_dir" 2>/dev/null
 }
 
+decimal_less_than() {
+  awk -v left="$1" -v right="$2" 'BEGIN {
+    while (length(left) > 1 && substr(left, 1, 1) == "0") left = substr(left, 2)
+    while (length(right) > 1 && substr(right, 1, 1) == "0") right = substr(right, 2)
+    if (length(left) < length(right)) exit 0
+    if (length(left) > length(right)) exit 1
+    exit !("x" left < "x" right)
+  }'
+}
+
+disk_preflight() {
+  _dp_min_free="${GC_DOLT_COMPACT_MIN_FREE_BYTES:-5368709120}"
+  case "$_dp_min_free" in
+    0)
+      return 0
+      ;;
+    ''|*[!0-9]*)
+      printf 'compact: GC_DOLT_COMPACT_MIN_FREE_BYTES=%s is invalid — must be a non-negative integer\n' \
+        "$_dp_min_free" >&2
+      exit 2
+      ;;
+  esac
+
+  if [ "$explicit_external_local_dolt" = "1" ]; then
+    return 0
+  fi
+
+  _dp_data_dir="$DOLT_DATA_DIR"
+  case "$_dp_data_dir" in
+    -*) _dp_data_dir="./$_dp_data_dir" ;;
+  esac
+  if ! _dp_df_out=$(df -Pk "$_dp_data_dir" 2>/dev/null); then
+    printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
+    return 1
+  fi
+  _dp_available_kb=$(printf '%s\n' "$_dp_df_out" | awk 'NR==2{
+    for (i = 4; i <= NF; i++) {
+      if ($i ~ /^[0-9]+%$/ && $(i-1) ~ /^-?[0-9]+$/ && $(i-2) ~ /^[0-9]+$/ && $(i-3) ~ /^[0-9]+$/) {
+        print $(i-1)
+        exit
+      }
+    }
+  }')
+  case "${_dp_available_kb:-}" in
+    -[0-9]*)
+      case "${_dp_available_kb#-}" in
+        *[!0-9]*) ;;
+        *) _dp_available_kb=0 ;;
+      esac
+      ;;
+  esac
+  case "${_dp_available_kb:-}" in
+    ''|*[!0-9]*)
+      printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
+      return 1
+      ;;
+  esac
+  _dp_available_bytes=$(awk -v available_kb="$_dp_available_kb" 'BEGIN { printf "%.0f", available_kb * 1024 }')
+  if decimal_less_than "$_dp_available_bytes" "$_dp_min_free"; then
+    disk_critical=1
+    disk_critical_reason="free disk below GC_DOLT_COMPACT_MIN_FREE_BYTES: free_bytes=$_dp_available_bytes floor=$_dp_min_free"
+    printf 'compact: disk CRITICAL: free_bytes=%s floor=%s DOLT_DATA_DIR=%s\n' \
+      "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
+    case "$only_dbs" in
+      ''|*,*)
+        ;;
+      *)
+        if valid_database_name "$only_dbs" && has_compact_marker "$pending_gc_dir" "$only_dbs"; then
+          if [ -n "$only_dbs_env_input" ]; then
+            printf 'compact: db=%s pending_gc=present — GC_DOLT_COMPACT_ONLY_DBS does not grant recovery under critical disk; run gc dolt compact --only-db %s without it set\n' \
+              "$only_dbs" "$only_dbs" >&2
+            return 0
+          fi
+          pending_gc_recovery_only=1
+          printf 'compact: db=%s pending_gc=present — proceeding with recovery only under critical disk\n' "$only_dbs" >&2
+          return 0
+        fi
+        ;;
+    esac
+    return 0
+  fi
+}
+
+# record_disk_hold DB REASON
+#   Record a database whose work the critical-disk floor held, for the order
+#   outcome declaration. Database names pass valid_database_name and reasons
+#   are fixed text, so neither needs JSON escaping.
+record_disk_hold() {
+  disk_held_scopes="${disk_held_scopes:+$disk_held_scopes,}$(printf '{"scope":"%s","reason":"%s"}' "$1" "$2")"
+}
+
+# write_order_outcome declares critical-disk holds to the order runner through
+# GC_ORDER_OUTCOME_FILE (contract: core assets/scripts/order_outcome.sh):
+# skipped when no GC ran, partial when a working-set GC still ran.
+# A run that held nothing writes nothing and records as a plain completion.
+write_order_outcome() {
+  if [ -z "${GC_ORDER_OUTCOME_FILE:-}" ] || [ -z "$disk_held_scopes" ]; then
+    return 0
+  fi
+  outcome_kind=skipped
+  if [ "$compact_gc_ran" = "1" ]; then
+    outcome_kind=partial
+  fi
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$disk_critical_reason" "$disk_held_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    printf 'compact: unable to write order outcome declaration to %s\n' "$GC_ORDER_OUTCOME_FILE" >&2
+    return 1
+  fi
+}
+
 acquire_lock() {
   if command -v flock >/dev/null 2>&1; then
     old_umask=$(umask)
@@ -3789,6 +4505,65 @@ acquire_lock() {
   exit 1
 }
 
+# compact_db_selected DB succeeds when GC_DOLT_COMPACT_ONLY_DBS (with --only-db)
+# is unset or names DB, the same rule every per-database pass applies.
+compact_db_selected() {
+  [ -n "$only_dbs" ] || return 0
+  case ",$only_dbs," in
+    *,"$1",*) return 0 ;;
+  esac
+  return 1
+}
+
+# compact_unreached_databases INDEX prints, comma-separated, the selected
+# databases after line INDEX of the unique database list, or none.
+compact_unreached_databases() {
+  _cud_list=""
+  _cud_line=0
+  while IFS= read -r _cud_db; do
+    _cud_line=$((_cud_line + 1))
+    [ "$_cud_line" -gt "$1" ] || continue
+    [ -n "$_cud_db" ] || continue
+    compact_db_selected "$_cud_db" || continue
+    _cud_list="${_cud_list:+$_cud_list,}$_cud_db"
+  done < "$_unique_db_tmp"
+  printf '%s\n' "${_cud_list:-none}"
+}
+
+# compact_each_database PASS FAILURE_LABEL runs the per-database PASS on every
+# discovered database. An ordinary failure is counted and the run moves on to
+# the next database; the run exits 1 after the last one if any failed. A failed
+# live-database gate ends the run at once: no further database is touched, and
+# the diagnostic names the step that failed and the selected databases the run
+# never reached.
+compact_each_database() {
+  _ced_pass="$1"
+  _ced_label="$2"
+  failed_count=0
+  _ced_line=0
+  while IFS= read -r _ced_db; do
+    _ced_line=$((_ced_line + 1))
+    [ -n "$_ced_db" ] || continue
+    live_gate_reset
+    _ced_rc=0
+    "$_ced_pass" "$_ced_db" || _ced_rc=$?
+    if [ "$live_gate_failed" = "1" ]; then
+      printf 'compact: db=%s live database gate failed after %s — aborting the run; selected databases not reached: %s\n' \
+        "$_ced_db" "$live_gate_failed_step" "$(compact_unreached_databases "$_ced_line")" >&2
+      exit 1
+    fi
+    if [ "$_ced_rc" -ne 0 ]; then
+      failed_count=$((failed_count + 1))
+    fi
+  done < "$_unique_db_tmp"
+
+  if [ "$failed_count" -gt 0 ]; then
+    printf 'compact: %s database(s) failed %s\n' "$failed_count" "$_ced_label" >&2
+    exit 1
+  fi
+  return 0
+}
+
 main() {
   lock_cleanup=""
   flock_acquired=""
@@ -3803,6 +4578,10 @@ main() {
     printf 'compact: another compaction already running for %s:%s — skipping\n' \
       "$host" "$GC_DOLT_PORT"
     exit 0
+  fi
+
+  if [ "$gc_only" != "1" ] && [ "$bare_gc" != "1" ]; then
+    disk_preflight
   fi
 
   _meta_tmp=$(mktemp)
@@ -3822,48 +4601,18 @@ main() {
     printf '%s\n' "$db" >> "$_unique_db_tmp"
   done < "$_db_tmp"
 
-  failed_count=0
   if [ "$gc_only" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! gc_only_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed gc-only reclaim\n' "$failed_count" >&2
-      exit 1
-    fi
+    compact_each_database gc_only_database "gc-only reclaim"
     exit 0
   fi
 
   if [ "$bare_gc" = "1" ]; then
-    while IFS= read -r db; do
-      [ -n "$db" ] || continue
-      if ! bare_gc_database "$db"; then
-        failed_count=$((failed_count + 1))
-      fi
-    done < "$_unique_db_tmp"
-
-    if [ "$failed_count" -gt 0 ]; then
-      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
-      exit 1
-    fi
+    compact_each_database bare_gc_database "bare GC"
     exit 0
   fi
 
-  while IFS= read -r db; do
-    [ -n "$db" ] || continue
-    if ! flatten_database "$db"; then
-      failed_count=$((failed_count + 1))
-    fi
-  done < "$_unique_db_tmp"
-
-  if [ "$failed_count" -gt 0 ]; then
-    printf 'compact: %s database(s) failed compaction\n' "$failed_count" >&2
-    exit 1
-  fi
+  compact_each_database flatten_database "compaction"
+  write_order_outcome || exit 1
   exit 0
 }
 

@@ -34,40 +34,44 @@ var contractCoverage = map[string]classification{
 	"Stop_MakesSessionNotRunning":    {Code: ReqLifecycleStopNotRunning},
 	"Stop_Idempotent_NotRunning":     {Code: ReqLifecycleStopIdempotent},
 	"Stop_Idempotent_AlreadyStopped": {Code: ReqLifecycleStopIdempotent},
+	"StopForCleanup_NeverStarted":    {Code: ReqLifecycleStopIdempotent},
 	"IsRunning_UnknownSession":       {Code: ReqLifecycleUnknownNotRunning},
 
-	// --- Optional error-bearing capabilities (deferred: in-process provider
-	// interfaces that the exec provider does not implement over the wire) ---
-	"ObserveLivenessWithError_StoppedIsAbsent": {Deferred: "optional capability; no error-bearing liveness op on the wire yet"},
-	"IsAttachedWithError_UnattachedSession":    {Deferred: "optional capability; no error-bearing attachment op on the wire"},
-	"IsAttachedWithError_MissingSession":       {Deferred: "optional capability; no error-bearing attachment op on the wire"},
+	// --- Optional error-bearing capabilities (in-process provider
+	// interfaces the exec provider maps onto observe.v1 and is-attached) ---
+	"ObserveLivenessWithError_StoppedIsAbsent": {Code: ReqObserveAbsentAfterStop},
+	"Start_FreshOnlyRefusesAHeldName":          {Code: ReqObserveFreshOnlyRefuses},
+	"ListRunning_AttestedAfterStartAndStop":    {Code: ReqObserveInventoryComplete},
+	"IsAttachedWithError_UnattachedSession":    {Code: ReqObserveAttachedUnattachedFalse},
+	"IsAttachedWithError_MissingSession":       {Code: ReqObserveAttachedMissingFalse},
 
-	// --- Concurrency (deferred: a cross-cutting property, ported once the
-	// single-session behaviors of each group are gated) ---
-	"Start_ConcurrentDistinctSessions":        {Deferred: "concurrency group not yet ported"},
-	"Stop_ConcurrentDistinctSessions":         {Deferred: "concurrency group not yet ported"},
-	"Interrupt_ConcurrentDistinctSessions":    {Deferred: "concurrency group not yet ported"},
-	"IsRunning_ConcurrentDistinctSessions":    {Deferred: "concurrency group not yet ported"},
-	"ProcessAlive_ConcurrentDistinctSessions": {Deferred: "concurrency group not yet ported"},
-	"ListRunning_ConcurrentDistinctPrefixes":  {Deferred: "concurrency group not yet ported"},
+	// --- Concurrency (wire-gated under observe.v1, whose rule 9 is the
+	// promise) ---
+	"Start_ConcurrentDistinctSessions":        {Code: ReqConcurrencyStart},
+	"Stop_ConcurrentDistinctSessions":         {Code: ReqConcurrencyStop},
+	"Interrupt_ConcurrentDistinctSessions":    {Deferred: "interrupt is a driving op: it ports with the signaling group, once the pack-selected carrier decides which wire op carries it"},
+	"IsRunning_ConcurrentDistinctSessions":    {Code: ReqConcurrencyIsRunning},
+	"ProcessAlive_ConcurrentDistinctSessions": {Code: ReqConcurrencyProcessAlive},
+	"ListRunning_ConcurrentDistinctPrefixes":  {Code: ReqConcurrencyListRunning},
 
-	// --- Discovery group (deferred) ---
-	"ListRunning_FindsSessions":   {Deferred: "discovery group not yet ported"},
-	"ListRunning_PrefixFiltering": {Deferred: "discovery group not yet ported"},
-	"ListRunning_ExcludesStopped": {Deferred: "discovery group not yet ported"},
-	"ListRunning_EmptyPrefix":     {Deferred: "discovery group not yet ported"},
+	// --- Discovery (wire-gated when list-running is implemented) ---
+	"ListRunning_FindsSessions":   {Code: ReqDiscoveryFindsSessions},
+	"ListRunning_PrefixFiltering": {Code: ReqDiscoveryPrefixFiltering},
+	"ListRunning_ExcludesStopped": {Code: ReqDiscoveryExcludesStopped},
+	"ListRunning_EmptyPrefix":     {Code: ReqDiscoveryEmptyPrefix},
 
-	// --- ProcessAlive group (deferred) ---
-	"ProcessAlive_EmptyNamesReturnsTrue": {Deferred: "process group not yet ported"},
-	"ProcessAlive_FalseAfterStop":        {Deferred: "process group not yet ported"},
+	// --- ProcessAlive (wire-gated when process-alive is implemented) ---
+	"ProcessAlive_EmptyNamesReturnsTrue": {Code: ReqProcessEmptyNamesAlive},
+	"ProcessAlive_FalseAfterStop":        {Code: ReqProcessFalseAfterStop},
 
-	// --- Metadata group (deferred) ---
-	"SetGetMeta_RoundTrip":           {Deferred: "metadata group not yet ported"},
-	"GetMeta_UnsetKey":               {Deferred: "metadata group not yet ported"},
-	"RemoveMeta_ThenGetReturnsEmpty": {Deferred: "metadata group not yet ported"},
-	"SetMeta_EmptyValueOverwrites":   {Deferred: "metadata group not yet ported"},
-	"SetMeta_OverwritesPrevious":     {Deferred: "metadata group not yet ported"},
-	"Meta_MultipleKeys":              {Deferred: "metadata group not yet ported"},
+	// --- Metadata (wire-gated when implemented; mandatory under
+	// observe.v1) ---
+	"SetGetMeta_RoundTrip":           {Code: ReqMetaRoundTrip},
+	"GetMeta_UnsetKey":               {Code: ReqMetaUnsetKeyEmpty},
+	"RemoveMeta_ThenGetReturnsEmpty": {Code: ReqMetaRemoveThenEmpty},
+	"SetMeta_EmptyValueOverwrites":   {Code: ReqMetaEmptyValueOverwrites},
+	"SetMeta_OverwritesPrevious":     {Code: ReqMetaOverwritesPrevious},
+	"Meta_MultipleKeys":              {Code: ReqMetaMultipleKeysIndependent},
 
 	// --- Observation group (deferred) ---
 	"Peek_NoError":            {Deferred: "observation group not yet ported"},
@@ -82,6 +86,40 @@ var contractCoverage = map[string]classification{
 	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
 	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
 	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+
+	// --- Fenced input (deferred: an optional in-process capability) ---
+	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_MismatchedFenceRefusesEveryInput": {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_AbsentSessionRefuses":             {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+}
+
+// wireOnlyCodes are the observe group's requirements that no
+// runtime.Provider method backs: the `observe`, `inventory` and
+// `kill-object` wire shapes (an exec pack's own ops, which the exec
+// provider maps), the attach answer's exact form, the fault and city-scope
+// tokens and the probe latency. The rest of the group (absent after stop,
+// FreshOnly, the attested listing, the error-bearing attachment answer)
+// back RunProviderTests cases. RPP-DISCOVERY-005 is wire-only too:
+// RunProviderTests cannot induce an observation failure generically (it is
+// provider-specific: kill the tmux server, break the ssh transport), so the
+// in-tree providers pin ListRunning's error-vs-absence rule in their own
+// tests, and the wire catalog gates it through the conformance fault.
+var wireOnlyCodes = map[Code]bool{
+	ReqDiscoveryFailureIsNotAbsence: true,
+
+	ReqObserveDeclaredOpsRespond:   true,
+	ReqObserveAbsentNeverStarted:   true,
+	ReqObserveRunningWithIdentity:  true,
+	ReqObserveObjectStable:         true,
+	ReqObserveAgentLiveness:        true,
+	ReqObserveMetaIsIdentity:       true,
+	ReqObserveKillObjectExact:      true,
+	ReqObserveAttachedIsStrict:     true,
+	ReqObserveFaultsReadUnknown:    true,
+	ReqObserveWithinBound:          true,
+	ReqObserveCityScoped:           true,
+	ReqObserveInventoryHasActivity: true,
+	ReqObservePeekNoScreen:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this
@@ -162,6 +200,25 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 		}
 	}
 	for _, req := range catalog {
+		if wireOnlyCodes[req.Code] {
+			// The observe group's wire shapes, tokens and latency, which no
+			// runtime.Provider method backs; see wireOnlyCodes.
+			continue
+		}
+		if req.Group == GroupServer {
+			// server-stop backs TeardownServer, which is not a
+			// RunProviderTests case: it is contract-tested by
+			// runtimetest.RunServerTeardownContract (RUNTIME-CONTRACT-023)
+			// over the same golden reference.
+			continue
+		}
+		if req.Group == GroupFSHost {
+			// fs.host is a handshake token whose promise (a shared filesystem
+			// view and user) no runtime.Provider method states; gc's side of
+			// it, host staging, is the RUNTIME-CONTRACT-022 suite
+			// (runtimetest.RunHostStagingContract), not a RunProviderTests case.
+			continue
+		}
 		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire

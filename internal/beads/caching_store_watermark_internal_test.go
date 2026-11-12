@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -119,13 +118,17 @@ func ageLocalWrite(cache *CachingStore, id string) {
 }
 
 // ageLocalWriteBy backdates id's local-write stamps, both the five-second
-// recency stamp and the write stamp recentWriteVerifyWindow reads, by age.
+// recency stamp and the write stamp recentWriteVerifyWindow reads, and the
+// retention of its fences once its row left the cache, by age.
 func ageLocalWriteBy(cache *CachingStore, id string, age time.Duration) {
 	cache.mu.Lock()
 	at := time.Now().Add(-age)
 	cache.localBeadAt[id] = at
 	if _, ok := cache.writeAt[id]; ok {
 		cache.writeAt[id] = at
+	}
+	if _, ok := cache.retainedAt[id]; ok {
+		cache.retainedAt[id] = at
 	}
 	cache.mu.Unlock()
 }
@@ -340,6 +343,7 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 	row := Bead{
 		Title: "t", Status: "in_progress", Type: "task", Priority: &priority,
 		Description: "d", Assignee: "a", Metadata: map[string]string{"k": "v"},
+		Labels: []string{"keep"},
 	}
 	unprioritized := cloneBead(row)
 	unprioritized.Priority = nil
@@ -363,6 +367,10 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 		{"lagged_assignee", row, UpdateOpts{Assignee: str("b")}, false},
 		{"lagged_metadata", row, UpdateOpts{Metadata: map[string]string{"k": "w"}}, false},
 		{"cleared_key_still_set", row, UpdateOpts{Metadata: map[string]string{"k": ""}}, false},
+		{"labels_present", row, UpdateOpts{Labels: []string{"keep"}, RemoveLabels: []string{"gone"}}, true},
+		{"lagged_added_label", row, UpdateOpts{Labels: []string{"new"}}, false},
+		{"lagged_removed_label", row, UpdateOpts{RemoveLabels: []string{"keep"}}, false},
+		{"label_added_and_removed_absent", row, UpdateOpts{Labels: []string{"x"}, RemoveLabels: []string{"x"}}, true},
 	}
 	for _, tc := range cases {
 		if got := updateReflected(tc.row, tc.opts); got != tc.want {
@@ -372,8 +380,8 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 }
 
 // TestCachingStoreRevisionMoved pins the revision half of the install
-// predicate: a row still at expectedRevision is a pre-write read, and zero on
-// either side carries no usable token.
+// predicate: a row still at expectedRevision is a pre-write read, and zero is
+// compared exactly, like any revision.
 func TestCachingStoreRevisionMoved(t *testing.T) {
 	t.Parallel()
 
@@ -385,8 +393,9 @@ func TestCachingStoreRevisionMoved(t *testing.T) {
 	}{
 		{"moved", 8, 7, true},
 		{"unmoved", 7, 7, false},
-		{"no_expected_token", 7, 0, true},
-		{"no_row_token", 0, 7, true},
+		{"moved_off_zero", 7, 0, true},
+		{"moved_to_zero", 0, 7, true},
+		{"unmoved_at_zero", 0, 0, false},
 	}
 	for _, tc := range cases {
 		if got := revisionMoved(Bead{Revision: tc.revision}, tc.expected); got != tc.want {
@@ -1014,8 +1023,9 @@ func (s *commitOrderStore) CompareAndSetMetadataKey(id, key, expected, next stri
 // unconditional writers with a conditional one on each row, while an injector
 // delivers delayed echo events of backing snapshots the writers overtake, the
 // cache's own notifications come back late through ApplyEventSnapshot as
-// cmd/gc feeds them, a toggler closes and reopens one more row, a reconciler
-// runs reconciles and full Primes, and backing reads fail now and then. It
+// cmd/gc feeds them, a toggler closes and reopens a row they write, a
+// reconciler runs reconciles and full Primes, and backing reads fail now and
+// then. It
 // catches an install that rolls a row back past a covered write: an unfenced
 // refresh or patch (F2), a refresh-failure fallback or an echo merge that
 // clears a fenced write's mark, an uncached event install (F1), or a late
@@ -1054,10 +1064,9 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 		ids[i] = b.ID
 		backing.turns[b.ID] = &rowTurn{}
 	}
-	toggled, err := cache.Create(Bead{Title: "toggled"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	// The toggler closes and reopens a row the writers contend on, so a
+	// reconcile drops it closed while their writes are in flight.
+	toggled := ids[0]
 
 	feedback := func(done <-chan struct{}) {
 		for {
@@ -1082,17 +1091,17 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 			select {
 			case <-done:
 				// End open, so the final census counts the row.
-				if err := cache.Reopen(toggled.ID); err != nil {
+				if err := cache.Reopen(toggled); err != nil {
 					t.Errorf("Reopen: %v", err)
 				}
 				return
 			default:
 			}
-			if err := cache.Close(toggled.ID); err != nil {
+			if err := cache.Close(toggled); err != nil {
 				t.Errorf("Close: %v", err)
 				return
 			}
-			if err := cache.Reopen(toggled.ID); err != nil {
+			if err := cache.Reopen(toggled); err != nil {
 				t.Errorf("Reopen: %v", err)
 				return
 			}
@@ -1157,7 +1166,7 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 	// omitted.
 	assignees := &assigneeLog{at: map[string][]*assigneeWrite{}}
 	writes := make([]int, rows*verbs)
-	final := runWatermarkStress(t, cache, append(slices.Clone(ids), toggled.ID), rows*verbs, func(w int) (string, int, bool) {
+	final := runWatermarkStress(t, cache, ids, rows*verbs, func(w int) (string, int, bool) {
 		if writes[w] == rounds {
 			if active.Add(-1) == 0 {
 				backing.failGets.Store(false)
@@ -1420,86 +1429,6 @@ func TestCachingStoreAtomicCloserInstallsReturnedRow(t *testing.T) {
 	})
 }
 
-// TestCachingStoreWriteRevCoversShortCircuitedWrites pins WriteRev on rows this
-// cache never wrote, where a matching write short-circuits without a backing
-// call: the revision is the current sequence, and a clean census covering it
-// reflects the (already present) write.
-func TestCachingStoreWriteRevCoversShortCircuitedWrites(t *testing.T) {
-	t.Parallel()
-
-	title := "seeded"
-	cases := []struct {
-		name  string
-		write func(cache *CachingStore, id string) error
-		check func(row Bead, present bool) bool
-	}{
-		{"update", func(cache *CachingStore, id string) error {
-			return cache.Update(id, UpdateOpts{Title: &title})
-		}, func(row Bead, present bool) bool { return present && row.Title == title }},
-		{"set_metadata", func(cache *CachingStore, id string) error {
-			return cache.SetMetadata(id, "k", "v")
-		}, func(row Bead, present bool) bool { return present && row.Metadata["k"] == "v" }},
-		{"set_metadata_batch", func(cache *CachingStore, id string) error {
-			return cache.SetMetadataBatch(id, map[string]string{"k": "v"})
-		}, func(row Bead, present bool) bool { return present && row.Metadata["k"] == "v" }},
-		{"close", func(cache *CachingStore, id string) error {
-			return cache.Close(id)
-		}, func(_ Bead, present bool) bool { return !present }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			backing := &casBackingStore{Store: NewMemStore()}
-			seeded, err := backing.Create(Bead{Title: title, Metadata: map[string]string{"k": "v"}})
-			if err != nil {
-				t.Fatalf("seed Create: %v", err)
-			}
-			other, err := backing.Create(Bead{Title: "other"})
-			if err != nil {
-				t.Fatalf("seed Create: %v", err)
-			}
-			cache := newConditionalCacheForTest(t, backing)
-			if tc.name == "close" {
-				// The cache learns of the close from the backing, not a write.
-				if err := backing.Close(seeded.ID); err != nil {
-					t.Fatalf("backing Close: %v", err)
-				}
-				cache.ApplyEvent("bead.closed", json.RawMessage(`{"id":"`+seeded.ID+`","status":"closed"}`))
-			}
-			// An unrelated write moves the sequence past the seeded row.
-			if err := cache.SetMetadata(other.ID, "x", "y"); err != nil {
-				t.Fatalf("SetMetadata: %v", err)
-			}
-
-			calls := backing.getCalls
-			if err := tc.write(cache, seeded.ID); err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			if backing.getCalls != calls {
-				t.Fatal("the write reached the backing; the short-circuit was not exercised")
-			}
-			w := cache.WriteRev(seeded.ID)
-			if w.Seq != cacheMutationSeq(cache) {
-				t.Fatalf("WriteRev %+v for a never-written row, want the current sequence %d", w, cacheMutationSeq(cache))
-			}
-			rows, rev := mustCleanCensus(t, cache)
-			if !coveredBy(w, rev) {
-				t.Fatalf("WriteRev %+v not covered by CacheRev %+v", w, rev)
-			}
-			var row Bead
-			present := false
-			for _, r := range rows {
-				if r.ID == seeded.ID {
-					row, present = r, true
-				}
-			}
-			if !tc.check(row, present) {
-				t.Fatalf("census row %+v (present=%v) does not reflect the short-circuited write", row, present)
-			}
-		})
-	}
-}
-
 // TestCachingStoreRevisionEpochPerInstance pins that each CachingStore issues
 // revisions under its own nonzero epoch, so revisions from a rebuilt cache are
 // never comparable with the old one's.
@@ -1526,13 +1455,19 @@ func TestCachingStoreRevisionEpochPerInstance(t *testing.T) {
 	}
 }
 
-// TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows pins that a wholesale
-// prime keeps the write revision of every row it keeps and drops the rest.
-func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
+// TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows pins that a wholesale
+// prime keeps the write revision of every row, the ones it drops included, for
+// the next reconcile to retain — and that dropping a row the cache itself
+// closed announces nothing further for it.
+func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
-	cache := newConditionalCacheForTest(t, backing)
+	rec := &carryNoteRecorder{}
+	cache := NewCachingStoreForTest(backing, rec.onChange)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	kept, err := cache.Create(Bead{Title: "kept"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1541,8 +1476,10 @@ func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := backing.Close(dropped.ID); err != nil {
-		t.Fatalf("backing Close: %v", err)
+	// Closed through the cache, so the cache holds the row closed — the row
+	// shape a full Prime drops.
+	if err := cache.Close(dropped.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	ageLocalWrite(cache, kept.ID)
 	ageLocalWrite(cache, dropped.ID)
@@ -1552,21 +1489,30 @@ func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
 	cache.mu.RLock()
 	_, keptRev := cache.writeSeq[kept.ID]
 	_, droppedRev := cache.writeSeq[dropped.ID]
+	_, droppedAt := cache.writeAt[dropped.ID]
 	_, droppedRow := cache.beads[dropped.ID]
 	cache.mu.RUnlock()
 	if droppedRow {
-		t.Fatal("prime kept the out-of-band closed row; the prune was not exercised")
+		t.Fatal("prime kept the row it holds closed; the drop was not exercised")
 	}
-	if !keptRev || droppedRev {
-		t.Fatalf("writeSeq kept=%v dropped=%v after prime, want true and false", keptRev, droppedRev)
+	if !keptRev || !droppedRev || !droppedAt {
+		t.Fatalf("after prime writeSeq kept=%v dropped=%v, writeAt dropped=%v; want all true", keptRev, droppedRev, droppedAt)
+	}
+	cache.ReconcileNowForTest()
+	if got := rec.count("bead.closed", dropped.ID); got != 1 {
+		t.Fatalf("bead.closed for %s = %d after prime and reconcile, want exactly the one the cache's own Close emitted", dropped.ID, got)
+	}
+	if got := rec.count("bead.closed", kept.ID); got != 0 {
+		t.Fatalf("bead.closed for open %s = %d, want 0", kept.ID, got)
 	}
 }
 
-// TestCachingStoreEvictDropsWriteRevision pins that a row leaving the cache
-// through evictLocked takes its write revision along, so the map cannot leak
-// ids the cache no longer holds. WriteRev then falls back to the current
-// sequence.
-func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
+// TestCachingStoreEvictRetainsWriteRevision pins that a row leaving the cache
+// through evictLocked keeps its write fences until a reconcile prunes them more
+// than recentWriteVerifyWindow later, so the maps cannot leak ids the cache no
+// longer holds. WriteRev reports the write while it is retained, then falls
+// back to the current sequence.
+func TestCachingStoreEvictRetainsWriteRevision(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -1598,18 +1544,37 @@ func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			tc.evict(t, backing, cache, b.ID)
+			w := cache.WriteRev(b.ID)
 			cache.mu.RLock()
 			_, cached := cache.beads[b.ID]
-			_, recorded := cache.writeSeq[b.ID]
+			seq, recorded := cache.writeSeq[b.ID]
 			cache.mu.RUnlock()
 			if cached {
 				t.Fatal("row still cached; the eviction was not exercised")
 			}
-			if recorded {
-				t.Fatalf("writeSeq still holds evicted %s", b.ID)
+			if !recorded || w.Seq != seq {
+				t.Fatalf("WriteRev %+v after eviction with writeSeq %d (recorded %v), want the retained write", w, seq, recorded)
 			}
-			if w := cache.WriteRev(b.ID); w.Seq != cacheMutationSeq(cache) {
-				t.Fatalf("WriteRev %+v after eviction, want the current sequence", w)
+			cache.ReconcileNowForTest()
+			if !isRetained(cache, b.ID) {
+				t.Fatalf("the reconcile did not retain the fences of evicted %s", b.ID)
+			}
+			ageLocalWriteBy(cache, b.ID, recentWriteVerifyWindow+time.Second)
+			cache.ReconcileNowForTest()
+			cache.mu.RLock()
+			_, recorded = cache.writeSeq[b.ID]
+			_, stamped := cache.writeAt[b.ID]
+			_, tombstoned := cache.deletedSeq[b.ID]
+			floor := cache.fenceFloor
+			cache.mu.RUnlock()
+			if recorded || stamped || tombstoned || isRetained(cache, b.ID) {
+				t.Fatalf("fences of %s outlived the window: writeSeq=%v writeAt=%v deletedSeq=%v", b.ID, recorded, stamped, tombstoned)
+			}
+			if floor < w.Seq {
+				t.Fatalf("fence floor %d after pruning write %+v, want it covered", floor, w)
+			}
+			if got := cache.WriteRev(b.ID); got.Seq != cacheMutationSeq(cache) {
+				t.Fatalf("WriteRev %+v after the prune, want the current sequence", got)
 			}
 		})
 	}
@@ -1784,6 +1749,15 @@ func clearWriteFence(t *testing.T, backing *casBackingStore, cache *CachingStore
 	}
 	if _, err := cache.Get(id); err != nil {
 		t.Fatalf("Get: %v", err)
+	}
+	if lagged {
+		// That refetch replaced the lagged row with the written one, a change
+		// a read stamps (fenceReadInstallLocked); a refetch that finds the
+		// row unchanged clears the stamp.
+		markDirtyForTest(cache, id)
+		if _, err := cache.Get(id); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
 	}
 	cache.mu.RLock()
 	_, beadSeq := cache.beadSeq[id]
@@ -2211,6 +2185,106 @@ func TestCachingStoreCloseIfMatchRejectsLaggedRowAtExpectedRevision(t *testing.T
 	if !dirty {
 		t.Fatal("a lagged refetch at expectedRevision was installed")
 	}
+}
+
+// TestCachingStoreFencesAtRevisionZero pins the install predicate on a row
+// stored at revision 0, a real token: a fence at 0 lands once and installs the
+// moved row, whether or not the cache held the row; an idempotent write the
+// backend did not re-stamp installs from a row clean at 0; and a refetch still
+// at 0 for a row the cache did not hold is the lagged pre-write read, left for
+// the next Get.
+func TestCachingStoreFencesAtRevisionZero(t *testing.T) {
+	t.Parallel()
+
+	seeded := func(t *testing.T) (*casBackingStore, *CachingStore) {
+		t.Helper()
+		backing := &casBackingStore{Store: NewMemStoreFrom(1, []Bead{{ID: "gc-1", Title: "zero", Status: "open", Type: "task"}}, nil)}
+		if got, err := backing.Store.Get("gc-1"); err != nil || got.Revision != 0 {
+			t.Fatalf("seeded row at revision %d (%v), want stored at 0", got.Revision, err)
+		}
+		return backing, newConditionalCacheForTest(t, backing)
+	}
+	// uncache drops the row from the cache, dirty mark included: a row the
+	// cache does not hold, which the clean-row exception cannot vouch for.
+	uncache := func(cache *CachingStore) {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		delete(cache.beads, "gc-1")
+		delete(cache.deps, "gc-1")
+		delete(cache.dirty, "gc-1")
+	}
+	dirty := func(cache *CachingStore) bool {
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		_, ok := cache.dirty["gc-1"]
+		return ok
+	}
+	for _, tc := range []struct {
+		name string
+		cold bool
+	}{{"lands_once_on_a_cached_row", false}, {"lands_once_on_a_cold_row", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, cache := seeded(t)
+			if tc.cold {
+				uncache(cache)
+			}
+			title := "fenced"
+			if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); err != nil {
+				t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+			}
+			if dirty(cache) {
+				t.Fatal("the landed fence's moved row was not installed")
+			}
+			got, err := cache.Get("gc-1")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Title != title || got.Revision == 0 {
+				t.Fatalf("row %q at revision %d, want the fenced write's moved row", got.Title, got.Revision)
+			}
+			if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); !IsPreconditionFailed(err) {
+				t.Fatalf("UpdateIfMatch again at revision 0 = %v, want a precondition failure", err)
+			}
+		})
+	}
+	t.Run("idempotent_from_clean_installs", func(t *testing.T) {
+		t.Parallel()
+		backing, cache := seeded(t)
+		backing.noopKeepsRevision = true
+		title := "zero"
+		if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+		}
+		if after, _ := backing.Store.Get("gc-1"); after.Revision != 0 {
+			t.Fatal("the backing re-stamped the no-op write; the fixture is wrong")
+		}
+		if dirty(cache) {
+			t.Fatal("an idempotent write from a row clean at revision 0 was not installed")
+		}
+	})
+	t.Run("lagged_refetch_of_a_cold_row_stays_dirty", func(t *testing.T) {
+		t.Parallel()
+		backing, cache := seeded(t)
+		uncache(cache)
+		pre, err := backing.Store.Get("gc-1")
+		if err != nil {
+			t.Fatalf("backing Get: %v", err)
+		}
+		backing.staleNextGet = &pre
+		if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &pre.Title}); err != nil {
+			t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+		}
+		if after, _ := backing.Store.Get("gc-1"); after.Revision == 0 {
+			t.Fatal("the backing kept revision 0 under a real write; the fixture is wrong")
+		}
+		if !dirty(cache) {
+			t.Fatal("a lagged refetch still at revision 0 was installed")
+		}
+		if got, err := cache.Get("gc-1"); err != nil || got.Revision == 0 {
+			t.Fatalf("Get = revision %d (%v), want the backing's moved row", got.Revision, err)
+		}
+	})
 }
 
 // TestCachingStoreConditionalEvictionPriorCoversEveryFence pins that the

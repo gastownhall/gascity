@@ -90,7 +90,29 @@ type mergeEndState struct {
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
-	readyLost      map[string]struct{}
+	readyLost map[string]struct{}
+	// retainedIDs is the key set of retainedAt: the orphan ids whose write
+	// fences the sweep retains. Its stamps are the pass clock.
+	retainedIDs map[string]struct{}
+	// announcedCloseIDs is the key set of announcedCloses: the evicted rows
+	// whose close the merge announced from a confirmed closed row. Its stamps
+	// are the pass clock.
+	announcedCloseIDs map[string]struct{}
+	// announcedPruneNext is announcedClosesPruneNext, the record size from
+	// which recording a close prunes the record again; the merge's prune sets
+	// it.
+	announcedPruneNext int
+	// announcedPrunedAt is announcedClosesPrunedAt, which the merge's prune
+	// dates with the pass clock.
+	announcedPrunedAt time.Time
+	// silentCloseIDs is the key set of silentCloses: the rows held closed
+	// that an install put there over no cached row without announcing the
+	// close. The merge's prune drops every mark of a row it does not hold
+	// closed.
+	silentCloseIDs map[string]struct{}
+	// fenceFloor rises only when a retention older than the window is
+	// pruned; no seeded state carries one, so it must stay put.
+	fenceFloor     uint64
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -310,6 +332,12 @@ func captureEndState(c *CachingStore) mergeEndState {
 		writeSeq:             cloneU64Map(c.writeSeq),
 		writeAtIDs:           keySet(c.writeAt),
 		readyLost:            cloneDirty(c.readyProjectionLost),
+		retainedIDs:          keySet(c.retainedAt),
+		announcedCloseIDs:    keySet(c.announcedCloses),
+		announcedPruneNext:   c.announcedClosesPruneNext,
+		announcedPrunedAt:    c.announcedClosesPrunedAt,
+		silentCloseIDs:       keySet(c.silentCloses),
+		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
@@ -341,7 +369,7 @@ type mergeImplResult struct {
 func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
-	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }

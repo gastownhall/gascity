@@ -50,7 +50,29 @@ type poolSessionCreateIdentity struct {
 	// signature change so the many zero-value create-path callers are
 	// unaffected.
 	TransientSlot bool
+	// InstanceToken is the token the new row carries; empty mints one. The v2
+	// allocator mints it at plan time: it is the create's ledger marker.
+	InstanceToken string
+	// BeforeWrite, when set, runs just before the row write with the row ID
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write, which then never happens.
+	BeforeWrite func(rowID string) error
 }
+
+// poolCreateWriteError marks a create error from the row write itself, or
+// from after it: the row may exist (rowID, when known, names it). The v2
+// create effect settles such an error as ambiguous, with its token as the
+// marker, so a read started after the settle decides (C5.4(3)). landed marks
+// an error from a write after the row landed, which no refusal class can
+// unwrite. The message is the cause's, so legacy output is unchanged.
+type poolCreateWriteError struct {
+	err    error
+	rowID  string
+	landed bool
+}
+
+func (e poolCreateWriteError) Error() string { return e.err.Error() }
+func (e poolCreateWriteError) Unwrap() error { return e.err }
 
 // poolSessionIdentifiers is the pure identity derivation needed before a pool
 // create can enter its reservation fence. sessionName is the runtime handle
@@ -89,6 +111,47 @@ func isPoolManagedSessionInfo(i sessionpkg.Info) bool {
 		return true
 	}
 	return strings.TrimSpace(i.PoolSlot) != ""
+}
+
+// isCollapsedCanonicalSingletonPoolBead reports whether bead is a
+// canonical-singleton pool seat that a configured named session of the same
+// template took over. buildDesiredState collapses the seat's phantom pool
+// identity onto the named identity, and the metadata sync then clears
+// pool_managed and stamps session_origin "named", but the row keeps the
+// runtime name the pool path minted for it. Every pace-keeper that gates on
+// the raw pool_managed value (the work ladder, the idle-claim backstop, the
+// warm-bind nudge) then drops the seat, leaving it with no claim retry: it
+// can sit awake while routed work goes unclaimed in front of it.
+//
+// It matches on that pool-minted name, not on session_origin, so it cannot
+// widen to ordinary named sessions: those are created under the name config
+// reserves for them, which never embeds the row's bead ID. Two names count:
+// PoolSessionName(template, bead.ID), what every unaliased pool row gets
+// today, and poolRuntimeSessionName's "<name>-pool" step-aside, which rows
+// minted before v1.5.0 still carry. An agent that is not a canonical
+// singleton pool is never matched.
+func isCollapsedCanonicalSingletonPoolBead(cfg *config.City, bead beads.Bead) bool {
+	if cfg == nil {
+		return false
+	}
+	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	if sessionName == "" {
+		return false
+	}
+	template := normalizedSessionTemplate(bead, cfg)
+	if template == "" {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	if id := strings.TrimSpace(bead.ID); id != "" && sessionName == PoolSessionName(template, id) {
+		return true
+	}
+	identity := cfgAgent.QualifiedName()
+	steppedAside := poolRuntimeSessionName(cfg, identity, template, false)
+	return steppedAside != poolIdentitySessionName(identity, template) && sessionName == steppedAside
 }
 
 // isCanonicalPoolManagedSessionBeadForTemplate is the bead-shape companion to
@@ -154,6 +217,12 @@ func sessionBeadStoredTemplate(bead beads.Bead) string {
 
 // sessionBeadStoredTemplateInfo is the session.Info mirror of sessionBeadStoredTemplate.
 func sessionBeadStoredTemplateInfo(i sessionpkg.Info) string {
+	return storedTemplateRef(&i)
+}
+
+// storedTemplateRef is sessionBeadStoredTemplateInfo through a pointer, for
+// the v2 fresh-slot occupancy's every-row scan (A3).
+func storedTemplateRef(i *sessionpkg.Info) string {
 	storedTemplate := strings.TrimSpace(i.Template)
 	if storedTemplate != "" {
 		return storedTemplate
@@ -324,7 +393,10 @@ func createPoolSessionBeadWithIdentifiers(
 			return sessionpkg.Info{}, err
 		}
 	}
-	instanceToken := sessionpkg.NewInstanceToken()
+	instanceToken := identity.InstanceToken
+	if instanceToken == "" {
+		instanceToken = sessionpkg.NewInstanceToken()
+	}
 	title := targetBasename(template)
 	if providedAgentName != "" {
 		title = agentName
@@ -377,6 +449,11 @@ func createPoolSessionBeadWithIdentifiers(
 	if identity.Slot > 0 {
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
+	if identity.BeforeWrite != nil {
+		if err := identity.BeforeWrite(explicitID); err != nil {
+			return sessionpkg.Info{}, err
+		}
+	}
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
@@ -386,15 +463,15 @@ func createPoolSessionBeadWithIdentifiers(
 		Metadata:  meta,
 	})
 	if err != nil {
-		return sessionpkg.Info{}, err
+		return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: explicitID}
 	}
 	if identifiers.beadScoped {
 		if want := PoolSessionName(template, info.ID); info.SessionNameMetadata != want {
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
-				closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
-				return sessionpkg.Info{}, err
+				closeSeat(store, nil, info, closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeRollback}, now, io.Discard)
+				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
 		}
@@ -410,7 +487,7 @@ func createPoolSessionBeadWithIdentifiers(
 // generations, so what keeps a slot at ONE unconfirmed generation is that a
 // fresh row may not be minted while an OPEN pool row of the same template and
 // identity is still an unconfirmed create — pending-create, or failed-create
-// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// whose runtime teardown has not been confirmed (releaseRowOwnedRuntime
 // holds such a row open). This is the guarantee #5372 got from the
 // identity-derived name collision (ga-vcjr9), keyed on the identity instead of
 // the runtime name. Identities compare in their tmux-safe encoding, the same
@@ -426,19 +503,8 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	}
 	want := poolIdentitySessionName(agentName, template)
 	holds := func(info sessionpkg.Info) bool {
-		if info.Closed || !isPoolManagedSessionInfo(info) {
-			return false
-		}
-		switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
-		case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
-		default:
-			return false
-		}
-		if strings.TrimSpace(info.AgentName) == "" || poolIdentitySessionName(info.AgentName, template) != want {
-			return false
-		}
-		stored := strings.TrimSpace(info.Template)
-		return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
+		lease, ok := poolIdentityLeaseOf(info)
+		return ok && lease == want && poolIdentityLeaseTemplateMatches(info, cfg, template)
 	}
 	if snapshot != nil {
 		for _, info := range snapshot.OpenInfos() {
@@ -450,7 +516,7 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	if store == nil {
 		return nil
 	}
-	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false,
 		map[string]string{"agent_name": agentName},
 		map[string]string{"agent_name": want})
 	if err != nil {
@@ -462,6 +528,34 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 		}
 	}
 	return nil
+}
+
+// poolIdentityLeaseOf reports whether info holds a pool identity lease, and
+// on which identity in its tmux-safe encoding: an open pool row that is still
+// an unconfirmed create (start-pending, creating, or failed-create whose
+// teardown is unconfirmed) with a concrete identity. Whether the lease covers a
+// given template is poolIdentityLeaseTemplateMatches.
+func poolIdentityLeaseOf(info sessionpkg.Info) (string, bool) {
+	if info.Closed || !isPoolManagedSessionInfo(info) {
+		return "", false
+	}
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
+	default:
+		return "", false
+	}
+	if strings.TrimSpace(info.AgentName) == "" {
+		return "", false
+	}
+	// A non-empty identity encodes without its template.
+	return poolIdentitySessionName(info.AgentName, ""), true
+}
+
+// poolIdentityLeaseTemplateMatches reports whether a lease-holding row counts
+// against template: its stored template is empty or names template.
+func poolIdentityLeaseTemplateMatches(info sessionpkg.Info, cfg *config.City, template string) bool {
+	stored := strings.TrimSpace(info.Template)
+	return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
 }
 
 // derivePoolSessionIdentifiers picks every identifier relevant to a fresh pool
@@ -570,7 +664,7 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
 }
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
@@ -729,15 +823,7 @@ func sessionBeadAgentName(bead beads.Bead) string {
 // sessionBeadAgentNameInfo is the session.Info mirror of sessionBeadAgentName:
 // agent_name metadata (untrimmed), then the agent:<name> label fallback.
 func sessionBeadAgentNameInfo(i sessionpkg.Info) string {
-	if i.AgentName != "" {
-		return i.AgentName
-	}
-	for _, label := range i.Labels {
-		if strings.HasPrefix(label, "agent:") {
-			return strings.TrimPrefix(label, "agent:")
-		}
-	}
-	return ""
+	return sessionpkg.AgentNameInfo(i)
 }
 
 // sessionAgentMetricIdentity resolves the stable agent-identity label for the
@@ -930,7 +1016,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
+	items, err := sessionpkg.ExactMetadataSessionCandidates(beads.SessionStore{Store: store}, false, map[string]string{key: value})
 	if err != nil {
 		return ""
 	}
@@ -944,7 +1030,7 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
 		}
-		sessionpkg.RepairEmptyType(store, &b)
+		sessionpkg.RepairEmptyType(beads.SessionStore{Store: store}, &b)
 		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
 			continue
 		}

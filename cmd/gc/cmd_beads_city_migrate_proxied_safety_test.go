@@ -207,7 +207,7 @@ func TestMigrateProxiedFencesBeforeDoltInit(t *testing.T) {
 	writeManagedDoltStateFile(t, city)
 
 	scope := migrateProxiedScope{Label: "city", Name: "city", Path: normalizePathForCompare(city), Prefix: "ci", IsCity: true}
-	err := migrateProxiedScopeNow(city, scope, migrateProxiedClassification{NeedsDoltInit: true})
+	_, err := migrateProxiedScopeNow(city, scope, migrateProxiedClassification{NeedsDoltInit: true})
 	if err == nil {
 		t.Fatal("migrateProxiedScopeNow ran with gc's server back up")
 	}

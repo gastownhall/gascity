@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -118,7 +118,7 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 			// durably mark the step, or a dropped emit becomes a permanent miss.
 			continue
 		}
-		if graphStore.Store != nil {
+		if graphStore != (beads.GraphStore{}) {
 			// The fact is durable; record that the step was emitted. A failed mark
 			// leaves the step unmarked, so the next tick re-emits it — the same
 			// at-least-once tolerance the snapshot facts already carry.
@@ -211,7 +211,7 @@ func (s StepDefinition) definedEvent(actor string) events.Event {
 // input convoy, the supplied work store exclusively owns that convoy's tracks
 // edges. A graph run without an input convoy is valid and projects only steps.
 func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID string) (Projection, error) {
-	if graphStore.Store == nil {
+	if graphStore == (beads.GraphStore{}) {
 		return Projection{}, fmt.Errorf("%w: nil graph store", ErrNotGraphV2Root)
 	}
 	if !eventexport.IsOpaqueRef(rootID) {
@@ -253,7 +253,7 @@ func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, ro
 // unreadable, non-exact, or ambiguous links produce no anchor while preserving
 // the rest of the execution snapshot.
 func currentRunAnchors(store beads.WorkStore, root beads.Bead, work []WorkAssociation) []RunAnchor {
-	if len(work) == 0 || store.Store == nil {
+	if len(work) == 0 || store == (beads.WorkStore{}) {
 		return nil
 	}
 	declaredLaunchID := root.Metadata[beadmeta.SourceBeadIDMetadataKey]
@@ -296,7 +296,7 @@ func currentWorkAssociations(store beads.WorkStore, rootID, convoyID string) ([]
 	if !eventexport.IsOpaqueRef(convoyID) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidConvoyReference, convoyID)
 	}
-	if store.Store == nil {
+	if store == (beads.WorkStore{}) {
 		return nil, fmt.Errorf("listing tracks membership for convoy %q: nil work store", convoyID)
 	}
 	dependencies, err := store.DepList(convoyID, "down")
@@ -452,19 +452,11 @@ func LifecycleEvent(eventType string, root, step beads.Bead, actor string) (even
 // EmitLifecycle records a validated lifecycle fact for a graph.v2 step. The
 // root is loaded from graphStore so a v1 or unrelated parent can never produce
 // a lifecycle event by metadata resemblance alone.
-func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType string, step beads.Bead, actor string) bool {
-	if recorder == nil || graphStore == nil {
+func EmitLifecycle(recorder events.Recorder, graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) bool {
+	if recorder == nil {
 		return false
 	}
-	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if !eventexport.IsOpaqueRef(rootID) {
-		return false
-	}
-	root, err := graphStore.Get(rootID)
-	if err != nil {
-		return false
-	}
-	event, ok := LifecycleEvent(eventType, root, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, eventType, step, actor)
 	if !ok {
 		return false
 	}
@@ -472,16 +464,53 @@ func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType s
 	return true
 }
 
-// EmitCompletedFromClosedNotification is the sole close-side lifecycle entry
-// point. It consumes the physical bead snapshot carried by the authoritative
-// bead.closed notification rather than inferring completion from dependencies
-// or re-projecting current graph state.
-func EmitCompletedFromClosedNotification(recorder events.Recorder, graphStore beads.Store, payload json.RawMessage, actor string) bool {
-	step, ok := beads.DecodeBeadEventPayload(payload)
-	if !ok || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+func lifecycleEventFromStore(graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) (events.Event, bool) {
+	if graphStore == (beads.GraphStore{}) {
+		return events.Event{}, false
+	}
+	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if !eventexport.IsOpaqueRef(rootID) {
+		return events.Event{}, false
+	}
+	root, err := graphStore.Get(rootID)
+	if err != nil {
+		return events.Event{}, false
+	}
+	return LifecycleEvent(eventType, root, step, actor)
+}
+
+// EmitCompleted is the sole close-side lifecycle entry point. step is a
+// committed close: the snapshot the controller's own cache write carried, or a
+// live read that returned the row closed. Any other writer's bead.closed is a
+// claim and reaches here only through such a read. Inferences (a row
+// absent from a scan) must be confirmed by such a read first.
+//
+// It records at most one fact per key: a fact this index already holds, from
+// the journal or from an earlier call, is not repeated, so a replayed or
+// re-inferred close is idempotent. The key is recorded unconfirmed, exactly as
+// the delta pass records its own facts, and an unloaded index stays unloaded,
+// so its first warm still reads the journal.
+func (idx *CompletedFactIndex) EmitCompleted(recorder events.Recorder, graphStore beads.GraphStore, step beads.Bead, actor string) bool {
+	if recorder == nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
 		return false
 	}
-	return EmitLifecycle(recorder, graphStore, events.ExecutionStepCompleted, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, events.ExecutionStepCompleted, step, actor)
+	if !ok {
+		return false
+	}
+	key := completedFactKeyFor(event)
+	idx.mu.Lock()
+	if _, present := idx.facts[key]; present {
+		idx.mu.Unlock()
+		return false
+	}
+	if idx.facts == nil {
+		idx.facts = map[completedFactKey]bool{}
+	}
+	idx.facts[key] = false
+	idx.mu.Unlock()
+	recorder.Record(event)
+	return true
 }
 
 // ReconcileCompleted repairs completed facts that were stranded between a
@@ -503,7 +532,7 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 	}
 	hasStore := false
 	for _, graphStore := range graphStores {
-		if graphStore.Store != nil {
+		if graphStore != (beads.GraphStore{}) {
 			hasStore = true
 			break
 		}
@@ -668,7 +697,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 	}
 	emitted := 0
 	for _, graphStore := range graphStores {
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			continue
 		}
 		// One batched read for every named root this store might hold, rather
@@ -862,16 +891,17 @@ type CompletionBackstop struct {
 	VisitStamped bool
 	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
 	sweepVisitsStamped bool
-	// sweepStoreSignature latches an ORDER-SENSITIVE identity of the store fan at
-	// sweep start. The caller re-resolves its store set every chunk, and the
-	// cursor is an INDEX into it: if any position's store changes mid-sweep — a
-	// store added, removed, replaced, or reordered, even when the total COUNT is
-	// unchanged (completionReconcileInputs sorts the rig tail, so a rig add+remove
+	// sweepStores latches a copy of the store fan, in order, at sweep start; a
+	// copy, because the caller may reuse its slice. The caller re-resolves its
+	// store set every chunk, and the cursor is an INDEX into it: if any
+	// position's store changes mid-sweep — a store added, removed, replaced, or
+	// reordered, even when the total COUNT is unchanged
+	// (completionReconcileInputs sorts the rig tail, so a rig add+remove
 	// reorders it at equal length) — the held roots no longer correspond to the
 	// store at the cursor, so the sweep restarts rather than reconciling one
 	// store's roots against another store. A length-only latch missed the
-	// equal-length reorder; see storeFanSignature.
-	sweepStoreSignature string
+	// equal-length reorder; sameStoreFan compares the fans.
+	sweepStores []beads.GraphStore
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
@@ -910,7 +940,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	b.prepareSweep(storeFanSignature(graphStores))
+	b.prepareSweep(graphStores)
 	if !b.index.warm(recorder) {
 		result.WarmFailed = true
 		return result
@@ -920,7 +950,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			return result
 		}
 		graphStore := graphStores[b.storeIndex]
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			b.advanceStore()
 			continue
 		}
@@ -968,18 +998,18 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // re-derives the completion record — nothing feeds this index between sweeps, so
 // a warm one would only know the facts it emitted itself and would re-emit
 // everything the delta lane or the close path recorded — and latches the sweep's
-// VisitStamped choice and store-fan signature. Mid-sweep, a changed store fan (a
+// VisitStamped choice and a copy of its store fan. Mid-sweep, a changed store fan (a
 // store added, removed, replaced, or reordered, even at unchanged length) means
 // the cursor's store index no longer names the store its held roots came from, so
 // the sweep restarts against the current fan.
-func (b *CompletionBackstop) prepareSweep(storeSignature string) {
+func (b *CompletionBackstop) prepareSweep(graphStores []beads.GraphStore) {
 	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
 		b.index.Invalidate()
 		b.sweepVisitsStamped = b.VisitStamped
-		b.sweepStoreSignature = storeSignature
+		b.sweepStores = slices.Clone(graphStores)
 		return
 	}
-	if b.sweepStoreSignature == storeSignature {
+	if sameStoreFan(b.sweepStores, graphStores) {
 		return
 	}
 	b.storeIndex = 0
@@ -988,7 +1018,7 @@ func (b *CompletionBackstop) prepareSweep(storeSignature string) {
 	b.storeRootsLoaded = false
 	b.skippedConverged = 0
 	b.sweepVisitsStamped = b.VisitStamped
-	b.sweepStoreSignature = storeSignature
+	b.sweepStores = slices.Clone(graphStores)
 }
 
 // ensureStoreRoots lists graphStore's graph.v2 workflow roots and holds the ones
@@ -1053,37 +1083,32 @@ func (b *CompletionBackstop) advanceStore() {
 	b.skippedConverged = 0
 }
 
-// storeFanSignature builds an order-sensitive identity for a resolved store fan.
-// The sweep cursor is an INDEX into this slice, so a mid-sweep change to which
-// store sits at any position — one added, removed, or replaced, even when the
-// total count is unchanged — must restart the sweep. Pointer identity of each
-// embedded store, taken in slice order, captures exactly that: two fans with the
-// same stores in the same order share a signature, and any reorder or
-// replacement diverges. This identity guarantee holds for pointer-backed stores,
-// which every production Store is (*BdStore, *CachingStore, *MemStore). A nil
-// store and a store whose concrete value is not a pointer (no stable address to
-// compare) get fixed markers ("nil"/"np"), so such entries are compared by shape
-// and position only: two DISTINCT non-pointer stores at the same index share the
-// "np" marker and would NOT diverge — acceptable only because no production fan
-// holds one.
-func storeFanSignature(graphStores []beads.GraphStore) string {
-	var b strings.Builder
-	for i, graphStore := range graphStores {
-		if i > 0 {
-			b.WriteByte('|')
-		}
-		if graphStore.Store == nil {
-			b.WriteString("nil")
-			continue
-		}
-		v := reflect.ValueOf(graphStore.Store)
-		if v.Kind() == reflect.Pointer && !v.IsNil() {
-			fmt.Fprintf(&b, "%d", v.Pointer())
-			continue
-		}
-		b.WriteString("np")
+// sameStoreFan reports whether a and b are one store fan: the same physical
+// stores (beads.SameStore) at the same positions, a zero handle matching only a
+// zero handle. The sweep cursor is an INDEX into the fan, so a mid-sweep change
+// to which store sits at any position — one added, removed, or replaced, even
+// when the total count is unchanged — must restart the sweep, while a fan the
+// caller re-resolved to the same stores must not. Every production store is a
+// comparable pointer (*BdStore, *CachingStore, *MemStore); a store whose
+// dynamic type is not comparable is the same as nothing, so a fan holding one
+// restarts the sweep on every Pass, and no production fan holds one.
+func sameStoreFan(a, b []beads.GraphStore) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return b.String()
+	for i := range a {
+		zeroA, zeroB := a[i] == (beads.GraphStore{}), b[i] == (beads.GraphStore{})
+		if zeroA || zeroB {
+			if zeroA != zeroB {
+				return false
+			}
+			continue
+		}
+		if !beads.SameStore(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcileRoots projects the closed steps of the supplied roots and records the

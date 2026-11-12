@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
 )
 
@@ -30,7 +32,7 @@ func TestOpenStorageRoutesStampsBindingWithResolvedMode(t *testing.T) {
 		stamped gate.Mode
 		fenced  bool
 	}{
-		{mode: "", stamped: gate.Off, fenced: false},
+		{mode: "", stamped: gate.Auto, fenced: true}, // unset means auto (mc-dpo2b)
 		{mode: "off", stamped: gate.Off, fenced: false},
 		{mode: "auto", stamped: gate.Auto, fenced: true},
 		{mode: "require", stamped: gate.Require, fenced: true},
@@ -83,7 +85,7 @@ func TestOpenStorageRoutesStampsBindingWithResolvedMode(t *testing.T) {
 func TestPreflightProbesRelocatedClassStores(t *testing.T) {
 	incapable := beads.NewMemStore()
 	incapable.DisableConditionalWrites = true
-	if err := beads.StampOpenedStore(incapable, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(incapable, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{}, binding: "infra"}
@@ -197,19 +199,135 @@ func TestOpenStorageRoutesRefusesACarrierlessEngineUnderRequire(t *testing.T) {
 	}
 }
 
-// TestConditionalWritesStatusReportsTheBindingEngine proves gc status sees a
-// split city's binding engine. Without its row, require over a legacy binding
-// (no revision column, so every fenced session write refuses) reported active.
-func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
-	dir := t.TempDir()
-	opened, err := beads.OpenSQLiteStore(dir)
+// TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff proves the
+// per-city beads.native_transport="off" kill switch reaches the storebinding
+// open path, not only the beads factory, for a NATIVE-TRANSPORT provider
+// (beads-workspace / native Dolt): such a binding has no BdStore fallback of
+// its own (see EngineOpener's doc), so letting it open while "off" would
+// silently break the switch's promise that this city's stores never open
+// natively.
+//
+// It deliberately uses workspaceSplitConfig with NO real workspace directory
+// on disk: the refusal this test proves fires in openStorageRoutes BEFORE
+// opener.OpenEngine is ever called, so it must not depend on — or touch — a
+// workspace that does not exist. "auto" (today's behavior) still reaches
+// OpenEngine and fails for the workspace-not-there reason instead
+// (beadsworkspace.ErrWorkspaceUnavailable), proving the native_transport gate
+// let it through rather than refusing it too.
+func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		refused bool
+	}{
+		{mode: "", refused: false},
+		{mode: "auto", refused: false},
+		{mode: "off", refused: true},
+	} {
+		t.Run("native_transport="+tc.mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := workspaceSplitConfig("infra")
+			cfg.Beads.NativeTransport = tc.mode
+			plan, err := resolveCityStoragePlan(root, cfg)
+			if err != nil {
+				t.Fatalf("resolving the storage plan: %v", err)
+			}
+			// infraBindingTarget{Binding: "infra"} directly, not
+			// mustResolveInfraTarget: that helper resolves the sqlite-beads
+			// migration destination specifically and does not recognize a
+			// beads-workspace binding at all.
+			routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: "infra"}, cfg, root, nil)
+			if tc.refused {
+				if err == nil {
+					_ = routes.close()
+					t.Fatal("native_transport=\"off\" served a binding engine that only opens natively")
+				}
+				if !strings.Contains(err.Error(), "native_transport") || !strings.Contains(err.Error(), `"off"`) {
+					t.Fatalf("err = %v, want it to name native_transport and off", err)
+				}
+				if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+					t.Fatalf("err = %v, refused for the wrong reason (workspace-not-there instead of native_transport)", err)
+				}
+				return
+			}
+			// Not refused by native_transport: the provider's own open still
+			// runs and fails because no real workspace directory exists here.
+			// That is the proof the native_transport gate let it through — a
+			// workspace that refused for ANY other reason, or that opened the
+			// routes it fails to close, would both hide a native_transport
+			// refusal that silently stopped firing.
+			if err == nil {
+				_ = routes.close()
+				t.Fatalf("openStorageRoutes (native_transport=%q) served a workspace that was never created", tc.mode)
+			}
+			if !errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+				t.Fatalf("openStorageRoutes (native_transport=%q) error = %v, want %v (proves native_transport did not refuse it)",
+					tc.mode, err, beadsworkspace.ErrWorkspaceUnavailable)
+			}
+			if strings.Contains(err.Error(), "native_transport") {
+				t.Fatalf("openStorageRoutes (native_transport=%q) error names native_transport: %v", tc.mode, err)
+			}
+		})
+	}
+}
+
+// TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv proves the
+// deprecated process-wide GC_BEADS_FORCE_FALLBACK alias also refuses a
+// native-transport (beads-workspace) EngineOpener bind when the per-city
+// beads.native_transport value is "auto", and that the refusal names the
+// alias: an operator told to set native_transport would change nothing.
+func TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv(t *testing.T) {
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	root := t.TempDir()
+	cfg := workspaceSplitConfig("infra")
+	cfg.Beads.NativeTransport = "auto"
+	plan, err := resolveCityStoragePlan(root, cfg)
 	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+		t.Fatalf("resolving the storage plan: %v", err)
 	}
-	if err := opened.(interface{ CloseStore() error }).CloseStore(); err != nil {
-		t.Fatalf("CloseStore: %v", err)
+	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: "infra"}, cfg, root, nil)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("GC_BEADS_FORCE_FALLBACK=1 served a binding engine that only opens natively")
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "beads.sqlite"))
+	if !strings.Contains(err.Error(), "GC_BEADS_FORCE_FALLBACK") {
+		t.Fatalf("err = %v, want it to name GC_BEADS_FORCE_FALLBACK as the cause", err)
+	}
+	if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+		t.Fatalf("err = %v, refused for the wrong reason (workspace-not-there instead of the force-fallback refusal)", err)
+	}
+}
+
+// TestOpenStorageRoutesDoesNotRefuseSQLiteBeadsUnderNativeTransportOff proves
+// the EngineOpener refusal is scoped to native-transport providers, not to
+// "implements EngineOpener" in general: sqlite-beads also implements
+// EngineOpener (how else would it bind classes?) but it is not native
+// transport, so beads.native_transport="off" must never stop a city with a
+// sqlite infra binding from booting.
+func TestOpenStorageRoutesDoesNotRefuseSQLiteBeadsUnderNativeTransportOff(t *testing.T) {
+	for _, mode := range []string{"", "auto", "off"} {
+		t.Run("native_transport="+mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := infraSplitConfig(filepath.Join(root, "store"))
+			cfg.Beads.NativeTransport = mode
+			plan, err := resolveCityStoragePlan(root, cfg)
+			if err != nil {
+				t.Fatalf("resolving the storage plan: %v", err)
+			}
+			routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+			if err != nil {
+				t.Fatalf("openStorageRoutes (native_transport=%q): sqlite-beads binding refused to open: %v", mode, err)
+			}
+			t.Cleanup(func() { _ = routes.close() })
+		})
+	}
+}
+
+// rewriteToPreRevisionLayout rewrites the SQLite beads database at path to
+// the deployed pre-revision layout: no revision column, so the store refuses
+// every fenced write and applies no guarded batch.
+func rewriteToPreRevisionLayout(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("opening the database: %v", err)
 	}
@@ -230,12 +348,27 @@ func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("closing the database: %v", err)
 	}
+}
+
+// TestConditionalWritesStatusReportsTheBindingEngine proves gc status sees a
+// split city's binding engine. Without its row, require over a legacy binding
+// (no revision column, so every fenced session write refuses) reported active.
+func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	if err := opened.(interface{ CloseStore() error }).CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	rewriteToPreRevisionLayout(t, filepath.Join(dir, "beads.sqlite"))
 	legacy, err := beads.OpenSQLiteStore(dir)
 	if err != nil {
 		t.Fatalf("reopening the legacy layout: %v", err)
 	}
 	t.Cleanup(func() { _ = legacy.(interface{ CloseStore() error }).CloseStore() })
-	if err := beads.StampOpenedStore(legacy, "sqlite-graph", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(legacy, "sqlite-graph", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 

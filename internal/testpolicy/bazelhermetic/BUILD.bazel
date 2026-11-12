@@ -1,0 +1,61 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bazelhermetic",
+    srcs = [
+        "ledger.go",
+        "scan.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/bazelhermetic",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_burntsushi_toml//:toml"],
+)
+
+go_test(
+    name = "bazelhermetic_test",
+    srcs = [
+        "scan_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//:go.mod",
+        "//:repo_go_test_srcs",
+        "//test:bazel-hermeticity.toml",
+    ],
+    embed = [":bazelhermetic"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

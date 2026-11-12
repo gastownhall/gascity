@@ -7,21 +7,43 @@ exports_files(glob(
 
 go_library(
     name = "runtimetest",
-    srcs = ["conformance.go"],
+    srcs = [
+        "conformance.go",
+        "contracts.go",
+        "dolt_env.go",
+        "host_staging.go",
+        "process_table.go",
+        "program_status.go",
+        "program_status_fake.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/execenv",
+        "//internal/pidutil",
+        "//internal/runtime",
+        "//internal/runtime/proctable",
+        "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
+        "//internal/runtime/runtimetest/osc7501emitter/emit",
+    ],
 )
 
 go_test(
     name = "runtimetest_test",
     srcs = [
         "conformance_test.go",
+        "contracts_test.go",
+        "host_staging_test.go",
+        "process_table_test.go",
+        "program_status_test.go",
         "testenv_import_test.go",
     ],
     embed = [":runtimetest"],
     deps = [
+        "//internal/execenv",
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/testenv",
     ],
 )
@@ -34,6 +56,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

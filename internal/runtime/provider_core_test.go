@@ -125,3 +125,36 @@ func TestListBackends_ListsEachBackendOnceInOrder(t *testing.T) {
 		}
 	}
 }
+
+type sharedListingProvider struct{ *Fake }
+
+func (sharedListingProvider) ListRunningShared() bool { return true }
+
+type backendsProvider struct {
+	*Fake
+	backends []Backend
+}
+
+func (p backendsProvider) Backends() []Backend { return p.backends }
+
+// Kills a shared listing hidden behind a composite: a provider that declares
+// it, or a composite with such a backend at any depth, is shared; one that
+// declares nothing is not.
+func TestListRunningShared(t *testing.T) {
+	shared := sharedListingProvider{NewFake()}
+	nested := backendsProvider{Fake: NewFake(), backends: []Backend{{Label: "default", Provider: NewFake()}, {Label: "k8s", Provider: shared}}}
+	for _, c := range []struct {
+		name string
+		sp   Provider
+		want bool
+	}{
+		{"undeclared", NewFake(), false},
+		{"declared", shared, true},
+		{"a composite of local backends", backendsProvider{Fake: NewFake(), backends: []Backend{{Label: "a", Provider: NewFake()}}}, false},
+		{"a composite over a shared backend, nested", backendsProvider{Fake: NewFake(), backends: []Backend{{Label: "outer", Provider: nested}}}, true},
+	} {
+		if got := ListRunningShared(c.sp); got != c.want {
+			t.Errorf("%s: ListRunningShared = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
