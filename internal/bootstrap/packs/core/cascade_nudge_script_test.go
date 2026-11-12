@@ -349,7 +349,7 @@ func TestCascadeNudgeWakesRoutedPoolMember(t *testing.T) {
 			depJSON: `[` + strings.Join([]string{
 				`{"id":"ga-none","status":"open"}`,
 				`{"id":"ga-closed","status":"closed","metadata":{"gc.routed_to":"gascity/pool"}}`,
-				`{"id":"ga-wip","status":"in_progress","metadata":{"gc.routed_to":"gascity/pool"}}`,
+				`{"id":"ga-wip","status":"in_progress"}`,
 				`{"id":"external:x","external":true}`,
 			}, ",") + `]`,
 			members: map[string][]string{"gascity/pool": {"pool-1"}},
@@ -794,4 +794,71 @@ func TestCascadeNudgeLeavesItsOwnBlockedCloseUnrecordedBesideAnotherBlocker(t *t
 	if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed") {
 		t.Fatalf("ga-blk's passing close must nudge worker-1; gc calls:\n%s", logged)
 	}
+}
+
+// TestCascadeNudgeWakesAnInProgressDependent pins the wake-up for a dependent
+// a session already claimed. `bd dep add` does not change a claimed bead's
+// status, so a blocker added after the claim leaves the dependent
+// in_progress, and its session parks on it. The close of its last blocker
+// must wake that session as it wakes an open dependent's: at the assignee,
+// once, with the pair recorded; a blocker that still holds it wakes no one.
+func TestCascadeNudgeWakesAnInProgressDependent(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	claimed := `[{"id":"ga-dep","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"gascity/pool"}}]`
+	fake := func(t *testing.T, down string) (binDir, logPath, stateDir string) {
+		t.Helper()
+		dir := t.TempDir()
+		binDir, logPath = fakeGCBin(t, cascadeFake{
+			eventsPath: writeCascadeCloseEvent(t, "ga-blk"),
+			depJSON:    claimed,
+			downJSON:   down,
+			members:    map[string][]string{"gascity/pool": {"pool-1"}},
+			failDir:    dir,
+		}.body())
+		return binDir, logPath, filepath.Join(dir, "state")
+	}
+
+	t.Run("its only blocker closes", func(t *testing.T) {
+		binDir, logPath, stateDir := fake(t, `[{"id":"ga-blk","status":"closed"}]`)
+		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+			t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+		}
+		got, logged := countNudges(t, logPath)
+		if got != 1 {
+			t.Fatalf("nudges = %d, want exactly 1 to the claiming session; gc calls:\n%s", got, logged)
+		}
+		if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed — your dependent ga-dep may be unblocked") {
+			t.Fatalf("the in_progress dependent must be nudged at its assignee; gc calls:\n%s", logged)
+		}
+		if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep") {
+			t.Fatal("the (blocker, dependent) pair must be recorded")
+		}
+	})
+
+	t.Run("another open blocker still holds it", func(t *testing.T) {
+		binDir, logPath, stateDir := fake(t, `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"open"}]`)
+		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+			t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+		}
+		if got, logged := countNudges(t, logPath); got != 0 {
+			t.Fatalf("nudges = %d, want 0 while another blocker holds ga-dep; gc calls:\n%s", got, logged)
+		}
+		if !cascadeStateHasKey(t, stateDir, "ga-blk|ga-dep") {
+			t.Fatal("the held pair must be recorded, as an open dependent's is")
+		}
+	})
+
+	t.Run("a second run sends no second nudge", func(t *testing.T) {
+		binDir, logPath, stateDir := fake(t, `[{"id":"ga-blk","status":"closed"}]`)
+		for i := range 2 {
+			if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+				t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", i+1, err, out)
+			}
+		}
+		if got, logged := countNudges(t, logPath); got != 1 {
+			t.Fatalf("nudges = %d across two runs, want 1; gc calls:\n%s", got, logged)
+		}
+	})
 }
