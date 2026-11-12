@@ -2603,7 +2603,7 @@ gc init --template gascity --default-provider claude \
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--storage` | string |  | storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes) |
+| `--storage` | string |  | storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger) |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
@@ -4221,6 +4221,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 [runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
+
+A runtime whose handshake declares carrier.ops is driven only through its
+nudge, peek, send-keys, interrupt and clear-scrollback operations, so each
+is reported as "capability carrier.ops: &lt;op&gt;" and an absent or broken one
+fails the run; this naming takes precedence over "required: nudge". With
+idle-boundary declared as well, "capability carrier.ops: ready-prompt
+metadata" requires set-meta and get-meta to round-trip a non-default ready
+prompt byte for byte, because gc keeps each session's prompt there.
 
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in, twice. The check runs it,

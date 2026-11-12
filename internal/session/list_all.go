@@ -28,6 +28,9 @@ import (
 // base.Type and base.Label are overridden by the union queries
 // internally — callers should not set them.
 //
+// A store that refuses the session type (its type registry does not define
+// it) answers the type leg with no rows rather than failing the listing.
+//
 // PartialResultError semantics: if either underlying List returns a
 // PartialResultError, its (partial) rows are still folded into the
 // union, and a PartialResultError is returned alongside the merged
@@ -49,6 +52,13 @@ func ListAllSessionBeads(store beads.SessionStore, base beads.ListQuery) ([]bead
 	byTypeQuery.Label = ""
 	byTypeQuery.Limit = 0
 	byType, typeErr := store.List(byTypeQuery)
+	if beads.IsIssueTypeRefused(typeErr) {
+		// A store whose type registry does not define the session type holds
+		// no row of it (an adopted rig store gc does not serve), so the leg is
+		// empty, keeping any rows another tier returned; the label leg below
+		// still finds a labeled session row.
+		typeErr = nil
+	}
 	if typeErr != nil && !beads.IsPartialResult(typeErr) {
 		return nil, fmt.Errorf("listing session beads by type: %w", typeErr)
 	}

@@ -53,7 +53,7 @@ named group of agents that share a work queue (you saw the bundled `dolt.dog`
 pool in Tutorial 01); a single agent's name works as a pool target too, so the
 examples here route to the `worker` agent from Tutorial 05. When the order
 fires, the orchestrator runs the formula and writes `gc.routed_to=worker` on the
-resulting work beads — the marker that the pool's `bd ready` query and the
+resulting work beads — the marker that the pool's `gc ready` query and the
 supervisor's `scale_check` both read. Any agent in the pool can then pick the
 work up.
 
@@ -69,7 +69,7 @@ blockers is Ready right away. Prefer v2 for new formulas.
 
 <Accordion title="v1 formulas don't wake a scaled-from-zero pool">
 A v1 formula whose root materializes as a container bead puts no
-immediately-Ready work on the pool — `bd ready` filters the container out, and
+immediately-Ready work on the pool — `gc ready` filters the container out, and
 the dispatcher logs a warning telling you to convert the formula to v2 before
 routing it to a pool. After upgrading from an older dispatcher, drain any
 already-dispatched container work with `gc order sweep-tracking --include-wisps
@@ -139,10 +139,10 @@ Any order can be triggered by hand, bypassing its trigger:
 ```shell
 ~/my-city
 $ gc order run pancakes-check
-Order "pancakes-check" executed: wisp mc-2xz → gc.routed_to=worker
+Order "pancakes-check" executed: wisp gcg-4097 → gc.routed_to=worker
 ```
 
-The bead ID (`mc-2xz` here; yours will differ) is the dispatched work, stamped
+The bead ID (`gcg-4097` here; yours will differ) is the dispatched work, stamped
 `gc.routed_to=worker` so the pool sees it (`wisp` is the CLI's label for that v1 materialization). Exec
 orders print `Order "<name>" executed (exec)`. Use this to test a new order or
 kick off work that's almost due anyway.
@@ -405,9 +405,9 @@ order name. You can query the history:
 ~/my-city
 $ gc order history pancakes-check
 ORDER                BEAD            EXECUTED
-pancakes-check       mc-3hb          2026-04-08T07:36:36Z
-pancakes-check       mc-zbd          2026-04-08T07:31:22Z
-pancakes-check       mc-9p8          2026-04-08T07:26:18Z
+pancakes-check       gcg-4121        2026-04-08T07:36:36Z
+pancakes-check       gcg-4113        2026-04-08T07:31:22Z
+pancakes-check       gcg-4105        2026-04-08T07:26:18Z
 ```
 
 Your bead IDs, timestamps, and row count depend on how long the order has been
@@ -659,8 +659,8 @@ minute, then confirm it ran and succeeded:
 ~/my-city
 $ gc order history lint-check
 ORDER                BEAD            EXECUTED
-lint-check           mc-q7v          2026-04-08T09:14:05Z
-lint-check           mc-p2d          2026-04-08T09:13:35Z
+lint-check           gcg-4210        2026-04-08T09:14:05Z
+lint-check           gcg-4202        2026-04-08T09:13:35Z
 
 ~/my-city
 $ gc events --type order.failed --since 5m

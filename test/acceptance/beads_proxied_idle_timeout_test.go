@@ -89,8 +89,11 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	})
 
 	// No controller: nothing but this test may touch the scopes, so the only
-	// thing that can retire a proxy is its own idle watcher.
-	city.InitNoStart("claude")
+	// thing that can retire a proxy is its own idle watcher. Single-store:
+	// the subject is bd's proxy, and this environment's PATH puts the
+	// tool-home wrapper ahead of the real bd that BD_BIN names, so a split
+	// city's rig-scope gc bd, which runs the bd on PATH, would refuse it.
+	city.InitNoStartSingleStore("claude")
 	if out, err := city.GC("rig", "add", rigDir); err != nil {
 		t.Fatalf("gc rig add: %v\n%s", err, out)
 	}
