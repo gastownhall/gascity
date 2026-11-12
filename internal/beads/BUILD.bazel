@@ -52,6 +52,7 @@ go_test(
     srcs = [
         "absent_blocked_test.go",
         "atomic_close_memstore_test.go",
+        "bddepth_internal_test.go",
         "bdsql_relocation_internal_test.go",
         "bdstore_assignee_fanout_test.go",
         "bdstore_batch_test.go",

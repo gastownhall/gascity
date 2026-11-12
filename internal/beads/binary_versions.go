@@ -75,6 +75,11 @@ func probeBinaryVersion(name, preferredBin string, env []string) (string, error)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "version")
 	cmd.Env = env
+	if name == "bd" {
+		if cmd.Env, err = GuardBdLaunch(path, env); err != nil {
+			return "", err
+		}
+	}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("%s version timed out after %s", name, binaryVersionProbeTimeout)

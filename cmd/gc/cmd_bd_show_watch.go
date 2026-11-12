@@ -313,12 +313,17 @@ type bdWatchRunner struct {
 func (r *bdWatchRunner) run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cmd := exec.CommandContext(ctx, r.bdPath, args...)
 	cmd.Dir = r.dir
-	cmd.Env = r.env
+	env, err := beads.GuardBdLaunch(r.bdPath, r.env)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cmd.Env = env
 	cmd.Stdout = stdout
 	scan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, scan)
 	start := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
 	exit := 0
 	if err != nil {
 		exit = -1

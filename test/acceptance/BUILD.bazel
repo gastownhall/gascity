@@ -151,6 +151,7 @@ go_test(
     srcs = [
         "agent_env_test.go",
         "agent_suspend_test.go",
+        "bd_recursion_fuse_test.go",
         "beads_adopt_loopback_server_test.go",
         "beads_blocked_repair_test.go",
         "beads_cli_contract_home_isolation_test.go",

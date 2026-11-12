@@ -9,6 +9,7 @@ go_library(
         "bd_time.go",
         "beads_topology.go",
         "binary.go",
+        "bounded_gc_unix.go",
         "bounded_tool_command.go",
         "bounded_tool_command_other.go",
         "bounded_tool_command_unix.go",

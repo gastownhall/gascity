@@ -358,7 +358,9 @@ func customTypesBDCommand(ctx *CheckContext, bdBin, dir string, args ...string) 
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	if cmd.Env, err = beads.GuardBdLaunch(cmd.Path, env); err != nil {
+		return nil, err
+	}
 	return cmd, nil
 }
 

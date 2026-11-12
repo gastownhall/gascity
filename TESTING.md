@@ -104,6 +104,23 @@ BUILD files (the `BUILD files in sync` gate checks this). See
 `engdocs/bazel-quickstart.md` for setup and `engdocs/bazel-ci-budget.md` for
 the CI optimization loop.
 
+**Regenerating checked files** (`-update`, `-update-golden`,
+`UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
+sandbox, so `--test_arg=-update` can pass while changing nothing. Run the
+generator with `bazel run` from the repository root (its own flag in place
+of `-update` below, or its environment switch, such as `UPDATE_GOLDEN=1`,
+in front), check that `git status` lists every new and changed file, then
+`bazel test` the result:
+
+```bash
+GC_TEST_REPO_ROOT="$PWD" bazel run --test_sharding_strategy=disabled \
+  //<dir>:<leaf>_test -- -test.run='^<TestName>$' -update
+```
+
+A relative write reaches your checkout only through a runfiles link, and
+those exist only for files already there: `touch` each new golden first,
+or the generator writes it under `bazel-out` and the run still passes.
+
 **Plain `go test` is not the gate, and agents do not run it.** Iterate on
 one package with `bazel test //internal/config:config_test`, narrowed to the
 tests you changed with `--test_filter='^<TestName>$'`: only changed inputs

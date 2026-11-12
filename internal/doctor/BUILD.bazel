@@ -96,6 +96,7 @@ go_test(
     name = "doctor_test",
     srcs = [
         "autofix_skills_test.go",
+        "bddepth_internal_test.go",
         "checks_bd_backup_freshness_test.go",
         "checks_bd_backup_size_test.go",
         "checks_bd_backup_state_test.go",

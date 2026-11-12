@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"gopkg.in/yaml.v3"
 )
@@ -285,7 +286,11 @@ func localOnlyRemoteFixHint(remotes []doltRemoteState) string {
 func removeDoltRemote(rigPath, remoteName string) error {
 	cmd := exec.Command("bd", "--sandbox", "dolt", "remote", "remove", remoteName)
 	cmd.Dir = rigPath
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	env, err := beads.GuardBdLaunch(cmd.Path, append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
+	if err != nil {
+		return err
+	}
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bd --sandbox dolt remote remove %s: %w: %s", remoteName, err, strings.TrimSpace(string(out)))

@@ -231,6 +231,10 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - Comments describe current behavior; don't narrate removed functionality.
 - Role names never appear in Go code. If you're writing `if role == "mayor"`,
   it's a design error.
+- Every Go launch of a bd binary goes through `beads.GuardBdLaunch` right before
+  the `exec.Command*` line and uses the env it returns; it is the recursion fuse
+  (`GC_BD_DEPTH`, bound `MaxBdDepth`), and `internal/testenv`'s launch-guard lint
+  fails an unguarded bd launch.
 - **Tmux safety:** Never run bare `tmux kill-server` as cleanup. Never kill the
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
@@ -292,21 +296,8 @@ targets, and a green `go test` is not evidence a change passes CI.
   `--test_arg`, `--test_env` or `--test_filter` is a new cache key, and
   `--test_arg=-test.v` keys the same verbose run apart from everyone else's.
 - **Regenerating checked files** (`-update`, `-update-golden`,
-  `UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
-  sandbox, so `--test_arg=-update` can pass while changing nothing. Run the
-  generator with `bazel run` from the repository root (its own flag in place
-  of `-update` below, or its environment switch, such as `UPDATE_GOLDEN=1`,
-  in front), check that `git status` lists every new and changed file, then
-  `bazel test` the result:
-
-  ```bash
-  GC_TEST_REPO_ROOT="$PWD" bazel run --test_sharding_strategy=disabled \
-    //<dir>:<leaf>_test -- -test.run='^<TestName>$' -update
-  ```
-
-  A relative write reaches your checkout only through a runfiles link, and
-  those exist only for files already there: `touch` each new golden first,
-  or the generator writes it under `bazel-out` and the run still passes.
+  `UPDATE_GOLDEN=1`) is not a test run: `bazel test` cannot change your
+  checkout. Use `bazel run` as TESTING.md "Regenerating checked files" says.
 
 - **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
   plain `bazel test` executes remotely. Contributors use

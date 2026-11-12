@@ -165,6 +165,10 @@ var LeakVectorVars = []string{
 	"DO_NOT_TRACK",
 	"GC_AGENT",
 	"GC_ALIAS",
+	// GC_BD_DEPTH is the bd recursion fuse's launch counter (beads.GuardBdLaunch).
+	// A counter an agent session inherited from the gc bd that launched it would
+	// make bd launches inside a test refuse at the bound.
+	"GC_BD_DEPTH",
 	"GC_BEADS",
 	"GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE",
 	"GC_BEADS_CONDITIONAL_WRITES",

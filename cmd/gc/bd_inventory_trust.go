@@ -530,7 +530,11 @@ func bdHelpRunnerFor(bdPath, home string) bdHelpRunner {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, bdPath, append(append([]string(nil), path...), "--help")...)
 		cmd.Dir = home
-		cmd.Env = env
+		guarded, err := beads.GuardBdLaunch(bdPath, env)
+		if err != nil {
+			return "", err
+		}
+		cmd.Env = guarded
 		cmd.Stdin = nil
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -775,7 +779,9 @@ func bdGuardRead(cityPath string, cfg *config.City, target execStoreTarget, args
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bdPath, args...)
 	cmd.Dir = target.ScopeRoot
-	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	if cmd.Env, err = beads.GuardBdLaunch(bdPath, workQueryEnvForDir(env, cmd.Dir)); err != nil {
+		return nil, err
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {

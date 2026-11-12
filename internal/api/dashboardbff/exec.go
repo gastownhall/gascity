@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
@@ -84,6 +85,15 @@ func (r *execRunner) run(ctx context.Context, cmd string, args []string, timeout
 	start := time.Now()
 	c := exec.CommandContext(cctx, cmd, args...)
 	c.Env = cleanEnv()
+	if cmd == "bd" {
+		// cleanEnv inherits nothing, so the recursion fuse's counter has to
+		// cross the scrub through the guard.
+		env, err := beads.GuardBdLaunch(c.Path, c.Env)
+		if err != nil {
+			return nil, &execError{msg: err.Error(), kind: execErrSpawn}
+		}
+		c.Env = env
+	}
 	stdout := &cappedBuffer{limit: capBytes, onOverflow: cancel}
 	stderr := &cappedBuffer{limit: maxBytes}
 	c.Stdout = stdout

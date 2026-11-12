@@ -155,6 +155,14 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
 			return bdReadsStandardOTELEnv(ctx, execName)
 		})
+		if name == "bd" {
+			guarded, err := GuardBdLaunch(cmd.Path, cmd.Env)
+			if err != nil {
+				trace("error", err)
+				return nil, err
+			}
+			cmd.Env = guarded
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -751,13 +759,17 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	guarded, err := GuardBdLaunch(cmd.Path, env)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = guarded
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	traceExit := 0
 	if err != nil {
 		var exitErr *exec.ExitError

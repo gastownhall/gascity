@@ -840,6 +840,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}, interval, stdout, stderr)
 	}
 
+	if cmd.Env, err = beads.GuardBdLaunch(bdPath, cmd.Env); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	traceStart := time.Now()
 	runErr := cmd.Run()
 	traceExit := 0

@@ -323,6 +323,9 @@ func readBdBackupStatus(ctx context.Context, cc *CheckContext, bdBin, scopeRoot 
 		bin = "bd"
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	if env, err = beads.GuardBdLaunch(cmd.Path, env); err != nil {
+		return report, err
+	}
 	cmd.Dir, cmd.Env = scopeRoot, env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
