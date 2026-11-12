@@ -162,7 +162,7 @@ type CityRuntime struct {
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
 	adt                     assignedWorkDeferTracker
-	wg                      wispGC
+	wg                      wispGC // seeds the wisp GC lane; reloads stage on the lane
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -204,6 +204,10 @@ type CityRuntime struct {
 	// workGCLane runs the wisp GC's work arm off the tick (wisp_gc_work_lane.go).
 	workGCLane     *workGCLane
 	workGCLaneOnce sync.Once
+	// wispGCLane runs the wisp GC purge off the tick (wisp_gc_lane.go). It
+	// owns the tracker, seeded from wg; created on first use.
+	wispGCLane     *wispGCLane
+	wispGCLaneOnce sync.Once
 
 	// inventoryLane lists runtimes at patrol cadence and publishes the
 	// observation cache (runtime_inventory_lane.go). run() creates it; it
@@ -339,6 +343,11 @@ type CityRuntime struct {
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
+	// fsPressureShedding is true while the tick's FS-pressure gate is skipping
+	// ticks: a tick the gate stops sets it, and a tick it lets through, forced
+	// or not, clears it. The wisp GC lane reads it from its own goroutine
+	// (wisp_gc_lane.go).
+	fsPressureShedding atomic.Bool
 
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
@@ -910,6 +919,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		stopWorkGCLane()
 		<-workGCLaneDone
 	}()
+	// The wisp GC purge runs on its own lane, which the tick wakes at the slot
+	// the purge held (wisp_gc_lane.go). Its stop is deferred after the work-arm
+	// lane's, so it runs first: every return from here joins a purge in flight
+	// while the work-arm lane it wakes, the stores and the trace (closed by
+	// shutdown, deferred first) are still up.
+	defer cr.startWispGCLane(ctx)()
 
 	// Recover ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty) before session reconciliation, so a
@@ -1426,7 +1441,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
 	{name: "retire_suspended_rig_scopes", run: (*CityRuntime).tickRetireSuspendedRigScopes},
 	{name: "reconcile_execution_completions", run: (*CityRuntime).tickReconcileExecutionCompletions},
-	{name: "wisp_gc", run: (*CityRuntime).tickWispGC},
+	{name: "wake_wisp_gc_lane", run: (*CityRuntime).tickWakeWispGCLane},
 	{name: "workspace_service_tick", run: (*CityRuntime).tickWorkspaceService},
 	{name: "auto_suspend_chat_sessions", session: true, run: (*CityRuntime).tickAutoSuspendChatSessions},
 	{name: "process_convergence_requests", run: (*CityRuntime).tickProcessConvergenceRequests},
@@ -1451,8 +1466,8 @@ func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 }
 
 // tick performs one reconciliation tick: pool death detection, config
-// reload (if dirty), agent reconciliation, wisp GC, and order
-// dispatch. Its steps are legacyTickPhases, in order.
+// reload (if dirty), agent reconciliation, and the wakes of the order and
+// wisp GC lanes. Its steps are legacyTickPhases, in order.
 func (cr *CityRuntime) tick(
 	ctx context.Context,
 	dirty *atomic.Bool,
@@ -1602,10 +1617,12 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 
 func (cr *CityRuntime) tickFSPressureGate(p *tickPass) bool {
 	if !p.configChanged && cr.shouldSkipTickForFSPressure(p.trace, p.trigger) {
+		cr.fsPressureShedding.Store(true)
 		cr.processConvergenceRequests(p.ctx)
 		p.completed = true
 		return true
 	}
+	cr.fsPressureShedding.Store(false)
 	if p.configChanged {
 		cr.resetFSPressureEpisode()
 	}
@@ -1920,50 +1937,6 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 		sweptAt, sweptReason, swept := completionsLane.lastSweep()
 		addBackstopAgeFields(completionFields, sweptAt, sweptReason, swept)
 		p.recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
-	}
-	return false
-}
-
-// tickWispGC purges expired closed molecules. The molecule/wisp/workflow
-// purge arm routes through the typed graph-class store; the read-message
-// retention arm through the typed messaging-class store. Both collapse to the
-// city store today, so the GC is byte-identical. The closed session purge arm
-// gets the sessions class only when it is relocated onto a SQLite infra
-// ledger; on an unsplit city it gets nothing and never touches the work store.
-func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
-		phaseStart := time.Now()
-		// On a city that relocates the graph class, the attachment holders and
-		// the v1 poured molecule roots live on the work legs, not the binding
-		// the GC sweeps (wispGCLegs). A single-store city hands none: its
-		// graph-class store is its work store.
-		var legs wispGCLegs
-		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
-			legs = cr.workLegs()
-		}
-		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
-		payload := map[string]any{"purged": purged}
-		if legs != nil {
-			// The work arm runs on its own lane; the tick only wakes it and
-			// records how stale its last pass is.
-			lane := cr.workGCLaneOf()
-			lane.wake()
-			if age, ran := lane.lastPassAge(time.Now()); ran {
-				payload["work_arm_last_pass_age_ms"] = age.Milliseconds()
-			}
-		}
-		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, payload)
-		if gcErr != nil {
-			for _, line := range strings.Split(gcErr.Error(), "\n") {
-				if line == "" {
-					continue
-				}
-				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
-			}
-		}
-		if purged > 0 {
-			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
-		}
 	}
 	return false
 }
@@ -3079,7 +3052,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = carryWispGCState(cr.wg, newWispGCForCity(nextCfg, cr.cityName))
+	// The wisp GC lane owns its tracker; a purge in flight keeps the one it
+	// started with, and the next pass installs this one (wisp_gc_lane.go).
+	cr.wispGCLaneOf().stage(newWispGCForCity(nextCfg, cr.cityName))
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
@@ -4491,13 +4466,14 @@ func backgroundManagedDoltHealth(health func(context.Context, string) error) fun
 }
 
 // ensureManagedDoltPublishedForTick runs the managed-Dolt preflight for one
-// caller (the tick, the startup pass, the control dispatcher or the orders
-// lane). The preflight runs as a flight (managed_dolt_flight.go) under ctx, the
-// caller's lifetime context, so shutdown cancels it; the caller waits for it at
-// most managedDoltFlightWindow from the flight's start and then carries on,
-// leaving the recover running. A caller that finds a flight already running
-// joins it, so one city never has two recovers at once. The wait ends with ctx
-// too, and a caller giving up on the recover never cancels it.
+// caller (the tick, the startup pass, the control dispatcher, the orders lane
+// or the wisp GC lane). The preflight runs as a flight (managed_dolt_flight.go)
+// under ctx, the caller's lifetime context, so shutdown cancels it; the caller
+// waits for it at most managedDoltFlightWindow from the flight's start and then
+// carries on, leaving the recover running. A caller that finds a flight
+// already running joins it, so one city never has two recovers at once. The
+// wait ends with ctx too, and a caller giving up on the recover never cancels
+// it.
 func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {

@@ -19,7 +19,8 @@ automations, and garbage-collects expired wisps.
 
 - **Controller Loop**: The persistent `select` loop in `controllerLoop()`
   that fires on a configurable ticker (default 30s) and on config file
-  changes. Each tick runs the full reconciliation and wisp GC pipeline.
+  changes. Each tick runs the full reconciliation pipeline and wakes the
+  wisp GC lane, which purges on its own goroutine.
   Implemented in `cmd/gc/controller.go`.
 
 - **Orders Lane**: Order dispatch runs on its own goroutine
@@ -99,7 +100,7 @@ gc start --foreground
   │                 ├─ wake orders lane  (no dispatch in the tick)
   │                 ├─ buildAgents(cfg)  →  evaluate pools in parallel
   │                 ├─ reconcileSessionBeads()
-  │                 └─ wispGC.runGC()
+  │                 └─ wake wisp GC lane  (no purge in the tick)
   │
   │     orders lane (own goroutine; wake after a duty-cycle gap, or backstop):
   │           ├─ FS-pressure gate + managed-Dolt preflight
@@ -137,9 +138,15 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    [Health Patrol](health-patrol.md) for the reconciliation state machine,
    crash loop quarantine, and idle tracking details.
 
-4. **Wisp GC** (`wg.runGC()`): If enabled (`wisp_gc_interval` and
-   `wisp_ttl` both set), queries closed molecules via `bd list` and
-   deletes those older than the TTL cutoff.
+4. **Wisp GC lane wake**: The tick does not purge. It wakes the wisp GC
+   lane (`cmd/gc/wisp_gc_lane.go`), which runs `wg.runGC()` on its own
+   goroutine when wisp GC is enabled (`wisp_gc_interval` and `wisp_ttl`
+   both set) and the interval has elapsed: it queries closed molecules
+   and deletes those older than the TTL cutoff. Only a tick's wake starts
+   a purge, and no tick waits for one. A wake the lane's duty cycle defers
+   can run a purge-length after its tick, so a pass starts no purge while
+   the tick's FS-pressure gate is skipping ticks, and it runs the
+   managed-Dolt preflight before every purge.
 
 5. **Orders lane wake**: The tick does not dispatch orders. It wakes the
    orders lane, which evaluates trigger conditions for all non-manual
@@ -199,10 +206,12 @@ indicate bugs.
   any reload where `workspace.name` changes. The city name is locked at
   startup; changing it requires a controller restart.
 
-- **Tracker rebuild is atomic per tick**: When config reloads, all four
-  trackers (crash, idle, wisp GC, order) are rebuilt in the same tick
-  before reconciliation runs. No tick ever uses a mix of old and new
-  tracker state.
+- **Tracker rebuild is atomic per tick**: When config reloads, the crash
+  and idle trackers are rebuilt in the same tick before reconciliation
+  runs, so no tick ever uses a mix of old and new tracker state. The
+  rebuilt wisp GC tracker and order dispatcher are staged for their lanes,
+  which install them between passes: a purge or dispatch in flight keeps
+  the one it started with, and the reload never waits for it.
 
 - **Dirty flag is edge-triggered, not level-triggered**: The `atomic.Bool`
   is set by the fsnotify goroutine and cleared by `dirty.Swap(false)` at
