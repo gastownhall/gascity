@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -433,29 +432,6 @@ func TestProcessScanSessionScanWaitsOutTheSweepBound(t *testing.T) {
 	}
 }
 
-// writeScanFakeProcess writes the /proc files the scanner reads for one
-// process of a fake procfs: environ, stat (parent ppid), comm, cmdline and a
-// status naming the test's effective uid.
-func writeScanFakeProcess(t *testing.T, root string, pid, ppid int, comm string, env []string) {
-	t.Helper()
-	dir := filepath.Join(root, strconv.Itoa(pid))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	uid := strconv.Itoa(os.Geteuid())
-	for name, content := range map[string]string{
-		"environ": strings.Join(env, "\x00") + "\x00",
-		"stat":    strconv.Itoa(pid) + " (" + comm + ") S " + strconv.Itoa(ppid) + strings.Repeat(" 0", 17) + " 100" + strings.Repeat(" 0", 29),
-		"comm":    comm + "\n",
-		"cmdline": comm + "\x00",
-		"status":  "Name:\t" + comm + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 // inBoxTmuxProcRoot is a fake procfs of a host-sharing box whose agent
 // founded a tmux server: the holder runs the box's program (11, with a
 // child and a tmux client), the server (20, adopted by init, carrying the
@@ -465,14 +441,14 @@ func inBoxTmuxProcRoot(t *testing.T, sessionID string) string {
 	t.Helper()
 	root := t.TempDir()
 	env := []string{"GC_SESSION_ID=" + sessionID, "GC_SESSION_NAME=box", "GC_CITY_PATH=/city"}
-	writeScanFakeProcess(t, root, 10, 1, "holder", nil)
-	writeScanFakeProcess(t, root, 11, 10, "sh", env)
-	writeScanFakeProcess(t, root, 12, 11, "sleep", env)
-	writeScanFakeProcess(t, root, 13, 11, "tmux: client", env)
-	writeScanFakeProcess(t, root, 20, 1, "tmux: server", env)
-	writeScanFakeProcess(t, root, 21, 20, "bash", env)
-	writeScanFakeProcess(t, root, 22, 21, "vim", env)
-	writeScanFakeProcess(t, root, 30, 1, "sleep", env)
+	runtimetest.WriteFakeProcEntry(t, root, 10, 1, "holder", nil)
+	runtimetest.WriteFakeProcEntry(t, root, 11, 10, "sh", env)
+	runtimetest.WriteFakeProcEntry(t, root, 12, 11, "sleep", env)
+	runtimetest.WriteFakeProcEntry(t, root, 13, 11, "tmux: client", env)
+	runtimetest.WriteFakeProcEntry(t, root, 20, 1, "tmux: server", env)
+	runtimetest.WriteFakeProcEntry(t, root, 21, 20, "bash", env)
+	runtimetest.WriteFakeProcEntry(t, root, 22, 21, "vim", env)
+	runtimetest.WriteFakeProcEntry(t, root, 30, 1, "sleep", env)
 	return root
 }
 

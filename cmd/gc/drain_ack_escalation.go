@@ -704,9 +704,12 @@ func terminateDrainAckRuntimeByProcessTable(
 // is one an agent or a user founded inside the box. Such a server carries the
 // session's GC_SESSION_ID, so the shared scan would read each of its panes as
 // a tracked, tmux-parented root of the seat, the exact shape this fence
-// accepts for the tmux runtime; fenced at the scanner, no in-box pane ever
-// reaches it. A wedged exec seat's escalation therefore reports
-// "nothing_attributable" and its slot stays occupied, the outcome below.
+// accepts for the tmux runtime; fenced at the scanner (and, in an auto
+// composite over the pack, on the ACP backend's roots too), no in-box pane
+// ever reaches it. The seat's own box program, under the pack's holder or
+// init, is never tmux-parented either. A wedged exec seat's escalation
+// therefore reports "nothing_attributable" and its slot stays occupied, the
+// outcome below.
 //
 // The cost of the positive form is that a provider whose runtimes are not
 // children of infrastructure the scan recognizes gets no force at all — its rows

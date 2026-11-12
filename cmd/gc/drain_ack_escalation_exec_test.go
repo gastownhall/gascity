@@ -2,11 +2,7 @@ package main
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	goruntime "runtime"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -14,41 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
-
-// moveUnderFakeTmuxServer rewrites pid's parent in the fake procfs root to a
-// fake "tmux: server" (serverPID, adopted by init) carrying env, as a server
-// an agent founded in its box does.
-func moveUnderFakeTmuxServer(t *testing.T, root string, pid, serverPID int, env []string) {
-	t.Helper()
-	statPath := filepath.Join(root, strconv.Itoa(pid), "stat")
-	data, err := os.ReadFile(statPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stat := string(data)
-	end := strings.LastIndexByte(stat, ')')
-	fields := strings.Fields(stat[end+1:])
-	fields[1] = strconv.Itoa(serverPID)
-	if err := os.WriteFile(statPath, []byte(stat[:end+1]+" "+strings.Join(fields, " ")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(root, strconv.Itoa(serverPID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	uid := strconv.Itoa(os.Geteuid())
-	for name, content := range map[string]string{
-		"environ": strings.Join(env, "\x00") + "\x00",
-		"stat":    strconv.Itoa(serverPID) + " (tmux: server) S 1" + strings.Repeat(" 0", 17) + " 100" + strings.Repeat(" 0", 29),
-		"comm":    "tmux: server\n",
-		"cmdline": "tmux\x00",
-		"status":  "Name:\ttmux: server\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
 
 // Kills a drain-ack escalation that force-terminates a pane of a tmux server
 // an agent founded inside a host-sharing exec box: the server carries the
@@ -67,7 +28,8 @@ func TestDrainAckEscalationNeverTargetsInBoxTmuxPaneOfExecPack(t *testing.T) {
 	pane := startSweepLeftover(t, sp, "seat", "gc-seat", cityPath, false)
 	root := runtimetest.SnapshotProcRoot(t, pane.PID)
 	const serverPID = 4194000
-	moveUnderFakeTmuxServer(t, root, pane.PID, serverPID, []string{"GC_SESSION_ID=gc-seat", "GC_CITY_PATH=" + cityPath})
+	writeFakeProcEntry(t, root, serverPID, 1, "tmux: server", []string{"GC_SESSION_ID=gc-seat", "GC_CITY_PATH=" + cityPath})
+	runtimetest.SetSnapshotParent(t, root, pane.PID, serverPID)
 	proctable.SetScanRootForTesting(t, root)
 
 	scanner, ok := runtime.AsProcessTableScanner(sp)
@@ -93,5 +55,47 @@ func TestDrainAckEscalationNeverTargetsInBoxTmuxPaneOfExecPack(t *testing.T) {
 	tmuxFound[0].IsTracked, tmuxFound[0].ProviderName = true, "seat"
 	if targets, _ := drainAckForceTerminationTargets(tmuxFound, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 1 {
 		t.Fatalf("escalation targets %+v of the tmux runtime's pane, want it: the tmux rule is unchanged; stderr=%q", targets, stderr.String())
+	}
+}
+
+// Pins the stated exec-pack outcome of the escalation: the wedged seat's own
+// box program, tracked under the seat's name while the pack lists its box,
+// is never a force-termination target, whether its parent is the pack's
+// holder or init, since the escalation targets only a root whose parent is
+// tmux infrastructure. The escalation therefore reports nothing attributable
+// for an exec seat, and the provider's stop, already tried, is all it gets.
+func TestDrainAckEscalationNeverTargetsAnExecSeatsOwnProgram(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("reads /proc snapshots, which only linux has")
+	}
+	cityPath := t.TempDir()
+	sp := sessionexec.NewSeamBackedForCity(sweepGoldenPack(t, true), "drain-city", cityPath)
+	program := startSweepLeftover(t, sp, "seat", "gc-seat", cityPath, false)
+	scanner, ok := runtime.AsProcessTableScanner(sp)
+	if !ok {
+		t.Fatal("the host-sharing golden pack has no process-table scanner")
+	}
+	const holderPID = 4194100
+	for _, tc := range []struct {
+		name   string
+		parent int
+	}{
+		{"under the pack's holder", holderPID},
+		{"adopted by init", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := runtimetest.SnapshotProcRoot(t, program.PID)
+			writeFakeProcEntry(t, root, holderPID, 1, "holder", []string{"PATH=/usr/bin"})
+			runtimetest.SetSnapshotParent(t, root, program.PID, tc.parent)
+			proctable.SetScanRootForTesting(t, root)
+			found, err := scanner.FindRuntimesBySessionID("gc-seat")
+			if err != nil || len(found) != 1 || found[0].PID != program.PID || !found[0].IsTracked || found[0].ProviderName != "seat" {
+				t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the seat's program pid %d tracked as seat, or the case proves nothing", found, err, program.PID)
+			}
+			var stderr bytes.Buffer
+			if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 0 {
+				t.Fatalf("escalation targets %+v, want none: an exec seat's own program is never force-terminated by the escalation; stderr=%q", targets, stderr.String())
+			}
+		})
 	}
 }

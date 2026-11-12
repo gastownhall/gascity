@@ -359,12 +359,15 @@ func checkTmuxSubtreeFenced(t *testing.T, sp runtime.Provider, l contractLeftove
 		{"under a pane shell", shellPID},
 	} {
 		root := SnapshotProcRoot(t, l.PID)
-		writeFakeProcEntry(t, root, serverPID, 1, "tmux: server", sessionEnv)
-		writeFakeProcEntry(t, root, shellPID, serverPID, "bash", nil)
-		if err := setSnapshotParent(root, l.PID, shape.parent); err != nil {
-			t.Fatal(err)
-		}
+		WriteFakeProcEntry(t, root, serverPID, 1, "tmux: server", sessionEnv)
+		WriteFakeProcEntry(t, root, shellPID, serverPID, "bash", nil)
+		SetSnapshotParent(t, root, l.PID, shape.parent)
 		proctable.SetScanRootForTesting(t, root)
+		// The empty id (the orphan sweep's scan) is a regression guard only:
+		// the sweep reads orphan candidates, whose parent is init or the
+		// subreaper, so neither shape here, parented by the server or a
+		// pane shell, is one even unfenced. The session's scan is the case
+		// that bites.
 		for _, id := range []string{l.sessionID, ""} {
 			found, err := s.FindRuntimesBySessionID(id)
 			if err != nil {
@@ -380,10 +383,10 @@ func checkTmuxSubtreeFenced(t *testing.T, sp runtime.Provider, l contractLeftove
 	return nil
 }
 
-// writeFakeProcEntry writes a fake process into the snapshot root: its
-// environ, stat (parent ppid), comm, cmdline, and a status naming this
-// test's effective uid.
-func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, env []string) {
+// WriteFakeProcEntry writes a fake process into a procfs-shaped root, such
+// as a SnapshotProcRoot: its environ, stat (parent ppid), comm, cmdline, and
+// a status naming this test's effective uid, which the Linux scanner reads.
+func WriteFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, env []string) {
 	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -403,18 +406,22 @@ func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, e
 	}
 }
 
-// setSnapshotParent rewrites pid's parent in the snapshot root to ppid.
-func setSnapshotParent(root string, pid, ppid int) error {
+// SetSnapshotParent rewrites pid's parent in a procfs-shaped root, such as
+// a SnapshotProcRoot, to ppid.
+func SetSnapshotParent(t *testing.T, root string, pid, ppid int) {
+	t.Helper()
 	path := filepath.Join(root, strconv.Itoa(pid), "stat")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		t.Fatal(err)
 	}
 	stat, err := withParent(string(data), ppid)
 	if err != nil {
-		return err
+		t.Fatal(err)
 	}
-	return os.WriteFile(path, []byte(stat), 0o644)
+	if err := os.WriteFile(path, []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // checkNoScannerOffHost reports how sp, whose sessions do not share this
