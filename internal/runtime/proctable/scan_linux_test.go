@@ -1196,3 +1196,313 @@ func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
 		t.Fatalf("entry error pids = %v (%s); want only the unscoped process %d", pids, SummarizeScanError(err), runtimePID)
 	}
 }
+
+// TestUnreadableEnvironUserManagerProofFailsClosed (ga-zpcphq): the
+// manager-scope exemption is narrow. A permission-denied process outside the
+// exact own user-manager init scope stays an entry error — a hardened runtime
+// CLI, a credential agent's name, another user's manager, a nested or
+// suffixed lookalike, or no cgroup at all — a proof read that fails keeps
+// its error beside the environ failure, a process whose age the failed read
+// cannot bound stays unproven, and a failure that is not a permission denial
+// is never excused.
+func TestUnreadableEnvironUserManagerProofFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ stays readable")
+	}
+	euid := os.Geteuid()
+	euidDir := strconv.Itoa(euid)
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	saved := scanNow
+	scanNow = func() time.Time { return readAt }
+	t.Cleanup(func() { scanNow = saved })
+	scope := "/user.slice/user-" + euidDir + ".slice/user@" + euidDir + ".service/init.scope"
+
+	// boot is readAt - 2h; startTicks are ticks after boot (linuxUserHZ 100).
+	const (
+		readRecent    = 719910 // boot + 7199.10s: 0.9s before the read, inside the uncertainty
+		newerThanRead = 720100 // boot + 7201s: 1s after the read
+	)
+
+	tests := []struct {
+		name string
+		comm string
+		// cgroupContent is the cgroup file's bytes; cgroupIsDir makes the
+		// cgroup path a directory instead.
+		cgroupContent string
+		cgroupIsDir   bool
+		noBootTime    bool
+		startTicks    uint64
+		environIsDir  bool // the environ read fails with EISDIR, not EACCES
+		wantProofErr  bool
+	}{
+		{name: "hardened runtime in a service cgroup", comm: "codex", cgroupContent: "0::/system.slice/app.service\n", startTicks: 100},
+		{name: "credential agent name in a login session scope", comm: "ssh-agent", cgroupContent: "0::/user.slice/user-" + euidDir + ".slice/session-3.scope\n", startTicks: 100},
+		{name: "another user's manager scope", comm: "(sd-pam)", cgroupContent: "0::/user.slice/user-999.slice/user@999.service/init.scope\n", startTicks: 100},
+		{name: "nested lookalike below the scope", comm: "(sd-pam)", cgroupContent: "0::" + scope + "/evil\n", startTicks: 100},
+		{name: "suffixed lookalike", comm: "(sd-pam)", cgroupContent: "0::" + scope + "-lookalike\n", startTicks: 100},
+		{name: "bare root path", comm: "(sd-pam)", cgroupContent: "0::/\n", startTicks: 100},
+		{name: "no cgroup file", comm: "(sd-pam)", startTicks: 100},
+		{name: "v1-only cgroup file", comm: "(sd-pam)", cgroupContent: "10:memory:/user.slice\n", startTicks: 100},
+		{name: "duplicate unified entries", comm: "(sd-pam)", cgroupContent: "0::" + scope + "\n0::" + scope + "\n", startTicks: 100, wantProofErr: true},
+		{name: "empty unified path", comm: "(sd-pam)", cgroupContent: "0::\n", startTicks: 100, wantProofErr: true},
+		{name: "malformed unified entry", comm: "(sd-pam)", cgroupContent: "0:ctrl\n", startTicks: 100, wantProofErr: true},
+		{name: "cgroup path is a directory", comm: "(sd-pam)", cgroupIsDir: true, startTicks: 100, wantProofErr: true},
+		{name: "no boot time to bound the read", comm: "(sd-pam)", cgroupContent: "0::" + scope + "\n", noBootTime: true, startTicks: 100, wantProofErr: true},
+		{name: "age inside the read's uncertainty", comm: "(sd-pam)", cgroupContent: "0::" + scope + "\n", startTicks: readRecent},
+		{name: "process newer than the read", comm: "(sd-pam)", cgroupContent: "0::" + scope + "\n", startTicks: newerThanRead},
+		{name: "non-permission environ failure", comm: "(sd-pam)", cgroupContent: "0::" + scope + "\n", startTicks: 100, environIsDir: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const pid = 2642
+			root := t.TempDir()
+			if !tt.noBootTime {
+				writeFakeBootTime(t, root, readAt.Add(-2*time.Hour))
+			}
+			buildFakeProcUnder(t, root, pid, 1, tt.comm, nil)
+			dir := filepath.Join(root, strconv.Itoa(pid))
+			writeFakeProcessStat(t, dir, pid, 1, tt.startTicks)
+			switch {
+			case tt.cgroupIsDir:
+				if err := os.MkdirAll(filepath.Join(dir, "cgroup"), 0o755); err != nil {
+					t.Fatalf("mkdir cgroup: %v", err)
+				}
+			case tt.cgroupContent != "":
+				if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(tt.cgroupContent), 0o644); err != nil {
+					t.Fatalf("write cgroup: %v", err)
+				}
+			}
+			if tt.environIsDir {
+				if err := os.Remove(filepath.Join(dir, "environ")); err != nil {
+					t.Fatalf("remove environ: %v", err)
+				}
+				if err := os.MkdirAll(filepath.Join(dir, "environ"), 0o755); err != nil {
+					t.Fatalf("mkdir environ: %v", err)
+				}
+			} else if err := os.Chmod(filepath.Join(dir, "environ"), 0o000); err != nil {
+				t.Fatalf("chmod environ: %v", err)
+			}
+
+			_, err := scanWithRoot(root, "ga-target")
+			if err == nil {
+				t.Fatalf("scan error = nil; want the unproven process to fail closed")
+			}
+			if pids := entryErrorPIDs(err); len(pids) != 1 || pids[0] != pid {
+				t.Fatalf("entry error pids = %v (%s); want the unreadable process reported", pids, SummarizeScanError(err))
+			}
+			if tt.wantProofErr {
+				if !strings.Contains(err.Error(), "proving user-manager scope for pid") {
+					t.Fatalf("error = %q; want the proof-read failure retained", err.Error())
+				}
+			} else if strings.Contains(err.Error(), "proving user-manager scope for pid") {
+				t.Fatalf("error = %q; want no proof error for an unproven process", err.Error())
+			}
+			if tt.environIsDir {
+				if !errors.Is(err, syscall.EISDIR) {
+					t.Fatalf("error = %v; want the EISDIR environ failure", err)
+				}
+			} else if !errors.Is(err, fs.ErrPermission) {
+				t.Fatalf("error = %v; want the permission-denied environ failure", err)
+			}
+		})
+	}
+}
+
+// TestUnreadableEnvironUserManagerRetainsEarlierProofError (ga-zpcphq): a
+// bounded scan of a hybrid host cannot read the two-hierarchy cgroup file
+// with the strict single-hierarchy reader, so the tmux-parent proof keeps its
+// error even after the manager-scope exemption succeeds: the environ failure
+// is gone, the earlier proof failure is not.
+func TestUnreadableEnvironUserManagerRetainsEarlierProofError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ stays readable")
+	}
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	saved := scanNow
+	scanNow = func() time.Time { return readAt }
+	t.Cleanup(func() { scanNow = saved })
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	root, pid := userManagerScopeFixture(t, "10:memory:/\n0::"+scope+"\n", readAt)
+	if err := os.Chmod(filepath.Join(root, strconv.Itoa(pid), "environ"), 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+
+	_, err := scanWithRootSince(root, "ga-target", readAt.Add(-90*time.Minute))
+	if err == nil {
+		t.Fatalf("scan error = nil; want the earlier proof failure retained")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "proving tmux parent for pid") {
+		t.Fatalf("error = %q; want the strict tmux-parent proof failure retained", msg)
+	}
+	if strings.Contains(msg, "reading environ") {
+		t.Fatalf("error = %q; want the excused environ failure gone", msg)
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("error = %q; want no permission failure left", msg)
+	}
+}
+
+// TestUnreadableEnvironUserManagerProofRevalidation (ga-zpcphq): the proof's
+// second census. Anything that moved between the two censuses — start ticks,
+// parent, cgroup path — abandons it; a process that vanished is unproven,
+// and a re-read that fails keeps its error. The census pair is the seam a
+// test can drive deterministically; the live proof cannot be mutated
+// mid-read.
+func TestUnreadableEnvironUserManagerProofRevalidation(t *testing.T) {
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	const pid = 2642
+	buildCensusFixture := func(t *testing.T) (root, dir string) {
+		t.Helper()
+		root = t.TempDir()
+		writeFakeBootTime(t, root, readAt.Add(-2*time.Hour))
+		buildFakeProcUnder(t, root, pid, 1, "(sd-pam)", nil)
+		dir = filepath.Join(root, strconv.Itoa(pid))
+		writeFakeProcessStat(t, dir, pid, 1, 3600*100)
+		writeFakeProcessCgroup(t, dir, scope)
+		return root, dir
+	}
+	censusOf := func(t *testing.T, root string) managerScopeCensus {
+		t.Helper()
+		census, exists, err := readManagerScopeCensus(root, pid)
+		if err != nil || !exists {
+			t.Fatalf("readManagerScopeCensus = (%v, %t, %v); want the fixture's identity", census, exists, err)
+		}
+		return census
+	}
+
+	t.Run("unchanged identity is still current", func(t *testing.T) {
+		root, _ := buildCensusFixture(t)
+		if ok, err := censusOf(t, root).stillCurrent(root, pid); err != nil || !ok {
+			t.Fatalf("stillCurrent = (%t, %v); want the unchanged identity to hold", ok, err)
+		}
+	})
+	t.Run("start ticks changed", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		writeFakeProcessStat(t, dir, pid, 1, 3600*100+1)
+		if ok, err := census.stillCurrent(root, pid); err != nil || ok {
+			t.Fatalf("stillCurrent = (%t, %v); want a recycled identity abandoned", ok, err)
+		}
+	})
+	t.Run("parent changed", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		writeFakeProcessStat(t, dir, pid, 999, 3600*100)
+		if ok, err := census.stillCurrent(root, pid); err != nil || ok {
+			t.Fatalf("stillCurrent = (%t, %v); want a changed parent abandoned", ok, err)
+		}
+	})
+	t.Run("cgroup path changed", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		writeFakeProcessCgroup(t, dir, "/user.slice/user-"+strconv.Itoa(euid)+".slice/session-3.scope")
+		if ok, err := census.stillCurrent(root, pid); err != nil || ok {
+			t.Fatalf("stillCurrent = (%t, %v); want a migrated cgroup abandoned", ok, err)
+		}
+	})
+	t.Run("process vanished", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		if err := os.Remove(filepath.Join(dir, "stat")); err != nil {
+			t.Fatalf("remove stat: %v", err)
+		}
+		if ok, err := census.stillCurrent(root, pid); err != nil || ok {
+			t.Fatalf("stillCurrent = (%t, %v); want a vanished process unproven", ok, err)
+		}
+	})
+	t.Run("cgroup became malformed between the censuses", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte("0::"+scope+"\n0::"+scope+"\n"), 0o644); err != nil {
+			t.Fatalf("write cgroup: %v", err)
+		}
+		if _, err := census.stillCurrent(root, pid); err == nil {
+			t.Fatalf("stillCurrent error = nil; want the duplicate-entry failure kept")
+		}
+	})
+	t.Run("cgroup became a directory between the censuses", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		if err := os.Remove(filepath.Join(dir, "cgroup")); err != nil {
+			t.Fatalf("remove cgroup: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "cgroup"), 0o755); err != nil {
+			t.Fatalf("mkdir cgroup: %v", err)
+		}
+		if _, err := census.stillCurrent(root, pid); err == nil {
+			t.Fatalf("stillCurrent error = nil; want the failed re-read kept")
+		}
+	})
+	t.Run("stat became malformed between the censuses", func(t *testing.T) {
+		root, dir := buildCensusFixture(t)
+		census := censusOf(t, root)
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte("garbage"), 0o644); err != nil {
+			t.Fatalf("write stat: %v", err)
+		}
+		if _, err := census.stillCurrent(root, pid); err == nil {
+			t.Fatalf("stillCurrent error = nil; want the malformed re-read kept")
+		}
+	})
+}
+
+// TestReadUnifiedCgroup (ga-zpcphq): the unified (cgroup v2) reader reads the
+// one 0:: entry and ignores v1 controller entries, so a hybrid host reads the
+// same as a pure v2 one; a missing file or entry is unproven, and a duplicate,
+// malformed or empty unified entry is an error.
+func TestReadUnifiedCgroup(t *testing.T) {
+	const pid = 2642
+	tests := []struct {
+		name    string
+		content string
+		// makeFile: false leaves no cgroup file at all.
+		makeFile   bool
+		wantPath   string
+		wantExists bool
+		wantErr    bool
+	}{
+		{name: "pure v2 entry", content: "0::/user.slice/x.scope\n", makeFile: true, wantPath: "/user.slice/x.scope", wantExists: true},
+		{name: "hybrid with v1 entries", content: "10:memory:/\n2:cpu:/\n0::/user.slice/x.scope\n", makeFile: true, wantPath: "/user.slice/x.scope", wantExists: true},
+		{name: "blank lines ignored", content: "0::/user.slice/x.scope\n\n", makeFile: true, wantPath: "/user.slice/x.scope", wantExists: true},
+		{name: "v1 entries only", content: "10:memory:/\n2:cpu:/\n", makeFile: true},
+		{name: "empty file", content: "", makeFile: true},
+		{name: "no cgroup file", makeFile: false},
+		{name: "duplicate unified entries", content: "0::/a\n0::/b\n", makeFile: true, wantErr: true},
+		{name: "empty unified path", content: "0::\n", makeFile: true, wantErr: true},
+		{name: "malformed unified entry", content: "0:x\n", makeFile: true, wantErr: true},
+		{name: "bare hierarchy id", content: "0\n", makeFile: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, strconv.Itoa(pid))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if tt.makeFile {
+				if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(tt.content), 0o644); err != nil {
+					t.Fatalf("write cgroup: %v", err)
+				}
+			}
+			path, exists, err := readUnifiedCgroup(root, pid)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("readUnifiedCgroup = (%q, %t, nil); want an error", path, exists)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readUnifiedCgroup error = %v; want none", err)
+			}
+			if exists != tt.wantExists || (exists && path != tt.wantPath) {
+				t.Fatalf("readUnifiedCgroup = (%q, %t); want (%q, %t)", path, exists, tt.wantPath, tt.wantExists)
+			}
+		})
+	}
+}
