@@ -124,62 +124,116 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 
 		timeout := bdCommandTimeoutFor(name, args)
 
-		// Bound concurrent bd children (bd_concurrency.go): the queue wait is
-		// budgeted separately, so the exec context below always starts with
-		// the command's full timeout rather than the post-queue remainder.
-		var releaseSlot func()
-		if name == "bd" {
-			release, err := acquireBDSubprocessSlot(parent, args)
-			if err != nil {
-				trace("concurrency_limit", err)
-				return nil, err
+		// invoke runs one real subprocess end to end: semaphore slot,
+		// exec, telemetry, classification. For a deduped read only the
+		// flight leader's invoke ever runs (bd_readflight.go).
+		invoke := func() (out []byte, status string, traceErr, resultErr error) {
+			// Bound concurrent bd children (bd_concurrency.go): the queue wait is
+			// budgeted separately, so the exec context below always starts with
+			// the command's full timeout rather than the post-queue remainder.
+			if name == "bd" {
+				release, err := acquireBDSubprocessSlot(parent, args)
+				if err != nil {
+					return nil, "concurrency_limit", err, err
+				}
+				defer release()
 			}
-			releaseSlot = release
-			defer releaseSlot()
-		}
 
-		ctx, cancel := context.WithTimeout(parent, timeout)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(parent, timeout)
+			defer cancel()
 
-		if name == "bd" {
-			bdArgs := append([]string(nil), args...)
-			agentID := bdTelemetryAgentID(env)
-			slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
-				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
-			})
-			defer slowTimer.Stop()
-		}
+			if name == "bd" {
+				bdArgs := append([]string(nil), args...)
+				agentID := bdTelemetryAgentID(env)
+				slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
+					telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+				})
+				defer slowTimer.Stop()
+			}
 
-		cmd := exec.CommandContext(ctx, execName, args...)
-		cmd.WaitDelay = 2 * time.Second
-		prepareCommandForTimeout(cmd)
-		cmd.Dir = dir
-		cmd.Cancel = func() error {
-			return killCommandTree(cmd)
-		}
-		overrides := env
-		if withoutAmbientBeads {
-			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
-			overrides = maps.Clone(env)
-			for key, value := range overrides {
-				if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
-					delete(overrides, key)
+			cmd := exec.CommandContext(ctx, execName, args...)
+			cmd.WaitDelay = 2 * time.Second
+			prepareCommandForTimeout(cmd)
+			cmd.Dir = dir
+			cmd.Cancel = func() error {
+				return killCommandTree(cmd)
+			}
+			overrides := env
+			if withoutAmbientBeads {
+				baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
+				overrides = maps.Clone(env)
+				for key, value := range overrides {
+					if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
+						delete(overrides, key)
+					}
 				}
 			}
+			cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
+				return bdReadsStandardOTELEnv(ctx, execName)
+			})
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			outBytes, err := cmd.Output()
+
+			recordBDExecTelemetry(name, dir, args, start, outBytes, stderr.String(), err)
+
+			status, traceErr, resultErr = classifyBDExecResult(
+				parent, ctx, name, timeout, start, outBytes, stderr.String(), err)
+			return outBytes, status, traceErr, resultErr
 		}
-		cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
-			return bdReadsStandardOTELEnv(ctx, execName)
-		})
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
 
-		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+		// Single-flight dedup for identical in-flight bd READS
+		// (bd_readflight.go): N goroutines issuing the same read share one
+		// subprocess, one semaphore slot and one telemetry record. The
+		// flight is joined BEFORE any semaphore work so waiters never
+		// queue on slots; nothing is cached — a call arriving after the
+		// flight completes spawns fresh. Writes never reach this branch.
+		if name == "bd" && bdReadOnlyArgs(args) {
+			key := bdReadFlightKey(dir, execName, args,
+				bdReadFlightEnv(baseEnv, env, withoutAmbientBeads))
+			bdReadFlightCalls.Add(1)
+			flight := bdReadFlights.DoChan(key, func() (any, error) {
+				bdReadFlightLeaders.Add(1)
+				outBytes, status, traceErr, resultErr := invoke()
+				return &bdReadFlightResult{
+					out: outBytes, resultErr: resultErr,
+					status: status, traceErr: traceErr,
+				}, nil
+			})
+			// A waiting caller detaches on its own deadline/cancel rather
+			// than dying with the flight: DoChan's fn keeps running for
+			// the remaining waiters (its ctx derives from parent, not from
+			// any one caller).
+			waitCtx, waitCancel := context.WithTimeout(parent, timeout)
+			defer waitCancel()
+			select {
+			case res := <-flight:
+				if res.Err != nil {
+					trace("error", res.Err)
+					return nil, res.Err
+				}
+				shared, _ := res.Val.(*bdReadFlightResult)
+				if shared == nil {
+					err := errors.New("bd read flight returned no result")
+					trace("error", err)
+					return nil, err
+				}
+				trace(shared.status, shared.traceErr)
+				return shared.out, shared.resultErr
+			case <-waitCtx.Done():
+				if waitCtx.Err() == context.DeadlineExceeded {
+					err := bdExecTimeoutError(parent, timeout, start)
+					trace("timeout", err)
+					return nil, err
+				}
+				trace("error", waitCtx.Err())
+				return nil, waitCtx.Err()
+			}
+		}
 
-		status, traceErr, resultErr := classifyBDExecResult(
-			parent, ctx, name, timeout, start, out, stderr.String(), err)
+		outBytes, status, traceErr, resultErr := invoke()
 		trace(status, traceErr)
-		return out, resultErr
+		return outBytes, resultErr
 	}
 }
 
