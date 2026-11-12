@@ -311,6 +311,33 @@ func beadsTopologyCheck(name string) bool {
 	return strings.HasPrefix(name, "custom-types")
 }
 
+// waitForAgentSessionsSettled gives a just-started city's controller time to
+// start its always-mode named sessions before a full doctor run judges them.
+// gc init returns once the controller is up, not once the reconciler has
+// started the mayor, and doctor correctly calls a running controller's missing
+// always-mode session an Error. The wait polls the agent-sessions check itself
+// and returns as soon as it is not an error; a session that never appears is
+// left for the caller's doctor run to fail on with the check's own message, so
+// nothing here softens what doctor reports. A city with no controller reports
+// the check as not checked, which is not an error, so it returns at once.
+func waitForAgentSessionsSettled(t *testing.T, city *helpers.City) {
+	t.Helper()
+	city.WaitForCondition(func() bool {
+		out, _ := city.GC("doctor", "--json", "--check", "agent-sessions")
+		var report doctorReport
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if err := json.Unmarshal([]byte(strings.TrimSpace(lines[len(lines)-1])), &report); err != nil {
+			return false
+		}
+		for _, r := range report.Results {
+			if r.Name == "agent-sessions" {
+				return r.Status != "error"
+			}
+		}
+		return false
+	}, 60*time.Second)
+}
+
 // assertDoctorGreen runs the real `gc doctor --json` front door and requires
 // exit 0, zero failures anywhere, and zero warnings from any check whose
 // subject is the bead store's topology.
@@ -327,6 +354,7 @@ func beadsTopologyCheck(name string) bool {
 // a doctor report nobody can get to zero is a doctor report nobody reads.
 func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 	t.Helper()
+	waitForAgentSessionsSettled(t, city)
 	out, err := city.GC("doctor", "--json")
 	var report doctorReport
 	lastJSONLine(t, out, &report)
