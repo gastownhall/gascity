@@ -335,7 +335,7 @@ func TestSweepProcessTableOrphansReportsDetachedUserServiceOncePerProcess(t *tes
 		}
 		return stderr.String()
 	}
-	const exempt = "leaving process-table root pid=4400 session=gc-restarter alone: detached user service devserver.service"
+	const exempt = `leaving process-table root pid=4400 session=gc-restarter alone: detached user service devserver.service (ppid=1 name="node")`
 
 	if out := sweep(1); strings.Count(out, exempt) != 1 {
 		t.Fatalf("first sweep stderr %q, want the service's exemption reported once", out)
@@ -409,5 +409,18 @@ func TestSupervisorSystemdUnitNamesMatchProctableStem(t *testing.T) {
 	}
 	if want := proctable.SupervisorSystemdUnitStem + "-"; supervisorSystemdUnitPrefix != want {
 		t.Fatalf("supervisorSystemdUnitPrefix = %q, want %q", supervisorSystemdUnitPrefix, want)
+	}
+}
+
+// TestSupervisorSystemdDelegationEnvMatchesProctable pins the delegation
+// variables the user-service fence reads to the ones gc's supervisor
+// lifecycle reads, so the unit an operator delegates the supervisor to stays
+// gc's own to the fence.
+func TestSupervisorSystemdDelegationEnvMatchesProctable(t *testing.T) {
+	if proctable.SupervisorSystemdUnitEnv != supervisorSystemdUnitEnv {
+		t.Fatalf("proctable.SupervisorSystemdUnitEnv = %q, want %q", proctable.SupervisorSystemdUnitEnv, supervisorSystemdUnitEnv)
+	}
+	if proctable.SupervisorSystemdScopeEnv != supervisorSystemdScopeEnv {
+		t.Fatalf("proctable.SupervisorSystemdScopeEnv = %q, want %q", proctable.SupervisorSystemdScopeEnv, supervisorSystemdScopeEnv)
 	}
 }

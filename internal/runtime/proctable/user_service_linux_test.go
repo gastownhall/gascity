@@ -97,3 +97,40 @@ func TestDetachedUserServiceUnitSparesOwnAndSupervisorUnits(t *testing.T) {
 		}
 	}
 }
+
+// TestDetachedUserServiceUnitSparesTheDelegatedSupervisorUnit: an operator
+// can delegate the supervisor's lifecycle to a user-scope unit of their own
+// (SupervisorSystemdUnitEnv with SupervisorSystemdScopeEnv=user). That unit
+// hosts gc's supervisor as the stem units do, so a stale root in it stays
+// reapable, whether the variable names the unit with or without the
+// ".service" suffix systemctl adds to a bare name. With no delegation, a
+// system-scope one (the default) or another unit delegated, the same unit is
+// foreign; a foreign service beside it stays fenced throughout.
+func TestDetachedUserServiceUnitSparesTheDelegatedSupervisorUnit(t *testing.T) {
+	root := t.TempDir()
+	writeTestCgroup(t, root, 300, "0::"+testUserManager+"/app.slice/gascity-prod.service\n")
+	writeTestCgroup(t, root, 301, "0::"+testUserManager+"/app.slice/devserver.service\n")
+	SetScanRootForTesting(t, root)
+	for _, tc := range []struct {
+		name, unit, scope, want string
+	}{
+		{name: "user scope names the unit", unit: "gascity-prod.service", scope: "user", want: ""},
+		{name: "user scope names the bare unit", unit: "gascity-prod", scope: "user", want: ""},
+		{name: "surrounding space is ignored", unit: " gascity-prod.service ", scope: " user ", want: ""},
+		{name: "system scope", unit: "gascity-prod.service", scope: "system", want: "gascity-prod.service"},
+		{name: "default scope", unit: "gascity-prod.service", scope: "", want: "gascity-prod.service"},
+		{name: "no delegated unit", unit: "", scope: "user", want: "gascity-prod.service"},
+		{name: "another unit delegated", unit: "gascity-staging.service", scope: "user", want: "gascity-prod.service"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(SupervisorSystemdUnitEnv, tc.unit)
+			t.Setenv(SupervisorSystemdScopeEnv, tc.scope)
+			if got := DetachedUserServiceUnit(300); got != tc.want {
+				t.Errorf("DetachedUserServiceUnit(300) [gascity-prod.service] = %q, want %q", got, tc.want)
+			}
+			if got := DetachedUserServiceUnit(301); got != "devserver.service" {
+				t.Errorf("DetachedUserServiceUnit(301) [devserver.service] = %q, want the foreign service fenced", got)
+			}
+		})
+	}
+}

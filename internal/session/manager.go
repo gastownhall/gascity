@@ -880,13 +880,16 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 		if live.LiveUnlisted {
 			return 0, refuseLiveUnlisted(sessionID, live, scanErr)
 		}
-		// A root the session started as a systemd user service runs in a
-		// user-manager unit of its own, which owns it: it is neither the
-		// session's runtime nor an orphan of it, so the restart leaves it
-		// running and proceeds. It is checked after the provider's claim so
-		// a live runtime the provider claims still refuses the start.
+		// A root in a foreign systemd user service carries the session's
+		// identity through the unit's environment (inherited from the user
+		// manager's environment, or set with `systemd-run --user --setenv`),
+		// and the unit owns it: it is neither the session's runtime nor an
+		// orphan of it, so the restart leaves it running and proceeds,
+		// logging its unit, ppid and command name. It is checked after the
+		// provider's claim so a live runtime the provider claims still
+		// refuses the start.
 		if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
-			log.Printf("session: leaving process-table root for %s pid=%d alone: detached user service %s", sessionID, live.PID, unit)
+			log.Printf("session: leaving process-table root for %s pid=%d alone: detached user service %s (ppid=%d name=%q)", sessionID, live.PID, unit, live.PPID, live.Name)
 			continue
 		}
 		orphans = append(orphans, live)
