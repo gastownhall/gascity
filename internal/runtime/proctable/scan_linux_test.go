@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -1451,5 +1452,42 @@ func TestReadUnifiedCgroup(t *testing.T) {
 				t.Fatalf("readUnifiedCgroup = (%q, %t); want (%q, %t)", path, exists, tt.wantPath, tt.wantExists)
 			}
 		})
+	}
+}
+
+// AC-4: with an excused user-manager helper, an unproven unreadable process
+// and readable session roots on one host, both unbounded scans name only the
+// unproven process in their EntryError and still return every readable root,
+// a credential agent carrying the session's identity among them: a process's
+// name never decides whether it is a root.
+func TestUnreadableEnvironUserManagerMixedScan(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, proofBoot)
+	uid := os.Geteuid()
+	helper := writeUnreadableEnvironProcess(t, root, 2642, 1, 500, "(sd-pam)", hybridCgroup(userManagerScopeOf(uid)))
+	hardened := writeUnreadableEnvironProcess(t, root, 3700, 1, 500, "codex", pureV2Cgroup(fmt.Sprintf("/user.slice/user-%d.slice/session-1.scope/tmux-spawn-a1b2.scope", uid)))
+	writeUnreadableEnvironProcess(t, root, 4100, 1, 600, "agent", pureV2Cgroup(fmt.Sprintf("/user.slice/user-%d.slice/session-1.scope", uid)))
+	writeUnreadableEnvironProcess(t, root, 4200, 1, 700, "ssh-agent", pureV2Cgroup(fmt.Sprintf("/user.slice/user-%d.slice/session-1.scope", uid)))
+	denyEnviron(t, helper)
+	denyEnviron(t, hardened)
+
+	for _, scan := range []struct {
+		name string
+		run  func() ([]runtime.LiveRuntime, error)
+	}{
+		{"id-scoped", func() ([]runtime.LiveRuntime, error) { return scanWithRoot(root, "ga-target") }},
+		{"orphan candidates", func() ([]runtime.LiveRuntime, error) { return scanOrphanCandidatesWithRoot(root, 0) }},
+	} {
+		got, err := scan.run()
+		if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{3700}) || HasWholeScanFailure(err) {
+			t.Fatalf("%s scan error %v names pids %v, want only the unproven pid 3700", scan.name, err, pids)
+		}
+		var roots []int
+		for _, live := range got {
+			roots = append(roots, live.PID)
+		}
+		if !slices.Equal(roots, []int{4100, 4200}) {
+			t.Fatalf("%s scan roots %v, want the readable roots 4100 and 4200", scan.name, roots)
+		}
 	}
 }
