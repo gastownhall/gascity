@@ -68,7 +68,10 @@ func classifyLeakedTestSupervisor(p leakedSupervisorProc, tempDir string) (bool,
 	if len(p.Argv) < 3 || p.Argv[1] != "supervisor" || p.Argv[2] != "run" {
 		return false, "not a `supervisor run` process"
 	}
-	if !underTestEnvDir(p.Argv[0], []string{"/tmp", tempDir}) {
+	// /var/tmp is listed because the Makefile's TEST_ENV defaults TMPDIR to
+	// it, so the harness's gc-int-env-* trees live there even when this
+	// process's own os.TempDir() is something else.
+	if !underTestEnvDir(p.Argv[0], []string{"/tmp", "/var/tmp", tempDir}) {
 		return false, fmt.Sprintf("binary %q is not under a %s* test environment", p.Argv[0], leakedSupervisorTestEnvPrefix)
 	}
 	switch {
