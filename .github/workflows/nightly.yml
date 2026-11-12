@@ -175,7 +175,10 @@ jobs:
   x6-steady-perf:
     name: Conversation lane / X6 steady perf lane
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Measured by the workflow_dispatch run 43311207223: the job took 8m23s end
+    # to end (7m41s of it the bazel step: build plus five 28-29s runs), so 20
+    # minutes is 2.4x that, enough for a cold cache and short of hiding a hang.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Set up Bazel

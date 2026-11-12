@@ -388,7 +388,8 @@ const (
 	// needs.<job>.result env var per dependency that fails closed on anything
 	// but "success"; no new trigger, permission or secret.
 	// Bumped again (ga-bzskl7f, the X6 steady perf lane): one new job,
-	// x6-steady-perf: ubuntu-latest, timeout-minutes 60, no env, no secret.
+	// x6-steady-perf: ubuntu-latest, timeout-minutes 20 (set from the dispatch run
+	// 43311207223, which took 8m23s), no env, no secret.
 	// Steps: checkout, setup-bazel (no secrets: the local mode), the LLVM
 	// archive cache, setup-go (`cache: false`) followed by
 	// `uses: ./.github/actions/go-mod-download`, one step that links
@@ -400,7 +401,7 @@ const (
 	// writes one line per run to GITHUB_STEP_SUMMARY, and an `if: always()`
 	// pinned upload-artifact step. nightly-summary gains the job in its needs
 	// and its fail-closed results. No new trigger, permission or secret.
-	expectedNightlyExecutionHash = "e68d633a57e6dff9a91026a28773a742a26ff7742f957d73b0751d60c5c030ec"
+	expectedNightlyExecutionHash = "bf3f99a8e229eb008a61bd01cf290dbe3cba6295bb7cf1472a25c4eca939c1f4"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
