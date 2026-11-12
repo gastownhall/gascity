@@ -1383,6 +1383,7 @@ go_test(
         "cmd_session_wake_test.go",
         "cmd_shell_test.go",
         "cmd_skill_test.go",
+        "cmd_sling_base_ref_test.go",
         "cmd_sling_dryrun_purity_test.go",
         "cmd_sling_reassign_reopen_test.go",
         "cmd_sling_routevars_test.go",
