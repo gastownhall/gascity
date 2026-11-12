@@ -2034,6 +2034,13 @@ func supervisorSystemdServiceName() string {
 // supervisorPortInUseMessage) instead of falsely claiming "without restart".
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
+//
+// ProcessType is Interactive because the supervisor runs an interactive
+// user's agent sessions: without the key launchd applies Standard, which
+// throttles CPU and I/O for the supervisor and for everything it spawns
+// (the managed Dolt server, the city tmux server and every agent pane).
+// Adaptive follows XPC activity, which gc never raises, so the job would sit
+// at background priority.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2048,6 +2055,8 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
