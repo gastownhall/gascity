@@ -669,27 +669,35 @@ const (
 // separated (`--graph plan`), inline (`--graph=plan`), and attached shorthand
 // (`-fplan`). A file flag with no value is reported with an empty path; bd
 // rejects it and mints nothing, so the caller's graph arm falls through safely.
+//
+// The FINAL file occurrence decides: pflag keeps the last value of a repeated
+// value flag, so a later occurrence of either file flag supersedes an earlier
+// one, an empty or missing final value included. A separated file flag's value
+// is consumed as a value even when it spells a flag (`--graph --file` names a
+// plan called `--file`), exactly as any other separated value flag's is.
 func bdRelocatedClassCreateFileForm(manifest string, verbArgs []string) (fileCreateForm, string) {
 	values := bdflags.ValueFlags(manifest)
+	selected, selectedPath := fileCreateNone, ""
 	for i := 0; i < len(verbArgs); i++ {
 		name, value, stated := bdRelocatedClassCreateFlagValue(verbArgs[i])
-		form := fileCreateFormForFlag(name)
-		switch {
 		// A flag names a file form only when the verb actually takes it as a
 		// value flag; `q` pins no --graph/--file, so its tokens are not one.
-		case form != fileCreateNone && values[name]:
-			if stated {
-				return form, value
-			}
+		if !values[name] {
+			continue
+		}
+		form := fileCreateFormForFlag(name)
+		if !stated {
+			value = ""
 			if i+1 < len(verbArgs) {
-				return form, verbArgs[i+1]
+				i++
+				value = verbArgs[i]
 			}
-			return form, ""
-		case !stated && values[name]:
-			i++
+		}
+		if form != fileCreateNone {
+			selected, selectedPath = form, value
 		}
 	}
-	return fileCreateNone, ""
+	return selected, selectedPath
 }
 
 // fileCreateFormForFlag maps a create flag to the file form it introduces, or
@@ -749,22 +757,33 @@ func fileCreateFormForFlag(name string) fileCreateForm {
 // whenever a class is relocated), and it refuses every node whose class the
 // work store does not hold, so a pipe left unread here is still refused when
 // it would mint a relocated class.
-func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Class, parsed bool) {
+//
+// node is the key of the first node that classifies as class on its own, so a
+// refusal can name the bead that makes the plan a relocated-class mint; it is
+// empty when no single node does (a plan classified by its graph markers across
+// nodes, or by metadata_refs).
+func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Class, node string, parsed bool) {
 	if scopeRoot != "" && path != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(scopeRoot, path)
 	}
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
-		return coordclass.ClassWork, false
+		return coordclass.ClassWork, "", false
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return coordclass.ClassWork, false
+		return coordclass.ClassWork, "", false
 	}
 	var plan beads.GraphApplyPlan
 	if err := json.Unmarshal(data, &plan); err != nil {
-		return coordclass.ClassWork, false
+		return coordclass.ClassWork, "", false
 	}
-	return coordclass.ClassifyGraphPlan(&plan), true
+	class = coordclass.ClassifyGraphPlan(&plan)
+	for _, n := range plan.Nodes {
+		if n.Key != "" && coordclass.Classify(beads.Bead{Type: n.Type, Labels: n.Labels, Metadata: n.Metadata}) == class {
+			return class, n.Key, true
+		}
+	}
+	return class, "", true
 }
 
 // bdRelocatedClassCreateRefusal reports whether a `gc bd` invocation would mint
@@ -841,8 +860,12 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, scopeRoot string, bdArgs []
 		// is nothing for this guard to strand. A plan that is not a regular
 		// file is left unread for the class-must-not-flip guard to judge
 		// (bdRelocatedClassGraphPlanClass).
-		if class, parsed := bdRelocatedClassGraphPlanClass(scopeRoot, path); parsed {
-			return bdRelocatedClassMatch(verb, relocated, class)
+		if class, node, parsed := bdRelocatedClassGraphPlanClass(scopeRoot, path); parsed {
+			msg, refused := bdRelocatedClassMatch(verb, relocated, class)
+			if refused && node != "" {
+				msg += fmt.Sprintf(" The plan's node %q is a %s-class bead.", node, class)
+			}
+			return msg, refused
 		}
 	case fileCreateBulk:
 		// A -f/--file payload is bd's own multi-issue markdown, whose per-issue
