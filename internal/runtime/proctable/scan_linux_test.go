@@ -1062,3 +1062,88 @@ func TestOrphanCandidate(t *testing.T) {
 		}
 	}
 }
+
+// userManagerScopeFixture builds a fake /proc holding only the systemd user
+// manager's (sd-pam) helper: parent init, uid the scanner's own, started an
+// hour before readAt (well beyond /proc's clock quantization), sitting in
+// cgroupFile. Its environ stays readable; a mode-based test makes it
+// unreadable itself.
+func userManagerScopeFixture(t *testing.T, cgroupFile string, readAt time.Time) (string, int) {
+	t.Helper()
+	const pid = 2642
+	root := t.TempDir()
+	writeFakeBootTime(t, root, readAt.Add(-2*time.Hour))
+	buildFakeProcUnder(t, root, pid, 1, "(sd-pam)", nil)
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	writeFakeProcessStat(t, dir, pid, 1, 3600*100) // boot + 1h: an hour older than the read
+	if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroupFile), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
+	}
+	return root, pid
+}
+
+// TestScanWithRootUnreadableEnvironOfHostHelperIsNoEntryError (ga-zpcphq, PR
+// #8182): a same-uid host helper the scanner cannot ptrace-read — the user
+// manager's (sd-pam), non-dumpable by design — sits in the exact own
+// user-manager init scope with an identity definitely older than the failed
+// read, so it is provably not a runtime and must not make either unbounded
+// scan incomplete, on pure-v2 and hybrid hosts.
+func TestScanWithRootUnreadableEnvironOfHostHelperIsNoEntryError(t *testing.T) {
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	saved := scanNow
+	scanNow = func() time.Time { return readAt }
+	t.Cleanup(func() { scanNow = saved })
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	for _, tc := range []struct {
+		name       string
+		cgroupFile string
+	}{
+		{"pure v2 unified cgroup", "0::" + scope + "\n"},
+		{"hybrid v1/v2 cgroup", "10:memory:/\n0::" + scope + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if euid == 0 {
+				t.Skip("root bypasses file modes, so the 0o000 environ stays readable")
+			}
+			root, pid := userManagerScopeFixture(t, tc.cgroupFile, readAt)
+			if err := os.Chmod(filepath.Join(root, strconv.Itoa(pid), "environ"), 0o000); err != nil {
+				t.Fatalf("chmod environ: %v", err)
+			}
+			if _, err := scanWithRoot(root, "ga-target"); err != nil {
+				t.Fatalf("scanWithRoot error = %v (%s); want the manager helper excused", err, SummarizeScanError(err))
+			}
+			if _, err := scanOrphanCandidatesWithRoot(root, 0); err != nil {
+				t.Fatalf("scanOrphanCandidatesWithRoot error = %v (%s); want the manager helper excused", err, SummarizeScanError(err))
+			}
+		})
+	}
+}
+
+// TestUnreadableEnvironHostHelperDirectPermissionError (ga-zpcphq): the
+// manager-scope exemption seen through the classifier directly, so it holds
+// whatever the file modes are (a root build cannot produce a real EACCES
+// from a 0o000 environ) and on hybrid hosts.
+func TestUnreadableEnvironHostHelperDirectPermissionError(t *testing.T) {
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	for _, tc := range []struct {
+		name       string
+		cgroupFile string
+	}{
+		{"pure v2 unified cgroup", "0::" + scope + "\n"},
+		{"hybrid v1/v2 cgroup", "10:memory:/\n0::" + scope + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, pid := userManagerScopeFixture(t, tc.cgroupFile, readAt)
+			readErr := fmt.Errorf("open %s: %w", filepath.Join(root, strconv.Itoa(pid), "environ"), fs.ErrPermission)
+			err := unreadableEnvironScanError(root, pid, "ga-target", time.Time{}, readErr, euid, readAt)
+			if err != nil {
+				t.Fatalf("unreadableEnvironScanError = %v (%s); want the manager helper excused", err, SummarizeScanError(err))
+			}
+		})
+	}
+}

@@ -38,6 +38,11 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 // orphan parent (a systemd --user supervisor); a test sets its fixture's.
 var detectSubreaper = pidutil.DetectUserSubreaperPID
 
+// scanNow is the clock the scan captures an environ read's start from, the
+// moment a proof must bind a process's age to; a test replaces it with a
+// fixed one.
+var scanNow = time.Now
+
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make
 // absence incomplete; those processes cannot belong to that incarnation.
@@ -188,16 +193,18 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if err != nil || pid <= 1 {
 		return runtime.LiveRuntime{}, false, nil
 	}
-	owned, err := processOwnedByUID(root, pid, os.Geteuid())
+	euid := os.Geteuid()
+	owned, err := processOwnedByUID(root, pid, euid)
 	if err != nil {
 		return runtime.LiveRuntime{}, false, unreadableOwnerScanError(root, pid, incarnationStartedAt, err)
 	}
 	if !owned {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	readStartedAt := scanNow()
 	env, err := parseEnvironFile(filepath.Join(root, entryName, "environ"))
 	if err != nil {
-		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, err)
+		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, err, euid, readStartedAt)
 	}
 	if root == "/proc" && pid == os.Getpid() {
 		env = mergeCurrentEnv(env)
@@ -278,11 +285,13 @@ func unreadableOwnerScanError(root string, pid int, incarnationStartedAt time.Ti
 }
 
 // unreadableEnvironScanError returns the error a process whose environment
-// could not be read adds to the scan, or nil when the process is proven to
-// predate incarnationStartedAt. A process proven outside the incarnation by its
-// tmux-spawn parent is skipped too, but a failed age proof still leaves the
+// could not be read adds to the scan, or nil when the process is proven
+// unable to hold a runtime of this scan: it predates incarnationStartedAt,
+// it is proven outside the incarnation by its tmux-spawn parent, or — for a
+// permission failure only — it is proven a manager helper
+// ([unreadableProcessProvenNonRuntime]). A failed proof still leaves the
 // scan incomplete.
-func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error) error {
+func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error, euid int, readStartedAt time.Time) error {
 	irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt)
 	if irrelevant {
 		return nil
@@ -297,6 +306,13 @@ func unreadableEnvironScanError(root string, pid int, id string, incarnationStar
 	}
 	if proofErr != nil {
 		errs = append(errs, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
+	}
+	irrelevant, proofErr = unreadableProcessProvenNonRuntime(root, pid, euid, readErr, readStartedAt)
+	if irrelevant {
+		return errors.Join(errs...)
+	}
+	if proofErr != nil {
+		errs = append(errs, fmt.Errorf("proving user-manager scope for pid %d: %w", pid, proofErr))
 	}
 	return errors.Join(append(errs, fmt.Errorf("reading environ for pid %d: %w", pid, readErr))...)
 }
@@ -447,6 +463,127 @@ func readProcessIdentity(root string, pid int) (processIdentity, bool, error) {
 		StartTicks: stat.StartTicks,
 		Cgroup:     cgroup,
 	}, true, nil
+}
+
+// unreadableProcessProvenNonRuntime reports whether a process whose environ
+// read failed with readErr is proven unable to be a runtime: the failure is a
+// permission denial, the process sits in the scanner's own systemd user
+// manager init scope, and its identity is bound to the failed read by a
+// second census. That scope holds only systemd --user and its (sd-pam)
+// helper, both non-dumpable and unreadable by design, and systemd starts
+// every unit, scope and session in its own cgroup, so nothing gc or a
+// provider launches occupies it. The proof assumes ordinary systemd
+// placement, which cgroups permit breaking: a custom PAM workload, a manually
+// populated leaf or hostile same-uid migration can put another process there,
+// so the exemption is structural, not unforgeable. Any other unreadable
+// process — a self-hardened runtime CLI included — stays an entry error, and
+// a failure that is not a permission denial is never excused.
+func unreadableProcessProvenNonRuntime(root string, pid, euid int, readErr error, readStartedAt time.Time) (bool, error) {
+	if !errors.Is(readErr, fs.ErrPermission) {
+		return false, nil
+	}
+	census, exists, err := readManagerScopeCensus(root, pid)
+	if err != nil || !exists {
+		return false, err
+	}
+	if census.cgroup != userManagerInitScope(euid) {
+		return false, nil
+	}
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return false, err
+	}
+	// The proof is bound to the failed read: a process that may have started
+	// after it, within /proc's clock quantization, could be a recycled pid,
+	// so it stays unproven rather than excused.
+	if !processDefinitelyPredatesIncarnation(processStartedAt(bootedAt, census.stat.StartTicks), readStartedAt) {
+		return false, nil
+	}
+	return census.stillCurrent(root, pid)
+}
+
+// managerScopeCensus is one reading of the identity the manager-scope proof
+// binds to a failed environ read: the process's stat and unified cgroup path.
+type managerScopeCensus struct {
+	stat   processStat
+	cgroup string
+}
+
+// readManagerScopeCensus reads pid's stat and unified cgroup path. exists is
+// false when either is missing: an absent process or cgroup proves nothing
+// either way.
+func readManagerScopeCensus(root string, pid int) (managerScopeCensus, bool, error) {
+	stat, statExists, err := readProcessStat(root, pid)
+	if err != nil || !statExists {
+		return managerScopeCensus{}, statExists, err
+	}
+	cgroup, cgroupExists, err := readUnifiedCgroup(root, pid)
+	if err != nil || !cgroupExists {
+		return managerScopeCensus{}, cgroupExists, err
+	}
+	return managerScopeCensus{stat: stat, cgroup: cgroup}, true, nil
+}
+
+// stillCurrent re-reads the census and reports whether the same process
+// identity — pid, parent, start ticks and cgroup path — is still there. A
+// pid recycled between the two censuses changes at least its start ticks or
+// its cgroup, so a mismatch abandons the proof rather than resolving it
+// either way.
+func (c managerScopeCensus) stillCurrent(root string, pid int) (bool, error) {
+	after, exists, err := readManagerScopeCensus(root, pid)
+	if err != nil || !exists {
+		return false, err
+	}
+	return after.stat.PID == c.stat.PID &&
+		after.stat.PPID == c.stat.PPID &&
+		after.stat.StartTicks == c.stat.StartTicks &&
+		after.cgroup == c.cgroup, nil
+}
+
+// userManagerInitScope is the unified cgroup path of the scanner's own
+// systemd user manager init scope, compared exactly: no cleaning, suffix
+// matches or name=systemd fallback, so nested and suffixed lookalikes fail
+// closed.
+func userManagerInitScope(euid int) string {
+	return fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/init.scope", euid, euid)
+}
+
+// readUnifiedCgroup reads pid's unified (cgroup v2) path from its
+// /proc/<pid>/cgroup file: the one 0:: entry, with v1 controller entries
+// ignored, so a hybrid v1/v2 host reads the same as a pure v2 one. exists is
+// false when the file or its unified entry is missing — unproven, not an
+// error. An unreadable file, a duplicate or malformed unified entry, or an
+// empty unified path is an error.
+func readUnifiedCgroup(root string, pid int) (string, bool, error) {
+	path := filepath.Join(root, strconv.Itoa(pid), "cgroup")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var cgroup string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, ":", 3)
+		if fields[0] != "0" {
+			continue // a v1 controller entry: another hierarchy, ignored
+		}
+		if len(fields) != 3 || fields[1] != "" {
+			return "", false, fmt.Errorf("malformed unified cgroup entry %q in %s", line, path)
+		}
+		if fields[2] == "" {
+			return "", false, fmt.Errorf("empty unified cgroup path in %s", path)
+		}
+		if cgroup != "" {
+			return "", false, fmt.Errorf("duplicate unified cgroup entry in %s", path)
+		}
+		cgroup = fields[2]
+	}
+	return cgroup, cgroup != "", nil
 }
 
 func readProcessCgroup(root string, pid int) (string, bool, error) {
