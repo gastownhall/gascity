@@ -25,8 +25,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -87,6 +89,17 @@ func hooklessStartupContext(env map[string]string, info sessionpkg.Info, cityPat
 	bin := strings.TrimSpace(env["GC_BIN"])
 	if bin == "" {
 		return ""
+	}
+	// Template resolution uses os.Executable for GC_BIN. Under tests that is
+	// the test binary, not gc: executing it recursively starts the test suite.
+	if testing.Testing() {
+		if exe, err := os.Executable(); err == nil {
+			current, currentErr := os.Stat(exe)
+			candidate, candidateErr := os.Stat(bin)
+			if currentErr == nil && candidateErr == nil && os.SameFile(current, candidate) {
+				return ""
+			}
+		}
 	}
 	childEnv := hooklessHookEnv(env, info, cityPath)
 	ctx, cancel := context.WithTimeout(context.Background(), hooklessContextTimeout)

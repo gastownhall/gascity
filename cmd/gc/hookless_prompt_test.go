@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -112,6 +113,19 @@ func TestHooklessHookEnvCarriesSessionIdentityAndHookMarkers(t *testing.T) {
 	// The child must run in the launch env, not the controller's ambient one.
 	if got := call.envValue("GC_CITY_PATH"); got == "/some/other/city" {
 		t.Errorf("GC_CITY_PATH came from the ambient env: %q", got)
+	}
+}
+
+func TestHooklessStartupContextDoesNotRunTestBinary(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := stubHooklessCommand(t, map[string]*string{})
+	t.Logf("launch GC_BIN = %q", bin)
+	_ = hooklessStartupContext(map[string]string{"GC_BIN": bin}, sessionpkg.Info{ID: "s-1"}, "", "")
+	if len(*calls) != 0 {
+		t.Fatalf("hookless attempted to execute %q with args %q", (*calls)[0].bin, (*calls)[0].args)
 	}
 }
 
