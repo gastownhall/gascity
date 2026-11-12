@@ -4,11 +4,13 @@ package session
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -194,12 +196,48 @@ func suspendedProcfsSession(t *testing.T) (*Manager, *procfsOrphanProvider, Info
 	return mgr, sp, info, city
 }
 
+// lockedLog collects the standard logger's output for a test while code
+// under test may also log from other goroutines.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// captureStdLog redirects the standard logger to a lockedLog, without
+// timestamps, until the test ends.
+func captureStdLog(t *testing.T) *lockedLog {
+	t.Helper()
+	logged := &lockedLog{}
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(logged)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return logged
+}
+
 // TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild: a
-// session that started a systemd user service leaves a root carrying its
-// identity in a user-manager service unit of its own. Neither that root nor
-// the session's leftover agent runtime is claimed live by the provider. The
-// restart terminates the leftover, confirms it dead before the replacement
-// starts, and leaves the service running without blocking the start.
+// root carrying the session's identity runs in a user-manager service unit
+// of its own (a user service whose environment carries the identity).
+// Neither that root nor the session's leftover agent runtime is claimed live
+// by the provider. The restart terminates the leftover, confirms it dead
+// before the replacement starts, and leaves the service running without
+// blocking the start, logging the service with its unit, ppid and command
+// name.
 func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *testing.T) {
 	mgr, sp, info, city := suspendedProcfsSession(t)
 	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
@@ -213,6 +251,7 @@ func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *te
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
 	writeFakeCgroup(t, root, agentPID, fakeUserManager()+"/app.slice/tmux-spawn-1234.scope")
 	proctable.SetScanRootForTesting(t, root)
+	logged := captureStdLog(t)
 
 	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -223,6 +262,10 @@ func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *te
 	}
 	if len(sp.started) != 1 || sp.started[0] != info.ID {
 		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+	wantLine := "session: leaving process-table root for " + info.ID + ` pid=4400 alone: detached user service devserver.service (ppid=1 name="node")` + "\n"
+	if out := logged.String(); strings.Count(out, wantLine) != 1 {
+		t.Fatalf("log %q, want the user service's exemption logged once as %q", out, wantLine)
 	}
 }
 

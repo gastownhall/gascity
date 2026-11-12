@@ -3957,15 +3957,16 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 
 // processRootFence is why the sweep holds a reapable root's termination:
 // the root is city infrastructure by argv, or a detached foreign systemd
-// user service. "" means the root may be reaped. The caller re-checks the
-// fence every sweep and reports each fenced root once per process through
-// the sweep's existing suppression.
-func processRootFence(pid int) string {
-	if proctable.IsCityInfrastructureRoot(pid) {
+// user service, reported with its unit, ppid and command name so a root
+// the fence spares can be identified from the log. "" means the root may
+// be reaped. The caller re-checks the fence every sweep and reports each
+// fenced root once per process through the sweep's existing suppression.
+func processRootFence(live runtime.LiveRuntime) string {
+	if proctable.IsCityInfrastructureRoot(live.PID) {
 		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)"
 	}
-	if unit := proctable.DetachedUserServiceUnit(pid); unit != "" {
-		return "detached user service " + unit
+	if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
+		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name)
 	}
 	return ""
 }
@@ -4109,11 +4110,12 @@ func sweepProcessTableOrphans(
 		// and takes the city's Dolt server down with it (#6316), and the
 		// fence is per-process argv, so it also covers processes stamped
 		// before their spawners began scrubbing session identity. Or it may
-		// be a detached systemd user service the session's shell started,
-		// running in a foreign unit of its own, not in the session: it is
-		// not this session's runtime, and a later incarnation's cleanup must
-		// not end it.
-		if reason := processRootFence(live.PID); reason != "" {
+		// be a detached systemd user service: a foreign unit of its own whose
+		// environment carries the session's identity (inherited from the user
+		// manager's environment, or set with `systemd-run --user --setenv`).
+		// It is not this session's runtime, and a later incarnation's cleanup
+		// must not end it.
+		if reason := processRootFence(live); reason != "" {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {

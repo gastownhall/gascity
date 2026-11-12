@@ -13,6 +13,17 @@ import (
 // city infrastructure, not a configured agent role.
 const SupervisorSystemdUnitStem = "gascity-supervisor"
 
+// SupervisorSystemdUnitEnv and SupervisorSystemdScopeEnv name the variables
+// through which an operator delegates the supervisor's lifecycle to a systemd
+// unit of their own (cmd/gc's supervisorSystemdUnitEnv and
+// supervisorSystemdScopeEnv; duplicated here and pinned equal by a test). A
+// unit delegated in the user manager hosts gc's supervisor as the stem units
+// do, so the detached user-service fence treats it as gc's own.
+const (
+	SupervisorSystemdUnitEnv  = "GC_SUPERVISOR_SYSTEMD_UNIT"
+	SupervisorSystemdScopeEnv = "GC_SUPERVISOR_SYSTEMD_SCOPE"
+)
+
 // userManagerServiceUnit returns the systemd user manager
 // ("user@<UID>.service") and the user service unit beneath it that owns the
 // process whose /proc/<pid>/cgroup content cgroupFile holds, or two empty
@@ -153,19 +164,4 @@ func isDecimal(s string) bool {
 		}
 	}
 	return true
-}
-
-// isSupervisorSystemdUnit reports whether unit is one of gc's supervisor
-// units: "<SupervisorSystemdUnitStem>.service" or
-// "<SupervisorSystemdUnitStem>-<suffix>.service" with a nonempty suffix.
-func isSupervisorSystemdUnit(unit string) bool {
-	name, ok := strings.CutSuffix(unit, ".service")
-	if !ok {
-		return false
-	}
-	if name == SupervisorSystemdUnitStem {
-		return true
-	}
-	suffix, ok := strings.CutPrefix(name, SupervisorSystemdUnitStem+"-")
-	return ok && suffix != ""
 }
