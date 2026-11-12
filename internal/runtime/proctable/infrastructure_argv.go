@@ -1,6 +1,9 @@
 package proctable
 
-import "path/filepath"
+import (
+	"errors"
+	"path/filepath"
+)
 
 // ManagedDoltScopeWatchdogVerb is the argv[1] re-exec marker of gc's managed
 // Dolt scope watchdog (cmd/gc/dolt_scope_watchdog.go).
@@ -55,17 +58,25 @@ func IsCityInfrastructureArgv(argv []string) bool {
 // keeps those callers' pre-fence behavior. Under `go test` without an injected
 // procfs root it reports false rather than read the host's live process table.
 func IsCityInfrastructureRoot(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	if err := liveScanGuard(); err != nil {
-		return false
-	}
-	argv, err := rootArgv(pid)
+	argv, err := ProcessArgv(pid)
 	if err != nil {
 		return false
 	}
 	return IsCityInfrastructureArgv(argv)
+}
+
+// ProcessArgv reads pid's argument vector from the same process-table root as
+// the scanner. It respects the test-only live-scan guard, so callers cannot
+// accidentally read the host's process table from a unit test without an
+// injected procfs root.
+func ProcessArgv(pid int) ([]string, error) {
+	if pid <= 0 {
+		return nil, errors.New("proctable: process pid must be positive")
+	}
+	if err := liveScanGuard(); err != nil {
+		return nil, err
+	}
+	return rootArgv(pid)
 }
 
 // RootStartIdentity returns pid's start-time token as the scanner would read

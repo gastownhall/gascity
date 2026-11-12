@@ -3995,6 +3995,8 @@ func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
 // set, is the tick's inventory view; without it, or when its pass is
 // incomplete or stale, rule 2 never holds. Each kill is bound to the root's
 // scanned start identity (TerminateRuntime re-checks it).
+// Production callers omit subreaperOverride; process-sweep tests use it to
+// model reparenting to a known subreaper without depending on the test runner.
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	sessionBeads *sessionBeadSnapshot,
@@ -4002,6 +4004,7 @@ func sweepProcessTableOrphans(
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
+	subreaperOverride ...int,
 ) int {
 	if sp == nil || store == nil {
 		return 0
@@ -4038,14 +4041,18 @@ func sweepProcessTableOrphans(
 
 	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	// A fenced root is reported once per process (pid + start time), not on
-	// every patrol: a stamped watchdog or bd proxy stays fenced for its whole
-	// life. The set is replaced each sweep, so it holds only roots that are
-	// still present and never grows past one city's live infrastructure.
+	// every patrol: a stamped watchdog, bd proxy or bd-owned Dolt server stays
+	// fenced for its whole life. The set is replaced each sweep, so it holds
+	// only roots that are still present and never grows past one city's live
+	// infrastructure.
 	previouslyFenced := fencedInfrastructureRoots.take(cityPath)
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
 	selfPID := os.Getpid()
 	subreaperPID := pidutil.DetectUserSubreaperPID(selfPID)
+	if len(subreaperOverride) > 0 {
+		subreaperPID = subreaperOverride[0]
+	}
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -4083,18 +4090,24 @@ func sweepProcessTableOrphans(
 		if rule == "" {
 			continue
 		}
-		// The root's incarnation is over — reap below, unless the root is city
-		// infrastructure that merely inherited the session's environment (a
-		// managed Dolt scope watchdog, bd's db-proxy-child or gc's nudge poller
-		// started from an agent shell). Terminating a watchdog or proxy signals
-		// its process group and takes the city's Dolt server down with it
-		// (#6316). The fence is per-process argv, so it also covers processes
-		// stamped before their spawners began scrubbing session identity.
+		// The root's incarnation is over — reap below, unless it is city
+		// infrastructure that inherited the session's environment (a managed
+		// Dolt scope watchdog, bd's db-proxy-child or gc's nudge poller), or a
+		// Dolt server whose config is owned by a live bd proxy. Terminating the
+		// proxy can take its Dolt child down with it; terminating that child
+		// directly takes the city's store down. These ownership checks do not
+		// depend on session identity being scrubbed from the inherited environment.
+		infrastructureReason := ""
 		if proctable.IsCityInfrastructureRoot(live.PID) {
+			infrastructureReason = "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)"
+		} else if proxyPID, owned := bdOwnedProxyDoltServerRoot(live.PID); owned {
+			infrastructureReason = fmt.Sprintf("bd-owned proxied Dolt server (live proxy pid %d)", proxyPID)
+		}
+		if infrastructureReason != "" {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {
-				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)\n", live.PID, live.SessionID) //nolint:errcheck
+				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: %s\n", live.PID, live.SessionID, infrastructureReason) //nolint:errcheck
 			}
 			continue
 		}
