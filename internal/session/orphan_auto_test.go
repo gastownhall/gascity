@@ -1,14 +1,18 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -58,14 +62,16 @@ func TestKillExistingOrphansThroughAutoTerminatesOnlyUntrackedSameCityRoots(t *t
 	}
 }
 
-// scanErrorFake is a Fake whose process-table scan fails with err.
+// scanErrorFake is a Fake whose process-table scan returns roots, afresh on
+// every call, together with err.
 type scanErrorFake struct {
 	*runtime.Fake
-	err error
+	roots []runtime.LiveRuntime
+	err   error
 }
 
 func (f *scanErrorFake) FindRuntimesBySessionID(string) ([]runtime.LiveRuntime, error) {
-	return nil, f.err
+	return slices.Clone(f.roots), f.err
 }
 
 // Every session start runs the pre-start orphan scan, and a scan that cannot
@@ -94,5 +100,68 @@ func TestKillExistingOrphansSummarizesScanError(t *testing.T) {
 	want := `session: scanning for orphaned runtimes for sid-scan (failing closed): 70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)` + "\n"
 	if logged != want {
 		t.Fatalf("logged %q, want one summary line %q", logged, want)
+	}
+}
+
+// permissionDeniedEntries is a scan error of unreadable environs at pids.
+func permissionDeniedEntries(pids ...int) error {
+	var err error
+	for _, pid := range pids {
+		err = errors.Join(err, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: open /proc/%d/environ: permission denied", pid, pid)})
+	}
+	return err
+}
+
+// pacedStart runs one pre-start orphan scan on a newly built Manager for city
+// at now, whose provider's scan returns root and scanErr. It returns how many
+// scan-error lines it logged, the pids it terminated, and killExistingOrphans'
+// error.
+func pacedStart(t *testing.T, logged *bytes.Buffer, clk *clock.Fake, city string, now time.Time, root runtime.LiveRuntime, scanErr error) (int, []string, error) {
+	t.Helper()
+	const line = "session: scanning for orphaned runtimes"
+	clk.Time = now
+	sp := &scanErrorFake{Fake: runtime.NewFake(), roots: []runtime.LiveRuntime{root}, err: scanErr}
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city), WithClock(clk))
+	before := strings.Count(logged.String(), line)
+	err := mgr.killExistingOrphans(context.Background(), root.SessionID)
+	var terminated []string
+	for _, c := range sp.Calls {
+		if c.Method == "TerminateRuntime" {
+			terminated = append(terminated, c.Value)
+		}
+	}
+	return strings.Count(logged.String(), line) - before, terminated, err
+}
+
+// AC-5: every start builds a new Manager, yet the pre-start orphan scan's
+// error line is paced per city across them: logged first, on a new shape and
+// once ScanErrorLogRepeat has passed, and suppressed for an unchanged shape in
+// between, whatever its pids and counts.
+func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
+	logged := captureLog(t)
+	city, otherCity := t.TempDir(), t.TempDir()
+	clk := &clock.Fake{}
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	ownerGone := &proctable.EntryError{PID: 31, Err: errors.New("reading owner for pid 31: open /proc/31/status: no such device")}
+
+	for _, step := range []struct {
+		name    string
+		city    string
+		err     error
+		at      time.Time
+		wantLog int
+	}{
+		{"first", city, permissionDeniedEntries(11, 12), t0, 1},
+		{"same shape, other pids and count", city, permissionDeniedEntries(13, 14, 15), t0.Add(time.Minute), 0},
+		{"another city", otherCity, permissionDeniedEntries(11, 12), t0.Add(time.Minute), 1},
+		{"a new kind", city, errors.Join(permissionDeniedEntries(11), ownerGone), t0.Add(2 * time.Minute), 1},
+		{"the new kind again", city, errors.Join(permissionDeniedEntries(12), ownerGone), t0.Add(3 * time.Minute), 0},
+		{"just inside the repeat window", city, errors.Join(permissionDeniedEntries(12), ownerGone), t0.Add(2*time.Minute + proctable.ScanErrorLogRepeat - time.Second), 0},
+		{"at the end of the repeat window", city, errors.Join(permissionDeniedEntries(12), ownerGone), t0.Add(2*time.Minute + proctable.ScanErrorLogRepeat), 1},
+	} {
+		root := runtime.LiveRuntime{SessionID: "sid-paced", City: step.city, PID: 100, PPID: 1}
+		if n, _, _ := pacedStart(t, logged, clk, step.city, step.at, root, step.err); n != step.wantLog {
+			t.Fatalf("%s: logged the scan error %d times, want %d; log=%q", step.name, n, step.wantLog, logged.String())
+		}
 	}
 }
