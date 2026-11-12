@@ -524,3 +524,66 @@ type holdLabelSetMetadataErrorStore struct {
 func (s holdLabelSetMetadataErrorStore) SetMetadata(string, string, string) error {
 	return errors.New("write refused")
 }
+
+// TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace covers ga-tkxbic
+// AC-3: gc doctor --fix runs v2-routed-to-namespace before
+// hold-label-routed-to, and each check verifies only itself, so the two
+// checks must agree on the canonical route. One fix pass leaves every held
+// route binding-qualified, and a second pass finds nothing to fix. Either
+// registration order converges.
+func TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		namespaceLast bool
+	}{
+		{name: "namespace then hold"},
+		{name: "hold then namespace", namespaceLast: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				{
+					ID: "C-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": ""},
+				},
+				{
+					ID: "C-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "planner"},
+				},
+				{
+					ID: "C-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "ops.planner"},
+				},
+			}, nil)
+			factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+			namespace := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+			hold := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+			d := &doctor.Doctor{}
+			if tc.namespaceLast {
+				d.Register(hold)
+				d.Register(namespace)
+			} else {
+				d.Register(namespace)
+				d.Register(hold)
+			}
+
+			d.RunCollect(&doctor.CheckContext{}, true)
+			for _, id := range []string{"C-1", "C-2", "C-3"} {
+				if got := holdLabelRoute(t, store, id); got != "ops.planner" {
+					t.Errorf("after first fix pass %s gc.routed_to = %q, want ops.planner", id, got)
+				}
+			}
+
+			second := d.RunCollect(&doctor.CheckContext{}, true)
+			if second.Warned != 0 || second.Fixed != 0 {
+				t.Errorf("second fix pass Warned=%d Fixed=%d, want 0 and 0: %#v", second.Warned, second.Fixed, second.Results)
+			}
+			for _, res := range second.Results {
+				if res.Status != doctor.StatusOK {
+					t.Errorf("second fix pass %s status = %v, want OK: %#v", res.Name, res.Status, res)
+				}
+			}
+		})
+	}
+}
