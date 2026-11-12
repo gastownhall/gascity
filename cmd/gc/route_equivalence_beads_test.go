@@ -197,9 +197,15 @@ func newBeadsRouteCity(t *testing.T, fault beadsRouteFault) *beadsRouteCity {
 	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), charCityName, cityPath)
 	cs.mu.Lock()
 	cs.cityBeadStore = beadsRouteReadinessStore{Store: cs.cityBeadStore}
+	wrapped := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
-		cs.beadStores[name] = beadsRouteReadinessStore{Store: store}
+		wrapped[name] = beadsRouteReadinessStore{Store: store}
 	}
+	// A new map and a new generation, as update publishes rig stores: the
+	// store epoch keys on the generation, and a published map is never
+	// written in place.
+	cs.beadStores = wrapped
+	cs.rigStoresGen++
 	cs.mu.Unlock()
 	c.h = &charHarness{cityPath: cityPath, cs: cs}
 	c.lanes = c.h.lanes(t)

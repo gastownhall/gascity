@@ -1,3 +1,5 @@
+//go:build unix
+
 package gastown_test
 
 import (
@@ -1326,6 +1328,9 @@ func TestReaperRunBudgetDeclaresPartialAndCarriesWorkForward(t *testing.T) {
 	out, ok := f.outcome(t)
 	if !ok || out.Outcome != "skipped" || !out.hasScope("rig:api", "run budget exhausted before this scope") {
 		t.Fatalf("outcome = %+v (declared %v), want skipped carrying the rig to the next run", out, ok)
+	}
+	if gcLog := f.read(t, f.gcLog); !strings.Contains(gcLog, "budget_skipped:") || !strings.Contains(gcLog, "rig:api@all") {
+		t.Fatalf("summary does not name the scope the budget skipped whole:\n%s", gcLog)
 	}
 	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
 		t.Fatalf("a spent run budget is not an anomaly:\n%s", f.read(t, f.gcLog))

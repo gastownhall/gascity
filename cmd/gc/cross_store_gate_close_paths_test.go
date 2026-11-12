@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -46,9 +47,10 @@ func TestWispGCRepairClosesACrossStoreGateAsTheController(t *testing.T) {
 }
 
 // TestCmdGCRootClosesReadAsControllerClosesOnACrossStoreGate: gc hook
-// --claim's skip of a done workflow and the stale order wisp sweep close by
-// gc.root_bead_id, so they reach a drain's gate; each reason is the shared
-// constant dispatch reads, and the real close leaves the gate controller-closed.
+// --claim's skip of a done workflow, its retirement of a workflow whose input
+// was purged, and the stale order wisp sweep close by gc.root_bead_id, so they
+// reach a drain's gate; each reason is the shared constant dispatch reads, and
+// the real close leaves the gate controller-closed.
 func TestCmdGCRootClosesReadAsControllerClosesOnACrossStoreGate(t *testing.T) {
 	if hookSkipDoneWorkflowCloseReason != sourceworkflow.HookSkipDoneWorkflowCloseReason {
 		t.Fatalf("hookSkipDoneWorkflowCloseReason %q drifted from sourceworkflow's %q", hookSkipDoneWorkflowCloseReason, sourceworkflow.HookSkipDoneWorkflowCloseReason)
@@ -59,6 +61,9 @@ func TestCmdGCRootClosesReadAsControllerClosesOnACrossStoreGate(t *testing.T) {
 	for name, closeRoot := range map[string]func(store beads.Store, rootID, gateID string) error{
 		"gc hook --claim skipDoneWorkflow": func(store beads.Store, rootID, _ string) error {
 			return skipDoneWorkflow(store, rootID)
+		},
+		"gc hook --claim failPurgedWorkflow": func(store beads.Store, rootID, _ string) error {
+			return failPurgedWorkflow(context.Background(), store, rootID)
 		},
 		"stale order wisp sweep": func(store beads.Store, rootID, gateID string) error {
 			_, err := closeStaleOrderWispIDs(store, []string{gateID, rootID}, "")

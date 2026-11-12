@@ -341,40 +341,36 @@ tcp_check() {
 }
 
 # run_with_timeout runs "$@" and sends it TERM once timeout_seconds elapse
-# (after 1s when sleep rejects the duration), returning its status. The
-# watchdog's sleep inherits every caller descriptor above 2 (op_start's fd 9
-# lock), so it must not outlive the call: the TERM that stops the watchdog
-# KILLs and reaps that sleep. KILL because a child that has forked but not
-# yet exec'd sleep runs the inherited trap and would swallow TERM. `stopped`
-# covers a TERM that lands before sleep_pid is set.
+# (after 1s when timeout_seconds is not a plain number of seconds), returning
+# its status. The timer is a `sleep` started by this function, so the caller
+# can KILL it the moment the command exits: it inherits every caller
+# descriptor above 2 (op_start's fd 9 lock) and must not outlive the call.
+# The stopper in front of it in the pipeline blocks writing into the pipe
+# until the sleep exits, then TERMs the command if it is still running. The
+# stopper holds those descriptors too: `wait` on the pipeline's pid waits for
+# both of its processes (bash and dash alike), so neither outlives the call.
+# No step depends on a process acting on a signal it traps: on macOS a
+# watchdog subshell that trapped the caller's TERM sometimes stayed blocked on
+# its sleep for the whole timeout.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
+    case "$timeout_seconds" in
+        '' | . | *[!0-9.]* | *.*.*) timeout_seconds=1 ;;
+    esac
     "$@" &
     local cmd_pid=$!
-    (
-        stopped=
-        sleep_pid=
-        trap 'stopped=1; [ -z "$sleep_pid" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true' TERM
-        for duration in "$timeout_seconds" 1; do
-            [ -z "$stopped" ] || break
-            sleep "$duration" 2>/dev/null &
-            sleep_pid=$!
-            [ -z "$stopped" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true
-            if wait "$sleep_pid"; then
-                sleep_pid=
-                break
-            fi
-            wait "$sleep_pid" 2>/dev/null || true
-            sleep_pid=
-        done
-        [ -n "$stopped" ] || kill "$cmd_pid" 2>/dev/null || true
-    ) </dev/null >/dev/null 2>&1 &
-    local watchdog_pid=$!
+    # shellcheck disable=SC2216 # sleep is the pipe's reader on purpose
+    {
+        trap '' PIPE
+        while printf '%8191s\n' ''; do :; done
+        ! kill -0 "$cmd_pid" || kill "$cmd_pid" || true
+    } </dev/null 2>/dev/null | sleep "$timeout_seconds" >/dev/null 2>&1 &
+    local sleep_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
+    kill -s KILL "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
     return "$status"
 }
 

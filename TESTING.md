@@ -41,7 +41,7 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
-| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (gating; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
@@ -60,12 +60,21 @@ other side's class is flagged), but its references to rows that already exist
 other side yet (`GraphApplyHandle` in `projection.go`), so a plan that wires a
 row to the wrong side's row passes the gate.
 
-Split-strict lane latency: `continue-on-error` keeps the lane's result out of
-the required `bazel test (side-by-side)` check, not its wall time. The lane is
-a leg of the matrix the gate job needs, so on a pull request that runs it the
-required check reports when it ends (about 5 minutes on a warm farm; 19 were
-seen cold). That keeps one copy of the lane's steps; give it its own job if
-the wait starts to matter.
+Split-strict lane gating: the lane is a leg of the matrix the required
+`bazel test (side-by-side)` check needs, so a red split-strict (a NEW ratchet
+key, a NEW FAILING test, a hung shard) fails that check, and on a pull request
+that runs it the required check reports when it ends (about 5 minutes on a
+warm farm; 19 were seen cold). It starts only in mode remote, for same-repo
+pull requests touching the storage paths, the nightly and dispatches (RC Gate
+included); fork, Dependabot and cache-mode PRs, merge groups and pushes do not
+run it. A regression landed that way turns the next storage PR red on files
+it never touched: check the open `split-strict-nightly` issue (a red nightly
+run opens or comments on it; bazel.yml's split-strict-alert job) before
+debugging your own change. Fix a red lane with `scripts/split-strict-baseline`:
+a new failure is classified as a product bug (fix the code), a fixture that
+does not model split stores (fix the fixture), or a gate artifact (list it
+with the reason). The downward ratchet (now-passing or unreached entries)
+gates the nightly only.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -296,6 +305,40 @@ is measured with nothing beside them, and the 90-minute budget leaves about
 16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
 the matrix parts a load can run past it, so no suite runs the two together.
 
+X6's fan-in (`TestX6FanIn`, in `conversationlane_test`) asserts its
+correctness on every run: every notice delivered once, one injection per
+boundary of at most `MaxBatchOps` notices, injections in order. Its steady
+phase also always holds the last injection to within 3 s of the rest's max
+(relative, so it scales with load) and every notice to a 30 s ceiling, which
+catches whole-path stalls (the 130 s lane lease recovery, the 60 s failed-pass
+backoff cap, the 60 s held-wake recheck) but not a lost wake, which the
+harness's 5 s anti-entropy scan recovers.
+The absolute SLO (p99 <= 5 s, max <= 7 s) is wall clock on a shared
+executor, which a loaded rbe-west worker broke 12 times in the merge queue
+in two weeks (#8240). It is logged on every run and asserted only on opt-in:
+
+| variable | selects | who needs it |
+| --- | --- | --- |
+| `GC_LANE_X6_PERF` | `1` turns X6 steady's absolute latency SLO from a log line into an assertion. No CI job sets it, so no CI job enforces the SLO: the nightly lanes share the same executors. Set it only in a local run on a host the run owns, with nothing beside it (command below) | `TestX6FanIn/steady` only |
+| `GC_LANE_X6_FULL` | `1` runs DES-O1's literal line (5,000 notices in 60 s), a manual measurement a keystroke runtime is expected to miss | `TestX6FanIn/full` only |
+
+Run the opted-in SLO locally, on a host the run owns with nothing beside it
+(not a shared executor or a shared development box). Bazel defaults to remote
+execution on the maintainers' hosts, so keep the test runner local:
+
+```bash
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
+  //test/conversationlane:conversationlane_test
+```
+
+Replacement coverage for the SLO, under "Flakes are defects": the busy
+re-probe cadence (`TestLaneHostReprobesBusyRuntimeWithoutRows`,
+`TestLaneWorkerNextDelay`) and the wake at a boundary's quiescence deadline
+(#8308's executor, planner and host tests) are pinned by deterministic unit
+tests, and the always-on ceiling and drain bound fail a run where a notice
+stalls. #8240 stays the tracking issue.
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
@@ -326,6 +369,16 @@ used: the test binary panics at init, naming the directory to remove.
   it, or the repos that child creates lose the guard, and a child that is a
   test binary installs a template of its own in its temp dir.
   `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
+- Go-native runs (the Makefile's `TEST_ENV` and the shard runners) also
+  point `GIT_CONFIG_GLOBAL` at a seed that sets `maintenance.auto = false`
+  and `gc.auto = 0` (`scripts/test-gitconfig-path`), which every git process
+  that keeps the variable reads, whatever repo it works in. Bazel runs have
+  no seed and rely on the template alone.
+- A script that rebuilds git's environment, pinning `GIT_CONFIG_GLOBAL` and
+  unsetting the other `GIT_*` variables, gets neither guard. It must pass
+  `-c maintenance.auto=false -c gc.auto=0` on its own git calls, as
+  `.github/actions/rbe-worker/fetch.sh` does through its `git()` wrapper
+  (`TestRBEWorkerFetchScriptInvariants`).
 - A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
   seeded; the testscript owns that env.
 - To check that a test path spawns no auto-maintenance (for humans working
@@ -386,7 +439,8 @@ this:
   is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
-  any other run. The `integration` lane can later be gated on `merge_group`
+  any other run. A storage PR's own run also has split-strict, which its
+  merge group does not (ga-ylpbsy.94.7). The `integration` lane can later be gated on `merge_group`
   only (G3).
 
 **Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
@@ -440,6 +494,35 @@ as `bazel-yml-bep-summary-<attempt>`, so hit rates can be compared across
 pre-push, PR, and main runs. `scripts/bazel_bep_summary_workflow_test.go`
 fails if a `bazel test` runs outside the lanes or a lane stops writing a
 BEP file the report reads.
+
+### Flame graphs (Bazel profiles)
+
+Every `bazel.yml` lane and the nightly `bazel / coverage` job upload their
+Bazel JSON trace profile (`--profile`), gzipped, as the artifact
+`bazel-profile-<lane>-<attempt>` (one `bazel-profile-<lane>.json.gz`
+inside), kept 7 days. To see where a slow lane spent its time:
+
+```bash
+gh run download <run-id> -R gastownhall/gascity -p 'bazel-profile-*' -D /tmp/prof
+```
+
+Open the `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it
+reads gzip directly and parses in the browser, nothing is uploaded) or in
+`chrome://tracing` ("Load"). For text, run
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/*/bazel-profile-unit.json.gz)`
+or `bazel analyze-profile`. Locally, Bazel already keeps the last five
+profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
+
+These artifacts are public, like every artifact of this repo. A profile
+holds timings, mnemonics, target labels and the runner's output base path;
+it carries no command line, environment value or endpoint. The prepare step
+still refuses a profile with anything secret-shaped (credentials in a URL, a
+PEM block, `token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host) or over 20 MB
+gzipped, with a warning. The upload never fails or holds up a lane
+(`continue-on-error`, 2-minute bounds);
+`TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
 
 ### Bazel cache tiers
 
@@ -582,6 +665,10 @@ passes the go suite can still fail nogo, formatting or a generated-artifact
 target. A green go run is not the Bazel suite; read it as "the go tests
 passed", never as "the push is clean". There is no value that skips the
 suite.
+
+Under either engine, a suite that exits 141 (SIGPIPE) fails the push with a
+named error. A 141 means a writer hit a closed pipe, which can follow a
+passing suite as easily as a failing one, so it is never read as a verdict.
 
 `auto` asks Bazel which options its rc files set (`bazel info --announce_rc
 --config=remote-exec`, which contacts no remote): a non-empty
@@ -1025,6 +1112,39 @@ manifest pin above). Bumping it is a one-line PR titled
 `chore(rbe): bump rbe-worker to <sha8> (<subject>)`:
 
 1. Merge the change into rbe-worker's main.
+
+   Canary it on real pool VMs before the bump, by hand: a dispatch by
+   any App or bot (`*[bot]`, the pool scalers' `bazel-allocator[bot]`
+   included) with the input is refused. Two limits:
+   - A commit that changes what the worker measures (`worker-env`) cannot
+     be canaried this way: the canary skips the drift jobs (a drift issue
+     would cap both pools for the pin and fail remote-mode PRs), so its
+     worker serves only actions that send no worker-env. Re-pin the host in
+     the bump PR instead (step 3).
+   - A hand dispatch of the fork pool bypasses rbe-west's fork off switch
+     (`/etc/rbe-fork/enabled` on the core, which the fork scaler obeys):
+     check that it is on before a fork canary, and do not run one while the
+     fork edge is off on purpose.
+
+   Dispatch a pool workflow on main with the new commit as `rbe_worker_sha`:
+
+   ```
+   gh workflow run rbe-worker-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   ```
+
+   The run is named `(canary, idle Nm) rbe-worker <sha>`, and its
+   `max_minutes` is capped at 60. The scalers' breaker ignores it (it counts
+   `bazel-allocator[bot]`'s runs alone). Their pool size counts it like any
+   unfinished run (max workers, the floor, booting, the drift cap, the fork
+   daily budget): one worker more, harmless.
+   The fetch takes the commit only if it is on rbe-worker main's first-parent
+   line and descends from the pin. Before any of its code runs, H5
+   (`h5.sh pin..sha`) checks every commit in between is signed, merged and
+   verified. A canary worker serves real actions like any other. Look for
+   `isolation: probe`, `worker ... started` and `rbe-first-exec: ... actions=N`
+   with N above 0, and for no `isolation:` failure. Empty `rbe_worker_sha`
+   (the default) is the pin.
 2. Change the 40-hex sha in `.github/actions/rbe-worker/pin` to the new
    commit. Use rbe-worker's `bin/bump-summary OLD NEW` output as the PR
    body: the compare URL, the commit list, and whether the bump touches the
@@ -1056,6 +1176,62 @@ nothing to walk. Every `worker-host` run still fetches the pin and runs
 its `cmd/product-check`, which is stdlib-only and quick. It measures only
 when the change touches the worker host. product-check is skipped if H5 or
 the fetch failed, and still runs if the measurement failed.
+
+### Setup download mirror (RBE_DIST_MIRROR)
+
+Each pool VM downloads three pinned artifacts in setup: NativeLink, Go and
+dolt. rbe-worker's `worker/rbe-fetch` retries each download. If the
+repository variable `RBE_DIST_MIRROR` (the fork pool: `RBE_FORK_DIST_MIRROR`)
+is `https://rbe-warm.ops.gascity.com/dist`, it tries the copy on rbe-west's
+warm bucket first (infra `nativelink-cas/west` README, "Pinned setup
+downloads on R2"). The copy is transport only: every file is checked against
+the sha256 pinned in the rbe-worker tree, and a miss or mismatch falls back
+to upstream. The pool workflows pass the variable to their measure and
+worker steps, `rbe-worker-legacy.yml` does the same, and
+`rbe-worker-env-canary.yml` passes it to its measure step. Unset, every
+download comes from upstream, still retried. Before a pin bump that moves
+NativeLink, Go (`go.mod`) or dolt, the core's `rbe-dist-publish.sh` puts the
+new artifact on the mirror; until it does, workers fall back to upstream.
+Each VM prints one `rbe-fetch:` line per artifact (`source=mirror|upstream`,
+`mirror=hit|off|miss|bad-sha256`). To roll back, unset the variable.
+
+### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
+
+Before the fork pool reads big blobs from rbe-west's R2 hot tier
+(`RBE_FORK_HOT_URL`; infra `nativelink-cas/west` README "Hot blobs on R2"),
+the edge is checked once from a Blacksmith runner: the WAF admits
+Blacksmith alone, and the promotion needs the fork worker certificate. By
+hand, on main:
+
+```
+gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f hot_precheck_digest=<64-hex sha256>-<size>
+```
+
+The digest is a blob of 64 MiB or more that the fork tier holds (rbe-west's
+`fork-big` or `cas-big`) and that R2 does not hold yet: the check aborts on
+one already promoted. The run (named `hot-precheck`) starts no worker and no
+drift job. It runs infra's `rbe-hot-precheck.sh`, vendored in
+`.github/rbe-hot/` with its sha256 (infra is private; the job checks the
+sha256 first) and one fix infra does not have yet: the decode check also
+fails when zstd rejects the stream. The fork worker certificate is in 0600
+files for that one step, and the job fails unless the script prints
+`precheck: ok`. The promotion is real: one PUT of about a quarter of the
+blob's size. A dispatch by any `*[bot]`, or together with `rbe_worker_sha`,
+is refused. Two cautions before you dispatch it:
+
+- The fork scaler counts the run in its pool size like any unfinished run,
+  and for its first 3 minutes also as a booting worker, one that never
+  registers: for those minutes it can dispatch one worker fewer for a fork
+  queue. Run the pre-check while the fork queue is quiet.
+- rbe-west's fork off switch (`/etc/rbe-fork/enabled`, which the fork scaler
+  obeys) does not stop a hand dispatch, but the promotion goes through the
+  fork edge's `:8444`, which the switch closes: while the edge is dark the
+  pre-check fails, and nothing is promoted.
+
+A new infra version of the script: copy it, keep the decode fix until infra
+has it (the test's decode cases fail without it), update
+`rbe-hot-precheck.sha256`, and update the two constants in
+`scripts/rbe_fork_pool_test.go`.
 
 ## The outcome: protected PR feedback in under five minutes
 
@@ -1561,6 +1737,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-12-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext: subprocess | ga-cp3hwi | doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server | P0.4b | 2026-12-31 |
 | Medium owner | `internal/hooks` package `hooks` | TestProviderPluginNodeSuite: subprocess | ga-cp3hwi | the embedded provider-plugin behavior proof is a checked Medium subprocess owner; the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce | P0.4b | 2026-12-31 |
+| Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-12-31 |
@@ -1576,6 +1753,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModVerifyCacheDetectsTamperedModules: subprocess | ga-cp3hwi | the CI Go module cache verification proof is a checked Medium subprocess owner; the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts | P0.4b | 2026-12-31 |
+| Medium owner | `scripts` package `scripts_test` | TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure: subprocess | ga-6hg5mi | the install-oapi-codegen retry proof is a checked Medium subprocess owner; the make subprocess is confined to TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure, which exists to exercise the install-oapi-codegen recipe end to end: a Make recipe is shell, so only a real make run against a PATH-injected fake go can prove the retry and fail-closed paths | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-12-31 |
 | Medium owner | `tools/nogo/nolinttest` package `nolinttest_test` | TestNolintNeverSuppressesStoreclass: subprocess | ga-cp3hwi | the storeclass nolint-suppression proof is a checked Medium subprocess owner; the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding | P0.4b | 2026-12-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-12-31 |
@@ -2139,17 +2317,23 @@ which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
 holding process exits — success, failure, or crash alike — so a stale slot
-can never survive a dead holder; no PID-file liveness probing is involved.
-FD inheritance into test jobs is severed at the fan-out boundary, so a slot
+can never survive a dead holder that still owns the descriptor. FD
+inheritance into test jobs is severed at the fan-out boundary, so a slot
 that stays locked past its gate means a leaked descendant is still holding
-the descriptor (`lsof` on the slot file names it), not a stale file to
-delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
-already lists as required; if it is absent the run proceeds uncapped with a
-warning rather than blocking. The run likewise proceeds uncapped, with a
-diagnostic, if no descriptor in `[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
-PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
-contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
-invocation.
+the descriptor, not a stale file to delete. When every slot is busy and one
+is locked under a stamped PID that is gone, acquire reaps those leaked
+descendants (the processes `lsof`/`fuser` show with the slot file open)
+instead of waiting out the bound. It first waits one second and checks
+again, and signals only a process that still has the file open under the
+same dead stamp: a new holder rewrites the stamp just after it wins the
+lock, and a waiter probing the slot holds the file only for an instant.
+Never delete the slot file to "unlock" it. The gate needs `flock(1)`,
+which `docs/getting-started/installation.md` already lists as required; if
+it is absent the run proceeds uncapped with a warning rather than blocking.
+The run likewise proceeds uncapped, with a diagnostic, if no descriptor in
+`[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN)` is free — an
+environment defect is never misreported as contention.
+`GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one invocation.
 
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
@@ -2599,19 +2783,19 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-17: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately. |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-21: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBackedForCity` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-31: the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-22: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately. |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-12: no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-26: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-16: no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_integration_test.go#TestSSHConformance (hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered) |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the production T3 bridge composition has focused tests but no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 | `runtime.worker-site.guard` | production_provider | — | `runtime.Provider` | `internal/runtime/guard.New` | source: cmd/gc/providers.go#resolveWorkerSpec — a worker site's control-plane descriptor selects the guard, outside the runtime registry | `runtime.Provider` | not applicable: worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable |

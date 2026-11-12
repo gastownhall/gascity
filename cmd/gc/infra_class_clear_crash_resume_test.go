@@ -1,19 +1,20 @@
 package main
 
-// Crash/resume rows for the retained-copy clear, contributed by the lane
-// split151 review (rel15/review-split151.md, A1). They pin that a clear
-// interrupted mid-delete settles the cross-store edges of the rows the earlier
-// run already removed: a satisfied blocking edge is released, and an edge to a
-// still-open moved bead survives a cascading delete.
+// Crash/resume rows for the retained-copy clear. The clear never re-adds an
+// edge (D9), so a run interrupted anywhere leaves no edge to restore: what it
+// must keep is the boundary check, run again by every resumed run before the
+// delete, and the backup's record of every edge it dropped.
 
 import (
 	"bytes"
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // cascadingStore models a backend whose Delete drops every edge touching the
@@ -30,17 +31,24 @@ func (s cascadingStore) Delete(id string) error {
 	return s.MemStore.Delete(id)
 }
 
-func reviewSeedCrossEdges(t *testing.T, source beads.Store) (done, running, waitsOnDone, waitsOnRunning beads.Bead) {
-	done = mustCreateInfraBead(t, source, beads.Bead{Title: "graft finished", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
-	running = mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
-	waitsOnDone = mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on done", Type: "task"})
-	waitsOnRunning = mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on running", Type: "task"})
-	for _, e := range []beads.Dep{{IssueID: waitsOnDone.ID, DependsOnID: done.ID, Type: "blocks"}, {IssueID: waitsOnRunning.ID, DependsOnID: running.ID, Type: "blocks"}} {
-		if err := source.DepAdd(e.IssueID, e.DependsOnID, e.Type); err != nil {
-			t.Fatal(err)
-		}
+// depAddCounting counts every edge written to the work store, and cascades
+// a delete onto the row's edges when cascade is set.
+type depAddCounting struct {
+	*beads.MemStore
+	cascade bool
+	adds    *int
+}
+
+func (s depAddCounting) DepAdd(issueID, dependsOnID, depType string) error {
+	*s.adds++
+	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+}
+
+func (s depAddCounting) Delete(id string) error {
+	if s.cascade {
+		return cascadingStore{s.MemStore}.Delete(id)
 	}
-	return
+	return s.MemStore.Delete(id)
 }
 
 func reviewReadyIDs(t *testing.T, s beads.Store) []string {
@@ -55,118 +63,183 @@ func reviewReadyIDs(t *testing.T, s beads.Store) []string {
 	return out
 }
 
-// Non-cascading backend (file store / MemStore): crash after the satisfied
-// blocker's row is deleted but before the release pass. The resume no longer
-// sees that row, so the satisfied edge is never released.
-func TestReviewCrashResumeReleasesSatisfiedEdge(t *testing.T) {
+// retainedCrossEdgeCity is a city an earlier build converged with its copies
+// retained (S51), whose work beads depend on the moved ones: waitsOnDone
+// blocks on done (closed in the binding), related is related to running
+// (open). source counts the edges the clear writes.
+type retainedCrossEdgeCity struct {
+	cityPath                   string
+	cfg                        *config.City
+	target                     infraBindingTarget
+	mem                        *beads.MemStore
+	adds                       *int
+	done, running              beads.Bead
+	waitsOnDone, related, more beads.Bead
+}
+
+func newRetainedCrossEdgeCity(t *testing.T, cascading bool) retainedCrossEdgeCity {
+	t.Helper()
 	stubInfraControllerPing(t, 0)
-	mem := beads.NewMemStore()
+	c := retainedCrossEdgeCity{mem: beads.NewMemStore(), adds: new(int)}
+	source := depAddCounting{MemStore: c.mem, cascade: cascading, adds: c.adds}
 	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return mem, nil }
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
 	t.Cleanup(func() { openInfraMigrationSource = prev })
-	done, _, waitsOnDone, _ := reviewSeedCrossEdges(t, mem)
-	cityPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	c.done = mustCreateInfraBead(t, c.mem, beads.Bead{Title: "graft finished", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	c.running = mustCreateInfraBead(t, c.mem, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	c.more = mustCreateInfraBead(t, c.mem, beads.Bead{Title: "a session", Type: "session", Labels: []string{"gc:session"}})
+	c.waitsOnDone = mustCreateInfraBead(t, c.mem, beads.Bead{Title: "work waiting on done", Type: "task"})
+	c.related = mustCreateInfraBead(t, c.mem, beads.Bead{Title: "work related to running", Type: "task"})
+	c.cityPath = t.TempDir()
+	c.cfg = infraSplitConfig(filepath.Join(c.cityPath, ".gc", "store"))
 	var log bytes.Buffer
-	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+	if got := migrateInfraClassesRetainingSource(t, c.cityPath, c.cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
 	}
-	target := mustResolveInfraTarget(t, cityPath, cfg)
-	binding := openMigratedDestination(t, target)
-	if err := binding.Close(done.ID); err != nil {
+	for _, e := range []beads.Dep{{IssueID: c.waitsOnDone.ID, DependsOnID: c.done.ID, Type: "blocks"}, {IssueID: c.related.ID, DependsOnID: c.running.ID, Type: "related"}} {
+		if err := c.mem.DepAdd(e.IssueID, e.DependsOnID, e.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.target = mustResolveInfraTarget(t, c.cityPath, c.cfg)
+	c.setInBinding(t, c.done.ID, "closed")
+	*c.adds = 0
+	return c
+}
+
+func (c retainedCrossEdgeCity) setInBinding(t *testing.T, id, status string) {
+	t.Helper()
+	binding := openMigratedDestination(t, c.target)
+	if err := binding.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
 		t.Fatal(err)
 	}
 	_ = closeBeadStoreHandle(binding)
+}
 
-	n := 0
-	prevDel := infraClearBeforeDelete
-	infraClearBeforeDelete = func(string) error {
-		n++
-		if n == 2 { // first row (done) already deleted
-			return errors.New("killed mid-clear")
+// assertClearedWithoutReAdding: converged, no edge from a work bead onto a
+// moved bead left or written, and each recorded in the backup as dropped.
+func (c retainedCrossEdgeCity) assertClearedWithoutReAdding(t *testing.T) {
+	t.Helper()
+	if *c.adds != 0 {
+		t.Fatalf("the clear wrote %d edge(s) into the work store; it never re-adds one", *c.adds)
+	}
+	for _, w := range []beads.Bead{c.waitsOnDone, c.related} {
+		deps, err := c.mem.DepList(w.ID, "down")
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
+		if len(deps) != 0 {
+			t.Fatalf("%s still depends on %+v after the clear", w.ID, deps)
+		}
 	}
-	first := migrateInfraClasses(t, cityPath, cfg, &log)
-	infraClearBeforeDelete = prevDel
-	if first.Outcome != infraMigrationRetained {
-		t.Fatalf("first = %s", first.Outcome)
+	backup, _, err := readInfraRetainedBackup(c.target)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := mem.Get(done.ID); err == nil {
-		t.Fatalf("precondition: %s should be deleted by first pass", done.ID)
+	recorded := map[string]string{}
+	for _, e := range backup {
+		for _, d := range e.Dependents {
+			recorded[d.IssueID+">"+d.DependsOnID] = d.Disposition
+		}
 	}
-	log.Reset()
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("resume = %s: %s", got.Outcome, log.String())
+	for _, key := range []string{c.waitsOnDone.ID + ">" + c.done.ID, c.related.ID + ">" + c.running.ID} {
+		if recorded[key] != rigEdgeDropped {
+			t.Fatalf("the backup records %s as %q, want %q: the edge is lost without a record", key, recorded[key], rigEdgeDropped)
+		}
 	}
-	if !slices.Contains(reviewReadyIDs(t, mem), waitsOnDone.ID) {
-		deps, _ := mem.DepList(waitsOnDone.ID, "down")
-		t.Errorf("after crash+resume %s is NOT ready though its blocker %s is closed in the binding; dangling edges: %+v", waitsOnDone.ID, done.ID, deps)
+	if !slices.Contains(reviewReadyIDs(t, c.mem), c.waitsOnDone.ID) {
+		t.Fatalf("%s is not ready after the binding finished its blocker", c.waitsOnDone.ID)
 	}
 }
 
-// Cascading backend: crash after the still-open blocker's row is deleted (its
-// inbound edge cascaded) but before the keep/restore pass. The resume no longer
-// sees that row, so the kept edge is never restored: the dependent unblocks early,
-// with no warning.
-func TestReviewCrashResumeKeepsOpenBlockerEdgeOnCascadingBackend(t *testing.T) {
-	stubInfraControllerPing(t, 0)
-	mem := beads.NewMemStore()
-	src := cascadingStore{mem}
-	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return src, nil }
-	t.Cleanup(func() { openInfraMigrationSource = prev })
-	_, running, _, waitsOnRunning := reviewSeedCrossEdges(t, src)
-	mustCreateInfraBead(t, src, beads.Bead{Title: "a session after", Type: "session", Labels: []string{"gc:session"}})
-	cityPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
-	var log bytes.Buffer
-	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
-	}
-	// Sanity: an uninterrupted clear on a cascading store keeps the edge.
-	n := 0
-	prevDel := infraClearBeforeDelete
-	infraClearBeforeDelete = func(string) error {
-		n++
-		if n == 3 { // done and running already deleted
-			return errors.New("killed mid-clear")
-		}
-		return nil
-	}
-	first := migrateInfraClasses(t, cityPath, cfg, &log)
-	infraClearBeforeDelete = prevDel
-	if first.Outcome != infraMigrationRetained {
-		t.Fatalf("first = %s: %s", first.Outcome, log.String())
-	}
-	if _, err := mem.Get(running.ID); err == nil {
-		t.Fatalf("precondition: %s should be deleted by the first pass", running.ID)
-	}
-	log.Reset()
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("resume = %s: %s", got.Outcome, log.String())
-	}
-	if slices.Contains(reviewReadyIDs(t, mem), waitsOnRunning.ID) {
-		t.Errorf("after crash+resume %s became READY although its blocker %s is still open in the binding (kept edge lost; no warning). log: %s", waitsOnRunning.ID, running.ID, log.String())
+// TestTheClearNeverReAddsAnEdgeAcrossACrash kills the clear after its first
+// row went and resumes it, on a store whose delete keeps edges and on one
+// whose delete cascades them: the resumed run writes no edge into the work
+// store, and the backup records every edge it dropped.
+//
+// Red on main: the resumed run re-added the related edge onto the removed
+// running graft (infraRestoreKeptEdge), a cross-store edge.
+func TestTheClearNeverReAddsAnEdgeAcrossACrash(t *testing.T) {
+	for _, cascading := range []bool{false, true} {
+		t.Run(map[bool]string{false: "keeping", true: "cascading"}[cascading], func(t *testing.T) {
+			c := newRetainedCrossEdgeCity(t, cascading)
+			n := 0
+			prev := infraClearBeforeDelete
+			infraClearBeforeDelete = func(string) error {
+				n++
+				if n == 2 {
+					return errors.New("killed mid-clear")
+				}
+				return nil
+			}
+			var log bytes.Buffer
+			first := migrateInfraClasses(t, c.cityPath, c.cfg, &log)
+			infraClearBeforeDelete = prev
+			if first.Outcome != infraMigrationRetained || !strings.Contains(log.String(), "killed mid-clear") {
+				t.Fatalf("first = %s: %s", first.Outcome, log.String())
+			}
+			log.Reset()
+			if got := migrateInfraClasses(t, c.cityPath, c.cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("resume = %s: %s", got.Outcome, log.String())
+			}
+			c.assertClearedWithoutReAdding(t)
+		})
 	}
 }
 
-// Same cascading backend, no crash: control that the uninterrupted path keeps it.
-func TestReviewUninterruptedClearKeepsOpenBlockerOnCascadingBackend(t *testing.T) {
-	stubInfraControllerPing(t, 0)
-	mem := beads.NewMemStore()
-	src := cascadingStore{mem}
-	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return src, nil }
-	t.Cleanup(func() { openInfraMigrationSource = prev })
-	_, running, _, waitsOnRunning := reviewSeedCrossEdges(t, src)
-	cityPath := t.TempDir()
-	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
-	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("migrate = %s: %s", got.Outcome, log.String())
-	}
-	if slices.Contains(reviewReadyIDs(t, mem), waitsOnRunning.ID) {
-		t.Errorf("%s ready while %s open", waitsOnRunning.ID, running.ID)
+// TestTheClearChecksItsBoundaryAgainAfterAKill is the crash seam between the
+// clear's boundary check and its delete: a run killed there, after the check
+// passed, whose blocker then reopens in the binding, is refused by the
+// resumed run before it removes a row, and the edge stays. Both kill points
+// are covered: before the cleared note goes pending (the "clear checked"
+// boundary), and after (before the first row's delete).
+func TestTheClearChecksItsBoundaryAgainAfterAKill(t *testing.T) {
+	for _, point := range []string{"clear checked", "before the first delete"} {
+		t.Run(point, func(t *testing.T) {
+			c := newRetainedCrossEdgeCity(t, true)
+			killed := errors.New("killed at " + point)
+			prevPoint, prevDelete := infraEngineCrashPoint, infraClearBeforeDelete
+			t.Cleanup(func() { infraEngineCrashPoint, infraClearBeforeDelete = prevPoint, prevDelete })
+			if point == "clear checked" {
+				infraEngineCrashPoint = func(p string) error {
+					if p == point {
+						return killed
+					}
+					return nil
+				}
+			} else {
+				infraClearBeforeDelete = func(string) error { return killed }
+			}
+			var log bytes.Buffer
+			if first := migrateInfraClasses(t, c.cityPath, c.cfg, &log); first.Outcome != infraMigrationRetained || !strings.Contains(log.String(), killed.Error()) {
+				t.Fatalf("first = %s: %s", first.Outcome, log.String())
+			}
+			infraEngineCrashPoint, infraClearBeforeDelete = prevPoint, prevDelete
+			c.setInBinding(t, c.done.ID, "open")
+			log.Reset()
+			resumed := migrateInfraClasses(t, c.cityPath, c.cfg, &log)
+			var refusal *infraClearBoundaryRefusal
+			if resumed.Outcome != infraMigrationRetained || !errors.As(resumed.Fault, &refusal) {
+				t.Fatalf("resume = %s (%v), want the boundary refused again: %s", resumed.Outcome, resumed.Fault, log.String())
+			}
+			if len(refusal.Refusals) != 1 || !slices.Equal(refusal.Refusals[0].IDs, []string{c.waitsOnDone.ID, c.done.ID}) {
+				t.Fatalf("refusals = %+v", refusal.Refusals)
+			}
+			for _, id := range []string{c.done.ID, c.running.ID, c.more.ID} {
+				if _, err := c.mem.Get(id); err != nil {
+					t.Fatalf("the refused resume removed %s: %v", id, err)
+				}
+			}
+			if deps, _ := c.mem.DepList(c.waitsOnDone.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != c.done.ID {
+				t.Fatalf("%s deps = %+v; the edge the check refused must stay", c.waitsOnDone.ID, deps)
+			}
+			// Finished in the binding again, the same command completes.
+			c.setInBinding(t, c.done.ID, "closed")
+			log.Reset()
+			if got := migrateInfraClasses(t, c.cityPath, c.cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("final = %s: %s", got.Outcome, log.String())
+			}
+			c.assertClearedWithoutReAdding(t)
+		})
 	}
 }

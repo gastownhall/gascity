@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -32,9 +33,9 @@ type initiatorAtRouteRouter struct {
 }
 
 func (r *initiatorAtRouteRouter) Route(_ context.Context, req RouteRequest) error {
-	store := req.Store
-	if store == nil {
-		store = r.fallback
+	store := r.fallback
+	if !req.Store.Absent() {
+		store = req.Store
 	}
 	b, err := store.Get(req.BeadID)
 	if err != nil {
@@ -91,7 +92,7 @@ func slingWorker() config.Agent {
 
 func TestSlingStampsInitiatorOnPlainBeadBeforeTypedRoute(t *testing.T) {
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 	router := &initiatorAtRouteRouter{fallback: deps.Store}
 	deps.Router = router
 
@@ -110,7 +111,7 @@ func TestSlingStampsInitiatorOnPlainBeadBeforeShellRoute(t *testing.T) {
 	store := seededStore("BL-1")
 	runner := &initiatorAtRouteRunner{store: store, ids: []string{"BL-1"}}
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	opts := testOpts(slingWorker(), "BL-1")
 	opts.Initiator = testInitiator
@@ -124,7 +125,7 @@ func TestSlingStampsInitiatorOnPlainBeadBeforeShellRoute(t *testing.T) {
 
 func TestSlingWithoutInitiatorStampsNothing(t *testing.T) {
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 	deps.Router = &initiatorAtRouteRouter{fallback: deps.Store}
 
 	if _, err := DoSling(testOpts(slingWorker(), "BL-1"), deps, deps.Store); err != nil {
@@ -244,7 +245,7 @@ func TestSlingGraphV2StampsInitiatorOnWorkflowRoot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := graphV2SlingTestConfig(t, writeInitiatorGraphV2Formula(t))
 			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-			graph := deps.Store
+			graph := beads.Store(deps.GraphStore)
 			if split {
 				deps, _, graph = splitSlingDeps(t, cfg)
 			}
@@ -320,9 +321,9 @@ func TestSlingBatchStampsInitiatorOnChildrenBeforeShellRoute(t *testing.T) {
 	convoyID, children := newInitiatorConvoy(t, store)
 	runner := &initiatorAtRouteRunner{store: store, ids: children}
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
-	result, err := DoSlingBatch(SlingOpts{Target: slingWorker(), BeadOrFormula: convoyID, Initiator: testInitiator}, deps, store)
+	result, err := DoSlingBatch(SlingOpts{Target: slingWorker(), BeadOrFormula: convoyID, Initiator: testInitiator}, deps, beadstest.Work(store))
 	if err != nil {
 		t.Fatalf("DoSlingBatch: %v", err)
 	}
@@ -398,7 +399,7 @@ func TestDispatchPlainRouteStampsInitiatorBeforeRouting(t *testing.T) {
 				}
 				shell := &initiatorAtRouteRunner{store: store, ids: ids}
 				deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), shell.run)
-				deps.Store = store
+				deps = withStore(deps, store)
 				typed := &initiatorAtRouteRouter{fallback: store}
 				if routing == "typed" {
 					deps.Router = typed
@@ -409,7 +410,7 @@ func TestDispatchPlainRouteStampsInitiatorBeforeRouting(t *testing.T) {
 				}
 
 				opts := SlingOpts{Target: tc.target, BeadOrFormula: beadID, NoFormula: tc.noFormula, Initiator: testInitiator}
-				if _, err := s.Dispatch(context.Background(), opts, store); err != nil {
+				if _, err := s.Dispatch(context.Background(), opts, beadstest.Work(store)); err != nil {
 					t.Fatalf("Dispatch: %v", err)
 				}
 				seen := shell.seen
@@ -433,7 +434,7 @@ func TestIntentEntryPointsCarryInitiator(t *testing.T) {
 	newSling := func(t *testing.T, store beads.Store) (*Sling, *initiatorAtRouteRouter) {
 		t.Helper()
 		deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
-		deps.Store = store
+		deps = withStore(deps, store)
 		router := &initiatorAtRouteRouter{fallback: store}
 		deps.Router = router
 		s, err := New(deps)
@@ -458,7 +459,7 @@ func TestIntentEntryPointsCarryInitiator(t *testing.T) {
 		store := beads.NewMemStore()
 		convoyID, children := newInitiatorConvoy(t, store)
 		s, router := newSling(t, store)
-		if _, err := s.ExpandConvoy(ctx, convoyID, slingWorker(), RouteOpts{Initiator: testInitiator}, store); err != nil {
+		if _, err := s.ExpandConvoy(ctx, convoyID, slingWorker(), RouteOpts{Initiator: testInitiator}, beadstest.Work(store)); err != nil {
 			t.Fatalf("ExpandConvoy: %v", err)
 		}
 		for _, id := range children {
@@ -534,7 +535,7 @@ func (s *initiatorStampCountStore) SetMetadata(id, key, value string) error {
 func newRoutingProbe(routing string, store beads.Store) (SlingDeps, func() []string) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	if routing == "typed" {
 		router := &routeCallRouter{}
 		deps.Router = router
@@ -642,7 +643,7 @@ func TestSlingBatchRefusesToRouteChildWhoseInitiatorStampFails(t *testing.T) {
 			convoyID, children := newInitiatorConvoy(t, mem)
 			deps, routed := newRoutingProbe(routing, &initiatorStampErrStore{Store: mem, err: stampErr})
 
-			result, err := DoSlingBatch(SlingOpts{Target: slingWorker(), BeadOrFormula: convoyID, Initiator: testInitiator}, deps, mem)
+			result, err := DoSlingBatch(SlingOpts{Target: slingWorker(), BeadOrFormula: convoyID, Initiator: testInitiator}, deps, beadstest.Work(mem))
 			if !errors.Is(err, stampErr) {
 				t.Fatalf("DoSlingBatch err = %v, want the stamp failure", err)
 			}
@@ -681,7 +682,7 @@ func TestSlingStampsInitiatorOnlyWhenBeadLacksIt(t *testing.T) {
 			t.Fatal(err)
 		}
 		deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
-		deps.Store = store
+		deps = withStore(deps, store)
 		router := &initiatorAtRouteRouter{fallback: store}
 		deps.Router = router
 

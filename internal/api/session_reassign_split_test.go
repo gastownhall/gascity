@@ -22,8 +22,9 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
-// splitReassignFixture is a split city whose sessions and graph classes share
-// one binding, with a city work store and the rig work store a test passes in.
+// splitReassignFixture is a split city whose sessions, messaging and graph
+// classes share one binding, as every class does on the split city the routes
+// serve, with a city work store and the rig work store a test passes in.
 // It holds the configured named session "worker", whose only row has lost
 // continuity, so the next materializing resolve of "worker" replaces it.
 type splitReassignFixture struct {
@@ -53,11 +54,11 @@ func newSplitReassignFixture(t *testing.T, rig beads.Store) splitReassignFixture
 
 	fs.cfg.Agents[0].Dir = ""
 	fs.cfg.NamedSessions[0].Dir = ""
-	spec, ok, err := srv.findNamedSessionSpecForTarget(binding, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil || !ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = %v, %v", ok, err)
 	}
-	historicalID, err := srv.materializeNamedSession(binding, spec)
+	historicalID, err := srv.materializeNamedSession(beadstest.Sessions(binding), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession(worker): %v", err)
 	}
@@ -163,7 +164,7 @@ func TestSplitNamedSessionWakeHandsOffPastAFailingWorkStore(t *testing.T) {
 	if !strings.Contains(logs.String(), "rig store unavailable") {
 		t.Fatalf("the first wake logged %q, want the rig store's error: the hand-off it could not finish must be reported", logs.String())
 	}
-	successor, ok, err := session.FindCanonicalConfiguredNamedSessionBead(f.binding, f.spec)
+	successor, ok, err := session.FindCanonicalConfiguredNamedSessionBead(beadstest.Sessions(f.binding), f.spec)
 	if err != nil || !ok || successor.ID != freshID || freshID == f.historicalID {
 		t.Fatalf("successor after the first wake = %q, %v, %v; want the new canonical bead the wake answered (%s)", successor.ID, ok, err, freshID)
 	}

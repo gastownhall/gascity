@@ -265,7 +265,7 @@ managed_runtime_listener_pid() (
   running=$(managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
-          ''|*[!0-9]*)
+          (''|*[!0-9]*)
             continue
             ;;
         esac

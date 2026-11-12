@@ -17,11 +17,7 @@ import (
 
 // resolveSessionID delegates to session.ResolveSessionID.
 func resolveSessionID(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionID(store, identifier)
-}
-
-func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionIDAllowClosed(store, identifier)
+	return session.ResolveSessionID(beads.SessionStore{Store: store}, identifier)
 }
 
 type namedSessionResolveOptions struct {
@@ -63,7 +59,7 @@ func resolveConfiguredNamedSessionID(
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	lookup, err := session.LookupConfiguredNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
 	if err != nil {
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
@@ -144,11 +140,12 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
+	sessions := beads.SessionStore{Store: store}
 	if isTemplateTarget(identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if !opts.skipExactID {
-		if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
+		if id, err := session.ResolveSessionIDByExactID(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
@@ -159,7 +156,7 @@ func resolveSessionIDWithOptions(
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionID(sessions, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {
@@ -188,7 +185,7 @@ func resolveSessionIDWithOptions(
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 			}
 		}
-		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
+		if id, err := session.ResolveSessionIDAllowClosed(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err

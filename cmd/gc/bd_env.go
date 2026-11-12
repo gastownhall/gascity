@@ -238,8 +238,10 @@ var errBdNotOnPath = errors.New("bd not found in PATH")
 
 // resolveBdBinaryForScope resolves the bd executable a scope's commands run.
 // The city scope and rigs that inherit its backend use the workspace pin so
-// every command speaks the same schema as the managed runtime. A rig that
-// explicitly overrides the city backend keeps the ambient lookup unless it
+// every command speaks the same schema as the managed runtime. A rig whose
+// metadata names the dolt backend but whose endpoint is inherited from the
+// city is served by the city's managed Dolt and so inherits the pin too. A rig
+// that explicitly overrides the city backend keeps the ambient lookup unless it
 // carries a complete storage binding of its own. An ambient miss is
 // errBdNotOnPath so callers can phrase their own remediation; a configured
 // but unresolvable pin is returned verbatim rather than masked as a missing
@@ -249,7 +251,8 @@ func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot)
+	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot) ||
+		scopeInheritsCityDoltEndpoint(cityPath, scopeRoot)
 	if bound || usesCityBackend {
 		pinned, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
@@ -1050,6 +1053,19 @@ func scopeBackendIsDoltlite(cityPath, scopeRoot string) bool {
 		cityUsesDoltliteBeadsBackend(cityPath)
 }
 
+// scopeInheritsCityDoltEndpoint reports whether a rig whose metadata names the
+// dolt backend still takes its endpoint from the city's managed Dolt, so its
+// metadata backend is a restatement of the city's rather than an override.
+func scopeInheritsCityDoltEndpoint(cityPath, scopeRoot string) bool {
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !ok || strings.TrimSpace(meta.Backend) != "dolt" {
+		return false
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	return err == nil && resolved.Kind == contract.ScopeConfigAuthoritative &&
+		resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity
+}
+
 func scopeOverridesCityBackend(cityPath, scopeRoot string) bool {
 	if samePath(cityPath, scopeRoot) {
 		return false
@@ -1282,17 +1298,19 @@ func applyProxiedDoltEnv(env map[string]string) {
 	env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 }
 
-// applyProxiedSharedServerOptOut keeps a gc-owned proxied scope out of bd's
-// user-level shared-server mode.
+// applyProxiedSharedServerOptOut keeps a gc-owned scope out of bd's user-level
+// shared-server mode.
 //
 // bd resolves dolt.shared-server through its layered config (env >
 // BEADS_DIR/project .beads/config.yaml > ~/.config/bd/config.yaml >
 // ~/.beads/config.yaml). A user-level `dolt.shared-server: true` therefore
 // relocates every proxied scope that does not say otherwise into
 // ~/.beads/shared-server — silently, and with one Dolt root for every city on
-// the host, so two cities' `hq` stores become one database. gc never supported
-// that topology (v1.4.2 refused it loudly), so every bd process gc spawns for a
-// proxied scope gc OWNS (gcOwnsProxiedScope) pins the mode off:
+// the host, so two cities' `hq` stores become one database — and queues every
+// bd call on a managed server-mode scope behind that root's gate lock, which a
+// bd init under the same HOME takes exclusively (gm-uasy78). gc never
+// supported that topology (v1.4.2 refused it loudly), so every bd process gc
+// spawns for a scope gc OWNS (gcOwnsScope) pins the mode off:
 //
 //   - BD_DOLT_SHARED_SERVER=false is bd's viper env binding for the key and
 //     outranks every config file layer;
@@ -1304,15 +1322,15 @@ func applyProxiedDoltEnv(env map[string]string) {
 //
 // The scope's own config.yaml carries the same pin (see
 // ensureGCOwnedProxiedScopeSharedServerOff) for the bd processes gc does not
-// spawn — an agent running `bd` in its shell. A proxied scope gc merely found
-// gets neither, so gc's bd and an agent's bd resolve it the same way.
+// spawn — an agent running `bd` in its shell. A scope gc merely found gets
+// neither, so gc's bd and an agent's bd resolve it the same way.
 func applyProxiedSharedServerOptOut(env map[string]string) {
 	env[proxiedSharedServerModeEnv] = "0"
 	env[proxiedSharedServerConfigEnv] = "false"
 }
 
 // clearProxiedSharedServerOptOut drops the projection applyProxiedSharedServerOptOut
-// adds, for a scope that is not a gc-owned proxied one.
+// adds, for a scope gc does not own.
 func clearProxiedSharedServerOptOut(env map[string]string) {
 	delete(env, proxiedSharedServerModeEnv)
 	delete(env, proxiedSharedServerConfigEnv)
@@ -1920,9 +1938,9 @@ func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cf
 		return cached, false, nil
 	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
-	// The city projection carries the shared-server opt-out when the CITY is
-	// proxied. It belongs to the rig only if the rig is proxied too (re-added
-	// below); a direct or external rig keeps bd's own resolution.
+	// The city projection carries the shared-server opt-out when gc owns the
+	// CITY. It belongs to the rig only if gc owns the rig too (re-added below); a
+	// rig gc does not own keeps bd's own resolution.
 	clearProxiedSharedServerOptOut(env)
 	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
@@ -1959,6 +1977,12 @@ func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cf
 			return env, false, cityErr
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), false, nil
+	}
+	// A managed server-mode rig is gc's own store as a proxied one is, so it
+	// takes the same opt-out — ahead of the Dolt projection, which hands env
+	// back alongside its error.
+	if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, rigPath); err != nil {
+		return env, false, err
 	}
 	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
@@ -2164,6 +2188,12 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 			return env, err
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil
+	}
+	// A managed server-mode city is gc's own store as a proxied one is, so it
+	// takes the same opt-out — ahead of the Dolt projection, which hands env
+	// back alongside its error.
+	if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, cityPath); err != nil {
+		return env, err
 	}
 	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)

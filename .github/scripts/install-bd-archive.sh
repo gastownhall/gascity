@@ -57,6 +57,14 @@ version_no_v="${version#v}"
 platform_tuple="${os}_${arch}"
 expected_sha=""
 case "${version}:${platform_tuple}" in
+  v1.3.4:linux_amd64) expected_sha="175c26904bde3ff9168d2282ff6b56f17b17f60c22fa5acb3dacc9fb3465303a" ;;
+  v1.3.4:linux_arm64) expected_sha="f4ee6eb3ec79bb2d7eb9d717c73efbcb6fa763cc70f726b4d055b72afdd68ad5" ;;
+  v1.3.4:darwin_arm64) expected_sha="b08a9c15bff80c42235f32946f94a6566a7d90944fe8afe45f3fd2f350596cdb" ;;
+  v1.3.4:darwin_amd64) expected_sha="05e713a2da8eeaba40b924184735d9a34d2da8669e4d3ac50cc716605ba10640" ;;
+  v1.3.3:linux_amd64) expected_sha="10a7aebfd50549c33c43d185e3870bbd82b4f900b2a5e3129369ee6e2b0fb2e5" ;;
+  v1.3.3:linux_arm64) expected_sha="7cbaeff861ed5f8b336ae94e4c22342363df8ade113f95f95098940da9bd808c" ;;
+  v1.3.3:darwin_arm64) expected_sha="dff94fd00ae921fe3f84d4750847e4126b5844bc868c253c45b391f112ff60aa" ;;
+  v1.3.3:darwin_amd64) expected_sha="650808fc8efef9931ded0fd83de49f15d7588611638e1698309d87173af794ca" ;;
   v1.3.2:linux_amd64) expected_sha="c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e" ;;
   v1.3.2:linux_arm64) expected_sha="39b34a1246b7216031a98ae838c785a7dbba29cf9f50f109114ac462a4b85e7c" ;;
   v1.3.2:darwin_arm64) expected_sha="b29b44499d11944bb5cecdd60b49eaf1481f4c3fe031ab45a2df1a36dadb8445" ;;
