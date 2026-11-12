@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -81,6 +82,21 @@ func ReservedPrefixCollision(prefix string) (string, bool) {
 	return "", false
 }
 
+// ErrReservedBeadPrefix is what errors.Is finds in every refusal of a work
+// store bead prefix in the reserved namespace a split city's binding mints ids
+// under (split-default R10). Nothing was written when one is returned, so a
+// projection answers it as the caller's error.
+var ErrReservedBeadPrefix = errors.New("bead prefix in a reserved class namespace")
+
+// reservedPrefixRefusal is a refusal whose text names each collision and its
+// remedy; errors.Is finds ErrReservedBeadPrefix in it.
+type reservedPrefixRefusal struct{ msg string }
+
+func (e reservedPrefixRefusal) Error() string { return e.msg }
+
+// Is reports whether target is ErrReservedBeadPrefix.
+func (e reservedPrefixRefusal) Is(target error) bool { return target == ErrReservedBeadPrefix }
+
 // ReservedPrefixSplitRefusal is the refusal for a SPLIT city whose HQ or rig
 // prefix collides with a reserved class id-prefix (split-default read audit
 // R10), or nil.
@@ -98,12 +114,14 @@ func ReservedPrefixSplitRefusal(cfg *City) error {
 
 // reservedPrefixFixes is the remedy each kind of collision names. A city that
 // exists is fixed in its own files; a city being created is fixed by naming it
-// differently or by changing the config it is created from. adoptedRig, when
-// set, names a rig being added with the prefix its existing store records:
-// city.toml must match that store, so the rig's fix is adopted, not rig.
+// differently or by changing the config it is created from, or, when a plain
+// gc init builds it, by gc init's own flags. addedRig, when set, names a rig
+// being added, which has no [[rigs]] entry to fix yet, so the rig's fix is
+// added, not rig: a fresh add takes another prefix on the add itself, and an
+// adopted store's prefix can change only in that store.
 type reservedPrefixFixes struct {
-	hq, rig, patch      string
-	adoptedRig, adopted string
+	hq, rig, patch  string
+	addedRig, added string
 }
 
 var (
@@ -112,12 +130,23 @@ var (
 		rig:   `set an explicit prefix: prefix = "<prefix>" on that [[rigs]] entry`,
 		patch: "choose another prefix",
 	}
+	// gc init --file and --from refuse --prefix and --storage: the config the
+	// city is created from owns both.
 	reservedPrefixFixesForNewCity = reservedPrefixFixes{
-		hq:    `name the city differently, pass a non-reserved --prefix to gc init, or set an explicit non-reserved prefix in the [workspace] of the config it is created from`,
+		hq:    `name the city differently, or set an explicit non-reserved prefix in the [workspace] of the config it is created from`,
 		rig:   `set an explicit non-reserved prefix on that rig in the config the city is created from`,
 		patch: "change that patch's prefix in the config the city is created from",
 	}
+	reservedPrefixFixesForPlainInit = reservedPrefixFixes{
+		hq:    `name the city differently, or pass a non-reserved --prefix or --storage=single to gc init`,
+		rig:   reservedPrefixFixesForNewCity.rig,
+		patch: reservedPrefixFixesForNewCity.patch,
+	}
 )
+
+// reservedPrefixFixForRigAdd is the fix for a rig a fresh add would have
+// written, for gc rig add and the API rig create alike.
+const reservedPrefixFixForRigAdd = `add it with a non-reserved prefix: gc rig add --prefix <prefix>, or the "prefix" field of an API rig create`
 
 func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 	if cfg == nil || !RelocatesAnyClass(cfg) {
@@ -133,8 +162,8 @@ func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 		prefix := strings.ToLower(strings.TrimSpace(r.EffectivePrefix()))
 		if reserved, ok := ReservedPrefixCollision(prefix); ok {
 			fix := fixes.rig
-			if fixes.adoptedRig != "" && r.Name == fixes.adoptedRig {
-				fix = fixes.adopted
+			if fixes.addedRig != "" && r.Name == fixes.addedRig {
+				fix = fixes.added
 			}
 			problems = append(problems, fmt.Sprintf("rig %q bead prefix %q is in the reserved %q namespace; %s", r.Name, prefix, reserved, fix))
 		}
@@ -153,8 +182,8 @@ func reservedPrefixSplitRefusal(cfg *City, fixes reservedPrefixFixes) error {
 	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("this city splits its coordination classes into a binding that mints ids under the reserved prefixes (%s), and %s. A work store whose prefix is, or starts with, a reserved prefix shares the binding's id namespace, so their ids collide. Choose a prefix whose first segment is outside the reserved set",
-		reservedClassPrefixListText(), strings.Join(problems, "; and "))
+	return reservedPrefixRefusal{msg: fmt.Sprintf("this city splits its coordination classes into a binding that mints ids under the reserved prefixes (%s), and %s. A work store whose prefix is, or starts with, a reserved prefix shares the binding's id namespace, so their ids collide. Choose a prefix whose first segment is outside the reserved set",
+		reservedClassPrefixListText(), strings.Join(problems, "; and "))}
 }
 
 // ReservedPrefixSplitRefusalForEdit is ReservedPrefixSplitRefusal for a
@@ -171,13 +200,24 @@ func ReservedPrefixSplitRefusalForEdit(fs fsys.FS, tomlPath string, next *City) 
 	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForExistingCity)
 }
 
+// ReservedPrefixSplitRefusalForRigAdd is ReservedPrefixSplitRefusalForEdit for
+// an edit that adds rigName afresh (gc rig add, the API rig create). The
+// refused add writes no [[rigs]] entry, so that rig's problem names the prefix
+// the add itself takes instead of the [[rigs]] one; every other collision keeps
+// its existing-city fix.
+func ReservedPrefixSplitRefusalForRigAdd(fs fsys.FS, tomlPath string, next *City, rigName string) error {
+	fixes := reservedPrefixFixesForExistingCity
+	fixes.addedRig, fixes.added = rigName, reservedPrefixFixForRigAdd
+	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, fixes)
+}
+
 // ReservedPrefixSplitRefusalForAdopt is ReservedPrefixSplitRefusalForEdit for
 // an edit that adds rigName with the prefix its existing store already records
 // (gc rig add --adopt). No [[rigs]] entry can give that rig another prefix, so
 // its problem names fix, the caller's remedy, instead of the [[rigs]] one.
 func ReservedPrefixSplitRefusalForAdopt(fs fsys.FS, tomlPath string, next *City, rigName, fix string) error {
 	fixes := reservedPrefixFixesForExistingCity
-	fixes.adoptedRig, fixes.adopted = rigName, fix
+	fixes.addedRig, fixes.added = rigName, fix
 	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, fixes)
 }
 
@@ -204,6 +244,14 @@ func ReservedPrefixSplitRefusalForNewCity(fs fsys.FS, tomlPath string, next *Cit
 		}
 	}
 	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForNewCity)
+}
+
+// ReservedPrefixSplitRefusalForPlainInit is ReservedPrefixSplitRefusalForNewCity
+// for a plain gc init, which builds next from a built-in template rather than
+// from a config file: its remedy names renaming the city, or gc init's own
+// --prefix and --storage=single, which gc init --file and --from refuse.
+func ReservedPrefixSplitRefusalForPlainInit(next *City) error {
+	return reservedPrefixSplitRefusal(next, reservedPrefixFixesForPlainInit)
 }
 
 func reservedPrefixSplitRefusalForConfig(fs fsys.FS, tomlPath string, next *City, fixes reservedPrefixFixes) error {

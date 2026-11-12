@@ -272,15 +272,19 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		}
 		// A reserved prefix on a split city is refused HERE, before anything is
 		// written: once it is in city.toml every CLI process refuses the city
-		// and every hook claim fails closed (split-default R10). An adopted
-		// store's own prefix can only change in that store, so its refusal
-		// names that remedy instead of a [[rigs]] prefix.
+		// and every hook claim fails closed (split-default R10). A fresh add
+		// writes no [[rigs]] entry, so its refusal names the prefix the add
+		// takes; an adopted store's own prefix can only change in that store,
+		// so its refusal names that remedy instead.
 		tomlPath := filepath.Join(deps.CityPath, "city.toml")
 		var refusal error
-		if !reAdd && adoptsStoreOwnPrefix(req, adopted.prefix, prefix) {
-			refusal = config.ReservedPrefixSplitRefusalForAdopt(deps.FS, tomlPath, nextCfg, name, adoptedStorePrefixRemedy(rigPath, adopted, "this city reserves that namespace"))
-		} else {
+		switch {
+		case reAdd:
 			refusal = config.ReservedPrefixSplitRefusalForEdit(deps.FS, tomlPath, nextCfg)
+		case adoptsStoreOwnPrefix(req, adopted.prefix, prefix):
+			refusal = config.ReservedPrefixSplitRefusalForAdopt(deps.FS, tomlPath, nextCfg, name, adoptedStorePrefixRemedy(rigPath, adopted, "this city reserves that namespace"))
+		default:
+			refusal = config.ReservedPrefixSplitRefusalForRigAdd(deps.FS, tomlPath, nextCfg, name)
 		}
 		if refusal != nil {
 			return rigMutationPlan{}, refusal

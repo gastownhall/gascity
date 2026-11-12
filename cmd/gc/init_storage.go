@@ -93,9 +93,11 @@ func bornSplitStorageConfig() *config.StorageConfig {
 // A city is born split unless it asked for single-store, or a split city
 // would not serve it: a remote session runtime, whose sessions refuse mail,
 // nudges, sessions, orders and workflows on a split city until worker-site
-// transport (CN-2) exists, or a bd that a split city's gc bd refuses. An
-// explicit --storage=split on a remote session runtime is refused rather than
-// quietly overridden.
+// transport (CN-2) exists, a bead prefix its name derives in the reserved
+// namespace a split city's binding mints under, or a bd that a split city's
+// gc bd refuses. An explicit --storage=split on a remote session runtime is
+// refused rather than quietly overridden; an explicit split, or a --prefix,
+// in the reserved namespace is left to the reserved-prefix refusal.
 func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageChoice) (*config.StorageConfig, string, error) {
 	if choice == initStorageSingle {
 		return nil, "", nil
@@ -105,6 +107,11 @@ func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageCho
 			return nil, "", fmt.Errorf("--storage=split: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; use --storage=single", runtime)
 		}
 		return nil, fmt.Sprintf("gc init: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; this city starts single-store. %s", runtime, initSplitLaterRemedy), nil
+	}
+	if choice == initStorageUnset {
+		if notice := reservedDerivedPrefixNotice(cfg); notice != "" {
+			return nil, notice, nil
+		}
 	}
 	if providerUsesBdStoreContract(initWorkStoreProvider(cfg)) {
 		if notice := splitBDFloorNotice(); notice != "" {
@@ -116,6 +123,26 @@ func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageCho
 
 // initSplitLaterRemedy is how a city that started single-store splits later.
 const initSplitLaterRemedy = "To split it later, run gc storage migrate (docs/runbooks/split-storage-classes.md)."
+
+// reservedDerivedPrefixNotice returns the notice for a city whose name derives
+// a bead prefix in the reserved namespace a split city's binding mints ids
+// under (gas-city-ops derives gco), or "" when it derives none. A split city
+// may not carry such a prefix, and the city did not choose it, so it starts
+// single-store instead of being refused for its name: the API's city create,
+// which cannot pass --prefix or --storage, keeps creating such a city. A
+// prefix the city was given (--prefix) is its own choice and keeps the
+// refusal.
+func reservedDerivedPrefixNotice(cfg *config.City) string {
+	if cfg == nil || strings.TrimSpace(cfg.Workspace.Prefix) != "" {
+		return ""
+	}
+	prefix := config.EffectiveHQPrefix(cfg)
+	reserved, collides := config.ReservedPrefixCollision(prefix)
+	if !collides {
+		return ""
+	}
+	return fmt.Sprintf("gc init: the bead prefix %q, derived from the city name %q, is in the reserved %q namespace, where a split city's infrastructure store mints its ids; this city starts single-store. For a split city, init it under another name or with a non-reserved --prefix.", prefix, cfg.EffectiveCityName(), reserved)
+}
 
 // initStorageLayout names the storage layout of the city.toml at cityPath for
 // gc init --json: "split" when it relocates any class off the work ledger,

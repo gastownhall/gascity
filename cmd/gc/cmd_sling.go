@@ -322,27 +322,31 @@ func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead
 // routes as before, and an id no store holds keeps the missing-bead path. A
 // work store that cannot be read is left to the sling's own read of it, which
 // reports the failure.
-func slingCoordinationBeadRefusal(cityPath, id string, work sling.BeadQuerier) error {
+//
+// A binding that cannot be read, when work does not hold the id, leaves
+// whether the binding holds it unknown: that is probeErr, a read failure the
+// caller reports as such, never the refusal.
+func slingCoordinationBeadRefusal(cityPath, id string, work sling.BeadQuerier) (refusal, probeErr error) {
 	if _, reserved := reservedClassPrefixForID(id); !reserved || !isBeadIDCandidate(id) {
-		return nil
+		return nil, nil
 	}
 	binding := slingResidenceBinding(cityPath)
 	if binding == nil {
-		return nil
+		return nil, nil
 	}
 	if work != nil {
 		if held, err := sling.ProbeBeadInStore(work, id); err != nil || held {
-			return nil
+			return nil, nil
 		}
 	}
 	held, err := sling.ProbeBeadInStore(binding, id)
 	if err != nil {
-		return fmt.Errorf("%s is not in the work ledger, and the city's infrastructure store, which mints ids like it, could not be read: %w", id, err)
+		return nil, fmt.Errorf("%s is not in the work ledger, and the city's infrastructure store, which mints ids like it, could not be read: %w", id, err)
 	}
 	if !held {
-		return nil
+		return nil, nil
 	}
-	return fmt.Errorf("%s is in this city's infrastructure store (workflow roots and steps, sessions, mail, order runs, queued nudges), and gc sling routes only work-ledger beads. To run a formula, launch it with gc sling <target> <formula> --formula, or with --on <formula> against a work bead; gc formula cook only creates a workflow's beads", id)
+	return fmt.Errorf("%s is in this city's infrastructure store (workflow roots and steps, sessions, mail, order runs, queued nudges), and gc sling routes only work-ledger beads. To run a formula, launch it with gc sling <target> <formula> --formula, or with --on <formula> against a work bead; gc formula cook only creates a workflow's beads", id), nil
 }
 
 // applySlingInlineBead resolves inline-text mode: when the sling argument is prose
@@ -499,8 +503,12 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		return fail(errCode, errMsg)
 	}
 	if !isFormula && !fromStdin && !sourceBead.exists {
-		if err := slingCoordinationBeadRefusal(cityPath, beadOrFormula, store); err != nil {
-			return fail("bead_not_slingable", fmt.Sprintf("gc sling: %v", err))
+		refusal, probeErr := slingCoordinationBeadRefusal(cityPath, beadOrFormula, store)
+		if probeErr != nil {
+			return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", probeErr))
+		}
+		if refusal != nil {
+			return fail("bead_not_slingable", fmt.Sprintf("gc sling: %v", refusal))
 		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)

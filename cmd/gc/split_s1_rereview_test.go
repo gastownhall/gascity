@@ -435,7 +435,9 @@ func TestInitFromASplitSourceHonorsItsExplicitPrefix(t *testing.T) {
 }
 
 // Plain `gc init --file` of a split template into a reserved-deriving name is
-// refused before anything is created (the check split-by-default needs).
+// refused before anything is created (the check split-by-default needs). Its
+// remedy names neither --storage nor --prefix: gc init refuses both with
+// --file, whose template owns the prefix and [storage].
 func TestInitFromASplitTemplateFileRefusesAReservedDerivedPrefix(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	tmpl := filepath.Join(t.TempDir(), "template.toml")
@@ -449,6 +451,11 @@ func TestInitFromASplitTemplateFileRefusesAReservedDerivedPrefix(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gcg") || strings.Contains(stderr.String(), "site.toml") {
 		t.Errorf("stderr = %q, want the new-city refusal naming gcg", stderr.String())
+	}
+	for _, flag := range []string{"--storage", "--prefix"} {
+		if strings.Contains(stderr.String(), flag) {
+			t.Errorf("the --file refusal names %s, which gc init refuses with --file: %q", flag, stderr.String())
+		}
 	}
 	if _, err := os.Stat(cityPath); err == nil {
 		t.Error("the refused init created the city directory")

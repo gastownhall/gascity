@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -221,6 +222,9 @@ func TestCmdSlingNamesACoordinationBeadTheBindingHolds(t *testing.T) {
 			t.Errorf("force=%t: refusal %q reports the bead missing or points at --force; the binding holds it", force, msg)
 		}
 	}
+	if got := slingJSONErrorCode(t, "worker", root.ID); got != "bead_not_slingable" {
+		t.Errorf("gc sling --json %s: error code %q, want the terminal bead_not_slingable", root.ID, got)
+	}
 
 	got, err := graph.Get(root.ID)
 	if err != nil {
@@ -256,22 +260,89 @@ func TestSlingCoordinationBeadRefusalLeavesEveryOtherShapeAlone(t *testing.T) {
 	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
 	_, root := splitCityWorkflowRoot(t, cityPath)
 
-	if err := slingCoordinationBeadRefusal(cityPath, root.ID, beads.NewMemStore()); err == nil {
-		t.Fatalf("a root only the binding holds was not refused")
+	if refusal, probeErr := slingCoordinationBeadRefusal(cityPath, root.ID, beads.NewMemStore()); refusal == nil || probeErr != nil {
+		t.Fatalf("a root only the binding holds: refusal=%v probe=%v, want a refusal", refusal, probeErr)
 	}
 	twin := beads.NewMemStoreFrom(0, []beads.Bead{{ID: root.ID, Title: "work-resident", Type: "task"}}, nil)
-	if err := slingCoordinationBeadRefusal(cityPath, root.ID, twin); err != nil {
-		t.Errorf("a reserved-namespace id the work store holds was refused: %v", err)
+	if refusal, probeErr := slingCoordinationBeadRefusal(cityPath, root.ID, twin); refusal != nil || probeErr != nil {
+		t.Errorf("a reserved-namespace id the work store holds: refusal=%v probe=%v, want it left to route", refusal, probeErr)
 	}
-	if err := slingCoordinationBeadRefusal(cityPath, "gcg-424242", beads.NewMemStore()); err != nil {
-		t.Errorf("an id no store holds was refused instead of left to the missing-bead path: %v", err)
+	if refusal, probeErr := slingCoordinationBeadRefusal(cityPath, "gcg-424242", beads.NewMemStore()); refusal != nil || probeErr != nil {
+		t.Errorf("an id no store holds: refusal=%v probe=%v, want it left to the missing-bead path", refusal, probeErr)
 	}
-	if err := slingCoordinationBeadRefusal(cityPath, "gc-1", beads.NewMemStore()); err != nil {
-		t.Errorf("a work-prefixed id was refused: %v", err)
+	if refusal, probeErr := slingCoordinationBeadRefusal(cityPath, "gc-1", beads.NewMemStore()); refusal != nil || probeErr != nil {
+		t.Errorf("a work-prefixed id: refusal=%v probe=%v, want it left alone", refusal, probeErr)
 	}
 
 	single := oneShotCLICity(t, "")
-	if err := slingCoordinationBeadRefusal(single, root.ID, beads.NewMemStore()); err != nil {
-		t.Errorf("a city that relocates nothing refused %s: %v", root.ID, err)
+	if refusal, probeErr := slingCoordinationBeadRefusal(single, root.ID, beads.NewMemStore()); refusal != nil || probeErr != nil {
+		t.Errorf("a city that relocates nothing: refusal=%v probe=%v for %s, want it left alone", refusal, probeErr, root.ID)
 	}
+}
+
+// TestSlingCoordinationBeadRefusalReportsAnUnreadableBindingAsAProbeFailure:
+// a binding that cannot be read (a busy SQLite store) says nothing about
+// whether it holds the id, so when work does not hold it either the sling
+// reports a read failure, which cmdSling maps to source_bead_probe_failed and
+// a --json caller may retry, never the terminal bead_not_slingable refusal.
+// When work holds the id the bead routes as before.
+func TestSlingCoordinationBeadRefusalReportsAnUnreadableBindingAsAProbeFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	routes := splitRoutes(faultingGetStore{beads.NewMemStore()})
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return beads.NewMemStore() })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	refusal, probeErr := slingCoordinationBeadRefusal(cityPath, "gcg-7", beads.NewMemStore())
+	if refusal != nil {
+		t.Errorf("an unreadable binding was reported as a refusal: %v", refusal)
+	}
+	if probeErr == nil || !strings.Contains(probeErr.Error(), "gcg-7") || !strings.Contains(probeErr.Error(), "could not be read") {
+		t.Fatalf("probe failure = %v, want a read failure naming gcg-7", probeErr)
+	}
+	twin := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gcg-7", Title: "work-resident", Type: "task"}}, nil)
+	if refusal, probeErr := slingCoordinationBeadRefusal(cityPath, "gcg-7", twin); refusal != nil || probeErr != nil {
+		t.Errorf("an id the work store holds, beside an unreadable binding: refusal=%v probe=%v, want it left to route", refusal, probeErr)
+	}
+}
+
+// TestCmdSlingReportsAnUnreadableBindingAsARetryableProbeFailure: the code a
+// gc sling --json caller sees decides whether it retries. A binding that
+// cannot be read, beside a work store that does not hold the id, is the
+// retryable source_bead_probe_failed, never the terminal bead_not_slingable.
+func TestCmdSlingReportsAnUnreadableBindingAsARetryableProbeFailure(t *testing.T) {
+	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	writeSplitSlingFormulaCity(t, cityPath)
+	routes := splitRoutes(faultingGetStore{beads.NewMemStore()})
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return beads.NewMemStore() })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	if got := slingJSONErrorCode(t, "worker", "gcg-7"); got != "source_bead_probe_failed" {
+		t.Errorf("gc sling --json gcg-7 over an unreadable binding: error code %q, want the retryable source_bead_probe_failed", got)
+	}
+}
+
+// slingJSONErrorCode runs gc sling --json target id on the test's city and
+// returns the code of the JSON error it prints, failing the test when the
+// sling succeeds or prints none.
+func slingJSONErrorCode(t *testing.T, target, id string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := cmdSlingWithJSON(
+		[]string{target, id},
+		false, false, false, // isFormula, doNudge, force
+		"", nil, "",
+		false, false, false, "", // noConvoy, owned, reassign, onFormula
+		false, false, false, // noFormula, fromStdin, dryRun
+		"", "",
+		true, // jsonOutput
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatalf("gc sling --json %s %s exited 0, want a refusal\nstdout: %s", target, id, stdout.String())
+	}
+	var out cliJSONErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("gc sling --json %s %s printed no JSON error: %v\nstdout: %s\nstderr: %s", target, id, err, stdout.String(), stderr.String())
+	}
+	return out.Error.Code
 }

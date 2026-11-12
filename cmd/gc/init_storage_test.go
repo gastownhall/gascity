@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -10,8 +11,11 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // stubInitBDVersion makes every `bd version` probe gc init runs report line
@@ -230,29 +234,195 @@ func TestInitDefaultStartsARemoteSessionRuntimeSingleStore(t *testing.T) {
 	}
 }
 
-// A born-split city may not carry a reserved bead prefix, so a plain gc init
-// of a city whose name derives one (gas-city-gateway derives gcg) is refused
-// with its fixes, before anything is written; --storage=single keeps the old
-// behavior.
-func TestInitDefaultRefusesAReservedDerivedPrefixWithItsFixes(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+// A born-split city may not carry a reserved bead prefix, and a city whose
+// name derives one (gas-city-gateway derives gcg) did not choose it, so a
+// plain gc init starts it single-store and says why, naming the way to a
+// split city, instead of refusing the name. The bd is not judged for a city
+// that starts single-store anyway. --storage=single stays silent.
+func TestInitDefaultStartsAReservedDerivedPrefixSingleStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_SESSION", "")
-	f, _, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{})
-	if code == 0 {
-		t.Fatal("a plain gc init of gas-city-gateway with its derived gcg prefix was not refused")
+	initStorageFakeBD(t)
+	stubInitBDVersion(t, "bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)")
+	judged := stubInitSplitBDJudge(t, "bd-1.3.4", nil)
+	_, cfg, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{})
+	if code != 0 {
+		t.Fatalf("a plain gc init of gas-city-gateway = %d: %s", code, stderr)
 	}
-	if !strings.Contains(stderr, "--prefix") {
-		t.Errorf("the refusal %q does not name --prefix", stderr)
+	if cfg.Storage != nil {
+		t.Fatalf("a plain gc init of gas-city-gateway wrote [storage] %+v; its derived gcg prefix keeps it single-store", cfg.Storage)
 	}
-	if len(f.Files) != 0 {
-		t.Errorf("the refused init wrote %d file(s)", len(f.Files))
+	for _, want := range []string{`"gcg"`, `"gas-city-gateway"`, "single-store", "--prefix"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the notice %q does not mention %s", stderr, want)
+		}
 	}
-	_, cfg, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{storage: initStorageSingle})
+	if len(*judged) != 0 {
+		t.Errorf("gc init judged bd %v for a city that starts single-store anyway", *judged)
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	_, cfg, code, stderr = initStorageTestCity(t, "/gas-city-gateway", wizardConfig{storage: initStorageSingle})
 	if code != 0 {
 		t.Fatalf("doInit --storage=single = %d: %s", code, stderr)
 	}
 	if cfg.Storage != nil {
 		t.Fatalf("--storage=single wrote [storage] %+v", cfg.Storage)
+	}
+	if stderr != "" {
+		t.Errorf("--storage=single printed %q, want nothing for an explicit opt-out", stderr)
+	}
+}
+
+// A reserved prefix the city was given is its own choice: a plain gc init
+// with --prefix gcm is refused, before anything is written, with fixes that
+// include --storage=single, rather than started single-store.
+func TestInitDefaultRefusesAGivenReservedPrefix(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	f, _, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{prefix: "gcm"})
+	if code == 0 {
+		t.Fatal("a plain gc init with --prefix gcm was not refused")
+	}
+	for _, want := range []string{`"gcm"`, "--prefix", "--storage=single"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the refusal %q does not mention %s", stderr, want)
+		}
+	}
+	if len(f.Files) != 0 {
+		t.Errorf("the refused init wrote %d file(s)", len(f.Files))
+	}
+}
+
+// The API's city create shares doInit and cannot pass --prefix or --storage,
+// so a directory whose name derives a reserved bead prefix is created
+// single-store, as before the split default, rather than refused (an untyped
+// scaffold error the API answered with a 500). Any other directory is born
+// split.
+func TestAPIInitOfAReservedPrefixDirectoryStartsSingleStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	root := t.TempDir()
+	apiInit := func(name string) *config.City {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		if err := cityInitDoInit(context.Background(), cityinit.InitRequest{Dir: dir, ConfigName: "tutorial", Provider: "claude"}); err != nil {
+			t.Fatalf("API init of %s = %v", name, err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Parse(data)
+		if err != nil {
+			t.Fatalf("parsing %s's city.toml: %v", name, err)
+		}
+		return cfg
+	}
+	for _, name := range []string{"gas-city-sandbox", "gas-city-main", "gas-city-ops"} {
+		if cfg := apiInit(name); config.RelocatesAnyClass(cfg) {
+			t.Errorf("API init of %s wrote a split [storage] %+v; the prefix its name derives is reserved", name, cfg.Storage)
+		}
+	}
+	assertBornSplit(t, apiInit("bright-lights"))
+}
+
+// defaultInitCityOnDisk runs a plain gc init, with neither --storage nor
+// --prefix, into a new directory on disk and returns its path. The city is
+// born split.
+func defaultInitCityOnDisk(t *testing.T) string {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var stdout, stderr bytes.Buffer
+	wiz := wizardConfig{configName: "minimal", defaultProvider: "codex", providers: []string{"codex"}}
+	if code := doInit(fsys.OSFS{}, cityPath, wiz, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("doInit = %d: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the new city's city.toml: %v", err)
+	}
+	assertBornSplit(t, cfg)
+	return cityPath
+}
+
+// Every new city is born split, so the reserved-prefix refusal at rig add
+// (split-default R10) meets ordinary repository names: graphql-code-generator
+// derives gcg. The refused add writes no [[rigs]] entry, so the refusal names
+// the add's own --prefix rather than a [[rigs]] entry to edit, and the add
+// with that --prefix succeeds.
+func TestRigAddOnADefaultCityNamesTheAddPrefixForAReservedDerivedPrefix(t *testing.T) {
+	cityPath := defaultInitCityOnDisk(t)
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	before, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(t.TempDir(), "graphql-code-generator")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "", "", false, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc rig add of graphql-code-generator on a born-split city exited 0; stdout=%s", stdout.String())
+	}
+	for _, want := range []string{`"gcg"`, "gc rig add --prefix <prefix>"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("the refusal %q does not mention %s", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "[[rigs]] entry") {
+		t.Errorf("the refusal names a [[rigs]] entry the refused add never wrote: %q", stderr.String())
+	}
+	after, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the refused rig add rewrote city.toml:\n%s", after)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, nil, "", "gqlcg", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc rig add --prefix gqlcg, the fix the refusal names, = %d: %s", code, stderr.String())
+	}
+}
+
+// The API's rig create provisions through the same refusal, and it reaches
+// the API's error mapping as ErrReservedBeadPrefix, which the API answers 400
+// rather than 500, with nothing written.
+func TestAPIRigCreateOfAReservedDerivedPrefixOnADefaultCityIsTheCallersError(t *testing.T) {
+	cityPath := defaultInitCityOnDisk(t)
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	before, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, runtime.NewFake(), events.NewFake(), "bright-lights", cityPath)
+
+	err = cs.CreateRig(config.Rig{Name: "graphql-code-generator", Path: filepath.Join(cityPath, "graphql-code-generator")})
+	if !errors.Is(err, config.ErrReservedBeadPrefix) {
+		t.Fatalf("CreateRig of graphql-code-generator = %v, want the reserved-prefix refusal (ErrReservedBeadPrefix)", err)
+	}
+	if !strings.Contains(err.Error(), `the "prefix" field of an API rig create`) {
+		t.Errorf("the refusal %q does not name the API's prefix field", err)
+	}
+	after, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the refused create rewrote city.toml:\n%s", after)
 	}
 }
 
@@ -528,6 +698,9 @@ func TestInitPrefixFixesAReservedDerivedPrefixOnASplitCity(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "--prefix") {
 		t.Errorf("the refusal %q does not name --prefix", stderr)
+	}
+	if strings.Contains(stderr, "starts single-store") {
+		t.Errorf("an explicit split request was answered with the default's single-store notice: %q", stderr)
 	}
 	f, cfg, code, stderr := initStorageTestCity(t, "/gas-city-gateway", wizardConfig{storage: initStorageSplit, prefix: "gw"})
 	if code != 0 {

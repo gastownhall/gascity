@@ -2594,7 +2594,7 @@ gc init --template gascity --default-provider claude \
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--storage` | string |  | storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime starts single-store, and an explicit split is refused there) or single (every class on the work ledger) |
+| `--storage` | string |  | storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger) |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
