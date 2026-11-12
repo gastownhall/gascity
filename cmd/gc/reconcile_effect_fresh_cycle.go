@@ -7,14 +7,15 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The fresh cycle's defer (SESS-612, plan C7a-2c), in the stop verb's
 // first section: the previous bead's live read, then legacy's defer on it.
 
-// causeFreshCycleDefer: the previous bead is still open, or this
-// incarnation already woke after it closed.
+// causeFreshCycleDefer: the previous bead is still open, this incarnation
+// already woke after it closed, or the runtime has not proved an idle boundary.
 const causeFreshCycleDefer = "fresh-cycle-defer"
 
 // freshCyclePrev is the fresh cycle's live read of the row's previous bead.
@@ -41,8 +42,15 @@ func freshCycleProbe(_ context.Context, r effectReads, v txView) (freshCyclePrev
 
 // stopDecideAfterProbe is stopDecide, after the fresh cycle's defer.
 func stopDecideAfterProbe(v txView, prev freshCyclePrev, err error) txStep {
-	if v.It.Reason == decideFreshCycle && freshCycleDefers(v.Row, prev, err) {
-		return txStep{Refuse: causeFreshCycleDefer}
+	if v.It.Reason == decideFreshCycle {
+		if v.RT != nil && v.RT.Class == rtAlive {
+			if _, ok := v.RT.leaf.(runtime.IdleSnapshotProvider); ok && v.Fence.Content != contentIdle {
+				return txStep{Refuse: causeFreshCycleDefer}
+			}
+		}
+		if freshCycleDefers(v.Row, prev, err) {
+			return txStep{Refuse: causeFreshCycleDefer}
+		}
 	}
 	return stopDecide(v)
 }
