@@ -1889,19 +1889,14 @@ func waitForLedgerFeed(t *testing.T, timeout time.Duration, cond func() bool, wh
 	}
 }
 
-// ledgerFeedDeliveryWait bounds how long an out-of-band write may take to
-// reach the cache through the feed. A quiet host delivers in under 1s (the
-// tailer's idle poll is up to 1s); a host under load takes several times that,
-// and the wait only has to fail a feed that never delivers (ga-1ki1ibba).
-const ledgerFeedDeliveryWait = 10 * time.Second
-
 // TestLedgerFeedOverEmbeddedDolt tails a real native store with the journal
 // on: a Create and then a Close made through the backing, behind the cache,
-// reach the cache and the legacy wake within ledgerFeedDeliveryWait. The
-// cache's reconcile gate stays closed, so no re-scan can deliver them however
-// long the test runs (under -race it outlasts the first re-scan's 30s
-// cadence). Writes through the cache neither notify as cache-reconcile nor
-// wake.
+// reach the cache and the legacy wake. The waits for them are hang detectors
+// (awaitCond), not latency bounds: delivery is later on a starved host, and
+// only a feed that never delivers should fail. The cache's reconcile gate
+// stays closed, so no re-scan can deliver them however long the test runs
+// (under -race it outlasts the first re-scan's 30s cadence). Writes through
+// the cache neither notify as cache-reconcile nor wake.
 func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	runLedgerFeedOverEmbeddedDolt(t, ledgerFeedHooks{}, nil)
 }
@@ -1909,7 +1904,7 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 // TestLedgerFeedOverEmbeddedDoltSlowStore holds each feed page up for 3s once
 // the out-of-band writes start, as a starved host does: the feed still
 // delivers them without a re-scan, only later than a quiet host's. The
-// delivery wait must outlast that (ga-1ki1ibba).
+// delivery waits must tolerate that (ga-1ki1ibba).
 func TestLedgerFeedOverEmbeddedDoltSlowStore(t *testing.T) {
 	var slow atomic.Bool
 	hooks := ledgerFeedHooks{work: func() func() {
@@ -1924,7 +1919,6 @@ func TestLedgerFeedOverEmbeddedDoltSlowStore(t *testing.T) {
 // runLedgerFeedOverEmbeddedDolt is the body of the two tests above. slow, when
 // non-nil, is set just before the out-of-band writes.
 func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *atomic.Bool) {
-	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("BD_EVENTS_JOURNAL", "")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2022,7 +2016,7 @@ func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *at
 	if err != nil {
 		t.Fatalf("backing Create: %v", err)
 	}
-	waitForLedgerFeed(t, ledgerFeedDeliveryWait, func() bool {
+	awaitCond(t, func() bool {
 		got, err := cache.Get(row.ID)
 		return err == nil && got.Status == "open" && slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadCreated+"/"+cacheReconcileActor)
 	}, "the out-of-band create to reach the cache")
@@ -2032,7 +2026,7 @@ func runLedgerFeedOverEmbeddedDolt(t *testing.T, hooks ledgerFeedHooks, slow *at
 	if err := native.Close(row.ID); err != nil {
 		t.Fatalf("backing Close: %v", err)
 	}
-	waitForLedgerFeed(t, ledgerFeedDeliveryWait, func() bool {
+	awaitCond(t, func() bool {
 		return slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadClosed+"/"+cacheReconcileActor)
 	}, "the out-of-band close to reach the cache")
 	if n := drain(); n == 0 {
