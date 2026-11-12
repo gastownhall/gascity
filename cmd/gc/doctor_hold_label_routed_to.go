@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,8 +23,12 @@ const holdLabelClearedValue = "cleared"
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
 // gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
 // the sole persisted routing key (ga-eld2x); a hold:<value> label with no
-// matching gc.routed_to has silently drifted from its intended route.
-// --fix backfills gc.routed_to from the label value.
+// matching gc.routed_to has silently drifted from its intended route. The
+// route satisfies the check when it is the bare hold value or, when the hold
+// value is bound in config, the binding-qualified canonical form that
+// v2-routed-to-namespace requires — a qualified route is the canonical state
+// for a bound hold value, never a drift. --fix backfills gc.routed_to from
+// the label value.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -68,6 +73,7 @@ type holdRouteTarget struct {
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -104,6 +110,14 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 			}
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
 			if got == want {
+				continue
+			}
+			// A bare hold value that config binds under a binding prefix has
+			// its canonical gc.routed_to in the binding-qualified form
+			// (v2-routed-to-namespace rewrites short forms to it), so a route
+			// equal to any qualified canonical is the healthy state, not a
+			// mismatch.
+			if slices.Contains(aliases[want], got) {
 				continue
 			}
 			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})

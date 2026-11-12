@@ -307,3 +307,83 @@ type holdLabelListErrorStore struct {
 func (s holdLabelListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// TestHoldLabelRoutedToCheckAcceptsBindingQualifiedRoute covers ga-tkxbic: in
+// a binding-prefixed city the canonical gc.routed_to for hold:<agent> is the
+// binding-qualified form, which v2-routed-to-namespace requires. The hold
+// check must accept it, and --fix must not regress it to the short form.
+func TestHoldLabelRoutedToCheckAcceptsBindingQualifiedRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "H-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:dog"},
+		Metadata: map[string]string{"gc.routed_to": "gastown.dog"},
+	}}, nil)
+	factory := func(string) (beads.Store, error) { return store, nil }
+
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("v2-routed-to-namespace status = %v, want OK for canonical route: %#v", res.Status, res)
+	}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("hold-label-routed-to status = %v, want OK for binding-qualified gc.routed_to: %#v", res.Status, res)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	got, err := store.Get("H-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if route := got.Metadata["gc.routed_to"]; route != "gastown.dog" {
+		t.Fatalf("after Fix gc.routed_to = %q, want canonical %q", route, "gastown.dog")
+	}
+}
+
+// TestHoldLabelRoutedToCheckBindingQualifiedRoutes covers ga-tkxbic: in a
+// binding-prefixed city, gc.routed_to for a hold:<value> bead is canonical
+// in its binding-qualified form (v2-routed-to-namespace rewrites short forms
+// to it), so the hold check must accept that qualified form instead of
+// demanding the bare hold value, and --fix must write the qualified form
+// when it backfills a missing or unrelated route. Covers both city and rig
+// stores.
+func TestHoldLabelRoutedToCheckBindingQualifiedRoutes(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "planner", BindingName: "ops"}},
+		Rigs:   []config.Rig{{Name: "repo", Path: rigDir}},
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Healthy: the canonical binding-qualified route must satisfy the
+		// check and survive --fix untouched (AC-1).
+		{
+			ID: "HQ-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "ops.planner"},
+		},
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{}, nil)
+	stores := map[string]beads.Store{cityDir: cityStore, rigDir: rigStore}
+	factory := func(path string) (beads.Store, error) {
+		store, ok := stores[path]
+		if !ok {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+
+	if res := newHoldLabelRoutedToCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("hold-label-routed-to status = %v, want OK for binding-qualified gc.routed_to: %#v", res.Status, res)
+	}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	hq1, err := cityStore.Get("HQ-1")
+	if err != nil {
+		t.Fatalf("get HQ-1: %v", err)
+	}
+	if got := hq1.Metadata["gc.routed_to"]; got != "ops.planner" {
+		t.Fatalf("HQ-1 gc.routed_to = %q, want ops.planner (canonical route must survive --fix)", got)
+	}
+}
