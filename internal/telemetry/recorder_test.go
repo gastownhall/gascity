@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -328,11 +327,11 @@ func installRecordingLogExporter(t *testing.T) *recordingLogExporter {
 	t.Helper()
 	exp := &recordingLogExporter{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
-	prev := otellogglobal.GetLoggerProvider()
-	otellogglobal.SetLoggerProvider(provider)
+	prev := otel.GetLoggerProvider()
+	otel.SetLoggerProvider(provider)
 	t.Cleanup(func() {
 		_ = provider.Shutdown(context.Background())
-		otellogglobal.SetLoggerProvider(prev)
+		otel.SetLoggerProvider(prev)
 	})
 	return exp
 }

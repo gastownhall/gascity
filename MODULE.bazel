@@ -269,6 +269,14 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 
+# beads v1.4.0 ships its own Bazel BUILD files, which load @gazelle and other
+# apparent repo names not visible from go_deps extension repositories. Discard
+# them and let gazelle generate plain go_library rules, as for earlier beads.
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    path = "github.com/steveyegge/beads",
+)
+
 # protoc-gen-validate's validate package regenerates the checked-in
 # validate.pb.go with go_proto_library, both in gazelle's default proto mode
 # and in the module's own validate/BUILD, which pulls the C++ protoc and
@@ -341,6 +349,21 @@ go_deps.module(
     path = "github.com/perimeterx/marshmallow",
     sum = "h1:a2LALqQ1BlHM8PZblsDdidgv1mWi1DgC2UmX50IvK2s=",
     version = "v1.1.5",
+)
+
+# marshmallow's requirements absent from gc's go.mod since beads v1.4.0 moved
+# go-openapi/swag past the release that pulled them in.
+go_deps.module(
+    indirect = True,
+    path = "github.com/mailru/easyjson",
+    sum = "h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0=",
+    version = "v0.7.7",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/josharian/intern",
+    sum = "h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=",
+    version = "v1.0.0",
 )
 go_deps.module(
     indirect = True,
@@ -420,9 +443,9 @@ use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_sh_v3", "cc_mvdan_unparam", "co_
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "bd_bin_v1_3_4",
-    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.4/beads_1.3.4_linux_amd64.tar.gz"],
-    sha256 = "175c26904bde3ff9168d2282ff6b56f17b17f60c22fa5acb3dacc9fb3465303a",
+    name = "bd_bin_v1_4_0_rc_1",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.4.0-rc.1/beads_1.4.0-rc.1_linux_amd64.tar.gz"],
+    sha256 = "721020fd962621e4c2815b3d6fbf7304d48979892344c47fc7986abe4a1c18e0",
     build_file_content = """
 exports_files(["bd"])
 """,
