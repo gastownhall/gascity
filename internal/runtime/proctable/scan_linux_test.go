@@ -1165,3 +1165,31 @@ func TestUnreadableEnvironUserManagerScope(t *testing.T) {
 		})
 	}
 }
+
+// AC-2: under an incarnation bound, a user-manager helper newer than the
+// incarnation, whose age and tmux proofs read cleanly but excuse nothing,
+// is excused by its scope alone. The user manager (systemd --user) shares
+// the helper's scope.
+func TestUnreadableEnvironUserManagerScopeBounded(t *testing.T) {
+	incarnation := proofBoot.Add(10 * time.Second)
+	const helperTicks = 2000 // 20s after boot: newer than the incarnation
+
+	t.Run("classifier", func(t *testing.T) {
+		const euid = 994
+		root := t.TempDir()
+		writeFakeBootTime(t, root, proofBoot)
+		dir := writeUnreadableEnvironProcess(t, root, 2641, 1, helperTicks, "systemd", pureV2Cgroup(userManagerScopeOf(euid)))
+		if err := unreadableEnvironScanError(root, 2641, "ga-target", incarnation, euid, proofReadAt, environReadFailure(dir, syscall.EACCES)); err != nil {
+			t.Fatalf("unreadableEnvironScanError = %v, want the helper excused without predating the incarnation", err)
+		}
+	})
+	t.Run("scan", func(t *testing.T) {
+		root := t.TempDir()
+		writeFakeBootTime(t, root, proofBoot)
+		dir := writeUnreadableEnvironProcess(t, root, 2641, 1, helperTicks, "systemd", pureV2Cgroup(userManagerScopeOf(os.Geteuid())))
+		denyEnviron(t, dir)
+		if got, err := scanWithRootSince(root, "ga-target", incarnation); err != nil || len(got) != 0 {
+			t.Fatalf("scanWithRootSince = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+		}
+	})
+}
