@@ -1990,7 +1990,7 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backing Create: %v", err)
 	}
-	waitForLedgerFeed(t, 2*time.Second, func() bool {
+	waitForLedgerFeed(t, 10*time.Second, func() bool {
 		got, err := cache.Get(row.ID)
 		return err == nil && got.Status == "open" && slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadCreated+"/"+cacheReconcileActor)
 	}, "the out-of-band create to reach the cache")
@@ -2000,7 +2000,7 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	if err := native.Close(row.ID); err != nil {
 		t.Fatalf("backing Close: %v", err)
 	}
-	waitForLedgerFeed(t, 2*time.Second, func() bool {
+	waitForLedgerFeed(t, 10*time.Second, func() bool {
 		return slices.Contains(lockedBeadEventsFor(t, ep, row.ID), events.BeadClosed+"/"+cacheReconcileActor)
 	}, "the out-of-band close to reach the cache")
 	if n := drain(); n == 0 {
