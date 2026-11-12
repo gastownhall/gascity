@@ -2227,6 +2227,17 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/genshell/genshell_concurrency_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/genshell/genshell_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/git/git_test.go"
 resource = "subprocess"
 calls = 2
