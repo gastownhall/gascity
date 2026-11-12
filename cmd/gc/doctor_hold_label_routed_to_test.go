@@ -515,6 +515,131 @@ func (s holdLabelSetErrorStore) SetMetadata(string, string, string) error {
 	return errors.New("metadata write failed")
 }
 
+// TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched covers ga-tkxbic:
+// when a hold value maps to several binding-qualified canonicals there is no
+// single write target, so the hold check must list the candidates, --fix must
+// leave the bead's metadata unchanged for manual resolution, and the warning
+// must remain on the verifying re-run — while still repairing unambiguous
+// targets in the same scan. Routes already equal to either candidate are
+// healthy, and a short route equal to the hold suffix stays the namespace
+// check's finding, not this one's.
+func TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "planner", BindingName: "ops"},
+			{Name: "planner", BindingName: "other"},
+			{Name: "builder", BindingName: "ops"},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Ambiguous, missing route: report both candidates, never repair.
+		{ID: "AM-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		// Ambiguous, unrelated route: same contract.
+		{
+			ID: "AM-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "reviewer"},
+		},
+		// Already routed to either candidate: healthy, not a finding.
+		{
+			ID: "AM-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "ops.planner"},
+		},
+		{
+			ID: "AM-4", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "other.planner"},
+		},
+		// Short route equal to the hold suffix satisfies the hold check; the
+		// namespace check owns reporting the ambiguity of migrating it.
+		{
+			ID: "AM-5", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "planner"},
+		},
+		// An already-qualified hold value keeps exact-match behavior.
+		{
+			ID: "AM-6", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:ops.builder"},
+			Metadata: map[string]string{"gc.routed_to": "ops.builder"},
+		},
+		// Uniquely resolvable held bead in the same scan: ambiguity elsewhere
+		// must not block its repair.
+		{ID: "AM-7", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:builder"}},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead AM-1 has hold:planner but gc.routed_to=""; use one of ops.planner, other.planner`,
+		`city bead AM-2 has hold:planner but gc.routed_to="reviewer"; use one of ops.planner, other.planner`,
+		`city bead AM-7 has hold:builder but gc.routed_to=""; use "ops.builder"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"bead AM-3", "bead AM-4", "bead AM-5", "bead AM-6"} {
+		if strings.Contains(details, notWant) {
+			t.Fatalf("details should not mention %q:\n%s", notWant, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v (ambiguity alone must not fail)", err)
+	}
+	for id, wantRoute := range map[string]string{
+		"AM-1": "",
+		"AM-2": "reviewer",
+		"AM-3": "ops.planner",
+		"AM-4": "other.planner",
+		"AM-5": "planner",
+		"AM-6": "ops.builder",
+		"AM-7": "ops.builder",
+	} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != wantRoute {
+			t.Errorf("%s gc.routed_to = %q, want %q", id, got, wantRoute)
+		}
+	}
+
+	// The unresolved warning remains on verification.
+	res2 := check.Run(&doctor.CheckContext{})
+	if res2.Status != doctor.StatusWarning {
+		t.Fatalf("post-fix Run status = %v, want warning (ambiguous holds stay unresolved): %#v", res2.Status, res2)
+	}
+	details2 := strings.Join(res2.Details, "\n")
+	for _, want := range []string{"bead AM-1", "bead AM-2"} {
+		if !strings.Contains(details2, want) {
+			t.Fatalf("post-fix details missing %q:\n%s", want, details2)
+		}
+	}
+	if strings.Contains(details2, "bead AM-7") {
+		t.Fatalf("post-fix details should not mention repaired bead AM-7:\n%s", details2)
+	}
+
+	// The short route equal to the hold suffix is the namespace check's
+	// finding, and it reports the same two candidates for manual choice.
+	nsRes := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	if nsRes.Status != doctor.StatusWarning {
+		t.Fatalf("v2-routed-to-namespace status = %v, want warning for short route: %#v", nsRes.Status, nsRes)
+	}
+	nsDetails := strings.Join(nsRes.Details, "\n")
+	if want := `city bead AM-5 has gc.routed_to="planner"; use one of ops.planner, other.planner`; !strings.Contains(nsDetails, want) {
+		t.Fatalf("namespace details missing %q:\n%s", want, nsDetails)
+	}
+}
+
 // TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace covers ga-tkxbic:
 // before the fix, hold-label-routed-to's --fix backfilled the bare hold value
 // while v2-routed-to-namespace rewrote short forms to the binding-qualified
