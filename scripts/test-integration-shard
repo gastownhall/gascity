@@ -149,6 +149,7 @@ cmd_gc_integration_tests=(
   TestPhase2WorkerCoreRealTransportProof
   TestProbeDetachedWork_RealTmuxMatchesSessionExactly
   TestProbeDetachedWork_RealTmuxOtherTMUXTMPDIRIsError
+  TestPurgeStrandedBatchedEdgeReadMatchesThePerRowReadOnRealBd
   TestPurgeStrandedMessagesOnARealBdWorkStore
   TestPurgeStrandedResumesAfterTheEdgesWereRemovedOnARealBdWorkStore
   TestRestorePurgeLeavesOutAParentThatIsGoneOrADifferentBeadOnARealBdWorkStore
@@ -162,6 +163,9 @@ cmd_gc_integration_tests=(
   TestStorageMigrateDoesNotCountItsOwnPooledSessions
   TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
   TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
+  TestStorageSnapshotHostedBdWorkStore
+  TestTheCityFloorHoldsOnARealBdStore
+  TestTheDefaultFloorOpenerReachesARealBdCity
 )
 
 join_regex() {

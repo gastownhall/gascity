@@ -42,7 +42,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers, and on gc's host for an exec runtime\nwhose handshake declares fs.host with locality local. Template variables\nsame as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",
@@ -1152,7 +1152,15 @@
         },
         "hold_mid_turn": {
           "type": "boolean",
-          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs only the bypass of the\nquiescence gate that a delivery starved on a never-quiet session takes.\nThe conversation lane takes that bypass only under the [session]\nprogram_status switch on, on a fresh read of the program's own record\nthat decides and shows no live working record. Legacy delivery defers\nit under on while such a read shows a live working record, and\notherwise takes it as without the declaration. Every other delivery is\nunchanged. It reaches a pane when its capture is armed (create,\nrespawn, heal), and heal keeps it current. Unset inherits."
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs the conversation lane's\nkeystroke boundary and the bypass of the quiescence gate that a\ndelivery starved on a never-quiet session takes. Under the [session]\nprogram_status switch on, the lane's quiescence boundary stays closed,\nand a delivery at it is held right before it is typed, while a fresh\nread of the program's own record shows a live working record; the lane\ntakes the starved bypass only on such a read that decides and shows no\nlive working record. Under off and shadow the lane never takes the\nstarved bypass. Legacy delivery defers the bypass under on while such a\nread shows a live working record, and otherwise takes it as without\nthe declaration. Every other delivery is unchanged. It reaches a pane\nwhen its capture is armed (create, respawn, heal), and heal keeps it\ncurrent. Unset inherits."
+        },
+        "decide_startup": {
+          "type": "boolean",
+          "description": "DecideStartup opts the startup ladder into deciding with the program's\nown record under the [session] program_status switch on: a turn start\npast the record read before the first send confirms the startup nudge,\nand a live blocked record holds the send (nothing is typed into the\ndialog) and, once the ladder runs out, hands the nudge back to be\nqueued for the session. Without it the ladder decides from the screen\nalone, exactly as under off. Declare it only for a program whose\nrecords were shown to agree with the ladder's outcomes. Unset inherits."
+        },
+        "decide_settle": {
+          "type": "boolean",
+          "description": "DecideSettle opts the interrupt settle into deciding with the program's\nown record under the [session] program_status switch on: the idle wait\nthat follows an interrupt gc sent returns at the first root boundary\npast the pre-interrupt record, and a dialog the program reports since\nends it as a pending interaction, so no further keys are sent. Without\nit the wait decides from the screen alone, exactly as under off. It\nreaches a pane when its capture is armed (create, respawn, heal), and\nheal keeps it current. Declare it only for a program whose records were\nshown to agree with the settle's outcomes. Unset inherits."
         },
         "env": {
           "additionalProperties": {

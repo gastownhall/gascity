@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -56,8 +57,8 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	// is resolved against SESSION beads, and the identity expansion below reads
 	// one — so this store is the sessions class even though the caller is a work
 	// query. Identity to the work store on a city that relocates nothing.
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return []string{assignee}
 	}
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
@@ -86,7 +87,7 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	// front door. A non-session or absent id (the front door rejects it) simply
 	// contributes no extra identity terms — the base assignee/id terms above still
 	// drive the ?assignee filter.
-	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+	if info, getErr := session.NewStore(store).Get(id); getErr == nil {
 		for _, identity := range session.AssigneeIdentities(info) {
 			add(identity)
 		}
@@ -104,8 +105,8 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	// RepairTypeBestEffort heal writes to it. Through the work store on a
 	// relocated city that create is a stranded infrastructure bead — the class
 	// binding never sees it and the boot containment re-check names it.
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return assignee, nil
 	}
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
@@ -118,7 +119,7 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	sessFront := session.NewStore(store)
 	info, err := sessFront.Get(id)
 	if err != nil {
 		// The front door rejects a present-but-non-session bead with
@@ -143,48 +144,49 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	return session.AssigneeIdentifier(info), nil
 }
 
-// findStore returns the bead store for the given rig. If rig is empty, returns
-// the sole store when exactly one exists (after deduplication), or nil when
-// multiple distinct stores exist (caller should require explicit rig).
-func (s *Server) findStore(rig string) beads.Store {
+// findWorkStore is the work handle a rig-addressed request reads or writes:
+// rig's store when rig is named, else the city's work store, else the sole
+// store left after deduplication. ok is false when no store answers (an unknown rig, or several
+// distinct stores and no rig).
+func findWorkStore(st storeref.Stores, cityName, rig string) (beads.WorkStore, bool) {
 	if rig != "" {
-		return s.state.BeadStore(rig)
+		return st.Rig(rig)
 	}
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		return cityStore
+	if work := st.Work(); work != (beads.WorkStore{}) {
+		return work, true
 	}
-	stores := s.state.BeadStores()
-	names := sortedRigNames(stores)
+	stores := workStoresByName(st, cityName)
+	names := sortedWorkStoreNames(stores)
 	if len(names) == 1 {
-		return stores[names[0]]
+		return stores[names[0]], true
 	}
-	return nil
+	return beads.WorkStore{}, false
 }
 
-// resolveStoreByPrefix finds the store that owns a bead prefix by checking
+// resolveRefByPrefix finds the work leg that owns a bead prefix by checking
 // routes.jsonl files in the city and each rig's .beads/ directory, then
-// mapping the resolved store path back to the correct store.
-func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
+// mapping the resolved store path back to the leg's ref. loaded is the legs
+// the epoch holds a store for (loadedWorkLegs): a route to any other answers
+// nothing.
+func (s *Server) resolveRefByPrefix(prefix string, loaded map[storeref.StoreRef]bool) (storeref.StoreRef, bool) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil
+		return "", false
 	}
-	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
+	rigLeg := func(name string) (storeref.StoreRef, bool) {
+		ref := storeref.RigRef(name)
+		return ref, loaded[ref]
+	}
 
-	if prefix == config.EffectiveHQPrefix(cfg) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			return cityStore
-		}
+	if prefix == config.EffectiveHQPrefix(cfg) && loaded[storeref.WorkRef] {
+		return storeref.WorkRef, true
 	}
 	for _, rig := range cfg.Rigs {
 		if prefix != rig.EffectivePrefix() {
 			continue
 		}
-		if store, exists := stores[rig.Name]; exists {
-			return store
-		}
-		return nil
+		return rigLeg(rig.Name)
 	}
 
 	// Build rig path → name map for reverse lookup (used by both city
@@ -207,15 +209,13 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 			cleanPath := filepath.Clean(storePath)
 			// Route may point to a rig directory — resolve to the rig store.
 			if rigName, found := rigPathToName[cleanPath]; found {
-				if store, exists := stores[rigName]; exists {
-					return store
+				if ref, ok := rigLeg(rigName); ok {
+					return ref, true
 				}
 			}
 			// Route points to the city itself (e.g. prefix "mc" → ".").
-			if cleanPath == filepath.Clean(cityPath) {
-				if cityStore := s.state.CityBeadStore(); cityStore != nil {
-					return cityStore
-				}
+			if cleanPath == filepath.Clean(cityPath) && loaded[storeref.WorkRef] {
+				return storeref.WorkRef, true
 			}
 		}
 	}
@@ -237,8 +237,8 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 		// (e.g., prefix "gb" in alpha's routes maps to ../beta).
 		cleanPath := filepath.Clean(storePath)
 		if rigName, found := rigPathToName[cleanPath]; found {
-			if store, exists := stores[rigName]; exists {
-				return store
+			if ref, ok := rigLeg(rigName); ok {
+				return ref, true
 			}
 		}
 		// Fallback: the route pointed back at this rig itself (a self-route).
@@ -247,12 +247,12 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 		// directory — says the prefix does NOT live here, so it must fall
 		// through to the caller's candidate scan rather than pin the wrong store.
 		if cleanPath == filepath.Clean(rigPath) {
-			if store, exists := stores[rig.Name]; exists {
-				return store
+			if ref, ok := rigLeg(rig.Name); ok {
+				return ref, true
 			}
 		}
 	}
-	return nil
+	return "", false
 }
 
 // sortedRigNames returns rig names from the store map in deterministic sorted order,
@@ -274,6 +274,45 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 			continue
 		}
 		seen[s] = true
+		deduped = append(deduped, name)
+	}
+	return deduped
+}
+
+// workStoresByName is State.BeadStores() as work handles from st: the city's
+// work store under cityName, then every rig's under its name, so a rig named
+// like the city replaces it. A city with no work store has no entry. Ranged
+// in sortedWorkStoreNames order, it reads the stores in exactly the order
+// sortedRigNames gives BeadStores(), which first-match lookups depend on.
+func workStoresByName(st storeref.Stores, cityName string) map[string]beads.WorkStore {
+	rigs := st.Rigs()
+	out := make(map[string]beads.WorkStore, len(rigs)+1)
+	if work := st.Work(); work != (beads.WorkStore{}) {
+		out[cityName] = work
+	}
+	for _, r := range rigs {
+		out[r.Name] = r.Work
+	}
+	return out
+}
+
+// sortedWorkStoreNames is sortedRigNames for work handles: the names in
+// sorted order, keeping only the first of names whose handles share one
+// physical store (beads.PhysicalStoreKey), as in legacy shared-file mode.
+func sortedWorkStoreNames(stores map[string]beads.WorkStore) []string {
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]bool, len(names))
+	deduped := names[:0]
+	for _, name := range names {
+		key := beads.PhysicalStoreKey(stores[name])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		deduped = append(deduped, name)
 	}
 	return deduped

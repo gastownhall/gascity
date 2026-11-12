@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -243,9 +244,9 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, errSupervisorLockHeld
 		}
 		return nil, fmt.Errorf("locking supervisor lock: %w", err)
@@ -1142,6 +1143,15 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			if ownership.Unit != "" {
 				payload["supervisor_unit"] = ownership.Unit
 			}
+		}
+		// api_url is the supervisor API base URL from supervisor.toml — the
+		// endpoint the CLI itself dials (supervisorAPIBaseURL) — reported
+		// whether or not the supervisor is running. It is absent, with a
+		// warning on stderr, when supervisor.toml cannot be read.
+		if apiURL, err := supervisorAPIBaseURL(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor status: warning: resolving API URL: %v\n", err) //nolint:errcheck
+		} else {
+			payload["api_url"] = apiURL
 		}
 		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {

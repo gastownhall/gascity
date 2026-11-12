@@ -1760,7 +1760,7 @@ func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, city
 	if cs == nil {
 		return 0, nil
 	}
-	sessions := cs.SessionsBeadStore()
+	sessions := cs.Stores().Sessions()
 	if sessions == (beads.SessionStore{}) {
 		return 0, nil
 	}

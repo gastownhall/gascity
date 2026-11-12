@@ -32,15 +32,19 @@ ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0
 ARG XNET_VERSION=0.62.0
 ARG JOSE_VERSION=4.1.6
+# BD_SOURCE_REF's go.mod pins klauspost/compress 1.18.7, which GO-2026-6865
+# (panic on two-block frames) affects; 1.20.2 is fixed and requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG COMPRESS_VERSION=1.20.2
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
-# configuration and release identity. GRPC_VERSION, THRIFT_VERSION and
-# XNET_VERSION override the source's own requirements with the current
-# security floor. Keep each `go get` and its trailing `go version -m` check:
-# together they fail the build if a future beads release regresses below these
-# versions instead of silently shipping it. Raise them with the upstream
-# requirement -- never leave one behind, or the `go get` downgrades the release while the check
-# still passes.
+# configuration and release identity. GRPC_VERSION, THRIFT_VERSION,
+# XNET_VERSION, JOSE_VERSION and COMPRESS_VERSION override the source's own
+# requirements with the current security floor. Keep each `go get` and its
+# trailing `go version -m` check: together they fail the build if a future
+# beads release regresses below these versions instead of silently shipping it.
+# Raise them with the upstream requirement -- never leave one behind, or the
+# `go get` downgrades the release while the check still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
@@ -56,6 +60,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && go get "golang.org/x/net@v${XNET_VERSION}" \
     && go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}" \
+    && go get "github.com/klauspost/compress@v${COMPRESS_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -66,7 +71,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "
 
 FROM ${BASE_IMAGE}
 

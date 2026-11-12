@@ -229,6 +229,7 @@ operator arranges rather than something a program can observe.`,
 		newStorageRepairSequenceCmd(surface, stdout, stderr),
 		newStorageVouchBdCmd(surface, stdout, stderr),
 		newStorageRemoteStageCmd(stdout, stderr),
+		newStorageSnapshotCmd(surface, stdout, stderr),
 	)
 	return cmd
 }
@@ -511,7 +512,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city; while it runs, any writer may change the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
@@ -542,8 +543,18 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// reads no store has passed (the controller, the shared-store identity and
 	// its co-tenants' locks, the attestation, the guard), and before the first
 	// that opens the work store (the shared-store row check). Closed before
-	// the guard, the co-tenants and the lock are released.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	// the guard, the co-tenants and the lock are released. The copy's
+	// cross-boundary plan reads the bound rigs for blockers the work store
+	// does not hold (infraCityBoundaryProbe), so the window starts each rig
+	// scope bd owns a proxied scope for, as --from-rigs does.
+	cityRoot := resolveStoreScopeRoot(request.CityPath, request.CityPath)
+	var rigRoots []string
+	for _, rig := range request.Cfg.Rigs {
+		if root := resolveStoreScopeRoot(request.CityPath, rig.Path); strings.TrimSpace(rig.Path) != "" && !samePath(root, cityRoot) {
+			rigRoots = append(rigRoots, root)
+		}
+	}
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -766,6 +777,15 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The hold boot makes before anything else on a marked binding (S5 §7.2):
+	// a binding converged from another work store is not this city's.
+	if state == infraConvergenceMarked || state == infraConvergenceStale {
+		if _, _, hold := markerWorkStoreIdentityHold(request.CityPath, target, logPrefix, stderr); hold != nil {
+			hold.Target = target
+			fmt.Fprintf(stdout, "converged: no (%s)\nblocking invariant: %s\n", hold.Outcome, infraMigrationOperatorAdvice(*hold, logPrefix)) //nolint:errcheck // best-effort stdout
+			return 1
+		}
+	}
 	// A converged city's work store is counted under its manifest's classifier
 	// generation, the one every verdict below judges it by: rows the copy's
 	// classifier left as work are not infrastructure that city retains.
@@ -816,11 +836,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	}
 
 	if state == infraConvergenceStale {
-		remedy := storageClearInstruction()
-		if present, err := infraPathExists(target.RetainedBackupPath()); err == nil && present {
-			remedy = storageRecopyFromBackupInstruction()
-		}
-		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: re-copy the binding with `%s`\n", infraStaleCause(target), remedy) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: repair the binding with `%s`\n", infraStaleCause(target), infraStaleBindingRemedy(target)) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if state != infraConvergenceMarked {
@@ -843,6 +859,14 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	purgeSettled := reportInfraPurgeLedger(target, stdout)
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
+		// What the gate does with this verdict (infraMigrationReport.servesDegraded):
+		// the exit stays 1 either way, because a stranded row is a defect
+		// whether or not the rest of the city serves around it.
+		verdict := infraMigrationReport{Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, Retained: gap.Retained, Unrecorded: gap.Unrecorded}
+		if note, present, err := readInfraClearedNote(request.CityPath); err != nil || (present && !note.Complete) {
+			verdict.ClearUnfinished = true
+		}
+		fmt.Fprintf(stdout, "  serving:     %s\n", infraStrandedServingLine(verdict)) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
 		// about it. This report used to carry only the ids, so the one command
 		// an operator would reach for after a non-zero `gc storage status` said
@@ -859,7 +883,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		// unsettled, its own remedy above is the only one: recover-stranded
 		// refuses until then (infraPurgeUnsettledRefusal).
 		if purgeSettled {
-			fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "blocking invariant: %s%s\n", infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable), infraStrandedRetainedAdvice(verdict)) //nolint:errcheck // best-effort stdout
 		}
 		return 1
 	}

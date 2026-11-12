@@ -109,7 +109,7 @@ func processRalphCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 		return ControlResult{Processed: true, Action: "logical-settled"}, nil
 	}
 
-	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
+	subjectID, err := resolveBlockingSubjectID(store, bead)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving subject: %w", bead.ID, err)
 	}
@@ -357,12 +357,16 @@ func runRalphCheck(store beads.GraphStore, bead, subject beads.Bead, attempt int
 			// file, or not executable. No verdict exists and none will appear by
 			// re-running, so this must neither burn an attempt nor close the step.
 			// Hold the step OPEN on the drift-pending lane (dependents stay
-			// blocked, gc.control_pending_* explains it, control.stalled fires once
-			// after the budget); shipping or chmod-ing the script heals it on the
+			// blocked, gc.control_pending_* explains it, control.check_unlaunchable
+			// announces it on the first refusal, control.stalled fires once after
+			// the budget); shipping or chmod-ing the script heals it on the
 			// next sweep (gastownhall/gascity#4239). A removed work_dir heals only
 			// when it is restored: RunCondition runs the check inside it, so a
 			// store-root copy found by the fallback above cannot start.
-			return convergence.GateResult{}, fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err)
+			return convergence.GateResult{}, &UnlaunchableCheckError{
+				CheckPath: checkPath,
+				err:       fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err),
+			}
 		}
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
@@ -1435,6 +1439,12 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ControlPendingCountMetadataKey,
 		beadmeta.ControlPendingFirstSeenMetadataKey,
 		beadmeta.ControlPendingStalledMetadataKey,
+		// The storage-class migration stamps the rows it copies into a
+		// binding, and a clone of one is a new row there that the migration
+		// did not write. A stamped clone would read as a copy to every reader
+		// of the stamp: a binding restore would look for it in the store the
+		// row came from, which never held it, and refuse.
+		beadmeta.InfraMigratedFromMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

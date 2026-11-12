@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/rppcheck",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
     ],

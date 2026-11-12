@@ -83,13 +83,18 @@ type BuiltinProviderSpec struct {
 	// ProgramStatusRelay wraps the agent in the probe-answering relay,
 	// ProgramStatusHoldMidTurn declares that input typed mid-turn aborts the
 	// program's turn (config.ProgramStatusBinding.HoldMidTurn says which
-	// deliveries that holds back), and ProgramStatusEnv is forced into the
-	// session env when capture is armed.
-	ProgramStatusProtocol    string
-	ProgramStatusApp         string
-	ProgramStatusRelay       bool
-	ProgramStatusHoldMidTurn bool
-	ProgramStatusEnv         map[string]string
+	// deliveries that holds back), ProgramStatusDecideStartup and
+	// ProgramStatusDecideSettle opt the startup ladder and the interrupt
+	// settle into deciding with the record under the switch on
+	// (config.ProgramStatusBinding.DecideStartup, DecideSettle), and
+	// ProgramStatusEnv is forced into the session env when capture is armed.
+	ProgramStatusProtocol      string
+	ProgramStatusApp           string
+	ProgramStatusRelay         bool
+	ProgramStatusHoldMidTurn   bool
+	ProgramStatusDecideStartup bool
+	ProgramStatusDecideSettle  bool
+	ProgramStatusEnv           map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -273,9 +278,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Claude Code (2.1.295+, verified on 2.1.311) reports OSC 7501 only
 		// after the terminal answers its support probe, which tmux never
 		// does, so capture runs it under the probe-answering relay.
-		ProgramStatusProtocol: programStatusOSC7501,
-		ProgramStatusApp:      "claude-code",
-		ProgramStatusRelay:    true,
+		// The second OSC 7501 shadow measured its startup ladder and
+		// interrupt settle against the record, so both decide with it under
+		// the switch on.
+		ProgramStatusProtocol:      programStatusOSC7501,
+		ProgramStatusApp:           "claude-code",
+		ProgramStatusRelay:         true,
+		ProgramStatusDecideStartup: true,
+		ProgramStatusDecideSettle:  true,
 		// Config-facing names map to current CLI values: Claude Code rejects the
 		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
@@ -355,10 +365,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
 		// pane-output tap alone captures it. Input typed into a running
 		// Codex turn aborts it (the 2026-11-03 shadow: 18 of 20 mid-turn
-		// deliveries aborted their turn), so it declares the hold.
-		ProgramStatusProtocol:    programStatusOSC7501,
-		ProgramStatusApp:         "codex",
-		ProgramStatusHoldMidTurn: true,
+		// deliveries aborted their turn), so it declares the hold. The second
+		// shadow measured its startup ladder against the record, so the
+		// ladder decides with it under the switch on. Neither shadow recorded
+		// a Codex interrupt settle (ga-crzq6e), so the settle is not declared
+		// and decides from the screen, as under off.
+		ProgramStatusProtocol:      programStatusOSC7501,
+		ProgramStatusApp:           "codex",
+		ProgramStatusHoldMidTurn:   true,
+		ProgramStatusDecideStartup: true,
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
@@ -651,6 +666,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
 		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
 		Args:                 []string{"--yolo"},
+		OptionsSchema: []BuiltinProviderOption{
+			// Copilot's ask_user tool blocks the pane on an interactive
+			// question until someone answers it. Most sessions run
+			// unattended, so the default launches with --no-ask-user; an
+			// agent a human attaches to opts back in with
+			// option_defaults = { ask_user = "on" }.
+			{
+				Key:     "ask_user",
+				Label:   "Ask User Tool",
+				Type:    "select",
+				Default: "off",
+				Choices: []BuiltinOptionChoice{
+					{Value: "off", Label: "Disabled (work autonomously)", FlagArgs: []string{"--no-ask-user"}},
+					{Value: "on", Label: "Enabled (may ask questions)", FlagArgs: []string{}},
+				},
+			},
+		},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects

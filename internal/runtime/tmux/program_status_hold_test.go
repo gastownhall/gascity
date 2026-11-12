@@ -57,11 +57,22 @@ func (e *holdExecutor) holdReads() int {
 }
 
 // holdPaneRow is a hold read's row for agent pane %1: armed under
-// holdNonce, its pipe open, carrying record, its hold option as hold and its
-// window's activity at activity (unix seconds; 0 for none).
+// holdNonce, its pipe open, carrying record, its hold option as hold, no
+// settle declaration, and its window's activity at activity (unix seconds; 0
+// for none).
 func holdPaneRow(record, hold string, activity int64) string {
-	return strings.Join([]string{"0", "agent", "%1", "1", holdNonce, record, hold, strconv.FormatInt(activity, 10), runtimeInventoryEnd}, "\t")
+	return declaredPaneRow(record, hold, "", activity)
 }
+
+// declaredPaneRow is holdPaneRow with the pane's settle option as settle.
+func declaredPaneRow(record, hold, settle string, activity int64) string {
+	return strings.Join([]string{"0", "agent", "%1", "1", holdNonce, record, hold, settle, strconv.FormatInt(activity, 10), runtimeInventoryEnd}, "\t")
+}
+
+// settlingPaneRow is a hold read's row for agent pane %1 armed declaring
+// the record-driven interrupt settle (programSettleOption bound to %1),
+// carrying record, with no hold and no activity.
+func settlingPaneRow(record string) string { return declaredPaneRow(record, "", "%1", 0) }
 
 // holdTmux is a Tmux under mode over inner, its capture gate passed, its
 // hold reads answered by row.
@@ -196,7 +207,7 @@ func TestProgramStatusHoldReadPastTheStateCache(t *testing.T) {
 				t.Fatalf("fixture: cached reading %+v, %v", cached, err)
 			}
 			ex := &holdExecutor{inner: fe, row: func(int) string {
-				return strings.Join([]string{"0", "agent", "%5", "1", readNonce, c.fresh, "%5", "0", runtimeInventoryEnd}, "\t")
+				return strings.Join([]string{"0", "agent", "%5", "1", readNonce, c.fresh, "%5", "", "0", runtimeInventoryEnd}, "\t")
 			}}
 			p.tm.exec = ex
 			r, held := runtime.ProgramRecordTypingHold(p, "s", time.Now())
@@ -267,7 +278,7 @@ func TestHealConvergesTheHoldDeclarationOfALiveCapture(t *testing.T) {
 	// A pane re-armed under another nonce between the read and the act
 	// keeps the declaration its own arm gave it.
 	agent.tap, server.taps = "n3wNonce.%5", map[string]bool{"n3wNonce.%5": true}
-	if err := p.tm.declareHold(healPane{programPane: programPane{id: "%5", tap: "l1vE.%5"}, target: "=s:@1.%5"}, true); err != nil {
+	if err := p.tm.declarePane(healPane{programPane: programPane{id: "%5", tap: "l1vE.%5"}, target: "=s:@1.%5"}, runtime.ProgramStatusArm{HoldMidTurn: true}); err != nil {
 		t.Fatal(err)
 	}
 	if agent.hold != "" {

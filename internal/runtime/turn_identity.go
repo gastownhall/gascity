@@ -256,9 +256,10 @@ func TurnCapabilitiesFor(p Provider, name string) TurnCapabilities {
 // agent on this host, so the transcript the agent writes lands on this host's
 // filesystem, where gc can read it for turns (X11 §3.2: the transcript tiers
 // need the reader on the transcript's host). A runtime that runs the agent
-// elsewhere (a pod, a remote host, an exec script's own box) does not
-// implement it. Composites do not either: the trait is read on the routed
-// leaf ([LocalTranscriptsFor]).
+// elsewhere (a pod, a remote host) does not implement it; an exec runtime
+// implements it and answers true only when its pack's handshake shares the
+// host filesystem ([ProtocolInfo.SharesHostFS]). Composites do not implement
+// it: the trait is read on the routed leaf ([LocalTranscriptsFor]).
 type LocalTranscriptProvider interface {
 	LocalTranscripts() bool
 }

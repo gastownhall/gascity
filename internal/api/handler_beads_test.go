@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type prefixedAliasStore struct {
@@ -363,11 +364,37 @@ func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
 	state, alphaStore, betaStore := configureBeadRouteState(t)
 	s := New(state)
 
-	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
-		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	loaded := loadedWorkLegs(state.Stores())
+	if got, ok := s.resolveRefByPrefix("ga", loaded); !ok || got != storeref.RigRef("alpha") {
+		t.Errorf("resolveRefByPrefix(ga) = %q, %t, want the alpha rig (store %p)", got, ok, alphaStore)
 	}
-	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
-		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	if got, ok := s.resolveRefByPrefix("gb", loaded); !ok || got != storeref.RigRef("beta") {
+		t.Errorf("resolveRefByPrefix(gb) = %q, %t, want the beta rig (store %p)", got, ok, betaStore)
+	}
+}
+
+// TestResolveRefByPrefixStopsAtAnUnloadedOwner pins the rig arm's stop: a
+// prefix a configured rig owns belongs to that rig, so when its store is not
+// loaded there is no route, and a routes.jsonl entry naming another store for
+// the prefix is not consulted (the id is left to the scan), as the frozen
+// resolveStoreByPrefix stopped.
+func TestResolveRefByPrefixStopsAtAnUnloadedOwner(t *testing.T) {
+	state, _, _ := configureBeadRouteState(t)
+	delete(state.stores, "alpha")
+	cityRoutes := filepath.Join(state.cityPath, ".beads")
+	if err := os.MkdirAll(cityRoutes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityRoutes, "routes.jsonl"), []byte(`{"prefix":"ga","path":"rigs/beta"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state.cfg.Rigs[0].Prefix = "ga"
+	s := New(state)
+	if ref, ok := s.resolveRefByPrefix("ga", loadedWorkLegs(state.Stores())); ok {
+		t.Fatalf("resolveRefByPrefix(ga) = %q with alpha, the prefix's owner, unloaded; want no route", ref)
+	}
+	if got := referenceStoreByPrefix(s, "ga"); got != nil {
+		t.Fatalf("fixture: the frozen resolver routed ga to %v", got)
 	}
 }
 
@@ -389,8 +416,8 @@ func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
 	}
 	s := New(state)
 
-	if got := s.resolveStoreByPrefix("gz"); got != nil {
-		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	if got, ok := s.resolveRefByPrefix("gz", loadedWorkLegs(state.Stores())); ok {
+		t.Fatalf("resolveRefByPrefix(gz) = %q, want no route (route resolves outside every rig); alpha is %p", got, alphaStore)
 	}
 	got := s.beadStoresForID("gz-1")
 	want := []beads.Store{cityStore, alphaStore, betaStore}
