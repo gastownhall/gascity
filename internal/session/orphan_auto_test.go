@@ -165,3 +165,49 @@ func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
 		}
 	}
 }
+
+// AC-6: pacing changes only the log line. A start whose scan error is
+// suppressed still terminates the orphan the scan found, and still refuses,
+// terminating nothing, when the provider claims the root as LiveUnlisted; a
+// failure of the whole scan, alone or joined to entry failures, is logged on
+// every start.
+func TestKillExistingOrphansPacingKeepsTerminationAndRefusal(t *testing.T) {
+	logged := captureLog(t)
+	city := t.TempDir()
+	clk := &clock.Fake{}
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	whole := errors.New("tmux backend: listing sessions: server exited unexpectedly")
+	orphan := runtime.LiveRuntime{SessionID: "sid-kept", City: city, PID: 100, PPID: 1}
+	unlisted := orphan
+	unlisted.LiveUnlisted = true
+
+	for _, step := range []struct {
+		name    string
+		root    runtime.LiveRuntime
+		err     error
+		at      time.Time
+		wantLog int
+	}{
+		{"first, orphan", orphan, permissionDeniedEntries(11), t0, 1},
+		{"suppressed, orphan", orphan, permissionDeniedEntries(12), t0.Add(time.Second), 0},
+		{"suppressed, LiveUnlisted", unlisted, permissionDeniedEntries(13), t0.Add(2 * time.Second), 0},
+		{"whole-scan failure, orphan", orphan, whole, t0.Add(3 * time.Second), 1},
+		{"whole-scan failure again, orphan", orphan, whole, t0.Add(4 * time.Second), 1},
+		{"joined whole-scan failure, LiveUnlisted", unlisted, errors.Join(whole, permissionDeniedEntries(11)), t0.Add(5 * time.Second), 1},
+		{"joined whole-scan failure again, LiveUnlisted", unlisted, errors.Join(whole, permissionDeniedEntries(11)), t0.Add(6 * time.Second), 1},
+	} {
+		n, terminated, err := pacedStart(t, logged, clk, city, step.at, step.root, step.err)
+		if n != step.wantLog {
+			t.Fatalf("%s: logged the scan error %d times, want %d; log=%q", step.name, n, step.wantLog, logged.String())
+		}
+		if step.root.LiveUnlisted {
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || len(terminated) != 0 {
+				t.Fatalf("%s: killExistingOrphans = %v, terminated %v; want the LiveUnlisted refusal and nothing terminated", step.name, err, terminated)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(terminated, []string{"100"}) {
+			t.Fatalf("%s: killExistingOrphans = %v, terminated %v; want orphan pid 100 terminated", step.name, err, terminated)
+		}
+	}
+}
