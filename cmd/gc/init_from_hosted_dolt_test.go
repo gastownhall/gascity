@@ -20,10 +20,10 @@ func gastownExamplePath(t *testing.T) string {
 	return p
 }
 
-// clearGCEnv moves the working directory into a temp dir, so a helper that
-// resolves the example city against the cwd silently skips every test that
-// calls it after clearGCEnv. The example source must stay reachable (the
-// helper must not skip) once clearGCEnv has run.
+// TestGastownExamplePathResolvesAfterClearGCEnv pins that the example city
+// stays reachable once clearGCEnv has run. clearGCEnv moves the working
+// directory into a temp dir, so a helper that resolves the example against the
+// cwd silently skips every test that calls it.
 func TestGastownExamplePathResolvesAfterClearGCEnv(t *testing.T) {
 	var sub *testing.T
 	var got string
