@@ -331,6 +331,38 @@ func TestDeliverStartupTurnNeverPastesIntoAKindLaunchedPane(t *testing.T) {
 	assertPasted(t, trace, false)
 }
 
+// TestDeliverStartupTurnShortDeadlineHonorsBindMode is the same limit on the
+// short-deadline branch: when Start's ctx leaves less than herdr's
+// state-change window, the turn goes out without --wait, and a kind launch's
+// pane with no named agent must still not get it typed into its shell. A raw
+// launch's pane still gets the paste fallback.
+func TestDeliverStartupTurnShortDeadlineHonorsBindMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode       string
+		wantPasted bool
+	}{
+		{mode: bindModeAgent, wantPasted: false},
+		{mode: bindModeShell, wantPasted: true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			bin, trace := registryFake(t, []string{},
+				`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
+			c := &client{session: "gc-test", bin: bin}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			err := c.deliverStartupTurn(ctx, "w1:p1", "first turn", tc.mode, nil, "")
+			if err == nil {
+				t.Fatal("deliverStartupTurn under a short deadline reported a confirmed delivery")
+			}
+			if b, rerr := os.ReadFile(trace); rerr == nil && strings.Contains(string(b), "--wait") {
+				t.Errorf("short-deadline delivery asked herdr to wait:\n%s", b)
+			}
+			assertPasted(t, trace, tc.wantPasted)
+		})
+	}
+}
+
 // TestWaitForIdleOutcomeTreatsAPaneWithNoNamedAgentAsNothingToWaitOn covers the
 // third caller. A raw shell pane has no agent to wait on, so the wait is a no-op
 // the caller may proceed past; classifying it as an error instead stalls a session

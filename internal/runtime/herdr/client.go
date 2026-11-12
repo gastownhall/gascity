@@ -651,7 +651,16 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode stri
 	for attempt := 1; ; attempt++ {
 		timeoutMS := startupTimeoutMS(ctx, startupPromptConfirmTimeoutMS)
 		if timeoutMS <= herdrStateChangeWindowMS {
-			if err := c.deliverNudge(ctx, paneID, text); err != nil {
+			err := c.agentPrompt(ctx, paneID, text)
+			if err != nil && herdrAnswerCode(err) == "agent_blocked" {
+				err = fmt.Errorf("%w: %w", runtime.ErrAgentBlocked, err)
+			} else if err != nil && c.targetHasNoNamedAgent(ctx, paneID, err) {
+				if mode != bindModeShell {
+					return fmt.Errorf("startup turn not sent (%w): %w; the agent launched on pane %s is gone, and the turn is not typed into the shell it left", startupTimeShort(timeoutMS), err, paneID)
+				}
+				err = c.pasteAndSubmit(ctx, paneID, text)
+			}
+			if err != nil {
 				return fmt.Errorf("startup turn not sent (%w): %w", startupTimeShort(timeoutMS), err)
 			}
 			return fmt.Errorf("startup turn sent without confirmation: %w", startupTimeShort(timeoutMS))

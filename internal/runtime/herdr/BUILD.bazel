@@ -67,6 +67,7 @@ go_test(
         "startup_delivery_confirm_test.go",
         "startup_delivery_test.go",
         "startup_dialogs_test.go",
+        "startup_notready_test.go",
         "testenv_import_test.go",
     ],
     embed = [":herdr"],
