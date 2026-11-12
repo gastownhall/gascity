@@ -484,7 +484,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DOLT_VERSION` pins (macOS regression, nightly, RC Gate, Ollama,
   fork-verify), the Bazel test Dolt (`dolt_bin_v2_6_0`), the agent base image
   (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
-  requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
+  requires; 1.27.4 since GO-2026-6859, see Security) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
   2.6.0, the first Dolt release patched for the eMudhra CA distrust. Moving
   from 2.2.0 to 2.6.0 crosses several behaviour changes (release notes for
   [2.3.3](https://github.com/dolthub/dolt/releases/tag/v2.3.3),
@@ -507,7 +507,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Treat the upgrade as one-way: back up the data directory first; going back
   means restoring that backup, not reverting the image.
 
-- **gc is now built with Go 1.27.3.** On macOS and Windows, a set
+- **gc is now built with Go 1.27.3 (1.27.4 since GO-2026-6859, see
+  Security).** On macOS and Windows, a set
   `SSL_CERT_FILE` or `SSL_CERT_DIR` now replaces the system trust store
   (the keychain, the Windows certificate store) for gc's HTTPS connections,
   as it already did on Linux. If you export either variable for other tools
@@ -2001,13 +2002,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - **gc is built with Go 1.27.4, which fixes GO-2026-6859 (CVE-2026-97054) in
-  `net/http`.** In Go 1.27.3 and earlier, when an `http.MaxBytesReader`
-  limit is exceeded, net/http sets `Connection: close` on the response
-  headers without synchronization, so an HTTP/1 handler that reads a limited
-  request body while it writes the response headers can crash the server.
-  gc's API server wraps request bodies in `http.MaxBytesReader` (webhook and
-  write-auth handlers), and govulncheck reports the advisory reachable from
-  gc. The `go.mod` floor, the Bazel `go_sdk`, the nogo analyzers' module, the
+  `net/http`.** In Go 1.27.0 through 1.27.3 (and below 1.26.11), when an
+  `http.MaxBytesReader` limit is exceeded, net/http sets `Connection: close`
+  on the response headers without synchronization, so an HTTP/1 handler that
+  reads a limited request body while it writes the response headers can
+  crash the server. gc's API server wraps request bodies in
+  `http.MaxBytesReader` (webhook and write-auth handlers), and govulncheck
+  reports the advisory reachable from gc. Both handlers read the body fully
+  before they write any header, so no gc handler is known to meet the race
+  condition; the toolchain fix removes it regardless. The `go.mod` floor, the Bazel `go_sdk`, the nogo analyzers' module, the
   `contrib/k8s` Go build images and the rbe-west worker host's Go all move to
   1.27.4. Building from source needs Go 1.27.4 or newer.
 
