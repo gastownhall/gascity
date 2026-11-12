@@ -170,14 +170,27 @@ func conditionToolLinksMatch(dir string, tools map[string]string) bool {
 }
 
 // ConditionActor is the BEADS_ACTOR a condition script runs as when the
-// controller's environment names none. Condition scripts are run by the
-// controller, not by an agent session or a human, so gc attributes their
-// writes to the controller, as it does the controller's own bd calls.
+// process that runs it sets none. It is the default the controller's own bd
+// calls use (applyControllerBdEnv and defaultSupervisorBeadsActor in cmd/gc).
 const ConditionActor = "controller"
 
-// conditionActor returns the actor a condition script's writes are
-// attributed to: the controller's ambient BEADS_ACTOR when set, otherwise
-// ConditionActor.
+// conditionActor returns the BEADS_ACTOR a condition script runs as: that of
+// the process running the script when set, otherwise ConditionActor. Environ
+// passes no other session-scoped identity key (execenv.SessionScopedEnvKeys),
+// so gc's eventActor attributes the script's writes to this actor, and bd
+// checks the script's closes against it. The process that runs the script
+// decides which actor that is:
+//
+//   - The controller runs convergence gates and triggers. A supervisor sets
+//     its BEADS_ACTOR to "controller" unless an operator set another; a
+//     standalone controller (gc start --foreground) sets none, so its scripts
+//     get ConditionActor.
+//   - The control dispatcher runs ralph checks inside its own managed session,
+//     so a check script runs as that session's identity, the actor of the
+//     dispatcher's own writes, and bd lets it close what that session holds.
+//   - gc converge test-gate and test-trigger, and gc convoy control for one
+//     bead, run the script in the caller's process: it runs as the caller's
+//     BEADS_ACTOR, or as ConditionActor from a shell that sets none.
 func conditionActor() string {
 	if actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); actor != "" {
 		return actor

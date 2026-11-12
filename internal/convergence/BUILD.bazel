@@ -79,6 +79,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/events",
+        "//internal/execenv",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/processenv",
