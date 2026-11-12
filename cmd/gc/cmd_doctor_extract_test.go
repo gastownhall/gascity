@@ -157,6 +157,47 @@ func TestBuildDoctorChecks_SessionLivenessChecksRegisteredRegardlessOfController
 	}
 }
 
+// TestBuildDoctorChecks_AgentSessionsThreadsControllerRunning pins that the
+// agent-sessions check gets the same controller state ControllerCheck does
+// (ga-8u9uvdn8): a stopped city is "not checked", a running one runs the
+// real check and reports the missing always-mode session.
+func TestBuildDoctorChecks_AgentSessionsThreadsControllerRunning(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "demo"},
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	for _, tc := range []struct {
+		running    bool
+		wantStatus doctor.CheckStatus
+		wantMsg    string
+	}{
+		{false, doctor.StatusOK, "not checked: controller not running"},
+		{true, doctor.StatusError, "confirmed missing"},
+	} {
+		var got *doctor.CheckResult
+		for _, c := range buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+			ControllerRunning: tc.running, SkipCityDoltCheck: true, SkipManagedDoltCheck: true,
+		}) {
+			if c.Name() == "agent-sessions" {
+				got = c.Run(&doctor.CheckContext{CityPath: cityDir})
+			}
+		}
+		if got == nil {
+			t.Fatalf("ControllerRunning=%v: agent-sessions not registered", tc.running)
+		}
+		if got.Status != tc.wantStatus || !strings.Contains(got.Message, tc.wantMsg) {
+			t.Errorf("ControllerRunning=%v: status=%v msg=%q, want status=%v msg containing %q", tc.running, got.Status, got.Message, tc.wantStatus, tc.wantMsg)
+		}
+	}
+}
+
 // TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController_GH5742
 // is the ga-o04bfr.1.4 counterpart to the session-liveness invariance test
 // above: startup-health-episodes is a read-only reporting check (GH#5742)

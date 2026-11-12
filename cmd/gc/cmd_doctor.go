@@ -435,7 +435,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				register(doctor.ErrorCheck("session-provider", err.Error()))
 				sessionSPErr = err
 			} else {
-				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp, controllerRunning))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
 				sessionSP = sp

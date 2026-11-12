@@ -540,10 +540,11 @@ func agentSuspendedByRuntimeState(cfg *config.City, cityPath string, st suspensi
 // session. On-demand sessions and agent templates without a named session
 // have no session by design and are not targets (GH#5742).
 type AgentSessionsCheck struct {
-	cfg             *config.City
-	cityName        string
-	sessionTemplate string
-	sp              runtime.Provider
+	cfg               *config.City
+	cityName          string
+	sessionTemplate   string
+	sp                runtime.Provider
+	controllerRunning bool
 	// livenessTimeout bounds each per-agent liveness probe. Zero means use
 	// the package default; tests may override it for deterministic timeout
 	// behavior, mirroring OrderFiringCurrentCheck.historyTimeout.
@@ -551,8 +552,8 @@ type AgentSessionsCheck struct {
 }
 
 // NewAgentSessionsCheck creates a check for agent session liveness.
-func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *AgentSessionsCheck {
-	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, controllerRunning bool) *AgentSessionsCheck {
+	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, controllerRunning: controllerRunning}
 }
 
 // Name returns the check identifier.

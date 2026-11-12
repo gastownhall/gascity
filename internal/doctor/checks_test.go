@@ -887,7 +887,7 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -902,7 +902,7 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Errorf("status = %d, want Error (confirmed missing); msg = %s", r.Status, r.Message)
@@ -921,6 +921,53 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	}
 }
 
+// TestAgentSessionsCheck_ControllerNotRunningIsNotChecked pins the ga-8u9uvdn8
+// ruling: always-mode is a controller policy, so with no controller running a
+// missing always-mode session is the expected state of a stopped city. The
+// check reports OK "not checked" and never calls the provider.
+func TestAgentSessionsCheck_ControllerNotRunningIsNotChecked(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not checked: controller not running") {
+		t.Errorf("Message = %q, want it to say %q", r.Message, "not checked: controller not running")
+	}
+	if len(r.Details) != 1 || !strings.Contains(r.Details[0], "gc start") {
+		t.Errorf("Details = %v, want one line pointing at gc start", r.Details)
+	}
+	if calls := sp.SnapshotCalls(); len(calls) != 0 {
+		t.Errorf("provider calls = %v, want none when the controller is not running", calls)
+	}
+}
+
+// TestAgentSessionsCheck_ControllerRunningFixHintPointsAtReconciler pins
+// ruling item c: with a controller already running, "run gc start" is wrong
+// advice for a missing session.
+func TestAgentSessionsCheck_ControllerRunningFixHintPointsAtReconciler(t *testing.T) {
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake(), true).Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if strings.Contains(r.FixHint, "gc start") {
+		t.Errorf("FixHint = %q, must not tell a running city to gc start", r.FixHint)
+	}
+	for _, want := range []string{"gc session list", "gc trace", "mayor"} {
+		if !strings.Contains(r.FixHint, want) {
+			t.Errorf("FixHint = %q, want it to contain %q", r.FixHint, want)
+		}
+	}
+}
+
 func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	// Suspended agent has no session — that's fine.
@@ -929,7 +976,7 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 		Agents:        []config.Agent{{Name: "worker", Suspended: true}},
 		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (suspended skipped); msg = %s", r.Status, r.Message)
@@ -954,7 +1001,7 @@ func TestAgentSessionsCheck_ProbeIncompleteIsWarningWithoutFixHint(t *testing.T)
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{})
 
 	if r.Status != StatusWarning {
@@ -989,7 +1036,7 @@ func TestAgentSessionsCheck_TimeoutYieldsProbeIncomplete(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	c.livenessTimeout = 20 * time.Millisecond
 
 	r := c.Run(&CheckContext{})
@@ -1036,7 +1083,7 @@ func TestAgentSessionsCheck_SkipsRigSuspendedViaState(t *testing.T) {
 		Agents:        []config.Agent{{Name: "worker", Dir: "alpha"}},
 		NamedSessions: []config.NamedSession{{Template: "worker", Dir: "alpha", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (rig suspended via runtime state); msg = %s", r.Status, r.Message)
@@ -1063,7 +1110,7 @@ func TestAgentSessionsCheck_SkipsCitySuspendedViaState(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}}, // city-scoped: empty Dir
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, true)
 	r := c.Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (city suspended via runtime state); msg = %s", r.Status, r.Message)
@@ -1123,7 +1170,7 @@ func TestAgentSessionsCheck_OnlyAlwaysModeNamedSessionsAreTargets(t *testing.T) 
 			{Template: "worker"}, // mode omitted: defaults to on_demand
 		},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake())
+	c := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake(), true)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (no always-mode named session configured); msg = %s details = %v", r.Status, r.Message, r.Details)
@@ -1145,7 +1192,7 @@ func TestAgentSessionsCheck_AlwaysNamedSessionProbedByNamedRuntimeName(t *testin
 		if err := sp.Start(context.Background(), bossName, runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+		r := NewAgentSessionsCheck(cfg, "test", "", sp, true).Run(&CheckContext{})
 		if r.Status != StatusOK {
 			t.Errorf("status = %d, want OK (named session %q is running); msg = %s", r.Status, bossName, r.Message)
 		}
@@ -1156,7 +1203,7 @@ func TestAgentSessionsCheck_AlwaysNamedSessionProbedByNamedRuntimeName(t *testin
 		if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+		r := NewAgentSessionsCheck(cfg, "test", "", sp, true).Run(&CheckContext{})
 		if r.Status != StatusError {
 			t.Fatalf("status = %d, want Error (named session %q confirmed missing); msg = %s", r.Status, bossName, r.Message)
 		}
@@ -1186,7 +1233,7 @@ func TestAgentSessionsCheck_PathFormDirRigSuspendedViaState(t *testing.T) {
 		Agents:        []config.Agent{{Name: "worker", Dir: "rigs/alpha"}},
 		NamedSessions: []config.NamedSession{{Template: "worker", Dir: "rigs/alpha", Mode: "always"}},
 	}
-	r := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake()).Run(&CheckContext{CityPath: cityDir})
+	r := NewAgentSessionsCheck(cfg, "test", "", runtime.NewFake(), true).Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (path-form Dir inside a suspended rig); msg = %s details = %v", r.Status, r.Message, r.Details)
 	}
@@ -1201,7 +1248,7 @@ func TestAgentSessionsCheck_ObservationErrorIsIncomplete(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{})
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, true).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning (observation error is not a confirmed answer); msg = %s", r.Status, r.Message)
 	}
@@ -1224,7 +1271,7 @@ func TestAgentSessionsCheck_UnreadableSuspensionStateIsSurfaced(t *testing.T) {
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
 	}
-	r := NewAgentSessionsCheck(cfg, "test", "", sp).Run(&CheckContext{CityPath: cityDir})
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, true).Run(&CheckContext{CityPath: cityDir})
 	if r.Status == StatusOK {
 		t.Errorf("status = OK, want Warning or worse: the suspension-state overlay could not be read; msg = %s", r.Message)
 	}
