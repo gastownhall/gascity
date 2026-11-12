@@ -668,10 +668,8 @@ func runMCPMailOSUpgradeDrift(t *testing.T, dockerfile string, extraEnv ...strin
 func TestMCPMailOSUpgradeDriftCheck(t *testing.T) {
 	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
 	pkgs := mcpMailUpgradePackages(t, dockerfile)
-	if !slices.Contains(pkgs, "gzip") {
-		t.Fatal("test expects gzip in the --only-upgrade list as the package to drop")
-	}
-	without := slices.DeleteFunc(slices.Clone(pkgs), func(p string) bool { return p == "gzip" })
+	droppedPackage := pkgs[0]
+	without := pkgs[1:]
 	pending := func(names ...string) string {
 		path := filepath.Join(t.TempDir(), "pending")
 		writeTestFile(t, path, strings.Join(names, "\n")+"\n")
@@ -688,8 +686,8 @@ func TestMCPMailOSUpgradeDriftCheck(t *testing.T) {
 	}{
 		{name: "in sync", env: pending(pkgs...), wantNoOutput: true},
 		{name: "pending upgrade not listed", env: pending(append(slices.Clone(pkgs), "libnewvuln1")...), wantFail: true, wantMissing: "libnewvuln1"},
-		{name: "listed package with nothing pending", env: pending(without...), wantFail: true, wantStale: "gzip"},
-		{name: "both directions", env: pending(append(slices.Clone(without), "libnewvuln1")...), wantFail: true, wantMissing: "libnewvuln1", wantStale: "gzip"},
+		{name: "listed package with nothing pending", env: pending(without...), wantFail: true, wantStale: droppedPackage},
+		{name: "both directions", env: pending(append(slices.Clone(without), "libnewvuln1")...), wantFail: true, wantMissing: "libnewvuln1", wantStale: droppedPackage},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
