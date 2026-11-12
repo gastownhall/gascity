@@ -79,18 +79,22 @@ func newRefusedScopeEnv(t *testing.T, shape string) refusedScopeEnv {
 	}
 	realGC := reexecGCTestBinaryForTests(t)
 	// write-provider and write-managed die in the script when the helper fails,
-	// so the fake writes the file they were asked for; every other helper op is
+	// so the fake writes the file they were asked for (recording --running); every other helper op is
 	// "unavailable" and the script falls back to its native code.
 	fakeGC := "#!/bin/sh\n" +
 		"case \"$1 $2\" in\n" +
-		"  'dolt-state admit-start'|'dolt-state start-managed'|'dolt-state recover-managed'|'dolt-state runtime-layout') exec " + shellQuote(realGC) + " \"$@\" ;;\n" +
+		"  'dolt-state admit-start') [ -z \"$FAKE_GC_ADMIT\" ] || exit 0; exec " + shellQuote(realGC) + " \"$@\" ;;\n" +
+		"  'dolt-state start-managed'|'dolt-state recover-managed'|'dolt-state runtime-layout') exec " + shellQuote(realGC) + " \"$@\" ;;\n" +
 		"  'dolt-state preflight-clean') exit 0 ;;\n" +
 		"  'dolt-state write-provider'|'dolt-config write-managed')\n" +
+		"    file=; running=false\n" +
 		"    while [ \"$#\" -gt 0 ]; do\n" +
-		"      if [ \"$1\" = --file ]; then mkdir -p \"$(dirname \"$2\")\" && echo '{}' > \"$2\"; exit 0; fi\n" +
+		"      case \"$1\" in --file) file=$2 ;; --running) running=$2 ;; esac\n" +
 		"      shift\n" +
 		"    done\n" +
-		"    exit 1 ;;\n" +
+		"    [ -n \"$file\" ] || exit 1\n" +
+		"    mkdir -p \"$(dirname \"$file\")\" && printf '{\"running\":%s}\\n' \"$running\" > \"$file\"\n" +
+		"    exit 0 ;;\n" +
 		"esac\n" +
 		"exit 1\n"
 	fakeGCPath := filepath.Join(binDir, "gc-fake")
@@ -136,14 +140,24 @@ func (e refusedScopeEnv) runRefused(t *testing.T, name string, extraEnv []string
 	return exitErr.ExitCode(), out.String()
 }
 
-// requireNothingLaunched fails when the refused scope shows any sign that a
-// managed Dolt was started in it: a sql-server launch, or a config, lock, log
-// or provider-state file a launch writes.
-func (e refusedScopeEnv) requireNothingLaunched(t *testing.T) {
+// requireNoSpawn fails when a dolt sql-server was launched.
+func (e refusedScopeEnv) requireNoSpawn(t *testing.T) {
 	t.Helper()
 	if data, err := os.ReadFile(e.marker); err == nil {
 		t.Errorf("a dolt sql-server was launched in the refused scope (%d launch(es))", strings.Count(string(data), "SPAWN"))
 	}
+}
+
+// requireNothingLaunched fails when the refused scope shows any sign that a
+// managed Dolt was started in it: a sql-server launch, or a config, lock, log
+// or provider-state file a launch writes. With stoppedStateOK a provider-state
+// file that records the server as not running is allowed: restart runs the
+// stop operation first, which is admitted in every scope so that a server
+// started where it should not have been can still be stopped, and it records
+// "not running" even when nothing ran.
+func (e refusedScopeEnv) requireNothingLaunched(t *testing.T, stoppedStateOK bool) {
+	t.Helper()
+	e.requireNoSpawn(t)
 	launchFiles := map[string]bool{
 		"dolt-config.yaml":         true,
 		"dolt.lock":                true,
@@ -156,6 +170,11 @@ func (e refusedScopeEnv) requireNothingLaunched(t *testing.T) {
 			return err
 		}
 		if !d.IsDir() && launchFiles[d.Name()] {
+			if stoppedStateOK && d.Name() == "dolt-provider-state.json" {
+				if data, readErr := os.ReadFile(path); readErr == nil && strings.Contains(string(data), `"running":false`) {
+					return nil
+				}
+			}
 			t.Errorf("refused scope holds %s, a file only a launched managed Dolt writes", path)
 		}
 		return nil
@@ -177,7 +196,7 @@ func TestGcBeadsBdRefusesManagedStartInRefusedScopes(t *testing.T) {
 			if code == 0 {
 				t.Errorf("gc-beads-bd.sh start exited 0 in a %s scope, want a refusal\n%s", shape, out)
 			}
-			env.requireNothingLaunched(t)
+			env.requireNothingLaunched(t, false)
 		})
 		t.Run(shape+"/restart", func(t *testing.T) {
 			env := newRefusedScopeEnv(t, shape)
@@ -186,7 +205,24 @@ func TestGcBeadsBdRefusesManagedStartInRefusedScopes(t *testing.T) {
 			if code == 0 {
 				t.Errorf("gc dolt restart exited 0 in a %s scope, want a refusal\n%s", shape, out)
 			}
-			env.requireNothingLaunched(t)
+			env.requireNothingLaunched(t, true)
+		})
+		// The start-managed refusal is fatal on its own too: admit-start can pass
+		// and start-managed still refuse, because it checks again under the
+		// lifecycle lock.
+		t.Run(shape+"/start-managed-refusal-alone", func(t *testing.T) {
+			env := newRefusedScopeEnv(t, shape)
+			code, out := env.runRefused(t, env.script, []string{"FAKE_GC_ADMIT=1"}, "start")
+			if code == 0 {
+				t.Errorf("gc-beads-bd.sh start exited 0 after start-managed refused in a %s scope\n%s", shape, out)
+			}
+			if !strings.Contains(out, "refused") {
+				t.Errorf("gc-beads-bd.sh start output = %q, want it to say gc refused", out)
+			}
+			// The start lock is taken before the helper is asked, so only the
+			// launch itself is checked here; the admit step above it is what keeps
+			// the scope untouched.
+			env.requireNoSpawn(t)
 		})
 		// recover is closed today only because recover-managed prints its zero
 		// report before it returns the refusal, so the script reads a report and
@@ -197,7 +233,7 @@ func TestGcBeadsBdRefusesManagedStartInRefusedScopes(t *testing.T) {
 			if code == 0 {
 				t.Errorf("gc-beads-bd.sh recover exited 0 in a %s scope, want a refusal\n%s", shape, out)
 			}
-			env.requireNothingLaunched(t)
+			env.requireNothingLaunched(t, false)
 		})
 	}
 }

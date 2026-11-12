@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -43,16 +44,46 @@ func managedDoltRedirectRefusal(cityPath string) error {
 	return nil
 }
 
+// managedDoltRefusedExitCode is the process exit code of a dolt-state command
+// that refused to start or recover a managed Dolt in a scope that cannot own
+// one. Every other failure of those commands exits 1, as does a gc that lacks
+// the command; the lifecycle script reads 3 as a verdict and never as a missing
+// helper, and so does not fall back to launching dolt itself.
+const managedDoltRefusedExitCode = 3
+
+// managedDoltRefusal marks an admission refusal, as opposed to an I/O or lock
+// failure met after admission, so the command that reports it can give it
+// managedDoltRefusedExitCode.
+type managedDoltRefusal struct{ err error }
+
+func (e *managedDoltRefusal) Error() string { return e.err.Error() }
+func (e *managedDoltRefusal) Unwrap() error { return e.err }
+
+// managedDoltFailureExit maps a failed start, recover or admit command to its
+// process exit: managedDoltRefusedExitCode for an admission refusal, 1 for
+// anything else.
+func managedDoltFailureExit(err error) error {
+	var refusal *managedDoltRefusal
+	if errors.As(err, &refusal) {
+		return exitForCode(managedDoltRefusedExitCode)
+	}
+	return errExit
+}
+
 // admitManagedDoltStart is the gate for operations that start or recover a
 // managed server. On top of admitLegacyManagedDoltLifecycle it requires the
 // scope to be able to own a store at all (managedDoltScopeRefusal). Inspection,
 // probe, wait and stop stay on the plain admission, so a server that was
 // already started in a scope that cannot own it can still be found and stopped.
+// A refusal is a *managedDoltRefusal.
 func admitManagedDoltStart(cityPath string) error {
 	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
-		return err
+		return &managedDoltRefusal{err: err}
 	}
-	return managedDoltScopeRefusal(cityPath)
+	if err := managedDoltScopeRefusal(cityPath); err != nil {
+		return &managedDoltRefusal{err: err}
+	}
+	return nil
 }
 
 // admitLegacyManagedDoltLifecycle rejects a legacy GC lifecycle operation

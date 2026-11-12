@@ -428,6 +428,23 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = stopManaged.MarkFlagRequired("city")
 	cmd.AddCommand(stopManaged)
 
+	admitStart := &cobra.Command{
+		Use:    "admit-start",
+		Short:  "Check that a city's scope may start a managed Dolt",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitManagedDoltStart(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state admit-start: %v\n", err) //nolint:errcheck
+				return managedDoltFailureExit(err)
+			}
+			return nil
+		},
+	}
+	admitStart.Flags().StringVar(&cityPath, "city", "", "city root")
+	_ = admitStart.MarkFlagRequired("city")
+	cmd.AddCommand(admitStart)
+
 	startManaged := &cobra.Command{
 		Use:    "start-managed",
 		Short:  "Start the managed Dolt process for a city",
@@ -436,7 +453,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if guardErr := admitManagedDoltStart(cityPath); guardErr != nil {
 				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
-				return errExit
+				return managedDoltFailureExit(guardErr)
 			}
 			lock, _, lockErr := openManagedDoltLifecycleLock(cityPath)
 			if lockErr != nil {
@@ -455,7 +472,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			defer releaseManagedDoltLifecycleLock(lock)
 			if guardErr := admitManagedDoltStart(cityPath); guardErr != nil {
 				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
-				return errExit
+				return managedDoltFailureExit(guardErr)
 			}
 			report, err := startManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltStartFields(report) {
@@ -496,7 +513,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state recover-managed: %v\n", err) //nolint:errcheck
-				return errExit
+				return managedDoltFailureExit(err)
 			}
 			return nil
 		},

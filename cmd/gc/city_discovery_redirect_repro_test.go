@@ -7,16 +7,12 @@ import (
 	"testing"
 )
 
-// Repro for ga-bkzobh / ga-2o0h0c: a git worktree of the city repo carries the
+// Tests for ga-bkzobh / ga-2o0h0c: a git worktree of the city repo carries the
 // tracked city.toml at its root, and worktree-setup.sh writes a .beads/ holding
 // only a redirect to the real city's store. To gc that directory looks like a
-// complete city -- city.toml plus a .beads -- so findCity stops there, and the
-// managed-dolt layer used to treat it as a scope that owns its own store and
-// start a private, empty Dolt server for it.
-//
-// Measured on this fleet: pid 181466, alive 12 days on port 28424, data dir 8K,
-// SHOW DATABASES returning only information_schema and mysql. Four such starts
-// since 2026-08-04.
+// complete city -- city.toml plus a .beads -- so findCity stops there. It does
+// not own its store, so the managed-dolt layer must not start a Dolt server for
+// it, and a directory with a leaked .gc but no city.toml is not a city at all.
 //
 // The binding assertions are on the ownership predicate and the lifecycle
 // admission gate, not on resolveManagedDoltRuntimeLayoutStrict: the layout is a

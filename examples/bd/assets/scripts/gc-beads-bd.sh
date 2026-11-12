@@ -214,6 +214,30 @@ resolve_gc_helper_bin() {
     return 0
 }
 
+# GC_REFUSED_EXIT is the exit code gc's dolt-state start-managed,
+# recover-managed and admit-start give when the scope cannot own a managed
+# Dolt. Any other non-zero exit, and a gc that lacks the command, means "helper
+# unavailable"; this one is a verdict, and no native launch may follow it.
+GC_REFUSED_EXIT=3
+
+# admit_managed_start asks gc whether this scope may start a managed Dolt, before
+# anything is created in it, and dies with gc's reason when gc refuses. Without
+# GC_BIN there is no gc to ask and the script runs natively; gc dolt start and
+# gc dolt restart always pin GC_BIN, so only direct use of this script reaches
+# that case.
+admit_managed_start() {
+    local gc_bin reason status=0
+    gc_bin=$(resolve_gc_helper_bin)
+    [ -n "$gc_bin" ] || return 0
+    # The script runs under set -e: an exit other than 3 (a gc without the
+    # command, or one that fails for another reason) must not abort it here.
+    reason=$("$gc_bin" dolt-state admit-start --city "$GC_CITY_PATH" 2>&1 </dev/null) || status=$?
+    if [ "$status" -eq "$GC_REFUSED_EXIT" ]; then
+        die "$reason"
+    fi
+    return 0
+}
+
 is_doltlite_backend() {
     [ "$BEADS_BACKEND" = "doltlite" ]
 }
@@ -2480,6 +2504,7 @@ load_start_managed_from_gc() {
     GC_START_MANAGED_USED="true"
     output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 9>&- </dev/null 2>/dev/null)
     status=$?
+    [ "$status" -ne "$GC_REFUSED_EXIT" ] || die "gc refused to start a managed dolt in $GC_CITY_PATH (run: gc dolt-state admit-start --city $GC_CITY_PATH)"
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             ready)
@@ -2635,6 +2660,7 @@ load_recover_managed_from_gc() {
     GC_RECOVER_MANAGED_USED="true"
     output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
     status=$?
+    [ "$status" -ne "$GC_REFUSED_EXIT" ] || die "gc refused to recover a managed dolt in $GC_CITY_PATH (run: gc dolt-state admit-start --city $GC_CITY_PATH)"
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             diagnosed_read_only)
@@ -3480,6 +3506,8 @@ op_start() {
         # Remote server — nothing to start locally.
         exit 2
     fi
+
+    admit_managed_start
 
     local gc_helper_bin
     gc_helper_bin=$(resolve_gc_helper_bin)
@@ -4861,6 +4889,8 @@ op_recover() {
     if is_remote; then
         die "recovery not supported for remote dolt servers"
     fi
+
+    admit_managed_start
 
     # Skip auto-recovery when dolt has been failing due to disk exhaustion.
     # Restarting dolt does not free disk space, and the recovery cycle
