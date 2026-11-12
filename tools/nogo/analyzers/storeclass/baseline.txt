@@ -50,7 +50,6 @@ cmd/gc/api_state.go	controllerState	raw-field	2
 cmd/gc/api_state.go	controllerState.BeadStore	raw-result	1
 cmd/gc/api_state.go	controllerState.BeadStores	raw-result	1
 cmd/gc/api_state.go	controllerState.CityBeadStore	raw-result	1
-cmd/gc/api_state.go	controllerState.ClassBindingHasLegacyResidents	raw-param	1
 cmd/gc/api_state.go	controllerState.ResetSessionCircuitBreaker	unwrap	1
 cmd/gc/api_state.go	controllerState.ScopedStoreLike	raw-param	1
 cmd/gc/api_state.go	controllerState.ScopedStoreLike	raw-result	1

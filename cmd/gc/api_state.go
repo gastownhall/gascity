@@ -2396,18 +2396,6 @@ func (cs *controllerState) NudgeQueue() api.NudgeQueue {
 	return openNudgeQueue(cs.cityPath, cs.Stores().Nudges()).Queue
 }
 
-// ClassBindingHasLegacyResidents replays the boot census for one binding store.
-//
-// The class handles Stores() mints wrap the routes' stores, which on the
-// controller are the CachingStores over the engines the boot census read;
-// hasLegacyResidents looks the engine up under the cache. A store this city
-// never censused, the work store included, keeps its probe.
-func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.storageRoutes.hasLegacyResidents(store)
-}
-
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()

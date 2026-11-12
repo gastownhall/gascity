@@ -222,7 +222,7 @@ func AllRulesBut(rs ...Rule) []Rule {
 // one tag set it cannot name (rules_go hands nogo no ignored files), so it
 // cannot tell a tagged entry's file from a stale one and does not report it;
 // the generator, which loads every tag variant, refuses a tagged entry its
-// variant compiles no file for.
+// variant compiles no file for, or one the untagged build compiles too.
 type Allow struct {
 	Package string
 	File    string

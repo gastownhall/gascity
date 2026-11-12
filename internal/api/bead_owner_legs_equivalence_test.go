@@ -41,6 +41,13 @@ var t7eVariants = map[string]t7eVariant{
 		fs.stores["zz"] = fx.tops["city"]
 		fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "zz", Path: "/nonexistent/zz"}, config.Rig{Name: "a0", Path: "/nonexistent/a0"})
 	},
+	// The city store's reads fail: the ready federation reports it under the
+	// city leg's label and serves the rest.
+	"failing city": func(_ *testing.T, fx t7dFixture, fs *fakeState) {
+		failing := t7eFailingStore{&t7dRecordingStore{Store: fx.mems["city"], name: "city-failing", log: fx.log}}
+		fx.tops["city-failing"] = failing
+		fs.cityBeadStore = failing
+	},
 	// A rig whose reads fail: the ready federation reports it and serves the
 	// rest.
 	"failing rig": func(_ *testing.T, fx t7dFixture, fs *fakeState) {
@@ -106,6 +113,24 @@ func t7eRecord(b beads.Bead, owned bool) beads.Bead {
 		meta[beadmeta.RootStoreRefMetadataKey] = b.Metadata[beadmeta.RootStoreRefMetadataKey]
 	}
 	return beads.Bead{ID: b.ID, Type: "task", Metadata: meta}
+}
+
+// t7eGateCall runs one close-gate check with the reachability oracle stubbed
+// to answer false and record each repository it was asked about, and renders
+// the error, the dirs asked and the gate's log: a gate that asked the wrong
+// checkout differs even where both answers are "not reachable".
+func t7eGateCall(t *testing.T, gate func() error) string {
+	t.Helper()
+	var asked []string
+	original := workRecordCommitReachable
+	workRecordCommitReachable = func(_ context.Context, repoDir, _, _ string) bool {
+		asked = append(asked, repoDir)
+		return false
+	}
+	defer func() { workRecordCommitReachable = original }()
+	logged := captureWorkRecordGateLog(t)
+	err := gate()
+	return fmt.Sprintf("%v | asked %q | %s", err, asked, logged)
 }
 
 // t7eGraph renders a bead graph with its beads and edges in id order: a
@@ -226,18 +251,18 @@ func t7eOps(home string) []t7dOp {
 						if miss != "" {
 							return miss
 						}
-						logged := captureWorkRecordGateLog(t)
-						err := frozenGateWorkRecordClose(t.Context(), New(fx.state), id, store, t7eRecord(b, owned), t7eShipped)
-						return fmt.Sprintf("%v | %s", err, logged)
+						return t7eGateCall(t, func() error {
+							return frozenGateWorkRecordClose(t.Context(), New(fx.state), id, store, t7eRecord(b, owned), t7eShipped)
+						})
 					},
 					live: func(t *testing.T, fx t7dFixture) string {
 						store, b, miss := owner(fx, id)
 						if miss != "" {
 							return miss
 						}
-						logged := captureWorkRecordGateLog(t)
-						err := New(fx.state).gateWorkRecordClose(t.Context(), id, store, t7eRecord(b, owned), t7eShipped)
-						return fmt.Sprintf("%v | %s", err, logged)
+						return t7eGateCall(t, func() error {
+							return New(fx.state).gateWorkRecordClose(t.Context(), id, store, t7eRecord(b, owned), t7eShipped)
+						})
 					},
 				},
 			)
@@ -248,10 +273,10 @@ func t7eOps(home string) []t7dOp {
 
 // t7eNormalize is an op's log as the table compares it. The ready legs' own
 // reads (Ready) keep their order; the cross-store ready gate's blocker reads
-// (DepList, Get) follow map order and its per-request memo, on both sides,
-// so they are compared as the set of stores, operations and verdicts they
-// reached. A graph walk's frontier is the order its last List served, map
-// order over a CachingStore, so its ids are compared sorted.
+// (DepList, Get) follow map order on both sides, so they are compared as a
+// set of whole entries: which store was asked about which id, how, under
+// which verdict. A graph walk's frontier is the order its last List served,
+// map order over a CachingStore, so its ids are compared sorted.
 func t7eNormalize(op string, log []string) []string {
 	out := make([]string, 0, len(log))
 	var gate []string
@@ -265,7 +290,7 @@ func t7eNormalize(op string, log []string) []string {
 	}
 	if len(gate) > 0 {
 		out = append(out, "-- the ready gate's reads --")
-		out = append(out, t7dOpSet(gate)...)
+		out = append(out, slices.Compact(slices.Sorted(slices.Values(gate)))...)
 	}
 	return out
 }
@@ -440,5 +465,46 @@ func TestBeadReadyWithoutACityStore(t *testing.T) {
 	want := t7eReady(frozenHumaHandleBeadReady(t.Context(), New(state), &BeadReadyInput{}))
 	if got != want || !strings.HasPrefix(got, "[al-1] total=1 partial=false") {
 		t.Errorf("ready without a city store = %s, frozen %s; want alpha's row alone, not partial", got, want)
+	}
+}
+
+// TestBeadReadyTakesTheGraphBindingsVerdictOnItsOwnNamespace pins the graph
+// leg's reserved prefixes (graphBindingPrefixes) on the ready federation: a
+// row the stranding graph binding serves, blocked by a closed target in the
+// binding's own gcg namespace, is settled by the binding's verdict, so the
+// gate asks no work store about that target. Without the prefixes every work
+// leg is read for a copy no work store can hold.
+func TestBeadReadyTakesTheGraphBindingsVerdictOnItsOwnNamespace(t *testing.T) {
+	t7dGateOff(t)
+	binding := &beads.MemStore{HonorExplicitIDs: true, IDPrefix: "gcg"}
+	for _, b := range []beads.Bead{{ID: "gcg-1", Title: "done step", Type: "task"}, {ID: "gcg-2", Title: "next step", Type: "task"}} {
+		if _, err := binding.Create(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := binding.Close("gcg-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.DepAdd("gcg-2", "gcg-1", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	log := &[]string{}
+	city := &t7dRecordingStore{Store: &beads.MemStore{HonorExplicitIDs: true, IDPrefix: "tc"}, name: "city", log: log}
+	alpha := &t7dRecordingStore{Store: &beads.MemStore{HonorExplicitIDs: true, IDPrefix: "al"}, name: "alpha", log: log}
+	state := newFakeState(t)
+	state.cityBeadStore, state.graphBeadStore = city, binding
+	state.stores = map[string]beads.Store{"alpha": alpha}
+
+	out, err := New(state).humaHandleBeadReady(t.Context(), &BeadReadyInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := t7eIDsOf(out.Body.Items); !slices.Equal(got, []string{"gcg-2"}) {
+		t.Fatalf("ready = %v, want [gcg-2]", got)
+	}
+	for _, entry := range *log {
+		if strings.Contains(entry, "gcg-1") {
+			t.Errorf("the gate read a work store about gcg-1, a target in the graph binding's own namespace: %s", entry)
+		}
 	}
 }

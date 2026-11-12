@@ -89,18 +89,9 @@ func run(repo string, write, initial bool, out io.Writer) error {
 		return err
 	}
 	dir := filepath.Join(repo, "tools", "nogo", "analyzers", "storeclass")
-	tl, pkgs, compiled, err := census(repo)
+	tl, err := checkedCensus(repo, storeclass.Default.Allow, out)
 	if err != nil {
 		return err
-	}
-	if _, err := fmt.Fprintf(out, "%s\nallowlisted files: %d findings in %d rows (allowed.txt)\n", summary(tl.rows), countFindings(tl.allowed), len(tl.allowed)); err != nil {
-		return err
-	}
-	if stale := staleAllows(storeclass.Default.Allow, pkgs); len(stale) > 0 {
-		return fmt.Errorf("the allowlist (config.go) names packages the module does not have; drop them:\n  %s", strings.Join(stale, "\n  "))
-	}
-	if stale := staleTaggedAllows(storeclass.Default.Allow, compiled); len(stale) > 0 {
-		return fmt.Errorf("the allowlist (config.go) names tagged files no build of their tag compiles; drop or fix them:\n  %s", strings.Join(stale, "\n  "))
 	}
 
 	ceilingPath := filepath.Join(dir, "ceiling.txt")
@@ -134,6 +125,27 @@ func run(repo string, write, initial bool, out io.Writer) error {
 	}
 	_, err = fmt.Fprintf(out, "wrote %s, %s and %s\n", files[0].path, files[1].path, files[2].path)
 	return err
+}
+
+// checkedCensus is census over repo, printed to out, with allow (the
+// allowlist) judged against what it loaded: an entry for a package the module
+// does not have, or a tagged entry (Allow.Tag) its tag's build compiles no
+// file for, is an error.
+func checkedCensus(repo string, allow []storeclass.Allow, out io.Writer) (tally, error) {
+	tl, pkgs, compiled, err := census(repo)
+	if err != nil {
+		return tally{}, err
+	}
+	if _, err := fmt.Fprintf(out, "%s\nallowlisted files: %d findings in %d rows (allowed.txt)\n", summary(tl.rows), countFindings(tl.allowed), len(tl.allowed)); err != nil {
+		return tally{}, err
+	}
+	if stale := staleAllows(allow, pkgs); len(stale) > 0 {
+		return tally{}, fmt.Errorf("the allowlist (config.go) names packages the module does not have; drop them:\n  %s", strings.Join(stale, "\n  "))
+	}
+	if stale := staleTaggedAllows(allow, compiled); len(stale) > 0 {
+		return tally{}, fmt.Errorf("the allowlist (config.go) names tagged files no build of their tag alone compiles; drop the tag or the entry:\n  %s", strings.Join(stale, "\n  "))
+	}
+	return tl, nil
 }
 
 // censusFile is one file the generator writes, and its text from the census.
@@ -249,26 +261,31 @@ func staleAllows(allow []storeclass.Allow, pkgs map[string]bool) []string {
 }
 
 // staleTaggedAllows is each tagged allowlist entry (Allow.Tag) that matches
-// no file the build of its tag compiles in its package, as
-// "package/file (tag)", sorted. files is census's: per tag, the
-// module-relative files compiled. A nogo pass cannot judge such an entry, so
-// this is where it is judged.
+// no file the build of its tag compiles in its package, or a file the
+// untagged build compiles too (the untagged nogo pass judges that one, so
+// the tag only hides a stale entry), as "package/file (tag)", sorted. files
+// is census's: per tag ("" untagged), the module-relative files compiled. A
+// nogo pass cannot judge a tagged entry, so this is where it is judged.
 func staleTaggedAllows(allow []storeclass.Allow, files map[string]map[string]bool) []string {
 	var stale []string
+	matches := func(a storeclass.Allow, tag string) bool {
+		for f := range files[tag] {
+			dir, base := path.Split(f)
+			if ok, err := path.Match(a.File, base); err == nil && ok && strings.TrimSuffix(dir, "/") == a.Package {
+				return true
+			}
+		}
+		return false
+	}
 	for _, a := range allow {
 		if a.Tag == "" || a.File == "" {
 			continue
 		}
-		found := false
-		for f := range files[a.Tag] {
-			dir, base := path.Split(f)
-			if ok, err := path.Match(a.File, base); err == nil && ok && strings.TrimSuffix(dir, "/") == a.Package {
-				found = true
-				break
-			}
-		}
-		if !found {
+		switch {
+		case !matches(a, a.Tag):
 			stale = append(stale, fmt.Sprintf("%s/%s (%s)", a.Package, a.File, a.Tag))
+		case matches(a, ""):
+			stale = append(stale, fmt.Sprintf("%s/%s (%s; the untagged build compiles it too)", a.Package, a.File, a.Tag))
 		}
 	}
 	sort.Strings(stale)

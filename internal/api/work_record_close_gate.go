@@ -218,12 +218,17 @@ func (s *Server) workRecordRepoDir(store beads.ResidentStore, bead beads.Bead) s
 // predates the residency census, so their closes are unchanged.
 //
 // The store is matched by asking each CONFIGURED rig whether it is the one that
-// answered: whether its work handle in one Stores() epoch is that store
-// (beads.SameStore, so the by-id owner over a rig's store is that rig, and a
-// rig the epoch holds no store for matches nothing), rather than by enumerating
-// the loaded stores: an enumeration is a list of work stores, which is blind
-// to a binding by construction, and the question is not "which stores exist"
-// but "does the store that answered belong to a rig with a checkout".
+// answered: whether its work handle is that store (beads.SameStore, so the
+// by-id owner over a rig's store is that rig, and a rig the epoch holds no
+// store for matches nothing), rather than by enumerating the loaded stores: an
+// enumeration is a list of work stores, which is blind to a binding by
+// construction, and the question is not "which stores exist" but "does the
+// store that answered belong to a rig with a checkout".
+//
+// Every rig is asked of one Stores() epoch, read here: one epoch per gate
+// check. The owner was resolved under resolveBeadOwner's own read, so a reload
+// between the two can still judge the bead against the city checkout, as it
+// could before; one epoch per request is T7e.2's.
 //
 // A store no configured rig claims is the city store or a class binding, and
 // both answered to the city checkout before this rule existed. buildStores keys
