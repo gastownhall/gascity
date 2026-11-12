@@ -1147,3 +1147,52 @@ func TestUnreadableEnvironHostHelperDirectPermissionError(t *testing.T) {
 		})
 	}
 }
+
+// TestUnreadableEnvironUserManagerScopeUnderIncarnationBound (ga-zpcphq): a
+// bounded exact-incarnation scan fails closed on every unreadable process it
+// cannot prove older than the incarnation. The manager-scope helper is newer
+// than the incarnation, so the age exception cannot excuse it; the structural
+// exemption must, without the helper predating anything — and an unscoped
+// unreadable process of the same age still fails closed, proving the bound
+// did not wave every unreadable entry through.
+func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ stays readable")
+	}
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	saved := scanNow
+	scanNow = func() time.Time { return readAt }
+	t.Cleanup(func() { scanNow = saved })
+	boot := readAt.Add(-2 * time.Hour)
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	root := t.TempDir()
+	writeFakeBootTime(t, root, boot)
+	// Both unreadable processes started an hour before the read, thirty
+	// minutes after the incarnation began: too new for the age exception.
+	const helperPID = 2642
+	buildFakeProcUnder(t, root, helperPID, 1, "(sd-pam)", nil)
+	helperDir := filepath.Join(root, strconv.Itoa(helperPID))
+	writeFakeProcessStat(t, helperDir, helperPID, 1, 3600*100)
+	writeFakeProcessCgroup(t, helperDir, scope)
+	if err := os.Chmod(filepath.Join(helperDir, "environ"), 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+	const runtimePID = 3700376
+	buildFakeProcUnder(t, root, runtimePID, 1, "codex", nil)
+	runtimeDir := filepath.Join(root, strconv.Itoa(runtimePID))
+	writeFakeProcessStat(t, runtimeDir, runtimePID, 1, 3600*100)
+	writeFakeProcessCgroup(t, runtimeDir, "/user.slice/user-"+strconv.Itoa(euid)+".slice/session-3.scope")
+	if err := os.Chmod(filepath.Join(runtimeDir, "environ"), 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+
+	got, err := scanWithRootSince(root, "ga-target", readAt.Add(-90*time.Minute))
+	if err == nil {
+		t.Fatalf("scan = %v, nil error; want the unscoped process to fail closed", got)
+	}
+	if pids := entryErrorPIDs(err); len(pids) != 1 || pids[0] != runtimePID {
+		t.Fatalf("entry error pids = %v (%s); want only the unscoped process %d", pids, SummarizeScanError(err), runtimePID)
+	}
+}
