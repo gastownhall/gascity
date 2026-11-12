@@ -485,47 +485,60 @@ func resolveLivenessTimeout(d time.Duration) time.Duration {
 	return sessionLivenessProbeTimeout
 }
 
-// loadSuspensionStateForCheck best-effort loads the runtime suspension-state
-// overlay for cityPath. An empty cityPath (as in most unit tests) or a load
-// error yields the zero State, under which every EffectiveXSuspended call
-// defers to the authored suspended_on_start default — never blocks a check.
-func loadSuspensionStateForCheck(cityPath string) suspensionstate.State {
-	var st suspensionstate.State
-	if cityPath != "" {
-		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+// loadSuspensionStateForCheck loads the runtime suspension-state overlay for
+// cityPath. An empty cityPath (as in most unit tests) or a missing file yields
+// the zero State with a nil error, under which every EffectiveXSuspended call
+// defers to the authored suspended_on_start default. An unreadable overlay
+// also yields the zero State, but the error is returned so the caller can say
+// that runtime suspensions were not applied rather than silently ignoring it.
+func loadSuspensionStateForCheck(cityPath string) (suspensionstate.State, error) {
+	if cityPath == "" {
+		return suspensionstate.State{}, nil
 	}
-	return st
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return suspensionstate.State{}, fmt.Errorf("reading suspension state %s: %w", citylayout.SuspensionStateFile(cityPath), err)
+	}
+	return st, nil
 }
 
-// resolveAgentRig finds the rig owning dir (an agent's Dir), or nil for a
-// city-scoped agent (empty Dir) or an unrecognized rig name.
-func resolveAgentRig(cfg *config.City, dir string) *config.Rig {
-	if cfg == nil || dir == "" {
-		return nil
+// noteSuspensionStateError records an unreadable suspension-state overlay on
+// r: a Details line, and at least a warning, because a check that could not
+// apply the runtime suspensions cannot claim a clean result.
+func noteSuspensionStateError(r *CheckResult, err error) {
+	if err == nil {
+		return
 	}
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == dir {
-			return &cfg.Rigs[i]
-		}
+	r.Details = append(r.Details, fmt.Sprintf("suspension state unreadable, runtime suspensions not applied: %v", err))
+	if r.Status == StatusOK {
+		r.Status = StatusWarning
+		r.Message += " (suspension state unreadable)"
 	}
-	return nil
 }
 
 // agentSuspendedByRuntimeState reports whether a is suspended via the
 // runtime suspension-state overlay (city- or rig-level; agent-level state is
 // a reserved, unwired schema slot — see internal/suspensionstate). This is
 // additional to, not a replacement for, the authored config.Agent.Suspended
-// flag.
-func agentSuspendedByRuntimeState(cfg *config.City, st suspensionstate.State, a config.Agent) bool {
-	if rig := resolveAgentRig(cfg, a.Dir); rig != nil {
-		if suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) {
-			return true
+// flag. The owning rig is resolved with workdir.ConfiguredRigName, which also
+// matches a path-form Dir against the rig's path, as the controller does.
+func agentSuspendedByRuntimeState(cfg *config.City, cityPath string, st suspensionstate.State, a config.Agent) bool {
+	if rigName := workdir.ConfiguredRigName(cityPath, a, cfg.Rigs); rigName != "" {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				if suspensionstate.EffectiveRigSuspended(st, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart()) {
+					return true
+				}
+				break
+			}
 		}
 	}
 	return suspensionstate.EffectiveCitySuspended(st, cfg.Workspace.EffectiveSuspendedOnStart())
 }
 
-// AgentSessionsCheck verifies non-suspended agents have running sessions.
+// AgentSessionsCheck verifies each always-mode named session has a running
+// session. On-demand sessions and agent templates without a named session
+// have no session by design and are not targets (GH#5742).
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
@@ -545,38 +558,58 @@ func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, s
 // Name returns the check identifier.
 func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 
-// Run checks that each non-suspended agent has a running session. Liveness
-// is observed via runtime.ObserveLivenessBounded so a stuck or unavailable
-// probe resolves to probe-incomplete (StatusWarning) rather than being
-// conflated with a confirmed-missing session (StatusError).
+// Run checks that each always-mode named session that is not suspended has a
+// running session. Liveness is observed via runtime.ObserveLivenessBounded so
+// a stuck or unavailable probe, or an observation error, resolves to
+// probe-incomplete (StatusWarning) rather than being conflated with a
+// confirmed-missing session (StatusError).
 func (c *AgentSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	st := loadSuspensionStateForCheck(ctx.CityPath)
+	st, stateErr := loadSuspensionStateForCheck(ctx.CityPath)
 	timeout := resolveLivenessTimeout(c.livenessTimeout)
 	var missing, incomplete []string
-	for _, a := range c.cfg.Agents {
-		if a.Suspended || agentSuspendedByRuntimeState(c.cfg, st, a) {
+	targets := 0
+	for i := range c.cfg.NamedSessions {
+		ns := &c.cfg.NamedSessions[i]
+		if ns.ModeOrDefault() != "always" {
 			continue
 		}
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		liveness, obs, _ := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, a.ProcessNames, timeout)
+		// The backing agent carries the authored suspension and the process
+		// names; when it cannot be resolved, Dir still locates the owning rig.
+		backing := config.Agent{Dir: ns.Dir}
+		if a := config.FindAgent(c.cfg, ns.TemplateQualifiedName()); a != nil {
+			backing = *a
+		}
+		if backing.Suspended || agentSuspendedByRuntimeState(c.cfg, ctx.CityPath, st, backing) {
+			continue
+		}
+		targets++
+		name := ns.QualifiedName()
+		sn := agent.SessionNameFor(c.cityName, name, c.sessionTemplate)
+		liveness, obs, err := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, backing.ProcessNames, timeout)
 		switch {
-		case obs == runtime.ObservationIncomplete:
-			incomplete = append(incomplete, a.QualifiedName())
+		case obs == runtime.ObservationIncomplete || err != nil:
+			incomplete = append(incomplete, name)
 		case !liveness.Running:
-			missing = append(missing, a.QualifiedName())
+			missing = append(missing, name)
 		}
 	}
 	switch {
 	case len(missing) > 0:
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("%d agent(s) confirmed missing", len(missing))
+		r.Message = fmt.Sprintf("%d named session(s) confirmed missing", len(missing))
 	case len(incomplete) > 0:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("%d agent(s) with incomplete liveness observation", len(incomplete))
+		r.Message = fmt.Sprintf("%d named session(s) with incomplete liveness observation", len(incomplete))
+	case targets == 0:
+		r.Status = StatusOK
+		r.Message = "no always-mode named sessions to check"
+		noteSuspensionStateError(r, stateErr)
+		return r
 	default:
 		r.Status = StatusOK
-		r.Message = "all agent sessions running"
+		r.Message = "all always-mode named sessions running"
+		noteSuspensionStateError(r, stateErr)
 		return r
 	}
 	for _, name := range missing {
@@ -588,6 +621,7 @@ func (c *AgentSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(missing) > 0 {
 		r.FixHint = fmt.Sprintf("run gc start to reconcile sessions for: %s", strings.Join(missing, ", "))
 	}
+	noteSuspensionStateError(r, stateErr)
 	return r
 }
 
@@ -622,17 +656,17 @@ func (c *ZombieSessionsCheck) Name() string { return "zombie-sessions" }
 // than being conflated with a confirmed zombie (StatusError).
 func (c *ZombieSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	st := loadSuspensionStateForCheck(ctx.CityPath)
+	st, stateErr := loadSuspensionStateForCheck(ctx.CityPath)
 	timeout := resolveLivenessTimeout(c.livenessTimeout)
 	var zombies, incomplete []string
 	for _, a := range c.cfg.Agents {
-		if a.Suspended || len(a.ProcessNames) == 0 || agentSuspendedByRuntimeState(c.cfg, st, a) {
+		if a.Suspended || len(a.ProcessNames) == 0 || agentSuspendedByRuntimeState(c.cfg, ctx.CityPath, st, a) {
 			continue
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		liveness, obs, _ := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, a.ProcessNames, timeout)
+		liveness, obs, err := runtime.ObserveLivenessBounded(context.Background(), c.sp, sn, a.ProcessNames, timeout)
 		switch {
-		case obs == runtime.ObservationIncomplete:
+		case obs == runtime.ObservationIncomplete || err != nil:
 			incomplete = append(incomplete, sn)
 		case liveness.Running && !liveness.Alive:
 			zombies = append(zombies, sn)
@@ -648,6 +682,7 @@ func (c *ZombieSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	default:
 		r.Status = StatusOK
 		r.Message = "no zombie sessions"
+		noteSuspensionStateError(r, stateErr)
 		return r
 	}
 	for _, name := range zombies {
@@ -659,6 +694,7 @@ func (c *ZombieSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(zombies) > 0 {
 		r.FixHint = fmt.Sprintf("run gc doctor --fix to kill zombie session(s): %s", strings.Join(zombies, ", "))
 	}
+	noteSuspensionStateError(r, stateErr)
 	return r
 }
 
@@ -675,8 +711,15 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
 	}
+	// Run skips agents suspended by the runtime overlay; Fix applies the same
+	// predicate so it never stops a session Run did not report. An unreadable
+	// overlay refuses the fix rather than guessing which agents are suspended.
+	st, err := loadSuspensionStateForCheck(ctx.CityPath)
+	if err != nil {
+		return err
+	}
 	for _, a := range c.cfg.Agents {
-		if a.Suspended || len(a.ProcessNames) == 0 {
+		if a.Suspended || len(a.ProcessNames) == 0 || agentSuspendedByRuntimeState(c.cfg, ctx.CityPath, st, a) {
 			continue
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
