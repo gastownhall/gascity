@@ -59,7 +59,6 @@ schema = 2
 source = "./assets/ops"
 -- city/city.toml --
 [workspace]
-suspended_on_start = true
 
 [[rigs]]
 name = "frontend"

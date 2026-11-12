@@ -35,8 +35,7 @@ func TestDoctorJSONSuccessIsParseableJSONOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cityTOML := "[workspace]\n\n[[patches.agent]]\nname = \"core.control-dispatcher\"\nsuspended = true\n"
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeBuiltinImportsFixture(t, cityDir, "core")

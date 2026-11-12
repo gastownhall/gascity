@@ -52,11 +52,16 @@ stdout 'passed'
 
 -- city.toml.custom --
 [workspace]
-suspended_on_start = true
 
 [imports.ops]
 source = "../packs/ops"
 transitive = false
+
+# This city is never started, so its always-mode mayor named session has no
+# session to observe: suspend it so agent-sessions reports cleanly.
+[[patches.agent]]
+name = "mayor"
+suspended = true
 
 -- site.toml.custom --
 workspace_name = "testcity"
