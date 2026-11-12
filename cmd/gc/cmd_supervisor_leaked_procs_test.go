@@ -137,6 +137,52 @@ func TestClassifyLeakedTestSupervisorHonorsTempDir(t *testing.T) {
 	}
 }
 
+// TestClassifyLeakedTestSupervisorAcceptsEachSweepRoot pins every root the
+// sweep trusts, with TMPDIR pointing somewhere else entirely: the Makefile's
+// TEST_ENV defaults TMPDIR=/var/tmp, so the harness's gc-int-env-* trees live
+// under /var/tmp even when the process running the sweep has another TMPDIR.
+func TestClassifyLeakedTestSupervisorAcceptsEachSweepRoot(t *testing.T) {
+	otherTempDir := filepath.Join(t.TempDir(), "tmp")
+	tests := []struct {
+		name  string
+		argv0 string
+		want  bool
+	}{
+		{name: "/tmp root", argv0: "/tmp/gc-int-env-1/bin/gc-drift", want: true},
+		{name: "/var/tmp root", argv0: "/var/tmp/gc-int-env-1/bin/gc-drift", want: true},
+		{name: "os.TempDir root", argv0: filepath.Join(otherTempDir, "gc-int-env-1", "bin", "gc-drift"), want: true},
+		{name: "/var/tmp non-test dir", argv0: "/var/tmp/other/bin/gc", want: false},
+		{name: "/var/tmp env dir not a direct child", argv0: "/var/tmp/x/gc-int-env-1/bin/gc", want: false},
+		{name: "/var/tmp env dir itself", argv0: "/var/tmp/gc-int-env-1", want: false},
+		{name: "/var/tmp dot-dot escape", argv0: "/var/tmp/gc-int-env-1/../../home/jaword/go/bin/gc", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := leakedProc(40, tt.argv0, procPathStateDeleted, procPathStateDeleted)
+			got, reason := classifyLeakedTestSupervisor(p, otherTempDir)
+			if got != tt.want {
+				t.Fatalf("classifyLeakedTestSupervisor(%q) = %v (%q), want %v", tt.argv0, got, reason, tt.want)
+			}
+		})
+	}
+}
+
+// TestSweepLeakedTestSupervisorsReapsVarTmpLeakWhenTMPDIRDiffers is the bead's
+// symptom path end to end: a leaked supervisor under /var/tmp/gc-int-env-* is
+// signaled by a sweep whose own temp dir is not /var/tmp.
+func TestSweepLeakedTestSupervisorsReapsVarTmpLeakWhenTMPDIRDiffers(t *testing.T) {
+	leaked := leakedProc(110, "/var/tmp/gc-int-env-77/bin/gc-drift", procPathStateDeleted, procPathStateDeleted)
+	f := &leakedSweepFake{
+		discovered: []leakedSupervisorProc{leaked},
+		reread:     map[int]leakedSupervisorProc{110: leaked},
+	}
+	var stderr bytes.Buffer
+	got := sweepLeakedTestSupervisors(&stderr, f.ops(), filepath.Join(t.TempDir(), "tmp"))
+	if len(got) != 1 || got[0] != 110 {
+		t.Fatalf("sweep reaped %v, want [110]; stderr=%q", got, stderr.String())
+	}
+}
+
 type leakedSweepFake struct {
 	discovered []leakedSupervisorProc
 	reread     map[int]leakedSupervisorProc
