@@ -471,7 +471,7 @@ func (c *BinaryCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
-// --- Session checks (skipped when controller is running) ---
+// --- Session checks (registered regardless of controller state, GH#5742) ---
 
 // sessionLivenessProbeTimeout bounds a single per-agent liveness probe when
 // a check's own livenessTimeout field is unset (zero value).
@@ -539,6 +539,13 @@ func agentSuspendedByRuntimeState(cfg *config.City, cityPath string, st suspensi
 // AgentSessionsCheck verifies each always-mode named session has a running
 // session. On-demand sessions and agent templates without a named session
 // have no session by design and are not targets (GH#5742).
+//
+// Always-mode is a controller policy: only a running controller ensures the
+// session is live. controllerRunning is the doctor run's single probed
+// controller state (the value ControllerCheck reports), so with no controller
+// the check reports OK "not checked" and makes no provider call. With a
+// controller running, a confirmed-missing session is an Error and an
+// incomplete observation a Warning.
 type AgentSessionsCheck struct {
 	cfg               *config.City
 	cityName          string
@@ -566,6 +573,12 @@ func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 // confirmed-missing session (StatusError).
 func (c *AgentSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if !c.controllerRunning {
+		r.Status = StatusOK
+		r.Message = "not checked: controller not running"
+		r.Details = []string{"always-mode named sessions are started by the controller; run gc start and re-run doctor to check them"}
+		return r
+	}
 	st, stateErr := loadSuspensionStateForCheck(ctx.CityPath)
 	timeout := resolveLivenessTimeout(c.livenessTimeout)
 	var missing, incomplete []string
@@ -620,7 +633,7 @@ func (c *AgentSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Details = append(r.Details, fmt.Sprintf("%s: observation incomplete, outcome unknown", name))
 	}
 	if len(missing) > 0 {
-		r.FixHint = fmt.Sprintf("run gc start to reconcile sessions for: %s", strings.Join(missing, ", "))
+		r.FixHint = fmt.Sprintf("the controller is running but did not start: %s; inspect with gc session list and gc trace (engdocs/contributors/reconciler-debugging.md)", strings.Join(missing, ", "))
 	}
 	noteSuspensionStateError(r, stateErr)
 	return r
