@@ -390,7 +390,8 @@ const (
 	// Bumped again (ga-bzskl7f, the X6 steady perf lane): one new job,
 	// x6-steady-perf: ubuntu-latest, timeout-minutes 60, no env, no secret.
 	// Steps: checkout, setup-bazel (no secrets: the local mode), the LLVM
-	// archive cache, setup-go (`cache: false`), one step that links
+	// archive cache, setup-go (`cache: false`) followed by
+	// `uses: ./.github/actions/go-mod-download`, one step that links
 	// /usr/local/go and installs tmux, lsof and openssh-client, one
 	// `bazel test --config=ci --config=integration --strategy=TestRunner=local
 	// --local_test_jobs=1 --nocache_test_results --runs_per_test=5
@@ -399,7 +400,7 @@ const (
 	// writes one line per run to GITHUB_STEP_SUMMARY, and an `if: always()`
 	// pinned upload-artifact step. nightly-summary gains the job in its needs
 	// and its fail-closed results. No new trigger, permission or secret.
-	expectedNightlyExecutionHash = "c71a8626521af69f3db10aab0cb729a2b558e062a56982f7be4cf112bd9a4694"
+	expectedNightlyExecutionHash = "e68d633a57e6dff9a91026a28773a742a26ff7742f957d73b0751d60c5c030ec"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
