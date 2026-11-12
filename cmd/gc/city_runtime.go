@@ -1931,7 +1931,8 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 // gets the sessions class only when it is relocated onto a SQLite infra
 // ledger; on an unsplit city it gets nothing and never touches the work store.
 func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
+	stores := cr.cityStores()
+	if graphStore := stores.Graph(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart := time.Now()
 		// On a city that relocates the graph class, the attachment holders and
 		// the v1 poured molecule roots live on the work legs, not the binding
@@ -1941,7 +1942,13 @@ func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
 		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
 			legs = cr.workLegs()
 		}
-		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
+		// The pass's readers: the epoch's Molecule{Roots} plan over the
+		// census legs (graph alone when legs is nil).
+		roots := wispGCGraphRoots(stores, graphStore)
+		if legs != nil {
+			roots = legs.wispGCRoots(stores, graphStore)
+		}
+		purged, gcErr := cr.wg.runGC(roots, legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		payload := map[string]any{"purged": purged}
 		if legs != nil {
 			// The work arm runs on its own lane; the tick only wakes it and

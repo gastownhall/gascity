@@ -30,7 +30,7 @@ for you; the other methods require manual installation.
 | bd (Beads CLI) | Yes | 1.3.0 or newer | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
-| Go 1.27.3+ | Source only | 1.27.3 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| Go 1.27.4+ | Source only | 1.27.4 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
 Use a final Dolt 2.6.0 or newer. Gas City's managed Dolt checks reject older
@@ -180,7 +180,7 @@ using direct download. Homebrew handles this automatically.
 
 ## Build from source
 
-Requires `make` and Go 1.27.3+ (pinned in `go.mod` as 1.27.3).
+Requires `make` and Go 1.27.4+ (pinned in `go.mod` as 1.27.4).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git

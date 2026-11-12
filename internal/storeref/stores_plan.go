@@ -22,6 +22,7 @@ package storeref
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -221,8 +222,7 @@ func (s Stores) Holds(ref StoreRef) []coordclass.Class {
 }
 
 // Plan plans a T7 federation intent (Molecule, OrderRuns, Workflow, Convoy,
-// CloseOwner) over the
-// epoch's minted handles, deciding relocation by handle identity (OD-T7-5).
+// CloseOwner, WorkFederation) over the epoch's minted handles, deciding relocation by handle identity (OD-T7-5).
 // Every other intent is the plane's topology question and is refused here: a
 // plane plans it with Plan over its own topology.
 //
@@ -245,6 +245,8 @@ func (s Stores) Plan(i Intent) (ResolvedPlan, error) {
 		plan, err = s.planConvoy(in)
 	case CloseOwner:
 		plan, err = s.planCloseOwner(in)
+	case WorkFederation:
+		plan, err = s.planWorkFederation(in)
 	default:
 		return ResolvedPlan{}, fmt.Errorf("storeref: %T is the plane's topology question; plan it with Plan over the plane's topology, not Stores.Plan", i)
 	}
@@ -601,4 +603,76 @@ func (s Stores) planCloseOwner(in CloseOwner) (ResolvedPlan, error) {
 		}
 	}
 	return plan, nil
+}
+
+// planWorkFederation pins each work kind's legs (intents.go). Skipped rigs
+// drop before Plan dedupes the legs.
+func (s Stores) planWorkFederation(in WorkFederation) (ResolvedPlan, error) {
+	if in.Kind == WorkScope {
+		work, err := s.workAt(in.Scope)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		return ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{workLeg(in.Scope, work)}}, nil
+	}
+	if in.Kind != WorkList && in.Kind != WorkSweep {
+		return ResolvedPlan{}, fmt.Errorf("storeref: unknown work kind %d", in.Kind)
+	}
+	if in.SuspendedRigs != WorkReadsSuspendedRigs && in.SuspendedRigs != WorkSkipsRigs {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan needs the reader's choice about suspended rigs (WorkReadsSuspendedRigs or WorkSkipsRigs), got %d", in.Kind, in.SuspendedRigs)
+	}
+	if in.SuspendedRigs == WorkReadsSuspendedRigs && len(in.Skip) > 0 {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan that reads every rig names rigs to skip; skipping them is WorkSkipsRigs", in.Kind)
+	}
+	skip := map[StoreRef]bool{}
+	for _, ref := range in.Skip {
+		if ref == WorkRef {
+			return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan never skips the city work store", in.Kind)
+		}
+		skip[ref] = true
+	}
+	relocated := s.relocated()
+	sessions := s.leg(coordclass.ClassSessions, s.city.Sessions.Raw(), WorkRef, RoleFederationTail, PolicyFatal)
+	if in.Kind == WorkSweep && !relocated {
+		return ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{sessions}}, nil
+	}
+	city := workLeg(WorkRef, s.city.Work.Raw())
+	var legs []PlanLeg
+	if in.Kind == WorkSweep {
+		legs = append(legs, city)
+	}
+	// The rigs in name order (a holder hands them over sorted, through
+	// RigLegs; the leg order must not depend on it). WorkList lists the city
+	// among them under CityName, unless a rig of that name replaces it.
+	rigs := slices.Clone(s.rigs)
+	slices.SortStableFunc(rigs, func(a, b rigStores) int { return strings.Compare(a.name, b.name) })
+	cityListed := in.Kind == WorkSweep
+	for _, r := range rigs {
+		if r.name == in.CityName {
+			cityListed = true
+		}
+	}
+	for _, r := range rigs {
+		if !cityListed && in.CityName < r.name {
+			legs, cityListed = append(legs, city), true
+		}
+		if !skip[r.ref] {
+			legs = append(legs, workLeg(r.ref, r.work.Raw()))
+		}
+	}
+	if !cityListed {
+		legs = append(legs, city)
+	}
+	if relocated {
+		legs = append(legs, s.leg(coordclass.ClassGraph, s.city.Graph.Raw(), WorkRef, RoleFederationTail, PolicyFatal))
+		if in.Kind == WorkSweep {
+			legs = append(legs, sessions)
+		}
+	}
+	return ResolvedPlan{Mode: ModeUnion, Legs: legs}, nil
+}
+
+// workLeg is the federated work leg of the scope ref names.
+func workLeg(ref StoreRef, store beads.Store) PlanLeg {
+	return PlanLeg{Leg: Leg{Ref: ref, Store: store}, Role: RoleAuthority, OnError: PolicyFatal, Gate: beads.FederatedLegRole}
 }

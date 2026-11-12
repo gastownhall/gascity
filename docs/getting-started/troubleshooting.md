@@ -1179,7 +1179,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.27.3 or newer:
+Building from source requires `make` and Go 1.27.4 or newer:
 
 ```bash
 make --version
