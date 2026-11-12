@@ -731,3 +731,38 @@ func TestWispGCLane_TickReachingTheSlotEnqueuesOneWake(t *testing.T) {
 		})
 	}
 }
+
+// laneStagedPending reports whether a reload has staged a policy the lane has
+// not installed yet.
+func laneStagedPending(lane *wispGCLane) bool {
+	lane.stageMu.Lock()
+	defer lane.stageMu.Unlock()
+	return lane.stagedPending
+}
+
+// Kills: a failed reload that reaches the lane. A reload that never
+// validates stages nothing, and the next install leaves the deployed
+// tracker running exactly as it was.
+func TestWispGCLane_RejectedReloadStagesNothing(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	before := installedWispGC(cr)
+	if before == nil {
+		t.Fatal("the deployed config left wisp GC disabled; want a running tracker")
+	}
+	// An unparseable table header fails the reload outright (an invalid
+	// duration is only a non-strict warning, which still applies).
+	if err := os.WriteFile(tomlPath, []byte(wispGCReloadCityBase+"\n[daemon\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual)
+	if reply.Outcome == reloadOutcomeApplied {
+		t.Fatalf("reload applied an unparseable config (%+v)", reply)
+	}
+	if laneStagedPending(cr.wispGCLaneOf()) {
+		t.Error("a reload that failed validation staged a policy for the lane")
+	}
+	if after := installedWispGC(cr); after != before {
+		t.Errorf("a rejected reload changed the deployed tracker: %T(%p) -> %T(%p)", before, before, after, after)
+	}
+}
