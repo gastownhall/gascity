@@ -1346,6 +1346,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET .../extmsg/transcript` no longer returns a 500 for a missing
+  conversation field.** The OpenAPI spec marks every field on that route
+  optional, but the handler mapped every lookup error to an opaque
+  `Internal` 500 instead of distinguishing client input errors, unlike its
+  sibling bind handler in the same file. A request missing a
+  conversation-identifying field, or naming an invalid one, now gets a 400
+  naming the problem.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
