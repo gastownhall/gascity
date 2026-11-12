@@ -1062,3 +1062,106 @@ func TestOrphanCandidate(t *testing.T) {
 		}
 	}
 }
+
+// proofBoot and proofReadAt fix the clock of the user-manager scope fixtures:
+// a fixture process starting startTicks after proofBoot is read at proofReadAt.
+var (
+	proofBoot   = time.Unix(1_700_000_000, 0).UTC()
+	proofReadAt = proofBoot.Add(time.Minute)
+)
+
+// userManagerScopeOf is the unified cgroup path systemd gives uid's user
+// manager and its (sd-pam) helper.
+func userManagerScopeOf(uid int) string {
+	return fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/init.scope", uid, uid)
+}
+
+// pureV2Cgroup is a cgroup v2-only host's cgroup file for a process at unified.
+func pureV2Cgroup(unified string) string { return "0::" + unified + "\n" }
+
+// hybridCgroup is a hybrid v1/v2 host's cgroup file for a process at unified:
+// v1 controller and named hierarchies, which name other paths, precede the
+// unified entry.
+func hybridCgroup(unified string) string {
+	return "12:cpu,cpuacct:/user.slice\n" +
+		"4:memory:/user.slice/user-0.slice/session-1.scope\n" +
+		"1:name=systemd:/user.slice/user-0.slice/session-1.scope\n" +
+		"0::" + unified + "\n"
+}
+
+// writeUnreadableEnvironProcess builds pid under root, owned by the scanner,
+// started startTicks after boot, named comm (argv[0] too), with cgroupFile as
+// its cgroup file. Its environ names the target session; whether it can be
+// read is the test's choice (denyEnviron).
+func writeUnreadableEnvironProcess(t *testing.T, root string, pid, ppid int, startTicks uint64, comm, cgroupFile string) string {
+	t.Helper()
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	writeFakeProcessUID(t, dir, os.Geteuid())
+	writeFakeProcessStat(t, dir, pid, ppid, startTicks)
+	writeFakeProcessEnviron(t, dir, map[string]string{"GC_SESSION_ID": "ga-target"})
+	for name, data := range map[string]string{"comm": comm + "\n", "cmdline": comm + "\x00", "cgroup": cgroupFile} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+// denyEnviron makes dir's environ unreadable and confirms the read now fails
+// with EACCES, as a non-dumpable process's does; it skips where file modes do
+// not bind the test's user, since such a run proves nothing.
+func denyEnviron(t *testing.T, dir string) {
+	t.Helper()
+	environ := filepath.Join(dir, "environ")
+	if err := os.Chmod(environ, 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+	if _, err := os.ReadFile(environ); !errors.Is(err, syscall.EACCES) {
+		t.Skipf("environ fixture read = %v, want EACCES: file modes do not bind this user", err)
+	}
+}
+
+// environReadFailure is the error a failed /proc/<pid>/environ open returns.
+func environReadFailure(dir string, errno syscall.Errno) error {
+	return &fs.PathError{Op: "open", Path: filepath.Join(dir, "environ"), Err: errno}
+}
+
+// AC-1: a same-uid process whose environ is denied, sitting in the scanner's
+// own user manager's init.scope on a pure-v2 or hybrid host and started
+// before the read, adds no entry error to either unbounded scan.
+func TestUnreadableEnvironUserManagerScope(t *testing.T) {
+	const euid = 994
+	for _, layout := range []struct {
+		name string
+		file func(unified string) string
+	}{
+		{"pure v2", pureV2Cgroup},
+		{"hybrid", hybridCgroup},
+	} {
+		t.Run(layout.name+"/classifier", func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, proofBoot)
+			dir := writeUnreadableEnvironProcess(t, root, 2642, 2600, 500, "(sd-pam)", layout.file(userManagerScopeOf(euid)))
+			for _, id := range []string{"", "ga-target"} {
+				if err := unreadableEnvironScanError(root, 2642, id, time.Time{}, euid, proofReadAt, environReadFailure(dir, syscall.EACCES)); err != nil {
+					t.Fatalf("id %q: unreadableEnvironScanError = %v, want the user-manager helper excused", id, err)
+				}
+			}
+		})
+		t.Run(layout.name+"/scans", func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, proofBoot)
+			dir := writeUnreadableEnvironProcess(t, root, 2642, 1, 500, "(sd-pam)", layout.file(userManagerScopeOf(os.Geteuid())))
+			denyEnviron(t, dir)
+			if got, err := scanWithRoot(root, "ga-target"); err != nil || len(got) != 0 {
+				t.Fatalf("scanWithRoot = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+			}
+			if got, err := scanOrphanCandidatesWithRoot(root, 0); err != nil || len(got) != 0 {
+				t.Fatalf("scanOrphanCandidatesWithRoot = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+			}
+		})
+	}
+}
