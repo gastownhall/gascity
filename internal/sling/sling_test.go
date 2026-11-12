@@ -6097,7 +6097,7 @@ func TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent(t 
 	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
-	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, beadID, a, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false for a bead assigned to the target but routed elsewhere, got %+v", result)
@@ -6118,7 +6118,7 @@ func TestCheckBeadStateSingleSessionAssignedAndRoutedIsIdempotent(t *testing.T) 
 	store, beadID := assignedSingleSessionBead(t, "mayor")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
-	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, beadID, a, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true for a bead assigned and routed to the target, got %+v", result)
@@ -6132,7 +6132,7 @@ func TestCheckBeadStateSingleSessionAssignedUnroutedIsIdempotent(t *testing.T) {
 	store, beadID := assignedSingleSessionBead(t, "")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
-	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, beadID, a, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true for an unrouted bead assigned to the target, got %+v", result)
@@ -6155,7 +6155,7 @@ func TestDoSlingReroutesClaimedBeadWithoutAttachingFormula(t *testing.T) {
 
 	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	result, err := DoSling(testOpts(a, beadID), deps, store)
 	if err != nil {
@@ -6167,10 +6167,11 @@ func TestDoSlingReroutesClaimedBeadWithoutAttachingFormula(t *testing.T) {
 	if result.Method != "bead" || result.WispRootID != "" {
 		t.Fatalf("Method = %q, WispRootID = %q; want a plain re-route (\"bead\", no wisp) onto claimed work", result.Method, result.WispRootID)
 	}
-	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	att, err := findBlockingAttachment(store, beadID, withStore(SlingDeps{}, store).attachmentScope())
 	if err != nil {
-		t.Fatalf("HasMoleculeChildren: %v", err)
+		t.Fatalf("findBlockingAttachment: %v", err)
 	}
+	hasMolecule := att != nil
 	if hasMolecule {
 		t.Fatalf("a molecule was attached to %s, which the target already claims", beadID)
 	}
@@ -6228,10 +6229,11 @@ func TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula(t *testing.T) {
 	if len(result.Children) != 1 || result.Children[0].WispRootID != "" || result.Children[0].WorkflowID != "" {
 		t.Fatalf("children = %#v, want %s routed with no formula attached", result.Children, child.ID)
 	}
-	hasMolecule, err := HasMoleculeChildren(store, child.ID, store)
+	att, err := findBlockingAttachment(store, child.ID, withStore(SlingDeps{}, store).attachmentScope())
 	if err != nil {
-		t.Fatalf("HasMoleculeChildren: %v", err)
+		t.Fatalf("findBlockingAttachment: %v", err)
 	}
+	hasMolecule := att != nil
 	if hasMolecule {
 		t.Fatalf("a molecule was attached to %s, which the target already claims", child.ID)
 	}
@@ -6249,7 +6251,7 @@ func TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula(t *testing.T) 
 
 	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	opts := testOpts(a, beadID)
 	opts.Reassign = true
@@ -6260,10 +6262,11 @@ func TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula(t *testing.T) 
 	if result.Method == "bead" {
 		t.Fatalf("Method = %q; --reassign cleared the claim, so the default formula must attach", result.Method)
 	}
-	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	att, err := findBlockingAttachment(store, beadID, withStore(SlingDeps{}, store).attachmentScope())
 	if err != nil {
-		t.Fatalf("HasMoleculeChildren: %v", err)
+		t.Fatalf("findBlockingAttachment: %v", err)
 	}
+	hasMolecule := att != nil
 	if !hasMolecule {
 		t.Fatalf("no molecule attached to %s after --reassign cleared its claim", beadID)
 	}
@@ -6291,7 +6294,7 @@ func TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod(t *testing.T) {
 
 	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	opts := testOpts(a, beadID)
 	opts.OnFormula = "code-review"
