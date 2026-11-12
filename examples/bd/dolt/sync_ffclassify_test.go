@@ -402,10 +402,12 @@ func TestSyncRemoteEnvOverrideNonLocalRequiresAllowFlag(t *testing.T) {
 
 // TestSyncRemoteEnvOverrideAllowFlagMustBeOne mirrors pull's strictness: only
 // the literal value 1 opts in, so a stray "true"/"0"/"yes" cannot arm a push
-// to a network remote.
+// to a network remote. "1\n" is in the table because shell command
+// substitution strips trailing line feeds: a flag read through $(...) turns the
+// two bytes 1,LF into the one byte 1 and arms the push.
 func TestSyncRemoteEnvOverrideAllowFlagMustBeOne(t *testing.T) {
 	t.Parallel()
-	for _, val := range []string{"", "0", "true", "yes"} {
+	for _, val := range []string{"", "0", "true", "yes", "1\n"} {
 		binDir := t.TempDir()
 		writeSyncFakeDoltMultiRemote(t, binDir, []string{
 			"origin,git+https://github.com/gastownhall/beads",
