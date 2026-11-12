@@ -750,8 +750,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
-				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
-				modelChoice("opencode/nemotron-3-super-free", "Nemotron 3 Super Free"),
+				modelChoice("opencode/deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free"),
+				modelChoice("opencode/nemotron-3.5-super-vl-free", "Nemotron 3.5 Super VL Free"),
 				modelChoice("opencode/big-pickle", "Big Pickle"),
 			),
 		},
