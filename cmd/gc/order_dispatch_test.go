@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -266,6 +267,12 @@ func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]strin
 	reason := strings.TrimSpace(metadata["close_reason"])
 	if len(reason) < 20 {
 		return 0, fmt.Errorf("strict close validation rejected close_reason %q", reason)
+	}
+	// bd is spawned with the reason as an argv word: Go refuses a NUL byte in
+	// argv (EINVAL), and a reason that is not valid UTF-8 does not survive the
+	// round trip, so a close carrying either never lands.
+	if strings.ContainsRune(reason, 0) || !utf8.ValidString(reason) {
+		return 0, fmt.Errorf("strict close validation rejected unspawnable close_reason %q", reason)
 	}
 	return s.Store.CloseAll(ids, metadata)
 }
@@ -4733,7 +4740,7 @@ func TestCloseOrderTrackingBeadErrorsWhenVerificationStillOpen(t *testing.T) {
 	}
 	store := &noopCloseAllStore{Store: base}
 
-	err = closeOrderTrackingBead(context.Background(), store, tracking.ID)
+	err = closeOrderTrackingBead(context.Background(), store, tracking.ID, completedOrderTrackingCloseReason)
 	if err == nil {
 		t.Fatal("closeOrderTrackingBead err = nil, want read-after-close verification error")
 	}
@@ -4772,7 +4779,7 @@ func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
 	}
 	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
 
-	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID); err != nil {
+	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID, completedOrderTrackingCloseReason); err != nil {
 		t.Fatalf("closeOrderTrackingBead: %v", err)
 	}
 	if store.closeCalls != 2 {
@@ -8338,6 +8345,16 @@ func TestOrderDispatchFailedExecClosesTrackingBeadWithFailureReason(t *testing.T
 				return nil, errors.New("fork/exec scripts/missing.sh: no such file or directory")
 			},
 			wantInReason: []string{"failed", "no such file or directory"},
+		},
+		{
+			// A script's output is arbitrary bytes. A NUL byte or a rune cut in
+			// half in the tail must not keep the tracking bead from closing.
+			name:  "output with a NUL byte and a half rune still closes the bead",
+			order: orders.Order{Name: "binary-output", Trigger: "cooldown", Interval: "1m", Exec: "scripts/binary.sh"},
+			run: func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+				return []byte("disk\x00 full \xe2\x82"), errors.New("exit status 4")
+			},
+			wantInReason: []string{"failed", "exit status 4", "disk", "full"},
 		},
 		{
 			name:  "timeout names the timeout",

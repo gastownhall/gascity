@@ -2010,7 +2010,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// address that store: closing through the target scope on a split city
 		// finds nothing, and the marker that suppresses re-dispatch stays open
 		// forever.
-		if err := closeOrderTrackingBeadWithReason(ctx, m.ordersStoreFor(store), trackingID, orderTrackingCloseReason(failure)); err != nil {
+		if err := closeOrderTrackingBead(ctx, m.ordersStoreFor(store), trackingID, orderTrackingCloseReason(failure)); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -2060,11 +2060,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 }
 
-func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
-	return closeOrderTrackingBeadWithReason(ctx, store, trackingID, completedOrderTrackingCloseReason)
-}
-
-func closeOrderTrackingBeadWithReason(ctx context.Context, store beads.Store, trackingID, reason string) error {
+func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID, reason string) error {
 	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, reason)
 	return err
 }
