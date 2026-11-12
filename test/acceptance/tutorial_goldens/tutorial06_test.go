@@ -99,7 +99,7 @@ func TestTutorial06Beads(t *testing.T) {
 		}
 		// A born-split city keeps the cooked workflow in its infrastructure
 		// store, which raw bd does not read.
-		if strings.Contains(out, "Finalize workflow") {
+		if ws.splitOnly("raw bd list leaves out the cooked workflow") && strings.Contains(out, "Finalize workflow") {
 			t.Fatalf("bd list shows the cooked workflow's steps; on a born-split city they live in the infrastructure store:\n%s", out)
 		}
 	})
@@ -171,11 +171,13 @@ func TestTutorial06Beads(t *testing.T) {
 	t.Run("gc session list", func(t *testing.T) {
 		// The mayor's session bead appears once the supervisor materializes
 		// the always-on named session, so wait for it rather than assert once.
+		// A born-split city keeps it in the infrastructure store (gcg- ids).
+		wantInfraID := ws.splitOnly("the mayor's session bead has an infrastructure-store id (gcg-)")
 		var out string
 		if !waitForCondition(t, 90*time.Second, 3*time.Second, func() bool {
 			var err error
 			out, err = ws.runShell("gc session list", "")
-			return err == nil && strings.Contains(out, "gcg-") && strings.Contains(out, "mayor")
+			return err == nil && strings.Contains(out, "mayor") && (!wantInfraID || strings.Contains(out, "gcg-"))
 		}) {
 			t.Fatalf("session listing should show the mayor's session bead:\n%s", out)
 		}

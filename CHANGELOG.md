@@ -18,11 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`depends_on`, `max_session_age`, `[chat_sessions] idle_timeout`, a
     session provider other than tmux, acp or subprocess), the v2 session
     reconciler.
-  - Its mail, session, workflow, order and nudge rows live in the
-    infrastructure store, with ids that start `gcg-`. Work beads keep the
-    city prefix.
+  - Its mail, session, workflow and order rows live in the infrastructure
+    store, with ids that start `gcg-`; queued nudges live there too, with ids
+    that start `gcnq-`. Work beads keep the city prefix.
   - Raw `bd` shows only the work ledger. Use `gc session list`, `gc mail`,
-    `gc formula` and `gc ready` for the rest; `gc bd ready` refuses.
+    `gc ready`, and `gc bd show` or `gc bd dep tree` on an infrastructure id
+    for the rest; `gc bd ready` refuses.
   - `gc sling` routes work beads only. A v2 workflow that `gc formula cook`
     creates lives in the infrastructure store, so `gc sling <target> <root>`
     refuses it and names the launch to use instead: `gc sling <target>
@@ -33,7 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cannot match to a pinned command tree, `gc init` starts the city
     single-store and says why.
   - A city name that derives a reserved prefix (`gcg`, `gcm`, `gcs`, `gco`,
-    `gcn`; for example `gas-city-ops`) is refused; pass `--prefix`.
+    `gcn`, `gcnq`; for example `gas-city-ops`) is refused; pass `--prefix`, or
+    with `gc init --from`, another `--name`.
 
   How each path behaves:
   - `gc init --storage=single` opts out; `--storage=split` asks for the split
@@ -42,9 +44,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     runtime that does not declare `locality=local`) starts single-store with a
     notice until worker-site transport exists; `--storage=split` is refused
     there.
-  - `gc init --from` and `gc init --file` copy their source's `[storage]` as
-    it is. The `gastown`, `swarm`, `lifecycle` and `t3bridge-gastown` examples
-    now carry the split; `hyperscale` (k8s) stays single-store.
+  - `gc init --from` copies its source's `[storage]`, except where a plain
+    `gc init` would start the city single-store (the bd or remote-runtime cases
+    above): there the copy leaves the section out and prints the same notice.
+    A remote stage (`--remote-stage`, or a K8S pod) copies it as it is.
+    `gc init --file` copies its source's `[storage]` as it is. `--storage` and
+    `--prefix` are refused with either. To keep a copy single-store on
+    purpose, make it with `--no-start`, delete the whole `[storage]` section
+    from its `city.toml` (`[storage]` and every `[storage.*]` table), then run
+    `gc start`. Without `--no-start` the copy starts split, and once it has
+    served its infrastructure classes from `.gc/store`, taking the section out
+    is a rollback (`docs/runbooks/split-storage-classes.md`, "Rolling back").
+  - The `gastown`, `swarm`, `lifecycle` and `t3bridge-gastown` examples now
+    carry the split; `hyperscale` (k8s) stays single-store. A city run in place
+    from one of those example directories (`gc start examples/gastown`) picks
+    up the section with this release; if it has run before, its next start
+    refuses until it is migrated (`gc storage migrate --from-work
+    --fleet-stopped`) or the section is removed.
   - The HTTP city create shares `gc init`'s default, so API-created cities are
     born split.
 

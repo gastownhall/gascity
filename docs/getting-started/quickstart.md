@@ -98,8 +98,8 @@ started: its `Attached workflow <ID>` line names the run, and the link is
 ## 5. Watch It Finish
 
 Open the link, or pass the run ID (the last part of the link) to `gc bd show`.
-It reports `CLOSED` when the run is done, usually within a minute or two, and
-`hello.sh` is committed in `~/hello-world`:
+Its `status:` line reads `closed` when the run is done, usually within a minute
+or two, and `hello.sh` is committed in `~/hello-world`:
 
 ```bash
 gc bd show gcg-1025

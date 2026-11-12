@@ -451,8 +451,9 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime starts single-store, and an explicit split is refused there) or single (every class on the work ledger)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
-	// --from copies its source verbatim and never adds the split (a K8S pod
-	// inits with --from); --file's source config owns both settings.
+	// --from never adds the split (a K8S pod inits with --from), and keeps a
+	// source's split unless this host could not serve it
+	// (initFromSplitStorageNotice); --file's source config owns both settings.
 	for _, initFlag := range []string{"storage", "prefix"} {
 		cmd.MarkFlagsMutuallyExclusive(initFlag, "from")
 		cmd.MarkFlagsMutuallyExclusive(initFlag, "file")
@@ -1924,9 +1925,17 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Decided before anything is copied, so the reserved-prefix check judges
+	// the city the copy becomes.
+	storageNotice, err := initFromSplitStorageNotice(fs, srcToml, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dropStorage := storageNotice != ""
 	// Refused before anything is copied, so a refusal leaves no destination
 	// behind and the corrected retry is not "already initialized".
-	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride); err != nil {
+	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride, dropStorage); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1940,10 +1949,14 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
-	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
+	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride, dropStorage)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if dropStorage {
+		fmt.Fprintln(stderr, storageNotice)                                                                            //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc init --from: the copy leaves out the [storage] of %s, which is unchanged.\n", srcToml) //nolint:errcheck // best-effort stderr
 	}
 	// A remote stage is recorded before anything else runs in it, so no
 	// later step (nor a one-shot gc racing this init) can reach storage
@@ -2079,8 +2092,9 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 // for both the pack.toml and the legacy (no pack.toml) layout, so it can run
 // before anything is copied. A [storage] in a source include fragment counts:
 // fragments resolve against the source directory exactly as they will
-// against the copy.
-func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string) error {
+// against the copy. dropStorage judges the copy without the city.toml
+// [storage] it leaves out (initFromSplitStorageNotice).
+func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string, dropStorage bool) error {
 	data, err := fs.ReadFile(srcToml)
 	if err != nil {
 		return nil // the copy and its own parse report this
@@ -2088,6 +2102,9 @@ func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride s
 	src, err := config.Parse(data)
 	if err != nil {
 		return nil
+	}
+	if dropStorage {
+		src.Storage = nil
 	}
 	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
 }
@@ -2114,11 +2131,12 @@ func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, ci
 }
 
 // rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
-// city identity. When the source declares rig paths, those paths are stripped
-// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
-// returned so later writers of the same city.toml can re-supply them and avoid
-// erasing the site bindings just written.
-func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
+// city identity, and without its [storage] when dropStorage is set. When the
+// source declares rig paths, those paths are stripped from cfg and persisted
+// to .gc/site.toml instead; the stripped bindings are returned so later
+// writers of the same city.toml can re-supply them and avoid erasing the site
+// bindings just written.
+func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string, dropStorage bool) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)
 	if err != nil {
@@ -2127,6 +2145,9 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return nil, "", "", false, nil, err
+	}
+	if dropStorage {
+		cfg.Storage = nil
 	}
 
 	cityName := resolveCityName(nameOverride, "", cityPath)

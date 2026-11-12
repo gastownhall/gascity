@@ -46,7 +46,8 @@ A new city's `gc bd` runs only a bd whose command tree gc pins: bd 1.3.2,
 1.3.3 or 1.3.4, or the pinned Enterprise 1.3.0 build. Put the real `bd` binary
 on `PATH`, not a mise or asdf shim or a wrapper script. With bd 1.3.0 or 1.3.1,
 or a bd gc cannot check, `gc init` creates the city single-store and prints how
-to split it after you upgrade bd.
+to split it after you upgrade bd. `gc init --from` does the same with an
+example that carries the split.
 
 An upgrade that moves an existing shared database to a newer Beads schema needs
 every client of that database upgraded together and a one-time `bd migrate

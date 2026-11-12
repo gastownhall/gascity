@@ -104,8 +104,8 @@ Three verbs create formula instances:
   formula, writes its beads, and stops. Nothing wakes up. Cook to inspect
   the beads first, route the work yourself, or graft a sub-DAG onto existing
   work with `--attach <bead-id>`. On a **split city** — one that serves the
-  graph class from its own `[storage]` binding, as every city `gc init`
-  creates does — a v2 workflow's beads live in that binding, and `gc sling`
+  graph class from its own `[storage]` binding, as a city `gc init` creates
+  does by default — a v2 workflow's beads live in that binding, and `gc sling`
   does not route them by hand: launch the formula with `--formula` instead.
   `--attach` is limited there too. See
   [Grafting on a split city](#grafting-on-a-split-city).

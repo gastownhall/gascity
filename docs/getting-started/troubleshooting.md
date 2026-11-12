@@ -320,7 +320,9 @@ Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 ## `gc init` Created a Single-Store City
 
 A new city is born split unless something keeps it single-store, and `gc init`
-prints the reason on stderr:
+prints the reason on stderr. `gc init --from` applies the same rules to a
+source that carries the split, as the shipped examples do: the copy leaves the
+source's `[storage]` out and prints the same notice.
 
 | Notice names | Why | To get the split |
 |---|---|---|
@@ -328,19 +330,38 @@ prints the reason on stderr:
 | a session runtime that runs sessions on remote hosts | A split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport exists | Keep the city single-store for now |
 
 `gc init --storage=single` creates a single-store city on purpose and prints
-nothing. To split a single-store city later, see
+nothing. `--storage` is refused with `gc init --from`. To keep a copied city
+single-store on purpose, make the copy without starting it, take the whole
+`[storage]` section out of its `city.toml` (`[storage]` and every
+`[storage.*]` table under it), then start it:
+
+```bash
+gc init --from examples/gastown --no-start ~/my-city
+# delete [storage] and every [storage.*] table from ~/my-city/city.toml
+cd ~/my-city && gc start
+```
+
+Without `--no-start`, `gc init --from` starts the city split. Once it has
+served its infrastructure classes from `.gc/store`, a city with the section
+taken out refuses to start until you remove `.gc/storage-served-binding.json`,
+which abandons everything that store holds; read
+[Rolling back](/runbooks/split-storage-classes#rolling-back) first. To split a
+single-store city later, see
 [Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes).
 
 ## `gc init` Refuses a Reserved Bead Prefix
 
-A split city's infrastructure store mints IDs under the reserved prefixes
-`gcg`, `gcm`, `gcs`, `gco` and `gcn`, so a city whose bead prefix falls in one
+A split city reserves the bead prefixes `gcg`, `gcm`, `gcs`, `gco`, `gcn` and
+`gcnq` for its infrastructure store, so a city whose bead prefix falls in one
 is refused. The prefix derives from the city name's initials, so
 `gas-city-ops` derives `gco`. Pass a prefix of your own:
 
 ```bash
 gc init --prefix gops ~/gas-city-ops
 ```
+
+`--prefix` is refused with `gc init --from`; give the copy another name
+instead, for example `gc init --from examples/gastown --name city-ops ~/gas-city-ops`.
 
 ## `gc bd` Refuses a Command on a Split City
 

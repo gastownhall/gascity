@@ -84,18 +84,19 @@ two stores:
 | Store | Holds | Read it with |
 | --- | --- | --- |
 | **Work ledger** | The work people and agents reason about: tasks, features, bugs, convoys | `bd`, `gc bd`, and every `gc` command |
-| **Infrastructure store** (`.gc/store`) | What the city runs on: sessions, mail, workflow steps, order runs, queued nudges | `gc` commands (`gc session list`, `gc mail`, `gc formula`, `gc ready`) |
+| **Infrastructure store** (`.gc/store`) | What the city runs on: sessions, mail, workflow steps, order runs, queued nudges | `gc` commands (`gc session list`, `gc mail`, `gc ready`, and `gc bd show` or `gc bd dep tree` on one of its IDs) |
 
 `gc init` writes this split into `city.toml` as the `[storage]` section. The
 infrastructure store is a local SQLite database that keeps the city's own
 bookkeeping from competing with your work for the ledger, and its beads carry
-IDs that start `gcg-`. Raw `bd` reads only the work ledger.
+IDs that start `gcg-` (queued nudges: `gcnq-`). Raw `bd` reads only the work
+ledger.
 
 Every bead has:
 
 - **ID** — prefixed with two letters from the city or rig name (`mc-194` for
   "my-city", `ma-12` for a rig "my-app"); beads in the infrastructure store
-  start `gcg-`
+  start `gcg-` (`gcnq-` for queued nudges)
 - **Title** — human-readable name
 - **Status** — `open`, `in_progress`, `blocked`, `deferred`, or `closed`
 - **Type** — what kind of bead it is

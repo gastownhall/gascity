@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // initStorageChoice is gc init's --storage: whether the new city keeps every
@@ -112,6 +113,39 @@ func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageCho
 		}
 	}
 	return bornSplitStorageConfig(), "", nil
+}
+
+// initFromSplitStorageNotice applies a plain gc init's split admission to the
+// split a gc init --from source declares in its city.toml. It returns "" when
+// the copy keeps the source's [storage], or the notice to print when the copy
+// starts single-store instead because a split city would not serve it here: a
+// remote session runtime, or a bd a split city's gc bd refuses
+// (resolveInitStorage). The shipped examples carry the split, and copying it
+// onto such a host would give a city whose every gc bd call is refused, where a
+// plain gc init on the same host starts single-store and says why.
+//
+// A remote stage keeps the source's [storage] as it is: it stages the
+// controller's city, so its storage is the controller's (F3).
+func initFromSplitStorageNotice(fs fsys.FS, srcToml, cityPath string) (string, error) {
+	if initFromStagesARemoteCity() {
+		return "", nil
+	}
+	data, err := fs.ReadFile(srcToml)
+	if err != nil {
+		return "", nil // the copy and its own parse report this
+	}
+	src, err := config.Parse(data)
+	if err != nil || !config.RelocatesAnyClass(src) {
+		return "", nil
+	}
+	storage, notice, err := resolveInitStorage(src, cityPath, initStorageUnset)
+	if err != nil {
+		return "", err
+	}
+	if storage != nil {
+		return "", nil
+	}
+	return notice, nil
 }
 
 // initSplitLaterRemedy is how a city that started single-store splits later.

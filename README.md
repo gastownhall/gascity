@@ -118,8 +118,8 @@ still started: its `Attached workflow <ID>` line names the run, and the link is
 `http://127.0.0.1:8372/city/my-city/runs/<ID>`.
 Open the link to watch the agent work; while the city is still setting up, the page can say "run
 projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
-to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
-minute or two, and `hello.sh` is committed in `~/hello-world`:
+to `gc bd show`; its `status:` line reads `closed` when the run is done, usually
+within a minute or two, and `hello.sh` is committed in `~/hello-world`:
 
 ```bash
 gc bd show gcg-1025

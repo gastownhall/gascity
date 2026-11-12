@@ -196,7 +196,7 @@ EOF`
 		}
 		// The page's city is born split, so the workflow lives in the
 		// infrastructure store, whose ids start gcg-.
-		if !strings.HasPrefix(pancakesRootID, "gcg-") {
+		if ws.splitOnly("the cooked root is an infrastructure-store id (gcg-)") && !strings.HasPrefix(pancakesRootID, "gcg-") {
 			t.Fatalf("cooked root %s is not an infrastructure-store id (gcg-); the page says a workflow's beads live there:\n%s", pancakesRootID, out)
 		}
 		if !strings.Contains(out, "Created: 7") {
