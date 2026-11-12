@@ -9,12 +9,11 @@ import (
 )
 
 // gastownExamplePath resolves the bundled example city used as a --from source.
+// It resolves against the repository root, not the working directory, because
+// clearGCEnv moves the working directory into a temp dir.
 func gastownExamplePath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
-	if err != nil {
-		t.Fatalf("resolving examples/gastown: %v", err)
-	}
+	p := filepath.Join(gcRepoRootFromEnv(), "examples", "gastown")
 	if _, err := os.Stat(filepath.Join(p, "city.toml")); err != nil {
 		t.Skipf("example source missing: %v", err)
 	}

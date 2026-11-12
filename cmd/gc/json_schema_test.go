@@ -153,14 +153,13 @@ func walkCommandTree(cmd *cobra.Command, visit func(*cobra.Command)) {
 var successDiscriminatorExempt = map[string]string{
 	"schemas/bd/result.schema.json":                                    "gc bd is an explicit passthrough: bd owns the payload shape.",
 	"schemas/context/list/result.schema.json":                          "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
-	"schemas/context/show/result.schema.json":                          "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/context/show/result.schema.json":                          "contextJSON is a single raw record (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
 	"schemas/extmsg/bind/result.schema.json":                           "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
 	"schemas/extmsg/handoff/result.schema.json":                        "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
 	"schemas/extmsg/unbind/result.schema.json":                         "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
 	"schemas/internal/program-status-shadow-report/result.schema.json": "gc internal program-status-shadow-report is a hidden diagnostic that prints a bare report object; it has no ok/schema_version envelope by design.",
 	"schemas/perf/run/result.schema.json":                              "gc perf is a hidden development-only harness that predates the ok convention.",
 	"schemas/perf/session-new/result.schema.json":                      "gc perf is a hidden development-only harness that predates the ok convention.",
-	"schemas/runtime/conformance/result.schema.json":                   "runtimecontract.Report is consumed by external runtime packs' CI as-is; it predates the ok convention.",
 }
 
 func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
@@ -190,10 +189,6 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 		}
 		if err := json.Unmarshal(data, &schema); err != nil {
 			return err
-		}
-		if path == "schemas/bd/result.schema.json" {
-			// gc bd is an explicit passthrough: bd owns the payload shape.
-			return nil
 		}
 		if path == "schemas/metrics/example/result.schema.json" ||
 			path == "schemas/pack/registry/requests/result.schema.json" ||
