@@ -15995,6 +15995,10 @@ export type GetV0CityByCityNameExtmsgTranscriptData = {
 
 export type GetV0CityByCityNameExtmsgTranscriptErrors = {
     /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
      * Not Found
      */
     404: ErrorModel;
