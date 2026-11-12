@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -760,9 +761,10 @@ func TestInitStorageAndPrefixRefuseAnExistingCityToml(t *testing.T) {
 	}
 }
 
-// --from copies its source verbatim and never adds the split (F3: a K8S pod
-// inits with --from), so --storage and --prefix are refused with it, as they
-// are with --file, whose source config owns both.
+// --from never adds the split (F3: a K8S pod inits with --from) and keeps a
+// source's split wherever this host can serve it (initFromSplitStorageNotice),
+// so --storage and --prefix are refused with it, as they are with --file,
+// whose source config owns both.
 func TestInitStorageAndPrefixFlagsRefuseFromAndFile(t *testing.T) {
 	for _, args := range [][]string{
 		{"--from", "/tmp/src", "--storage", "split"},
@@ -969,5 +971,287 @@ func TestBornSplitCityResolvesTheV2ReconcilerUnlessAGapIsConfigured(t *testing.T
 	}
 	if res.Mode != reconcilerLegacy || !strings.Contains(strings.Join(res.Fallbacks, "\n"), "depends_on") {
 		t.Fatalf("a born-split city with depends_on resolves %v (%v), want legacy naming depends_on", res.Mode, res.Fallbacks)
+	}
+}
+
+// initFromSplitSourceOnK8s is remoteStageSplitSource with a k8s session
+// runtime: a split source a plain gc init would start single-store.
+const initFromSplitSourceOnK8s = remoteStageSplitSource + `
+[session]
+provider = "k8s"
+`
+
+// gc init --from keeps the split a source declares exactly where a plain gc
+// init is born split (resolveInitStorage): a bd a split city's gc bd refuses,
+// or a remote session runtime, holds the copy single-store with plain init's
+// notice. It never adds a split, and a remote stage copies its controller's
+// [storage] as it is (F3).
+func TestInitFromSplitStorageNoticeAppliesPlainInitAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		setup  func(t *testing.T) (bdPath string)
+		// wantNotice lists what the notice names; nil means the copy keeps
+		// the source's [storage].
+		wantNotice []string
+	}{
+		{
+			name:   "admitted bd keeps the split",
+			source: remoteStageSplitSource,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "bd")
+				bd := initStorageFakeBD(t)
+				admitInitSplitBD(t)
+				return bd
+			},
+		},
+		{
+			name:   "bd below the split floor",
+			source: remoteStageSplitSource,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "bd")
+				bd := initStorageFakeBD(t)
+				stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+				stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+				return bd
+			},
+			wantNotice: []string{"single-store", "v" + initSplitBDMinVersion, "upgrade bd", "gc storage migrate"},
+		},
+		{
+			name:   "bd matching no pinned tree",
+			source: remoteStageSplitSource,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "bd")
+				bd := initStorageFakeBD(t)
+				stubInitBDVersion(t, "bd version 1.3.4 (wrapped)")
+				stubInitSplitBDJudge(t, "", nil)
+				return bd
+			},
+			wantNotice: []string{"matches no pinned gc bd inventory", "single-store", "upgrade bd"},
+		},
+		{
+			name:   "remote session runtime",
+			source: initFromSplitSourceOnK8s,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "file")
+				return ""
+			},
+			wantNotice: []string{`"k8s"`, "remote hosts", "single-store"},
+		},
+		{
+			name:   "single-store source on a bd below the floor",
+			source: "[workspace]\nname = \"template\"\n",
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "bd")
+				initStorageFakeBD(t)
+				stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+				stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+				return ""
+			},
+		},
+		{
+			name:   "pod remote stage on a bd below the floor",
+			source: remoteStageSplitSource,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "bd")
+				t.Setenv(remoteStageControllerEnv, "/city")
+				initStorageFakeBD(t)
+				stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+				stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+				return ""
+			},
+		},
+		{
+			name:   "--remote-stage on a remote session runtime",
+			source: initFromSplitSourceOnK8s,
+			setup: func(t *testing.T) string {
+				t.Setenv("GC_BEADS", "file")
+				setInitRemoteStage(t, "/city")
+				return ""
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", "")
+			t.Setenv(remoteStageControllerEnv, "")
+			bd := tc.setup(t)
+			srcToml := filepath.Join(t.TempDir(), "city.toml")
+			if err := os.WriteFile(srcToml, []byte(tc.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			notice, err := initFromSplitStorageNotice(fsys.OSFS{}, srcToml, filepath.Join(t.TempDir(), "city"))
+			if err != nil {
+				t.Fatalf("initFromSplitStorageNotice: %v", err)
+			}
+			if tc.wantNotice == nil {
+				if notice != "" {
+					t.Fatalf("notice = %q; want the copy to keep the source's [storage]", notice)
+				}
+				return
+			}
+			if bd != "" {
+				tc.wantNotice = append(tc.wantNotice, bd)
+			}
+			for _, want := range tc.wantNotice {
+				if !strings.Contains(notice, want) {
+					t.Errorf("notice %q does not mention %q", notice, want)
+				}
+			}
+		})
+	}
+}
+
+// On a file work store gc never judges a bd, for --from as for a plain init.
+func TestInitFromSplitStorageNoticeOnAFileStoreNeverProbesBD(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	t.Setenv(remoteStageControllerEnv, "")
+	initStorageFakeBD(t)
+	judged := stubInitSplitBDJudge(t, "", nil)
+	srcToml := filepath.Join(t.TempDir(), "city.toml")
+	if err := os.WriteFile(srcToml, []byte(remoteStageSplitSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notice, err := initFromSplitStorageNotice(fsys.OSFS{}, srcToml, filepath.Join(t.TempDir(), "city"))
+	if err != nil || notice != "" {
+		t.Fatalf("initFromSplitStorageNotice = %q, %v; want the split kept", notice, err)
+	}
+	if len(*judged) != 0 {
+		t.Fatalf("a file work store judged bd %v", *judged)
+	}
+}
+
+// A copy held single-store is written without the source's [storage], says
+// so, and leaves the source alone. It is judged as the single-store city it
+// becomes, so a name whose derived prefix only a split city reserves (gco) is
+// not refused.
+func TestInitFromASplitSourceStartsSingleStoreWherePlainInitWould(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv(remoteStageControllerEnv, "")
+	configureIsolatedRuntimeEnv(t)
+	src := newRemoteStageSource(t)
+	srcToml := filepath.Join(src, "city.toml")
+	if err := os.WriteFile(srcToml, []byte(initFromSplitSourceOnK8s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := filepath.Join(t.TempDir(), "gas-city-ops")
+
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+		t.Fatalf("gc init --from a split k8s source = %d; stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the copy's city.toml: %v\n%s", err, data)
+	}
+	if cfg.Storage != nil || config.RelocatesAnyClass(cfg) {
+		t.Fatalf("the copy kept the source's [storage] %+v:\n%s", cfg.Storage, data)
+	}
+	for _, want := range []string{`"k8s"`, "single-store", "leaves out the [storage] of " + srcToml} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q does not mention %q", stderr.String(), want)
+		}
+	}
+	if layout, err := initStorageLayout(cityPath); err != nil || layout != string(initStorageSingle) {
+		t.Errorf("initStorageLayout = %q, %v; want %q for gc init --json", layout, err, initStorageSingle)
+	}
+	after, err := os.ReadFile(srcToml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != initFromSplitSourceOnK8s {
+		t.Errorf("gc init --from rewrote its source:\n%s", after)
+	}
+}
+
+// A remote stage copies its controller's split as it is, even where this
+// host's own sessions would hold a new city single-store (F3): --remote-stage,
+// or the pod environment initCityInPod runs gc init --from in.
+func TestInitFromARemoteStageKeepsTheControllersSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(t *testing.T)
+	}{
+		{name: "--remote-stage", stage: func(t *testing.T) { setInitRemoteStage(t, "/city") }},
+		{name: "pod environment", stage: func(t *testing.T) { t.Setenv(remoteStageControllerEnv, "/city") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv(remoteStageControllerEnv, "")
+			configureIsolatedRuntimeEnv(t)
+			src := newRemoteStageSource(t)
+			if err := os.WriteFile(filepath.Join(src, "city.toml"), []byte(initFromSplitSourceOnK8s), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tc.stage(t)
+			pod := filepath.Join(t.TempDir(), "workspace")
+
+			var stdout, stderr bytes.Buffer
+			if code := doInitFromDirWithOptionsInternal(src, pod, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+				t.Fatalf("gc init --from a remote stage = %d; stderr=%s", code, stderr.String())
+			}
+			data, err := os.ReadFile(filepath.Join(pod, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Parse(data)
+			if err != nil {
+				t.Fatalf("parsing the stage's city.toml: %v\n%s", err, data)
+			}
+			if !config.RelocatesAnyClass(cfg) {
+				t.Fatalf("the remote stage dropped its controller's [storage]:\n%s", data)
+			}
+			if strings.Contains(stderr.String(), "single-store") {
+				t.Errorf("the remote stage printed a single-store notice: %s", stderr.String())
+			}
+		})
+	}
+}
+
+// The shipped examples that say they carry the split gc init writes carry
+// exactly bornSplitStorageConfig, so a change to that block moves them with
+// it. hyperscale runs its sessions in pods, where gc init starts a city
+// single-store, so it carries none.
+func TestShippedExamplesCarryTheBornSplitStorage(t *testing.T) {
+	t.Setenv("GC_SESSION", "")
+	for _, tc := range []struct {
+		example string
+		split   bool
+	}{
+		{example: "gastown", split: true},
+		{example: "lifecycle", split: true},
+		{example: "swarm", split: true},
+		{example: "t3bridge-gastown", split: true},
+		{example: "hyperscale"},
+	} {
+		t.Run(tc.example, func(t *testing.T) {
+			path := filepath.Join("..", "..", "examples", tc.example, "city.toml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			cfg, err := config.Parse(data)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", path, err)
+			}
+			if tc.split {
+				if !reflect.DeepEqual(cfg.Storage, bornSplitStorageConfig()) {
+					t.Fatalf("%s [storage] = %+v, want the block gc init writes, %+v", path, cfg.Storage, bornSplitStorageConfig())
+				}
+				return
+			}
+			if cfg.Storage != nil {
+				t.Fatalf("%s declares [storage] %+v; want none", path, cfg.Storage)
+			}
+			if runtime, remote := cityRunsRemoteSessions(cfg, t.TempDir()); !remote {
+				t.Fatalf("%s runs sessions locally (%q), so gc init would split it; carry the born-split block", path, runtime)
+			}
+		})
 	}
 }

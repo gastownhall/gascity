@@ -426,7 +426,7 @@ func TestInitFromASplitSourceHonorsItsExplicitPrefix(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(src, "city.toml"), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			err := initFromReservedPrefixRefusal(fsysOSFSForTest(), filepath.Join(src, "city.toml"), filepath.Join(t.TempDir(), tc.cityName), tc.cityName)
+			err := initFromReservedPrefixRefusal(fsysOSFSForTest(), filepath.Join(src, "city.toml"), filepath.Join(t.TempDir(), tc.cityName), tc.cityName, false)
 			if (err != nil) != tc.refused {
 				t.Errorf("refusal = %v, want refused=%v", err, tc.refused)
 			}

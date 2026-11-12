@@ -112,7 +112,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		listOut, _ := ws.runShell("gc session list --template my-project/reviewer", "")
 		t.Fatalf("reviewer session target did not materialize for %s:\n%s", reviewerSessionID, listOut)
 	}
-	ws.noteWarning("tutorial 03 uses an example bead id in `gc session peek mc-8sfd`, so the page driver resolves the seeded reviewer session to its live session bead `%s` before running the equivalent command", reviewerSessionID)
+	ws.noteWarning("tutorial 03 uses an example bead id in `gc session peek gcg-14`, so the page driver resolves the seeded reviewer session to its live session bead `%s` before running the equivalent command", reviewerSessionID)
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
 		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
 		return err == nil && strings.TrimSpace(out) != ""
@@ -220,7 +220,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		}
 	})
 
-	t.Run("gc session peek mc-8sfd", func(t *testing.T) {
+	t.Run("gc session peek gcg-14", func(t *testing.T) {
 		reviewerIdentityPeekLines := 200
 		peekIdentifiesReviewer := func(out string) bool {
 			lower := strings.ToLower(out)

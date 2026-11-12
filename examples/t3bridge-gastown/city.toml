@@ -15,6 +15,24 @@ nudge_ready_timeout = "30s"
 [imports.t3demo]
 source = "packs/t3demo"
 
+# Storage classes (docs/runbooks/split-storage-classes.md): work stays in the
+# work ledger, and the five infrastructure classes live in one local SQLite
+# store under .gc/store, created on first start. This is the split gc init
+# writes for a new city. `gc init --from` copies it, except where gc init
+# would start a new city single-store (a bd a split city's gc bd refuses):
+# there the copy leaves it out and says why.
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+
 [daemon]
 patrol_interval = "30s"
 max_restarts = 3

@@ -2487,6 +2487,7 @@ go_test(
         "//examples/hyperscale:pack_files",
         "//examples/lifecycle:pack_files",
         "//examples/swarm:pack_files",
+        "//examples/t3bridge-gastown:city.toml",
         "//internal/beads/contract:bdconfig_fixtures",
         "//internal/bootstrap/packs/core:pack_files",
         "//internal/hooks:config_files",

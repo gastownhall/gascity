@@ -6,17 +6,22 @@ description: Config swap, one operator command, and the boot refusal that stands
 Every city stores six kinds of state. One is the **work ledger** — the tasks,
 epics, bugs, and convoys people and agents actually reason about. The other
 five are **infrastructure**: the execution graph, session lifecycle, messaging,
-orders, and the nudge queue. By default all six live in the work ledger.
+orders, and the nudge queue. A city with no `[storage]` section keeps all six
+in the work ledger.
 
 They do not have to. `[storage]` in `city.toml` assigns each class to a named
 binding, and this build serves one split: work stays on the work ledger, and
-the five infrastructure classes move to a single SQLite bead engine. On a
+the five infrastructure classes move to a single SQLite bead engine. A city
+created by `gc init` is born split: it carries that section from the start,
+creates the binding on its first boot, and has nothing to migrate. On a
 production-scale city that measured **130–250× lower latency for
 infrastructure-class reads** than serving them from the work ledger, because
 those reads stop competing with the work ledger's own traffic.
 
-This runbook is the whole cutover. It is short because the design is: swap the
-config, run one command, start the city.
+This runbook is the whole cutover for a city that predates the split, or
+that `gc init` created single-store (`--storage=single`, a remote session
+runtime, or a bd a split city does not run). It is short because the design
+is: swap the config, run one command, start the city.
 
 ## Before you start
 
