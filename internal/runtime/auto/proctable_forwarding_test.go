@@ -318,3 +318,28 @@ func TestFindRuntimesBySessionIDAppliesTheDefaultBackendsTmuxFence(t *testing.T)
 		t.Fatalf("over a default that does not fence: found = %+v, %v; want both roots", found, err)
 	}
 }
+
+// A fence error must never turn a tracked root untracked. The ACP backend
+// tracks a root the default backend reports untracked, and the default's
+// fence fails on it and leaves it out: merged naively, the default's
+// untracked record would stand alone and a start's orphan kill would end a
+// live ACP agent. Every PID the fence leaves out of a later backend's roots
+// is dropped from the merge, so the root is reported by neither record.
+func TestFindRuntimesBySessionIDFenceErrorNeverUntracksATrackedRoot(t *testing.T) {
+	acp := runtime.NewFake()
+	acp.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid", PID: 5000, IsTracked: true, ProviderName: "acp-seat"}, {SessionID: "sid", PID: 5100}}
+	def := &fencingScanner{Fake: runtime.NewFake(), under: map[int]bool{5000: true}}
+	def.ExtraRuntimes = []runtime.LiveRuntime{{SessionID: "sid", PID: 5000}, {SessionID: "sid", PID: 5100}}
+
+	found, err := New(def, acp).FindRuntimesBySessionID("sid")
+	if err == nil {
+		t.Fatal("err = nil, want the fence's error")
+	}
+	got := byPID(found)
+	if r, ok := got[5000]; ok && !r.IsTracked {
+		t.Fatalf("root 5000 = %+v: the fence's error turned the ACP backend's tracked root untracked", r)
+	}
+	if r, ok := got[5100]; !ok || r.IsTracked {
+		t.Fatalf("found = %+v, want the untracked root 5100 the fence kept", found)
+	}
+}

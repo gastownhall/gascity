@@ -134,7 +134,12 @@ type TmuxSubtreeFence interface {
 // for a composite by querying every backend [ScanningBackends] returns and
 // merging the results by PID. When the default backend's scanner is a
 // [TmuxSubtreeFence], every later backend's roots pass through its fence
-// before the merge.
+// before the merge, and a PID the fence leaves out is dropped from the whole
+// merge: no backend's record of it is reported. The fence leaves out a root
+// it could not decide (with an error) as well as one under tmux, and keeping
+// another backend's record of such a PID could report a root a later backend
+// tracks as untracked, for an orphan kill to end. Dropping it only makes
+// callers terminate less.
 //
 // Local backends scan the same host process table, so one root commonly
 // appears in several results, each backend marking tracked only the sessions
@@ -145,6 +150,7 @@ type TmuxSubtreeFence interface {
 // backend are still merged, per the best-effort contract.
 func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 	merged := make(map[int]LiveRuntime)
+	fenced := make(map[int]bool)
 	var errs []error
 	scanners := ScanningBackends(backends)
 	var fence TmuxSubtreeFence
@@ -157,10 +163,20 @@ func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 			errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, err))
 		}
 		if i > 0 && fence != nil && len(found) > 0 {
-			var fenceErr error
-			if found, fenceErr = fence.FenceTmuxSubtrees(found); fenceErr != nil {
+			kept, fenceErr := fence.FenceTmuxSubtrees(found)
+			if fenceErr != nil {
 				errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, fenceErr))
 			}
+			keptPIDs := make(map[int]bool, len(kept))
+			for _, r := range kept {
+				keptPIDs[r.PID] = true
+			}
+			for _, r := range found {
+				if !keptPIDs[r.PID] {
+					fenced[r.PID] = true
+				}
+			}
+			found = kept
 		}
 		for _, r := range found {
 			existing, ok := merged[r.PID]
@@ -174,8 +190,10 @@ func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 		}
 	}
 	out := make([]LiveRuntime, 0, len(merged))
-	for _, r := range merged {
-		out = append(out, r)
+	for pid, r := range merged {
+		if !fenced[pid] {
+			out = append(out, r)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
 	return out, errors.Join(errs...)
