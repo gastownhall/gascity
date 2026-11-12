@@ -83,18 +83,28 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 }
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
-	report := runGolden(t, writeGolden(t))
-	if report.Failed() {
-		for _, res := range report.Results {
-			if res.Status == StatusFail {
-				t.Errorf("golden failed %s: %s", res.Code, res.Detail)
+	for name, bodies := range map[string]map[string]string{"tmux": reference.HostFSBodies(), "ops": reference.NonTmuxHostFSBodies()} {
+		t.Run(name, func(t *testing.T) {
+			state := t.TempDir()
+			report := runGolden(t, writeScript(t, state, bodies))
+			if report.Failed() {
+				for _, res := range report.Results {
+					if res.Status == StatusFail {
+						t.Errorf("golden failed %s: %s", res.Code, res.Detail)
+					}
+				}
+				t.Fatalf("golden reference must pass every requirement; summary=%+v", report.Summary)
 			}
-		}
-		t.Fatalf("golden reference must pass every requirement; summary=%+v", report.Summary)
-	}
-	if report.Summary.Passed != len(catalog) {
-		t.Errorf("golden passed %d/%d (skipped %d) — the golden must exercise every required behavior",
-			report.Summary.Passed, len(catalog), report.Summary.Skipped)
+			if report.Summary.Passed != len(catalog) {
+				t.Errorf("golden passed %d/%d (skipped %d) — the golden must exercise every required behavior",
+					report.Summary.Passed, len(catalog), report.Summary.Skipped)
+			}
+			if name == "ops" {
+				if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
+					t.Error("ops golden received tmux")
+				}
+			}
+		})
 	}
 }
 
@@ -691,15 +701,26 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 }
 
 // The base golden, which does not declare fs.host, fails nothing and skips
-// exactly the fshost group: fs.host adds a promise, it changes no other.
+// exactly the fshost group: fs.host adds a promise, it changes no other. The
+// same holds under either carrier.
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
-	report := runGolden(t, writeScript(t, t.TempDir(), reference.Bodies()))
-	for _, res := range report.Results {
-		switch {
-		case res.Status == StatusFail:
-			t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
-		case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
-			t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
-		}
+	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
+		t.Run(name, func(t *testing.T) {
+			state := t.TempDir()
+			report := runGolden(t, writeScript(t, state, bodies))
+			for _, res := range report.Results {
+				switch {
+				case res.Status == StatusFail:
+					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
+				case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
+					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
+				}
+			}
+			if name == "ops" {
+				if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
+					t.Error("ops golden received tmux")
+				}
+			}
+		})
 	}
 }
