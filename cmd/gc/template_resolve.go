@@ -399,6 +399,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
+	// An agent's own env may name BEADS_DIR: a pack can point its sessions'
+	// raw bd at no store, while gc bd, which pins the store it routes to,
+	// still reaches the ledger.
+	if beadsDir, ok := cfgAgent.Env["BEADS_DIR"]; ok {
+		agentEnv["BEADS_DIR"] = processenv.ExpandSessionEnvValue(beadsDir)
+	}
 
 	// configDir is the directory agent config-relative paths (pre-start
 	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
