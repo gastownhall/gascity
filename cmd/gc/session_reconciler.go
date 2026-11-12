@@ -2000,6 +2000,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// residual. Same underlying store, so every session bead write is
 	// byte-identical.
 	sessFront := sessionpkg.NewStore(sessStore)
+	// The wake loop's startup-health episode reads, served from one store read
+	// per call and taken lazily at the first down candidate. Local to this call
+	// on purpose: the next tick must see the episodes the commit phase writes.
+	episodeIndex := newStartupHealthEpisodeIndex(sessFront)
 	// Every tick counts as a cycle, including ticks aborted by context
 	// cancellation after real work (e.g. starts) already executed — the
 	// counter means "cycles", not "cycles that ran to completion". started
@@ -4838,7 +4842,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
-			if episode, err := sessFront.LoadStartupHealthEpisode(startupHealthEpisodeKey(info, name)); err != nil {
+			if episode, err := episodeIndex.lookup(startupHealthEpisodeKey(info, name)); err != nil {
 				// Fail open: proceed as if no quarantine episode exists rather
 				// than block every session start on a transient store-read
 				// error. Logged (matching the two LoadStartupHealthEpisode

@@ -285,7 +285,7 @@ var effectLintSessionReads = []string{
 	"GetLocalString", "GetPersistedResponse", "GetState", "GetWait", "HasOpenSessionNamed", "List", "ListAddresses",
 	"ListAll", "ListAllForReconcile", "ListAllForReconcileWithFingerprint", "ListAllWithResponses",
 	"ListByMetadataInfos", "ListLabeledSessionInfosUnfiltered", "ListStartupHealthEpisodes", "ListWaits",
-	"LoadStartupHealthEpisode", "LookupConfiguredNamed", "MailboxAddress", "MailboxAddresses", "PersistedMarkers",
+	"LoadStartupHealthEpisode", "LookupConfiguredNamed", "MailboxAddress", "MailboxAddresses", "OpenStartupHealthEpisodes", "PersistedMarkers",
 	"ResolveAddress", "ResolveID", "ResolveIDAllowClosed", "ResolveIDByExactID", "ResolveMailboxAddress", "Store",
 	"WaitNudgeIDs", "WaitsForSession", "Holds", "ResumeHeldRefusal",
 	"UpdateRowFenced",

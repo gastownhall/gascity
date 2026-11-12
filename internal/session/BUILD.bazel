@@ -210,6 +210,7 @@ go_test(
         "runtime_lease_unix_test.go",
         "session_mutation_lock_test.go",
         "sleep_reason_test.go",
+        "startup_health_batch_test.go",
         "startup_health_test.go",
         "startup_nudge_handback_test.go",
         "state_machine_test.go",

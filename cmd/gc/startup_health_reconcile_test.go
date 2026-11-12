@@ -313,14 +313,16 @@ func TestQuarantinedStartupHealthMirrorClearsOnSuccessfulRecovery(t *testing.T) 
 }
 
 // failFirstStartupHealthLoadStore forces exactly the first episode List
-// lookup filtered on the given session name's startup-health episode key to
-// fail, then delegates every later matching call — including the sibling
-// LoadStartupHealthEpisode calls in session_lifecycle_parallel.go's
-// start-result commit paths — to the real store. Scoping the failure to only
-// the first matching call isolates the assertion to the reconciler's own
-// quarantine-gate lookup, which always runs before any commit-path lookup
-// within a tick: a matching log line can then only be attributed to that
-// call site, not to a sibling that already logs correctly today.
+// lookup that covers the given session name's startup-health episode to
+// fail — the reconciler's batch read (every open episode, no name filter) or
+// a per-name query filtered on the name — then delegates every later
+// matching call — including the sibling LoadStartupHealthEpisode calls in
+// session_lifecycle_parallel.go's start-result commit paths — to the real
+// store. Scoping the failure to only the first matching call isolates the
+// assertion to the reconciler's own quarantine-gate lookup, which always runs
+// before any commit-path lookup within a tick: a matching log line can then
+// only be attributed to that call site, not to a sibling that already logs
+// correctly today.
 type failFirstStartupHealthLoadStore struct {
 	beads.Store
 	sessionName string
@@ -330,7 +332,7 @@ type failFirstStartupHealthLoadStore struct {
 }
 
 func (s *failFirstStartupHealthLoadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.Type == sessionpkg.StartupHealthEpisodeType && q.Metadata[sessionpkg.StartupHealthSessionNameMetadataKey] == s.sessionName {
+	if q.Type == sessionpkg.StartupHealthEpisodeType && (len(q.Metadata) == 0 || q.Metadata[sessionpkg.StartupHealthSessionNameMetadataKey] == s.sessionName) {
 		s.calls++
 		if !s.failed {
 			s.failed = true

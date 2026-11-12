@@ -2253,6 +2253,7 @@ go_test(
         "session_reconciler_read_after_write_test.go",
         "session_reconciler_relaunch_preparedstart_test.go",
         "session_reconciler_restart_request_test.go",
+        "session_reconciler_startup_health_batch_test.go",
         "session_reconciler_test.go",
         "session_reconciler_tick_budget_test.go",
         "session_reconciler_timer_trace_test.go",
