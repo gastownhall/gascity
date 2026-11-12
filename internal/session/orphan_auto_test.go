@@ -194,3 +194,128 @@ func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
 		t.Fatalf("logged %d times after the repeat interval, want 5", n)
 	}
 }
+
+// scanRootsFake is a Fake process-table scanner whose scan returns both roots
+// and an error, the way a fail-closed partial scan does.
+type scanRootsFake struct {
+	*runtime.Fake
+	roots []runtime.LiveRuntime
+	err   error
+}
+
+func (f *scanRootsFake) FindRuntimesBySessionID(string) ([]runtime.LiveRuntime, error) {
+	return f.roots, f.err
+}
+
+// TestKillExistingOrphansSuppressedLogStillTerminatesAndRefuses
+// (ga-zpcphq): pacing only quiets the log line. A suppressed start still
+// terminates the orphans the incomplete scan surfaced, still refuses over a
+// LiveUnlisted root, and a failure of the whole scan is still logged every
+// time, not paceable: it can never be mistaken for a quiet scan.
+func TestKillExistingOrphansSuppressedLogStillTerminatesAndRefuses(t *testing.T) {
+	const sessionID = "sid-term"
+	entries := func() error {
+		var err error
+		for pid := 1000; pid < 1070; pid++ {
+			err = errors.Join(err, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: permission denied", pid)})
+		}
+		return err
+	}()
+	wholeScanErr := errors.Join(entries, errors.New("enumerating /proc: permission denied"))
+
+	city := t.TempDir()
+	t0 := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	var clk clock.Fake
+	clk.Time = t0
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	orphan := runtime.LiveRuntime{SessionID: sessionID, City: city, PID: 100}
+	liveUnlisted := runtime.LiveRuntime{SessionID: sessionID, City: city, PID: 300, LiveUnlisted: true}
+	start := func(roots []runtime.LiveRuntime, err error) (*Manager, *runtime.Fake) {
+		fake := &scanRootsFake{Fake: runtime.NewFake(), roots: roots, err: err}
+		return newTestManager(t, beads.NewMemStore(), fake, WithCityPath(city), WithClock(&clk)), fake.Fake
+	}
+	scanErrCount := func() int {
+		return strings.Count(buf.String(), "session: scanning for orphaned runtimes for "+sessionID)
+	}
+	terminated := func(fake *runtime.Fake) int {
+		n := 0
+		for _, c := range fake.Calls {
+			if c.Method == "TerminateRuntime" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// The first start reports the scan and terminates the orphan.
+	m1, f1 := start([]runtime.LiveRuntime{orphan}, entries)
+	if err := m1.killExistingOrphans(context.Background(), sessionID); err != nil {
+		t.Fatalf("killExistingOrphans: %v", err)
+	}
+	if n := terminated(f1); n != 1 {
+		t.Fatalf("terminated %d runtimes, want the orphan", n)
+	}
+	if n := scanErrCount(); n != 1 {
+		t.Fatalf("logged %d times after the first start, want 1", n)
+	}
+
+	// A suppressed start still terminates what the scan surfaced.
+	clk.Advance(time.Minute)
+	m2, f2 := start([]runtime.LiveRuntime{orphan}, entries)
+	if err := m2.killExistingOrphans(context.Background(), sessionID); err != nil {
+		t.Fatalf("killExistingOrphans: %v", err)
+	}
+	if n := terminated(f2); n != 1 {
+		t.Fatalf("terminated %d runtimes on a suppressed start, want the orphan", n)
+	}
+	if n := scanErrCount(); n != 1 {
+		t.Fatalf("logged %d times on a suppressed start, want still 1", n)
+	}
+
+	// A suppressed start still refuses over a LiveUnlisted root: a
+	// replacement would race the provider's runtime for the session's work.
+	clk.Advance(time.Minute)
+	m3, f3 := start([]runtime.LiveRuntime{liveUnlisted}, entries)
+	err := m3.killExistingOrphans(context.Background(), sessionID)
+	if err == nil || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("killExistingOrphans error = %v; want the LiveUnlisted refusal", err)
+	}
+	if n := terminated(f3); n != 0 {
+		t.Fatalf("terminated %d runtimes over a LiveUnlisted root, want none", n)
+	}
+	if n := scanErrCount(); n != 1 {
+		t.Fatalf("logged %d times over a LiveUnlisted refusal, want the scan line still suppressed", n)
+	}
+	if !strings.Contains(buf.String(), "refusing to start "+sessionID) {
+		t.Fatalf("the refusal line is missing: %q", buf.String())
+	}
+
+	// A whole-scan failure is logged every time, entry errors or not.
+	clk.Advance(time.Minute)
+	m4, f4 := start([]runtime.LiveRuntime{orphan}, wholeScanErr)
+	if err := m4.killExistingOrphans(context.Background(), sessionID); err != nil {
+		t.Fatalf("killExistingOrphans: %v", err)
+	}
+	if n := terminated(f4); n != 1 {
+		t.Fatalf("terminated %d runtimes during a whole-scan failure, want the surfaced orphan", n)
+	}
+	if n := scanErrCount(); n != 2 {
+		t.Fatalf("logged %d times during a whole-scan failure, want 2", n)
+	}
+	clk.Advance(time.Minute)
+	m5, _ := start(nil, wholeScanErr)
+	if err := m5.killExistingOrphans(context.Background(), sessionID); err != nil {
+		t.Fatalf("killExistingOrphans: %v", err)
+	}
+	if n := scanErrCount(); n != 3 {
+		t.Fatalf("logged %d times during a repeated whole-scan failure, want 3", n)
+	}
+}
