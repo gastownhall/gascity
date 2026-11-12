@@ -718,9 +718,13 @@ with the server and its clients. When the city also runs ACP agents, gc
 applies the same rule to the ACP side's scan. A session's start and the
 drain-ack escalation therefore never end a tmux session running inside a
 box, nor any process in its panes. gc recognizes tmux by its process name:
-`tmux`, or the `<name>: server` and `<name>: client` titles tmux takes from
-the name it runs under, so a renamed tmux binary is recognized too, except
-on macOS, where only `tmux` is.
+`tmux`, or a title tmux takes from the name it runs under, so a renamed tmux
+binary is recognized too, except on macOS, where only `tmux` is. On Linux
+that title is `<name>: server` or `<name>: client` for a name of up to six
+characters, and `<name>:` for a longer one, because the kernel keeps 15
+bytes of a process name and tmux cuts the rest at its last space. Any other
+process whose name takes one of these forms is treated as tmux too, so the
+scan skips it and everything under it.
 
 The rule has costs:
 
@@ -731,6 +735,12 @@ The rule has costs:
   ended as the session's leftover once it leaves its pane and is adopted.
 - A tmux session an agent starts with `tmux new -d` inside a box is never
   cleaned up by gc. It runs until it exits or someone ends it.
+- In a city that also runs ACP agents, the same rule covers the ACP
+  agents' processes, since gc cannot tell a tmux server an ACP agent
+  started from one inside a box. A tmux session an ACP agent starts
+  (`tmux new -d`) is no longer ended when that session restarts, as it is
+  in a city without a host-sharing exec script, and any ACP agent process
+  under a tmux server is skipped.
 - The drain-ack escalation ends a wedged session's processes only when
   their parent is a tmux server, so it finds nothing to end for an exec
   script's session: the slot stays occupied until the box exits.

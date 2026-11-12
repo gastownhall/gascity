@@ -346,3 +346,59 @@ func TestSameSessionRestartOnAutoOverHostFSExecPackNeverReachesInBoxTmux(t *test
 		})
 	}
 }
+
+// The exception to AC-7 (TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim)
+// in a city that runs ACP agents over a host-sharing exec pack: gc wraps the
+// exec base as auto(exec, acp), and the composite passes the ACP leaf's roots
+// through the exec leaf's tmux fence. The fence cannot tell a tmux server an
+// ACP session's agent founded from one inside an exec box, so an ACP-routed
+// session's own tmux-parented leftover is not reported: its restart leaves
+// the pane running and the start proceeds rather than refusing.
+func TestSameSessionRestartOnAutoOverHostFSExecPackLeavesAnACPSessionsOwnTmuxPane(t *testing.T) {
+	store := beads.NewMemStore()
+	city := t.TempDir()
+	composite := auto.New(sessionexec.NewSeamBackedForCity(hostFSGoldenPack(t), "c", city), acp.NewSeamBackedWithDir(t.TempDir(), acp.Config{}))
+	scanner, ok := runtime.AsProcessTableScanner(composite)
+	if !ok {
+		t.Fatal("auto over the host-sharing golden pack has no process-table scanner")
+	}
+	sp := &execScanOrphanProvider{Fake: runtime.NewFake(), scanner: scanner}
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	composite.RouteACP(info.SessionName)
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+	startsBefore := sp.CountCalls("Start", info.SessionName)
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		serverPID   = 4100
+		paneRootPID = 4101
+	)
+	writeFakeProcess(t, root, serverPID, 1, []string{"tmux: server"}, env)
+	writeFakeProcess(t, root, paneRootPID, serverPID, []string{"bash"}, append(env, "TMUX=/tmp/tmux-"+strconv.Itoa(os.Getuid())+"/agent-own,"+strconv.Itoa(serverPID)+",0"))
+	proctable.SetScanRootForTesting(t, root)
+
+	found, err := scanner.FindRuntimesBySessionID(info.ID)
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("the composite's scan = %+v, want nothing: the exec leaf's fence drops the ACP session's tmux pane", found)
+	}
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(sp.terminated) != 0 {
+		t.Fatalf("pre-start orphan kill terminated %v, want nothing: the ACP session's own tmux pane %d is fenced, unlike standalone ACP (AC-7)", sp.terminated, paneRootPID)
+	}
+	if got := sp.CountCalls("Start", info.SessionName) - startsBefore; got != 1 {
+		t.Fatalf("Start calls after the restart = %d, want 1: the start proceeds", got)
+	}
+}
