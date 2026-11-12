@@ -14,12 +14,14 @@ package conversationlane_test
 // run holds the stream's last injection to its own bound relative to the
 // rest (x6DrainOver) and every notice to a stall ceiling (x6SteadyCeiling);
 // the absolute p99 and max are wall clock on a shared executor, so they gate
-// only under x6PerfEnv, which no CI job sets (#8240). GC_LANE_X6_FULL=1 runs
-// the literal line and logs the measurement.
+// only under x6PerfEnv, which only the nightly X6 perf lane sets (#8240).
+// GC_LANE_X6_FULL=1 runs the literal line and logs the measurement.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -83,24 +85,29 @@ const x6SteadyCeiling = 30 * time.Second
 // every boundary slips (injection gaps of 5-9 s against the 3 s quiescence
 // window, steady p99 up to 11.18 s; 12 merge-queue ejections in the two
 // weeks after #8255 and #8308, each passing on a rerun), so the SLO measured
-// the executor (#8240). No CI job sets it, so no CI job enforces the
-// absolute SLO: the nightly lanes run on the same shared executors. It is a
-// manual measurement, run locally on a host the run owns with nothing
-// beside it (not a shared executor or a shared development box). Bazel
-// defaults to remote execution on the maintainers' hosts, so the command
-// keeps the test local:
+// the executor (#8240). Only the nightly X6 perf lane (nightly.yml, job
+// x6-steady-perf) sets it, on a runner it owns: the job runs the steady phase
+// alone, five times one after another, on the runner's own cores, with the
+// local strategy and no cached result (TestX6PerfGateHasALane keeps a job
+// that sets it and selects this test). The same command runs it by hand on a
+// host the run owns with nothing beside it (not a shared executor or a shared
+// development box); Bazel defaults to remote execution on the maintainers'
+// hosts, so the command keeps the test local:
 //
 //	bazel test --config=ci --config=integration --strategy=TestRunner=local \
-//	  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
+//	  --nocache_test_results --test_env=GC_LANE_X6_PERF=1 \
+//	  --test_filter='^TestX6FanIn$/^steady$' --test_sharding_strategy=disabled \
 //	  //test/conversationlane:conversationlane_test
 //
 // Every run still logs the figures and asserts what does not measure the
 // host: x6SteadyCeiling, and x6DrainOver, which is relative to the rest's
 // max and so scales with load. The wakes the SLO watched are pinned
-// deterministically by unit tests: the busy re-probe cadence
+// deterministically by unit tests on a fake clock: the busy re-probe cadence
 // (TestLaneHostReprobesBusyRuntimeWithoutRows, TestLaneWorkerNextDelay) and
-// the wake at a boundary's quiescence deadline (#8308's executor, planner
-// and host tests).
+// the wake at a boundary's quiescence deadline: the host's timer and the
+// deadline's pass (TestLaneHostBusyBoundaryWakesAtItsDeadline over laneTestClock),
+// the planner's hint (TestPlanTakeBoundaryHint) and the executor's probe
+// (TestLaneExecProbeBoundaryAt).
 const x6PerfEnv = "GC_LANE_X6_PERF"
 
 // x6GatesSLO reports whether getenv opts this run into the steady phase's
@@ -328,6 +335,140 @@ func (c *laneCity) logTail(phase string) {
 		phase, sizes, gaps, sizes[len(sizes)-1], final, longest, (final - longest).Round(time.Millisecond), at[len(at)-1].Sub(lastNotice).Round(time.Millisecond))
 }
 
+// x6LongestGap is the longest spacing of consecutive times in at, in any
+// order: the producers' longest gap between op.CreatedAt, and the largest
+// interval between the fake runtime's invocations. It is zero below two times.
+func x6LongestGap(at []time.Time) time.Duration {
+	sorted := slices.SortedFunc(slices.Values(at), time.Time.Compare)
+	var longest time.Duration
+	for i := 1; i < len(sorted); i++ {
+		longest = max(longest, sorted[i].Sub(sorted[i-1]))
+	}
+	return longest
+}
+
+// x6NoticeAges are the ages, at injectedAt, of an injection's oldest and
+// newest notice: injectedAt less the earliest and the latest op.CreatedAt in
+// created. A notice created after its injection has a negative age, reported
+// as it is.
+func x6NoticeAges(injectedAt time.Time, created []time.Time) (oldest, newest time.Duration) {
+	if len(created) == 0 {
+		return 0, 0
+	}
+	first, last := slices.MinFunc(created, time.Time.Compare), slices.MaxFunc(created, time.Time.Compare)
+	return injectedAt.Sub(first), injectedAt.Sub(last)
+}
+
+// x6InStreamGap is the longest gap between two consecutive injections in at,
+// the final gap excluded (it is the drain's, as logTail's "longest in-stream
+// gap"); the first of equal gaps wins. ok is false below three injections.
+func x6InStreamGap(at []time.Time) (from, to time.Time, ok bool) {
+	var longest time.Duration
+	for i := 0; i+2 < len(at); i++ {
+		if gap := at[i+1].Sub(at[i]); !ok || gap > longest {
+			from, to, longest, ok = at[i], at[i+1], gap, true
+		}
+	}
+	return from, to, ok
+}
+
+// x6Within are the times in at strictly between from and to.
+func x6Within(at []time.Time, from, to time.Time) []time.Time {
+	var out []time.Time
+	for _, t := range at {
+		if t.After(from) && t.Before(to) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// x6InvocationTimes reads the time of each invocation in the fake runtime's
+// ops.jsonl, in file order. A last line that does not parse is one being
+// appended and is left for the next read; any other line that does not is an
+// error.
+func x6InvocationTimes(data []byte) ([]time.Time, error) {
+	lines := strings.Split(string(data), "\n")
+	var out []time.Time
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var inv struct {
+			At string `json:"at"`
+		}
+		err := json.Unmarshal([]byte(line), &inv)
+		var at time.Time
+		if err == nil {
+			at, err = time.Parse(time.RFC3339Nano, inv.At)
+		}
+		if err != nil {
+			if i == len(lines)-1 {
+				continue
+			}
+			return nil, fmt.Errorf("invocation line %d %q: %w", i+1, line, err)
+		}
+		out = append(out, at)
+	}
+	return out, nil
+}
+
+// x6WallClockLine names the steady phase's wall-clock assertion, its two
+// limits and whether this run asserts it.
+func x6WallClockLine(gated bool) string {
+	state := fmt.Sprintf("not asserted (%s is not 1)", x6PerfEnv)
+	if gated {
+		state = fmt.Sprintf("asserted (%s=1)", x6PerfEnv)
+	}
+	return fmt.Sprintf("x6 steady wall-clock line: p99 <= %s and max <= %s, %s", x6SteadyP99, x6SteadyMax, state)
+}
+
+// logAttribution logs what the steady phase's latency is made of, as numbers,
+// for every run: per injection the notices it carried and the age at injection
+// of its oldest and newest notice; the producers' longest gap between
+// op.CreatedAt; and from the fake runtime's ops.jsonl the invocations inside
+// the longest in-stream gap between injections and the largest interval
+// between invocations between the first and the last injection.
+func (c *laneCity) logAttribution(phase string) {
+	c.t.Helper()
+	prefix := "x6 " + phase + " "
+	created := map[string]time.Time{}
+	var producers []time.Time
+	for _, op := range c.ops() {
+		if strings.HasPrefix(op.Payload, prefix) {
+			created[op.Payload] = op.CreatedAt
+			producers = append(producers, op.CreatedAt)
+		}
+	}
+	var at []time.Time
+	for i, d := range deliveriesOf(c.deliveries(), prefix) {
+		injectedAt := d.at(c.t)
+		at = append(at, injectedAt)
+		var times []time.Time
+		for _, payload := range injectedPayloads(d.Text) {
+			times = append(times, created[payload])
+		}
+		oldest, newest := x6NoticeAges(injectedAt, times)
+		c.t.Logf("x6 %s injection %d: %d notices, oldest %s newest %s at injection", phase, i, len(times), oldest.Round(time.Millisecond), newest.Round(time.Millisecond))
+	}
+	data, err := os.ReadFile(filepath.Join(c.state, "ops.jsonl"))
+	if err != nil {
+		c.t.Fatalf("reading the runtime's invocation log: %v", err)
+	}
+	invocations, err := x6InvocationTimes(data)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	from, to, ok := x6InStreamGap(at)
+	if !ok {
+		c.t.Logf("x6 %s attribution: producers' longest gap %s; %d injections, no in-stream gap", phase, x6LongestGap(producers).Round(time.Millisecond), len(at))
+		return
+	}
+	c.t.Logf("x6 %s attribution: producers' longest gap %s; longest in-stream gap %s holds %d invocations; largest interval between invocations %s",
+		phase, x6LongestGap(producers).Round(time.Millisecond), to.Sub(from).Round(time.Millisecond), len(x6Within(invocations, from, to)),
+		x6LongestGap(x6Within(invocations, at[0], at[len(at)-1])).Round(time.Millisecond))
+}
+
 // TestX6FanIn runs its phases one after another, never in parallel: the
 // steady phase measures latency, which a city beside it would load.
 func TestX6FanIn(t *testing.T) {
@@ -354,12 +495,15 @@ func TestX6FanIn(t *testing.T) {
 		a := x6Assess(lat)
 		t.Logf("x6 steady: %d notices at 20/s in %d injections; latency p50 %s p99 %s max %s; the last injection's %d notices: max %s; all notices: p99 %s",
 			len(ids), len(c.injectionSizes("steady")), a.p50, a.p99, a.max, len(lat.drain), a.drainMax, a.allP99)
+		gated := x6GatesSLO(os.Getenv)
+		t.Log(x6WallClockLine(gated))
+		c.logAttribution("steady")
 		for _, o := range a.always {
 			t.Error(o)
 		}
-		if !x6GatesSLO(os.Getenv) {
+		if !gated {
 			for _, o := range a.slo {
-				t.Logf("x6 steady: absolute SLO not gated (no CI job sets %s=1; set it on a host the run owns): %s", x6PerfEnv, o)
+				t.Logf("x6 steady: absolute SLO not asserted (%s is not 1; the nightly X6 perf lane sets it): %s", x6PerfEnv, o)
 			}
 			return
 		}

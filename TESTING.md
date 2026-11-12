@@ -319,24 +319,40 @@ in two weeks (#8240). It is logged on every run and asserted only on opt-in:
 
 | variable | selects | who needs it |
 | --- | --- | --- |
-| `GC_LANE_X6_PERF` | `1` turns X6 steady's absolute latency SLO from a log line into an assertion. No CI job sets it, so no CI job enforces the SLO: the nightly lanes share the same executors. Set it only in a local run on a host the run owns, with nothing beside it (command below) | `TestX6FanIn/steady` only |
+| `GC_LANE_X6_PERF` | `1` turns X6 steady's absolute latency SLO from a log line into an assertion; the nightly `Conversation lane / X6 steady perf lane` job (`nightly.yml`, `x6-steady-perf`) sets it, five sequential runs on a runner it owns, and `TestX6PerfGateHasALane` fails when no workflow job both sets it and selects `TestX6FanIn`. Set it elsewhere only in a local run on a host the run owns, with nothing beside it (command below) | `TestX6FanIn/steady` only |
 | `GC_LANE_X6_FULL` | `1` runs DES-O1's literal line (5,000 notices in 60 s), a manual measurement a keystroke runtime is expected to miss | `TestX6FanIn/full` only |
 
-Run the opted-in SLO locally, on a host the run owns with nothing beside it
-(not a shared executor or a shared development box). Bazel defaults to remote
-execution on the maintainers' hosts, so keep the test runner local:
+The nightly lane runs the steady phase alone, five times one after another,
+with the local strategy, no cached result and no retry, so each run is an
+independent sample of one host: its job log carries every run's
+`x6 steady:` and `x6 steady tail:` lines and the attribution lines, and its
+step summary one line per run. Every steady run (the PR gate's included) logs,
+as numbers only: the `x6 steady wall-clock line:` naming the two limits and
+whether the gate is on; per injection the notices carried and the age at
+injection of the oldest and newest notice; the producers' longest gap between
+`op.CreatedAt`; and, from the fake runtime's `ops.jsonl`, the invocations inside
+the longest in-stream gap and the largest interval between invocations. A
+nightly failure is a sample of the host to read with those lines, not a reason
+to raise `x6SteadyP99` or `x6SteadyMax`.
+
+Run the opted-in SLO locally the same way, on a host the run owns with nothing
+beside it (not a shared executor or a shared development box). Bazel defaults
+to remote execution on the maintainers' hosts, so keep the test runner local:
 
 ```bash
 bazel test --config=ci --config=integration --strategy=TestRunner=local \
-  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
+  --local_test_jobs=1 --nocache_test_results --runs_per_test=5 \
+  --test_env=GC_LANE_X6_PERF=1 --test_env=GO_TEST_WRAP_TESTV=1 --test_output=all \
+  --test_filter='^TestX6FanIn$/^steady$' --test_sharding_strategy=disabled \
   //test/conversationlane:conversationlane_test
 ```
 
 Replacement coverage for the SLO, under "Flakes are defects": the busy
 re-probe cadence (`TestLaneHostReprobesBusyRuntimeWithoutRows`,
 `TestLaneWorkerNextDelay`) and the wake at a boundary's quiescence deadline
-(#8308's executor, planner and host tests) are pinned by deterministic unit
-tests, and the always-on ceiling and drain bound fail a run where a notice
+(`TestLaneHostBusyBoundaryWakesAtItsDeadline` on a fake clock,
+`TestPlanTakeBoundaryHint`, `TestLaneExecProbeBoundaryAt`) are pinned by
+deterministic unit tests, and the always-on ceiling and drain bound fail a run where a notice
 stalls. #8240 stays the tracking issue.
 
 ### Git auto-maintenance in test repos

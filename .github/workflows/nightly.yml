@@ -158,6 +158,86 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The X6 fan-in steady phase's wall-clock line (TestX6FanIn/steady: p99 <= 5s
+  # and max <= 7s). The test asserts it only under GC_LANE_X6_PERF, because on a
+  # shared executor every boundary slips and the line measures the executor
+  # (#8240); nothing set the variable, so nothing enforced the line. This is
+  # that lane: the steady phase alone, five times one after another
+  # (--runs_per_test runs separate actions and --local_test_jobs=1 starts them
+  # one at a time), on this runner's own cores, with the local strategy, no
+  # cached result and no retry, so each run is an independent sample of one
+  # host with nothing beside it. The figures, the tail and the attribution
+  # lines of every run are in the job log, and one line per run goes to the
+  # step summary. A failing run fails the job: the line is asserted here and
+  # the fix is not to add headroom to the constants.
+  # TestX6PerfGateHasALane (scripts/) keeps a job that sets the gate and selects
+  # TestX6FanIn.
+  x6-steady-perf:
+    name: Conversation lane / X6 steady perf lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
+      # Tests run here with .bazelrc's pinned test PATH, so give them the Go
+      # the remote workers have at /usr/local/go, and the host tools the
+      # integration tests drive.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Provide /usr/local/go and host tools
+        run: |
+          set -euo pipefail
+          if [ ! -e /usr/local/go ]; then
+            sudo ln -s "$(go env GOROOT)" /usr/local/go
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux lsof openssh-client
+          mkdir -p /tmp/bt
+      - name: X6 steady, five sequential runs with the wall-clock gate on
+        run: |
+          set -euo pipefail
+          bazel test --config=ci --config=integration \
+            --strategy=TestRunner=local --local_test_jobs=1 \
+            --nocache_test_results --runs_per_test=5 \
+            --test_env=GC_LANE_X6_PERF=1 --test_env=GO_TEST_WRAP_TESTV=1 \
+            --test_output=all \
+            --test_filter='^TestX6FanIn$/^steady$' --test_sharding_strategy=disabled \
+            --build_event_json_file="$RUNNER_TEMP/x6-bep.json" \
+            //test/conversationlane:conversationlane_test
+      - name: One summary line per run
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          runs=0
+          {
+            echo "### X6 steady perf lane (attempt ${{ github.run_attempt }}, GC_LANE_X6_PERF=1, local strategy)"
+            for log in bazel-testlogs/test/conversationlane/conversationlane_test/run_*_of_*/test.log; do
+              [ -f "$log" ] || continue
+              runs=$((runs + 1))
+              status=FAIL
+              grep -aq -- '--- PASS: TestX6FanIn/steady ' "$log" && status=PASS
+              figures=$(grep -ao 'x6 steady: [0-9].*' "$log" | head -1)
+              echo "- $(basename "$(dirname "$log")") $status: ${figures:-no figures line}"
+            done
+            echo "- runs found: $runs"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$runs" -gt 0 ]
+      - name: Upload the build event log and test logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: x6-steady-perf-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/x6-bep.json
+            bazel-testlogs/test/conversationlane/conversationlane_test/run_*_of_*/test.log
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
   # the pack-gate pin check in ci.yml.
@@ -228,6 +308,7 @@ jobs:
       - tier-b
       - tier-c
       - beads-proxied-perf
+      - x6-steady-perf
       - bundled-pack-pins
       - waiver-clock
     if: ${{ always() }}
@@ -239,6 +320,7 @@ jobs:
           TIER_B_RESULT: ${{ needs.tier-b.result }}
           TIER_C_RESULT: ${{ needs.tier-c.result }}
           BEADS_PROXIED_PERF_RESULT: ${{ needs.beads-proxied-perf.result }}
+          X6_STEADY_PERF_RESULT: ${{ needs.x6-steady-perf.result }}
           BUNDLED_PACK_PINS_RESULT: ${{ needs.bundled-pack-pins.result }}
           WAIVER_CLOCK_RESULT: ${{ needs.waiver-clock.result }}
         run: |
@@ -250,6 +332,7 @@ jobs:
               "tier-b": os.environ.get("TIER_B_RESULT", "missing"),
               "tier-c": os.environ.get("TIER_C_RESULT", "missing"),
               "beads-proxied-perf": os.environ.get("BEADS_PROXIED_PERF_RESULT", "missing"),
+              "x6-steady-perf": os.environ.get("X6_STEADY_PERF_RESULT", "missing"),
               "bundled-pack-pins": os.environ.get("BUNDLED_PACK_PINS_RESULT", "missing"),
               "waiver-clock": os.environ.get("WAIVER_CLOCK_RESULT", "missing"),
           }

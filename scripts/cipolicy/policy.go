@@ -387,7 +387,19 @@ const (
 	// needs every other Nightly job, one python3 step fed by a dedicated
 	// needs.<job>.result env var per dependency that fails closed on anything
 	// but "success"; no new trigger, permission or secret.
-	expectedNightlyExecutionHash = "adfd68dfb5d2c4285bb6cf2ecf5a81ea1446fa54e2bf2a39aa5dd4e4581153cf"
+	// Bumped again (ga-bzskl7f, the X6 steady perf lane): one new job,
+	// x6-steady-perf: ubuntu-latest, timeout-minutes 60, no env, no secret.
+	// Steps: checkout, setup-bazel (no secrets: the local mode), the LLVM
+	// archive cache, setup-go (`cache: false`), one step that links
+	// /usr/local/go and installs tmux, lsof and openssh-client, one
+	// `bazel test --config=ci --config=integration --strategy=TestRunner=local
+	// --local_test_jobs=1 --nocache_test_results --runs_per_test=5
+	// --test_env=GC_LANE_X6_PERF=1` step selecting `^TestX6FanIn$/^steady$` of
+	// //test/conversationlane:conversationlane_test, an `if: always()` step that
+	// writes one line per run to GITHUB_STEP_SUMMARY, and an `if: always()`
+	// pinned upload-artifact step. nightly-summary gains the job in its needs
+	// and its fail-closed results. No new trigger, permission or secret.
+	expectedNightlyExecutionHash = "c71a8626521af69f3db10aab0cb729a2b558e062a56982f7be4cf112bd9a4694"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
