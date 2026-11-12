@@ -62,6 +62,11 @@ resource = "net_listen"
 calls = 8
 
 [[count]]
+path = "cmd/gc/bd_env_workspace_env_lock_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
 resource = "slow_process_gate"
 calls = 1
