@@ -5280,7 +5280,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
-| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
+| `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, re-route a bead whose gc.routed_to names another agent, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
 | `--json` | bool |  | Output dispatch result in JSON format |
 | `--merge` | string |  | merge strategy: direct, mr, or local |
