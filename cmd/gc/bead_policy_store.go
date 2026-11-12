@@ -65,7 +65,25 @@ var (
 	_ beads.DepBatchRemover        = (*beadPolicyGraphStore)(nil)
 	_ beads.ParentProjectionWaiter = (*beadPolicyStore)(nil)
 	_ beads.ParentProjectionWaiter = (*beadPolicyGraphStore)(nil)
+	_ beads.SchemaCursorReporter   = (*beadPolicyStore)(nil)
+	_ beads.SchemaCursorReporter   = (*beadPolicyGraphStore)(nil)
 )
+
+// SchemaCursor forwards the wrapped store's schema migration cursor. The
+// scope-ready wait asks the store it opens, and that store is this wrapper:
+// without the forward, the embedded Store interface hides the cursor and
+// beads.CheckSchemaAtTarget passes a store stalled part-way through its
+// migration without ever asking it. A backing that cannot report a cursor gets
+// beads.ErrSchemaCursorUnavailable, never (0, 0, nil): the check skips
+// "cannot be asked" but reads a zero cursor as one at target.
+// beadPolicyGraphStore inherits this through its embedded *beadPolicyStore.
+func (s *beadPolicyStore) SchemaCursor(ctx context.Context) (current, target int, err error) {
+	reporter, ok := beads.As[beads.SchemaCursorReporter](s.Store)
+	if !ok {
+		return 0, 0, fmt.Errorf("policy-wrapped store %T: %w", s.Store, beads.ErrSchemaCursorUnavailable)
+	}
+	return reporter.SchemaCursor(ctx)
+}
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	return wrapStoreWithBeadPoliciesOwnership(store, cfg, false)
