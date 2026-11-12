@@ -27,8 +27,9 @@ const holdLabelClearedValue = "cleared"
 // route satisfies the check when it is the bare hold value or, when the hold
 // value is bound in config, the binding-qualified canonical form that
 // v2-routed-to-namespace requires — a qualified route is the canonical state
-// for a bound hold value, never a drift. --fix backfills gc.routed_to from
-// the label value.
+// for a bound hold value, never a drift. --fix backfills gc.routed_to with
+// the unique binding-qualified canonical for a bound hold value, or the bare
+// hold value when config does not bind it.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -63,13 +64,34 @@ func holdLabelValue(labels []string) (string, bool) {
 }
 
 // holdRouteTarget is a single bead whose hold:<value> label and gc.routed_to
-// metadata have drifted apart.
+// metadata have drifted apart. canonicals holds every binding-qualified
+// canonical route the hold value maps to in config; its length decides the
+// repair: none keeps the bare hold value, one names the qualified route to
+// backfill, several have no single answer and must be resolved manually.
 type holdRouteTarget struct {
-	label  string
-	store  beads.Store
-	beadID string
-	want   string
-	got    string
+	label      string
+	store      beads.Store
+	beadID     string
+	want       string
+	got        string
+	canonicals []string
+}
+
+// resolvedRoute returns the gc.routed_to value --fix should write for the
+// target and whether writing it is safe. Without a canonical there is no
+// binding to qualify with, so the bare hold value is the route as before; a
+// single canonical is the binding-qualified form v2-routed-to-namespace
+// requires; several canonicals leave no unambiguous write target, so the
+// bead must be left for manual resolution.
+func (t holdRouteTarget) resolvedRoute() (route string, fixable bool) {
+	switch len(t.canonicals) {
+	case 0:
+		return t.want, true
+	case 1:
+		return t.canonicals[0], true
+	default:
+		return "", false
+	}
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
@@ -120,7 +142,7 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 			if slices.Contains(aliases[want], got) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
+			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got, canonicals: aliases[want]})
 		}
 	}
 	return targets, skipped
@@ -133,7 +155,13 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	details := make([]string, 0, len(targets)+len(skipped))
 	for _, tgt := range targets {
-		details = append(details, fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q", tgt.label, tgt.beadID, tgt.want, tgt.got))
+		detail := fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q", tgt.label, tgt.beadID, tgt.want, tgt.got)
+		if route, fixable := tgt.resolvedRoute(); fixable {
+			detail += fmt.Sprintf("; use %q", route)
+		} else {
+			detail += fmt.Sprintf("; use one of %s", strings.Join(tgt.canonicals, ", "))
+		}
+		details = append(details, detail)
 	}
 	details = append(details, skipped...)
 	sort.Strings(details)
@@ -145,14 +173,24 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	return warnCheck(c.Name(),
 		fmt.Sprintf("%d bead(s) carry a hold:<value> label without matching gc.routed_to", len(targets)),
-		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label",
+		"run gc doctor --fix to backfill gc.routed_to with the hold:<value>'s binding-qualified route where bound, then rerun gc doctor",
 		details)
 }
 
+// Fix backfills every target's gc.routed_to with its resolved route: the
+// unique binding-qualified canonical when the hold value is bound, the bare
+// hold value otherwise. A target whose hold value maps to several canonical
+// routes has no unambiguous write target and is left untouched for manual
+// resolution; it alone does not make Fix fail — the warning stays, so
+// doctor's verifying re-run still reports it.
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
+		route, fixable := tgt.resolvedRoute()
+		if !fixable {
+			continue
+		}
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, route); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
 	}

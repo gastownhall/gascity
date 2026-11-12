@@ -346,23 +346,49 @@ func TestHoldLabelRoutedToCheckAcceptsBindingQualifiedRoute(t *testing.T) {
 // to it), so the hold check must accept that qualified form instead of
 // demanding the bare hold value, and --fix must write the qualified form
 // when it backfills a missing or unrelated route. Covers both city and rig
-// stores.
+// stores, named-session bindings (including an agent and session sharing a
+// qualified name, which stays unambiguous), dir-qualified hold values, and
+// metadata-write error propagation.
 func TestHoldLabelRoutedToCheckBindingQualifiedRoutes(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := t.TempDir()
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "planner", BindingName: "ops"}},
-		Rigs:   []config.Rig{{Name: "repo", Path: rigDir}},
+		Agents: []config.Agent{
+			{Name: "planner", BindingName: "ops"},
+			{Name: "worker", Dir: "repo", BindingName: "ops"},
+			{Name: "scribe", BindingName: "ops"},
+		},
+		NamedSessions: []config.NamedSession{{Name: "scribe", BindingName: "ops"}},
+		Rigs:          []config.Rig{{Name: "repo", Path: rigDir}},
 	}
 	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
 		// Healthy: the canonical binding-qualified route must satisfy the
-		// check and survive --fix untouched (AC-1).
+		// check and survive --fix untouched.
 		{
 			ID: "HQ-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
 			Metadata: map[string]string{"gc.routed_to": "ops.planner"},
 		},
+		// Mismatch: missing gc.routed_to — --fix must backfill the qualified form.
+		{ID: "HQ-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		// Mismatch: unrelated route — --fix must rewrite it to the qualified form.
+		{
+			ID: "HQ-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "reviewer"},
+		},
+		// Dir-qualified hold value resolves through its dir-qualified canonical.
+		{
+			ID: "HQ-4", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:repo/worker"},
+			Metadata: map[string]string{"gc.routed_to": "someone-else"},
+		},
+		// A hold value bound only via a named session (agent scribe exists too,
+		// but shares the session's qualified name so the canonical is unique).
+		{ID: "HQ-5", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:scribe"}},
+		// No hold label — ignored.
+		{ID: "T-9", Title: "work", Type: "task", Status: "open"},
 	}, nil)
-	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RHQ-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+	}, nil)
 	stores := map[string]beads.Store{cityDir: cityStore, rigDir: rigStore}
 	factory := func(path string) (beads.Store, error) {
 		store, ok := stores[path]
@@ -372,18 +398,119 @@ func TestHoldLabelRoutedToCheckBindingQualifiedRoutes(t *testing.T) {
 		return store, nil
 	}
 
-	if res := newHoldLabelRoutedToCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
-		t.Fatalf("hold-label-routed-to status = %v, want OK for binding-qualified gc.routed_to: %#v", res.Status, res)
-	}
 	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead HQ-2 has hold:planner but gc.routed_to=""; use "ops.planner"`,
+		`city bead HQ-3 has hold:planner but gc.routed_to="reviewer"; use "ops.planner"`,
+		`city bead HQ-4 has hold:repo/worker but gc.routed_to="someone-else"; use "repo/ops.worker"`,
+		`city bead HQ-5 has hold:scribe but gc.routed_to=""; use "ops.scribe"`,
+		`rig repo bead RHQ-1 has hold:planner but gc.routed_to=""; use "ops.planner"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"bead HQ-1", "T-9"} {
+		if strings.Contains(details, notWant) {
+			t.Fatalf("details should not mention %q:\n%s", notWant, details)
+		}
+	}
+
 	if err := check.Fix(&doctor.CheckContext{}); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	hq1, err := cityStore.Get("HQ-1")
-	if err != nil {
-		t.Fatalf("get HQ-1: %v", err)
+	for id, wantRoute := range map[string]string{
+		"HQ-1":  "ops.planner",
+		"HQ-2":  "ops.planner",
+		"HQ-3":  "ops.planner",
+		"HQ-4":  "repo/ops.worker",
+		"HQ-5":  "ops.scribe",
+		"RHQ-1": "ops.planner",
+	} {
+		store := cityStore
+		if id == "RHQ-1" {
+			store = rigStore
+		}
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != wantRoute {
+			t.Errorf("%s gc.routed_to = %q, want %q", id, got, wantRoute)
+		}
 	}
-	if got := hq1.Metadata["gc.routed_to"]; got != "ops.planner" {
-		t.Fatalf("HQ-1 gc.routed_to = %q, want ops.planner (canonical route must survive --fix)", got)
+
+	// After --fix both the hold check and v2-routed-to-namespace must be OK:
+	// the backfill writes exactly the canonical form the namespace check requires.
+	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix hold-label-routed-to status = %v, want OK: %#v", res2.Status, res2)
 	}
+	if nsRes := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); nsRes.Status != doctor.StatusOK {
+		t.Fatalf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", nsRes.Status, nsRes)
+	}
+
+	// A named-session-only binding must resolve too — an Agent's absence must
+	// not mask session support.
+	t.Run("named-session-only-binding", func(t *testing.T) {
+		sessDir := t.TempDir()
+		sessCfg := &config.City{NamedSessions: []config.NamedSession{{Name: "scribe", BindingName: "ops"}}}
+		sessStore := beads.NewMemStoreFrom(0, []beads.Bead{
+			{ID: "NS-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:scribe"}},
+		}, nil)
+		sessFactory := func(path string) (beads.Store, error) {
+			if path != sessDir {
+				return nil, fmt.Errorf("unexpected store path %q", path)
+			}
+			return sessStore, nil
+		}
+		sessCheck := newHoldLabelRoutedToCheck(sessCfg, sessDir, sessFactory)
+		if res := sessCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusWarning {
+			t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+		}
+		if err := sessCheck.Fix(&doctor.CheckContext{}); err != nil {
+			t.Fatalf("Fix: %v", err)
+		}
+		b, err := sessStore.Get("NS-1")
+		if err != nil {
+			t.Fatalf("get NS-1: %v", err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != "ops.scribe" {
+			t.Errorf("NS-1 gc.routed_to = %q, want ops.scribe (named-session binding)", got)
+		}
+	})
+
+	// Metadata-write failures keep propagating with bead context.
+	t.Run("setmetadata-error-propagates", func(t *testing.T) {
+		errDir := t.TempDir()
+		errCfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+		errStore := holdLabelSetErrorStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+			{ID: "E-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		}, nil)}
+		errCheck := newHoldLabelRoutedToCheck(errCfg, errDir, func(path string) (beads.Store, error) {
+			if path != errDir {
+				return nil, fmt.Errorf("unexpected store path %q", path)
+			}
+			return errStore, nil
+		})
+		err := errCheck.Fix(&doctor.CheckContext{})
+		if err == nil {
+			t.Fatal("Fix error = nil, want setmetadata failure")
+		}
+		if got := err.Error(); !strings.Contains(got, "city bead E-1") || !strings.Contains(got, "metadata write failed") {
+			t.Fatalf("Fix error = %q, want bead context and store error detail", got)
+		}
+	})
+}
+
+type holdLabelSetErrorStore struct {
+	beads.Store
+}
+
+func (s holdLabelSetErrorStore) SetMetadata(string, string, string) error {
+	return errors.New("metadata write failed")
 }
