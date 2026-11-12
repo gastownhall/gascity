@@ -5600,6 +5600,13 @@ func (cr *CityRuntime) observeResume() {
 		return
 	}
 	wall, mono := cr.resume.lastDeltas()
+	// Detection runs in both modes so the floor is ready if a reload switches
+	// to the legacy reconciler, but only the legacy reconciler applies it.
+	if cr.runsV2() {
+		fmt.Fprintf(cr.stderr, "%s: host resume detected (wall clock advanced %s, monotonic clock %s); the v2 session reconciler does not apply the resume floor\n", //nolint:errcheck
+			cr.logPrefix, wall.Round(time.Second), mono.Round(time.Second))
+		return
+	}
 	fmt.Fprintf(cr.stderr, "%s: host resume detected (wall clock advanced %s, monotonic clock %s); idle and stall time is measured from %s\n", //nolint:errcheck
 		cr.logPrefix, wall.Round(time.Second), mono.Round(time.Second), cr.resume.resumedAt().UTC().Format(time.RFC3339))
 }

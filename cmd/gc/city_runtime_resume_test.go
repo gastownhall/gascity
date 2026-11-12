@@ -81,6 +81,9 @@ func TestCityRuntimeTick_DetectsResumeAndFloorsActivity(t *testing.T) {
 	if !strings.Contains(stderr.String(), "host resume detected") {
 		t.Fatalf("stderr = %q, want a host-resume line", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "idle and stall time is measured from") {
+		t.Fatalf("stderr = %q, want the legacy line naming the floor", stderr.String())
+	}
 }
 
 // TestCityRuntimeTick_FloorSurvivesLaterQuietTicks: the floor stays at the
@@ -190,4 +193,56 @@ func TestCityRuntimeControlDispatcherTick_DetectsResume(t *testing.T) {
 	if got := cr.activityFloor().at; !got.Equal(fc.wall) {
 		t.Fatalf("floor = %v, want the resume pass's wall time %v", got, fc.wall)
 	}
+}
+
+// A v2 controller still runs the detector, so the floor is ready if a reload
+// switches it to legacy, but its diagnostic does not claim the floor: the v2
+// session reconciler does not apply it. The legacy line keeps its text.
+func TestCityRuntimeObserveResume_V2DiagnosticDoesNotClaimFloor(t *testing.T) {
+	run := func(t *testing.T, v2 bool) (string, *CityRuntime, *fakeResumeClock) {
+		t.Helper()
+		fc := newFakeResumeClock()
+		var stderr bytes.Buffer
+		cr := &CityRuntime{
+			cfg:       &config.City{},
+			logPrefix: "gc test",
+			stderr:    &stderr,
+			resume:    newResumeDetector(fc.read),
+		}
+		if v2 {
+			cr.reconcilerDrift.running = reconcilerV2
+		}
+		if cr.runsV2() != v2 {
+			t.Fatalf("test setup: runsV2() = %v, want %v", cr.runsV2(), v2)
+		}
+		cr.observeResume()
+		fc.tick(30 * time.Second)
+		fc.suspend(72 * time.Hour)
+		cr.observeResume()
+		return stderr.String(), cr, fc
+	}
+	t.Run("v2", func(t *testing.T) {
+		out, cr, fc := run(t, true)
+		if !strings.Contains(out, "host resume detected") {
+			t.Fatalf("stderr = %q, want a host-resume line", out)
+		}
+		if strings.Contains(out, "idle and stall time is measured from") {
+			t.Fatalf("stderr = %q claims the resume floor under v2", out)
+		}
+		if !strings.Contains(out, "does not apply the resume floor") {
+			t.Fatalf("stderr = %q, want the v2 no-floor diagnostic", out)
+		}
+		if got := cr.activityFloor().at; !got.Equal(fc.wall) {
+			t.Fatalf("floor = %v under v2, want detection to keep running and set %v", got, fc.wall)
+		}
+	})
+	t.Run("legacy", func(t *testing.T) {
+		out, _, _ := run(t, false)
+		if !strings.Contains(out, "idle and stall time is measured from") {
+			t.Fatalf("stderr = %q, want the legacy floor line", out)
+		}
+		if strings.Contains(out, "does not apply the resume floor") {
+			t.Fatalf("stderr = %q carries the v2 diagnostic under legacy", out)
+		}
+	})
 }
