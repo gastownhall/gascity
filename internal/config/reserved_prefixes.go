@@ -229,21 +229,29 @@ func ReservedPrefixSplitRefusalForAdopt(fs fsys.FS, tomlPath string, next *City,
 //
 // Unlike an edit, which introduces only what it writes, a new city gets every
 // rig its config composes, so with include fragments the check runs on the
-// composed city (next's identity, the composed rigs with their patches
-// applied, and the composed [storage]): a rig declared only in a fragment
-// counts. A composed load that fails falls back to the raw check; the boot
-// gate still refuses what that misses.
+// city those fragments compose (next's identity, the composed rigs with their
+// patches applied, and the composed [storage]): a rig declared only in a
+// fragment counts. It composes them with ComposeFragments, without the packs,
+// which a new city may not have installed yet (gc init --from installs a
+// source's imports only once it has copied it). Fragments that do not compose
+// are an error: the check cannot judge the city, and the city could not load
+// them either.
 func ReservedPrefixSplitRefusalForNewCity(fs fsys.FS, tomlPath string, next *City) error {
-	if next != nil && len(next.Include) > 0 && fs != nil && tomlPath != "" {
-		if composed, _, err := LoadWithIncludes(fs, tomlPath); err == nil {
-			check := *next
-			check.Rigs = composed.Rigs
-			check.Patches.Rigs = nil
-			check.Storage = composed.Storage
-			return reservedPrefixSplitRefusal(&check, reservedPrefixFixesForNewCity)
-		}
+	if next == nil || len(next.Include) == 0 || fs == nil || tomlPath == "" {
+		return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForNewCity)
 	}
-	return reservedPrefixSplitRefusalForConfig(fs, tomlPath, next, reservedPrefixFixesForNewCity)
+	composed, _, err := ComposeFragments(fs, tomlPath)
+	if err != nil {
+		return fmt.Errorf("composing %s with its include fragments: %w", tomlPath, err)
+	}
+	if err := ApplyPatches(composed, Patches{Rigs: composed.Patches.Rigs}); err != nil {
+		return fmt.Errorf("composing %s with its include fragments: %w", tomlPath, err)
+	}
+	check := *next
+	check.Rigs = composed.Rigs
+	check.Patches.Rigs = nil
+	check.Storage = composed.Storage
+	return reservedPrefixSplitRefusal(&check, reservedPrefixFixesForNewCity)
 }
 
 // ReservedPrefixSplitRefusalForPlainInit is ReservedPrefixSplitRefusalForNewCity

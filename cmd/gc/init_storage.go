@@ -34,7 +34,7 @@ const initSplitBindingName = "infra"
 
 // initSplitBDMinVersion is the oldest bd release a split city admits
 // (maintainer ruling 2026-11-04): a split request on an older release starts
-// the city single-store with an upgrade hint (splitBDFloorNotice).
+// the city single-store with an upgrade hint (splitBDFloorHold).
 const initSplitBDMinVersion = "1.3.2"
 
 // initSplitBDRemedy is how an operator whose bd keeps a split request
@@ -104,32 +104,83 @@ func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageCho
 		return nil, "", nil
 	}
 	if runtime, remote := cityRunsRemoteSessions(cfg, cityPath); remote {
+		hold := remoteSessionsSplitHold(runtime)
 		if choice == initStorageSplit {
-			return nil, "", fmt.Errorf("--storage=split: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; use --storage=single", runtime)
+			return nil, "", fmt.Errorf("--storage=split: %s; use --storage=single", hold.reason)
 		}
-		return nil, fmt.Sprintf("gc init: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; this city starts single-store. %s", runtime, initSplitLaterRemedy), nil
+		return nil, hold.notice(), nil
 	}
 	if choice == initStorageUnset {
 		if notice := reservedDerivedPrefixNotice(cfg); notice != "" {
 			return nil, notice, nil
 		}
 	}
-	if providerUsesBdStoreContract(initWorkStoreProvider(cfg)) {
-		if notice := splitBDFloorNotice(); notice != "" {
-			return nil, notice, nil
-		}
+	if hold := bdStoreSplitHold(cfg); hold.held() {
+		return nil, hold.notice(), nil
 	}
 	return bornSplitStorageConfig(), "", nil
 }
 
+// initSplitHold is why a split city would not serve a new city on this host:
+// reason says what holds the city single-store, and remedy how the operator
+// gets the split. The zero value holds nothing.
+type initSplitHold struct {
+	reason string
+	remedy string
+}
+
+// held reports whether h holds the new city single-store.
+func (h initSplitHold) held() bool {
+	return h.reason != ""
+}
+
+// notice is the stderr line gc init prints for a city h starts single-store,
+// or "" when h holds nothing.
+func (h initSplitHold) notice() string {
+	if !h.held() {
+		return ""
+	}
+	return "gc init: " + h.reason + "; this city starts single-store. " + h.remedy
+}
+
+// remoteSessionsSplitHold holds a city whose session runtime runs sessions on
+// remote hosts single-store.
+func remoteSessionsSplitHold(runtime string) initSplitHold {
+	return initSplitHold{
+		reason: fmt.Sprintf("this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists", runtime),
+		remedy: initSplitLaterRemedy,
+	}
+}
+
+// bdStoreSplitHold holds a city on a bd work store single-store when a split
+// city's gc bd would refuse its bd (splitBDFloorHold). A city on any other
+// work store never judges a bd.
+func bdStoreSplitHold(cfg *config.City) initSplitHold {
+	if !providerUsesBdStoreContract(initWorkStoreProvider(cfg)) {
+		return initSplitHold{}
+	}
+	return splitBDFloorHold()
+}
+
 // initFromSplitStorageNotice applies a plain gc init's split admission to the
-// split a gc init --from source declares in its city.toml. It returns "" when
-// the copy keeps the source's [storage], or the notice to print when the copy
-// starts single-store instead because a split city would not serve it here: a
-// remote session runtime, or a bd a split city's gc bd refuses
-// (resolveInitStorage). The shipped examples carry the split, and copying it
-// onto such a host would give a city whose every gc bd call is refused, where a
-// plain gc init on the same host starts single-store and says why.
+// split a gc init --from source declares, composed across its city.toml and
+// its include fragments. It returns "" when the copy keeps the source's
+// [storage], or the notice to print when the copy starts single-store instead
+// because a split city would not serve it here: a remote session runtime, or a
+// bd a split city's gc bd refuses (resolveInitStorage). The shipped examples
+// carry the split, and copying it onto such a host would give a city whose
+// every gc bd call is refused, where a plain gc init on the same host starts
+// single-store and says why. Plain init's reserved-prefix reason is left out:
+// it judges a city's name, the source's name is not the copy's, and
+// initFromReservedPrefixRefusal judges the copy's own name.
+//
+// A copy leaves out only the [storage] of its city.toml, so where it would
+// start single-store, a source that declares any part of [storage] in an
+// include fragment is refused before anything is copied: the copy would keep
+// that part, an incomplete [storage] or the very split this host does not
+// serve. So is a source whose include fragments do not compose: whether its
+// copy would keep a split cannot be told, and the copy could not load them
+// either.
 //
 // A remote stage keeps the source's [storage] as it is: it stages the
 // controller's city, so its storage is the controller's (F3).
@@ -137,22 +188,58 @@ func initFromSplitStorageNotice(fs fsys.FS, srcToml, cityPath string) (string, e
 	if initFromStagesARemoteCity() {
 		return "", nil
 	}
+	src, fragments, composeErr := initFromSourceConfig(fs, srcToml)
+	if src == nil || (composeErr == nil && !config.RelocatesAnyClass(src)) {
+		return "", nil
+	}
+	hold := initFromSplitHold(src, cityPath)
+	if !hold.held() {
+		return "", nil
+	}
+	if composeErr != nil {
+		return "", fmt.Errorf("a split city would not serve the copy here: %s. Whether the copy would keep a split is decided by the [storage] of %s and its include fragments, which do not compose (%w), so nothing was copied. Fix the source and run gc init --from again", hold.reason, srcToml, composeErr)
+	}
+	if len(fragments) > 0 {
+		return "", fmt.Errorf("a split city would not serve the copy here: %s. A single-store copy must leave out the source's [storage], but gc init --from leaves out only the [storage] of %s, not the [storage] declared in %s, so nothing was copied. Run it again where a split city is served, or copy the source, remove [storage] and every [storage.*] table from its city.toml and include fragments, and run gc init --from on that copy", hold.reason, srcToml, strings.Join(fragments, " and "))
+	}
+	return hold.notice(), nil
+}
+
+// initFromSplitHold is what holds a gc init --from copy of src single-store
+// on this host: a remote session runtime, or a bd a split city's gc bd
+// refuses.
+func initFromSplitHold(src *config.City, cityPath string) initSplitHold {
+	if runtime, remote := cityRunsRemoteSessions(src, cityPath); remote {
+		return remoteSessionsSplitHold(runtime)
+	}
+	return bdStoreSplitHold(src)
+}
+
+// initFromSourceConfig returns the gc init --from source city.toml at srcToml
+// composed with its include fragments, as the copy will compose them, and the
+// fragments that declare any part of its [storage]. It composes them with
+// config.ComposeFragments, without the source's packs: the copy installs its
+// imports only after the copy is made, so a source whose remote pack this host
+// has not installed yet is still judged by its whole [storage].
+//
+// Where the fragments do not compose, it returns the source's city.toml alone
+// with the error that stopped them, so the caller can still judge what holds
+// the copy single-store and refuse with that error. It returns no config when
+// even the city.toml cannot be read or parsed, which the copy reports too.
+func initFromSourceConfig(fs fsys.FS, srcToml string) (*config.City, []string, error) {
+	composed, prov, composeErr := config.ComposeFragments(fs, srcToml)
+	if composeErr == nil {
+		return composed, prov.StorageFragments, nil
+	}
 	data, err := fs.ReadFile(srcToml)
 	if err != nil {
-		return "", nil // the copy and its own parse report this
+		return nil, nil, nil
 	}
 	src, err := config.Parse(data)
-	if err != nil || !config.RelocatesAnyClass(src) {
-		return "", nil
-	}
-	storage, notice, err := resolveInitStorage(src, cityPath, initStorageUnset)
 	if err != nil {
-		return "", err
+		return nil, nil, nil
 	}
-	if storage != nil {
-		return "", nil
-	}
-	return notice, nil
+	return src, nil, composeErr
 }
 
 // initSplitLaterRemedy is how a city that started single-store splits later.
@@ -178,20 +265,18 @@ func reservedDerivedPrefixNotice(cfg *config.City) string {
 	return fmt.Sprintf("gc init: the bead prefix %q, derived from the city name %q, is in the reserved %q namespace, where a split city's infrastructure store mints its ids; this city starts single-store. For a split city, init it under another name or with a non-reserved --prefix.", prefix, cfg.EffectiveCityName(), reserved)
 }
 
-// initStorageLayout names the storage layout of the city.toml at cityPath for
-// gc init --json: "split" when it relocates any class off the work ledger,
-// else "single". It returns "" when the city has no city.toml.
+// initStorageLayout names the storage layout of the city at cityPath for
+// gc init --json: "split" when its city.toml, composed with its include
+// fragments (config.ComposeFragments), relocates any class off the work
+// ledger, else "single". It returns "" when the city has no city.toml.
 func initStorageLayout(cityPath string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if errors.Is(err, os.ErrNotExist) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if _, err := os.Stat(tomlPath); errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
+	cfg, _, err := config.ComposeFragments(fsys.OSFS{}, tomlPath)
 	if err != nil {
-		return "", fmt.Errorf("reading the new city's city.toml: %w", err)
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		return "", fmt.Errorf("parsing the new city's city.toml: %w", err)
+		return "", fmt.Errorf("reading the new city's config: %w", err)
 	}
 	if config.RelocatesAnyClass(cfg) {
 		return string(initStorageSplit), nil
@@ -199,8 +284,8 @@ func initStorageLayout(cityPath string) (string, error) {
 	return string(initStorageSingle), nil
 }
 
-// splitBDFloorNotice judges the bd a new split city's gc bd would run, and
-// returns "" to admit the split or the notice for a city that starts
+// splitBDFloorHold judges the bd a new split city's gc bd would run, and
+// returns the zero hold to admit the split or what holds the city
 // single-store instead.
 //
 // A split city's gc bd runs only a bd whose command tree matches a pinned
@@ -211,26 +296,26 @@ func initStorageLayout(cityPath string) (string, error) {
 // has 1.3.2's tree): a binary reporting an older version is admitted only as
 // the pinned build its tree matched (the Enterprise 1.3.0 build). With no bd
 // at all there is nothing to judge, and the dependency check reports it.
-func splitBDFloorNotice() string {
+func splitBDFloorHold() initSplitHold {
 	bdPath, ok := initSplitBDPath()
 	if !ok {
-		return ""
+		return initSplitHold{}
 	}
 	inv, err := initJudgeSplitBD(bdPath)
 	if err != nil {
-		return fmt.Sprintf("gc init: gc could not check the command tree of bd at %s (%v), and a split city's gc bd runs only a bd whose tree gc pins; this city starts single-store. %s", bdPath, err, initSplitBDRemedy)
+		return initSplitHold{reason: fmt.Sprintf("gc could not check the command tree of bd at %s (%v), and a split city's gc bd runs only a bd whose tree gc pins", bdPath, err), remedy: initSplitBDRemedy}
 	}
 	version := ""
 	if line, err := initRunVersion(bdPath); err == nil {
 		version = parseDepVersionLine(line)
 	}
 	if inv == nil {
-		return fmt.Sprintf("gc init: the command tree of bd%s at %s matches no pinned gc bd inventory (%s), so a split city's gc bd would refuse it; this city starts single-store. %s", versionLabel(version), bdPath, pinnedBdInventoryNames(), initSplitBDRemedy)
+		return initSplitHold{reason: fmt.Sprintf("the command tree of bd%s at %s matches no pinned gc bd inventory (%s), so a split city's gc bd would refuse it", versionLabel(version), bdPath, pinnedBdInventoryNames()), remedy: initSplitBDRemedy}
 	}
 	if version != "" && compareVersions(version, initSplitBDMinVersion) < 0 && compareVersions(version, inv.Version) != 0 {
-		return fmt.Sprintf("gc init: bd v%s at %s is older than v%s, the oldest bd release a split city admits; this city starts single-store. %s", version, bdPath, initSplitBDMinVersion, initSplitBDRemedy)
+		return initSplitHold{reason: fmt.Sprintf("bd v%s at %s is older than v%s, the oldest bd release a split city admits", version, bdPath, initSplitBDMinVersion), remedy: initSplitBDRemedy}
 	}
-	return ""
+	return initSplitHold{}
 }
 
 // versionLabel renders a parsed bd version for a notice, or nothing when bd

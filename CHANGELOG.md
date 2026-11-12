@@ -33,9 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     through a shim or wrapper script. With OSS bd 1.3.0 or 1.3.1, or a bd gc
     cannot match to a pinned command tree, `gc init` starts the city
     single-store and says why.
-  - A city name that derives a reserved prefix (`gcg`, `gcm`, `gcs`, `gco`,
-    `gcn`, `gcnq`; for example `gas-city-ops`) is refused; pass `--prefix`, or
-    with `gc init --from`, another `--name`.
+  - Its bead prefix may not be one its infrastructure store mints ids under
+    (`gcg`, `gcm`, `gcs`, `gco`, `gcn`, `gcnq`), and a name derives its
+    prefix from its initials (`gas-city-ops` derives `gco`). A plain
+    `gc init` starts a city whose name derives one single-store with a
+    notice; for a split city, pass a non-reserved `--prefix`. The HTTP city
+    create, which names a city after its directory and takes no prefix,
+    starts such a city single-store without a notice; for a split city,
+    create it in a directory with another name. A reserved `--prefix` is
+    refused, and so is `--storage=split` for such a name. A split source
+    given to `gc init --file`, or to `gc init --from` where the copy keeps
+    the split, is refused for such a name: pass another `--name`.
+    `gc rig add` refuses a rig whose prefix is reserved (the directory
+    `graphql-code-generator` derives `gcg`): pass `gc rig add --prefix`, or
+    the `prefix` field of an HTTP rig create.
 
   How each path behaves:
   - `gc init --storage=single` opts out; `--storage=split` asks for the split
@@ -47,22 +58,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `gc init --from` copies its source's `[storage]`, except where a plain
     `gc init` would start the city single-store (the bd or remote-runtime cases
     above): there the copy leaves the section out and prints the same notice.
+    It can leave out only the `[storage]` of the source's `city.toml`, so
+    there a source that declares part of it in an include fragment, as
+    `examples/storage` does, is refused instead, and nothing is copied.
     A remote stage (`--remote-stage`, or a K8S pod) copies it as it is.
     `gc init --file` copies its source's `[storage]` as it is. `--storage` and
     `--prefix` are refused with either. To keep a copy single-store on
     purpose, make it with `--no-start`, delete the whole `[storage]` section
-    from its `city.toml` (`[storage]` and every `[storage.*]` table), then run
-    `gc start`. Without `--no-start` the copy starts split, and once it has
-    served its infrastructure classes from `.gc/store`, taking the section out
-    is a rollback (`docs/runbooks/split-storage-classes.md`, "Rolling back").
-  - The `gastown`, `swarm`, `lifecycle` and `t3bridge-gastown` examples now
-    carry the split; `hyperscale` (k8s) stays single-store. A city run in place
-    from one of those example directories (`gc start examples/gastown`) picks
-    up the section with this release; if it has run before, its next start
-    refuses until it is migrated (`gc storage migrate --from-work
-    --fleet-stopped`) or the section is removed.
+    from its `city.toml` and from any include fragment that declares part of
+    it (`[storage]` and every `[storage.*]` table), then run `gc start`.
+    Without `--no-start` the copy starts split, and once it has served its
+    infrastructure classes from `.gc/store`, taking the section out is a
+    rollback (`docs/runbooks/split-storage-classes.md`, "Rolling back").
+  - The `gastown`, `swarm` and `lifecycle` examples now carry the split;
+    `hyperscale` (k8s) stays single-store, and so does `t3bridge-gastown`:
+    the t3bridge runtime reads the beads behind a T3 thread's activity with
+    plain `bd`, which sees only a split city's work store, so keep a city on
+    that runtime single-store (`gc init --storage=single`). A city run in
+    place from one of the split example directories
+    (`gc start examples/gastown`) picks up the section with this release; if
+    it has run before, its next start refuses until it is migrated
+    (`gc storage migrate --from-work --fleet-stopped`) or the section is
+    removed.
   - The HTTP city create shares `gc init`'s default, so API-created cities are
-    born split.
+    born split wherever a plain `gc init` would split them.
 
   A pre-1.5 `gc` on an agent's `PATH` writes infrastructure rows into a
   born-split city's work store; keep every `gc` a city's agents run current.

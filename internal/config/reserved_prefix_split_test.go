@@ -186,6 +186,81 @@ provider = "sqlite-beads"
 	}
 }
 
+// newCityNamed parses root, the city.toml a new city is created from, and
+// gives it the name the new city takes.
+func newCityNamed(t *testing.T, root, name string) *City {
+	t.Helper()
+	next, err := Parse([]byte(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Workspace.Name, next.ResolvedWorkspaceName = name, name
+	return next
+}
+
+// A new city is judged by the [storage] its city.toml and include fragments
+// declare, which does not wait on its packs: a source whose remote import this
+// host has not installed yet, which LoadWithIncludes cannot load, is refused
+// for a reserved prefix as the split city its copy will be.
+func TestReservedPrefixSplitRefusalForNewCityJudgesTheSplitBeforeItsPacksAreInstalled(t *testing.T) {
+	const root = "include = [\"storage.toml\"]\n\n[workspace]\nname = \"template\"\n"
+	tomlPath := writeCityWithUninstalledImport(t, map[string]string{"city.toml": root, "storage.toml": wholeSplitStorage})
+
+	err := ReservedPrefixSplitRefusalForNewCity(fsys.OSFS{}, tomlPath, newCityNamed(t, root, "gas-city-ops"))
+	if !errors.Is(err, ErrReservedBeadPrefix) || !strings.Contains(err.Error(), `"gco"`) {
+		t.Fatalf("ForNewCity of gas-city-ops with its whole [storage] in a fragment = %v, want the gco refusal", err)
+	}
+}
+
+// A new city whose include fragments do not compose cannot be judged, and
+// could not load them either: the check refuses it with the reason rather than
+// passing a split it cannot see.
+func TestReservedPrefixSplitRefusalForNewCityRefusesFragmentsThatDoNotCompose(t *testing.T) {
+	const root = "include = [\"storage.toml\"]\n\n[workspace]\nname = \"template\"\n"
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	if err := os.WriteFile(tomlPath, []byte(root), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ReservedPrefixSplitRefusalForNewCity(fsys.OSFS{}, tomlPath, newCityNamed(t, root, "bright-lights"))
+	if err == nil || errors.Is(err, ErrReservedBeadPrefix) || !strings.Contains(err.Error(), `"storage.toml"`) || !strings.Contains(err.Error(), tomlPath) {
+		t.Fatalf("ForNewCity whose fragment is missing = %v, want an error naming %s and the missing fragment", err, tomlPath)
+	}
+}
+
+// A new city's rigs mint under the prefixes its rig patches give them, which
+// do not wait on its packs either: a fragment rig whose name derives gcg,
+// patched to gql, is not refused, and one patched into a reserved namespace is.
+func TestReservedPrefixSplitRefusalForNewCityJudgesPatchedRigPrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		prefix  string
+		refused bool
+	}{
+		{prefix: "gql"},
+		{prefix: "gcs-gql", refused: true},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			root := "include = [\"rigs.toml\", \"storage.toml\"]\n\n[workspace]\nname = \"template\"\n\n[[patches.rigs]]\nname = \"graphql-code-generator\"\nprefix = \"" + tc.prefix + "\"\n"
+			tomlPath := writeCityWithUninstalledImport(t, map[string]string{
+				"city.toml":    root,
+				"rigs.toml":    "[[rigs]]\nname = \"graphql-code-generator\"\npath = \"/tmp/gql\"\n",
+				"storage.toml": wholeSplitStorage,
+			})
+
+			err := ReservedPrefixSplitRefusalForNewCity(fsys.OSFS{}, tomlPath, newCityNamed(t, root, "bright-lights"))
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("ForNewCity with the gcg-derived rig patched to %s = %v, want no refusal", tc.prefix, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrReservedBeadPrefix) || !strings.Contains(err.Error(), `rig "graphql-code-generator" bead prefix "`+tc.prefix+`"`) {
+				t.Fatalf("ForNewCity with the rig patched to %s = %v, want the refusal naming the patched prefix", tc.prefix, err)
+			}
+		})
+	}
+}
+
 func TestReservedPrefixSplitRefusalSeesARigPatchPrefix(t *testing.T) {
 	cfg := splitCityNamed("my-city", Rig{Name: "alpha", Prefix: "al"})
 	reserved := "gcs-alpha"

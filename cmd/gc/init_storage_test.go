@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -838,7 +839,7 @@ func TestInitSplitFloorAppliesToOSSPinnedInventoriesOnly(t *testing.T) {
 			if belowFloor && enterprise {
 				sawEnterpriseBelowFloor = true
 			}
-			notice := splitBDFloorNotice()
+			notice := splitBDFloorHold().notice()
 			if wantAdmit := enterprise || !belowFloor; wantAdmit {
 				if notice != "" {
 					t.Errorf("bd v%s matching %s (enterprise=%t) held single-store: %s", inv.Version, inv.Name, enterprise, notice)
@@ -1217,17 +1218,20 @@ func TestInitFromARemoteStageKeepsTheControllersSplit(t *testing.T) {
 // The shipped examples that say they carry the split gc init writes carry
 // exactly bornSplitStorageConfig, so a change to that block moves them with
 // it. hyperscale runs its sessions in pods, where gc init starts a city
-// single-store, so it carries none.
+// single-store, so it carries none. Nor does t3bridge-gastown, while it runs
+// on the t3bridge runtime: that runtime reads the beads behind a T3 thread's
+// activity with plain bd, which sees only a split city's work store.
 func TestShippedExamplesCarryTheBornSplitStorage(t *testing.T) {
 	t.Setenv("GC_SESSION", "")
 	for _, tc := range []struct {
-		example string
-		split   bool
+		example  string
+		split    bool
+		t3bridge bool
 	}{
 		{example: "gastown", split: true},
 		{example: "lifecycle", split: true},
 		{example: "swarm", split: true},
-		{example: "t3bridge-gastown", split: true},
+		{example: "t3bridge-gastown", t3bridge: true},
 		{example: "hyperscale"},
 	} {
 		t.Run(tc.example, func(t *testing.T) {
@@ -1249,8 +1253,418 @@ func TestShippedExamplesCarryTheBornSplitStorage(t *testing.T) {
 			if cfg.Storage != nil {
 				t.Fatalf("%s declares [storage] %+v; want none", path, cfg.Storage)
 			}
+			if tc.t3bridge {
+				if cfg.Session.Provider != "t3bridge" {
+					t.Fatalf("%s runs sessions on %q, not t3bridge, so gc init would split it; carry the born-split block", path, cfg.Session.Provider)
+				}
+				return
+			}
 			if runtime, remote := cityRunsRemoteSessions(cfg, t.TempDir()); !remote {
 				t.Fatalf("%s runs sessions locally (%q), so gc init would split it; carry the born-split block", path, runtime)
+			}
+		})
+	}
+}
+
+// fragmentSplitWorkspace, fragmentSplitClasses and fragmentSplitBinding make up
+// a gc init --from source whose born-split [storage] can sit in its city.toml
+// or in an include fragment, in part or in whole.
+const (
+	fragmentSplitWorkspace = `[workspace]
+name = "template"
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+`
+	fragmentSplitClasses = `[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+`
+	fragmentSplitBinding = `[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+`
+)
+
+// writeInitFromSource writes a gc init --from source directory holding files
+// (name to content) and returns its path.
+func writeInitFromSource(t *testing.T, files map[string]string) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "template")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(src, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return src
+}
+
+// fragmentStorageSource is a gc init --from source that declares part or all
+// of its split [storage] in the include fragment fragment.
+type fragmentStorageSource struct {
+	name     string
+	src      string
+	fragment string
+}
+
+// fragmentStorageSources are the layouts a source can split its [storage]
+// across: the shipped examples/storage (class map in city.toml, binding in a
+// fragment), the reverse, and the whole section in a fragment.
+func fragmentStorageSources(t *testing.T) []fragmentStorageSource {
+	t.Helper()
+	example, err := filepath.Abs(filepath.Join("..", "..", "examples", "storage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(example, "storage-bindings.toml")); err != nil {
+		t.Fatalf("the shipped storage example: %v", err)
+	}
+	classes := writeInitFromSource(t, map[string]string{
+		"city.toml":            "include = [\"storage-classes.toml\"]\n\n" + fragmentSplitWorkspace + "\n" + fragmentSplitBinding,
+		"storage-classes.toml": fragmentSplitClasses,
+	})
+	whole := writeInitFromSource(t, map[string]string{
+		"city.toml":    "include = [\"storage.toml\"]\n\n" + fragmentSplitWorkspace,
+		"storage.toml": fragmentSplitClasses + "\n" + fragmentSplitBinding,
+	})
+	return []fragmentStorageSource{
+		{name: "examples/storage", src: example, fragment: filepath.Join(example, "storage-bindings.toml")},
+		{name: "class map in a fragment", src: classes, fragment: filepath.Join(classes, "storage-classes.toml")},
+		{name: "whole [storage] in a fragment", src: whole, fragment: filepath.Join(whole, "storage.toml")},
+	}
+}
+
+// Where a split city would not serve the copy, a gc init --from source that
+// declares any part of its [storage] in an include fragment is refused before
+// anything is copied: a copy leaves out only the [storage] of its city.toml,
+// so it would keep the fragment's part, an incomplete [storage] or the split
+// itself. The refusal says why, names the fragment and the way to a
+// single-store copy, and once the host serves a split city the same command
+// makes a copy that composes the whole split.
+func TestInitFromRefusesFragmentStorageWhereTheCopyWouldStartSingleStore(t *testing.T) {
+	for _, host := range []struct {
+		name   string
+		hold   func(t *testing.T)
+		serve  func(t *testing.T)
+		reason []string
+	}{
+		{
+			name: "bd below the split floor",
+			hold: func(t *testing.T) {
+				t.Setenv("GC_BEADS", "bd")
+				initStorageFakeBD(t)
+				stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+				stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+			},
+			serve:  admitInitSplitBD,
+			reason: []string{"older than v" + initSplitBDMinVersion},
+		},
+		{
+			name: "remote session runtime",
+			hold: func(t *testing.T) {
+				t.Setenv("GC_BEADS", "file")
+				t.Setenv("GC_SESSION", "k8s")
+			},
+			serve:  func(t *testing.T) { t.Setenv("GC_SESSION", "fake") },
+			reason: []string{`"k8s"`, "remote hosts"},
+		},
+	} {
+		for _, source := range fragmentStorageSources(t) {
+			t.Run(host.name+"/"+source.name, func(t *testing.T) {
+				t.Setenv("GC_DOLT", "skip")
+				t.Setenv("GC_SESSION", "")
+				t.Setenv(remoteStageControllerEnv, "")
+				configureIsolatedRuntimeEnv(t)
+				host.hold(t)
+				cityPath := filepath.Join(t.TempDir(), "storage-city")
+
+				var stdout, stderr bytes.Buffer
+				if code := doInitFromDirWithOptionsInternal(source.src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code == 0 {
+					t.Fatalf("gc init --from a source whose include fragment declares [storage] = 0 where the copy would start single-store; stderr=%s", stderr.String())
+				}
+				for _, want := range append([]string{source.fragment, "nothing was copied", "every [storage.*] table"}, host.reason...) {
+					if !strings.Contains(stderr.String(), want) {
+						t.Errorf("the refusal %q does not mention %q", stderr.String(), want)
+					}
+				}
+				if _, err := os.Stat(cityPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the refused gc init --from left %s behind (stat: %v)", cityPath, err)
+				}
+
+				host.serve(t)
+				stdout.Reset()
+				stderr.Reset()
+				if code := doInitFromDirWithOptionsInternal(source.src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+					t.Fatalf("gc init --from where a split city is served = %d; stderr=%s", code, stderr.String())
+				}
+				cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+				if err != nil {
+					t.Fatalf("loading the copy: %v", err)
+				}
+				if !config.RelocatesAnyClass(cfg) {
+					t.Fatalf("the copy composes no split [storage]: %+v", cfg.Storage)
+				}
+				if layout, err := initStorageLayout(cityPath); err != nil || layout != string(initStorageSplit) {
+					t.Errorf("initStorageLayout = %q, %v; want %q for gc init --json, read across the copy's include fragments", layout, err, initStorageSplit)
+				}
+			})
+		}
+	}
+}
+
+// A copy held single-store leaves out its source's [storage], so the
+// reserved-prefix check has nothing to refuse, even when the source has include
+// fragments: a copy named gas-city-ops (gco) of a split source whose fragment
+// declares no [storage] starts single-store instead of being refused for the
+// source's split.
+func TestInitFromASingleStoreCopyIsNotRefusedForAReservedDerivedPrefix(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "")
+	t.Setenv(remoteStageControllerEnv, "")
+	configureIsolatedRuntimeEnv(t)
+	initStorageFakeBD(t)
+	stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+	stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+	src := writeInitFromSource(t, map[string]string{
+		"city.toml":   "include = [\"daemon.toml\"]\n\n" + remoteStageSplitSource,
+		"daemon.toml": "[daemon]\npatrol_interval = \"30s\"\n",
+	})
+	cityPath := filepath.Join(t.TempDir(), "gas-city-ops")
+
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+		t.Fatalf("gc init --from a split source with a fragment into gas-city-ops on bd 1.3.1 = %d; want a single-store copy\nstderr=%s", code, stderr.String())
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading the copy: %v", err)
+	}
+	if cfg.Storage != nil {
+		t.Fatalf("the copy kept [storage] %+v; want single-store", cfg.Storage)
+	}
+	for _, want := range []string{"single-store", "leaves out the [storage] of"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q does not mention %q", stderr.String(), want)
+		}
+	}
+}
+
+// gc init --from judges the copy's name, never its source's, for a reserved
+// bead prefix: a split source whose own name derives one (gas-city-ops derives
+// gco), copied into bright-lights (bl) where a split city is served, keeps its
+// split and prints no notice.
+func TestInitFromKeepsTheSplitOfASourceWhoseNameDerivesAReservedPrefix(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "")
+	t.Setenv(remoteStageControllerEnv, "")
+	configureIsolatedRuntimeEnv(t)
+	initStorageFakeBD(t)
+	admitInitSplitBD(t)
+	body := strings.Replace(remoteStageSplitSource, `name = "template"`, `name = "gas-city-ops"`, 1)
+	if !strings.Contains(body, `name = "gas-city-ops"`) {
+		t.Fatalf("the source fixture no longer names the city:\n%s", body)
+	}
+	src := writeInitFromSource(t, map[string]string{"city.toml": body})
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+		t.Fatalf("gc init --from a split source named gas-city-ops into bright-lights = %d; stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the copy's city.toml: %v\n%s", err, data)
+	}
+	if !config.RelocatesAnyClass(cfg) {
+		t.Fatalf("the copy lost its source's split for the source's name:\n%s", data)
+	}
+	if strings.Contains(stderr.String(), "single-store") {
+		t.Errorf("stderr %q has a single-store notice; the copy's name derives no reserved prefix", stderr.String())
+	}
+}
+
+// writeInitFromSourceWithUninstalledPack writes a gc init --from source like
+// writeInitFromSource, whose pack.toml also imports a remote pack (a local
+// file:// repository) that this host has not installed: the source does not
+// load here until gc import install runs, but the copy, whose init installs
+// its imports, does.
+func writeInitFromSourceWithUninstalledPack(t *testing.T, files map[string]string) string {
+	t.Helper()
+	remote := initImportBarePackRepo(t, "remote-pack", "", "[pack]\nname = \"remote-pack\"\nversion = \"1.0.0\"\nschema = 1\n")
+	commit := gitOutputImport(t, remote, "rev-parse", "HEAD")
+	files = maps.Clone(files)
+	files["pack.toml"] = "[pack]\nname = \"template\"\nschema = 1\n\n[imports.remote]\nsource = \"file://" + filepath.ToSlash(remote) + "\"\nversion = \"sha:" + commit + "\"\n"
+	src := writeInitFromSource(t, files)
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(src, "city.toml")); err == nil || !strings.Contains(err.Error(), "is not installed") {
+		t.Fatalf("loading the source = %v, want its remote import not installed", err)
+	}
+	return src
+}
+
+// The [storage] a gc init --from source declares in its city.toml and include
+// fragments does not wait on the source's packs, which the copy installs only
+// once it is made: the admission and the reserved-prefix check judge that
+// [storage] for a source whose remote pack this host has not installed. Where
+// a split city would not serve the copy and a fragment declares part of the
+// split, or where the copy keeps the split under a name that derives a
+// reserved prefix, gc init --from is refused and copies nothing; where the
+// split is served, under another name, the same source makes a split copy.
+func TestInitFromJudgesTheStorageOfASourceWhosePackIsNotInstalled(t *testing.T) {
+	belowFloor := func(t *testing.T) {
+		stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+		stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+	}
+	for _, tc := range []struct {
+		name     string
+		files    map[string]string
+		fragment string
+		host     func(t *testing.T)
+		city     string
+		want     []string
+	}{
+		{
+			name: "class map in city.toml, binding in a fragment, on a bd below the split floor",
+			files: map[string]string{
+				"city.toml":             "include = [\"storage-bindings.toml\"]\n\n" + fragmentSplitWorkspace + "\n" + fragmentSplitClasses,
+				"storage-bindings.toml": fragmentSplitBinding,
+			},
+			fragment: "storage-bindings.toml",
+			host:     belowFloor,
+			city:     "storage-city",
+			want:     []string{"older than v" + initSplitBDMinVersion, "nothing was copied"},
+		},
+		{
+			name: "whole [storage] in a fragment, on a bd below the split floor",
+			files: map[string]string{
+				"city.toml":    "include = [\"storage.toml\"]\n\n" + fragmentSplitWorkspace,
+				"storage.toml": fragmentSplitClasses + "\n" + fragmentSplitBinding,
+			},
+			fragment: "storage.toml",
+			host:     belowFloor,
+			city:     "storage-city",
+			want:     []string{"older than v" + initSplitBDMinVersion, "nothing was copied"},
+		},
+		{
+			name: "whole [storage] in a fragment, into a name that derives gco",
+			files: map[string]string{
+				"city.toml":    "include = [\"storage.toml\"]\n\n" + fragmentSplitWorkspace,
+				"storage.toml": fragmentSplitClasses + "\n" + fragmentSplitBinding,
+			},
+			host: admitInitSplitBD,
+			city: "gas-city-ops",
+			want: []string{`"gco"`, "reserved"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_SESSION", "")
+			t.Setenv(remoteStageControllerEnv, "")
+			configureIsolatedRuntimeEnv(t)
+			initStorageFakeBD(t)
+			useRealInitRemoteImports(t)
+			tc.host(t)
+			src := writeInitFromSourceWithUninstalledPack(t, tc.files)
+			cityPath := filepath.Join(t.TempDir(), tc.city)
+
+			var stdout, stderr bytes.Buffer
+			if code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code == 0 {
+				t.Fatalf("gc init --from = 0; want it refused\nstderr=%s", stderr.String())
+			}
+			want := tc.want
+			if tc.fragment != "" {
+				want = append(want, filepath.Join(src, tc.fragment))
+			}
+			for _, w := range want {
+				if !strings.Contains(stderr.String(), w) {
+					t.Errorf("the refusal %q does not mention %q", stderr.String(), w)
+				}
+			}
+			if _, err := os.Stat(cityPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the refused gc init --from left %s behind (stat: %v)", cityPath, err)
+			}
+
+			admitInitSplitBD(t)
+			served := filepath.Join(t.TempDir(), "bright-lights")
+			stdout.Reset()
+			stderr.Reset()
+			if code := doInitFromDirWithOptionsInternal(src, served, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+				t.Fatalf("gc init --from where a split city is served, into bright-lights = %d; stderr=%s", code, stderr.String())
+			}
+			cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(served, "city.toml"))
+			if err != nil {
+				t.Fatalf("loading the copy, its import installed: %v", err)
+			}
+			if !config.RelocatesAnyClass(cfg) {
+				t.Fatalf("the copy composes no split [storage]: %+v", cfg.Storage)
+			}
+		})
+	}
+}
+
+// A gc init --from source whose include fragments do not compose cannot say
+// whether its copy keeps a split, and the copy could not load them either.
+// Where a split city would not serve the copy, the admission refuses it with
+// the reason; where it would, the reserved-prefix check, which cannot judge it
+// either, refuses it the same way. Either way nothing is copied.
+func TestInitFromRefusesASourceWhoseFragmentsDoNotCompose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host func(t *testing.T)
+		want []string
+	}{
+		{
+			name: "on a bd below the split floor",
+			host: func(t *testing.T) {
+				stubInitBDVersion(t, "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)")
+				stubInitSplitBDJudge(t, "bd-1.3.2", nil)
+			},
+			want: []string{"older than v" + initSplitBDMinVersion, "do not compose", "nothing was copied"},
+		},
+		{
+			name: "where a split city is served",
+			host: admitInitSplitBD,
+			want: []string{"with its include fragments"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_SESSION", "")
+			t.Setenv(remoteStageControllerEnv, "")
+			configureIsolatedRuntimeEnv(t)
+			initStorageFakeBD(t)
+			tc.host(t)
+			src := writeInitFromSource(t, map[string]string{
+				"city.toml": "include = [\"storage.toml\"]\n\n" + fragmentSplitWorkspace + "\n" + fragmentSplitClasses + "\n" + fragmentSplitBinding,
+			})
+			cityPath := filepath.Join(t.TempDir(), "storage-city")
+
+			var stdout, stderr bytes.Buffer
+			if code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code == 0 {
+				t.Fatalf("gc init --from a source whose fragment is missing = 0; want it refused\nstderr=%s", stderr.String())
+			}
+			for _, w := range append(tc.want, `loading fragment "storage.toml"`) {
+				if !strings.Contains(stderr.String(), w) {
+					t.Errorf("the refusal %q does not mention %q", stderr.String(), w)
+				}
+			}
+			if _, err := os.Stat(cityPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the refused gc init --from left %s behind (stat: %v)", cityPath, err)
 			}
 		})
 	}

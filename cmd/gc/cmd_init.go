@@ -1927,7 +1927,8 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Decided before anything is copied, so the reserved-prefix check judges
+	// Decided before anything is copied, so a source the copy cannot be made
+	// from leaves no destination behind, and the reserved-prefix check judges
 	// the city the copy becomes.
 	storageNotice, err := initFromSplitStorageNotice(fs, srcToml, cityPath)
 	if err != nil {
@@ -2094,9 +2095,14 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 // for both the pack.toml and the legacy (no pack.toml) layout, so it can run
 // before anything is copied. A [storage] in a source include fragment counts:
 // fragments resolve against the source directory exactly as they will
-// against the copy. dropStorage judges the copy without the city.toml
-// [storage] it leaves out (initFromSplitStorageNotice).
+// against the copy. A copy that leaves out the source's [storage]
+// (dropStorage) starts single-store, which no reserved prefix refuses:
+// initFromSplitStorageNotice leaves it out only when no include fragment
+// declares any part of it.
 func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string, dropStorage bool) error {
+	if dropStorage {
+		return nil
+	}
 	data, err := fs.ReadFile(srcToml)
 	if err != nil {
 		return nil // the copy and its own parse report this
@@ -2104,9 +2110,6 @@ func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride s
 	src, err := config.Parse(data)
 	if err != nil {
 		return nil
-	}
-	if dropStorage {
-		src.Storage = nil
 	}
 	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
 }
