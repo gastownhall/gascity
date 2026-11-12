@@ -2405,8 +2405,11 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// A routeless claim takes the seat's own route, as every controller-side
 	// retirement gives it; a claim no lane serves stays on the closed row and
 	// raises session.stranded_claims, which the controller's detector repeats.
+	// Work assigned to a still-configured named session's identity stays
+	// assigned: the controller re-materializes the identity to serve it.
 	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
-	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	keep := closedNamedSessionKeptAssignees(closedSessionBead, cfg, loadedCityName(cfg, cityPath))
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), keep, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}
