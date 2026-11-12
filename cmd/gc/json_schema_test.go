@@ -152,8 +152,8 @@ func walkCommandTree(cmd *cobra.Command, visit func(*cobra.Command)) {
 // convention checked by TestJSONResultSchemasRequireSuccessDiscriminator.
 var successDiscriminatorExempt = map[string]string{
 	"schemas/bd/result.schema.json":                                    "gc bd is an explicit passthrough: bd owns the payload shape.",
-	"schemas/context/list/result.schema.json":                          "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
-	"schemas/context/show/result.schema.json":                          "contextJSON is a single raw record (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/context/list/result.schema.json":                          "contextJSON is a per-record JSONL line; writeCLIJSONLine injects ok:true at write time, but the record schema does not declare or require it.",
+	"schemas/context/show/result.schema.json":                          "contextJSON is a single record; writeCLIJSONLine injects ok:true at write time, but the record schema does not declare or require it.",
 	"schemas/extmsg/bind/result.schema.json":                           "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
 	"schemas/extmsg/handoff/result.schema.json":                        "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
 	"schemas/extmsg/unbind/result.schema.json":                         "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
