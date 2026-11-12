@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // Test actions exec host tools through the client's PATH, and the host runs
@@ -158,7 +162,20 @@ func TestRBEWorkerEnvManifestNamesTheWorkerHost(t *testing.T) {
 
 // rbeScriptHangBudget is how long runRBEScript lets a script run before it
 // declares the script wedged.
-const rbeScriptHangBudget = 30 * time.Second
+//
+// It is a HANG DETECTOR, not a latency assertion: every assertion about a
+// script comes after the call returns and a passing script never waits the
+// budget out, so raising it does not slow a passing run (TESTING.md "Test
+// deadline rule"). Do not tune it to make a failing run pass.
+//
+// Sizing, measured on ga-izzzy5t: a publish/fetch call takes 4-82 ms on an
+// idle host and up to 397 ms with ~113 runnable processes on 32 cores, but a
+// pre-push //scripts shard stalled three unrelated tests for 89-105 s each, and
+// a 30 s ceiling turned one of those stalls into "signal: killed". 24 x the
+// exec floor is 240 s: 2.3x the worst stall seen, and still under the 300 s
+// shard alarm, so a genuinely wedged script is reported at its own call site
+// instead of by the unattributed package alarm.
+const rbeScriptHangBudget = 24 * testutil.ExecRaceTimeout
 
 // runRBEScript runs a script with bash in dir (the test's cwd if
 // empty) and exactly env, and returns its stdout and stderr.
@@ -176,6 +193,9 @@ func runRBEScriptWithin(budget time.Duration, dir string, env []string, script s
 	var out, errOut strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err = cmd.Run()
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("%s did not finish within the hang budget %s (%w): %w", filepath.Base(script), budget, ctx.Err(), err)
+	}
 	return out.String(), errOut.String(), err
 }
 
