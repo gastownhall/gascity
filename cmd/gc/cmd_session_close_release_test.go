@@ -582,3 +582,17 @@ func TestCmdSessionCloseReleasesNamedSessionBeadIDClaims(t *testing.T) {
 
 	assertCloseClaimReleased(t, reopened, claimed.ID, beadmeta.RunTargetMetadataKey)
 }
+
+// TestCmdSessionCloseReleasesRemovedNamedIdentityClaims pins that the
+// configured-identity exception needs the identity still configured: once
+// the named session is removed from config no canonical bead returns to
+// serve it, so a manual close releases the identity's work under the
+// existing retirement policy, into the backing template that still serves it.
+func TestCmdSessionCloseReleasesRemovedNamedIdentityClaims(t *testing.T) {
+	cityDir, store, sessionBead := seedNamedCloseSession(t, namedCloseAgentTOML, "reviewer")
+	identityWork := seedCloseClaim(t, store, "reviewer", "open", map[string]string{beadmeta.RoutedToMetadataKey: ""})
+
+	reopened := runSessionCloseAndReopen(t, cityDir, sessionBead.ID)
+
+	assertCloseClaimReleased(t, reopened, identityWork.ID, beadmeta.RunTargetMetadataKey)
+}
