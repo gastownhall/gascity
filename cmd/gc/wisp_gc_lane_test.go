@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -849,4 +850,77 @@ func TestWispGCLane_StageInstallTransitions(t *testing.T) {
 			t.Errorf("installed tracker sessionPurgeCursor=%v, want the carried cursor", fresh.sessionPurgeCursor)
 		}
 	})
+}
+
+// Kills: a controller exit that abandons a purge in flight. run() stops the
+// wisp GC lane on its way out and joins it, so the purge finishes with its
+// stores, trace and output still available, and only then does run return.
+// TestWispGCLane_StopWaitsForPurgeInFlight covers the lane's own stop.
+func TestCityRuntimeRunJoinsAnInFlightWispGCPurgeOnExit(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	// A fast patrol so the controller's own tick loop wakes the purge in
+	// seconds, not after the default interval.
+	f, err := os.OpenFile(tomlPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	if _, err := f.WriteString("\n[daemon]\npatrol_interval = \"5ms\"\n"); err != nil {
+		t.Fatalf("append config: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	wg := newBlockingWispGC()
+	cr.wg = wg
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		cr.run(ctx)
+	}()
+	select {
+	case <-wg.started:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the controller's patrol ticks never started the purge")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+		t.Fatal("run returned while its purge was still running; the exit must join the lane")
+	case <-time.After(5 * time.Second):
+	}
+
+	close(wg.release)
+	select {
+	case <-runDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("run did not return after the purge it was joining finished")
+	}
 }
