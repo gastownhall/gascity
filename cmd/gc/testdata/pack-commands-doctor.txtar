@@ -52,6 +52,7 @@ stdout 'passed'
 
 -- city.toml.custom --
 [workspace]
+suspended_on_start = true
 
 [imports.ops]
 source = "../packs/ops"
