@@ -136,7 +136,7 @@ trigger = "manual"
 	}
 }
 
-func TestScanDisabled(t *testing.T) {
+func TestScanReturnsDisabledAndFilterEnabledDropsIt(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
@@ -150,8 +150,11 @@ enabled = false
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(orders) != 0 {
-		t.Fatalf("got %d orders, want 0 (disabled)", len(orders))
+	if len(orders) != 1 || orders[0].IsEnabled() {
+		t.Fatalf("Scan = %#v, want the one order returned with Enabled=false", orders)
+	}
+	if active := FilterEnabled(orders); len(active) != 0 {
+		t.Fatalf("got %d active orders, want 0 (disabled)", len(active))
 	}
 }
 
