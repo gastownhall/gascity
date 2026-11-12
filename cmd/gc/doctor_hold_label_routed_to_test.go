@@ -514,3 +514,78 @@ type holdLabelSetErrorStore struct {
 func (s holdLabelSetErrorStore) SetMetadata(string, string, string) error {
 	return errors.New("metadata write failed")
 }
+
+// TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace covers ga-tkxbic:
+// before the fix, hold-label-routed-to's --fix backfilled the bare hold value
+// while v2-routed-to-namespace rewrote short forms to the binding-qualified
+// canonical, so a doctor run containing both checks (in production order)
+// repaired a route and then degraded it again, flip-flopping every pass. Both
+// checks must now converge: after one --fix pass every held route is the
+// qualified canonical, and the second pass reports both checks OK with zero
+// repairs, in production order and reversed.
+func TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		name := "production-order"
+		if reverse {
+			name = "reverse-order"
+		}
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "CV-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+				{
+					ID: "CV-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "planner"},
+				},
+				{
+					ID: "CV-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "ops.planner"},
+				},
+			}, nil)
+			factory := func(path string) (beads.Store, error) {
+				if path != cityDir {
+					return nil, fmt.Errorf("unexpected store path %q", path)
+				}
+				return store, nil
+			}
+
+			d := &doctor.Doctor{}
+			nsCheck := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+			holdCheck := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+			if reverse {
+				d.Register(holdCheck)
+				d.Register(nsCheck)
+			} else {
+				d.Register(nsCheck)
+				d.Register(holdCheck)
+			}
+
+			rep1 := d.RunCollect(&doctor.CheckContext{}, true)
+			for _, res := range rep1.Results {
+				if res.Status != doctor.StatusOK {
+					t.Errorf("first pass check %q status = %v, want OK: %#v", res.Name, res.Status, res)
+				}
+			}
+			for _, id := range []string{"CV-1", "CV-2", "CV-3"} {
+				b, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("get %s: %v", id, err)
+				}
+				if got := b.Metadata["gc.routed_to"]; got != "ops.planner" {
+					t.Errorf("after first --fix pass %s gc.routed_to = %q, want ops.planner", id, got)
+				}
+			}
+
+			rep2 := d.RunCollect(&doctor.CheckContext{}, true)
+			if rep2.Warned != 0 || rep2.Fixed != 0 {
+				t.Fatalf("second pass Warned = %d, Fixed = %d, want 0/0 (results: %+v)", rep2.Warned, rep2.Fixed, rep2.Results)
+			}
+			for _, res := range rep2.Results {
+				if res.Status != doctor.StatusOK {
+					t.Errorf("second pass check %q status = %v, want OK: %#v", res.Name, res.Status, res)
+				}
+			}
+		})
+	}
+}
