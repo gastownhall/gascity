@@ -428,3 +428,99 @@ func TestHoldLabelRoutedToCheckAcceptsCanonicalBoundRoutes(t *testing.T) {
 		}
 	}
 }
+
+// TestHoldLabelRoutedToCheckRepairsToCanonicalBoundRoute covers ga-tkxbic
+// AC-2: when a bound hold value's gc.routed_to is missing or names another
+// route, the check reports it with the binding-qualified repair and Fix
+// writes that canonical route, in city and rig stores alike, so both the hold
+// check and v2-routed-to-namespace then report OK.
+func TestHoldLabelRoutedToCheckRepairsToCanonicalBoundRoute(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), t.TempDir()
+	cfg := holdLabelBoundCity(rigDir)
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "M-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		{
+			ID: "M-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "someone-else"},
+		},
+		{ID: "M-3", Title: "held", Type: "task", Status: "blocked", Labels: []string{"hold:reviewer"}},
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RM-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:repo/worker"}},
+		{
+			ID: "RM-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "repo/ops.worker"},
+		},
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: cityStore, rigDir: rigStore})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead M-1 has hold:planner but gc.routed_to=""; use "ops.planner"`,
+		`city bead M-2 has hold:planner but gc.routed_to="someone-else"; use "ops.planner"`,
+		`city bead M-3 has hold:reviewer but gc.routed_to=""; use "ops.reviewer"`,
+		`rig repo bead RM-1 has hold:repo/worker but gc.routed_to=""; use "repo/ops.worker"`,
+		`rig repo bead RM-2 has hold:planner but gc.routed_to="repo/ops.worker"; use "ops.planner"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, tc := range []struct {
+		store beads.Store
+		id    string
+		want  string
+	}{
+		{cityStore, "M-1", "ops.planner"},
+		{cityStore, "M-2", "ops.planner"},
+		{cityStore, "M-3", "ops.reviewer"},
+		{rigStore, "RM-1", "repo/ops.worker"},
+		{rigStore, "RM-2", "ops.planner"},
+	} {
+		if got := holdLabelRoute(t, tc.store, tc.id); got != tc.want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want canonical %q", tc.id, got, tc.want)
+		}
+	}
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix hold-label-routed-to status = %v, want OK: %#v", res.Status, res)
+	}
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", res.Status, res)
+	}
+}
+
+// TestHoldLabelRoutedToFixReportsCanonicalWriteFailure pins that a failed
+// canonical repair surfaces as a Fix error naming the bead.
+func TestHoldLabelRoutedToFixReportsCanonicalWriteFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+	store := holdLabelSetMetadataErrorStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "W-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+	}, nil)}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, holdLabelStores(map[string]beads.Store{cityDir: store}))
+
+	err := check.Fix(&doctor.CheckContext{})
+	if err == nil {
+		t.Fatal("Fix error = nil, want metadata write failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "city bead W-1") || !strings.Contains(got, "write refused") {
+		t.Fatalf("Fix error = %q, want bead and write failure detail", got)
+	}
+}
+
+type holdLabelSetMetadataErrorStore struct {
+	beads.Store
+}
+
+func (s holdLabelSetMetadataErrorStore) SetMetadata(string, string, string) error {
+	return errors.New("write refused")
+}
