@@ -96,8 +96,10 @@ type Leg struct {
 	// Suspended marks a rig leg the holder reports suspended: named, so the
 	// epoch keeps its handles, but never read by a plan (orderedRigs skips
 	// it), because a suspended rig's store is routinely dark and a read can
-	// wake its retired proxy. A plane constructor leaves such a rig out
-	// instead; Stores.Topology keeps it marked.
+	// wake its retired proxy. The one exception is a by-id work axis that
+	// routes to it by ref (WorkAxisRouter): the plane's route, not a probe. A
+	// plane constructor leaves such a rig out instead; Stores.Topology keeps
+	// it marked.
 	Suspended bool
 }
 
@@ -174,7 +176,8 @@ type Topology struct {
 	// Rigs are the rig work-class legs. A plane constructor excludes
 	// suspended rigs: it is TOLD which rigs are serving, it does not decide.
 	// Stores.Topology keeps every rig its holder opened and marks a suspended
-	// one (Leg.Suspended); no plan reads a suspended leg either way.
+	// one (Leg.Suspended); no plan reads a suspended leg either way, but for
+	// a by-id work axis that routes to it (WorkAxisRouter).
 	Rigs []Leg
 
 	// Bindings are the relocated class bindings actually being served. Empty

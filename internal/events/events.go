@@ -357,10 +357,20 @@ const (
 	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
-	ConvoyCreated         = "convoy.created"
-	ConvoyClosed          = "convoy.closed"
-	ControllerStarted     = "controller.started"
-	ControllerStopped     = "controller.stopped"
+	// SessionCreated fires when a session joins the city's set of open
+	// sessions (a session bead created open, or a closed one reopened) and
+	// SessionClosed when one leaves it (its session bead closed), so a client
+	// tracks the session list from the stream instead of polling. The
+	// controller derives each from the ledger's session-bead notifications,
+	// once per transition (session.ListTransitions); the envelope's Subject
+	// and SessionID are the session bead.
+	SessionCreated = "session.created"
+	SessionClosed  = "session.closed"
+
+	ConvoyCreated     = "convoy.created"
+	ConvoyClosed      = "convoy.closed"
+	ControllerStarted = "controller.started"
+	ControllerStopped = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -680,6 +690,15 @@ func IsJournalDerived(eventType string) bool {
 	return eventType == OpChanged || eventType == FactRecorded
 }
 
+// IsSessionListDerived reports whether eventType is one the controller
+// derives from session beads' bead.* notifications (session.created,
+// session.closed). No writer may author one: a client applies it to the
+// session list it read, and only the session bead can say whether the session
+// is open.
+func IsSessionListDerived(eventType string) bool {
+	return eventType == SessionCreated || eventType == SessionClosed
+}
+
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
 // event type has a registered payload — a missing registration is a
@@ -705,6 +724,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
+	SessionCreated, SessionClosed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,

@@ -146,18 +146,28 @@ const (
 		`if [ -n "$ps" ]; then (cd "${wd:-.}" && sh -c "$ps") </dev/null >/dev/null 2>&1 || { rm -rf "$box.tmp"; echo "pre_start failed" >&2; exit 1; }; fi; `
 
 	// goldenHostFSLaunch runs the start's command in its work_dir as a
-	// background host process of the caller's user and records its pid.
+	// background host process of the caller's user, with the session's
+	// identity env from the config's env (goldenLaunchEnv), and records its
+	// pid.
 	goldenHostFSLaunch = `cmd=$(printf %s "$cfg" | sed -n 's/.*"command":"\([^"]*\)".*/\1/p'); ` +
-		`if [ -n "$cmd" ]; then (cd "${wd:-.}" && exec sh -c "$cmd") </dev/null >/dev/null 2>&1 & echo $! > "$box.tmp/pid"; fi; `
+		`if [ -n "$cmd" ]; then (cd "${wd:-.}" && ` +
+		`for k in ` + goldenLaunchEnv + `; do v=$(printf %s "$cfg" | sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p"); if [ -n "$v" ]; then export "$k=$v"; fi; done; ` +
+		`exec sh -c "$cmd") </dev/null >/dev/null 2>&1 & echo $! > "$box.tmp/pid"; fi; `
+
+	// goldenLaunchEnv are the env keys of the start config the host
+	// command runs with: the session's identity and city, so its processes
+	// carry them as an agent's do.
+	goldenLaunchEnv = `GC_SESSION_ID GC_SESSION_NAME GC_CITY_PATH GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN`
 )
 
 // HostFSBodies returns Bodies for a reference whose boxes share the
 // controller's host filesystem and user: it declares locality local and
 // fs.host, stages the overlay_dir and runs the pre_start its start config
 // carries (exactly what the config carries: gc leaves out what it did
-// itself), runs the start's command in work_dir as a host process whose pid
-// observe reports as agent_pid, and stops that process with the box. Each
-// box keeps the start config it received as start.json.
+// itself), runs the start's command in work_dir as a host process carrying
+// the session's identity env, whose pid observe reports as agent_pid, and
+// stops that process with the box. Each box keeps the start config it
+// received as start.json.
 func HostFSBodies() map[string]string {
 	b := Bodies()
 	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","fs.host"],"locality":"local"}'`

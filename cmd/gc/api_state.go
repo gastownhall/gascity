@@ -172,6 +172,11 @@ type controllerState struct {
 	autocloseSweep     *autocloseSweep
 	autocloseSweepOnce sync.Once
 
+	// sessionList folds the bead event watcher's session-bead events into
+	// session.created and session.closed; see session_list_events.go.
+	sessionList     *session.ListTransitions
+	sessionListOnce sync.Once
+
 	// webhookInapplicableReports is the set of orders the webhook dispatch seam
 	// has reported as inapplicable this controller boot. Every per-delivery
 	// dispatcher shares it (controllerWebhookDispatcher.dispatcher), so a refused
@@ -1138,6 +1143,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	cs.recordSessionListEvent(evt, id)
 	// The reads after the cache application (autoclose) see the event's
 	// stores as the split-strict test gate's views (identity in production).
 	stores, relic = splitStrictEventStores(id, stores, relic)

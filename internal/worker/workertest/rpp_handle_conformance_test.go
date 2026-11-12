@@ -6,12 +6,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	worker "github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -32,11 +39,46 @@ func TestRPPHandleConformance(t *testing.T) {
 	})
 	reporter.Require(t, vanishedNudgeNotDeliveredResult(t))
 	reporter.Require(t, hostFSTranscriptTurnsResult(t))
+	t.Run(string(RequirementRPPHostFSLeftoverReaped), func(t *testing.T) {
+		requireHostFSLeftoverReaped(t, reporter, goruntime.GOOS)
+	})
+}
+
+// requireHostFSLeftoverReaped records WC-RPP-006 on goos. Where the row is
+// unsupported (no /proc) it records the outcome and skips; elsewhere a
+// non-passing result fails t.
+func requireHostFSLeftoverReaped(t *testing.T, reporter *SuiteReporter, goos string) {
+	t.Helper()
+	result := hostFSLeftoverReapedResult(t, goos)
+	if result.Status == ResultUnsupported {
+		reporter.Record(result)
+		t.Skip(result.Detail)
+		return
+	}
+	reporter.Require(t, result)
+}
+
+// TestRPPHostFSLeftoverReapedSkipsWithoutProcfs proves WC-RPP-006 is recorded
+// as unsupported and skipped, not failed, on a platform without /proc.
+func TestRPPHostFSLeftoverReapedSkipsWithoutProcfs(t *testing.T) {
+	reporter := &SuiteReporter{suite: "rpp-handle-skip"}
+	var skipped bool
+	t.Run("darwin", func(t *testing.T) {
+		t.Cleanup(func() { skipped = t.Skipped() })
+		requireHostFSLeftoverReaped(t, reporter, "darwin")
+	})
+	if !skipped {
+		t.Fatal("WC-RPP-006 on darwin did not skip")
+	}
+	if len(reporter.results) != 1 || reporter.results[0].Status != ResultUnsupported ||
+		reporter.results[0].Requirement != RequirementRPPHostFSLeftoverReaped {
+		t.Fatalf("recorded results = %+v, want one unsupported WC-RPP-006", reporter.results)
+	}
 }
 
 func TestRPPHandleCatalogRegistersItsRequirements(t *testing.T) {
 	catalog := RPPHandleCatalog()
-	want := []RequirementCode{RequirementRPPVanishedNudgeNotDelivered, RequirementRPPHostFSTranscriptTurns}
+	want := []RequirementCode{RequirementRPPVanishedNudgeNotDelivered, RequirementRPPHostFSTranscriptTurns, RequirementRPPHostFSLeftoverReaped}
 	if len(catalog) != len(want) {
 		t.Fatalf("RPPHandleCatalog() = %+v, want %v", catalog, want)
 	}
@@ -113,6 +155,68 @@ func hostFSTranscriptTurnsResult(t *testing.T) Result {
 	}
 	return Pass(rppHandleProfile, RequirementRPPHostFSTranscriptTurns,
 		"an fs.host pack session reads its turns from its transcript; without fs.host it has no turn source")
+}
+
+// hostFSLeftoverReapedResult evaluates WC-RPP-006: a session on a pack
+// sharing the host, whose agent leaves a process behind, is stopped and
+// started again through a SessionHandle; the start reaps the leftover
+// before the new incarnation launches. The same pack without fs.host
+// claims no scanner. The process-table scan reads a snapshot of the
+// leftover alone, so the start can reach no process the check did not
+// start. On a goos other than linux, which has no /proc to snapshot, the
+// row is unsupported.
+func hostFSLeftoverReapedResult(t *testing.T, goos string) Result {
+	t.Helper()
+	if goos != "linux" {
+		return Unsupported(rppHandleProfile, RequirementRPPHostFSLeftoverReaped, "the check reads /proc snapshots, which only linux has")
+	}
+	if _, ok := runtime.AsProcessTableScanner(sessionexec.NewSeamBackedForCity(rppHostFSPack(t, false), "rpp-conformance", t.TempDir())); ok {
+		return Fail(rppHandleProfile, RequirementRPPHostFSLeftoverReaped, "a pack without fs.host claims a process-table scanner")
+	}
+	proctable.SetScanRootForTesting(t, runtimetest.SnapshotProcRoot(t))
+	cityPath := t.TempDir()
+	sp := sessionexec.NewSeamBackedForCity(rppHostFSPack(t, true), "rpp-conformance", cityPath)
+	command, wait := runtimetest.LeftoverCommand(t)
+	store := beads.NewMemStore()
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(cityPath),
+		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
+	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
+		Manager: manager,
+		Session: worker.SessionSpec{
+			Template: "probe",
+			Title:    "Probe",
+			Command:  command,
+			WorkDir:  t.TempDir(),
+			Provider: "generic",
+			Env:      map[string]string{"GC_CITY_PATH": cityPath},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	by := managerActor(t, manager, sessionpkg.ActorAgent)
+	ctx := context.Background()
+	if err := handle.Start(ctx, by); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = handle.StopForShutdown(context.Background()) })
+	leftover := wait()
+	if err := handle.Stop(ctx, by); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !pidutil.AliveWithStartTime(leftover.PID, leftover.Identity) {
+		t.Fatalf("the leftover pid %d did not outlive its session's stop; the check proves nothing", leftover.PID)
+	}
+	proctable.SetScanRootForTesting(t, runtimetest.SnapshotProcRoot(t, leftover.PID))
+	if err := handle.Start(ctx, managerActor(t, manager, sessionpkg.ActorOperator)); err != nil {
+		return Fail(rppHandleProfile, RequirementRPPHostFSLeftoverReaped, fmt.Sprintf("starting the session again: %v", err))
+	}
+	if pidutil.AliveWithStartTime(leftover.PID, leftover.Identity) {
+		return Fail(rppHandleProfile, RequirementRPPHostFSLeftoverReaped,
+			fmt.Sprintf("the stopped incarnation's leftover pid %d still runs after the session started again", leftover.PID))
+	}
+	return Pass(rppHandleProfile, RequirementRPPHostFSLeftoverReaped,
+		"a start of an fs.host pack session reaps its stopped incarnation's leftover process; without fs.host the pack claims no scanner")
 }
 
 // rppGoldenPack writes the golden reference with two changes: `exec` runs

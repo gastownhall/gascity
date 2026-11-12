@@ -71,7 +71,7 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 	// session), so it does not declare server-lifecycle.
 	wantSkip := map[Code]bool{
 		ReqConnectionExec: true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
-		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true,
+		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true, ReqFSHostHomeView: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
 		ReqServerStopSparesOtherCities: true,
 	}
