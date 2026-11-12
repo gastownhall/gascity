@@ -21,6 +21,29 @@ func gastownExamplePath(t *testing.T) string {
 	return p
 }
 
+// clearGCEnv moves the working directory into a temp dir, so a helper that
+// resolves the example city against the cwd silently skips every test that
+// calls it after clearGCEnv. The example source must stay reachable (the
+// helper must not skip) once clearGCEnv has run.
+func TestGastownExamplePathResolvesAfterClearGCEnv(t *testing.T) {
+	var sub *testing.T
+	var got string
+	t.Run("after clearGCEnv", func(st *testing.T) {
+		sub = st
+		clearGCEnv(st)
+		got = gastownExamplePath(st)
+	})
+	if sub.Skipped() {
+		t.Fatal("gastownExamplePath skipped after clearGCEnv: the example city must resolve independent of the working directory")
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("gastownExamplePath = %q, want an absolute path", got)
+	}
+	if _, err := os.Stat(filepath.Join(got, "city.toml")); err != nil {
+		t.Fatalf("example city.toml missing under %s: %v", got, err)
+	}
+}
+
 // TestInitFromPinsHostedDoltEndpoint verifies that `gc init --from` honors an
 // external Dolt endpoint (the regression: --from previously ignored --dolt-*/
 // GC_DOLT_* and let the copied template's managed-local assumption win). The

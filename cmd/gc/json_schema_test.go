@@ -247,6 +247,44 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 	}
 }
 
+// An exemption must still describe a schema that lacks the convention: once a
+// command adopts the ok:true discriminator, the entry hides it from
+// TestJSONResultSchemasRequireSuccessDiscriminator without protecting
+// anything, so it has to go.
+func TestSuccessDiscriminatorExemptionsAreNotStale(t *testing.T) {
+	for path := range successDiscriminatorExempt {
+		data, err := gascity.BuiltinSchemas.ReadFile(path)
+		if err != nil {
+			t.Errorf("exempt schema %s is not embedded: %v", path, err)
+			continue
+		}
+		var schema struct {
+			Type       json.RawMessage            `json:"type"`
+			Required   []string                   `json:"required"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(data, &schema); err != nil {
+			t.Errorf("exempt schema %s: %v", path, err)
+			continue
+		}
+		var okProperty struct {
+			Const *bool `json:"const"`
+		}
+		if raw := schema.Properties["ok"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &okProperty); err != nil {
+				t.Errorf("exempt schema %s: ok property: %v", path, err)
+				continue
+			}
+		}
+		conforms := string(schema.Type) == `"object"` &&
+			slices.Contains(schema.Required, "ok") &&
+			okProperty.Const != nil && *okProperty.Const
+		if conforms {
+			t.Errorf("stale exemption: %s already requires ok:true; remove it from successDiscriminatorExempt", path)
+		}
+	}
+}
+
 func TestWithDefaultSuccessOKHandlesNilPayload(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
