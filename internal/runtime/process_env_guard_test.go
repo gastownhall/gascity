@@ -20,10 +20,6 @@ var bareEnvironAllowed = map[string]string{
 	// mergeCurrentEnv fills this process's own identity into a process-table
 	// scan of itself; it starts nothing.
 	"proctable/scan_linux.go": "self identity merge for the process-table scan",
-	// trackedOverlayGitEnv feeds only the git probe that asks whether an
-	// overlay file is tracked; it starts no session, git reads no BEADS_*
-	// variable, and this package must stay stdlib-only.
-	"staging_tracked.go": "git trackedness probe in the stdlib-only contract package",
 }
 
 // TestRuntimeProvidersBuildChildEnvThroughExecenv keeps every runtime provider

@@ -88,6 +88,9 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 
 // WorktreeAddOptions controls optional git worktree add behavior.
 type WorktreeAddOptions struct {
+	// SkipLFSSmudge leaves Git LFS files as pointers rather than downloading
+	// their contents during checkout. Callers must run git lfs pull before
+	// building or testing code that needs those contents.
 	SkipLFSSmudge bool
 }
 

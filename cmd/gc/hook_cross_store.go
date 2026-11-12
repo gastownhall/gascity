@@ -150,11 +150,7 @@ func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agen
 // hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
 // entry when primaryOnly.
 func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool, primaryOnly bool) []hookStore {
-	stores := []hookStore{{
-		dir:      workDir,
-		env:      queryEnv,
-		storeRef: primaryHookStoreRef(cityPath, cfg, agentForQuery, workDir, queryEnv),
-	}}
+	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(a) {
 		if primaryOnly {
 			return stores

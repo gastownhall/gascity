@@ -7,7 +7,53 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestStageProviderOverlayDirTrackedCollision(t *testing.T) {
+	for _, skipTracked := range []bool{false, true} {
+		name := "default"
+		if skipTracked {
+			name = "skip-tracked"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo, _ := testutil.InitGitRepo(t)
+			const rel = "instructions.txt"
+			target := filepath.Join(repo, rel)
+			if err := os.WriteFile(target, []byte("repository instructions\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			testutil.RunGit(t, repo, "add", rel)
+			testutil.RunGit(t, repo, "commit", "-m", "track instructions")
+			src := t.TempDir()
+			if err := os.WriteFile(filepath.Join(src, rel), []byte("overlay instructions\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var opts []StageOption
+			if skipTracked {
+				opts = append(opts, WithSkipTrackedOverlays())
+			}
+			var warnings bytes.Buffer
+			if err := StageProviderOverlayDir(src, repo, nil, &warnings, opts...); err != nil {
+				t.Fatalf("StageProviderOverlayDir: %v", err)
+			}
+			want := "overlay instructions\n"
+			if skipTracked || defaultSkipTrackedOverlays() {
+				want = "repository instructions\n"
+				if !strings.Contains(warnings.String(), "tracked by the destination repository") {
+					t.Fatalf("missing collision warning: %s", &warnings)
+				}
+			} else if warnings.Len() != 0 {
+				t.Fatalf("default staging warned about trackedness: %s", &warnings)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != want {
+				t.Fatalf("staged instructions = %q, %v; want %q", got, err, want)
+			}
+		})
+	}
+}
 
 func TestStageDirPreservesBestEffortOverlayWarnings(t *testing.T) {
 	t.Parallel()

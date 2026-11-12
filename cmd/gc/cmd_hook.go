@@ -617,6 +617,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
 				return 1
 			}
+			for i := range stores {
+				if stores[i].storeRef == "" {
+					stores[i].storeRef = primaryHookStoreRef(cityPath, cfg, agentForQuery, stores[i].dir, stores[i].env)
+				}
+			}
 		}
 		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -58,7 +57,8 @@ func gitOverlayTrackedStatuses(dstDir string, relPaths []string) (map[string]ove
 		return statuses, true
 	}
 
-	prefix, ok, unknown := gitWorktreePrefix(dstDir)
+	env := trackedOverlayGitEnv()
+	prefix, ok, unknown := gitWorktreePrefix(dstDir, env)
 	switch {
 	case unknown:
 		return statuses, true
@@ -79,7 +79,7 @@ func gitOverlayTrackedStatuses(dstDir string, relPaths []string) (map[string]ove
 	defer cancel()
 	args := append([]string{"-C", dstDir, "ls-files", "-z", "--"}, pathspecs...)
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = trackedOverlayGitEnv()
+	cmd.Env = env
 	output, err := cmd.Output()
 	if ctx.Err() != nil || err != nil {
 		for _, rel := range relPaths {
@@ -101,11 +101,11 @@ func gitOverlayTrackedStatuses(dstDir string, relPaths []string) (map[string]ove
 	return statuses, true
 }
 
-func gitWorktreePrefix(dstDir string) (string, bool, bool) {
+func gitWorktreePrefix(dstDir string, env []string) (string, bool, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", dstDir, "rev-parse", "--show-toplevel", "--show-prefix")
-	cmd.Env = trackedOverlayGitEnv()
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return "", false, true
@@ -168,18 +168,4 @@ func warnTrackedOverlaySkip(dstDir, relPath string, status overlayTrackedStatus,
 		reason = "destination repository trackedness could not be determined"
 	}
 	fmt.Fprintf(warnings, "overlay: skipping provider overlay %q: %s\n", relPath, reason) //nolint:errcheck
-}
-
-func trackedOverlayGitEnv() []string {
-	out := make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
-		key, _, _ := strings.Cut(entry, "=")
-		switch key {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
-			continue
-		default:
-			out = append(out, entry)
-		}
-	}
-	return out
 }

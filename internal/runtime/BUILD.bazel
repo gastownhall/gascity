@@ -64,7 +64,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/overlay"],
+    deps = [
+        "//internal/execenv",
+        "//internal/overlay",
+    ],
 )
 
 go_test(
@@ -161,6 +164,7 @@ go_test(
         "//internal/runtime/t3bridge",
         "//internal/runtime/tmux",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

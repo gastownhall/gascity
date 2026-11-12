@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"os"
@@ -303,5 +304,82 @@ func TestHookClaimWorktreeReceiptIncludesWorktreeFields(t *testing.T) {
 	}
 	if result.WorkDir != `C:\city\.gc\worktrees\rig\ga-work` || result.WorkBranch != "gc/rig/ga-work" {
 		t.Fatalf("worktree result fields = %q/%q", result.WorkDir, result.WorkBranch)
+	}
+}
+
+func TestHookClaimWorktreeFailureReleasesClaim(t *testing.T) {
+	for _, failure := range []string{"checkout", "staging", "publication"} {
+		t.Run(failure, func(t *testing.T) {
+			repo, base := testutil.InitGitRepo(t)
+			cityPath := t.TempDir()
+			p := hookClaimWorktreeProvisioner{
+				cityPath: cityPath, cityName: "test-city", repoDir: repo,
+				root:    filepath.Join(cityPath, ".gc", "worktrees", "rig"),
+				rigName: "rig", rigComponent: "rig", base: base,
+				defaultRef: "rig:rig", owner: "worker",
+			}
+			switch failure {
+			case "checkout":
+				p.base = "missing-base"
+			case "staging":
+				p.runtimeConfig.OverlayDir = filepath.Join(cityPath, "not-a-directory")
+				if err := os.WriteFile(p.runtimeConfig.OverlayDir, []byte("blocked overlay"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			held := beads.Bead{ID: "work-1", Status: "open"}
+			rec := &turnBoundClaimRecorder{}
+			ops := rec.ops(t, turnBoundRoutedWork)
+			ops.Claim = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+				if held.Status != "open" || id != held.ID {
+					t.Fatalf("unexpected claim of %+v", held)
+				}
+				held.Status, held.Assignee = "in_progress", assignee
+				rec.claims = append(rec.claims, id)
+				return held, true, nil
+			}
+			ops.ProvisionWorktree = func(b beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookProvisionedWorktree, beads.Bead, error) {
+				if held.Status != "in_progress" {
+					t.Fatal("provisioning ran before the claim")
+				}
+				return p.provision(b, opts, ops, dir, stderr)
+			}
+			ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error {
+				if failure != "publication" {
+					t.Fatal("unexpected metadata publication after provisioning failure")
+				}
+				return errors.New("publication unavailable")
+			}
+			ops.Release = func(_ context.Context, dir string, env []string, id, assignee string) (bool, error) {
+				if dir != repo || hookClaimEnvValue(env, "BEADS_DIR") != "claim-store" {
+					t.Fatalf("release reached another store: %q, %v", dir, env)
+				}
+				if held.ID != id || held.Assignee != assignee || held.Status != "in_progress" {
+					t.Fatalf("release did not match held claim: %+v", held)
+				}
+				held.Status, held.Assignee = "open", ""
+				rec.releases = append(rec.releases, id)
+				return true, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", repo, hookClaimOptions{
+				Assignee: "worker", RouteTargets: []string{"worker"},
+				Env: []string{"BEADS_DIR=claim-store"}, StoreRef: "rig:rig", JSON: true,
+			}, ops, &stdout, &stderr)
+			if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "provisioning worktree") {
+				t.Fatalf("failed provision = %d, stdout=%s, stderr=%s", code, &stdout, &stderr)
+			}
+			if held.Status != "open" || held.Assignee != "" || len(rec.claims) != 1 || len(rec.releases) != 1 {
+				t.Fatalf("claim parked after failed provision: %+v; claims=%v releases=%v", held, rec.claims, rec.releases)
+			}
+			if len(rec.claimReleased) != 1 || len(rec.stepsStarted) != 0 {
+				t.Fatalf("lifecycle after failed provision: released=%v started=%v", rec.claimReleased, rec.stepsStarted)
+			}
+			if failure != "checkout" {
+				if _, err := os.Stat(filepath.Join(p.root, held.ID, ".git")); err != nil {
+					t.Fatalf("test did not fail after worktree creation: %v", err)
+				}
+			}
+		})
 	}
 }

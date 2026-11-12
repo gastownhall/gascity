@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/overlay"
 )
 
@@ -184,6 +185,21 @@ func WithSkipTrackedOverlays() StageOption {
 	return func(c *stageConfig) {
 		c.skipTracked = true
 	}
+}
+
+func trackedOverlayGitEnv() []string {
+	env := execenv.Environ()
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // StageProviderOverlayDirSkippingMergeable copies a provider-aware overlay
