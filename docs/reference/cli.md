@@ -4645,8 +4645,9 @@ stranded (session.stranded_claims).
 A still-configured named session keeps the work assigned to its configured
 named identity and its runtime name: that work stays assigned, and the
 controller creates the session again to serve it. Once the named session is
-removed from config, a close releases that work too. To restart a session and
-keep the same session bead and all of its assignments, use gc session kill.
+removed from config, a close releases that work too. To restart a named
+session and keep the same session bead and its assignments, use gc session
+kill.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
 with the same --key replays the close only when it names the session by its
