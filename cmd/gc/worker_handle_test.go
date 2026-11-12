@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2827,5 +2830,86 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
 			}
 		})
+	}
+}
+
+// TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch is the
+// #8539 end-to-end guard: a bead reconciled from a provider with an explicit
+// resume command to one that resumes by flag/style must resolve a worker
+// runtime with an EMPTY resume command. Pre-fix, the reconciler left the old
+// provider's resume_command pinned on the bead, and the resolver's fallback
+// (firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)) replayed
+// the old provider's command on every resume.
+func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "true old-exec"})
+
+	// Tick 1: the bead is created on a provider whose resume story is an
+	// explicit resume command alone.
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName:     "worker",
+			Command:          "true old-exec",
+			ResolvedProvider: &config.ResolvedProvider{Name: "oldprov", ResumeCommand: "true old-resume {{.SessionKey}}"},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, store)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(created))
+	}
+	if got := created[0].Metadata["resume_command"]; got == "" {
+		t.Fatal("tick 1: resume_command was not stamped at creation")
+	}
+
+	// Tick 2: the agent's provider becomes one that resumes by flag/style
+	// with no resume command; reconciliation clears the stale command.
+	ds["worker"] = TemplateParams{
+		TemplateName: "worker",
+		Command:      "true new-exec",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "newprov", ResumeFlag: "--continue", ResumeStyle: "flag",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, store)[0].Metadata["resume_command"]; got != "" {
+		t.Fatalf("tick 2: reconciled resume_command = %q, want empty", got)
+	}
+
+	// Reread the refreshed session information and resolve the runtime from
+	// it, as the resume path does.
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(created[0].ID)
+	if err != nil {
+		t.Fatalf("rereading session %s: %v", created[0].ID, err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "newprov"}},
+		Providers: map[string]config.ProviderSpec{
+			"newprov": {Command: "true", Args: []string{"new-exec"}, ResumeFlag: "--continue", ResumeStyle: "flag"},
+		},
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfig("", cfg, info, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := resolved.Resume.ResumeCommand; got != "" {
+		t.Fatalf("Resume.ResumeCommand = %q, want empty (the stale oldprov command must not survive the switch)", got)
+	}
+	if got := resolved.Resume.ResumeFlag; got != "--continue" {
+		t.Fatalf("Resume.ResumeFlag = %q, want --continue", got)
+	}
+	if got := resolved.Resume.ResumeStyle; got != "flag" {
+		t.Fatalf("Resume.ResumeStyle = %q, want flag", got)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }

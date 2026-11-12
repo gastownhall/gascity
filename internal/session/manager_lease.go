@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -126,7 +125,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, by Actor, id, sessName strin
 	if ttl <= 0 {
 		ttl = RuntimeLeaseTTLFor(nil)
 	}
-	front := NewStore(beads.SessionStore{Store: m.store})
+	front := NewStore(m.store)
 	req := RuntimeLeaseRequest{City: by.City.Path(), Name: sessName, ID: id, TTL: ttl}
 	if mode == leaseTry {
 		l, err := TryRuntimeLease(front, req) // busy stays ErrRuntimeLeaseBusy: no retry, the caller defers

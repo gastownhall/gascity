@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execgrace"
@@ -30,17 +32,50 @@ type Provider struct {
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
 
-	// RPP handshake result, resolved lazily once per instance (see
-	// handshake.go). The error is cached alongside the info so a broken
-	// `protocol` op degrades probes to the zero-capability floor instead
-	// of re-running on every call.
-	handshakeOnce sync.Once
-	handshakeInfo runtime.ProtocolInfo
-	handshakeErr  error
+	// cityName and cityPath scope every op to the city this provider serves
+	// (GC_EXEC_CITY_NAME, GC_EXEC_CITY_PATH), when citySet; see
+	// NewProviderForCity.
+	cityName, cityPath string
+	citySet            bool
+
+	// RPP handshake result, resolved lazily per instance (see
+	// handshake.go). A success is cached for the provider's life; an error
+	// is cached for handshakeRetryAfter, so a broken `protocol` op degrades
+	// probes to the zero-capability floor without re-running on every call.
+	handshakeMu       sync.Mutex
+	handshakeRan      bool
+	handshakeRetrying bool
+	handshakeAt       time.Time
+	handshakeInfo     runtime.ProtocolInfo
+	handshakeErr      error
+
+	// execUnsupported remembers an `exec` exit 2 from a pack whose
+	// successful handshake does not declare proc.exec, so the driving
+	// methods stop spawning `exec` before every dedicated op. An exit 2
+	// while the handshake is failing is not remembered (see Exec).
+	execUnsupported atomic.Bool
 
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
 	readyPrompts sync.Map
+
+	// setupTimeout and setupMaxTimeout budget each host pre_start and
+	// session_setup command gc runs for a pack sharing the host filesystem
+	// (hoststage.go; WithSetupTimeouts). setupWarnings receives the non-fatal
+	// diagnostics of that work; nil is os.Stderr.
+	setupTimeout    time.Duration
+	setupMaxTimeout time.Duration
+	setupWarnings   io.Writer
+
+	// scanListingTimeout bounds the listing the orphan sweep's
+	// process-table scan reads to track its roots (process_scan.go); zero
+	// is defaultScanListingTimeout.
+	scanListingTimeout time.Duration
+
+	// hostSetupDue holds the names whose `provision` config gc stripped of
+	// its host work (provisionBox), so the launch that follows runs their
+	// session_setup on the host (execTransport.Launch).
+	hostSetupDue sync.Map
 }
 
 type startupWatchEvent struct {
@@ -54,12 +89,64 @@ const startupWatchCloseTimeout = 200 * time.Millisecond
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
-func NewProvider(script string) *Provider {
-	return &Provider{
+func NewProvider(script string, opts ...Option) *Provider {
+	p := &Provider{
 		script:       script,
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
+		setupTimeout: defaultSetupTimeout,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// NewProviderForCity returns an exec [Provider] for the given script that
+// runs every op with GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH set to the city
+// it serves, so a script shared by several cities on one backend can scope
+// its boxes and listings to this one.
+func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Provider {
+	p := NewProvider(script, opts...)
+	p.cityName, p.cityPath, p.citySet = cityName, cityPath, true
+	return p
+}
+
+// cityEnv returns the env an op of a provider built for a city runs with:
+// gc's environment, read through execenv.Environ without a session's
+// identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
+// it before arming the op's deadline: execenv.Environ waits out an
+// in-flight native store open, and that wait is not the op's.
+func (p *Provider) cityEnv() []string {
+	if !p.citySet {
+		return nil
+	}
+	return append(sessionlessEnviron(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+}
+
+// opEnv returns the env a bounded op runs with: cityEnv for a provider built
+// for a city, else gc's environment read through execenv.Environ, without
+// a session's identity (sessionlessEnviron). Like cityEnv, read it before
+// arming the op's deadline.
+func (p *Provider) opEnv() []string {
+	if env := p.cityEnv(); env != nil {
+		return env
+	}
+	return sessionlessEnviron()
+}
+
+// withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
+// rounded down and never negative, until ctx's deadline — the earlier of the
+// op's own timeout and any deadline its parent already carried. A ctx with
+// no deadline leaves env as it is. Call it with the op's armed ctx, on the
+// env opEnv read before arming it.
+func withDeadline(ctx context.Context, env []string) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return env
+	}
+	ms := max(time.Until(deadline).Milliseconds(), 0)
+	return append(env, "GC_EXEC_DEADLINE_MS="+strconv.FormatInt(ms, 10))
 }
 
 // run executes the script with the given args using the default timeout.
@@ -81,10 +168,19 @@ func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...s
 // runWithContext executes the script using the given parent context with
 // the specified timeout, optionally piping stdinData to its stdin.
 func (p *Provider) runWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
+	return p.runCapped(parent, dur, 0, stdinData, args...)
+}
+
+// runCapped is runWithContext with stdout capped at limit bytes (0: no
+// cap). Output past the cap is discarded and fails the op, without echoing
+// any of it.
+func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
+	env := p.opEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -95,7 +191,8 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// grandchild processes (e.g. sleep in a shell script) still hold them open.
 	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
 
-	var stdout, stderr bytes.Buffer
+	stdout := cappedBuffer{limit: limit}
+	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -105,7 +202,10 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 
 	err := cmd.Run()
 	if err == nil {
-		return strings.TrimRight(stdout.String(), "\n"), nil
+		if stdout.over {
+			return "", fmt.Errorf("exec provider %s %s: stdout over %d bytes", p.script, strings.Join(args, " "), limit)
+		}
+		return strings.TrimRight(stdout.buf.String(), "\n"), nil
 	}
 
 	// An accepted cancellation action wins over the adapter's exit status. In
@@ -119,6 +219,23 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
 	return "", p.runError(err, stderr.String(), args)
+}
+
+// cappedBuffer collects stdout up to limit bytes (0: no limit) and records
+// whether more was written. It accepts every write, so a script printing
+// past the cap is not killed by a broken pipe before its exit is read.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	over  bool
+}
+
+func (c *cappedBuffer) Write(b []byte) (int, error) {
+	if c.over || c.limit > 0 && c.buf.Len()+len(b) > c.limit {
+		c.over = true
+		return len(b), nil
+	}
+	return c.buf.Write(b)
 }
 
 // cancellationError formats the error returned when a delivered cancellation
@@ -164,22 +281,45 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	if len(args) > 0 {
 		op = args[0]
 	}
-	return classifyExecExit(op, code, errMsg, fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg))
+	// Only the ops strictExitTwo names consult the handshake, so the
+	// `protocol` op's own failure never re-enters it.
+	strict := code == 2 && strictWhenReady(op) && p.v2Ready()
+	base := &opExitError{op: op, code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
+	return classifyExecExit(op, code, errMsg, strict, base)
 }
+
+// opExitError is an op's failure with the op, exit code and stderr message
+// it ended with, so a caller can read a code the contract reserves (exit 73
+// under fresh_only) without parsing text. It reads as its wrapped error.
+type opExitError struct {
+	op   string
+	code int
+	msg  string
+	err  error
+}
+
+func (e *opExitError) Error() string { return e.err.Error() }
+
+func (e *opExitError) Unwrap() error { return e.err }
 
 // classifyExecExit maps an adapter op's exit code and message onto the
 // provider's contract. base is the formatted adapter error. Exit code 2 is an
 // unknown operation treated as success (forward compatible, nil error),
 // except from ops that cannot be unknown, where it is an ordinary failure:
 // start (a pack that cannot start is not a provider), provision (it runs only
-// for a pack that declared proc.provision), and is-attached (it runs only for
-// a pack that declared report-attachment; [Provider.IsAttachedWithError]
-// reports its failure as "could not tell"). A start-op name collision maps to
-// [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail] is an
-// endpoint capacity refusal ([runtime.CapacityError]); everything else is base
-// unchanged.
-func classifyExecExit(op string, code int, msg string, base error) error {
+// for a pack that declared proc.provision), is-attached (it runs only for a
+// pack that declared report-attachment; [Provider.IsAttachedWithError]
+// reports its failure as "could not tell"), the observe.v1 ops, and
+// server-stop (it runs only for a pack that declared server-lifecycle). strict
+// is a v2-ready script's exit 2 from an op observe.v1 obliges it to
+// implement, which fails as strictExitTwo maps it. A start-op name collision
+// maps to [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail]
+// is an endpoint capacity refusal ([runtime.CapacityError]); everything else
+// is base unchanged.
+func classifyExecExit(op string, code int, msg string, strict bool, base error) error {
 	switch {
+	case code == 2 && strict:
+		return strictExitTwo(op, base)
 	case code == 2 && !exitTwoIsFailure(op):
 		return nil
 	case op == "start" && isStartCollision(msg):
@@ -195,10 +335,38 @@ func classifyExecExit(op string, code int, msg string, base error) error {
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached":
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false
+	}
+}
+
+// strictWhenReady reports an op a v2-ready script must implement, whose
+// exit 2 is therefore a failure rather than the unknown-op no-op.
+func strictWhenReady(op string) bool {
+	switch op {
+	case "stop", "get-meta", "set-meta", "remove-meta", "peek":
+		return true
+	default:
+		return false
+	}
+}
+
+// strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
+// nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
+// ([runtime.ErrMetaUnsupported]), or a peek that read nothing (the op's
+// failure, never an empty screen). (is-running needs no entry: its exit 2
+// already reads as no answer. A v2-ready listing is `inventory`, whose
+// exit 2 is a failure like any other.)
+func strictExitTwo(op string, base error) error {
+	switch op {
+	case "stop":
+		return fmt.Errorf("%w: %w", runtime.ErrStopUnsupported, base)
+	case "get-meta", "set-meta", "remove-meta":
+		return fmt.Errorf("%w: %w", runtime.ErrMetaUnsupported, base)
+	default:
+		return base
 	}
 }
 
@@ -217,6 +385,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
+	cmd.Env = p.opEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -230,18 +399,34 @@ func (p *Provider) runWithTTY(args ...string) error {
 // After the script returns, Start handles startup dialogs (workspace
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
+//
+// For a pack sharing the host filesystem, Start first stages the work dir
+// and runs pre_start on the host (fatal: no box is created), leaves that
+// work out of the start config, and runs session_setup on the host once the
+// agent is up (hoststage.go). It does that host work only into a name the
+// pack reports holding no live box (vacant, or held by a dead box the start
+// recycles): into a name a running box holds it would re-run pre_start in a
+// live session's work dir, and a name whose occupancy read fails may be
+// one, so there it sends the full config instead.
+//
+// A [runtime.Config.FreshOnly] start is startFresh's.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if cfg.FreshOnly {
+		return p.startFresh(ctx, name, cfg)
+	}
 	p.rememberReadyPrompt(name, cfg)
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
 	// question the teardown below actually depends on.
-	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
+	before := p.readOccupancy(name)
+	occupiedBefore, occupancyKnown := before.occupied, before.definite
 	foreignBox := occupancyKnown && occupiedBefore
 
-	data, err := marshalStartConfig(cfg)
+	hostWork := before.holdsNoLiveBox() && p.sharesHostFS()
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
+		return err
 	}
 	var saved savedPaneFence
 	if !occupancyKnown || occupiedBefore {
@@ -254,21 +439,33 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	if err := p.publishInputFence(ctx, name, cfg); err != nil {
-		if startFailureKeepsBox(err, foreignBox) {
+	if publishFailed, err := p.finishStart(ctx, name, cfg); err != nil {
+		if publishFailed && startFailureKeepsBox(err, foreignBox) {
 			// The box was up before the attempt and stays: its pane, unless
 			// the start op replaced its process, keeps the fence it held.
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	p.publishReadyPrompt(ctx, name, cfg)
-
-	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
+	if hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
 	}
-
 	return nil
+}
+
+// finishStart runs what follows a successful welded `start` op, for Start
+// and startFresh alike: it publishes the agent pane's input fence, then its
+// ready prompt, then dismisses startup dialogs. publishFailed reports that
+// the error is the fence publish's.
+func (p *Provider) finishStart(ctx context.Context, name string, cfg runtime.Config) (publishFailed bool, err error) {
+	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		return true, err
+	}
+	p.publishReadyPrompt(ctx, name, cfg)
+	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
+		return false, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+	}
+	return false, nil
 }
 
 // cleanupAfterStartFailure tears down the box the adapter may already have
@@ -328,25 +525,39 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // provisionBox creates the box for name. When the pack supports a separable
 // launch it runs the `provision` op (box + staging + pre_start, NO agent); the
 // agent is launched separately by launchAgent. Otherwise it falls back to the
-// welded Start (which both provisions and launches). (Un-weld B3b.)
+// welded Start (which both provisions and launches). (Un-weld B3b.) For a pack
+// sharing the host filesystem, and as in Start only into a name the pack
+// reports holding no live box, the host work precedes `provision` and is
+// left out of its config; session_setup then follows the launch
+// (execTransport.Launch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
-	data, err := marshalStartConfig(cfg)
+	p.hostSetupDue.Delete(name)
+	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+		return err
 	}
-	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
-	return err
+	if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+		return err
+	}
+	if hostWork {
+		p.hostSetupDue.Store(name, struct{}{})
+	}
+	return nil
 }
 
 // launchAgent starts the agent in the in-box tmux session over the `exec` op, for
 // a pack with a separable launch; for a welded pack it is a no-op (provisionBox /
 // Start already launched). The launch is idempotent: it respawns the pane if the
 // session already exists (relaunch into a warm box) and otherwise creates it
-// (first launch after provision), then dismisses startup dialogs — the same
+// (first launch after provision). A FreshOnly launch never respawns: an
+// existing agent session fails it, as an ordinary start failure, so
+// startFresh's token-gated cleanup removes the box it provisioned. It then
+// dismisses startup dialogs — the same
 // Go-side orchestration the welded Start runs. The `exec` op runs in the box's
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
@@ -361,6 +572,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	}
 	var argv []string
 	if _, code, _ := p.Exec(ctx, name, []string{"tmux", "has-session", "-t", execTmuxSession}); code == 0 {
+		if cfg.FreshOnly {
+			return fmt.Errorf("exec provider: fresh launch in %q found an existing agent session", name)
+		}
 		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
 	} else {
 		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
@@ -380,17 +594,34 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
 // ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// the agent in the warm box over the exec op (launchAgent) — no reprovision —
+// and, for a pack sharing the host filesystem, then runs session_setup on the
+// host again, as the launch after provision does and as tmux re-runs it on a
+// relaunch. Pre_start and staging are not redone: the box is warm. A
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
-// degrades to a full reprovision (Stop+Start), which is still correct.
+// degrades to a full reprovision (Stop+Start), which is still correct. On a
+// v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
+// name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.supportsSeparableLaunch() {
-		return p.launchAgent(ctx, name, cfg)
+		if err := p.launchAgent(ctx, name, cfg); err != nil {
+			return err
+		}
+		if p.sharesHostFS() {
+			p.runHostSessionSetup(ctx, name, cfg)
+		}
+		return nil
 	}
 	if err := p.Stop(name); err != nil {
 		return err
 	}
-	return p.Start(ctx, name, cfg)
+	if !p.v2Ready() {
+		return p.Start(ctx, name, cfg)
+	}
+	if err := p.awaitAbsent(ctx, name); err != nil {
+		return err
+	}
+	return p.startFresh(ctx, name, cfg)
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
@@ -439,8 +670,10 @@ func (p *Provider) startStartupWatch(
 	name string,
 	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
+	env := p.opEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
+	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -690,8 +923,18 @@ func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
 	return err
 }
 
+// peekOp runs the `peek` op. A v2-ready script's exit 66
+// ([runtime.ExitCodeNoScreen]) answers "no screen" (no box, or a dead box
+// whose screen is gone): an empty screen with no error, for every caller, so
+// a start whose agent exits while its startup dialogs are read sees a blank
+// screen, not a failed start.
 func (p *Provider) peekOp(name string, lines int) (string, error) {
-	return p.run(nil, "peek", name, strconv.Itoa(lines))
+	out, err := p.run(nil, "peek", name, strconv.Itoa(lines))
+	var e *opExitError
+	if errors.As(err, &e) && e.code == runtime.ExitCodeNoScreen && p.v2Ready() {
+		return "", nil
+	}
+	return out, err
 }
 
 func (p *Provider) sendKeysOp(name string, keys ...string) error {
@@ -722,19 +965,63 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning checks if the session is alive: script is-running <name>
 // Returns true only if stdout is "true". Errors → false.
 func (p *Provider) IsRunning(name string) bool {
-	occupied, _ := p.boxOccupancy(name)
-	return occupied
+	running, _ := p.isRunningOp(name)
+	return running
 }
 
-// boxOccupancy asks `is-running <name>` and reports both the answer and
+// boxOccupancy reports whether a box holds name, and whether there was an
+// answer. On a v2-ready pack it is `observe`: a live or dead box is
+// occupied, absent is vacant, and unknown has no answer. Otherwise it is
+// isRunningOp.
+//
+// A caller deciding whether it may destroy the box needs the distinction:
+// "no" authorizes a teardown, "I don't know" must not.
+func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
+	o := p.readOccupancy(name)
+	return o.occupied, o.definite
+}
+
+// occupancy is one read of whether a box holds a name: occupied by a live
+// or a dead box, live only by a running one, and definite when the pack
+// answered.
+type occupancy struct {
+	occupied, live, definite bool
+}
+
+// holdsNoLiveBox reports a definite answer that no running box holds the
+// name: it is vacant, or held only by a dead box.
+func (o occupancy) holdsNoLiveBox() bool {
+	return o.definite && !o.live
+}
+
+// readOccupancy reads boxOccupancy's answer, telling a running box from a
+// dead one where the pack can: on a v2-ready pack from `observe`; otherwise
+// `is-running`, whose true is taken as a live box.
+func (p *Provider) readOccupancy(name string) occupancy {
+	if p.v2Ready() {
+		o, err := p.observe(context.Background(), name, nil)
+		if err != nil {
+			return occupancy{}
+		}
+		return occupancy{occupied: o.present(), live: o.state == stateRunning, definite: true}
+	}
+	running, definite := p.isRunningOp(name)
+	return occupancy{occupied: running, live: running, definite: definite}
+}
+
+// holdsNoLiveBox reports whether the pack definitely reports no live box
+// holding name: vacant, or held by a dead box, which a start recycles. A
+// failed read reports nothing: the name may be held by a live session.
+func (p *Provider) holdsNoLiveBox(name string) bool {
+	return p.readOccupancy(name).holdsNoLiveBox()
+}
+
+// isRunningOp asks `is-running <name>` and reports both the answer and
 // whether there was one. Only a literal "true" or "false" is an answer; an op
 // error, an unknown op (exit 2 on a pack with no is-running), or empty output
-// means the adapter could not tell.
-//
-// [Provider.IsRunning] flattens that to a bool because its callers only need
-// "treat as not running". A caller deciding whether it may destroy the box
-// needs the distinction: "no" authorizes a teardown, "I don't know" must not.
-func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
+// means the adapter could not tell. [Provider.IsRunning] flattens that to a
+// bool because its callers only need "treat as not running".
+func (p *Provider) isRunningOp(name string) (running, definite bool) {
 	out, err := p.run(nil, "is-running", name)
 	if err != nil {
 		return false, false
@@ -747,6 +1034,32 @@ func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 	default:
 		return false, false
 	}
+}
+
+// requirePresent reports a session the pack can tell is gone as an error
+// wrapping [runtime.ErrSessionNotFound], so a driving call to it is never
+// reported delivered. On a v2-ready pack it reads `observe`: an absent or
+// dead box is gone, and a failed read wraps [runtime.ErrRuntimeUnavailable].
+// Otherwise it asks `is-running`, and only a definite "false" is gone; a pack
+// that cannot tell is let through, as before.
+//
+// The seam-backed driving verbs call it; the raw driving methods do not,
+// because the startup dialog loops drive a box through them.
+func (p *Provider) requirePresent(name string) error {
+	if p.v2Ready() {
+		o, err := p.observe(context.Background(), name, nil)
+		if err != nil {
+			return fmt.Errorf("session %q: %w", name, err)
+		}
+		if o.state != stateRunning {
+			return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+		}
+		return nil
+	}
+	if running, definite := p.isRunningOp(name); definite && !running {
+		return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+	}
+	return nil
 }
 
 // IsAttached reports terminal attachment via `script is-attached <name>`
@@ -826,7 +1139,12 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 
 // ListRunning returns sessions matching a prefix: script list-running <prefix>
 // Returns one name per stdout line. Empty stdout → empty slice (not nil).
+// A v2-ready pack lists through `inventory` instead (listInventory).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	if p.v2Ready() {
+		names, _, err := p.ListInventory(prefix)
+		return names, err
+	}
 	out, err := p.run(nil, "list-running", prefix)
 	if err != nil {
 		return nil, err
@@ -894,9 +1212,10 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 }
 
 // SleepCapability reports the idle-sleep capability the pack's handshake
-// supports. A pack that declares report-activity, report-attachment and
-// proc.exec gets full idle sleep: it has an activity clock, an attachment
-// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// supports. A pack that declares report-activity, report-attachment, proc.exec
+// and idle-boundary gets full idle sleep: it has an activity clock, an
+// attachment probe, and an idle boundary read from its in-box tmux pane
+// (WaitForIdle).
 // Every other pack keeps the timed-only floor. The floor is never disabled:
 // non-interactive sleep and the queued-nudge poller rely on timed-only for
 // exec runtimes that report no activity.
@@ -933,6 +1252,16 @@ var (
 	_ runtime.IdleWaitProvider            = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
 	_ runtime.IdleProbeBudgetProvider     = (*Provider)(nil)
+
+	_ runtime.LivenessObserverWithError = (*Provider)(nil)
+	_ runtime.FreshByConstruction       = (*Provider)(nil)
+	_ runtime.IdentityObserver          = (*Provider)(nil)
+	_ runtime.SessionObjectKiller       = (*Provider)(nil)
+	_ runtime.V2ReadinessReporter       = (*Provider)(nil)
+	_ runtime.InventoryProvider         = (*Provider)(nil)
+	_ runtime.InventoryGate             = (*Provider)(nil)
+	_ runtime.ListingAttestation        = (*Provider)(nil)
+	_ runtime.InventoryLister           = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements
@@ -947,11 +1276,16 @@ var (
 // own stdin is not separately available; the driving ops reproduced over Exec
 // (tmux send-keys / capture-pane / …) do not need it.
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	if p.execUnsupported.Load() {
+		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+	}
 	command := shellQuote(argv)
+	env := p.opEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -975,9 +1309,16 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 				// exit code). A runtime that DECLARES the exec connection in its
 				// handshake implements the op, so exit 2 is the command's own exit
 				// code; only an UNDECLARED runtime means "op unimplemented" — fall
-				// back to the dedicated driving ops.
-				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+				// back to the dedicated driving ops. Only a successful
+				// handshake's answer is remembered: a failed one reads as
+				// undeclared until its retry, and remembering that would pin
+				// a proc.exec pack to the dedicated ops for the provider's life.
+				info, herr := p.Protocol()
+				if herr == nil && info.Has(runtime.ProtocolCapabilityConnectionExec) {
 					return stdout.Bytes(), 2, nil
+				}
+				if herr == nil {
+					p.execUnsupported.Store(true)
 				}
 				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 			}

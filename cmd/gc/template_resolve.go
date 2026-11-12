@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -162,6 +163,17 @@ type TemplateParams struct {
 	// (templateParamsForSession). Nil for ACP templates and providers
 	// without ACP support.
 	ACPLaunch *TemplateACPLaunch
+	// ProgramStatusArm is the OSC 7501 capture arm for the template's
+	// resolved transport (config.ProgramStatusLaunchFor): the provider's
+	// declaration, armed by the leaf only under its live switch. It stays out of Hints:
+	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
+	// launch whose transport is not ACP, so a session kept on its ACP launch
+	// (templateParamsForSession) starts disarmed.
+	ProgramStatusArm runtime.ProgramStatusArm
+	// ProgramStatusEnv is the declared provider's forced session env that goes
+	// with ProgramStatusArm, already expanded. It stays out of Env, so an ACP
+	// launch keeps the value Env resolved for any key it names.
+	ProgramStatusEnv map[string]string
 }
 
 // TemplateACPLaunch is the ACP launch command and session/new MCP server set
@@ -317,7 +329,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
+		if all, err := session.ExactMetadataSessionCandidates(beads.SessionStore{Store: p.beadStore}, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
@@ -473,6 +485,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
+	// The session runtime as the skill/MCP materialization gates read it
+	// (steps 9b, 11b, 11c).
+	materializationRT := materializationRuntimeFor(p.city, p.cityName, p.cityPath, p.sessionProvider)
+
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
 	// delivers the skills to the session workdir. The appendix claims
@@ -500,8 +516,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
@@ -593,6 +609,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
+	// Step 10c: program status (OSC 7501). The arm is the provider's
+	// switch-independent declaration (empty for ACP or an undeclared
+	// provider), which the leaf arms only under its live switch, so a cached
+	// resolution follows a flip either way; the forced env is empty unless the
+	// switch is shadow or on. The arm and the forced env stay out of hints and env:
+	// templateParamsToConfig applies them to a launch whose transport is not
+	// ACP, so a session kept on its ACP launch starts disarmed with this env.
+	programStatusArm, programStatusEnv := config.ProgramStatusLaunchFor(p.city, resolved, sessionTransport)
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -653,7 +677,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
-	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+	if isStage2EligibleSession(materializationRT, cfgAgent) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 		wsProvider := ""
@@ -746,8 +770,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+		stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
 		case stage1Delivers || stage2Delivers:
 			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
@@ -830,6 +854,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 		ACPLaunch:        acpLaunch,
+		ProgramStatusArm: programStatusArm,
+		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
@@ -996,6 +1022,8 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
+	} else {
+		applyTemplateProgramStatus(&cfg, tp)
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
@@ -1014,6 +1042,25 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, cfg.Env)
 	return cfg, plan.Delivery, nil
+}
+
+// applyTemplateProgramStatus applies a template's OSC 7501 program status to a
+// launch whose transport is not ACP: the capture arm, and the forced env
+// written over the template env. resolveTemplate's managed pins (the
+// usage-metrics opt-out and the controller-only keys) stay the last writers.
+// The forced env never reaches OperatorEnv, so it stays off the launch
+// fingerprint.
+func applyTemplateProgramStatus(cfg *runtime.Config, tp TemplateParams) {
+	cfg.ProgramStatus = tp.ProgramStatusArm
+	if len(tp.ProgramStatusEnv) == 0 {
+		return
+	}
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string, len(tp.ProgramStatusEnv))
+	}
+	maps.Copy(cfg.Env, tp.ProgramStatusEnv)
+	cfg.Env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	maps.Copy(cfg.Env, processenv.ControllerOnlyEnvOverlay())
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestKeyedRootsTakeOnlyARoot (architecture B): a lookup by an idempotence
@@ -25,7 +26,7 @@ func TestKeyedRootsTakeOnlyARoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := KeyedRoots(store, key, "k")
+	got, err := KeyedRoots(beadstest.GraphMolecule(store), key, "k")
 	if err != nil || len(got) != 1 || got[0].ID != root.ID {
 		t.Fatalf("KeyedRoots = %v (%v), want only %s", got, err, root.ID)
 	}

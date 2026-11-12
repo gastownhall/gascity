@@ -152,9 +152,11 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	rec.Rows = p.traceRows(w.Census, reasons, res)
 
 	p.out.relevant.Store(newRelevantSet(w.Demand))
+	p.observeClaimedDemand(w.Demand)
 	p.out.summary.Store(newAllocSummary(now, &w, &a))
 	counts := passCountsOf(res, w.InFlight)
 	p.observeWorld(&w, a.Alerts, &counts)
+	p.observeWorktreeRefusals(a.Trace)
 	p.observeIdentityHolds(&w, reasons)
 	return passResult{Next: next, Counts: counts}
 }

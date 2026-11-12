@@ -651,7 +651,7 @@ func TestNoMaintenanceBuiltinPack(t *testing.T) {
 	for _, rel := range []string{
 		"orders/gate-sweep.toml",
 		"orders/orphan-sweep.toml",
-		"orders/wisp-compact.toml",
+		"orders/prune-branches.toml",
 		"assets/scripts/gate-sweep.sh",
 		"doctor/check-binaries/run.sh",
 	} {

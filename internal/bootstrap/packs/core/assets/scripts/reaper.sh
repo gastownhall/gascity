@@ -184,6 +184,12 @@ RUN_DEADLINE=$(( $(date +%s) + RUN_BUDGET_SECS ))
 # shellcheck disable=SC2034
 SCOPE_DEADLINE="$RUN_DEADLINE"
 RUN_BUDGET_HIT=0
+# BUDGET_SKIPPED lists, space-separated, each "<scope>@<step>" the run budget
+# kept from running: the step it stopped before (and every later step of
+# that scope), "all" for a scope it never started, "6" for the session
+# prune. A city whose later steps never run is then visible in the outcome
+# and the summary every run (ga-efurfu).
+BUDGET_SKIPPED=""
 
 # Convert Go-style hour durations to SQL INTERVAL hours.
 duration_to_hours() {
@@ -230,6 +236,21 @@ run_budget_exhausted() {
         order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "run budget exhausted; remaining work carries to the next run"
     fi
     return 0
+}
+
+# budget_stops_before <step> reports whether the run budget is spent before
+# <step> of the current scope, naming the steps that do not run on the
+# outcome and in the summary.
+budget_stops_before() {
+    run_budget_exhausted || return 1
+    budget_skipped "${SCOPE_LABEL:-city}" "$1" "run budget exhausted before step $1; it and every later step did not run in this scope"
+    return 0
+}
+
+# budget_skipped <scope> <step> <reason> records what the run budget skipped.
+budget_skipped() {
+    order_outcome_scope_skipped "$1" "$3"
+    BUDGET_SKIPPED="${BUDGET_SKIPPED:+$BUDGET_SKIPPED }$1@$2"
 }
 
 sanitize_output() {
@@ -998,7 +1019,7 @@ reap_scope() {
         fi
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 2 && return 0
 
     # Step 2: close stale inactive workflow roots. This is the finalize-crash
     # safety net: it only reaps old, unassigned topology roots whose stamped
@@ -1016,7 +1037,7 @@ reap_scope() {
     fi
     reap_workflow_roots wisp "workflow_wisp_root_candidates" "wisps" "w" "'message'"
 
-    run_budget_exhausted && return 0
+    budget_stops_before 2-issue-roots && return 0
 
     if get_sql_count "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
@@ -1029,7 +1050,7 @@ reap_scope() {
         reap_workflow_roots issue "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 3 && return 0
 
     # Step 3: purge closed wisps past purge_age through gc bd purge, which keeps
     # a closed wisp that a live wisp still depends on (parent-child, tracks,
@@ -1037,7 +1058,7 @@ reap_scope() {
     # and events with it.
     reap_scope_purge
 
-    run_budget_exhausted && return 0
+    budget_stops_before 4 && return 0
 
     # Step 4: close gc:nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
@@ -1098,7 +1119,7 @@ reap_scope() {
         fi
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 5 && return 0
 
     # Step 5: auto-close stale issues (exclude P0/P1, epics, durable extmsg
     # records, TTL-stamped beads and beads with an active dependency in either
@@ -1304,7 +1325,7 @@ while IFS= read -r scope_db; do
     fi
     SCOPE_DB="$scope_db"
     if run_budget_exhausted; then
-        order_outcome_scope_skipped "$SCOPE_LABEL" "run budget exhausted before this scope"
+        budget_skipped "$SCOPE_LABEL" all "run budget exhausted before this scope"
         continue
     fi
     TOTAL_SCOPES=$((TOTAL_SCOPES + 1))
@@ -1496,7 +1517,7 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); else BD_PRUNE_ARGS+=(--dry-run); fi
         BD_PRUNE_ARGS+=(--json)
         if [ "$_PRUNE_SKIP" -eq 0 ] && run_budget_exhausted; then
-            order_outcome_scope_skipped "city" "session prune skipped: run budget exhausted"
+            budget_skipped city 6 "session prune skipped: run budget exhausted"
             _PRUNE_SKIP=1
         fi
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
@@ -1540,7 +1561,9 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
                 DELETED_COUNT=""
                 if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // empty' 2>/dev/null || true)
+                    # gc bd delete --json: a batch reply has deleted_count; a one-id
+                    # reply has deleted as a non-empty string and no count.
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (if (.deleted | type) == "string" and .deleted != "" then 1 else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)
@@ -1596,7 +1619,7 @@ else
     resolve_incident "reaper:anomalies" || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS, budget_skipped:${BUDGET_SKIPPED:-none}"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

@@ -12,6 +12,10 @@ agent; formulas and orders hand the wheel to the orchestrator.
 For the conceptual model underneath, start with the [six
 primitives](/getting-started/how-gas-city-works).
 
+The tutorials use the latest Homebrew release of `gc`. If you followed the
+[Quickstart](/getting-started/quickstart), you already have `~/my-city`;
+Tutorial 01 tells you where to pick up.
+
 Follow them in order:
 
 1. [Cities and Rigs](/tutorials/01-cities-and-rigs) — create a city, add a project as a rig, and sling your first work to an agent.
