@@ -5,203 +5,344 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
-// A managed Dolt that is alive and still accepting connections but failed the
-// recover query probe is usually busy, not dead: a probe that timed out under
-// load says nothing about whether the server would answer a moment later.
-// Recovery therefore waits until the server has been continuously
-// unresponsive for [daemon].dolt_unresponsive_restart_after before it stops a
-// process it can still see listening. The first-unresponsive time lives in a
-// file under the pack state dir because every recover is a fresh process.
-
-// managedDoltUnresponsiveSincePath is the file that records when a live
-// managed Dolt was first seen unresponsive, so the window spans processes.
-func managedDoltUnresponsiveSincePath(layout managedDoltRuntimeLayout) string {
-	return filepath.Join(layout.PackStateDir, "recover-unresponsive-since")
+// resolveManagedDoltUnresponsiveRestartAfter returns how long recovery
+// observes a live, listening managed dolt that fails SQL probes before it
+// restarts that server, read from `[daemon].dolt_unresponsive_restart_after`.
+// A config that cannot be loaded (including a rejected negative value) and a
+// malformed value both resolve to the default; each such fallback is returned
+// as a diagnostic so it is never silent.
+func resolveManagedDoltUnresponsiveRestartAfter(cityPath string) (time.Duration, []string) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return config.DefaultDoltUnresponsiveRestartAfter, []string{
+			fmt.Sprintf("load city config for dolt_unresponsive_restart_after: %v; using default %s", err, config.DefaultDoltUnresponsiveRestartAfter),
+		}
+	}
+	var diagnostics []string
+	for _, warning := range config.ValidateDurations(cfg, "city.toml") {
+		if strings.Contains(warning, "dolt_unresponsive_restart_after") {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s; using default %s", warning, config.DefaultDoltUnresponsiveRestartAfter))
+		}
+	}
+	return cfg.Daemon.DoltUnresponsiveRestartAfterDuration(), diagnostics
 }
 
-// managedDoltRecoverLastPath is the file that records when the last
-// provider-level recover started, so its cooldown spans processes.
-func managedDoltRecoverLastPath(layout managedDoltRuntimeLayout) string {
-	return filepath.Join(layout.PackStateDir, "recover-last")
+// managedDoltRecoveryDeferredError reports that recovery left an owned, live,
+// listening managed dolt running because it has failed SQL observations for
+// less than the configured unresponsive window.
+type managedDoltRecoveryDeferredError struct {
+	Identity managedDoltServerIdentity
+	Elapsed  time.Duration
+	Window   time.Duration
+	Cause    error
 }
 
-// readManagedDoltTimestamp returns the time stored at path. A missing,
-// unreadable, or malformed file reads as "no time recorded".
-func readManagedDoltTimestamp(path string) (time.Time, bool) {
-	data, err := os.ReadFile(path)
+func (e *managedDoltRecoveryDeferredError) Error() string {
+	return fmt.Sprintf("managed dolt (pid %d, port %d) is live and listening but failed its SQL check (%v); deferring restart until it has been unresponsive for %s (so far %s)",
+		e.Identity.PID, e.Identity.Port, e.Cause, e.Window, e.Elapsed.Round(time.Second))
+}
+
+func (e *managedDoltRecoveryDeferredError) Unwrap() error {
+	return e.Cause
+}
+
+// managedDoltLiveListenerIdentity returns the identity of an owned, live
+// managed dolt that holds a kernel listener on the requested port or on the
+// port the city's runtime state reports after a rebind. Ownership is proven
+// either by the process arguments/working directory or by this city's runtime
+// state recording that PID on that port; a process with deleted data inodes
+// or an unreadable start time is not eligible.
+func managedDoltLiveListenerIdentity(cityPath string, layout managedDoltRuntimeLayout, port string) (managedDoltServerIdentity, bool) {
+	ports := []string{strings.TrimSpace(port)}
+	if observed := recoverManagedDoltObservedPort(cityPath, port); observed != "" {
+		ports = append(ports, observed)
+	}
+	for _, candidate := range ports {
+		if identity, ok := managedDoltOwnedListenerIdentity(cityPath, layout, candidate); ok {
+			return identity, true
+		}
+	}
+	return managedDoltServerIdentity{}, false
+}
+
+func managedDoltOwnedListenerIdentity(cityPath string, layout managedDoltRuntimeLayout, port string) (managedDoltServerIdentity, bool) {
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portNum <= 0 {
+		return managedDoltServerIdentity{}, false
+	}
+	recorded := managedDoltRecordedPIDForPort(cityPath, layout, portNum)
+	holder := findPortHolderPID(port, recorded)
+	if holder <= 0 || !pidAlive(holder) {
+		return managedDoltServerIdentity{}, false
+	}
+	var owned, deleted bool
+	if holder == recorded {
+		owned, deleted = true, processHasDeletedDataInodes(holder, layout.DataDir)
+	} else {
+		owned, deleted = inspectManagedDoltOwnership(holder, layout)
+	}
+	if !owned || deleted {
+		return managedDoltServerIdentity{}, false
+	}
+	startTime, err := pidutil.StartTime(holder)
+	if err != nil || strings.TrimSpace(startTime) == "" {
+		return managedDoltServerIdentity{}, false
+	}
+	return managedDoltServerIdentity{PID: holder, StartTime: startTime, Port: portNum}, true
+}
+
+// managedDoltRecordedPIDForPort returns the PID this city's runtime state
+// records as running its managed dolt on port, or 0.
+func managedDoltRecordedPIDForPort(cityPath string, layout managedDoltRuntimeLayout, port int) int {
+	for _, path := range []string{providerManagedDoltStatePath(cityPath), managedDoltStatePath(cityPath)} {
+		state, err := readDoltRuntimeStateFile(path)
+		if err != nil || !state.Running || state.PID <= 0 || state.Port != port {
+			continue
+		}
+		if dataDir := strings.TrimSpace(state.DataDir); dataDir != "" && !samePath(dataDir, layout.DataDir) {
+			continue
+		}
+		return state.PID
+	}
+	return 0
+}
+
+// gateManagedDoltUnresponsiveRestart decides whether a failed SQL observation
+// (cause) may proceed to stopping the managed dolt. It returns a nil error and
+// the stop's journal entry to proceed with the existing recovery path, a
+// *managedDoltRecoveryDeferredError (journaled here) while
+// an owned, live, listening server is inside the unresponsive window, or
+// another error when the history cannot be read or written; neither error
+// authorizes a stop. Callers hold the managed dolt lifecycle lock.
+func gateManagedDoltUnresponsiveRestart(cityPath, port string, layout managedDoltRuntimeLayout, ops managedDoltRecoveryOps, cause error, report *managedDoltRecoverReport) (managedDoltRecoveryJournalEntry, error) {
+	stop := managedDoltRecoveryJournalEntry{
+		Action:  managedDoltJournalStop,
+		Reason:  cause.Error(),
+		Elapsed: managedDoltJournalNotApplicable,
+		Port:    port,
+	}
+	window, configDiagnostics := ops.unresponsiveWindow(cityPath)
+	for _, diagnostic := range configDiagnostics {
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, ops.now(), managedDoltJournalConfigDiagnostic, diagnostic)
+	}
+	stop.Window = max(window, 0)
+	if window <= 0 {
+		return stop, nil
+	}
+	identity, live := ops.liveListener(cityPath, layout, port)
+	if !live {
+		return stop, nil
+	}
+	path := managedDoltRecoveryStatePath(layout)
+	state, diagnostic, err := readManagedDoltRecoveryState(path)
 	if err != nil {
-		return time.Time{}, false
+		return stop, fmt.Errorf("managed dolt (pid %d, port %d) failed its SQL check (%w); not restarting without recovery history: %w", identity.PID, identity.Port, cause, err)
 	}
-	when, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	now := ops.now()
+	if diagnostic != "" {
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+	}
+	streak, diagnostic := continueManagedDoltUnresponsiveStreak(state.Streak, identity, now, window)
+	if diagnostic != "" {
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+	}
+	elapsed := now.Sub(streak.FirstFailedAt)
+	if elapsed < window {
+		return stop, deferManagedDoltRestart(layout, state, streak, window, cause, ops, report)
+	}
+	// The window has elapsed: consume the streak so no later observation can
+	// reuse it, then confirm the same instance still holds the listener. A
+	// replacement instance cannot inherit the elapsed window.
+	state.Streak = nil
+	if err := ops.writeHistory(path, state); err != nil {
+		return stop, fmt.Errorf("managed dolt (pid %d, port %d) failed its SQL check (%w); not restarting without recovery history: %w", identity.PID, identity.Port, cause, err)
+	}
+	current, stillLive := ops.liveListener(cityPath, layout, port)
+	if stillLive && current != identity {
+		fresh := managedDoltUnresponsiveStreak{managedDoltServerIdentity: current, FirstFailedAt: now, LastFailedAt: now, Failures: 1}
+		return stop, deferManagedDoltRestart(layout, state, fresh, window, cause, ops, report)
+	}
+	stop.Elapsed = elapsed
+	stop.Identity = identity
+	return stop, nil
+}
+
+// deferManagedDoltRestart persists streak, records the deferral in the
+// managed dolt log and returns it. A journal failure is joined to the
+// deferral so neither hides the other.
+func deferManagedDoltRestart(layout managedDoltRuntimeLayout, state managedDoltRecoveryState, streak managedDoltUnresponsiveStreak, window time.Duration, cause error, ops managedDoltRecoveryOps, report *managedDoltRecoverReport) error {
+	identity := streak.managedDoltServerIdentity
+	state.Streak = &streak
+	if err := ops.writeHistory(managedDoltRecoveryStatePath(layout), state); err != nil {
+		return fmt.Errorf("managed dolt (pid %d, port %d) failed its SQL check (%w); not restarting without recovery history: %w", identity.PID, identity.Port, cause, err)
+	}
+	report.HadPID = true
+	report.PID = identity.PID
+	report.Port = identity.Port
+	deferred := &managedDoltRecoveryDeferredError{
+		Identity: identity,
+		Elapsed:  streak.LastFailedAt.Sub(streak.FirstFailedAt),
+		Window:   window,
+		Cause:    cause,
+	}
+	entry := managedDoltRecoveryJournalEntry{
+		Action:   managedDoltJournalDefer,
+		Reason:   cause.Error(),
+		Elapsed:  deferred.Elapsed,
+		Window:   window,
+		Identity: identity,
+		Port:     strconv.Itoa(identity.Port),
+	}
+	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), entry); err != nil {
+		return errors.Join(deferred, err)
+	}
+	return deferred
+}
+
+// managedDoltUnresponsiveStreakMinGap is the shortest observation gap that
+// ends a streak; the effective limit is max(window, this).
+const managedDoltUnresponsiveStreakMinGap = 5 * time.Minute
+
+// continueManagedDoltUnresponsiveStreak extends prior with a failure observed
+// at now, or starts a fresh streak when prior belongs to another instance,
+// its timestamps are out of order or in the future, or the gap since its last
+// failure exceeds max(window, 5m). Only a continued streak can carry elapsed
+// time toward the window; the returned diagnostic explains a clock reset.
+func continueManagedDoltUnresponsiveStreak(prior *managedDoltUnresponsiveStreak, identity managedDoltServerIdentity, now time.Time, window time.Duration) (managedDoltUnresponsiveStreak, string) {
+	fresh := managedDoltUnresponsiveStreak{managedDoltServerIdentity: identity, FirstFailedAt: now, LastFailedAt: now, Failures: 1}
+	if prior == nil || prior.managedDoltServerIdentity != identity {
+		return fresh, ""
+	}
+	if prior.FirstFailedAt.After(prior.LastFailedAt) || prior.LastFailedAt.After(now) {
+		return fresh, fmt.Sprintf("recorded unresponsive streak for pid %d (first %s, last %s) is out of order or ahead of now %s (clock moved backwards?); resetting it",
+			prior.PID, prior.FirstFailedAt.Format(time.RFC3339), prior.LastFailedAt.Format(time.RFC3339), now.Format(time.RFC3339))
+	}
+	if now.Sub(prior.LastFailedAt) > max(window, managedDoltUnresponsiveStreakMinGap) {
+		return fresh, ""
+	}
+	continued := *prior
+	continued.LastFailedAt = now
+	continued.Failures++
+	return continued, ""
+}
+
+// managedDoltHistoryLockTimeout bounds how long a healthy observation that
+// does not already hold the lifecycle lock waits for it to clear a streak.
+var managedDoltHistoryLockTimeout = 10 * time.Second
+
+// clearManagedDoltUnresponsiveStreakLocked removes a pending unresponsive
+// streak after a measured healthy observation and preserves the provider
+// cooldown. Callers hold the managed dolt lifecycle lock, which serializes
+// the clear with failure writes so an older snapshot cannot restore the
+// streak. A failed write is returned because the stale streak would stay
+// readable. An unreadable history is reported on diag and in the managed
+// dolt log rather than failing the healthy return: the gate refuses to stop
+// on a history it cannot read, so that history can never authorize a
+// restart. Each reset is journaled in the managed dolt log.
+func clearManagedDoltUnresponsiveStreakLocked(layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer) error {
+	path := managedDoltRecoveryStatePath(layout)
+	state, diagnostic, err := readManagedDoltRecoveryState(path)
 	if err != nil {
-		return time.Time{}, false
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, time.Now(), managedDoltJournalHistoryDiagnostic,
+			fmt.Sprintf("cannot clear the unresponsive streak after a healthy check: %v", err))
+		return nil
 	}
-	return when, true
-}
-
-// writeManagedDoltTimestamp atomically persists when at path, creating its
-// directory.
-func writeManagedDoltTimestamp(path string, when time.Time) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+	if diagnostic != "" {
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, time.Now(), managedDoltJournalHistoryDiagnostic, diagnostic)
+	} else if state.Streak == nil {
+		return nil
 	}
-	return fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(when.UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
-}
-
-// removeManagedDoltTimestamp deletes the timestamp at path; a missing file is
-// not an error.
-func removeManagedDoltTimestamp(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	hadStreak := state.Streak != nil
+	state.Streak = nil
+	if err := write(path, state); err != nil {
+		return fmt.Errorf("clear managed dolt unresponsive streak after a healthy check: %w", err)
+	}
+	if hadStreak {
+		reportManagedDoltRecoveryNote(diag, layout.LogFile, time.Now(), managedDoltJournalReset, managedDoltJournalResetReason)
 	}
 	return nil
 }
 
-// clearManagedDoltUnresponsiveSince ends any recorded unresponsive streak for
-// cityPath. Callers that have just seen the server answer use it so a stall
-// that cleared by itself is not counted into a later, unrelated one. A failure
-// is reported on stderr and otherwise ignored: the record then only makes the
-// next recover act sooner, which is the pre-window behavior.
-func clearManagedDoltUnresponsiveSince(cityPath string) {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+// clearManagedDoltUnresponsiveStreak is clearManagedDoltUnresponsiveStreakLocked
+// for callers that do not hold the lifecycle lock. With no visible streak
+// there is nothing to clear and it returns without waiting; otherwise it
+// waits up to managedDoltHistoryLockTimeout for the lock and reports a
+// synchronization error rather than returning healthy over a stale streak.
+func clearManagedDoltUnresponsiveStreak(layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer) error {
+	if state, diagnostic, err := readManagedDoltRecoveryState(managedDoltRecoveryStatePath(layout)); err == nil && diagnostic == "" && state.Streak == nil {
+		return nil
+	}
+	lockFile, err := openManagedDoltLifecycleLockAt(layout)
 	if err != nil {
-		return
+		return fmt.Errorf("synchronize managed dolt recovery history: %w", err)
 	}
-	clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+	defer releaseManagedDoltLifecycleLock(lockFile)
+	if err := acquireManagedDoltLifecycleLockWithin(lockFile, managedDoltHistoryLockTimeout); err != nil {
+		return fmt.Errorf("synchronize managed dolt recovery history: %w", err)
+	}
+	return clearManagedDoltUnresponsiveStreakLocked(layout, write, diag)
 }
 
-func clearManagedDoltUnresponsiveSinceAt(sincePath string) {
-	if err := removeManagedDoltTimestamp(sincePath); err != nil {
-		fmt.Fprintf(os.Stderr, "gc recover-managed: clear %s: %v\n", sincePath, err) //nolint:errcheck
-	}
-}
-
-// recentManagedDoltRecover reports whether a recover started within cooldown
-// before now, according to the persisted record.
-func recentManagedDoltRecover(cityPath string, now time.Time, cooldown time.Duration) bool {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		return false
-	}
-	last, ok := readManagedDoltTimestamp(managedDoltRecoverLastPath(layout))
-	// A record from the future (clock stepped back) cannot be a recent recover.
-	return ok && !last.After(now) && now.Sub(last) < cooldown
-}
-
-// recordManagedDoltRecover persists the start of a recover for
-// recentManagedDoltRecover.
-func recordManagedDoltRecover(cityPath string, now time.Time) error {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+// clearProviderManagedDoltUnresponsiveStreak clears the streak after a
+// healthy provider check, using the strict layout the provider projects to
+// its recovery helper so both resolve the same history and lock.
+func clearProviderManagedDoltUnresponsiveStreak(cityPath string) error {
+	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
 	if err != nil {
 		return err
 	}
-	return writeManagedDoltTimestamp(managedDoltRecoverLastPath(layout), now)
+	return clearManagedDoltUnresponsiveStreak(layout, writeManagedDoltRecoveryState, os.Stderr)
 }
 
-// resolveManagedDoltUnresponsiveRestartAfter returns how long a live managed
-// Dolt may stay unresponsive before recovery stops it. It reads
-// `[daemon].dolt_unresponsive_restart_after` from city.toml and falls back to
-// the default when the config cannot be loaded. An empty cityPath returns the
-// default without loading a config, as resolveManagedDoltStopTimeout does.
-func resolveManagedDoltUnresponsiveRestartAfter(cityPath string) time.Duration {
-	if strings.TrimSpace(cityPath) == "" {
-		return config.DefaultDoltUnresponsiveRestartAfter
-	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil || cfg == nil {
-		return config.DefaultDoltUnresponsiveRestartAfter
-	}
-	return cfg.Daemon.DoltUnresponsiveRestartAfterDuration()
-}
-
-// classifyManagedDoltUnresponsive reports the managed Dolt PID when the
-// process is alive, owned by this city, and its port still accepts TCP
-// connections. Anything else (no process, a foreign owner, a refused
-// connection) is not the "alive but slow" case.
-func classifyManagedDoltUnresponsive(cityPath, host, port string) (int, bool) {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+// reserveManagedDoltProviderRecoverAttempt reserves a provider-driven
+// recovery attempt at now unless one was reserved less than cooldown ago.
+// The reservation lives in the city's recovery history under the lifecycle
+// lock, so separate provider-health processes share one cooldown; it is
+// written before recovery runs and the lock is released before the caller
+// spawns the recovery helper, which takes that lock itself. A reservation
+// ahead of now (the clock moved backwards) is reset with a diagnostic. An
+// unreadable or unwritable history returns an error and reserves nothing.
+func reserveManagedDoltProviderRecoverAttempt(cityPath string, now time.Time, cooldown time.Duration, diag io.Writer) (bool, error) {
+	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
 	if err != nil {
-		return 0, false
+		return false, err
 	}
-	pid, _ := findManagedDoltPIDWithOptions(layout, port, false)
-	if pid <= 0 || !managedDoltProcessControllable(pid, layout) {
-		return 0, false
+	lockFile, err := openManagedDoltLifecycleLockAt(layout)
+	if err != nil {
+		return false, fmt.Errorf("synchronize managed dolt recovery history: %w", err)
 	}
-	if managedDoltTCPProbe(host, port) != nil {
-		return 0, false
+	defer releaseManagedDoltLifecycleLock(lockFile)
+	if err := acquireManagedDoltLifecycleLockWithin(lockFile, managedDoltHistoryLockTimeout); err != nil {
+		return false, fmt.Errorf("synchronize managed dolt recovery history: %w", err)
 	}
-	return pid, true
-}
-
-// managedDoltRecoverCaller describes who asked for the recover: the beads
-// order that ran it, else the executable and its parent.
-func managedDoltRecoverCaller() string {
-	if actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); strings.HasPrefix(actor, "order:") {
-		return actor
+	path := managedDoltRecoveryStatePath(layout)
+	state, diagnostic, err := readManagedDoltRecoveryState(path)
+	if err != nil {
+		return false, err
 	}
-	return fmt.Sprintf("%s ppid=%d", os.Args[0], os.Getppid())
-}
-
-// logManagedDoltRecoverDecision appends one line to dolt.log saying what
-// recover decided about the managed Dolt and why. A log that cannot be
-// written falls back to stderr so the decision is never silent.
-func logManagedDoltRecoverDecision(layout managedDoltRuntimeLayout, decision, reason string, pid int, port string, probeErr error, unresponsiveFor time.Duration, now time.Time) {
-	line := fmt.Sprintf("%s gc recover-managed: decision=%s reason=%s pid=%d port=%s probe_error=%q unresponsive_for=%s caller=%q\n",
-		now.UTC().Format(time.RFC3339), decision, reason, pid, strings.TrimSpace(port), fmt.Sprint(probeErr), unresponsiveFor.Round(time.Second), managedDoltRecoverCaller())
-	f, err := os.OpenFile(layout.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err == nil {
-		_, err = f.WriteString(line)
-		if closeErr := f.Close(); err == nil {
-			err = closeErr
+	if diagnostic != "" {
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+	}
+	if last := state.LastProviderAttemptAt; last != nil {
+		if last.After(now) {
+			reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic,
+				fmt.Sprintf("recorded provider recovery attempt %s is ahead of now %s (clock moved backwards?); resetting it",
+					last.Format(time.RFC3339), now.Format(time.RFC3339)))
+		} else if now.Sub(*last) < cooldown {
+			return false, nil
 		}
 	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gc recover-managed: write %s: %v\n%s", layout.LogFile, err, line) //nolint:errcheck
+	state.LastProviderAttemptAt = &now
+	if err := writeManagedDoltRecoveryState(path, state); err != nil {
+		return false, fmt.Errorf("reserve provider recovery attempt: %w", err)
 	}
-}
-
-// managedDoltRecoverUnresponsiveGate decides whether a failed query probe may
-// proceed to stopping the managed Dolt. It returns the reason to stop and how
-// long the server has been unresponsive, or an error when the stop must be
-// deferred because the server is alive, listening, and has not been
-// unresponsive for the whole window.
-func managedDoltRecoverUnresponsiveGate(cityPath, host, port string, layout managedDoltRuntimeLayout, ops managedDoltRecoveryOps, probeErr error, report *managedDoltRecoverReport) (string, time.Duration, error) {
-	if ops.unresponsiveRestartAfter <= 0 || ops.classifyUnresponsive == nil {
-		return "probe-failed", 0, nil
-	}
-	now := recoverNow(ops)
-	sincePath := managedDoltUnresponsiveSincePath(layout)
-	pid, live := ops.classifyUnresponsive(cityPath, host, port)
-	if !live {
-		clearManagedDoltUnresponsiveSinceAt(sincePath)
-		return "probe-failed-not-live", 0, nil
-	}
-	report.HadPID = true
-	report.PID = pid
-	since, recorded := readManagedDoltTimestamp(sincePath)
-	if !recorded || since.After(now) {
-		since = now
-		if err := writeManagedDoltTimestamp(sincePath, since); err != nil {
-			// Without a persisted start the window could never elapse and a
-			// wedged server would never be restarted: fall back to stopping.
-			fmt.Fprintf(os.Stderr, "gc recover-managed: record %s: %v\n", sincePath, err) //nolint:errcheck
-			return "probe-failed-window-unrecorded", 0, nil
-		}
-	}
-	elapsed := now.Sub(since)
-	if elapsed >= ops.unresponsiveRestartAfter {
-		clearManagedDoltUnresponsiveSinceAt(sincePath)
-		return "unresponsive-window-elapsed", elapsed, nil
-	}
-	logManagedDoltRecoverDecision(layout, "defer", "unresponsive-within-window", pid, port, probeErr, elapsed, now)
-	return "", elapsed, fmt.Errorf("managed dolt (pid %d) on port %s is listening but unresponsive (%w); not restarting until it has been unresponsive for %s (so far %s)",
-		pid, strings.TrimSpace(port), probeErr, ops.unresponsiveRestartAfter, elapsed.Round(time.Second))
+	return true, nil
 }

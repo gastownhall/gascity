@@ -61,14 +61,6 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // concurrent provider operation per city (serialize lifecycle ops).
 var providerOpSemaphores sync.Map // cityPath → chan struct{}
 
-// lastBeadsProviderRecover records the timestamp of the most recent
-// recover attempt per city so healthBeadsProvider can refuse a 2nd
-// recover within providerRecoverCooldown of the prior one. Together
-// with the breaker-aware skip, this breaks the low-RSS restart-loop
-// where each patrol tick re-trips the bd circuit breaker and
-// re-desyncs the managed-dolt PID.
-var lastBeadsProviderRecover sync.Map // cityPath → time.Time
-
 // providerRecoverCooldown is the minimum interval between consecutive
 // managed-dolt recover attempts on a single city. Stubbable for tests.
 // 30s is the lower bound suggested by issue #2792 — long enough to
@@ -2472,28 +2464,20 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 					return err
 				}
 				// Recover backoff: refuse a 2nd recover within
-				// providerRecoverCooldown of the prior one, keyed per
-				// city. This alone breaks the low-RSS restart-loop where
-				// each tick (~60-110s apart) starts a fresh recover.
-				cityKey := normalizePathForCompare(cityPath)
-				now := providerRecoverNow()
-				if v, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
-					if last, ok := v.(time.Time); ok && now.Sub(last) < providerRecoverCooldown() {
-						return err
-					}
+				// providerRecoverCooldown of the prior one, across every
+				// process checking this city. This alone breaks the low-RSS
+				// restart-loop where each tick (~60-110s apart) starts a
+				// fresh recover.
+				reserved, reserveErr := reserveManagedDoltProviderRecoverAttempt(cityPath, providerRecoverNow(), providerRecoverCooldown(), os.Stderr)
+				if reserveErr != nil {
+					return fmt.Errorf("unhealthy (%w); not recovering because the provider recovery cooldown is unavailable: %w", err, reserveErr)
 				}
-				// Every gc invocation starts with an empty map, so the cooldown
-				// is also read from, and recorded in, the city's pack state.
-				if recentManagedDoltRecover(cityPath, now, providerRecoverCooldown()) {
+				if !reserved {
 					return err
 				}
-				lastBeadsProviderRecover.Store(cityKey, now)
-				if recordErr := recordManagedDoltRecover(cityPath, now); recordErr != nil {
-					// Not fatal: this process still holds the in-memory cooldown.
-					fmt.Fprintf(os.Stderr, "gc: record recover cooldown: %v\n", recordErr) //nolint:errcheck
-				}
 			}
-			if recErr := runProviderOpWithEnvContext(ctx, script, providerEnv, "recover"); recErr != nil {
+			recoverEnv := withManagedDoltRecoverCaller(providerEnv, managedDoltRecoverCallerProviderHealth)
+			if recErr := runProviderOpWithEnvContext(ctx, script, recoverEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
 			}
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
@@ -2505,9 +2489,9 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				}
 			}
 		} else if providerUsesBdStoreContract(provider) {
-			// The server answers: an unresponsive streak recorded by an
-			// earlier deferred recover is over.
-			clearManagedDoltUnresponsiveSince(cityPath)
+			if err := clearProviderManagedDoltUnresponsiveStreak(cityPath); err != nil {
+				return err
+			}
 			deps := healthyManagedRuntimePublicationDeps{
 				currentPort:     currentManagedDoltPort,
 				lifecycleOwned:  managedDoltLifecycleOwned,

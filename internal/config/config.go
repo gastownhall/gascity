@@ -2922,12 +2922,15 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
-	// DoltUnresponsiveRestartAfter is how long a managed dolt that is still
-	// alive and listening may stay unresponsive to the recover probe before
-	// recovery stops and restarts it. A single timed-out probe under load does
-	// not restart a server that is merely slow. Duration string (e.g., "180s",
-	// "5m"). Defaults to "180s". Set to "0s" to restart on the first failed
-	// probe. Negative values are rejected at config load.
+	// DoltUnresponsiveRestartAfter is how long recovery observes an owned,
+	// live, listening managed dolt server that keeps failing SQL probes before
+	// it stops and restarts that server. A probe that times out under load
+	// says nothing about whether the server answers a moment later, so a
+	// single failure no longer restarts it. The window is measured in wall
+	// time for one server instance (PID, process start time, and port).
+	// Duration string (e.g., "180s", "5m"). Defaults to "180s". Set to "0s"
+	// to restart on the first failed probe. Negative values are rejected at
+	// config load; malformed values warn and fall back to the default.
 	DoltUnresponsiveRestartAfter string `toml:"dolt_unresponsive_restart_after,omitempty" jsonschema:"default=180s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
 	// path waits on the originally requested port when dolt reports it in
@@ -3348,16 +3351,15 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
 }
 
-// DefaultDoltUnresponsiveRestartAfter is how long a live managed dolt may stay
-// unresponsive to the recover probe before recovery stops it. It is several
-// times the 5s probe timeout and the 30s recover cooldown, so one probe lost
-// to load never restarts a server, while a wedged one is still replaced.
+// DefaultDoltUnresponsiveRestartAfter is how long recovery observes a live,
+// listening managed dolt that fails SQL probes before restarting it when no
+// value is configured.
 const DefaultDoltUnresponsiveRestartAfter = 180 * time.Second
 
-// DoltUnresponsiveRestartAfterDuration returns the unresponsive window as a
-// time.Duration. Defaults to DefaultDoltUnresponsiveRestartAfter (180s) when
-// empty or unparseable. Zero is allowed and means restart on the first failed
-// probe.
+// DoltUnresponsiveRestartAfterDuration returns the managed-dolt unresponsive
+// window as a time.Duration. Defaults to DefaultDoltUnresponsiveRestartAfter
+// (180s) when empty or unparseable. Zero is allowed and means recovery
+// restarts on the first failed probe.
 func (d *DaemonConfig) DoltUnresponsiveRestartAfterDuration() time.Duration {
 	return durationOr(d.DoltUnresponsiveRestartAfter, DefaultDoltUnresponsiveRestartAfter)
 }

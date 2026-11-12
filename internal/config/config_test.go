@@ -4174,49 +4174,6 @@ func TestDaemonDoltStopTimeoutInvalid(t *testing.T) {
 	}
 }
 
-// --- DoltUnresponsiveRestartAfter tests ---
-
-func TestDaemonDoltUnresponsiveRestartAfter(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		raw  string
-		want time.Duration
-	}{
-		{name: "default", raw: "", want: DefaultDoltUnresponsiveRestartAfter},
-		{name: "custom", raw: "90s", want: 90 * time.Second},
-		{name: "zero disables the window", raw: "0s", want: 0},
-		{name: "invalid falls back to default", raw: "not-a-duration", want: DefaultDoltUnresponsiveRestartAfter},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := DaemonConfig{DoltUnresponsiveRestartAfter: tc.raw}
-			if got := d.DoltUnresponsiveRestartAfterDuration(); got != tc.want {
-				t.Errorf("DoltUnresponsiveRestartAfterDuration() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-	if DefaultDoltUnresponsiveRestartAfter != 180*time.Second {
-		t.Errorf("DefaultDoltUnresponsiveRestartAfter = %v, want 180s", DefaultDoltUnresponsiveRestartAfter)
-	}
-}
-
-func TestParseDoltUnresponsiveRestartAfter(t *testing.T) {
-	cfg, err := Parse([]byte("[workspace]\nname = \"test\"\n\n[daemon]\ndolt_unresponsive_restart_after = \"2m\"\n\n[[agent]]\nname = \"mayor\"\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got := cfg.Daemon.DoltUnresponsiveRestartAfterDuration(); got != 2*time.Minute {
-		t.Errorf("DoltUnresponsiveRestartAfterDuration() = %v, want 2m", got)
-	}
-}
-
-func TestValidateNonNegativeDurationsRejectsNegativeDoltUnresponsiveRestartAfter(t *testing.T) {
-	cfg := &City{}
-	cfg.Daemon.DoltUnresponsiveRestartAfter = "-1s"
-	if err := ValidateNonNegativeDurations(cfg, "city.toml"); err == nil || !strings.Contains(err.Error(), "dolt_unresponsive_restart_after") {
-		t.Fatalf("ValidateNonNegativeDurations error = %v, want one naming dolt_unresponsive_restart_after", err)
-	}
-}
-
 func TestParseDoltStopTimeout(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -8770,5 +8727,82 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 	}
 	if DefaultMaxOrderDispatchesPerTick != 4 {
 		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
+	}
+}
+
+// --- DoltUnresponsiveRestartAfter tests ---
+
+func TestDaemonDoltUnresponsiveRestartAfterResolves(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "absent", value: "", want: 180 * time.Second},
+		{name: "zero", value: "0s", want: 0},
+		{name: "positive", value: "45s", want: 45 * time.Second},
+		{name: "malformed", value: "soon", want: 180 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := DaemonConfig{DoltUnresponsiveRestartAfter: tt.value}
+			if got := d.DoltUnresponsiveRestartAfterDuration(); got != tt.want {
+				t.Errorf("DoltUnresponsiveRestartAfterDuration(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+	if DefaultDoltUnresponsiveRestartAfter != 180*time.Second {
+		t.Errorf("DefaultDoltUnresponsiveRestartAfter = %v, want 180s", DefaultDoltUnresponsiveRestartAfter)
+	}
+}
+
+func TestDaemonDoltUnresponsiveRestartAfterParsesFromTOML(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_unresponsive_restart_after = "4m"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Daemon.DoltUnresponsiveRestartAfterDuration(); got != 4*time.Minute {
+		t.Errorf("DoltUnresponsiveRestartAfterDuration() = %v, want 4m", got)
+	}
+}
+
+func TestDaemonDoltUnresponsiveRestartAfterRejectsNegative(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltUnresponsiveRestartAfter = "-3s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_unresponsive_restart_after")
+	}
+	if !strings.Contains(err.Error(), "dolt_unresponsive_restart_after") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-3s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+	for _, ok := range []string{"", "0s", "90s"} {
+		cfg.Daemon.DoltUnresponsiveRestartAfter = ok
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(%q) = %v, want nil", ok, err)
+		}
+	}
+}
+
+func TestDaemonDoltUnresponsiveRestartAfterWarnsOnMalformed(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltUnresponsiveRestartAfter = "soon"
+	warnings := ValidateDurations(cfg, "city.toml")
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "dolt_unresponsive_restart_after") && strings.Contains(w, "soon") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ValidateDurations() = %q, want a warning naming dolt_unresponsive_restart_after and its value", warnings)
 	}
 }

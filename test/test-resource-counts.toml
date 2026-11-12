@@ -104,7 +104,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "net_listen"
-calls = 3
+calls = 2
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"

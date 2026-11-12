@@ -1439,7 +1439,7 @@
         },
         "dolt_unresponsive_restart_after": {
           "type": "string",
-          "description": "DoltUnresponsiveRestartAfter is how long a managed dolt that is still\nalive and listening may stay unresponsive to the recover probe before\nrecovery stops and restarts it. A single timed-out probe under load does\nnot restart a server that is merely slow. Duration string (e.g., \"180s\",\n\"5m\"). Defaults to \"180s\". Set to \"0s\" to restart on the first failed\nprobe. Negative values are rejected at config load.",
+          "description": "DoltUnresponsiveRestartAfter is how long recovery observes an owned,\nlive, listening managed dolt server that keeps failing SQL probes before\nit stops and restarts that server. A probe that times out under load\nsays nothing about whether the server answers a moment later, so a\nsingle failure no longer restarts it. The window is measured in wall\ntime for one server instance (PID, process start time, and port).\nDuration string (e.g., \"180s\", \"5m\"). Defaults to \"180s\". Set to \"0s\"\nto restart on the first failed probe. Negative values are rejected at\nconfig load; malformed values warn and fall back to the default.",
           "default": "180s"
         },
         "dolt_start_address_in_use_retry_window": {

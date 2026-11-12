@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,14 +32,40 @@ type managedDoltRecoveryOps struct {
 	publish          func(cityPath string) error
 	failedCleanup    func(cityPath string, pid, port int, cause error) error
 
-	// classifyUnresponsive reports the managed PID when it is alive, owned,
-	// and its port still accepts TCP connections.
-	classifyUnresponsive func(cityPath, host, port string) (int, bool)
-	// now is the clock for the unresponsive window; nil means time.Now.
+	// now is the clock for the unresponsive window.
 	now func() time.Time
-	// unresponsiveRestartAfter is how long a live server may stay
-	// unresponsive before recovery stops it; zero stops on the first failure.
-	unresponsiveRestartAfter time.Duration
+	// unresponsiveWindow resolves how long an owned, live, listening server
+	// may fail SQL checks before recovery restarts it (zero disables
+	// deferral), plus diagnostics for any fallback to the default.
+	unresponsiveWindow func(cityPath string) (time.Duration, []string)
+	// liveListener reports the identity of an owned, live managed dolt that
+	// holds a kernel listener for the requested (or rebound) port.
+	liveListener func(cityPath string, layout managedDoltRuntimeLayout, port string) (managedDoltServerIdentity, bool)
+	// writeHistory persists the cross-invocation recovery history.
+	writeHistory func(path string, state managedDoltRecoveryState) error
+	// diag receives non-fatal recovery diagnostics.
+	diag io.Writer
+}
+
+// withDefaults fills unset unresponsive-window hooks with their production
+// implementations so callers only inject what a test controls.
+func (ops managedDoltRecoveryOps) withDefaults() managedDoltRecoveryOps {
+	if ops.diag == nil {
+		ops.diag = os.Stderr
+	}
+	if ops.now == nil {
+		ops.now = time.Now
+	}
+	if ops.unresponsiveWindow == nil {
+		ops.unresponsiveWindow = resolveManagedDoltUnresponsiveRestartAfter
+	}
+	if ops.liveListener == nil {
+		ops.liveListener = managedDoltLiveListenerIdentity
+	}
+	if ops.writeHistory == nil {
+		ops.writeHistory = writeManagedDoltRecoveryState
+	}
+	return ops
 }
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
@@ -54,16 +81,13 @@ func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
 		start: func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
 			return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
 		},
-		publish:              publishManagedDoltRuntimeStateIfOwned,
-		failedCleanup:        cleanupFailedManagedDoltRecovery,
-		classifyUnresponsive: classifyManagedDoltUnresponsive,
+		publish:       publishManagedDoltRuntimeStateIfOwned,
+		failedCleanup: cleanupFailedManagedDoltRecovery,
 	}
 }
 
 func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltRecoverReport, error) {
-	ops := defaultManagedDoltRecoveryOps()
-	ops.unresponsiveRestartAfter = resolveManagedDoltUnresponsiveRestartAfter(cityPath)
-	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, ops)
+	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, defaultManagedDoltRecoveryOps())
 }
 
 func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel string, timeout time.Duration, ops managedDoltRecoveryOps) (managedDoltRecoverReport, error) {
@@ -83,6 +107,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	ops = ops.withDefaults()
 	// Refuse before opening or waiting on the legacy lock: that wait probes a
 	// listener and can publish state while a provider-owned scope is pending.
 	if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
@@ -112,7 +137,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
 				return report, err
 			}
-			clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+			// The lock holder still owns the lifecycle, so the clear waits
+			// (bounded) for the lock before reporting success.
+			if err := clearManagedDoltUnresponsiveStreak(layout, ops.writeHistory, ops.diag); err != nil {
+				return report, err
+			}
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -140,10 +169,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			observePort = alternatePort
 		}
 		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
-			// An inconclusive wait learned nothing about the server, so only a
-			// measured observation ends the unresponsive streak.
+			// An inconclusive keep was never measured, so it leaves the streak.
 			if !report.ReadyInconclusive {
-				clearManagedDoltUnresponsiveSinceAt(managedDoltUnresponsiveSincePath(layout))
+				if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
+					return report, err
+				}
 			}
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
@@ -152,23 +182,30 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		}
 	}
 
-	var stopReason string
-	var unresponsiveFor time.Duration
-	probeErr := ops.queryProbe(host, port, user)
-	if probeErr == nil {
-		// The server answers, so any unresponsive streak is over.
-		if err := removeManagedDoltTimestamp(managedDoltUnresponsiveSincePath(layout)); err != nil {
-			return report, fmt.Errorf("clear managed dolt unresponsive state: %w", err)
-		}
-		stopReason = "health-not-ready"
+	// Only a failed SQL check (probe or health-check error) is subject to the
+	// unresponsive window; a server that reports read-only or not-ready keeps
+	// the existing recovery path.
+	stop := managedDoltRecoveryJournalEntry{
+		Action:  managedDoltJournalStop,
+		Elapsed: managedDoltJournalNotApplicable,
+		Window:  managedDoltJournalNotApplicable,
+		Port:    port,
+	}
+	unresponsiveCause := ops.queryProbe(host, port, user)
+	if unresponsiveCause == nil {
 		health, healthErr := ops.healthCheck(host, port, user)
+		unresponsiveCause = healthErr
+		stop.Reason = fmt.Sprintf("server is not ready (query_ready=%t read_only=%s)", health.QueryReady, health.ReadOnly)
 		if healthErr == nil && health.ReadOnly == "true" {
 			report.DiagnosedReadOnly = true
-			stopReason = "read-only"
+			stop.Reason = "server is read-only"
 		} else if healthErr == nil && health.QueryReady && health.ReadOnly == "false" {
 			report.Ready = true
 			report.Healthy = true
 			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, port); err != nil {
+				return report, err
+			}
+			if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
 				return report, err
 			}
 			if err := ops.publish(cityPath); err != nil {
@@ -177,14 +214,17 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
 			return report, nil
 		}
-	} else {
-		reason, elapsed, deferErr := managedDoltRecoverUnresponsiveGate(cityPath, host, port, layout, ops, probeErr, &report)
-		if deferErr != nil {
-			return report, deferErr
-		}
-		stopReason, unresponsiveFor = reason, elapsed
 	}
-	logManagedDoltRecoverDecision(layout, "stop", stopReason, report.PID, port, probeErr, unresponsiveFor, recoverNow(ops))
+	if unresponsiveCause != nil {
+		gated, err := gateManagedDoltUnresponsiveRestart(cityPath, port, layout, ops, unresponsiveCause, &report)
+		if err != nil {
+			return report, err
+		}
+		stop = gated
+	}
+	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), stop); err != nil {
+		fmt.Fprintf(ops.diag, "gc dolt recovery: %v\n", err) //nolint:errcheck // best-effort diagnostic
+	}
 
 	stopReport, stopErr := ops.stop(cityPath, port)
 	report.HadPID = stopReport.HadPID
@@ -226,18 +266,15 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	if !report.Healthy {
 		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
 	}
+	// The restarted server is measured healthy; a history error here does
+	// not justify killing it.
+	if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
+		return report, err
+	}
 	if err := ops.publish(cityPath); err != nil {
 		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
 	}
 	return report, nil
-}
-
-// recoverNow reads the recovery clock, which tests replace through ops.now.
-func recoverNow(ops managedDoltRecoveryOps) time.Time {
-	if ops.now != nil {
-		return ops.now()
-	}
-	return time.Now()
 }
 
 func cleanupFailedManagedDoltRecovery(cityPath string, pid, port int, cause error) error {

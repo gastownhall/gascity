@@ -1237,6 +1237,7 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	applyBdContributorRoutingOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
+	environ = withManagedDoltRecoverCaller(environ, managedDoltRecoverCallerBdRetry)
 	return runProviderOpWithEnv(script, environ, "recover")
 }
 
