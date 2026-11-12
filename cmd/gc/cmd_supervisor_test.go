@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -381,6 +382,58 @@ func TestRenderSupervisorLaunchdTemplateUsesPreserveEnvFromData(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("launchd template missing preserve env %q:\n%s", want, content)
 		}
+	}
+}
+
+// parseLaunchdPlistRoot decodes the root <dict> of a launchd plist.
+func parseLaunchdPlistRoot(t *testing.T, content string) map[string]plistValue {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(content))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("launchd plist has no root dict: %v\n%s", err, content)
+		}
+		if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "dict" {
+			root, err := parsePlistDict(dec)
+			if err != nil {
+				t.Fatalf("parse launchd plist: %v\n%s", err, content)
+			}
+			return root
+		}
+	}
+}
+
+// TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType guards #8015:
+// without a root ProcessType key launchd treats the supervisor as Standard and
+// throttles it, the Dolt server and every tmux session it spawns.
+func TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType(t *testing.T) {
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
+		GCPath:       "/usr/local/bin/gc",
+		LogPath:      "$HOME/.gc/supervisor.log",
+		GCHome:       "$HOME/.gc",
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "ProcessType", Value: "Standard"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := parseLaunchdPlistRoot(t, content)
+	got, ok := root["ProcessType"]
+	if !ok {
+		t.Fatalf("launchd plist root sets no ProcessType key (launchd defaults to Standard and throttles the supervisor):\n%s", content)
+	}
+	if got.text != "Interactive" {
+		t.Fatalf("launchd plist root ProcessType = %q, want <string>Interactive</string>:\n%s", got.text, content)
+	}
+	if env := root["EnvironmentVariables"].dict["ProcessType"].text; env != "Standard" {
+		t.Fatalf("EnvironmentVariables ProcessType = %q, want ExtraEnv value %q", env, "Standard")
+	}
+	if n := strings.Count(content, "<key>ProcessType</key>"); n != 2 {
+		t.Fatalf("launchd plist has %d ProcessType keys, want 2 (one root key plus the ExtraEnv entry):\n%s", n, content)
 	}
 }
 
