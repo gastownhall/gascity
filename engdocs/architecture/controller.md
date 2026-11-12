@@ -143,7 +143,10 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    goroutine when wisp GC is enabled (`wisp_gc_interval` and `wisp_ttl`
    both set) and the interval has elapsed: it queries closed molecules
    and deletes those older than the TTL cutoff. Only a tick's wake starts
-   a purge, and no tick waits for one.
+   a purge, and no tick waits for one. A wake the lane's duty cycle defers
+   can run a purge-length after its tick, so a pass starts no purge while
+   the tick's FS-pressure gate is skipping ticks, and it runs the
+   managed-Dolt preflight before every purge.
 
 5. **Orders lane wake**: The tick does not dispatch orders. It wakes the
    orders lane, which evaluates trigger conditions for all non-manual

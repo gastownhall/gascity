@@ -21,7 +21,10 @@ import (
 // The tick stays the purge's only trigger. A tick that stops before the wake
 // slot (a quiescent city, an FS-pressure skip) wakes nothing, as it ran no
 // purge before; the lane's own timer only paces wakes and installs reloaded
-// policy, and never starts a purge by itself.
+// policy, and never starts a purge by itself. A wake the duty cycle defers
+// can be delivered a purge-length after its tick, so a pass does not rely on
+// that tick's checks: it starts no purge while the tick's FS-pressure gate is
+// shedding ticks, and it runs the managed-Dolt preflight before every purge.
 
 const (
 	// wispGCLaneSafeTickTrigger names the lane in safeTick panic lines.
@@ -159,10 +162,10 @@ func (cr *CityRuntime) startWispGCLane(ctx context.Context) (stop func()) {
 }
 
 // runWispGCLanePass is one lane pass: install any staged policy, then purge if
-// a tick's wake asked for it, the installed tracker is due, the city is not
-// quiescent and it has a graph store. It sets
-// *ran just before the purge starts, so a purge that panics still counts
-// toward the lane's pacing.
+// a tick's wake asked for it, the installed tracker is due, the tick is not
+// shedding FS pressure, the city is not quiescent and it has a graph store,
+// once the managed-Dolt preflight has run. It sets *ran just before the purge
+// starts, so a purge that panics still counts toward the lane's pacing.
 func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bool) {
 	if ctx.Err() != nil {
 		return
@@ -173,6 +176,12 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 	lane.installStagedLocked()
 	wg := lane.active
 	if !wake || wg == nil || !wg.shouldRun(time.Now()) {
+		return
+	}
+	if cr.fsPressureShedding.Load() {
+		// A deferred wake delivered inside an FS-pressure episode the tick is
+		// shedding starts no bulk delete. The next tick the gate lets through,
+		// forced or not, wakes the lane again.
 		return
 	}
 	if cr.cs != nil {
@@ -189,7 +198,17 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 		return
 	}
 	graphStore := cr.graphBeadStore()
-	if graphStore.Store == nil {
+	if graphStore == (beads.GraphStore{}) {
+		return
+	}
+	// The waking tick ran the preflight, but a deferred wake's tick ran it a
+	// purge-length ago. Run it again, as the orders lane does, so no purge
+	// starts against an endpoint it would repair; it joins a flight already
+	// running. Like the purge, it runs only on a city that is not quiescent
+	// and inside the pass's store work, so it never restarts a retired city
+	// pair.
+	cr.ensureManagedDoltPublishedForTick(ctx)
+	if ctx.Err() != nil {
 		return
 	}
 	*ran = true

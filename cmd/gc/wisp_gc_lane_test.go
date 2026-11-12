@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,18 @@ func (b *blockingWispGC) awaitPurgeStart(t *testing.T) {
 	case <-time.After(wispGCLaneTestWait):
 		t.Fatal("no wisp GC purge started")
 	}
+}
+
+// countingWispGC is a tracker that is always due and counts its purges.
+type countingWispGC struct {
+	runs *atomic.Int32
+}
+
+func (c countingWispGC) shouldRun(time.Time) bool { return true }
+
+func (c countingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	c.runs.Add(1)
+	return 0, nil
 }
 
 // newWispGCLaneRuntime is a bare runtime with a city store and wg as its
@@ -234,6 +247,7 @@ func TestWispGCLane_DeclinesWithoutPurge(t *testing.T) {
 		}},
 		{name: "disabled", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.wg = nil }},
 		{name: "not-due", wake: true, setup: func(cr *CityRuntime, runs *atomic.Int32) { cr.wg = notDueWispGC{runs: runs} }},
+		{name: "fs-pressure-shedding", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.fsPressureShedding.Store(true) }},
 		{name: "city-quiescent", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.beadsQuiescent.Store(true) }},
 		{name: "no-graph-store", wake: true, setup: func(cr *CityRuntime, _ *atomic.Int32) { cr.standaloneCityStore = nil }},
 		{name: "timer-only", wake: false},
@@ -254,6 +268,54 @@ func TestWispGCLane_DeclinesWithoutPurge(t *testing.T) {
 				t.Fatalf("purges = %d, ran = %v; want no purge", got, ran)
 			}
 		})
+	}
+}
+
+// orderRecordingWispGC is a tracker that is always due and records each purge
+// in order.
+type orderRecordingWispGC struct{ order *orderedRuntimeEvents }
+
+func (o orderRecordingWispGC) shouldRun(time.Time) bool { return true }
+
+func (o orderRecordingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	o.order.record("purge")
+	return 0, nil
+}
+
+// Kills: a purge that relies on its tick's managed-Dolt preflight, and a
+// preflight moved ahead of the quiescence check. A wake the duty cycle
+// deferred runs a purge-length after its tick, so the pass runs the preflight
+// itself, before the purge; a pass on a quiescent city runs neither, so it
+// never restarts a retired pair.
+func TestWispGCLane_PreflightsManagedDoltBeforeItsPurge(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+	order := &orderedRuntimeEvents{}
+	cr, _, _ := newWispGCLaneRuntime(t, orderRecordingWispGC{order: order})
+	cr.cityPath = cityPath
+	cr.managedDoltOwned = func(string) (bool, error) { return true, nil }
+	cr.managedDoltPort = func(string) string { return "" }
+	cr.managedDoltHealth = func(context.Context, string) error {
+		order.record("preflight")
+		return nil
+	}
+
+	cr.beadsQuiescent.Store(true)
+	if runLanePass(cr, true) {
+		t.Fatal("a woken pass purged on a quiescent city")
+	}
+	if got := order.snapshot(); len(got) != 0 {
+		t.Fatalf("a pass on a quiescent city ran %v, want neither the preflight nor a purge", got)
+	}
+
+	cr.beadsQuiescent.Store(false)
+	if !runLanePass(cr, true) {
+		t.Fatal("a woken pass with a due tracker did not purge")
+	}
+	if got, want := order.snapshot(), []string{"preflight", "purge"}; !slices.Equal(got, want) {
+		t.Fatalf("a woken pass ran %v, want %v", got, want)
 	}
 }
 
@@ -478,12 +540,16 @@ func awaitLanePass(t *testing.T, done <-chan bool) {
 }
 
 // newQuiescenceLaneRuntime is quiescenceRuntime's city with a controller
-// state over a memory city store and wg as its wisp GC tracker.
+// state over a memory city store and wg as its wisp GC tracker. The lane's
+// managed-Dolt preflight checks health through a hook that logs no provider
+// op, so the provider log holds only the retirement's ops; the preflight's
+// own test is TestWispGCLane_PreflightsManagedDoltBeforeItsPurge.
 func newQuiescenceLaneRuntime(t *testing.T, rigExtra string, wg wispGC) (*CityRuntime, string) {
 	t.Helper()
 	cr, _, _, logPath := quiescenceRuntime(t, rigExtra)
 	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool), cityBeadStore: beads.NewMemStore()}
 	cr.wg = wg
+	cr.managedDoltHealth = func(context.Context, string) error { return nil }
 	return cr, logPath
 }
 

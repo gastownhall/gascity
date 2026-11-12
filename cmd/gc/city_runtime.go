@@ -343,6 +343,11 @@ type CityRuntime struct {
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
+	// fsPressureShedding is true while the tick's FS-pressure gate is skipping
+	// ticks: a tick the gate stops sets it, and a tick it lets through, forced
+	// or not, clears it. The wisp GC lane reads it from its own goroutine
+	// (wisp_gc_lane.go).
+	fsPressureShedding atomic.Bool
 
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
@@ -1612,10 +1617,12 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 
 func (cr *CityRuntime) tickFSPressureGate(p *tickPass) bool {
 	if !p.configChanged && cr.shouldSkipTickForFSPressure(p.trace, p.trigger) {
+		cr.fsPressureShedding.Store(true)
 		cr.processConvergenceRequests(p.ctx)
 		p.completed = true
 		return true
 	}
+	cr.fsPressureShedding.Store(false)
 	if p.configChanged {
 		cr.resetFSPressureEpisode()
 	}
@@ -4459,13 +4466,14 @@ func backgroundManagedDoltHealth(health func(context.Context, string) error) fun
 }
 
 // ensureManagedDoltPublishedForTick runs the managed-Dolt preflight for one
-// caller (the tick, the startup pass, the control dispatcher or the orders
-// lane). The preflight runs as a flight (managed_dolt_flight.go) under ctx, the
-// caller's lifetime context, so shutdown cancels it; the caller waits for it at
-// most managedDoltFlightWindow from the flight's start and then carries on,
-// leaving the recover running. A caller that finds a flight already running
-// joins it, so one city never has two recovers at once. The wait ends with ctx
-// too, and a caller giving up on the recover never cancels it.
+// caller (the tick, the startup pass, the control dispatcher, the orders lane
+// or the wisp GC lane). The preflight runs as a flight (managed_dolt_flight.go)
+// under ctx, the caller's lifetime context, so shutdown cancels it; the caller
+// waits for it at most managedDoltFlightWindow from the flight's start and then
+// carries on, leaving the recover running. A caller that finds a flight
+// already running joins it, so one city never has two recovers at once. The
+// wait ends with ctx too, and a caller giving up on the recover never cancels
+// it.
 func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
