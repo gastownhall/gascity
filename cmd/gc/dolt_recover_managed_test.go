@@ -912,8 +912,8 @@ func TestCleanupFailedManagedDoltRecoverySkipsReusedPID(t *testing.T) {
 		t.Fatalf("cleanup error = %v, want the original cause", err)
 	}
 
-	// Give any erroneous SIGTERM time to land before asserting survival.
-	time.Sleep(200 * time.Millisecond)
+	// terminateManagedDoltPIDGuarded is synchronous: an erroneous SIGTERM would
+	// already have landed (it waits until the PID is dead), so assert at once.
 	if !pidAlive(victimPID) {
 		t.Fatalf("recovery cleanup signaled reused PID %d; identity guard not enforced", victimPID)
 	}
@@ -946,12 +946,10 @@ func TestCleanupFailedManagedDoltRecoveryTerminatesMatchingProcess(t *testing.T)
 	if !errors.Is(err, cause) {
 		t.Fatalf("cleanup error = %v, want the original cause", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if !pidAlive(childPID) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	// The guarded termination returns only once the PID is dead (the goroutine
+	// above reaps the child, and pidAlive counts a zombie as dead), so one
+	// assertion after the call is enough.
+	if pidAlive(childPID) {
+		t.Fatalf("recovery cleanup did not terminate matching PID %d; identity guard wrongly skipped it", childPID)
 	}
-	t.Fatalf("recovery cleanup did not terminate matching PID %d; identity guard wrongly skipped it", childPID)
 }

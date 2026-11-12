@@ -345,4 +345,50 @@ func TestStopManagedDoltReportCarriesStartIdentity(t *testing.T) {
 	if report.PID != pid || report.StartTimeTicks != 4444 {
 		t.Fatalf("stop report pid/ticks = %d/%d, want %d/4444 (identity must be snapshotted before the SIGTERM)", report.PID, report.StartTimeTicks, pid)
 	}
+	if report.StartIdentity != "" {
+		t.Fatalf("stop report StartIdentity = %q, want empty when ticks were read (ticks and ps-lstart identity are either/or)", report.StartIdentity)
+	}
+}
+
+// TestStopManagedDoltReportCarriesPsStartIdentityWithoutProc pins the no-/proc
+// route: when the start-ticks read yields zero, the stop report falls back to
+// the ps-lstart identity, snapshotted while the process is still alive, so
+// recovery's pre-start cleanup stays guarded on hosts without /proc.
+func TestStopManagedDoltReportCarriesPsStartIdentityWithoutProc(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	city, _ := raceTestCity(t, "[workspace]\nname = \"stop-identity-ps\"\n\n[daemon]\ndolt_stop_timeout = \"2s\"\n")
+	child := exec.Command("sleep", "60")
+	child.Dir = filepath.Join(city, ".beads", "dolt")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	pid := child.Process.Pid
+	go func() { _ = child.Wait() }()
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if err := os.WriteFile(os.Getenv("GC_DOLT_PID_FILE"), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 0 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+	// Only a live process has a start identity, as above.
+	oldIdentity := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartIdentity = func(p int) string {
+		if p == pid && syscall.Kill(p, 0) == nil {
+			return "lstart-4444"
+		}
+		return ""
+	}
+	t.Cleanup(func() { managedDoltTestReadStartIdentity = oldIdentity })
+
+	report, err := stopManagedDoltProcessWithOptions(city, "", false)
+	if err != nil {
+		t.Fatalf("stop error = %v, want nil", err)
+	}
+	if report.PID != pid || report.StartTimeTicks != 0 || report.StartIdentity != "lstart-4444" {
+		t.Fatalf("stop report pid/ticks/identity = %d/%d/%q, want %d/0/%q (identity must be snapshotted before the SIGTERM)", report.PID, report.StartTimeTicks, report.StartIdentity, pid, "lstart-4444")
+	}
 }

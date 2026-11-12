@@ -762,7 +762,7 @@ calls = 3
 [[count]]
 path = "cmd/gc/dolt_lifecycle_race_test.go"
 resource = "subprocess"
-calls = 2
+calls = 4
 
 [[count]]
 path = "cmd/gc/dolt_preflight_cleanup_test.go"
@@ -786,6 +786,11 @@ calls = 3
 
 [[count]]
 path = "cmd/gc/dolt_project_id_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_recover_managed_test.go"
 resource = "subprocess"
 calls = 2
 
