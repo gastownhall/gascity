@@ -195,6 +195,7 @@ func nudgeStalledPoolExecution(
 	workStoreRefs []string,
 	snapshotPartial bool,
 	now time.Time,
+	floor activityFloor,
 	rec events.Recorder,
 	requestDrain func(sessionBead beads.Bead) error,
 	stdout io.Writer,
@@ -209,6 +210,7 @@ func nudgeStalledPoolExecution(
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
+		floor:        floor,
 		rec:          rec,
 		requestDrain: requestDrain,
 		claims:       newExecutionClaimSnapshot(work, workStores, workStoreRefs),
@@ -322,6 +324,7 @@ type poolExecutionBackstop struct {
 	cfg          *config.City
 	sp           runtime.Provider
 	now          time.Time
+	floor        activityFloor // latest detected host resume; quiet time is measured from it
 	rec          events.Recorder
 	requestDrain func(sessionBead beads.Bead) error
 	claims       executionClaimSnapshot
@@ -441,7 +444,7 @@ func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last ti
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	hold := sessionQuietHold(p.sp, s, sessName, p.now, snapshotHoldFor)
+	hold := sessionQuietHold(p.sp, s, sessName, p.now, p.floor, snapshotHoldFor)
 	shadowHold(p.sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
 		runtime.ProgramPointExecutionBackstop, hold != "", p.now, runtime.ProgramHoldVerdict)
 	return hold
@@ -449,12 +452,13 @@ func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 
 // sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
 // session sessName (its row s) from being treated as quiet at now, "" when it
-// is quiet, its screen read by screen. The pool-claim backstop reads it before
-// its terminal drain, with the screen read as its nudges read it
-// (turnHoldFor).
-func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time, screen func(runtime.Provider, string) string) string {
+// is quiet, its screen read by screen. Quiet time is measured from the later of
+// the runtime's activity stamp and floor, so a host suspend is not quiet time.
+// The pool-claim backstop reads it before its terminal drain, with the screen
+// read as its nudges read it (turnHoldFor).
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time, floor activityFloor, screen func(runtime.Provider, string) string) string {
 	last, err := sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
+	if err != nil || last.IsZero() || now.Sub(floor.raise(last)) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
 	if !executionSnapshotVetoApplies(s.Metadata) {

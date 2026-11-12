@@ -77,6 +77,24 @@ type memoryIdleTracker struct {
 	templateTimeouts           map[string]time.Duration // agent template → idle timeout
 	templateFallbackExemptions map[string]bool          // session name → skip template fallback
 	idleSince                  map[string]time.Time     // session name → start of the current continuous content-idle run
+	floor                      activityFloor            // latest detected host resume; the activity route measures from it
+}
+
+// activityFloorSetter is implemented by an idleTracker that measures activity
+// stamps through the controller's activity floor.
+type activityFloorSetter interface {
+	setActivityFloor(activityFloor)
+}
+
+// setActivityFloor sets the floor the activity route raises stamps to. The
+// content route anchors on the controller's own now and is not floored.
+func (m *memoryIdleTracker) setActivityFloor(f activityFloor) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.floor = f
 }
 
 // newIdleTracker creates an idle tracker. Returns nil if disabled.
@@ -136,6 +154,7 @@ func (m *memoryIdleTracker) checkIdleUnder(sessionName, settingName, template, p
 	m.mu.Lock()
 	timeout, ok := m.timeouts[settingName]
 	exempt := m.templateFallbackExemptions[settingName]
+	floor := m.floor
 	if !ok && !exempt && template != "" {
 		timeout, ok = m.templateTimeouts[template]
 	}
@@ -173,7 +192,7 @@ func (m *memoryIdleTracker) checkIdleUnder(sessionName, settingName, template, p
 	if err != nil || lastActivity.IsZero() {
 		return false
 	}
-	return now.Sub(lastActivity) > timeout
+	return now.Sub(floor.raise(lastActivity)) > timeout
 }
 
 // checkIdleByContent drives the per-session idle-since anchor from a

@@ -20,8 +20,9 @@ func reconcileIdleRespawnTestTick(
 	session beads.Bead,
 	work beads.Bead,
 	ready bool,
+	opts ...startExecutionOption,
 ) {
-	reconcileIdleRespawnTestTickWithDrainOps(t, env, session, work, ready, nil)
+	reconcileIdleRespawnTestTickWithDrainOps(t, env, session, work, ready, nil, opts...)
 }
 
 func reconcileIdleRespawnTestTickWithDrainOps(
@@ -31,6 +32,7 @@ func reconcileIdleRespawnTestTickWithDrainOps(
 	work beads.Bead,
 	ready bool,
 	dops drainOps,
+	opts ...startExecutionOption,
 ) {
 	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
@@ -38,8 +40,10 @@ func reconcileIdleRespawnTestTickWithDrainOps(
 		context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, dops, []beads.Bead{work}, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-		withReadyAssignedFlags([]bool{ready}),
-		withAsyncDrainAckStopTracker(env.stops),
+		append([]startExecutionOption{
+			withReadyAssignedFlags([]bool{ready}),
+			withAsyncDrainAckStopTracker(env.stops),
+		}, opts...)...,
 	)
 }
 

@@ -812,7 +812,10 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	if p.drain.readTrigger == nil || p.drain.request == nil || sessName == "" || p.sp == nil {
 		return
 	}
-	if sessionQuietHold(p.sp, *s, sessName, p.now, turnHoldFor) != "" {
+	// The zero floor is deliberate: the idle-claim nudge entry does not carry the
+	// controller's host-resume floor, so this quiet check measures raw stamps
+	// (tracked by ga-wo27vyc).
+	if sessionQuietHold(p.sp, *s, sessName, p.now, activityFloor{}, turnHoldFor) != "" {
 		return // not proven quiet: hold, the next tick looks again
 	}
 	trigger, found, err := p.drain.readTrigger(s.Metadata[idleClaimNudgeTriggerKey])

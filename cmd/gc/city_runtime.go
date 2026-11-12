@@ -161,6 +161,7 @@ type CityRuntime struct {
 	ct                      crashTracker
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
+	resume                  *resumeDetector
 	adt                     assignedWorkDeferTracker
 	wg                      wispGC
 	od                      orderDispatcher
@@ -580,6 +581,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
 	cr := &CityRuntime{
+		resume:                  newResumeDetector(newSystemResumeClock()),
 		storageRoutes:           routes,
 		bootCityStore:           bootCityStoreFor(p.CityPath),
 		cityPath:                p.CityPath,
@@ -1464,6 +1466,9 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	// Before every phase, and before the beads-quiescence early return, so a
+	// resume is seen on the pass that follows it.
+	cr.observeResume()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
 	if cr.runsV2() {
@@ -3577,6 +3582,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withAsyncStartTracker(&cr.asyncStarts),
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
+		withActivityFloor(cr.activityFloor()),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
@@ -3724,6 +3730,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 			result.AssignedWorkStoreRefs,
 			result.StoreQueryPartial || result.SessionQueryPartial,
 			time.Now(),
+			cr.activityFloor(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
 			cr.stdout,
@@ -4352,6 +4359,10 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
+	// This tick reconciles between main ticks, so it observes the host-resume
+	// detector itself: a resume it is the first pass to follow must floor its
+	// own activity reads.
+	cr.observeResume()
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
 	}
@@ -4476,6 +4487,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// control-dispatcher create waiting on a start gate is not kept past
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
+		withActivityFloor(cr.activityFloor()),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withParkedSeats(parked),
 	)
@@ -5573,6 +5585,37 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// activityFloor returns the controller's current activity floor: the instant
+// of the latest detected host resume, or the zero floor when none has been
+// detected or the runtime has no detector.
+func (cr *CityRuntime) activityFloor() activityFloor { return cr.resume.floor() }
+
+// observeResume runs the host-resume detector for this pass. It runs once per
+// tick, ahead of every phase that reads an activity timestamp, and logs one
+// line when it fires.
+func (cr *CityRuntime) observeResume() {
+	if cr.resume == nil {
+		return
+	}
+	var patrol time.Duration
+	if cr.cfg != nil {
+		patrol = cr.cfg.Daemon.PatrolIntervalDuration()
+	}
+	if !cr.resume.observe(patrol) {
+		return
+	}
+	wall, mono := cr.resume.lastDeltas()
+	// Detection runs in both modes so the floor is ready if a reload switches
+	// to the legacy reconciler, but only the legacy reconciler applies it.
+	if cr.runsV2() {
+		fmt.Fprintf(cr.stderr, "%s: host resume detected (wall clock advanced %s, monotonic clock %s); the v2 session reconciler does not apply the resume floor\n", //nolint:errcheck
+			cr.logPrefix, wall.Round(time.Second), mono.Round(time.Second))
+		return
+	}
+	fmt.Fprintf(cr.stderr, "%s: host resume detected (wall clock advanced %s, monotonic clock %s); idle and stall time is measured from %s\n", //nolint:errcheck
+		cr.logPrefix, wall.Round(time.Second), mono.Round(time.Second), cr.resume.resumedAt().UTC().Format(time.RFC3339))
 }
 
 // adoptConfigRevision records rev as the configuration this runtime runs. A

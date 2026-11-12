@@ -106,7 +106,10 @@ func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalRea
 	if ctx.Err() != nil {
 		return
 	}
-	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
+	// The zero floor is deliberate: the external-reads lane does not yet carry the
+	// controller's host-resume floor, so this quiet check measures raw stamps
+	// until the lane is plumbed (tracked by ga-s0jo1x9, which decides the v2 reconciler's floor).
+	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, activityFloor{}, l.events, l.requestExecutionStalled(env), l.stderr)
 }
 
 // requestExecutionStalled is the execution backstop's requestDrain: it reads

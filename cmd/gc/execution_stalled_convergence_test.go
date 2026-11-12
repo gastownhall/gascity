@@ -135,7 +135,7 @@ func (h *stalledConvergenceHarness) runBackstopToExhaustion(t *testing.T) {
 			stores[j] = h.env.store
 		}
 		nudgeStalledPoolExecution(h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
-			now, h.env.rec, h.drainRequester(t), &h.env.stdout)
+			now, activityFloor{}, h.env.rec, h.drainRequester(t), &h.env.stdout)
 		now = now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 	}
 }
@@ -290,7 +290,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 		stores[j] = h.env.store
 	}
 	nudgeStalledPoolExecution(h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
-		h.env.clk.Now(), h.env.rec, func(beads.Bead) error { drains++; return nil }, &h.env.stdout)
+		h.env.clk.Now(), activityFloor{}, h.env.rec, func(beads.Bead) error { drains++; return nil }, &h.env.stdout)
 
 	if got := strings.Count(h.env.stdout.String(), "execution-claim-nudge: nudged"); got != before {
 		t.Fatalf("nudges delivered to a now-active session: %d -> %d", before, got)

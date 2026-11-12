@@ -1771,7 +1771,9 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it. Legacy only:
 	// deprecated and ignored under the v2 reconciler, whose work ladder
-	// replaces it.
+	// replaces it. Under the legacy reconciler stall time is awake time: after
+	// the controller detects a host suspend and resume, it is measured from the
+	// resume, not from an activity stamp that pre-dates it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
 	// desired, alive session that holds in-progress work but has stopped making
@@ -3868,10 +3870,15 @@ type Agent struct {
 	// IdleTimeout is the maximum time an agent session can be inactive before
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking. Not applied to a [[named_session]]
-	// with mode = "always": the controller keeps that session running.
+	// with mode = "always": the controller keeps that session running. Under
+	// the legacy reconciler idle time is awake time: after the controller
+	// detects a host suspend and resume, a session is idle from the later of
+	// its last activity and the resume. The v2 reconciler does not apply the
+	// resume floor.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
-	// session before the controller preemptively restarts it. Duration string
+	// session before the controller preemptively restarts it. Age is wall-clock,
+	// so a host suspend counts as elapsed age. Duration string
 	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
 	// is idle-gated: sessions with a pending interaction or an in-progress
 	// assigned work bead are left alone until they settle. Not applied to a

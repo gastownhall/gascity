@@ -2030,6 +2030,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			apply(&reconcileOpts)
 		}
 	}
+	// The idle tracker measures activity through the same floor as the rest of
+	// this pass; a tracker that does not take one measures raw stamps.
+	if setter, ok := it.(activityFloorSetter); ok {
+		setter.setActivityFloor(reconcileOpts.activityFloor)
+	}
 	capacityGuard := reconcileOpts.capacityGuard
 	deferralMemo := reconcileOpts.deferralMemo
 	effectiveStartOptions := startOptions
@@ -3556,7 +3561,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
-			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
+			// A detected host resume floors the stamp: stall time is awake time
+			// since the resume, so a suspend is not a stall. The claim-holder
+			// log line below prints the raw stamp.
+			stallActivity := reconcileOpts.activityFloor.raise(lastActivity)
+			if lastActivityErr == nil && !stallActivity.IsZero() && clk.Now().Sub(stallActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
 				// A pinned configured named session is never stopped on a
@@ -3668,7 +3677,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, exemptReason, TraceOutcomeExempt, tp.TemplateName, name, nil)
 					}
 				}
-				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt || onDemandIdleExempt, lastActivity, clk.Now()) {
+				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt || onDemandIdleExempt, stallActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -3680,7 +3689,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
 				}
-				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, stallActivity, clk.Now()) {
 					// A confirmed holder can wedge mid-work on a provider condition it
 					// will not self-clear. This remains opt-in and uses a separate,
 					// more conservative timeout because it interrupts in-progress work.

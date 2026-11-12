@@ -426,6 +426,7 @@ type startExecutionOptions struct {
 	asyncTracker                   *asyncStartTracker
 	asyncStopTracker               *asyncStartTracker
 	maxSessionAgeTr                maxSessionAgeTracker
+	activityFloor                  activityFloor // latest detected host resume; zero when none
 	assignedWorkDeferTr            assignedWorkDeferTracker
 	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
@@ -517,6 +518,14 @@ func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOpti
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.maxSessionAgeTr = tr
+	}
+}
+
+// withActivityFloor sets the activity floor this reconcile pass reads wall-clock
+// activity stamps through.
+func withActivityFloor(f activityFloor) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.activityFloor = f
 	}
 }
 
