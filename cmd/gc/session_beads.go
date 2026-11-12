@@ -3125,6 +3125,25 @@ func reapStaleSessionBeads(
 		fmt.Fprintf(stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
 		return 0
 	}
+	return reapStaleSessionBeadsFromInfos(cityPath, store, open, sw, sp, dt, holdsPendingCreate, clk, stderr)
+}
+
+// reapStaleSessionBeadsFromInfos is reapStaleSessionBeads over an already
+// loaded open-session snapshot, so the tick's pre-create pass can share one
+// ListAll between the stale-creating reap and the freeable-pool-slot close —
+// their predicates are disjoint (a creating row is never slot-freeable), so a
+// row one pass closes can never match the other's filter.
+func reapStaleSessionBeadsFromInfos(
+	cityPath string,
+	store beads.Store,
+	open []session.Info,
+	sw *SeatWork,
+	sp runtime.Provider,
+	dt *drainTracker,
+	holdsPendingCreate func(session.Info) bool,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
 	now := clk.Now()
 	reaped := 0
 	for _, info := range open {
@@ -3238,6 +3257,159 @@ func reapStaleSessionBeads(
 		}
 		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
+			reaped++
+		}
+	}
+	return reaped
+}
+
+// reapFreeablePoolSessionSlots closes open pool session beads whose slot is
+// freeable — the reconciler's poolFreeable predicate
+// (session_reconciler.go's pool-slot close) minus shouldWake, which the
+// desired-state pass has not computed yet when this runs.
+//
+// It exists because every occupancy site — claimFreshPoolSlotInfo, the v2
+// allocator's buildOccupancy, and canonicalSingletonAliasHeldTemplates —
+// counts an open asleep row as holding its max_active_sessions slot, and the
+// legacy pool-free close runs after the demand pass mints beads. A clean
+// `gc stop` parks every pool row asleep with sleep_reason=city-stop; with no
+// revival desired (a min_active_sessions=0 pool, or a pool whose covered
+// count is already met) those rows hold their slots until some later close
+// fires, and the demand probe's fresh claim fails closed on the occupied
+// slot. Running the close BEFORE demand frees the slot for the same tick's
+// create; physically closing first is required because the stale row still
+// owns its session_name/alias — excluding it from the occupancy scan alone
+// would collide at poolAliasCollisionFromInfos and fail closed anyway.
+//
+// Rows a wake path still owns are kept, exactly as the downstream close
+// keeps them: named and manual sessions, dependency-only rows (the
+// dependency gate wakes them in place), pending-create claims, rows under an
+// operator suspend or any non-freeable sleep (wait-hold, quarantine — the
+// isPoolSessionSlotFreeableInfo allowlist decides), rows carrying an
+// unserved restart/reset/explicit-wake request, and — for
+// sleep_reason=city-stop — rows whose agent's min_active_sessions>0, which
+// cityStopPoolBeads revives in place on the next start; closing those would
+// trade a resumed conversation for a fresh spawn. Rows holding open
+// assigned work are kept (the read fails closed), and the close itself goes
+// through closeSeat's work gate and CommitClose fence. A pool row that owns
+// its bead-scoped runtime name closes only once that runtime is confirmed
+// torn down (releaseRowOwnedRuntimeLeased, the ga-vcjr9 leak guard).
+//
+// Returns the number of beads closed.
+func reapFreeablePoolSessionSlots(
+	cfg *config.City,
+	cityPath string,
+	store beads.SessionStore,
+	sw *SeatWork,
+	sp runtime.Provider,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if store == (beads.SessionStore{}) || sp == nil {
+		return 0
+	}
+	if clk == nil {
+		clk = clock.Real{}
+	}
+	open, err := loadOpenSessionInfos(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "reapFreeablePoolSessionSlots: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	return reapFreeablePoolSessionSlotsFromInfos(cfg, cityPath, store, open, sw, sp, dt, clk, stderr)
+}
+
+// reapFreeablePoolSessionSlotsFromInfos is reapFreeablePoolSessionSlots over
+// an already loaded open-session snapshot; see
+// reapStaleSessionBeadsFromInfos for why one ListAll feeds both pre-create
+// passes.
+func reapFreeablePoolSessionSlotsFromInfos(
+	cfg *config.City,
+	cityPath string,
+	store beads.SessionStore,
+	open []session.Info,
+	sw *SeatWork,
+	sp runtime.Provider,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	now := clk.Now()
+	reaped := 0
+	for _, info := range open {
+		sn := strings.TrimSpace(info.SessionNameMetadata)
+		if sn == "" {
+			continue
+		}
+		// Only pool-managed, non-named seats are disposable; a named or
+		// singleton identity must keep its bead so a later wake restarts in
+		// place, and a manual session is operator-owned.
+		if !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
+			isManualSessionInfo(info) || session.HasStartedManualConversation(info) {
+			continue
+		}
+		// A dependency-only row wakes in place through the dependency gate;
+		// closing it would trade its session for a fresh spawn.
+		if info.DependencyOnly || info.PendingCreateClaim {
+			continue
+		}
+		// A live drain owns the row's lifecycle.
+		if dt != nil && dt.get(info.ID) != nil {
+			continue
+		}
+		// The freeable allowlist: state asleep (or drained) under a known
+		// freeable reason — city-stop, idle, failed-create, runtime-missing,
+		// etc. — with no operator KeepsSlot hold. wait-hold, quarantine and
+		// unknown reasons are denied there.
+		if !isPoolSessionSlotFreeableInfo(info, now) {
+			continue
+		}
+		// A wake already requested on the row revives it in place; the close
+		// fence does not refuse a request that predates the decision, so the
+		// intent is checked here.
+		if strings.TrimSpace(info.RestartRequested) == "true" ||
+			strings.TrimSpace(info.ContinuationResetPending) != "" ||
+			session.ExplicitWakeUnserved(info) {
+			continue
+		}
+		// cityStopPoolBeads revives a min_active_sessions>0 pool's city-stop
+		// rows in place on the next start; closing them would recreate the
+		// pool fresh each start (the pre-boot reaper's city-stop skip).
+		if strings.TrimSpace(info.SleepReason) == string(session.SleepReasonCityStop) {
+			if agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg)); agent != nil &&
+				!agent.Suspended && agent.EffectiveMinActiveSessions() > 0 {
+				continue
+			}
+		}
+		// Session is alive — nothing to free.
+		if sp.IsRunning(sn) {
+			continue
+		}
+		// A row holding open assigned work keeps its seat (fails closed on a
+		// read error).
+		hasWork, workErr := sessionHasOpenAssignedWorkForReachableStore(sw, info)
+		if workErr != nil {
+			fmt.Fprintf(stderr, "reapFreeablePoolSessionSlots: checking assigned work for %s: %v\n", info.ID, workErr) //nolint:errcheck
+			continue
+		}
+		if hasWork {
+			continue
+		}
+		// A row that owns its bead-scoped runtime name closes only once that
+		// runtime is confirmed torn down (ga-vcjr9); a busy name or a
+		// moved-on row holds for a later pass.
+		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
+			continue
+		}
+		// Preserve the original sleep_reason on the closed bead, the same
+		// forensic fidelity the reconciler's pool-free close keeps.
+		closeReason := strings.TrimSpace(info.SleepReason)
+		if closeReason == "" {
+			closeReason = "drained"
+		}
+		if closeSeat(store, sw, info, closeWhy{reason: closeReason, gate: closeGated}, now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "session reconciler: closed freeable pool session bead %s (session %q, sleep_reason=%s) — slot freed\n", info.ID, sn, strings.TrimSpace(info.SleepReason)) //nolint:errcheck
 			reaped++
 		}
 	}

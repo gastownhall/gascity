@@ -10968,3 +10968,263 @@ func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
 	return bead, ok
 }
+
+// TestReapFreeablePoolSessionSlots pins the pre-create pool-slot reaper: an
+// open, pool-managed session bead parked in a freeable sleep state with a dead
+// runtime and no open assigned work holds its max_active_sessions slot forever —
+// the stale-bead reaper covers only creating rows and the reconciler's
+// pool-free close runs after demand, so without this pass a gc-stop'd pool
+// never frees a slot for the same tick's demand spawn. The pass must free the
+// slot pre-demand and must keep every row a wake path or an operator still
+// owns.
+func TestReapFreeablePoolSessionSlots(t *testing.T) {
+	testCity := t.TempDir()
+	poolAgent := []config.Agent{{Name: "worker", StartCommand: "true"}}
+	minActiveAgent := []config.Agent{{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1)}}
+
+	poolRow := map[string]string{
+		"session_name": "worker-1",
+		"template":     "worker",
+		"pool_managed": "true",
+		"state":        "asleep",
+		"sleep_reason": "city-stop",
+	}
+	with := func(extra map[string]string) map[string]string {
+		m := maps.Clone(poolRow)
+		maps.Copy(m, extra)
+		return m
+	}
+
+	tests := []struct {
+		name       string
+		metadata   map[string]string
+		agents     []config.Agent
+		running    []string
+		work       []beads.Bead
+		wantReaped int
+	}{
+		{
+			name:       "asleep city-stop pool row reaped",
+			metadata:   nil, // base row
+			agents:     poolAgent,
+			wantReaped: 1,
+		},
+		{
+			name:       "asleep idle-timeout pool row reaped",
+			metadata:   with(map[string]string{"sleep_reason": "idle-timeout"}),
+			agents:     poolAgent,
+			wantReaped: 1,
+		},
+		{
+			name:       "drained pool row reaped",
+			metadata:   with(map[string]string{"state": "drained", "sleep_reason": ""}),
+			agents:     poolAgent,
+			wantReaped: 1,
+		},
+		{
+			name:       "min-active revival candidate kept",
+			metadata:   nil,
+			agents:     minActiveAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "suspended min-active agent's row reaped",
+			metadata:   nil,
+			agents:     []config.Agent{{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1), Suspended: true}},
+			wantReaped: 1,
+		},
+		{
+			name: "manual session kept",
+			metadata: with(map[string]string{
+				"session_origin":      "manual",
+				"session_key":         "native-key",
+				"started_config_hash": "h",
+			}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "wait-hold kept",
+			metadata:   with(map[string]string{"sleep_reason": "wait-hold"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name: "operator suspend kept",
+			metadata: with(map[string]string{
+				"sleep_intent": "user-hold",
+				"held_until":   "2126-01-01T00:00:00Z",
+			}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "quarantined row kept",
+			metadata:   with(map[string]string{"state": "quarantined"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "named session kept",
+			metadata:   with(map[string]string{namedSessionMetadataKey: "true"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "pending create claim kept",
+			metadata:   with(map[string]string{"pending_create_claim": "true"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "dependency-only kept",
+			metadata:   with(map[string]string{"dependency_only": "true"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "restart requested kept",
+			metadata:   with(map[string]string{"restart_requested": "true"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name: "unserved explicit wake kept",
+			metadata: with(map[string]string{
+				"wake_request":      "explicit",
+				"wake_requested_at": "2026-03-08T12:00:00Z",
+			}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "live runtime kept",
+			metadata:   nil,
+			agents:     poolAgent,
+			running:    []string{"worker-1"},
+			wantReaped: 0,
+		},
+		{
+			name:     "open assigned work kept",
+			metadata: nil,
+			agents:   poolAgent,
+			work: []beads.Bead{{
+				Title: "routed step", Type: "task", Status: "open", Assignee: "worker-1",
+			}},
+			wantReaped: 0,
+		},
+		{
+			// No pool_managed marker, but the session_name still resolves
+			// a numbered slot — the marker-less holder whose slot legacy
+			// occupancy counts anyway.
+			name:       "marker-less slot-named pool row reaped",
+			metadata:   with(map[string]string{"pool_managed": ""}),
+			agents:     poolAgent,
+			wantReaped: 1,
+		},
+		{
+			// A row is still pool-managed without the marker when its
+			// session_name resolves a <template>-<n> slot
+			// (sessionOriginInfo's ephemeral heuristic) — that is the
+			// marker-less holder this pass exists to reap. A genuinely
+			// non-pool row needs a name outside the slot pattern.
+			name:       "non-pool row kept",
+			metadata:   with(map[string]string{"pool_managed": "", "session_name": "adhoc-seat"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "active pool row kept",
+			metadata:   with(map[string]string{"state": "active", "sleep_reason": ""}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+		{
+			name:       "session-name-less pool row kept",
+			metadata:   with(map[string]string{"session_name": "", "pool_slot": "1"}),
+			agents:     poolAgent,
+			wantReaped: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			for _, name := range tt.running {
+				if err := sp.Start(context.TODO(), name, runtime.Config{Command: "test"}); err != nil {
+					t.Fatalf("Start(%s): %v", name, err)
+				}
+			}
+			meta := tt.metadata
+			if meta == nil {
+				meta = poolRow
+			}
+			sessionBead, err := store.Create(beads.Bead{
+				Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: meta,
+			})
+			if err != nil {
+				t.Fatalf("Create session bead: %v", err)
+			}
+			for _, w := range tt.work {
+				if _, err := store.Create(w); err != nil {
+					t.Fatalf("Create work bead: %v", err)
+				}
+			}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: tt.agents}
+			var stderr bytes.Buffer
+			got := reapFreeablePoolSessionSlots(cfg, testCity, beads.SessionStore{Store: store}, testSeatWork(testCity, cfg, store, nil), sp, nil, &clock.Fake{Time: sessionBead.CreatedAt.Add(time.Minute)}, &stderr)
+			if got != tt.wantReaped {
+				t.Fatalf("reapFreeablePoolSessionSlots() = %d, want %d\nstderr: %s", got, tt.wantReaped, stderr.String())
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if wantOpen := 1 - tt.wantReaped; len(open) != wantOpen {
+				t.Fatalf("open session beads = %d, want %d", len(open), wantOpen)
+			}
+			if tt.wantReaped > 0 {
+				closed, err := store.Get(sessionBead.ID)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				if closed.Status != "closed" {
+					t.Fatalf("reaped bead status = %q, want closed", closed.Status)
+				}
+			}
+		})
+	}
+}
+
+// TestReapFreeablePoolSessionSlotsPreservesSleepReason: the close preserves the
+// row's sleep_reason as its close_reason, the forensic fidelity the
+// reconciler's pool-free close keeps (session_reconciler.go's closeReason).
+func TestReapFreeablePoolSessionSlotsPreservesSleepReason(t *testing.T) {
+	testCity := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{
+		Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1", "template": "worker", "pool_managed": "true",
+			"state": "asleep", "sleep_reason": "city-stop",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	var stderr bytes.Buffer
+	if got := reapFreeablePoolSessionSlots(cfg, testCity, beads.SessionStore{Store: store}, testSeatWork(testCity, cfg, store, nil), sp, nil, &clock.Fake{Time: b.CreatedAt.Add(time.Minute)}, &stderr); got != 1 {
+		t.Fatalf("reapFreeablePoolSessionSlots() = %d, want 1\nstderr: %s", got, stderr.String())
+	}
+	closed, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if want := session.CanonicalCloseReason("city-stop"); closed.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", closed.Metadata["close_reason"], want)
+	}
+}
