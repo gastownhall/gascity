@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"slices"
 	"strconv"
@@ -404,6 +405,8 @@ func parseLaunchdPlistRoot(t *testing.T, content string) map[string]plistValue {
 	}
 }
 
+var launchdExitTimeOutPattern = regexp.MustCompile(`<key>ExitTimeOut</key>\s*<integer>(\d+)</integer>`)
+
 // TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType guards #8015:
 // without a root ProcessType key launchd treats the supervisor as Standard and
 // throttles it, the Dolt server and every tmux session it spawns.
@@ -434,6 +437,35 @@ func TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType(t *testing.T)
 	}
 	if n := strings.Count(content, "<key>ProcessType</key>"); n != 2 {
 		t.Fatalf("launchd plist has %d ProcessType keys, want 2 (one root key plus the ExtraEnv entry):\n%s", n, content)
+	}
+}
+
+// TestRenderSupervisorLaunchdTemplateSetsExitTimeOut guards #8015: launchd's
+// default 5 s SIGTERM-to-SIGKILL grace cuts off a preserve-mode stop.
+func TestRenderSupervisorLaunchdTemplateSetsExitTimeOut(t *testing.T) {
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
+		GCPath:       "/usr/local/bin/gc",
+		LogPath:      "$HOME/.gc/supervisor.log",
+		GCHome:       "$HOME/.gc",
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := parseLaunchdPlistRoot(t, content)
+	if _, ok := root["ExitTimeOut"]; !ok {
+		t.Fatalf("launchd plist root sets no ExitTimeOut key (launchd defaults to a 5 s grace):\n%s", content)
+	}
+	if n := strings.Count(content, "<key>ExitTimeOut</key>"); n != 1 {
+		t.Fatalf("launchd plist has %d ExitTimeOut keys, want 1:\n%s", n, content)
+	}
+	matches := launchdExitTimeOutPattern.FindAllStringSubmatch(content, -1)
+	if len(matches) != 1 {
+		t.Fatalf("launchd plist ExitTimeOut is not a single <integer> (launchd ignores a <string>):\n%s", content)
+	}
+	if matches[0][1] != "60" {
+		t.Fatalf("launchd plist ExitTimeOut = %s, want 60", matches[0][1])
 	}
 }
 
