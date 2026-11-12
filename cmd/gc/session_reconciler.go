@@ -7932,6 +7932,7 @@ func relaunchAgentForLaunchDrift(
 		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
+	composeHooklessStartupContext(ctx, prepared, cityPath)
 	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
 	// A startup nudge the session's program held back behind a dialog
 	// (program_status = "on", row A20) is queued, never typed or failed.

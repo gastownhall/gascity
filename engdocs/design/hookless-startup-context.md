@@ -46,15 +46,17 @@ content again.
 
 ## Decision
 
-A launch is hookless only when both facts hold: the resolved provider declares
-no executable hook mechanism (`supports_hooks = false`) and no hooks are
-installed for the agent (`TemplateParams.HookEnabled`). Both are checked because
+A launch qualifies when the resolved provider has `supports_hooks = false`
+and no hooks are installed for the agent (`TemplateParams.HookEnabled`). An
+unset provider capability also resolves to false; it does not prove that the
+provider itself lacks a hook mechanism. Both conditions are checked because
 the pi builtin loads `gc-hooks.js` from its own argv while `AgentHasHooks` is
 false unless the agent also lists `install_agent_hooks`; composing there would
 deliver the same mail twice. For a hookless launch, Core composes the
 SessionStart hook context into the launch payload it already delivers. The
-implementation is `cmd/gc/hookless_prompt.go`, called from
-`buildPreparedStartWithTranscript` (`cmd/gc/session_lifecycle_parallel.go`):
+implementation is `cmd/gc/hookless_prompt.go`. The legacy and v2 reconciler
+start and relaunch paths call it immediately before invoking the runtime.
+Preparation and adoption of an already-running session do not run the commands.
 
 1. `gc prime --hook --json` — the preview form. It renders hook-only context
    (`writePrimePromptWithFormat` suppresses the role prompt when
@@ -86,9 +88,10 @@ unknown provenance.
   excluded from `CoreFingerprint`, `LaunchFingerprint` and `LiveFingerprint`, and
   the injection is applied after `promptHash` is taken, so volatile mail cannot
   drive a drift restart or re-prime a session (S19).
-- **Bounded and observable.** The child commands share a 30 s bound. A failure
-  is logged with the command and session and yields no context; hook context is
-  additive and never fails a launch. Context over 32 KiB is dropped with a log
+- **Bounded and observable.** The child commands share a 30 s bound and the
+  launch's cancellation deadline. A failed prime yields no prime context. A
+  failed hook injection retains successful prime output. Both failures are
+  logged and do not fail a launch. Context over 32 KiB is dropped with a log
   line rather than truncated: the mail stays unread and a later launch can
   deliver it whole.
 - **No carrier, no context.** A suppressed startup prompt (deterministic control

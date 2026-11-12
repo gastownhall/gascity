@@ -4,6 +4,10 @@
 and lifecycle operations. Callers outside `internal/session` reach sessions
 through `worker.Handle`, not through `session.Manager`.
 
+Hookless startup context is collected only when starting or relaunching a
+session, under the launch context. Preparing a start or adopting an already
+running session must not execute hook commands.
+
 ## Active migration: worker boundary
 
 Started `12a0a848` on Apr 17 2026, in progress. New code on affected paths

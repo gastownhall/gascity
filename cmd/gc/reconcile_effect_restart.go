@@ -200,6 +200,7 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 		if out.Held, _ = attachLeg(ctx, p.leaf, p.name, false, p.now); out.Held != "" {
 			return out, nil
 		}
+		composeHooklessStartupContext(ctx, prepared, p.w.CityPath)
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
 		// A startup nudge the session's program held back behind a dialog
 		// (program_status = "on", row A20) is queued, never typed or failed.

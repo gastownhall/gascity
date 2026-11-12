@@ -119,7 +119,6 @@ dir = %q
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 	template := gcSeatHookRig + "/seat"
-	waitForActiveSessionTargets(t, cityDir, []string{template}, 60*time.Second)
 	seat := gcSeatHookSession(t, cityDir, template)
 
 	// The seat's identity, as the session lifecycle projects it into the
@@ -191,27 +190,37 @@ type gcSeatHookSessionRow struct {
 	Template    string `json:"template"`
 	SessionName string `json:"session_name"`
 	Closed      bool   `json:"closed"`
+	Running     bool   `json:"running"`
 }
 
-// gcSeatHookSession returns the live session of template.
+// gcSeatHookSession waits for the runtime: a session row can appear before
+// its process starts, but the hooks measured below run inside that process.
 func gcSeatHookSession(t *testing.T, cityDir, template string) gcSeatHookSessionRow {
 	t.Helper()
-	out, err := gc(cityDir, "session", "list", "--json", "--template", template)
-	if err != nil {
-		t.Fatalf("gc session list: %v\n%s", err, out)
-	}
-	var list struct {
-		Sessions []gcSeatHookSessionRow `json:"sessions"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &list); err != nil {
-		t.Fatalf("decode session list: %v\n%s", err, out)
-	}
-	for _, s := range list.Sessions {
-		if !s.Closed && s.Template == template && s.ID != "" && s.SessionName != "" {
-			return s
+	var out string
+	var seat gcSeatHookSessionRow
+	if pollUntil(60*time.Second, 300*time.Millisecond, func() bool {
+		var err error
+		out, err = gc(cityDir, "session", "list", "--json", "--template", template)
+		if err == nil {
+			var list struct {
+				Sessions []gcSeatHookSessionRow `json:"sessions"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &list); err != nil {
+				t.Fatalf("decode session list: %v\n%s", err, out)
+			}
+			for _, s := range list.Sessions {
+				if !s.Closed && s.Running && s.Template == template && s.ID != "" && s.SessionName != "" {
+					seat = s
+					return true
+				}
+			}
 		}
+		return false
+	}) {
+		return seat
 	}
-	t.Fatalf("no live %s session in:\n%s", template, out)
+	t.Fatalf("no running %s session in:\n%s", template, out)
 	return gcSeatHookSessionRow{}
 }
 

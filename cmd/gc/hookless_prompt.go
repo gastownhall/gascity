@@ -78,9 +78,10 @@ var hooklessCommand = func(ctx context.Context, bin string, args []string, env [
 // It runs as the session's own identity, never the controller's: the child env
 // is the launch env (which already carries GC_CITY_PATH, the store bindings and
 // GC_BIN), with the session and hook markers set explicitly so `gc prime`
-// proves the same managed session its in-agent hook would. An error is logged
-// and yields no context; hook context is additive and must never fail a launch.
-func hooklessStartupContext(env map[string]string, info sessionpkg.Info, cityPath, workDir string) string {
+// proves the same managed session its in-agent hook would. Errors are logged
+// and do not fail a launch. A failed prime yields no prime context; a failed
+// hook injection leaves successful prime output intact.
+func hooklessStartupContext(parent context.Context, env map[string]string, info sessionpkg.Info, cityPath, workDir string) string {
 	// Only a managed launch names the exact binary it must call: the launch env
 	// carries GC_BIN from the gc that resolved it (template_resolve.go). Never
 	// fall back to an ambient "gc" — a different installation on PATH would run
@@ -102,7 +103,7 @@ func hooklessStartupContext(env map[string]string, info sessionpkg.Info, cityPat
 		}
 	}
 	childEnv := hooklessHookEnv(env, info, cityPath)
-	ctx, cancel := context.WithTimeout(context.Background(), hooklessContextTimeout)
+	ctx, cancel := context.WithTimeout(parent, hooklessContextTimeout)
 	defer cancel()
 
 	prime, err := hooklessCommand(ctx, bin, []string{"prime", "--hook", "--json"}, childEnv, workDir)
@@ -126,6 +127,14 @@ func hooklessStartupContext(env map[string]string, info sessionpkg.Info, cityPat
 		return ""
 	}
 	return injection
+}
+
+// composeHooklessStartupContext runs only when a prepared session is launched.
+// Its volatile output is excluded from the fingerprints computed at preparation.
+func composeHooklessStartupContext(ctx context.Context, prepared *preparedStart, cityPath string) {
+	if hooklessStartupContextApplies(prepared.candidate.tp, &prepared.cfg) {
+		applyHooklessStartupContext(&prepared.cfg, hooklessStartupContext(ctx, prepared.cfg.Env, prepared.candidate.info, cityPath, prepared.cfg.WorkDir))
+	}
 }
 
 // hooklessPrimeContent decodes the `--json` preview envelope. An unparseable

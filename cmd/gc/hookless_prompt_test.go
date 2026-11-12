@@ -8,11 +8,75 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+func TestHooklessPreparationDoesNotRunHookCommands(t *testing.T) {
+	prime := primeEnvelope(t, "context")
+	calls := stubHooklessCommand(t, map[string]*string{"prime": &prime})
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "worker", "template": "worker", "state": "asleep",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := startCandidate{
+		info: sessiontest.SeedBead(t, bead),
+		tp: TemplateParams{
+			TemplateName: "worker", SessionName: "worker", Command: "fx", Prompt: "prompt",
+			Env: map[string]string{"GC_BIN": "/opt/gc"}, ResolvedProvider: &config.ResolvedProvider{PromptMode: "arg"},
+		},
+	}
+	if _, _, err := buildPreparedStart(candidate, &config.City{}, store); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("preparing a session ran hook command %q", (*calls)[0].args)
+	}
+}
+
+func TestHooklessLaunchComposesContext(t *testing.T) {
+	prime := primeEnvelope(t, "context")
+	hook := ""
+	calls := stubHooklessCommand(t, map[string]*string{"prime": &prime, "hook": &hook})
+	prepared := &preparedStart{
+		candidate: startCandidate{tp: TemplateParams{ResolvedProvider: &config.ResolvedProvider{}}},
+		cfg:       runtime.Config{Env: map[string]string{"GC_BIN": "/opt/gc"}, Nudge: "prompt"},
+	}
+	composeHooklessStartupContext(context.Background(), prepared, "/city")
+	if len(*calls) != 2 || prepared.cfg.Nudge != "prompt\n\ncontext" {
+		t.Fatalf("calls = %d, nudge = %q", len(*calls), prepared.cfg.Nudge)
+	}
+}
+
+func TestHooklessLaunchUsesCallerContext(t *testing.T) {
+	original := hooklessCommand
+	var observed error
+	hooklessCommand = func(ctx context.Context, _ string, _ []string, _ []string, _ string) ([]byte, error) {
+		observed = ctx.Err()
+		return nil, observed
+	}
+	t.Cleanup(func() { hooklessCommand = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prepared := &preparedStart{
+		candidate: startCandidate{tp: TemplateParams{ResolvedProvider: &config.ResolvedProvider{}}},
+		cfg:       runtime.Config{Env: map[string]string{"GC_BIN": "/opt/gc"}, Nudge: "prompt"},
+	}
+	composeHooklessStartupContext(ctx, prepared, "/city")
+	if !errors.Is(observed, context.Canceled) {
+		t.Fatalf("command context error = %v, want canceled", observed)
+	}
+	if prepared.cfg.Nudge != "prompt" {
+		t.Fatalf("canceled launch changed the nudge: %q", prepared.cfg.Nudge)
+	}
+}
 
 // stubHooklessCommand replaces the child-command seam for one test and returns
 // the recorded argv calls. byArg0 maps the first argument ("prime" or "hook")
@@ -64,7 +128,7 @@ func TestHooklessStartupContextComposesPrimeAndHookInject(t *testing.T) {
 	calls := stubHooklessCommand(t, map[string]*string{"prime": &prime, "hook": &hook})
 
 	info := sessionpkg.Info{ID: "s-1", SessionName: "fx-tui", Alias: "fx-tui", AgentName: "fx-tui"}
-	got := hooklessStartupContext(map[string]string{"GC_BIN": "/opt/gc"}, info, "/city", "/work")
+	got := hooklessStartupContext(context.Background(), map[string]string{"GC_BIN": "/opt/gc"}, info, "/city", "/work")
 
 	if want := "prime context\n\nhook context"; got != want {
 		t.Fatalf("context = %q, want %q", got, want)
@@ -89,7 +153,7 @@ func TestHooklessStartupContextComposesPrimeAndHookInject(t *testing.T) {
 func TestHooklessHookEnvCarriesSessionIdentityAndHookMarkers(t *testing.T) {
 	calls := stubHooklessCommand(t, map[string]*string{})
 	info := sessionpkg.Info{ID: "s-1", SessionName: "fx-tui", Alias: "alias-1", AgentName: "agent-1"}
-	_ = hooklessStartupContext(map[string]string{"BEADS_DIR": "/beads", "GC_BIN": "/opt/gc"}, info, "/city", "")
+	_ = hooklessStartupContext(context.Background(), map[string]string{"BEADS_DIR": "/beads", "GC_BIN": "/opt/gc"}, info, "/city", "")
 
 	if len(*calls) == 0 {
 		t.Fatal("no child command recorded")
@@ -123,7 +187,7 @@ func TestHooklessStartupContextDoesNotRunTestBinary(t *testing.T) {
 	}
 	calls := stubHooklessCommand(t, map[string]*string{})
 	t.Logf("launch GC_BIN = %q", bin)
-	_ = hooklessStartupContext(map[string]string{"GC_BIN": bin}, sessionpkg.Info{ID: "s-1"}, "", "")
+	_ = hooklessStartupContext(context.Background(), map[string]string{"GC_BIN": bin}, sessionpkg.Info{ID: "s-1"}, "", "")
 	if len(*calls) != 0 {
 		t.Fatalf("hookless attempted to execute %q with args %q", (*calls)[0].bin, (*calls)[0].args)
 	}
@@ -132,7 +196,7 @@ func TestHooklessStartupContextDoesNotRunTestBinary(t *testing.T) {
 func TestHooklessStartupContextRequiresNamedBinary(t *testing.T) {
 	calls := stubHooklessCommand(t, map[string]*string{})
 
-	if got := hooklessStartupContext(map[string]string{"PATH": "/usr/bin"}, sessionpkg.Info{ID: "s-1"}, "", ""); got != "" {
+	if got := hooklessStartupContext(context.Background(), map[string]string{"PATH": "/usr/bin"}, sessionpkg.Info{ID: "s-1"}, "", ""); got != "" {
 		t.Fatalf("context = %q, want empty without a launch GC_BIN", got)
 	}
 	if len(*calls) != 0 {
@@ -143,7 +207,7 @@ func TestHooklessStartupContextRequiresNamedBinary(t *testing.T) {
 func TestHooklessStartupContextPrimeFailureIsNotFatal(t *testing.T) {
 	stubHooklessCommand(t, map[string]*string{})
 
-	got := hooklessStartupContext(map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", "")
+	got := hooklessStartupContext(context.Background(), map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", "")
 	if got != "" {
 		t.Fatalf("context = %q, want empty on prime failure", got)
 	}
@@ -153,7 +217,7 @@ func TestHooklessStartupContextHookInjectFailureKeepsPrime(t *testing.T) {
 	prime := primeEnvelope(t, "prime context")
 	stubHooklessCommand(t, map[string]*string{"prime": &prime})
 
-	if got, want := hooklessStartupContext(map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", ""), "prime context"; got != want {
+	if got, want := hooklessStartupContext(context.Background(), map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", ""), "prime context"; got != want {
 		t.Fatalf("context = %q, want %q", got, want)
 	}
 }
@@ -162,7 +226,7 @@ func TestHooklessStartupContextSkipsOversizedContext(t *testing.T) {
 	prime := primeEnvelope(t, strings.Repeat("x", hooklessContextLimit+1))
 	stubHooklessCommand(t, map[string]*string{"prime": &prime})
 
-	if got := hooklessStartupContext(map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", ""); got != "" {
+	if got := hooklessStartupContext(context.Background(), map[string]string{"GC_BIN": "/opt/gc"}, sessionpkg.Info{ID: "s-1"}, "", ""); got != "" {
 		t.Fatalf("context = %q, want empty over the limit", got)
 	}
 }

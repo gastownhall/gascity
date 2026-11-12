@@ -350,6 +350,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 		return startOutcome{}, context.Cause(ctx) // the shutdown came first: never begin a start after it
 	}
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
+	composeHooklessStartupContext(startCtx, prepared, in.w.CityPath)
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
 	// A startup nudge the session's program held back behind a dialog
