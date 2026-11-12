@@ -5422,6 +5422,30 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 }
 
+// TestIsIssueTypeRefused pins the classifier for a store refusing a type its
+// registry does not define, however the store wrapped bd's answer.
+func TestIsIssueTypeRefused(t *testing.T) {
+	refusal := errors.New(`Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd's answer", refusal, true},
+		{"both tiers, hard", fmt.Errorf("bd list both tiers: bd list: %w", refusal), true},
+		{"both tiers, partial", &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", refusal)}, true},
+		{"a failed read is not a refusal", errors.New("bd list: dial tcp 127.0.0.1:3307: connect: connection refused"), false},
+		{"a timeout is not a refusal", errors.New("timed out after 30s"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsIssueTypeRefused(tc.err); got != tc.want {
+				t.Fatalf("IsIssueTypeRefused(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsTimeoutError pins the narrow timeout classifier used to distinguish a
 // store/bd query that ran out of time (a contention signal callers may safely
 // relax for idempotent work) from a genuine store-read failure or a plain

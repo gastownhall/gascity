@@ -850,6 +850,7 @@ var nonSessionKeys = func() map[string]string {
 		"GitHub PR bead and trace":    "source github.base github.failed_checks github.failure_kind github.head github.head_sha github.merge_state_status github.monitor github.owner github.pending_checks github.pr github.repo github.state github.url",
 		"order wisp bead":             "order_tracking_sweep order_tracking_sweep_by order_wisp_sweep",
 		"rig-imported graph bead":     "gc.migrated_cross_edges",
+		"reverse-migrated bead":       "gc.infra_reversed_from gc.step_ref",
 		"rig idempotency bead":        "gc.idem.created_dir gc.idem.dolt_db gc.idem.event_cursor gc.idem.kind gc.idem.result.branch gc.idem.result.prefix gc.idem.result.rig gc.idem.state",
 	} {
 		for _, k := range strings.Fields(keys) {

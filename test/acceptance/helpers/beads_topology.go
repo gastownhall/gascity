@@ -913,7 +913,9 @@ func (r *TopologyRun) initCity(t *testing.T) {
 	if legacy := r.LegacyGCPath; legacy != "" {
 		out, err = r.runBinary(legacy, "", args...)
 	} else {
-		out, err = RunGC(r.Env, "", args...)
+		// Every shape is a single-store city (topologyRunEnv); the gc under
+		// test would otherwise write a born-split one.
+		out, err = RunGC(r.Env, "", append([]string{args[0], "--storage=single"}, args[1:]...)...)
 	}
 	if err != nil {
 		t.Fatalf("gc init for %s: %v\n%s", r.Topology.Name, err, out)

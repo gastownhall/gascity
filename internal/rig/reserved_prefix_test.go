@@ -1,6 +1,7 @@
 package rig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,10 +26,14 @@ func splitCityCfg() *config.City {
 // Split-default R10, at the point a reserved prefix is INTRODUCED: rig
 // provisioning (gc rig add and the API rig create) refuses a rig whose
 // derived or explicit prefix falls in a reserved namespace on a split city,
-// before anything is written.
+// before anything is written. Every new city is born split, so ordinary
+// repository names meet it (graphql-code-generator derives gcg): the refusal
+// names the --prefix that fixes the add, and is ErrReservedBeadPrefix, which
+// the API answers as the caller's error.
 func TestProvisionRefusesAReservedRigPrefixOnASplitCity(t *testing.T) {
 	for _, tc := range []struct{ name, prefix, reserved string }{
 		{"gas-city-gateway", "", "gcg"},
+		{"graphql-code-generator", "", "gcg"},
 		{"alpha", "gcg-alpha", "gcg"},
 		{"beta", "gco", "gco"},
 	} {
@@ -39,6 +44,12 @@ func TestProvisionRefusesAReservedRigPrefixOnASplitCity(t *testing.T) {
 			_, _, err := Provision(deps, ProvisionRequest{Name: tc.name, Path: rigPath, Prefix: tc.prefix})
 			if err == nil || !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), tc.reserved) {
 				t.Fatalf("Provision err = %v, want the reserved-prefix refusal naming %q", err, tc.reserved)
+			}
+			if !errors.Is(err, config.ErrReservedBeadPrefix) {
+				t.Errorf("Provision err = %v, want ErrReservedBeadPrefix", err)
+			}
+			if !strings.Contains(err.Error(), "gc rig add --prefix <prefix>") {
+				t.Errorf("Provision err = %v, want it to name gc rig add --prefix", err)
 			}
 			if _, statErr := os.Stat(rigPath); statErr == nil {
 				t.Error("the refused add created the rig directory")

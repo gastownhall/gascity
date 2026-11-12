@@ -4,9 +4,11 @@ package api
 // stores, frozen (t7-plan.md §2.3; T7d's workflow_legs_reference_test.go
 // precedent). Each declaration is copied, doc comment and all, renamed to its
 // frozen form; methods take the Server as their first argument, after a context. Every helper
-// they call that reads or writes a store and that T7e edits is frozen too
-// (relocatedGraphStore); sortedRigNames is T7d's frozen copy, identical to
-// main's; the helpers T7e leaves byte-identical are called live.
+// they call that reads or writes a store and that T7e edits is frozen too:
+// relocatedGraphStore is T7b.3's frozen copy
+// (work_federation_legs_reference_test.go) and sortedRigNames T7d's, both
+// identical to main's at 607e3570e3; the helpers T7e leaves byte-identical
+// are called live.
 // The equivalence table (bead_owner_legs_equivalence_test.go) runs them beside
 // the converted readers. Do not edit them to follow production.
 
@@ -196,25 +198,6 @@ func frozenHumaHandleBeadReady(ctx context.Context, s *Server, input *BeadReadyI
 			PartialErrors: pa.messages(),
 		},
 	}, nil
-}
-
-// frozenRelocatedGraphStore returns the graph-class handle when — and only when —
-// the city has actually relocated it.
-//
-// Routing is keyed on STORE IDENTITY (beads.SameStore), the same rule
-// Stores.Plan and handler_convoy_dispatch.go's workflow scan use: on a default
-// city Stores().Graph() wraps the city's work store itself, so there is
-// nothing to federate and every caller's extra arm stays dead. That identity
-// guard is what keeps a single-store city byte-identical. Under the
-// split-strict gate the graph handle reads the work store's class view, a
-// store of its own, so a gate fixture keeps its split shape.
-func frozenRelocatedGraphStore(state State) (beads.GraphStore, bool) {
-	st := state.Stores()
-	graph := st.Graph()
-	if beads.IsNilStore(graph) || beads.SameStore(graph, st.Work()) {
-		return beads.GraphStore{}, false
-	}
-	return graph, true
 }
 
 func frozenAppendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
