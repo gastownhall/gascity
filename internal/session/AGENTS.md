@@ -83,12 +83,6 @@ evidence from tests, source, an issue, or a commit.
 - Do not make ordinary config names or `template:<name>` values act like live
   session targets.
 
-## Orphan cleanup
-
-- A detached systemd user service in a unit other than the session's own
-  survives session orphan cleanup; preserve the live-unlisted runtime fence
-  before terminating any remaining roots. See SESSION-RUNTIME-017.
-
 ## Startup Fencing Pitfalls
 
 - `Store.Tx` groups rollback writes but cannot read, so it does not fence a

@@ -3,11 +3,10 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,10 +22,13 @@ type procfsOrphanProvider struct {
 	*runtime.Fake
 	terminated []int
 	started    []string
+	// events orders terminations ("terminate:<pid>") and starts ("start").
+	events []string
 }
 
 func (p *procfsOrphanProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	p.started = append(p.started, cfg.Env["GC_SESSION_ID"])
+	p.events = append(p.events, "start")
 	return p.Fake.Start(ctx, name, cfg)
 }
 
@@ -36,6 +38,7 @@ func (p *procfsOrphanProvider) FindRuntimesBySessionID(id string) ([]runtime.Liv
 
 func (p *procfsOrphanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	p.terminated = append(p.terminated, r.PID)
+	p.events = append(p.events, "terminate:"+strconv.Itoa(r.PID))
 	return nil
 }
 
@@ -156,13 +159,26 @@ func TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim(t *
 	}
 }
 
-// TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild is
-// the systemd-run --user case: a transient user service that inherited the
-// session id survives the session's restart, and an in-session child that
-// stayed in the session's scope is still reaped. A leftover in the session's
-// own unit (the reaper's service, planted at this process's pid) is reaped
-// and named. The service's child is not promoted to a root in its place.
-func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *testing.T) {
+// writeFakeCgroup writes pid's cgroup file, the record the detached
+// user-service fence reads.
+func writeFakeCgroup(t *testing.T, root string, pid int, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "cgroup"), []byte(content+"\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
+	}
+}
+
+// fakeUserManager is the unified cgroup path of the test user's systemd user
+// manager.
+func fakeUserManager() string {
+	uid := strconv.Itoa(os.Geteuid())
+	return "0::/user.slice/user-" + uid + ".slice/user@" + uid + ".service"
+}
+
+// suspendedProcfsSession creates and suspends a session over a
+// procfsOrphanProvider and clears the provider's records.
+func suspendedProcfsSession(t *testing.T) (*Manager, *procfsOrphanProvider, Info, string) {
+	t.Helper()
 	store := beads.NewMemStore()
 	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
 	city := t.TempDir()
@@ -174,68 +190,74 @@ func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *te
 	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
-	sp.terminated = nil
-	sp.started = nil
+	sp.terminated, sp.started, sp.events = nil, nil, nil
+	return mgr, sp, info, city
+}
 
-	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper", "GC_CITY_PATH=" + city}
+// TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild: a
+// session that started a systemd user service leaves a root carrying its
+// identity in a user-manager service unit of its own. Neither that root nor
+// the session's leftover agent runtime is claimed live by the provider. The
+// restart terminates the leftover, confirms it dead before the replacement
+// starts, and leaves the service running without blocking the start.
+func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *testing.T) {
+	mgr, sp, info, city := suspendedProcfsSession(t)
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
 	root := t.TempDir()
 	const (
-		servicePID = 5100
-		childPID   = 5101
-		scopePID   = 5200
-		ownPID     = 5300
-		systemPID  = 5400
+		servicePID = 4400
+		agentPID   = 4300
 	)
-	writeFakeProcess(t, root, servicePID, 1, []string{"sleep", "900"}, env)
-	writeFakeCgroup(t, root, servicePID, "/user.slice/user-1000.slice/user@1000.service/app.slice/detached-worker.service")
-	writeFakeProcess(t, root, childPID, servicePID, []string{"sleep", "1"}, env)
-	writeFakeCgroup(t, root, childPID, "/user.slice/user-1000.slice/user@1000.service/app.slice/detached-worker.service")
-	writeFakeProcess(t, root, scopePID, 1, []string{"sleep", "900"}, env)
-	writeFakeCgroup(t, root, scopePID, "/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-abc.scope")
-	writeFakeProcess(t, root, ownPID, 1, []string{"claude", "--resume"}, env)
-	writeFakeCgroup(t, root, ownPID, "/user.slice/user-1000.slice/user@1000.service/app.slice/agent.service")
-	writeFakeProcess(t, root, systemPID, 1, []string{"rogue"}, env)
-	writeFakeCgroup(t, root, systemPID, "/system.slice/rogue.service")
-	// The reaper's own unit. No session id, so the scan does not reap it.
-	self := os.Getpid()
-	writeFakeProcess(t, root, self, 1, []string{"gc", "test"}, []string{"PATH=/usr/bin"})
-	writeFakeCgroup(t, root, self, "/user.slice/user-1000.slice/user@1000.service/app.slice/agent.service")
+	writeFakeProcess(t, root, servicePID, 1, []string{"node", "server.js"}, env)
+	writeFakeCgroup(t, root, servicePID, fakeUserManager()+"/app.slice/devserver.service")
+	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
+	writeFakeCgroup(t, root, agentPID, fakeUserManager()+"/app.slice/tmux-spawn-1234.scope")
 	proctable.SetScanRootForTesting(t, root)
-
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := map[int]bool{}
-	for _, pid := range sp.terminated {
-		got[pid] = true
+	want := []string{"terminate:" + strconv.Itoa(agentPID), "start"}
+	if strings.Join(sp.events, ",") != strings.Join(want, ",") {
+		t.Fatalf("restart events = %v, want %v (the leftover agent %d terminated before the start, the user service %d never)", sp.events, want, agentPID, servicePID)
 	}
-	if got[servicePID] || got[childPID] {
-		t.Fatalf("restart terminated %v, want the detached service %d and its child %d left alone", sp.terminated, servicePID, childPID)
-	}
-	for _, pid := range []int{scopePID, ownPID, systemPID} {
-		if !got[pid] {
-			t.Fatalf("restart terminated %v, want in-session scope %d, own-unit leftover %d, and system service %d", sp.terminated, scopePID, ownPID, systemPID)
-		}
-	}
-	if len(got) != 3 {
-		t.Fatalf("restart terminated %v, want exactly the scope, own-unit, and system leftovers", sp.terminated)
-	}
-	text := logs.String()
-	if !strings.Contains(text, "user service detached-worker.service") {
-		t.Errorf("log %q does not name the skipped unit", text)
-	}
-	if !strings.Contains(text, "unit=agent.service") {
-		t.Errorf("log %q does not name the reaped session unit", text)
+	if len(sp.started) != 1 || sp.started[0] != info.ID {
+		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
 	}
 }
 
-func writeFakeCgroup(t *testing.T, root string, pid int, path string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "cgroup"), []byte("0::"+path+"\n"), 0o644); err != nil {
-		t.Fatalf("write cgroup: %v", err)
+// TestSameSessionRestartReapsOrphansInOwnAndSupervisorUnits: the restart's
+// user-service fence spares only a foreign unit. The session's leftover roots
+// in the restarting process's own unit, or in Gas City's default or suffixed
+// supervisor unit, are terminated before the replacement starts; a foreign
+// service beside them is left running.
+func TestSameSessionRestartReapsOrphansInOwnAndSupervisorUnits(t *testing.T) {
+	mgr, sp, info, city := suspendedProcfsSession(t)
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	self := os.Getpid()
+	writeFakeProcess(t, root, self, 1, []string{"gc", "supervisor", "run"}, []string{"PATH=/usr/bin"})
+	writeFakeCgroup(t, root, self, fakeUserManager()+"/app.slice/gc-controller.service")
+	units := map[int]string{
+		4500: "gc-controller.service",
+		4501: proctable.SupervisorSystemdUnitStem + ".service",
+		4502: proctable.SupervisorSystemdUnitStem + "-3f9a2c.service",
+		4400: "devserver.service",
+	}
+	for pid, unit := range units {
+		writeFakeProcess(t, root, pid, 1, []string{"claude", "--resume"}, env)
+		writeFakeCgroup(t, root, pid, fakeUserManager()+"/app.slice/"+unit)
+	}
+	proctable.SetScanRootForTesting(t, root)
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	terminated := slices.Sorted(slices.Values(sp.terminated))
+	if !slices.Equal(terminated, []int{4500, 4501, 4502}) {
+		t.Fatalf("pre-start orphan kill terminated %v, want 4500, 4501 and 4502 (own and supervisor units), never the foreign service 4400", terminated)
+	}
+	if n := len(sp.events); n == 0 || sp.events[n-1] != "start" || slices.Index(sp.events, "start") != n-1 {
+		t.Fatalf("restart events = %v, want every termination before the single start", sp.events)
 	}
 }

@@ -83,6 +83,7 @@ go_test(
         "sweep_guards_test.go",
         "testenv_import_test.go",
         "user_service_linux_test.go",
+        "user_service_stub_test.go",
         "user_service_test.go",
     ],
     embed = [":proctable"],
