@@ -342,11 +342,13 @@ city.toml (or restores the bytes from before the split), renames the split's
 notes and records *.reverted-<run>, and archives the binding root the same
 way. It refuses, naming each bead and the fix, an open cross-store gate, an
 open row the binding minted for a rig's scope, an edge that would join two
-open rows in different stores, and an edge payload its destination cannot
-write. An explicit session_reconciler = "v2" refuses too, unless
---reconciler=legacy rewrites it in the same edit. --dry-run prints the plan
-and every refusal and writes nothing; it takes no lock and needs no
---fleet-stopped, so it rehearses on a live city.
+open rows in different stores or hold an open row behind a blocker in another
+store that has not released it (open, or closed with gc.work_outcome=blocked),
+and an edge payload its destination cannot write. An explicit
+session_reconciler = "v2" refuses too, unless --reconciler=legacy rewrites it
+in the same edit. --dry-run prints the plan and every refusal and writes
+nothing; it takes no lock and needs no --fleet-stopped, so it rehearses on a
+live city.
 
 --to-rigs --rig X returns rig X's imported rows to its store and keeps the
 city split: the binding's copies go once the rig's are proven, and the rig

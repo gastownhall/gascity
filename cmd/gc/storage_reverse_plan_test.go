@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -196,8 +197,12 @@ func TestPlanReverseRefusals(t *testing.T) {
 		}, nil, true},
 		{"an edge joining two open rows in different stores", func() reverseInput {
 			return planInput([]beads.Bead{planRow("gp-1", "open", rigImportStamp("packs"), ""), planRow("gcg-2", "open", "", "")},
+				[]beads.Dep{{IssueID: "gcg-2", DependsOnID: "gp-1", Type: "related"}})
+		}, []string{"gcg-2 -[related]-> gp-1 (the city work store, the store of rig packs)", "joins two open rows", "close one side"}, false},
+		{"a blocking edge onto an open blocker in another store", func() reverseInput {
+			return planInput([]beads.Bead{planRow("gp-1", "open", rigImportStamp("packs"), ""), planRow("gcg-2", "open", "", "")},
 				[]beads.Dep{{IssueID: "gcg-2", DependsOnID: "gp-1", Type: "blocks"}})
-		}, []string{"gcg-2 -[blocks]-> gp-1 (the city work store, the store of rig packs)", "close one side"}, false},
+		}, []string{"gcg-2 -[blocks]-> gp-1 (the city work store, the store of rig packs)", "a blocker that has not released it", "finish the blocker, or close the dependent"}, false},
 		{"the same edge with one side closed is dropped", func() reverseInput {
 			return planInput([]beads.Bead{planRow("gp-1", "closed", rigImportStamp("packs"), ""), planRow("gcg-2", "open", "", "")},
 				[]beads.Dep{{IssueID: "gcg-2", DependsOnID: "gp-1", Type: "blocks"}})
@@ -233,6 +238,92 @@ func TestPlanReverseRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPlanReverseRefusesACrossingEdgeOntoABlockerThatStillHolds: a blocker
+// closed with gc.work_outcome=blocked holds its dependents as an open one does
+// (beads.DependencySatisfied). So an open row's ready-blocking edge onto such a
+// blocker, where the two would land in different stores, is refused as one onto
+// an open blocker is, in both reverses and both directions: dropped, it would
+// release a row the split city withholds. The refusal names the edge once with
+// both stores, and nothing records the edge as dropped. These are dropped and
+// recorded as before: a blocker readiness releases (closed, or closed blocked as
+// a step that passed), a closed dependent, and an edge that does not block.
+func TestPlanReverseRefusesACrossingEdgeOntoABlockerThatStillHolds(t *testing.T) {
+	packs := rigImportStamp("packs")
+	closedBlocked := func(b beads.Bead) beads.Bead {
+		b.Status = "closed"
+		b.Metadata[beadmeta.WorkOutcomeMetadataKey] = beadmeta.WorkOutcomeBlocked
+		return b
+	}
+	shapes := []struct {
+		name               string
+		mode               reverseMode
+		dependent, blocker beads.Bead
+		stores             string
+	}{
+		{"to-work onto a row bound for a rig", reverseToWork, planRow("gcg-2", "open", "", ""), planRow("gp-1", "closed", packs, ""), "(the city work store, the store of rig packs)"},
+		{"to-work from a row bound for a rig", reverseToWork, planRow("gp-3", "open", packs, ""), planRow("mc-4", "closed", infraMigrationCityStamp, ""), "(the store of rig packs, the city work store)"},
+		{"to-rigs from a row the binding keeps", reverseToRigs, planRow("gcg-5", "open", "", ""), planRow("gp-6", "closed", packs, ""), "(the binding, the store of rig packs)"},
+		{"to-rigs onto a row the binding keeps", reverseToRigs, planRow("gp-7", "open", packs, ""), planRow("mc-8", "closed", infraMigrationCityStamp, ""), "(the store of rig packs, the binding)"},
+	}
+	cases := []struct {
+		name            string
+		depType         string
+		dependentStatus string
+		blocker         func(beads.Bead) beads.Bead
+		refused         bool
+	}{
+		{"blocks onto a blocker closed blocked", "blocks", "open", closedBlocked, true},
+		{"waits-for onto a blocker closed blocked", "waits-for", "open", closedBlocked, true},
+		{"conditional-blocks onto a blocker closed blocked", "conditional-blocks", "open", closedBlocked, true},
+		{"blocks onto an open blocker", "blocks", "open", func(b beads.Bead) beads.Bead {
+			b.Status = "open"
+			return b
+		}, true},
+		{"blocks onto a closed blocker", "blocks", "open", func(b beads.Bead) beads.Bead { return b }, false},
+		{"blocks onto a step closed blocked whose step passed", "blocks", "open", func(b beads.Bead) beads.Bead {
+			b = closedBlocked(b)
+			b.Metadata[beadmeta.StepRefMetadataKey] = "mol.review"
+			b.Metadata[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+			return b
+		}, false},
+		{"blocks from a closed row onto a blocker closed blocked", "blocks", "closed", closedBlocked, false},
+		{"related onto a row closed blocked", "related", "open", closedBlocked, false},
+		{"tracks onto a row closed blocked", "tracks", "open", closedBlocked, false},
+	}
+	// clone is b with its own metadata, so no case writes into another's rows.
+	clone := func(b beads.Bead) beads.Bead {
+		b.Metadata = maps.Clone(b.Metadata)
+		return b
+	}
+	for _, shape := range shapes {
+		for _, tc := range cases {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				dependent, blocker := clone(shape.dependent), tc.blocker(clone(shape.blocker))
+				dependent.Status = tc.dependentStatus
+				in := planInput([]beads.Bead{dependent, blocker}, []beads.Dep{{IssueID: dependent.ID, DependsOnID: blocker.ID, Type: tc.depType}})
+				in.Mode, in.Rigs = shape.mode, map[string]bool{"packs": true}
+				plan := planReverse(in)
+				edge := fmt.Sprintf("%s -[%s]-> %s", dependent.ID, tc.depType, blocker.ID)
+				got, dropped := planRefusal(plan), strings.Join(plan.Dropped, "\n")
+				if !tc.refused {
+					if got != "" || !strings.Contains(dropped, edge+": it would cross stores, and one side is closed") {
+						t.Fatalf("refusals %q, dropped %q; want %s dropped", got, dropped, edge)
+					}
+					return
+				}
+				if len(plan.Refusals) != 1 || strings.Count(got, edge) != 1 || strings.Contains(dropped, edge) {
+					t.Fatalf("refusals %q, dropped %q; want %s refused once and not dropped", got, dropped, edge)
+				}
+				for _, want := range []string{edge + " " + shape.stores, "a blocker that has not released it", "gc.work_outcome=blocked", "finish the blocker, or close the dependent"} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("the refusal does not say %q:\n%s", want, got)
+					}
+				}
+			})
+		}
 	}
 }
 

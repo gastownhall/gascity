@@ -2029,7 +2029,7 @@ func (r *reverseRun) retireSplit() error {
 			return err
 		}
 	default:
-		return fmt.Errorf("%s changed while the reverse was under way, so this run cannot tell its edit from yours; put it back, or abandon the reverse with `%s`", tomlPath, storageAbortReverseInstruction())
+		return fmt.Errorf("%s changed while the reverse was under way, so this run cannot tell its edit from yours; put it back (the journal %s holds the earlier file as city_toml_before), or abandon the reverse with `%s`, which keeps your change once the file declares the split's [storage]", tomlPath, storageReverseJournalPath(cityPath), storageAbortReverseInstruction())
 	}
 	if err := infraEngineCrashPoint("reverse R4 config"); err != nil {
 		return err
@@ -2295,6 +2295,11 @@ func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, 
 	if len(dangling) > 0 {
 		return fail(fmt.Errorf("%s held edge(s) onto rows this reverse wrote before it wrote them, and could not take each back whole once the row is gone (an edge onto a row it does not hold, or a payload it cannot write), so abandoning the reverse would lose them: %s. Nothing was removed; finish the reverse with `%s` instead", "the destination store(s)", strings.Join(dangling, ", "), storageReverseInstruction(journal.Mode, journal.Rigs)))
 	}
+	// A city.toml the abort could not put back refuses here too, before any
+	// row is deleted, not after every row is gone.
+	if _, _, err := reverseCityTOMLToUndo(request.CityPath, journal); err != nil {
+		return fail(err)
+	}
 	// From the first delete on, the reverse can only be abandoned: a resume
 	// would find its own rows gone and archive the binding over them.
 	journal.Aborting = true
@@ -2425,26 +2430,17 @@ func reverseRigRowsLeftBinding(target infraBindingTarget, journal storageReverse
 	return false, nil
 }
 
-// undoReverseRetirement puts back what R4 changed: city.toml (unless the
-// operator changed it since), the renamed records and the version floor.
+// undoReverseRetirement puts back what R4 changed: city.toml, unless the
+// operator changed it since (reverseCityTOMLToUndo), the renamed records and
+// the version floor.
 func undoReverseRetirement(cityPath string, journal storageReverseJournal) error {
-	if journal.CityTOMLBefore != nil {
-		path, err := reverseCityTOMLPath(cityPath)
-		if err != nil {
+	tomlPath, undo, err := reverseCityTOMLToUndo(cityPath, journal)
+	if err != nil {
+		return err
+	}
+	if undo {
+		if err := writeCityTOMLAtomic(tomlPath, []byte(*journal.CityTOMLBefore)); err != nil {
 			return err
-		}
-		current, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		switch sha256Hex(current) {
-		case sha256Hex([]byte(*journal.CityTOMLBefore)):
-		case journal.CityTOMLAfterSHA256:
-			if err := writeCityTOMLAtomic(path, []byte(*journal.CityTOMLBefore)); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("%s changed since the reverse edited it, so putting back its earlier bytes would undo your change; restore [storage] by hand (the journal %s holds the earlier bytes), then run this again", path, storageReverseJournalPath(cityPath))
 		}
 	}
 	for _, rn := range journal.Renamed {
@@ -2463,4 +2459,64 @@ func undoReverseRetirement(cityPath string, journal storageReverseJournal) error
 		}
 	}
 	return nil
+}
+
+// reverseCityTOMLToUndo judges city.toml against what an open --to-work's R4
+// did to it (journal): undo is true when it is R4's own edit, which an abort
+// replaces with the bytes from before it. The file from before R4, or any file
+// the city composes into a [storage] that serves the journal's binding (the
+// operator put the split back by hand, a change of their own kept), stays as
+// it is. Any other file is an error, since putting the earlier bytes back
+// would undo the operator's change. Until the journal says Aborting the abort
+// has deleted no row (it records that first), so the error then says nothing
+// was removed and names the resume as the other way out. path is city.toml as
+// R4 edits it, through a symlink, or "" when R4 recorded no edit.
+func reverseCityTOMLToUndo(cityPath string, journal storageReverseJournal) (path string, undo bool, err error) {
+	if journal.CityTOMLBefore == nil {
+		return "", false, nil
+	}
+	if path, err = reverseCityTOMLPath(cityPath); err != nil {
+		return "", false, err
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, err
+	}
+	switch sha256Hex(current) {
+	case sha256Hex([]byte(*journal.CityTOMLBefore)):
+		return path, false, nil
+	case journal.CityTOMLAfterSHA256:
+		return path, true, nil
+	}
+	serves, loadErr := reverseCityTOMLServesBinding(cityPath, current, journal)
+	if serves {
+		return path, false, nil
+	}
+	why := fmt.Sprintf("composes no [storage] that serves the binding %s at %s", journal.Binding, journal.Root)
+	if loadErr != nil {
+		why = fmt.Sprintf("does not load (%v)", loadErr)
+	}
+	refusal := fmt.Sprintf("%s changed since the reverse edited it and %s, so putting back its earlier bytes would undo your change", path, why)
+	remedy := fmt.Sprintf("put [storage] back as the split had it, keeping your change (the journal %s holds the earlier file as city_toml_before), then run this again", storageReverseJournalPath(cityPath))
+	if journal.Aborting {
+		return "", false, fmt.Errorf("%s; %s", refusal, remedy)
+	}
+	return "", false, fmt.Errorf("%s. Nothing was removed: %s, or undo your change and finish the reverse with `%s`", refusal, remedy, storageReverseInstruction(journal.Mode, journal.Rigs))
+}
+
+// reverseCityTOMLServesBinding reports whether the city, composed with data in
+// place of its city.toml (fragments and includes as they are on disk),
+// declares a [storage] whose infrastructure binding is the journal's, by name
+// and root: the split as the reverse found it.
+func reverseCityTOMLServesBinding(cityPath string, data []byte, journal storageReverseJournal) (bool, error) {
+	path := filepath.Join(cityPath, "city.toml")
+	cfg, err := loadCityConfigWithoutBuiltinPackRefreshFS(reverseOverlayFS{FS: fsys.OSFS{}, path: path, data: data}, path, io.Discard)
+	if err != nil {
+		return false, err
+	}
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		return false, err
+	}
+	return target.Binding == journal.Binding && samePath(target.Root, journal.Root), nil
 }

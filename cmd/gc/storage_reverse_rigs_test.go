@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -383,6 +384,81 @@ func TestReverseToRigsRefusesToHoldARowAnOperatorReleased(t *testing.T) {
 				t.Fatalf("the rig lacks gp-g1 -> gp-w9: %v", rigEdgeFingerprint(t, r.rig("packs")))
 			}
 		})
+	}
+}
+
+// TestReverseToRigsRefusesToReleaseARowABlockerClosedBlockedHolds: the rig's
+// import moved gp-b1, closed with gc.work_outcome=blocked, and the binding
+// minted an open step since that waits on it, which a blocker closed blocked
+// keeps from being ready. --to-rigs would return gp-b1 to the rig and keep the
+// step in the binding, and no edge crosses stores, so dropping the edge would
+// make the step ready. It refuses instead, dry run included, naming the edge
+// once with both stores, and writes nothing: the step keeps its edge and stays
+// not ready. Once the step is closed, the reverse returns the rig.
+func TestReverseToRigsRefusesToReleaseARowABlockerClosedBlockedHolds(t *testing.T) {
+	r := newReverseRigFixtureOf(t, []beads.Bead{
+		graphRow("gp-b1", "gp-b1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}),
+	}, nil)
+	ready := func(id string) bool {
+		t.Helper()
+		rows, err := r.binding().Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(rows, func(b beads.Bead) bool { return b.ID == id })
+	}
+	binding, err := openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := mustCreateInfraBead(t, binding, beads.Bead{Title: "a step the binding minted", Type: "task"})
+	_ = closeBeadStoreHandle(binding)
+	if !ready(step.ID) {
+		t.Fatalf("the binding does not offer %s with no blocker", step.ID)
+	}
+	binding, err = openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.DepAdd(step.ID, "gp-b1", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	if ready(step.ID) {
+		t.Fatalf("the binding offers %s, which waits on gp-b1, closed blocked", step.ID)
+	}
+
+	opts := reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}
+	rigBefore, bindingBefore := workStoreFingerprint(t, r.rig("packs")), workStoreFingerprint(t, r.binding())
+	want := step.ID + " -[blocks]-> gp-b1 (the binding, the store of rig packs)"
+	dry := opts
+	dry.DryRun = true
+	for _, run := range []reverseOptions{dry, opts} {
+		code, stdout, stderr := r.reverse(t, run)
+		if code == 0 || strings.Count(stderr, want) != 1 || !strings.Contains(stderr, "a blocker that has not released it") {
+			t.Fatalf("--to-rigs (dry run %v) over a step gp-b1 holds closed blocked = %d, want one refusal of %s: %s%s", run.DryRun, code, want, stdout, stderr)
+		}
+	}
+	if workStoreFingerprint(t, r.rig("packs")) != rigBefore || workStoreFingerprint(t, r.binding()) != bindingBefore || fileExists(storageReverseJournalPath(r.request.CityPath)) {
+		t.Fatal("a refused reverse wrote to the rig, the binding or its journal")
+	}
+	if !hasEdge(t, r.binding(), step.ID, "gp-b1") || ready(step.ID) {
+		t.Fatalf("after the refusal %s lost its edge onto gp-b1 or became ready", step.ID)
+	}
+
+	binding, err = openInfraDestination(r.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	if code, stdout, stderr := r.reverse(t, opts); code != 0 {
+		t.Fatalf("--to-rigs once the step is closed = %d: %s%s", code, stdout, stderr)
+	}
+	if got, err := r.rig("packs").Get("gp-b1"); err != nil || got.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeBlocked {
+		t.Fatalf("the rig's gp-b1 after the reverse = %+v, %v; want it back, closed blocked", got, err)
 	}
 }
 

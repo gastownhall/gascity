@@ -319,7 +319,7 @@ func planReverse(in reverseInput) reversePlan {
 	}
 	type edgeKey struct{ from, to string }
 	added := map[string]map[edgeKey]bool{}
-	var crossing, payloadBlocked []string
+	var crossing, held, payloadBlocked []string
 	addEdge := func(dest string, d beads.Dep, payload string) {
 		if added[dest] == nil {
 			added[dest] = map[edgeKey]bool{}
@@ -335,10 +335,19 @@ func planReverse(in reverseInput) reversePlan {
 		added[dest][key] = true
 		plan.Edges[dest] = append(plan.Edges[dest], beads.DepWithPayload{Dep: d, Payload: payload})
 	}
-	judge := func(d beads.Dep, payload, fromDest, toDest string, fromOpen, toOpen bool, why string) {
+	// judge refuses an edge that would cross stores while it still joins its
+	// rows (fromOpen, and toHolds from reverseEdgeHolds), listing a
+	// ready-blocking edge apart from the others, and drops and records any
+	// other edge.
+	judge := func(d beads.Dep, payload, fromDest, toDest string, fromOpen, toHolds bool, why string) {
 		edge := fmt.Sprintf("%s -[%s]-> %s", d.IssueID, d.Type, d.DependsOnID)
-		if fromOpen && toOpen {
-			crossing = append(crossing, fmt.Sprintf("%s (%s, %s)", edge, reverseDestNoun(fromDest), reverseDestNoun(toDest)))
+		if fromOpen && toHolds {
+			line := fmt.Sprintf("%s (%s, %s)", edge, reverseDestNoun(fromDest), reverseDestNoun(toDest))
+			if beads.IsReadyBlockingDependencyType(d.Type) {
+				held = append(held, line)
+			} else {
+				crossing = append(crossing, line)
+			}
 			return
 		}
 		plan.Dropped = append(plan.Dropped, edge+": "+why)
@@ -387,10 +396,10 @@ func planReverse(in reverseInput) reversePlan {
 			case moving && toDest == fromDest:
 				addEdge(fromDest, d, payload)
 			case moving:
-				judge(d, payload, fromDest, toDest, rigRowOpen(from), rigRowOpen(toRow), "it would cross stores, and one side is closed")
+				judge(d, payload, fromDest, toDest, rigRowOpen(from), reverseEdgeHolds(d, toRow), "it would cross stores, and one side is closed")
 			default:
 				// A row the binding keeps onto one that leaves (to-rigs).
-				judge(d, payload, "binding", toDest, rigRowOpen(from), rigRowOpen(toRow), "it would cross stores, and one side is closed")
+				judge(d, payload, "binding", toDest, rigRowOpen(from), reverseEdgeHolds(d, toRow), "it would cross stores, and one side is closed")
 			}
 		}
 	}
@@ -577,6 +586,8 @@ func planReverse(in reverseInput) reversePlan {
 		"restore the row's gc.migrated_cross_edges from a snapshot of the binding, then re-run")
 	refuse(crossing, "each edge joins two open rows that would land in different stores, and no cross-store edge is ever written",
 		"close one side (finish or cancel it), then re-run")
+	refuse(held, "each edge holds an open row behind a blocker that has not released it (open, or closed with gc.work_outcome=blocked), and the two would land in different stores: no cross-store edge is ever written, and dropping the edge would release the row",
+		"finish the blocker, or close the dependent, then re-run (a blocker closed blocked releases its dependents only once its work is done and gc.work_outcome no longer says blocked)")
 	refuse(payloadBlocked, "each edge carries a payload and its destination store cannot write one (native Dolt has no edge-payload writer yet)",
 		"keep the city split until a build whose store carries edge payloads, or close and remove the edge if it is no longer needed; nothing was written")
 	for dest := range plan.Edges {
@@ -722,6 +733,17 @@ func reverseGatesFor(byID map[string]beads.Bead, closed map[string]bool) map[bea
 		out[key] = append(out[key], id)
 	}
 	return out
+}
+
+// reverseEdgeHolds reports whether to, the row d points at, still holds d's row
+// to it: for a ready-blocking edge, a blocker that has not released its
+// dependents (open, or closed blocked: rigRowSatisfied), as readiness and the
+// forward migration judge it; for any other edge, an open row.
+func reverseEdgeHolds(d beads.Dep, to beads.Bead) bool {
+	if beads.IsReadyBlockingDependencyType(d.Type) {
+		return !rigRowSatisfied(to)
+	}
+	return rigRowOpen(to)
 }
 
 // reverseUndoesOverride reports whether restoring d, row -> blocker, the edge

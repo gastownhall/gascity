@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -739,37 +740,133 @@ func TestAbortReverseUnpinsTheSnapshot(t *testing.T) {
 
 // TestReverseKeepsACityTOMLEditedMidReverse (M18, M19): city.toml changed
 // after R4's edit makes the resume refuse and the abort refuse, and neither
-// touches the bytes.
+// touches the bytes. The abort refuses before its first delete, so it removes
+// no row and does not mark the reverse as being abandoned; an abort killed
+// after its deletes refuses the same way, without claiming it removed nothing.
+// Either way the remedy it prints finishes it: once [storage] is back by hand
+// as the split had it, the operator's own change kept, the abort keeps that
+// file, the work store is as it was, and the city reads as split again.
 func TestReverseKeepsACityTOMLEditedMidReverse(t *testing.T) {
-	for _, abort := range []bool{false, true} {
-		city := newReverseEngineCity(t, 60, "")
-		closeBindingGates(t, city)
-		killReverseAt(t, city, "reverse R4 config")
-		path := filepath.Join(city.cityPath, "city.toml")
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.WriteString("# the operator's edit\n"); err != nil {
-			t.Fatal(err)
-		}
-		_ = f.Close()
-		edited, _ := os.ReadFile(path)
-		var code int
-		var stderr, want string
-		if abort {
-			code, _, stderr = city.abort(t)
-			want = "changed since the reverse edited it"
-		} else {
-			code, _, stderr = city.reverse(t, reverseOptions{})
-			want = "changed while the reverse was under way"
-		}
-		if code == 0 || !strings.Contains(stderr, want) {
-			t.Fatalf("abort=%v over an edited city.toml = %d: %s, want %q", abort, code, stderr, want)
-		}
-		if got, _ := os.ReadFile(path); !bytes.Equal(got, edited) {
-			t.Fatalf("abort=%v changed the operator's city.toml", abort)
-		}
+	const edit = "# the operator's edit\n"
+	for _, tc := range []struct {
+		name string
+		// abort runs the abort over the edited file, not the resume; killed
+		// first kills an abort after its deletes, before the edit.
+		abort, killed bool
+	}{
+		{"resume", false, false},
+		{"abort", true, false},
+		{"abort killed after its deletes", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := newReverseEngineCity(t, 60, "")
+			closeBindingGates(t, city)
+			before := workStoreFingerprint(t, city.source)
+			killReverseAt(t, city, "reverse R4 config")
+			if tc.killed {
+				killAbortAt(t, city, "abort-reverse rows")
+			}
+			journal, _, err := readStorageReverseJournal(city.cityPath)
+			if err != nil || journal.CityTOMLBefore == nil {
+				t.Fatalf("the journal after R4's edit = %+v, %v; want city.toml's earlier bytes in it", journal, err)
+			}
+			path := filepath.Join(city.cityPath, "city.toml")
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(edit); err != nil {
+				t.Fatal(err)
+			}
+			_ = f.Close()
+			edited, _ := os.ReadFile(path)
+			rows := workStoreFingerprint(t, city.source)
+			var code int
+			var stderr, want string
+			if tc.abort {
+				code, _, stderr = city.abort(t)
+				want = "changed since the reverse edited it"
+			} else {
+				code, _, stderr = city.reverse(t, reverseOptions{})
+				want = "changed while the reverse was under way"
+			}
+			if code == 0 || !strings.Contains(stderr, want) {
+				t.Fatalf("%s over an edited city.toml = %d: %s, want %q", tc.name, code, stderr, want)
+			}
+			if got, _ := os.ReadFile(path); !bytes.Equal(got, edited) {
+				t.Fatalf("%s changed the operator's city.toml", tc.name)
+			}
+			if !tc.abort {
+				// The way out it names: the abort, which keeps the change.
+				for _, want := range []string{storageAbortReverseInstruction(), "keeps your change once the file declares the split's [storage]", "city_toml_before"} {
+					if !strings.Contains(stderr, want) {
+						t.Fatalf("the resume's refusal does not say %q: %s", want, stderr)
+					}
+				}
+				return
+			}
+			if got := workStoreFingerprint(t, city.source); got != rows {
+				t.Fatal("the refused abort removed rows")
+			}
+			if after, _, _ := readStorageReverseJournal(city.cityPath); after.Aborting != tc.killed {
+				t.Fatalf("after the refused abort the journal says aborting=%v, want %v", after.Aborting, tc.killed)
+			}
+			if strings.Contains(stderr, "Nothing was removed") == tc.killed {
+				t.Fatalf("the refusal of an abort killed=%v says whether it removed rows wrongly: %s", tc.killed, stderr)
+			}
+			for _, want := range []string{"put [storage] back as the split had it", "city_toml_before"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("the refusal does not say %q: %s", want, stderr)
+				}
+			}
+
+			// A [storage] that serves another root is not the split put back.
+			elsewhere := strings.Replace(*journal.CityTOMLBefore, `path = ".gc/store"`, `path = ".gc/elsewhere"`, 1)
+			if elsewhere == *journal.CityTOMLBefore {
+				t.Fatal("the fixture's city.toml names no binding path .gc/store")
+			}
+			if err := os.WriteFile(path, []byte(elsewhere+edit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if code, _, stderr := city.abort(t); code == 0 || !strings.Contains(stderr, "composes no [storage] that serves the binding") {
+				t.Fatalf("the abort over a [storage] serving another root = %d: %s", code, stderr)
+			}
+			if got := workStoreFingerprint(t, city.source); got != rows {
+				t.Fatal("the abort over a [storage] serving another root removed rows")
+			}
+
+			// The remedy it prints: [storage] back by hand, the edit kept.
+			restored := *journal.CityTOMLBefore + edit
+			if err := os.WriteFile(path, []byte(restored), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if code, stdout, stderr := city.abort(t); code != 0 {
+				t.Fatalf("the abort over a city.toml with [storage] back by hand = %d: %s%s", code, stdout, stderr)
+			}
+			if got, _ := os.ReadFile(path); string(got) != restored {
+				t.Fatalf("the abort did not keep the city.toml put back by hand:\n%s", got)
+			}
+			if got := workStoreFingerprint(t, city.source); got != before {
+				t.Fatal("the abort did not leave the work store as it was")
+			}
+			for _, p := range []string{bornSplitServedNotePath(city.cityPath), infraClearedNotePath(city.cityPath), city.target.MarkerPath()} {
+				if !fileExists(p) {
+					t.Fatalf("%s is gone after the abort", p)
+				}
+			}
+			for _, p := range []string{storageReverseJournalPath(city.cityPath), filepath.Join(city.target.Root, infraRevertingRecordName), filepath.Join(city.target.Root, infraReversedManifestName)} {
+				if fileExists(p) {
+					t.Fatalf("%s is left behind by the abort", p)
+				}
+			}
+			cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city.cityPath, io.Discard)
+			if err != nil || cfg.Storage == nil {
+				t.Fatalf("the city after the abort = %+v, %v; want it to declare [storage]", cfg, err)
+			}
+			if _, err := storageBootGate(city.cityPath, cfg, "gc start", nil, io.Discard); err != nil {
+				t.Fatalf("boot after the abort = %v, want the split served again", err)
+			}
+		})
 	}
 }
 

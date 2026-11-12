@@ -1639,9 +1639,13 @@ city and name both ways out:
   city is split again as it was. A store that would refuse one of those edges
   back (native Dolt, for an edge onto its own prefix, or for any edge payload)
   refuses the abort before anything is deleted; finish the reverse instead.
-  Once the abort has begun deleting, the reverse cannot be resumed: run the
-  abort again to finish it. Once R5 has renamed the binding root the reverse
-  can only be finished.
+  If you changed `city.toml` after R4 edited it, the abort keeps your change:
+  it refuses, before it deletes anything, until the file declares the split's
+  `[storage]` again. Put `[storage]` back as the split had it (the journal
+  `.gc/storage-reverse.json` holds the earlier file as `city_toml_before`)
+  and run the abort again. Once the abort has begun deleting, the reverse
+  cannot be resumed: run the abort again to finish it. Once R5 has renamed
+  the binding root the reverse can only be finished.
 
 Like the forward migration, the reverse and its abort refuse a work or rig
 store another registered city also uses, until `--force=shared-store:<token>`
@@ -1666,8 +1670,13 @@ It refuses, writing nothing, and names each bead and the fix:
 - an **open row the binding minted for a rig's scope** (D8): no reader reaches
   it on a single-store city. Finish or cancel its workflow; closed ones move to
   the city store;
-- an **edge joining two open rows that would land in different stores**:
-  close one side;
+- an **edge whose rows would land in different stores** while it still joins
+  them, since no cross-store edge is ever written. A blocking edge (`blocks`,
+  `waits-for`, `conditional-blocks`) holds its open row until the blocker is
+  finished: a blocker that is open, or closed with `gc.work_outcome=blocked`,
+  still holds it, so dropping the edge would release the row. Finish the
+  blocker, or close the dependent. Any other edge joins two open rows: close
+  one side;
 - an **edge payload** (a `waits_for` gate's) going into a store that cannot
   write one: native Dolt has no edge-payload writer yet. That includes an
   edge such a store already holds onto a row the reverse writes, which a
@@ -1772,8 +1781,8 @@ minted and those the runtime minted for them since, which carry no import
 stamp, and refuses an open one. A gate that a row the binding keeps still
 waits on stays there with that row, and a gate whose owner stays in the
 binding stays there as it is. Records the clear wrote on work beads stay on
-them. An edge the reverse drops (one that would cross stores with one side
-closed, or onto a row no store holds) is recorded as
+them. An edge the reverse drops (one that would cross stores once it no
+longer joins its rows, or one onto a row no store holds) is recorded as
 `gc.migrated_cross_edges` on the row it moves, so a later import can restore
 it.
 
