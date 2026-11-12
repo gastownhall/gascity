@@ -229,3 +229,30 @@ func TestReconcileSessionBeads_StartupHealthListFailureFailsOpenForAQuarantinedC
 		}
 	}
 }
+
+// TestReconcileSessionBeads_StartupHealthEpisodeIndexRefreshesEachTick pins
+// that the episode index lives in one reconcile call: a quarantine that holds
+// a candidate on one tick no longer holds it once its episode is cleared
+// before the next tick, so no index is carried across ticks.
+func TestReconcileSessionBeads_StartupHealthEpisodeIndexRefreshesEachTick(t *testing.T) {
+	env, counting, sessions := downCandidatesEnv(t, 1)
+	seedStartupHealthEpisodes(t, counting.Store,
+		sessionpkg.StartupHealthEpisode{SessionName: "worker-0", ConsecutiveCount: defaultMaxWakeAttempts, Kind: sessionpkg.FailureKindOther, QuarantinedUntil: env.clk.Now().Add(time.Hour)},
+	)
+
+	env.reconcile(sessions)
+	if startedSessionNames(env.sp)["worker-0"] {
+		t.Fatalf("worker-0 started on the first tick although its episode is in an active quarantine")
+	}
+
+	seedStartupHealthEpisodes(t, counting.Store, sessionpkg.ClearStartupHealthEpisode("worker-0"))
+	refreshed, err := counting.Get(sessions[0].ID)
+	if err != nil {
+		t.Fatalf("get worker-0 row: %v", err)
+	}
+
+	env.reconcile([]beads.Bead{refreshed})
+	if !startedSessionNames(env.sp)["worker-0"] {
+		t.Fatalf("worker-0 not started on the second tick although its episode was cleared: the index outlived its tick")
+	}
+}
