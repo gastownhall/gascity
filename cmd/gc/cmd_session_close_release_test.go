@@ -596,3 +596,26 @@ func TestCmdSessionCloseReleasesRemovedNamedIdentityClaims(t *testing.T) {
 
 	assertCloseClaimReleased(t, reopened, identityWork.ID, beadmeta.RunTargetMetadataKey)
 }
+
+// TestSessionCloseHelpDocumentsWorkRelease pins what `gc session close --help`
+// tells an operator about the session's assigned work: the closed
+// incarnation's work is released, a still-configured named session's
+// identity keeps its own, unserved work stays and is reported stranded, and
+// `gc session kill` is the way to keep the same session bead and assignments.
+func TestSessionCloseHelpDocumentsWorkRelease(t *testing.T) {
+	var discard bytes.Buffer
+	long := strings.Join(strings.Fields(newSessionCloseCmd(&discard, &discard).Long), " ")
+	for _, want := range []string{
+		"Open and in-progress work assigned to the closed session",
+		"is released",
+		"session's template",
+		"configured named identity and its runtime name",
+		"session.stranded_claims",
+		"gc session kill",
+		"same session bead",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("gc session close help is missing %q:\n%s", want, long)
+		}
+	}
+}
