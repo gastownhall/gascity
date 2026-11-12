@@ -292,8 +292,9 @@ func clearManagedDoltUnresponsiveStreak(layout managedDoltRuntimeLayout, write f
 }
 
 // clearProviderManagedDoltUnresponsiveStreak clears the streak after a
-// healthy provider check, using the strict layout the provider projects to
-// its recovery helper so both resolve the same history and lock.
+// healthy provider check, using the strict layout whose paths the provider
+// passes to its recovery helper through providerLifecycleDoltPathEnv, so both
+// resolve the same history and lock.
 func clearProviderManagedDoltUnresponsiveStreak(cityPath string) error {
 	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
 	if err != nil {
