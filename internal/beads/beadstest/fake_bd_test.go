@@ -162,3 +162,88 @@ func TestFakeBdModelsBdDefaultCloseReason(t *testing.T) {
 		}
 	}
 }
+
+// TestFakeBdKeepsTheCloseReasonColumnApartFromMetadata pins that the fake holds
+// bd's close_reason column apart from metadata.close_reason, as real bd does:
+// `bd close --reason X` writes only the column, so the metadata key stays the
+// input BdStore forwards as --reason and never a copy of bd's output. Reopen
+// clears the column, and a close given no reason stamps bd's default again.
+func TestFakeBdKeepsTheCloseReasonColumnApartFromMetadata(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	created, err := store.Create(beads.Bead{Title: "closed straight through bd", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	show := func(step string) (column string, metadataKey bool) {
+		t.Helper()
+		out, err := f.Run("", "bd", "show", "--json", created.ID)
+		if err != nil {
+			t.Fatalf("%s: show: %v", step, err)
+		}
+		var rows []struct {
+			CloseReason string            `json:"close_reason"`
+			Metadata    map[string]string `json:"metadata"`
+		}
+		if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("%s: show = %s, %v", step, out, err)
+		}
+		_, metadataKey = rows[0].Metadata["close_reason"]
+		return rows[0].CloseReason, metadataKey
+	}
+
+	if _, err := f.Run("", "bd", "close", "--json", created.ID, "--reason", "fixed in abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("close --reason"); column != "fixed in abc123" || leaked {
+		t.Errorf("after close --reason: column = %q, metadata.close_reason present = %v; want the column only", column, leaked)
+	}
+
+	if _, err := f.Run("", "bd", "reopen", "--json", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("reopen"); column != "" || leaked {
+		t.Errorf("after reopen: column = %q, metadata.close_reason present = %v; want neither", column, leaked)
+	}
+
+	if _, err := f.Run("", "bd", "close", "--json", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("close without a reason"); column != "Closed" || leaked {
+		t.Errorf("after a close with no reason: column = %q, metadata.close_reason present = %v; want bd's default and no key", column, leaked)
+	}
+}
+
+// TestFakeBdBackedCloseForwardsTheMetadataReasonToBd pins, through the fake,
+// that BdStore.Close forwards metadata.close_reason to bd as --reason: the
+// column bd answers with is the reason the caller wrote, not bd's default
+// "Closed". A BdStore.Close that stopped forwarding it would leave the column
+// at the default, and this test would fail where a fake echoing the metadata
+// back on its own would stay green.
+func TestFakeBdBackedCloseForwardsTheMetadataReasonToBd(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	created, err := store.Create(beads.Bead{Title: "close forwards its reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(created.ID, beads.UpdateOpts{Metadata: map[string]string{"close_reason": "shipped in def456"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.Run("", "bd", "show", "--json", created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []struct {
+		CloseReason string `json:"close_reason"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("show = %s, %v", out, err)
+	}
+	if rows[0].CloseReason != "shipped in def456" {
+		t.Errorf("bd close_reason column = %q, want the forwarded %q", rows[0].CloseReason, "shipped in def456")
+	}
+}
