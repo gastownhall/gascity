@@ -2041,6 +2041,15 @@ func supervisorSystemdServiceName() string {
 // (the managed Dolt server, the city tmux server and every agent pane).
 // Adaptive follows XPC activity, which gc never raises, so the job would sit
 // at background priority.
+//
+// ExitTimeOut bounds the SIGTERM-to-SIGKILL grace for a launchd-initiated
+// stop (bootout, logout, or the unload installSupervisorLaunchd runs when the
+// plist changes), so a preserve-mode stop is not killed after launchd's
+// default 5 s. 60 is the largest value launchd honored for this agent (a
+// requested 240 was capped at 60). The supervisor stops its cities one at a
+// time, each with [daemon] shutdown_timeout and then up to 5x that, so the
+// stops of several cities can still exceed it. A plist-change reload waits
+// for the old supervisor to stop, up to ExitTimeOut.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2057,6 +2066,8 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
