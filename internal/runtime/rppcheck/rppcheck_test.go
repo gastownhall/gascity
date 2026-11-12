@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -219,6 +220,98 @@ func TestRun_UnknownDeclaredCapabilityIgnored(t *testing.T) {
 	}
 	if hasCheck(res, "capability future-cap") {
 		t.Error("unknown capability produced a capability check")
+	}
+}
+
+// idle-boundary is a capability gc honors, so the handshake check must not
+// call it unknown; it promises no op of its own, so it adds no capability
+// check (gc runtime conformance checks it as RPP-CONN-002).
+// Kills: a token gc acts on reported as ignored.
+func TestRun_IdleBoundaryCapabilityIsKnown(t *testing.T) {
+	state := t.TempDir()
+	const from = `["report-attachment","report-activity"]`
+	script := conformantScript(state)
+	if !strings.Contains(script, from) {
+		t.Fatalf("conformant script declares no %s to extend", from)
+	}
+	body := strings.Replace(script, from, `["report-attachment","report-activity","idle-boundary"]`, 1)
+	res := runScript(t, body, Options{})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true with idle-boundary declared: %+v", res.Checks)
+	}
+	if c := findCheck(t, res, "protocol handshake"); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail = %q, want idle-boundary not reported as unknown", c.Detail)
+	}
+	if hasCheck(res, "capability idle-boundary") {
+		t.Error("idle-boundary produced a capability check")
+	}
+}
+
+// A pack declaring proc.exec, report-activity and report-attachment without
+// idle-boundary is in a recognizable migration state: it passes, but is told
+// gc gives it no idle wait. Declaring idle-boundary, or not declaring all
+// three, silences the warning.
+// Kills: a pack that silently drops to timed_only sleep (gh#8903).
+func TestRun_WarnsOnTheTripleWithoutIdleBoundary(t *testing.T) {
+	const from = `["report-attachment","report-activity"]`
+	for _, tc := range []struct {
+		caps string
+		warn bool
+	}{
+		{`["report-attachment","report-activity","proc.exec"]`, true},
+		{`["report-attachment","report-activity","proc.exec","idle-boundary"]`, false},
+		{`["report-attachment","report-activity"]`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.caps, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.caps, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, idleBoundaryMigrationWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want migration warning %v", tc.caps, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.caps, detail)
+		}
+	}
+}
+
+// fs.host narrows locality local: a handshake declaring it without
+// "locality": "local" passes, but is told gc reads fs.host as undeclared and
+// does no host work for it. With locality local, fs.host is a token gc
+// honors, not an unknown one.
+// Kills: a pack whose fs.host gc silently ignores.
+func TestRun_WarnsOnFSHostWithoutLocalityLocal(t *testing.T) {
+	const from = `{"version":0,"capabilities":["report-attachment","report-activity"]}`
+	for _, tc := range []struct {
+		handshake string
+		warn      bool
+	}{
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"]}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"remote"}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"local"}`, false},
+		{`{"version":0,"capabilities":["report-attachment","report-activity"],"locality":"local"}`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.handshake, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.handshake, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, fsHostWithoutLocalityWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want the fs.host locality warning %v", tc.handshake, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.handshake, detail)
+		}
 	}
 }
 
@@ -735,4 +828,69 @@ func TestRun_ObserveV1ChecksSkippedWhenStartFails(t *testing.T) {
 func minimalResult(t *testing.T) Result {
 	t.Helper()
 	return runScript(t, minimalScript(t.TempDir()), Options{})
+}
+
+// Kills a smoke check that does not run, or does not gate, the server-stop a
+// script declaring server-lifecycle owes: the golden passes both checks; a
+// server-stop that is not implemented, leaves the session running, or fails
+// the second time fails its check; and an undeclared script is not sent it.
+func TestRun_ServerLifecycleSmoke(t *testing.T) {
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{serverStopCheck, serverStopIdempotentCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	for check, body := range map[string]string{
+		serverStopCheck + " (exit 2)":           `exit 2`,
+		serverStopCheck + " (leaves a session)": `:`,
+		serverStopIdempotentCheck:               `if [ -f "$S/server-stopped" ]; then exit 1; fi; : > "$S/server-stopped"; rm -rf "$B"`,
+	} {
+		res, err := Run(context.Background(), observeReference(t, map[string]string{"server-stop": body}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
+			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
+		}
+	}
+	if hasCheck(minimalResult(t), serverStopCheck) {
+		t.Error("a script without server-lifecycle reports a server-stop check")
+	}
+}
+
+// Kills a server-stop smoke check run in the city the check inherited: gc
+// runtime check run from a city must leave that city's sessions running,
+// though the golden's server-stop, like a city-scoped pack's, ends every
+// session of the city it runs in.
+func TestRun_ServerStopSparesTheCallersCity(t *testing.T) {
+	script := observeReference(t, nil)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+	const sentinel = "live-city-sentinel"
+	if out, err := scriptOp(script, `{"command":"sleep 300"}`, "start", sentinel); err != nil {
+		t.Fatalf("starting %s in the caller's city: %v (%s)", sentinel, err, out)
+	}
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, serverStopCheck); c.Status != StatusPass {
+		t.Fatalf("%s = %s (%s), want PASS: the check must run server-stop", serverStopCheck, c.Status, c.Detail)
+	}
+	if out, err := scriptOp(script, "", "is-running", sentinel); err != nil || out != "true" {
+		t.Fatalf("%s in the caller's city: is-running = %q (%v) after the check, want true: the check's server-stop ended a session of the city it was run from", sentinel, out, err)
+	}
+}
+
+// scriptOp runs one op of script in the test's environment, the city a check
+// started from it inherits.
+func scriptOp(script, stdin string, args ...string) (string, error) {
+	cmd := exec.Command(script, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
 }

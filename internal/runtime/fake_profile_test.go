@@ -213,8 +213,8 @@ func execV2Pack(t *testing.T) string {
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
 // fencing, response fencing, local transcripts, a steer mode, observable
-// identity, v2 readiness, an available inventory, an attested listing), or
-// no backend checked.
+// identity, v2 readiness, an available inventory, an attested listing, a
+// process-table scan), or no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
@@ -239,7 +239,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -282,6 +282,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.ListingAttestation); ok {
 		out[13] = strconv.FormatBool(f.ListRunningComplete())
+	}
+	if f, ok := p.(runtime.ConditionalProcessTableScanner); ok {
+		out[14] = strconv.FormatBool(f.CanScanProcessTable())
 	}
 	return strings.Join(out, " ")
 }

@@ -42,7 +42,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers, and on gc's host for an exec runtime\nwhose handshake declares fs.host with locality local. Template variables\nsame as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "prompt_template": {
           "type": "string",
@@ -717,6 +717,13 @@
         "version": {
           "type": "string",
           "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
+        },
+        "agents_exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AgentsExclude removes named agent templates from this import edge.\nSelectors are matched against each agent's local name before the import\nbinding is applied; other imported resources remain visible."
         }
       },
       "additionalProperties": false,

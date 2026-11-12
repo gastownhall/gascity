@@ -122,6 +122,9 @@ type snapshotOptions struct {
 	// IfBound makes a city with no binding a successful no-op (the order). It
 	// goes with --binding alone.
 	IfBound bool
+	// NoRetention keeps every earlier snapshot: the reverse's mandatory one
+	// (R0) must not prune an older one, the pre-split snapshot among them.
+	NoRetention bool
 }
 
 // storageSnapshotDefaultDir is .gc/snapshots: under .gc, so `gc init --from`
@@ -287,17 +290,33 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 		}
 		defer w.closeReporting(logPrefix, stderr, &code)
 	}
-
-	to, err := filepath.Abs(opts.To)
+	_, retention, err := takeStorageSnapshot(ctx, request, opts, target, identity, stdout, stderr, logPrefix)
 	if err != nil {
 		return fail(err)
 	}
+	if retention != nil {
+		code = 1
+	}
+	return code
+}
+
+// takeStorageSnapshot writes one snapshot of what opts names into opts.To,
+// applies retention and reports it, and returns its id. The caller holds the
+// migration guard and, for the work store or the rigs, the controller lock
+// and the maintenance window: `gc storage snapshot`, and the reverse
+// migration's mandatory snapshot (R0), which holds them for its whole run. A
+// retention failure is reported and returned apart: the snapshot stands.
+func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts snapshotOptions, target infraBindingTarget, identity workStoreIdentity, stdout, stderr io.Writer, logPrefix string) (id string, retention, err error) {
+	to, err := filepath.Abs(opts.To)
+	if err != nil {
+		return "", nil, err
+	}
 	if err := os.MkdirAll(to, 0o755); err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	dirLock, err := lockSnapshotDir(to)
 	if err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	defer dirLock.Close() //nolint:errcheck // releases the flock
 	// Interrupted snapshots go first, so the space they held is counted free.
@@ -306,18 +325,18 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 		fmt.Fprintf(stdout, "removed the interrupted snapshot %s\n", filepath.Join(to, name)) //nolint:errcheck // best-effort stdout
 	}
 	if err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	if opts.Binding {
 		if err := snapshotDiskPreflight(to, target.Database, logPrefix, stderr); err != nil {
-			return fail(err)
+			return "", nil, err
 		}
 	}
 
 	now := time.Now().UTC()
-	id, err := newSnapshotID(to, now)
+	id, err = newSnapshotID(to, now)
 	if err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	dir := filepath.Join(to, id)
 	manifest := snapshotManifest{
@@ -331,7 +350,7 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 		Notes:           []string{snapshotJSONLNote},
 	}
 	if err := os.Mkdir(dir, 0o755); err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	published := false
 	defer func() {
@@ -349,37 +368,39 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 	if opts.Binding {
 		records, err := readSnapshotBindingRecords(request.CityPath, target)
 		if err != nil {
-			return fail(err)
+			return "", nil, err
 		}
 		manifest.Binding = &records
 		err = add(snapshotBinding(ctx, target, dir))
 		if err != nil {
-			return fail(err)
+			return "", nil, err
 		}
 	}
 	if opts.Work {
 		if err := add(snapshotScope(request, snapshotScopeRef{name: "work", root: request.CityPath}, snapshotTagName(id, to), dir)); err != nil {
-			return fail(err)
+			return "", nil, err
 		}
 	}
 	if opts.Rigs {
 		for _, rig := range snapshotRigs(request) {
 			if err := add(snapshotScope(request, rig, snapshotTagName(id, to), dir)); err != nil {
-				return fail(err)
+				return "", nil, err
 			}
 		}
 	}
 	if err := publishSnapshotManifest(ctx, dir, manifest); err != nil {
-		return fail(err)
+		return "", nil, err
 	}
 	published = true
-	removed, err := applySnapshotRetention(to, opts.Keep, id, snapshotOwner{City: request.CityPath, Identity: identity})
+	var removed []string
+	if !opts.NoRetention {
+		removed, retention = applySnapshotRetention(to, opts.Keep, id, snapshotOwner{City: request.CityPath, Identity: identity})
+	}
 	for _, name := range removed {
 		fmt.Fprintf(stdout, "removed %s\n", filepath.Join(to, name)) //nolint:errcheck // best-effort stdout
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: retention: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		code = 1
+	if retention != nil {
+		fmt.Fprintf(stderr, "%s: retention: %v\n", logPrefix, retention) //nolint:errcheck // best-effort stderr
 	}
 	fmt.Fprintf(stdout, "Snapshot %s written to %s:\n", id, dir) //nolint:errcheck // best-effort stdout
 	for _, rec := range manifest.Stores {
@@ -388,7 +409,7 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 			fmt.Fprintf(stdout, "             note: %s\n", note) //nolint:errcheck // best-effort stdout
 		}
 	}
-	return code
+	return id, retention, nil
 }
 
 func describeSnapshotExact(e snapshotExact) string {

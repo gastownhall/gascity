@@ -97,7 +97,7 @@ func TestAuthorshipKeepsTheRecordedDecisions(t *testing.T) {
 			SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest, SupervisorFSPressureSkippedTick,
 			CitySuspended, CityResumed, CityCreated, CityUnregisterRequested,
 			StorageBindingConverged, StorageBindingGenesis, StorageBindingUnconverged,
-			StorageBindingUncheckable, StorageBindingNotConfigured,
+			StorageBindingUncheckable, StorageBindingNotConfigured, StorageBindingStranded,
 			SessionWoke, SessionCrashed, SessionQuarantined, SessionIdleKilled, SessionMaxAgeKilled,
 		},
 		AuthorWorker: {

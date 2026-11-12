@@ -869,6 +869,10 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
+	// AgentsExclude removes named agent templates from this import edge.
+	// Selectors are matched against each agent's local name before the import
+	// binding is applied; other imported resources remain visible.
+	AgentsExclude []string `toml:"agents_exclude,omitempty"`
 	// Export is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Export bool `toml:"export,omitempty" jsonschema:"-"`
@@ -914,12 +918,15 @@ func (imp *Import) ImportIsTransitive() bool {
 
 // HasDefaultOptionSemantics reports whether the import carries the
 // default option semantics: not exported, transitive resolution enabled,
-// and shadow handling empty or "warn". This is the option half of the
+// shadow handling empty or "warn", and no agent narrowing. This is the option half of the
 // reuse policy composition applies when deciding whether an existing
 // same-source binding can stand in for a converted legacy include
 // (existingDefaultImportBindingForSource); the doctor migration's
 // same-source dedup shares it so the two policies cannot drift.
 func (imp *Import) HasDefaultOptionSemantics() bool {
+	if len(imp.AgentsExclude) > 0 {
+		return false
+	}
 	if imp.Export {
 		return false
 	}
@@ -3721,7 +3728,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.

@@ -41,6 +41,7 @@ go_test(
         "residency_fixtures_test.go",
         "resolve_test.go",
         "storeref_test.go",
+        "stores_plan_t7b1_test.go",
         "stores_plan_test.go",
         "stores_rigs_test.go",
         "stores_test.go",

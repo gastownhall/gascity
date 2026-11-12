@@ -26,6 +26,7 @@ go_test(
         "close_reason_test.go",
         "convoy_fields_test.go",
         "convoy_test.go",
+        "membership_on_test.go",
         "testenv_import_test.go",
     ],
     embed = [":convoy"],

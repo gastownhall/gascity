@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -58,6 +58,24 @@ type Provider struct {
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
 	readyPrompts sync.Map
+
+	// setupTimeout and setupMaxTimeout budget each host pre_start and
+	// session_setup command gc runs for a pack sharing the host filesystem
+	// (hoststage.go; WithSetupTimeouts). setupWarnings receives the non-fatal
+	// diagnostics of that work; nil is os.Stderr.
+	setupTimeout    time.Duration
+	setupMaxTimeout time.Duration
+	setupWarnings   io.Writer
+
+	// scanListingTimeout bounds the listing the orphan sweep's
+	// process-table scan reads to track its roots (process_scan.go); zero
+	// is defaultScanListingTimeout.
+	scanListingTimeout time.Duration
+
+	// hostSetupDue holds the names whose `provision` config gc stripped of
+	// its host work (provisionBox), so the launch that follows runs their
+	// session_setup on the host (execTransport.Launch).
+	hostSetupDue sync.Map
 }
 
 type startupWatchEvent struct {
@@ -71,44 +89,50 @@ const startupWatchCloseTimeout = 200 * time.Millisecond
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
-func NewProvider(script string) *Provider {
-	return &Provider{
+func NewProvider(script string, opts ...Option) *Provider {
+	p := &Provider{
 		script:       script,
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
+		setupTimeout: defaultSetupTimeout,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // NewProviderForCity returns an exec [Provider] for the given script that
 // runs every op with GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH set to the city
 // it serves, so a script shared by several cities on one backend can scope
 // its boxes and listings to this one.
-func NewProviderForCity(script, cityName, cityPath string) *Provider {
-	p := NewProvider(script)
+func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Provider {
+	p := NewProvider(script, opts...)
 	p.cityName, p.cityPath, p.citySet = cityName, cityPath, true
 	return p
 }
 
 // cityEnv returns the env an op of a provider built for a city runs with:
-// gc's environment, read through execenv.Environ, plus the city. It is nil
-// otherwise, so the op inherits gc's environment unchanged. Read it before
-// arming the op's deadline: execenv.Environ waits out an in-flight native
-// store open, and that wait is not the op's.
+// gc's environment, read through execenv.Environ without a session's
+// identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
+// it before arming the op's deadline: execenv.Environ waits out an
+// in-flight native store open, and that wait is not the op's.
 func (p *Provider) cityEnv() []string {
 	if !p.citySet {
 		return nil
 	}
-	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+	return append(sessionlessEnviron(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
 }
 
 // opEnv returns the env a bounded op runs with: cityEnv for a provider built
-// for a city, else gc's environment read through execenv.Environ. Like
-// cityEnv, read it before arming the op's deadline.
+// for a city, else gc's environment read through execenv.Environ, without
+// a session's identity (sessionlessEnviron). Like cityEnv, read it before
+// arming the op's deadline.
 func (p *Provider) opEnv() []string {
 	if env := p.cityEnv(); env != nil {
 		return env
 	}
-	return execenv.Environ()
+	return sessionlessEnviron()
 }
 
 // withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
@@ -285,7 +309,8 @@ func (e *opExitError) Unwrap() error { return e.err }
 // start (a pack that cannot start is not a provider), provision (it runs only
 // for a pack that declared proc.provision), is-attached (it runs only for a
 // pack that declared report-attachment; [Provider.IsAttachedWithError]
-// reports its failure as "could not tell"), and the observe.v1 ops. strict
+// reports its failure as "could not tell"), the observe.v1 ops, and
+// server-stop (it runs only for a pack that declared server-lifecycle). strict
 // is a v2-ready script's exit 2 from an op observe.v1 obliges it to
 // implement, which fails as strictExitTwo maps it. A start-op name collision
 // maps to [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail]
@@ -310,7 +335,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object":
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false
@@ -360,7 +385,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	cmd.Env = p.cityEnv()
+	cmd.Env = p.opEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -375,6 +400,15 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 //
+// For a pack sharing the host filesystem, Start first stages the work dir
+// and runs pre_start on the host (fatal: no box is created), leaves that
+// work out of the start config, and runs session_setup on the host once the
+// agent is up (hoststage.go). It does that host work only into a name the
+// pack reports holding no live box (vacant, or held by a dead box the start
+// recycles): into a name a running box holds it would re-run pre_start in a
+// live session's work dir, and a name whose occupancy read fails may be
+// one, so there it sends the full config instead.
+//
 // A [runtime.Config.FreshOnly] start is startFresh's.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if cfg.FreshOnly {
@@ -385,12 +419,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
 	// question the teardown below actually depends on.
-	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
+	before := p.readOccupancy(name)
+	occupiedBefore, occupancyKnown := before.occupied, before.definite
 	foreignBox := occupancyKnown && occupiedBefore
 
-	data, err := marshalStartConfig(cfg)
+	hostWork := before.holdsNoLiveBox() && p.sharesHostFS()
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
+		return err
 	}
 	var saved savedPaneFence
 	if !occupancyKnown || occupiedBefore {
@@ -410,6 +446,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
+	}
+	if hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
 	}
 	return nil
 }
@@ -486,18 +525,29 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // provisionBox creates the box for name. When the pack supports a separable
 // launch it runs the `provision` op (box + staging + pre_start, NO agent); the
 // agent is launched separately by launchAgent. Otherwise it falls back to the
-// welded Start (which both provisions and launches). (Un-weld B3b.)
+// welded Start (which both provisions and launches). (Un-weld B3b.) For a pack
+// sharing the host filesystem, and as in Start only into a name the pack
+// reports holding no live box, the host work precedes `provision` and is
+// left out of its config; session_setup then follows the launch
+// (execTransport.Launch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
-	data, err := marshalStartConfig(cfg)
+	p.hostSetupDue.Delete(name)
+	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+		return err
 	}
-	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
-	return err
+	if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+		return err
+	}
+	if hostWork {
+		p.hostSetupDue.Store(name, struct{}{})
+	}
+	return nil
 }
 
 // launchAgent starts the agent in the in-box tmux session over the `exec` op, for
@@ -544,14 +594,23 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
 // ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// the agent in the warm box over the exec op (launchAgent) — no reprovision —
+// and, for a pack sharing the host filesystem, then runs session_setup on the
+// host again, as the launch after provision does and as tmux re-runs it on a
+// relaunch. Pre_start and staging are not redone: the box is warm. A
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
 // degrades to a full reprovision (Stop+Start), which is still correct. On a
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.supportsSeparableLaunch() {
-		return p.launchAgent(ctx, name, cfg)
+		if err := p.launchAgent(ctx, name, cfg); err != nil {
+			return err
+		}
+		if p.sharesHostFS() {
+			p.runHostSessionSetup(ctx, name, cfg)
+		}
+		return nil
 	}
 	if err := p.Stop(name); err != nil {
 		return err
@@ -918,14 +977,43 @@ func (p *Provider) IsRunning(name string) bool {
 // A caller deciding whether it may destroy the box needs the distinction:
 // "no" authorizes a teardown, "I don't know" must not.
 func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
+	o := p.readOccupancy(name)
+	return o.occupied, o.definite
+}
+
+// occupancy is one read of whether a box holds a name: occupied by a live
+// or a dead box, live only by a running one, and definite when the pack
+// answered.
+type occupancy struct {
+	occupied, live, definite bool
+}
+
+// holdsNoLiveBox reports a definite answer that no running box holds the
+// name: it is vacant, or held only by a dead box.
+func (o occupancy) holdsNoLiveBox() bool {
+	return o.definite && !o.live
+}
+
+// readOccupancy reads boxOccupancy's answer, telling a running box from a
+// dead one where the pack can: on a v2-ready pack from `observe`; otherwise
+// `is-running`, whose true is taken as a live box.
+func (p *Provider) readOccupancy(name string) occupancy {
 	if p.v2Ready() {
 		o, err := p.observe(context.Background(), name, nil)
 		if err != nil {
-			return false, false
+			return occupancy{}
 		}
-		return o.present(), true
+		return occupancy{occupied: o.present(), live: o.state == stateRunning, definite: true}
 	}
-	return p.isRunningOp(name)
+	running, definite := p.isRunningOp(name)
+	return occupancy{occupied: running, live: running, definite: definite}
+}
+
+// holdsNoLiveBox reports whether the pack definitely reports no live box
+// holding name: vacant, or held by a dead box, which a start recycles. A
+// failed read reports nothing: the name may be held by a live session.
+func (p *Provider) holdsNoLiveBox(name string) bool {
+	return p.readOccupancy(name).holdsNoLiveBox()
 }
 
 // isRunningOp asks `is-running <name>` and reports both the answer and
@@ -1124,9 +1212,10 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 }
 
 // SleepCapability reports the idle-sleep capability the pack's handshake
-// supports. A pack that declares report-activity, report-attachment and
-// proc.exec gets full idle sleep: it has an activity clock, an attachment
-// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// supports. A pack that declares report-activity, report-attachment, proc.exec
+// and idle-boundary gets full idle sleep: it has an activity clock, an
+// attachment probe, and an idle boundary read from its in-box tmux pane
+// (WaitForIdle).
 // Every other pack keeps the timed-only floor. The floor is never disabled:
 // non-interactive sleep and the queued-nudge poller rely on timed-only for
 // exec runtimes that report no activity.
