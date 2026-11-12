@@ -209,3 +209,25 @@ func TestScanErrorLogSharedConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// TestScanErrorLogInstancesReportIndependently (ga-zpcphq): the sweep and
+// the start path each hold their own ScanErrorLog; one's observation never
+// suppresses the other's report, and within one instance one key's report
+// never paces another's.
+func TestScanErrorLogInstancesReportIndependently(t *testing.T) {
+	sweep, start := &ScanErrorLog{}, &ScanErrorLog{}
+	err := entryScanError("reading environ for pid PID: permission denied", 31)
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	if !sweep.Report("/city", err, now) {
+		t.Fatal("the sweep's first report = false, want true")
+	}
+	if sweep.Report("/city", err, now.Add(time.Minute)) {
+		t.Fatal("the sweep's unchanged repeat = true, want suppressed")
+	}
+	if !start.Report("/city", err, now.Add(time.Minute)) {
+		t.Fatal("the start path's report = false, want true: separate instances keep their own state")
+	}
+	if !sweep.Report("/other-city", err, now.Add(2*time.Minute)) {
+		t.Fatal("another key's report = false, want true")
+	}
+}
