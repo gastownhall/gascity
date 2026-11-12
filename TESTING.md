@@ -352,8 +352,8 @@ re-probe cadence (`TestLaneHostReprobesBusyRuntimeWithoutRows`,
 `TestLaneWorkerNextDelay`) and the wake at a boundary's quiescence deadline
 (`TestLaneHostBusyBoundaryWakesAtItsDeadline` on a fake clock,
 `TestPlanTakeBoundaryHint`, `TestLaneExecProbeBoundaryAt`) are pinned by
-deterministic unit tests, and the always-on ceiling and drain bound fail a run where a notice
-stalls. #8240 stays the tracking issue.
+deterministic unit tests, and the always-on ceiling and drain bound fail a run
+where a notice stalls. #8240 stays the tracking issue.
 
 ### Git auto-maintenance in test repos
 
