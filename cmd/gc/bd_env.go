@@ -238,8 +238,10 @@ var errBdNotOnPath = errors.New("bd not found in PATH")
 
 // resolveBdBinaryForScope resolves the bd executable a scope's commands run.
 // The city scope and rigs that inherit its backend use the workspace pin so
-// every command speaks the same schema as the managed runtime. A rig that
-// explicitly overrides the city backend keeps the ambient lookup unless it
+// every command speaks the same schema as the managed runtime. A rig whose
+// metadata names the dolt backend but whose endpoint is inherited from the
+// city is served by the city's managed Dolt and so inherits the pin too. A rig
+// that explicitly overrides the city backend keeps the ambient lookup unless it
 // carries a complete storage binding of its own. An ambient miss is
 // errBdNotOnPath so callers can phrase their own remediation; a configured
 // but unresolvable pin is returned verbatim rather than masked as a missing
@@ -249,7 +251,8 @@ func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot)
+	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot) ||
+		scopeInheritsCityDoltEndpoint(cityPath, scopeRoot)
 	if bound || usesCityBackend {
 		pinned, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
@@ -1048,6 +1051,19 @@ func scopeBackendIsDoltlite(cityPath, scopeRoot string) bool {
 	}
 	return resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity &&
 		cityUsesDoltliteBeadsBackend(cityPath)
+}
+
+// scopeInheritsCityDoltEndpoint reports whether a rig whose metadata names the
+// dolt backend still takes its endpoint from the city's managed Dolt, so its
+// metadata backend is a restatement of the city's rather than an override.
+func scopeInheritsCityDoltEndpoint(cityPath, scopeRoot string) bool {
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !ok || strings.TrimSpace(meta.Backend) != "dolt" {
+		return false
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	return err == nil && resolved.Kind == contract.ScopeConfigAuthoritative &&
+		resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity
 }
 
 func scopeOverridesCityBackend(cityPath, scopeRoot string) bool {

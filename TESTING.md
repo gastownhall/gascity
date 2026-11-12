@@ -1177,6 +1177,24 @@ its `cmd/product-check`, which is stdlib-only and quick. It measures only
 when the change touches the worker host. product-check is skipped if H5 or
 the fetch failed, and still runs if the measurement failed.
 
+### Setup download mirror (RBE_DIST_MIRROR)
+
+Each pool VM downloads three pinned artifacts in setup: NativeLink, Go and
+dolt. rbe-worker's `worker/rbe-fetch` retries each download. If the
+repository variable `RBE_DIST_MIRROR` (the fork pool: `RBE_FORK_DIST_MIRROR`)
+is `https://rbe-warm.ops.gascity.com/dist`, it tries the copy on rbe-west's
+warm bucket first (infra `nativelink-cas/west` README, "Pinned setup
+downloads on R2"). The copy is transport only: every file is checked against
+the sha256 pinned in the rbe-worker tree, and a miss or mismatch falls back
+to upstream. The pool workflows pass the variable to their measure and
+worker steps, `rbe-worker-legacy.yml` does the same, and
+`rbe-worker-env-canary.yml` passes it to its measure step. Unset, every
+download comes from upstream, still retried. Before a pin bump that moves
+NativeLink, Go (`go.mod`) or dolt, the core's `rbe-dist-publish.sh` puts the
+new artifact on the mirror; until it does, workers fall back to upstream.
+Each VM prints one `rbe-fetch:` line per artifact (`source=mirror|upstream`,
+`mirror=hit|off|miss|bad-sha256`). To roll back, unset the variable.
+
 ### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
 
 Before the fork pool reads big blobs from rbe-west's R2 hot tier
@@ -1719,6 +1737,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-12-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext: subprocess | ga-cp3hwi | doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server | P0.4b | 2026-12-31 |
 | Medium owner | `internal/hooks` package `hooks` | TestProviderPluginNodeSuite: subprocess | ga-cp3hwi | the embedded provider-plugin behavior proof is a checked Medium subprocess owner; the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce | P0.4b | 2026-12-31 |
+| Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-12-31 |
@@ -1734,6 +1753,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModVerifyCacheDetectsTamperedModules: subprocess | ga-cp3hwi | the CI Go module cache verification proof is a checked Medium subprocess owner; the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts | P0.4b | 2026-12-31 |
+| Medium owner | `scripts` package `scripts_test` | TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure: subprocess | ga-6hg5mi | the install-oapi-codegen retry proof is a checked Medium subprocess owner; the make subprocess is confined to TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure, which exists to exercise the install-oapi-codegen recipe end to end: a Make recipe is shell, so only a real make run against a PATH-injected fake go can prove the retry and fail-closed paths | P0.4b | 2026-12-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-12-31 |
 | Medium owner | `tools/nogo/nolinttest` package `nolinttest_test` | TestNolintNeverSuppressesStoreclass: subprocess | ga-cp3hwi | the storeclass nolint-suppression proof is a checked Medium subprocess owner; the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding | P0.4b | 2026-12-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-12-31 |

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -39,8 +38,11 @@ const (
 	// its path and without blocking on a FIFO or device there (openFile then
 	// refuses anything but a regular file), and for reading too, so the
 	// copier reads the mirror's tail through the handle it appends with.
-	mirrorOpenFlags = os.O_RDWR | os.O_APPEND | os.O_CREATE | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+	mirrorOpenFlags = os.O_RDWR | os.O_APPEND | os.O_CREATE
 )
+
+// errMirrorLockHeld reports that another process holds the mirror lock.
+var errMirrorLockHeld = errors.New("another process is mirroring this event log")
 
 // MirrorOptions configures a mirror of the event log: a second JSONL file,
 // outside the city's .gc directory, that receives a copy of every event line
@@ -341,7 +343,7 @@ func (m *eventMirror) run(ctx context.Context) {
 // ctx ends first.
 func (m *eventMirror) acquireLock(ctx context.Context) (func(), bool) {
 	for {
-		lock, err := tryLockFile(m.canonical + ".mirror.lock")
+		release, err := tryLockMirror(m.canonical + ".mirror.lock")
 		if err == nil {
 			if m.failing {
 				// The wait was reported; say that it ended.
@@ -349,31 +351,13 @@ func (m *eventMirror) acquireLock(ctx context.Context) (func(), bool) {
 				m.failing = false
 				m.suppressed = 0
 			}
-			return func() {
-				_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-				_ = lock.Close()
-			}, true
+			return release, true
 		}
 		m.reportFailure(fmt.Errorf("waiting for the mirror lock: %w", err))
 		if !sleepCtx(ctx, m.opts.RetryInterval) {
 			return nil, false
 		}
 	}
-}
-
-func tryLockFile(path string) (*os.File, error) {
-	lock, err := openLockFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lock.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, errors.New("another process is mirroring this event log")
-		}
-		return nil, err
-	}
-	return lock, nil
 }
 
 // copyOnce opens the mirror, resumes after the last event it holds, and
@@ -443,9 +427,9 @@ func (m *eventMirror) resumeSeq() (uint64, error) {
 // file with no other name (see checkOpened). A torn last line (a write cut
 // short) is closed with a newline so the next event starts on its own line.
 func (m *eventMirror) openFile() error {
-	f, err := os.OpenFile(m.opts.Path, mirrorOpenFlags, m.opts.Mode)
+	f, err := openMirrorPath(m.opts.Path, mirrorOpenFlags, m.opts.Mode)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
+		if isMirrorSymlinkRefusal(err) {
 			return fmt.Errorf("opening: %w (gc writes the mirror only as a regular file, never through a symbolic link)", err)
 		}
 		return fmt.Errorf("opening: %w", err)
@@ -499,8 +483,8 @@ func (m *eventMirror) checkOpened(f *os.File) (os.FileInfo, error) {
 	if err == nil && os.SameFile(info, canon) {
 		return nil, fmt.Errorf("the path names the canonical event log %s itself", m.canonical)
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
-		return nil, fmt.Errorf("the file has %d hard links; gc writes the mirror only as a file with no other name", st.Nlink)
+	if nlink, ok := mirrorLinkCount(f, info); ok && nlink > 1 {
+		return nil, fmt.Errorf("the file has %d hard links; gc writes the mirror only as a file with no other name", nlink)
 	}
 	return info, nil
 }
@@ -626,7 +610,7 @@ func (m *eventMirror) reportRecovered() {
 // regular file at path (see lastSeqInHandle), or 0 when it is absent. Like the
 // mirror itself, it does not follow a symbolic link at path.
 func lastSeqInFile(path string) (uint64, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openMirrorPath(path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil

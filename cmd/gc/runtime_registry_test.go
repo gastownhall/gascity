@@ -474,3 +474,79 @@ func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
 		t.Errorf("config.DefaultACPCancelTimeout = %v, want sessionacp.DefaultCancelTimeout (%v): the documented default must match the provider's own", config.DefaultACPCancelTimeout, sessionacp.DefaultCancelTimeout)
 	}
 }
+
+// writeFSHostScript writes an exec runtime whose `protocol` answers
+// handshake; `start` records that it ran, and `is-running` answers false.
+func writeFSHostScript(t *testing.T, handshake string) (script, startedMarker string) {
+	t.Helper()
+	dir := t.TempDir()
+	script = filepath.Join(dir, "gc-runtime")
+	startedMarker = filepath.Join(dir, "started")
+	body := "#!/bin/sh\ncase \"$1\" in\n" +
+		"  protocol) echo '" + handshake + "' ;;\n" +
+		"  start) cat >/dev/null; : > '" + startedMarker + "' ;;\n" +
+		"  is-running) echo false ;;\n" +
+		"  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, startedMarker
+}
+
+// TestExecRuntimeHostCapabilitiesReadTheHandshake pins the exec answer the
+// skill and MCP gates read: both capabilities exactly when the script's own
+// handshake shares the host filesystem (locality=local with fs.host), none
+// for a container on the host (locality alone), fs.host without locality, or
+// a handshake that cannot be read.
+func TestExecRuntimeHostCapabilitiesReadTheHandshake(t *testing.T) {
+	both := runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+	for _, tc := range []struct {
+		name, handshake string
+		want            runtime.HostCapabilities
+	}{
+		{"local with fs.host", `{"version":0,"capabilities":["fs.host"],"locality":"local"}`, both},
+		{"local without fs.host", `{"version":0,"capabilities":[],"locality":"local"}`, runtime.HostCapabilities{}},
+		{"fs.host without locality", `{"version":0,"capabilities":["fs.host"]}`, runtime.HostCapabilities{}},
+		{"unreadable handshake", `not json`, runtime.HostCapabilities{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script, _ := writeFSHostScript(t, tc.handshake)
+			if got := execRuntimeHostCapabilities(script, "city", t.TempDir()); got != tc.want {
+				t.Errorf("execRuntimeHostCapabilities = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeRegistryExecRuntimesCarryTheSetupBudget pins the [session]
+// setup budget on the exec providers the registry builds: a host pre_start
+// that outlives setup_timeout fails the start, for a pack runtime and an
+// exec: selection alike, before the start op runs.
+func TestRuntimeRegistryExecRuntimesCarryTheSetupBudget(t *testing.T) {
+	script, started := writeFSHostScript(t, `{"version":0,"capabilities":["fs.host"],"locality":"local"}`)
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{"pack-rt": {Name: "pack-rt", Command: script}}}
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := config.SessionConfig{SetupTimeout: "300ms"}
+	for _, selection := range []string{"pack-rt", "exec:" + script} {
+		t.Run(selection, func(t *testing.T) {
+			sp, err := reg.New(selection, sc, "city", t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			began := time.Now()
+			err = sp.Start(context.Background(), "s1", runtime.Config{WorkDir: t.TempDir(), PreStart: []string{"sleep 10"}, AcceptStartupDialogs: new(bool)})
+			if err == nil || !strings.Contains(err.Error(), "pre_start[0]") {
+				t.Fatalf("Start = %v, want the pre_start's setup deadline", err)
+			}
+			if took := time.Since(began); took > 5*time.Second {
+				t.Errorf("Start took %s, past setup_timeout 300ms and its kill grace", took)
+			}
+			if _, statErr := os.Stat(started); statErr == nil {
+				t.Error("the start op ran after a fatal pre_start")
+			}
+		})
+	}
+}

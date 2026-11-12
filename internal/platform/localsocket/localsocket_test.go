@@ -295,8 +295,8 @@ func errorAs(err error, target **PathTooLongError) bool {
 // components so no single one exceeds a filesystem's name limit.
 //
 // Every padding segment costs its own length plus a separator, so a lone
-// 1-byte remainder cannot be spent on a segment. Each chunk leaves at least two
-// bytes behind, and a padding of exactly one byte lengthens the leaf instead,
+// 1-byte remainder cannot be spent on a segment. No chunk leaves exactly one
+// byte behind, and a padding of exactly one byte lengthens the leaf instead,
 // so every target at or above the minimum is reachable.
 func padPathTo(base string, target int) (string, error) {
 	const leaf = "p.sock"
@@ -306,8 +306,10 @@ func padPathTo(base string, target int) (string, error) {
 		return "", fmt.Errorf("target %d is below the %d-byte minimum under %q", target, minimum, base)
 	}
 	padding := target - minimum
+	name := leaf
 	if padding == 1 {
-		return prefix + "p" + leaf, nil
+		name = "p" + leaf
+		padding = 0
 	}
 	var segments []string
 	for padding > 0 {
@@ -321,10 +323,7 @@ func padPathTo(base string, target int) (string, error) {
 		segments = append(segments, strings.Repeat("x", chunk-1))
 		padding -= chunk
 	}
-	path := prefix + leaf
-	if len(segments) > 0 {
-		path = prefix + strings.Join(segments, string(filepath.Separator)) + string(filepath.Separator) + leaf
-	}
+	path := prefix + strings.Join(append(segments, name), string(filepath.Separator))
 	if len(path) != target {
 		return "", fmt.Errorf("built a %d-byte path, want %d bytes exactly", len(path), target)
 	}

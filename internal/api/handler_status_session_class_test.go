@@ -53,7 +53,7 @@ func (s sessionClassUnavailableState) Stores() storeref.Stores {
 	relocated := s.relocatedClasses()
 	relocated[coordclass.ClassSessions] = nil
 	relocated[coordclass.ClassMessaging] = nil
-	return mintFakeStores(s.cityBeadStore, s.stores, relocated, gateProjection{})
+	return mintFakeStores(s.cityBeadStore, s.stores, relocated, storeref.StoresOptions{Projection: gateProjection{}}, s.cfg, s.ClassBindingHasLegacyResidents, s.rigBits)
 }
 
 // splitClassState builds a city with sessions relocated off the work ledger:

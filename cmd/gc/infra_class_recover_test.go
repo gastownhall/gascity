@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -783,6 +784,7 @@ func TestStorageRecoverStrandedRefusesAMovingSource(t *testing.T) {
 	if !strings.Contains(stderr.String(), "is live on this city") {
 		t.Errorf("the refusal does not name the live controller: %q", stderr.String())
 	}
+	assertLiveControllerMessageClaimsNoWrites(t, stderr.String())
 
 	stubInfraControllerPing(t, 0)
 	request.FleetStopped = false
@@ -941,5 +943,213 @@ func TestBornSplitAdviceDoesNotNameARepairItCannotRun(t *testing.T) {
 	}
 	if !strings.Contains(advice, "no repair command for that provider") {
 		t.Errorf("the born-split advice does not say that this build carries no repair for it: %q", advice)
+	}
+}
+
+// assertLiveControllerMessageClaimsNoWrites pins the 2c wording: a controller
+// answering the socket is not evidence of any write, so the refusal says why a
+// live one matters (anything may move the source) and never claims it is
+// writing infrastructure beads to the work store. The su-i8g7 report read the
+// old wording as proof of a continuous stranded writer.
+func assertLiveControllerMessageClaimsNoWrites(t *testing.T, msg string) {
+	t.Helper()
+	if !strings.Contains(msg, "is live on this city") {
+		t.Errorf("the refusal does not name the live controller: %q", msg)
+	}
+	if !strings.Contains(msg, "any writer may change the work store") || !strings.Contains(msg, "Stop it (gc stop) and run this again") {
+		t.Errorf("the refusal does not say why a live controller matters or what to do: %q", msg)
+	}
+	if strings.Contains(msg, "still writing") {
+		t.Errorf("the refusal claims the controller is writing, which a socket ping cannot show: %q", msg)
+	}
+}
+
+// workShapedStrandedBead is the substrate incident's shape: ordinary work (a
+// task) that names its workflow root as a reference, so gc.root_bead_id alone
+// makes it graph class.
+func workShapedStrandedBead(t *testing.T, source beads.Store) beads.Bead {
+	t.Helper()
+	b := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-622605"}})
+	if keys, ok := coordclass.ClassMetadataOnly(b); !ok || !slices.Equal(keys, []string{beadmeta.RootBeadIDMetadataKey}) {
+		t.Fatalf("the fixture %s is not work-shaped (keys %v, ok %v); the scenario under test was never created", b.ID, keys, ok)
+	}
+	return b
+}
+
+// TestStorageRecoverStrandedLeavesAWorkShapedRowInTheWorkStore is Fix 2b: a
+// stranded row that metadata alone made infrastructure is NOT carried into the
+// binding by default. Carrying su-i8g7, su-rqta and su-9k5z handed three work
+// beads to a workflow that then force-closed them as skipped. The row stays
+// where it is, out of the binding and the manifest, the run names the in-place
+// repair, and it exits non-zero because the city is still stranded. A
+// session-class stranded row beside it is carried exactly as before. Named
+// with --move, the work-shaped row is carried too.
+func TestStorageRecoverStrandedLeavesAWorkShapedRowInTheWorkStore(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "late session", Type: "session", Labels: []string{"gc:session"}})
+	work := workShapedStrandedBead(t, source)
+	if got := strandedIDs(t, cityPath, target); len(got) != 2 {
+		t.Fatalf("the fixture produced %d stranded bead(s) (%v), want 2", len(got), got)
+	}
+	sourceBefore := infraStoreFingerprint(t, source)
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Errorf("recovery exited 0 with a work-shaped row left stranded; the city is still stranded. stdout: %s", stdout)
+	}
+	declassify := coordclass.DeclassifyCommand(work.ID, []string{beadmeta.RootBeadIDMetadataKey})
+	if !strings.Contains(stdout, declassify) {
+		t.Errorf("the run does not name the in-place repair %q: %s %s", declassify, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "--move "+work.ID) {
+		t.Errorf("the run does not name --move %s for a real workflow step: %s", work.ID, stdout)
+	}
+	binding := openMigratedDestination(t, target)
+	if _, err := binding.Get(work.ID); err == nil {
+		t.Errorf("the work-shaped row %s was carried into the binding without --move", work.ID)
+	}
+	if _, err := binding.Get(session.ID); err != nil {
+		t.Errorf("the session row %s was not carried, as it is without a work-shaped row beside it: %v", session.ID, err)
+	}
+	proven := manifestIDs(t, target)
+	if slices.Contains(proven, work.ID) {
+		t.Errorf("the manifest records the work-shaped row %s it did not carry", work.ID)
+	}
+	if !slices.Contains(proven, session.ID) {
+		t.Errorf("the manifest does not record the carried session row %s", session.ID)
+	}
+	if got := strandedIDs(t, cityPath, target); !slices.Equal(got, []string{work.ID}) {
+		t.Errorf("stranded after the run = %v, want only %s", got, work.ID)
+	}
+	if after := infraStoreFingerprint(t, source); !slices.Equal(sourceBefore, after) {
+		t.Errorf("the work store changed: before %v, after %v", sourceBefore, after)
+	}
+
+	code, stdout, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{work.ID: true}})
+	if code != 0 {
+		t.Fatalf("recovery with --move %s exited %d; stdout: %s stderr: %s", work.ID, code, stdout, stderr)
+	}
+	if _, err := openMigratedDestination(t, target).Get(work.ID); err != nil {
+		t.Errorf("--move %s did not carry it: %v", work.ID, err)
+	}
+	if !slices.Contains(manifestIDs(t, target), work.ID) {
+		t.Errorf("the manifest does not record %s after --move", work.ID)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Errorf("still stranded after --move: %v", got)
+	}
+}
+
+// TestStorageRecoverStrandedOnlyWorkShapedIsNotNothingToRecover: a city whose
+// only strand is work-shaped must not read as converged.
+func TestStorageRecoverStrandedOnlyWorkShapedIsNotNothingToRecover(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	work := workShapedStrandedBead(t, source)
+	manifestBefore := manifestIDs(t, target)
+
+	code, stdout, _ := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code == 0 {
+		t.Errorf("recovery exited 0 while %s is still stranded: %s", work.ID, stdout)
+	}
+	if strings.Contains(stdout, "nothing to recover:") {
+		t.Errorf("the run claims nothing is left to recover while %s is stranded: %s", work.ID, stdout)
+	}
+	if !strings.Contains(stdout, coordclass.DeclassifyCommand(work.ID, []string{beadmeta.RootBeadIDMetadataKey})) {
+		t.Errorf("the run does not name the in-place repair: %s", stdout)
+	}
+	if after := manifestIDs(t, target); !slices.Equal(manifestBefore, after) {
+		t.Errorf("the manifest changed: %v -> %v", manifestBefore, after)
+	}
+}
+
+// TestStorageRecoverStrandedDryRunListsWorkShapedRowsApart: the dry run shows
+// the work-shaped row in its own list with the repair, leaves it out of the
+// copy count, and exits non-zero; with --move it would move. The dump carries
+// it, with its source dep edges, beside the row the run would move: it is a
+// row awaiting the operator's choice, and the dump is what they choose from.
+func TestStorageRecoverStrandedDryRunListsWorkShapedRowsApart(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+	work := workShapedStrandedBead(t, source)
+	followed := mustCreateInfraBead(t, source, beads.Bead{Title: "the work it follows", Type: "task"})
+	if err := source.DepAdd(work.ID, followed.ID, "blocks"); err != nil {
+		t.Fatalf("seeding the work-shaped row's edge: %v", err)
+	}
+	bindingBefore := infraStoreFingerprint(t, openMigratedDestination(t, target))
+	manifestBefore := manifestIDs(t, target)
+	dumpPath := filepath.Join(t.TempDir(), "stranded.json")
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DryRun: true, DumpPath: dumpPath})
+	if code == 0 {
+		t.Errorf("the dry run exited 0 with a work-shaped row it would leave stranded: %s", stdout)
+	}
+	if !strings.Contains(stdout, "1 bead(s) would be copied") {
+		t.Errorf("the dry run counts the work-shaped row as copied: %s %s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, coordclass.DeclassifyCommand(work.ID, []string{beadmeta.RootBeadIDMetadataKey})) {
+		t.Errorf("the dry run does not name the in-place repair: %s", stdout)
+	}
+	contents, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("reading the dump: %v", err)
+	}
+	var dumped []strandedBeadDump
+	if err := json.Unmarshal(contents, &dumped); err != nil {
+		t.Fatalf("decoding the dump: %v", err)
+	}
+	byID := map[string]strandedBeadDump{}
+	for _, entry := range dumped {
+		byID[entry.Bead.ID] = entry
+	}
+	if len(dumped) != 2 || len(byID) != 2 {
+		t.Errorf("the dump carries %d row(s), want exactly the movable %s and the work-shaped %s: %+v", len(dumped), tracker.ID, work.ID, dumped)
+	}
+	if _, ok := byID[tracker.ID]; !ok {
+		t.Errorf("the dump does not carry %s, the row the run would move: %+v", tracker.ID, dumped)
+	}
+	deferred, ok := byID[work.ID]
+	if !ok {
+		t.Fatalf("the dump does not carry the work-shaped row %s awaiting a choice: %+v", work.ID, dumped)
+	}
+	if !slices.ContainsFunc(deferred.Deps, func(d beads.Dep) bool {
+		return d.DependsOnID == followed.ID && d.Type == "blocks"
+	}) {
+		t.Errorf("the dump of %s does not carry its source edge to %s: %+v", work.ID, followed.ID, deferred.Deps)
+	}
+	if after := infraStoreFingerprint(t, openMigratedDestination(t, target)); !slices.Equal(bindingBefore, after) {
+		t.Errorf("the dry run changed the binding")
+	}
+	if after := manifestIDs(t, target); !slices.Equal(manifestBefore, after) {
+		t.Errorf("the dry run changed the manifest")
+	}
+
+	code, stdout, stderr = runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{DryRun: true, Move: map[string]bool{work.ID: true}})
+	if code != 0 {
+		t.Errorf("the dry run with --move %s exited %d: %s %s", work.ID, code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "2 bead(s) would be copied") || !strings.Contains(stdout, "would move: "+work.ID) {
+		t.Errorf("the dry run with --move does not carry %s: %s", work.ID, stdout)
+	}
+}
+
+// TestStorageRecoverStrandedRefusesMoveForARowThatIsNotWorkShaped: --move names
+// a work-shaped stranded row (or a legacy manifest row); naming a stranded row
+// the run carries anyway, or an id nothing knows, is refused and writes nothing.
+func TestStorageRecoverStrandedRefusesMoveForARowThatIsNotWorkShaped(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "late session", Type: "session", Labels: []string{"gc:session"}})
+	work := workShapedStrandedBead(t, source)
+	manifestBefore := manifestIDs(t, target)
+	for _, id := range []string{session.ID, "gc-nope"} {
+		code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{Move: map[string]bool{id: true, work.ID: true}})
+		if code == 0 || !strings.Contains(stderr, id) {
+			t.Errorf("--move %s was accepted (code %d): %s %s", id, code, stdout, stderr)
+		}
+	}
+	if after := manifestIDs(t, target); !slices.Equal(manifestBefore, after) {
+		t.Errorf("a refused run changed the manifest: %v -> %v", manifestBefore, after)
+	}
+	if _, err := openMigratedDestination(t, target).Get(work.ID); err == nil {
+		t.Errorf("a refused run carried %s", work.ID)
 	}
 }

@@ -172,6 +172,11 @@ type controllerState struct {
 	autocloseSweep     *autocloseSweep
 	autocloseSweepOnce sync.Once
 
+	// sessionList folds the bead event watcher's session-bead events into
+	// session.created and session.closed; see session_list_events.go.
+	sessionList     *session.ListTransitions
+	sessionListOnce sync.Once
+
 	// webhookInapplicableReports is the set of orders the webhook dispatch seam
 	// has reported as inapplicable this controller boot. Every per-delivery
 	// dispatcher shares it (controllerWebhookDispatcher.dispatcher), so a refused
@@ -597,11 +602,40 @@ func (cs *controllerState) rigSuspended(rigName string) bool {
 }
 
 // setSuspendedRigs publishes the rigs the city runtime sees suspended.
+//
+// It publishes a new set only when the set changed: the store epoch keys on
+// the published pointer (city_stores.go), and the city runtime republishes
+// every tick.
 func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
 	if cs == nil {
 		return
 	}
+	if current := cs.suspendedRigs.Load(); current != nil && sameSuspendedRigs(*current, rigs) {
+		return
+	}
 	cs.suspendedRigs.Store(&rigs)
+}
+
+// sameSuspendedRigs reports whether a and b suspend the same rigs.
+func sameSuspendedRigs(a, b map[string]bool) bool {
+	count := func(m map[string]bool) int {
+		n := 0
+		for _, suspended := range m {
+			if suspended {
+				n++
+			}
+		}
+		return n
+	}
+	if count(a) != count(b) {
+		return false
+	}
+	for name, suspended := range a {
+		if suspended && !b[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // beginStoreWork counts one piece of store work as in flight (see storeWork)
@@ -1109,6 +1143,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	cs.recordSessionListEvent(evt, id)
 	// The reads after the cache application (autoclose) see the event's
 	// stores as the split-strict test gate's views (identity in production).
 	stores, relic = splitStrictEventStores(id, stores, relic)

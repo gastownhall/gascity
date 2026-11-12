@@ -491,9 +491,9 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()
-	if graphStore := relocatedGraphStore(s.state); graphStore != nil {
+	if graph, ok := relocatedGraphStore(s.state); ok {
 		stores = append(stores, sling.SourceWorkflowStore{
-			Store:    graphStore,
+			Store:    graph,
 			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
 			Strict:   true,
 		})

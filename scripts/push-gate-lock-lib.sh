@@ -132,7 +132,7 @@
 #       PUSH_GATE_REAP_SETTLE_SECONDS. Never kills the stamped PID while it
 #       is alive, and never kills this shell ($$). Returns 0 if anything was
 #       signalled (caller should retry acquire immediately), 1 if there was
-#       nothing to reap. Best-effort: if neither lsof nor fuser is
+#       nothing to reap. Best-effort: if neither fuser nor lsof is
 #       available, prints a diagnostic and returns 1 rather than blocking.
 #   push_gate_release_slot <fd>
 #       Explicit release + close. Normally unnecessary (process exit
@@ -258,18 +258,25 @@ push_gate_describe_slots() {
     done
 }
 
-# PIDs that currently have $1 open. Best-effort; empty if neither lsof nor
-# fuser is present.
+# PIDs that currently have $1 open. Best-effort; empty if neither fuser nor
+# lsof is present.
+#
+# fuser is asked first: it answers for the one file, while lsof walks every
+# process's descriptor table before filtering. On a loaded shared host that
+# is ~0.4 s versus ~2.5 s per call, and the reaper calls this up to three
+# times per dead slot inside the caller's wait bound. lsof is the fallback
+# for hosts without fuser.
 _push_gate_slot_holder_pids() {
     local _pgh_slot="$1"
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -t -- "$_pgh_slot" 2>/dev/null || true
+    if command -v fuser >/dev/null 2>&1; then
+        # fuser writes the pids to stdout (the file name and access-mode
+        # letters such as "1234e"/"1234f" go to stderr on psmisc; BSD
+        # interleaves them). Keep digits only, one pid per line.
+        fuser "$_pgh_slot" 2>/dev/null | tr -cs '0-9' '\n' || true
         return 0
     fi
-    if command -v fuser >/dev/null 2>&1; then
-        # fuser prints space-separated pids, sometimes with mode suffixes
-        # (e.g. "1234e"). Keep digits only.
-        fuser "$_pgh_slot" 2>/dev/null | tr -cs '0-9' '\n' || true
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -t -- "$_pgh_slot" 2>/dev/null || true
         return 0
     fi
     return 0
@@ -309,8 +316,8 @@ push_gate_reap_dead_holders() {
     for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
         _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
         _pgr_stamp="$(_push_gate_dead_stamp "$_pgr_slot")" || continue
-        if ! command -v lsof >/dev/null 2>&1 && ! command -v fuser >/dev/null 2>&1; then
-            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead but neither lsof nor fuser is available to reap leaked descendants" >&2
+        if ! command -v fuser >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1; then
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead but neither fuser nor lsof is available to reap leaked descendants" >&2
             continue
         fi
         _pgr_stamps[_pgr_i]="$_pgr_stamp"

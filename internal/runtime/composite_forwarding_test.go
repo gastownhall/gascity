@@ -18,6 +18,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
 		"FreshByConstruction":          {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
 		"FreshActivityProvider":        {"deliberate", "the fresh activity read is read on the routed leaf (runtime.FreshActivityFor)", ""},
+		"HeldFileProvider":             {"deliberate", "the held files are read on the routed leaf (runtime.HeldFilesFor)", ""},
 		"IdentityObserver":             {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdentitySidecarProvider":      {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdleProbeBudgetProvider":      {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
@@ -38,6 +39,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"hybrid": {
 		"FreshByConstruction":          {"deliberate", "as auto's", ""},
 		"FreshActivityProvider":        {"deliberate", "as auto's", ""},
+		"HeldFileProvider":             {"deliberate", "as auto's", ""},
 		"IdentityObserver":             {"deliberate", "as auto's", ""},
 		"IdentitySidecarProvider":      {"deliberate", "as auto's", ""},
 		"IdleProbeBudgetProvider":      {"deliberate", "as auto's", ""},
@@ -93,6 +95,30 @@ func TestCompositesForwardEveryLeafCapability(t *testing.T) {
 		for iface := range unforwarded[name] {
 			if !slices.Contains(leaves, iface) {
 				t.Errorf("%s's entry %s: no leaf implements it", name, iface)
+			}
+		}
+	}
+}
+
+// Kills a composite that reads the exec leaf's scanner methods as the
+// capability: every exec provider implements the scanner, but one whose pack
+// does not share the host cannot scan, and a composite over it as its default
+// (auto) or local (hybrid) backend must read as having no scanner, exactly
+// as it did before exec implemented one; over a leaf that scans, it scans.
+func TestCompositesReadAScannerlessExecLeafAsNoScanner(t *testing.T) {
+	full := func() runtime.FullFake { return runtime.FullFake{Fake: runtime.NewFake()} }
+	for _, tc := range []struct {
+		leaf runtime.Profile
+		want bool
+	}{{runtime.ProfileExec, false}, {runtime.ProfileExecV2, false}, {runtime.ProfileSubprocess, true}} {
+		leaf := func() runtime.Provider { return runtime.NewFakeProfile(tc.leaf, full()) }
+		composites := map[string]runtime.Provider{
+			"auto":   auto.New(leaf(), runtime.NewFakeProfile(runtime.ProfileACP, full())),
+			"hybrid": hybrid.New(leaf(), runtime.NewFakeProfile(runtime.ProfileK8s, full()), func(string) bool { return false }),
+		}
+		for name, c := range composites {
+			if _, ok := runtime.AsProcessTableScanner(c); ok != tc.want {
+				t.Errorf("%s over a %s leaf: AsProcessTableScanner ok = %t, want %t", name, tc.leaf, ok, tc.want)
 			}
 		}
 	}

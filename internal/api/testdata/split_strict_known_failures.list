@@ -77,7 +77,6 @@ TestProjectWorkflowEventFallsBackToSubjectWhenPayloadMissing	fails under the gat
 TestProjectWorkflowEventUsesLegacyCityScopeForRigStoredWorkflow	fails under the gate: projection = nil, want workflow event
 TestProjectWorkflowEventUsesRootStoreRefHint	fails under the gate: workflow_id = "wf_city", want wf_rig
 TestResolveStoreByPrefixDoesNotCaptureForeignRoute	fails under the gate: beadStoresForID(gz-1) = [0x185dd4d02c60 0x185dd4d02c40 0x185dd4d02b00 0x185dd4d02b20] (len 4), want the full candidate scan [0x185dd4cfbce0 0x185dd40cf300 0x185
-TestResolveStoreByPrefixKeepsRigRouteResolution	fails under the gate: resolveStoreByPrefix(ga) = 0x138a4f85f200, want alpha store 0x138a4ede6dc0
 TestRetiredSessionWorkStoresIsTheSessionsStoreAloneOnASingleStoreCity	fails under the gate: single-store sweep = [0x2651b1997360 0x2651b1997380 0x2651b1997340 0x2651b12c7960], want only the sessions store
 TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState	fails under the gate: rig store swept = false, want true (sweep = [0x155f2d592fc0 0x155f2d592fe0 0x155f30e46540])
 TestRunCancelAtomicRootCloseFailureLeavesRunCancelingForRetry	fails under the gate: cancel with a failing atomic root close returned nil error, want a retryable 5xx
