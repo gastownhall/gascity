@@ -957,3 +957,74 @@ func TestWispGCLane_PurgePanicIsRecoveredAndAbortsItsCycle(t *testing.T) {
 		t.Errorf("a panicked purge's cycle completion = %q, want %q", got, TraceCompletionAborted)
 	}
 }
+
+// dueOnceGatedWispGC is due only for its first pass: it blocks in its one
+// purge and is not due once that has run, so any later pass is provably a
+// decline. secondCheck closes on the second shouldRun call, the queued
+// wake's pass reaching the due-time check.
+type dueOnceGatedWispGC struct {
+	runs        atomic.Int32
+	started     chan struct{}
+	secondCheck chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	secondOnce  sync.Once
+}
+
+func (g *dueOnceGatedWispGC) shouldRun(time.Time) bool {
+	if g.runs.Load() > 0 {
+		g.secondOnce.Do(func() { close(g.secondCheck) })
+		return false
+	}
+	return true
+}
+
+func (g *dueOnceGatedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	g.runs.Add(1)
+	g.startOnce.Do(func() { close(g.started) })
+	<-g.release
+	return 0, nil
+}
+
+// Kills: a queue of purges behind a burst of ticks. Three ticks reaching the
+// wake slot while a purge runs leave one queued wake, whose pass reaches
+// the due-time check and starts no second purge.
+func TestWispGCLane_ABurstOfTicksIsNeverAQueueOfPurges(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	tracker := &dueOnceGatedWispGC{
+		started:     make(chan struct{}),
+		secondCheck: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	cr.wg = tracker
+	stop := cr.startWispGCLane(context.Background())
+
+	for range 3 {
+		runFixtureTick(cr, "patrol")
+	}
+	select {
+	case <-tracker.started:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the first woken tick never started the purge")
+	}
+	close(tracker.release)
+
+	select {
+	case <-tracker.secondCheck:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the queued wake never ran its pass after the first purge finished")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(wispGCLaneTestWait):
+		t.Fatal("the lane did not stop after its pass finished")
+	}
+	if got := tracker.runs.Load(); got != 1 {
+		t.Fatalf("purges = %d, want 1: a burst of ticks during a purge queues at most one more pass, which is not due", got)
+	}
+}
