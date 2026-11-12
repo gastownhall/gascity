@@ -305,9 +305,9 @@ func TestCmdSessionCloseWithoutConfigRefusesOnlyOverClaims(t *testing.T) {
 	}
 }
 
-// namedCloseCityTOML is a city whose one agent backs the still-configured
-// named session "reviewer".
-const namedCloseCityTOML = `[workspace]
+// namedCloseAgentTOML is a city with the one agent "worker" and no named
+// session.
+const namedCloseAgentTOML = `[workspace]
 name = "test-city"
 
 [beads]
@@ -316,7 +316,11 @@ provider = "file"
 [[agent]]
 name = "worker"
 start_command = "true"
+`
 
+// namedCloseCityTOML is namedCloseAgentTOML with "worker" backing the
+// still-configured named session "reviewer".
+const namedCloseCityTOML = namedCloseAgentTOML + `
 [[named_session]]
 name = "reviewer"
 template = "worker"
@@ -325,9 +329,10 @@ mode = "on_demand"
 `
 
 // seedNamedCloseSession writes cityTOML, points the CLI at it, and seeds one
-// open configured-named session row for identity under runtime name
-// sessionName, backed by the "worker" template.
-func seedNamedCloseSession(t *testing.T, cityTOML, identity, sessionName string) (string, beads.Store, beads.Bead) {
+// open configured-named session row for the identity "reviewer" under
+// runtime name sessionName, backed by the "worker" template.
+func seedNamedCloseSession(t *testing.T, cityTOML, sessionName string) (string, beads.Store, beads.Bead) {
+	const identity = "reviewer"
 	t.Helper()
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, cityTOML)
@@ -426,9 +431,12 @@ func assertCloseClaimKept(t *testing.T, store beads.Store, before beads.Bead) {
 }
 
 // assertCloseClaimReleased requires that id's claim was released open and
-// unassigned into route.
-func assertCloseClaimReleased(t *testing.T, store beads.Store, id, route string) {
+// unassigned into the "worker" lane, read from its routing metadata key:
+// gc.routed_to for a claim that carried its own route, gc.run_target for the
+// seat-template fallback a routeless claim is stamped with.
+func assertCloseClaimReleased(t *testing.T, store beads.Store, id, key string) {
 	t.Helper()
+	const route = "worker"
 	got, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
@@ -436,8 +444,8 @@ func assertCloseClaimReleased(t *testing.T, store beads.Store, id, route string)
 	if got.Assignee != "" || got.Status != "open" {
 		t.Errorf("claim %s = (assignee %q, status %q), want released (\"\", open)", id, got.Assignee, got.Status)
 	}
-	if got.Metadata[beadmeta.RoutedToMetadataKey] != route {
-		t.Errorf("claim %s %s = %q, want %q", id, beadmeta.RoutedToMetadataKey, got.Metadata[beadmeta.RoutedToMetadataKey], route)
+	if got.Metadata[key] != route {
+		t.Errorf("claim %s %s = %q, want %q", id, key, got.Metadata[key], route)
 	}
 }
 
@@ -450,7 +458,7 @@ func assertCloseClaimReleased(t *testing.T, store beads.Store, id, route string)
 func TestCmdSessionCloseKeepsConfiguredNamedIdentityClaims(t *testing.T) {
 	for _, status := range []string{"open", "in_progress"} {
 		t.Run(status, func(t *testing.T) {
-			cityDir, store, sessionBead := seedNamedCloseSession(t, namedCloseCityTOML, "reviewer", "reviewer")
+			cityDir, store, sessionBead := seedNamedCloseSession(t, namedCloseCityTOML, "reviewer")
 			identityWork := seedCloseClaim(t, store, "reviewer", status, map[string]string{beadmeta.RoutedToMetadataKey: ""})
 			control := seedCloseClaim(t, store, sessionBead.ID, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
 			if err := store.SetMetadata(sessionBead.ID, beadmeta.CurrentClaimBeadIDMetadataKey, identityWork.ID); err != nil {
@@ -460,7 +468,7 @@ func TestCmdSessionCloseKeepsConfiguredNamedIdentityClaims(t *testing.T) {
 			reopened := runSessionCloseAndReopen(t, cityDir, sessionBead.ID)
 
 			assertCloseClaimKept(t, reopened, identityWork)
-			assertCloseClaimReleased(t, reopened, control.ID, "worker")
+			assertCloseClaimReleased(t, reopened, control.ID, beadmeta.RoutedToMetadataKey)
 			gotSession, err := reopened.Get(sessionBead.ID)
 			if err != nil {
 				t.Fatalf("Get(session bead): %v", err)
@@ -549,7 +557,7 @@ func TestClosedNamedSessionKeptAssignees(t *testing.T) {
 // carries too, so a close keeps it as it keeps the identity's.
 func TestCmdSessionCloseKeepsConfiguredNamedRuntimeNameClaims(t *testing.T) {
 	cityTOML := strings.Replace(namedCloseCityTOML, `name = "test-city"`, "name = \"test-city\"\nsession_template = \"{{.City}}-{{.Agent}}\"", 1)
-	cityDir, store, sessionBead := seedNamedCloseSession(t, cityTOML, "reviewer", "test-city-reviewer")
+	cityDir, store, sessionBead := seedNamedCloseSession(t, cityTOML, "test-city-reviewer")
 	runtimeWork := seedCloseClaim(t, store, "test-city-reviewer", "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "reviewer"})
 	identityWork := seedCloseClaim(t, store, "reviewer", "open", map[string]string{beadmeta.RoutedToMetadataKey: ""})
 	control := seedCloseClaim(t, store, sessionBead.ID, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
@@ -558,5 +566,19 @@ func TestCmdSessionCloseKeepsConfiguredNamedRuntimeNameClaims(t *testing.T) {
 
 	assertCloseClaimKept(t, reopened, runtimeWork)
 	assertCloseClaimKept(t, reopened, identityWork)
-	assertCloseClaimReleased(t, reopened, control.ID, "worker")
+	assertCloseClaimReleased(t, reopened, control.ID, beadmeta.RoutedToMetadataKey)
+}
+
+// TestCmdSessionCloseReleasesNamedSessionBeadIDClaims pins that the
+// configured-identity exception does not reach the closed incarnation's own
+// ID: the re-materialized canonical bead gets a new one, so a routeless claim
+// on the closed row's ID is released open and unassigned into the seat's
+// backing template.
+func TestCmdSessionCloseReleasesNamedSessionBeadIDClaims(t *testing.T) {
+	cityDir, store, sessionBead := seedNamedCloseSession(t, namedCloseCityTOML, "reviewer")
+	claimed := seedCloseClaim(t, store, sessionBead.ID, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: ""})
+
+	reopened := runSessionCloseAndReopen(t, cityDir, sessionBead.ID)
+
+	assertCloseClaimReleased(t, reopened, claimed.ID, beadmeta.RunTargetMetadataKey)
 }
