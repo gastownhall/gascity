@@ -1,6 +1,8 @@
 package proctable
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -170,39 +172,60 @@ func reportedParent(records map[int]psRecord, ppid int) (int, bool) {
 	return ppid, ok && isInfrastructureCommand(parent.command)
 }
 
-// fenceTmuxSubtreeRecords is the pure half of the Darwin
-// ScanBySessionIDOutsideTmux: it keeps the roots none of whose ancestors in
-// records is a tmux server or client. A root whose ancestry the snapshot
-// cannot complete (a parent it does not hold, or a loop) is left out: it may
-// sit under a tmux server.
-func fenceTmuxSubtreeRecords(records map[int]psRecord, roots []runtime.LiveRuntime) []runtime.LiveRuntime {
+// scanRecordsOutsideTmux is the pure half of the Darwin
+// ScanBySessionIDOutsideTmux, over one ps snapshot: scanRecordsBySessionID's
+// roots that fenceTmuxSubtreeRecords keeps and, for the empty id (the orphan
+// sweep), only those reparented to launchd.
+func scanRecordsOutsideTmux(records map[int]psRecord, id string) ([]runtime.LiveRuntime, error) {
+	roots, err := fenceTmuxSubtreeRecords(records, scanRecordsBySessionID(records, id))
+	if id == "" {
+		roots = orphanCandidates(roots)
+	}
+	return roots, err
+}
+
+// fenceTmuxSubtreeRecords is the pure half of the Darwin FenceTmuxSubtrees:
+// it keeps the roots none of whose ancestors in records is a tmux server or
+// client. A root whose ancestry the snapshot cannot complete (a parent it
+// does not hold, or a loop) may sit under a tmux server, so it is left out
+// with an EntryError, as on Linux.
+func fenceTmuxSubtreeRecords(records map[int]psRecord, roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
 	kept := make([]runtime.LiveRuntime, 0, len(roots))
+	var errs []error
 	for _, r := range roots {
-		if recordOutsideTmux(records, r.PID) {
+		under, err := recordUnderTmux(records, r.PID)
+		if err != nil {
+			errs = append(errs, &EntryError{PID: r.PID, Err: fmt.Errorf("reading the ancestry of pid %d: %w", r.PID, err)})
+			continue
+		}
+		if !under {
 			kept = append(kept, r)
 		}
 	}
-	return kept
+	return kept, errors.Join(errs...)
 }
 
-// recordOutsideTmux reports whether records proves that no ancestor of pid is
-// a tmux server or client.
-func recordOutsideTmux(records map[int]psRecord, pid int) bool {
+// recordUnderTmux reports whether records shows a tmux server or client
+// among pid's ancestors, or an error when it cannot complete the ancestry.
+func recordUnderTmux(records map[int]psRecord, pid int) (bool, error) {
 	record, ok := records[pid]
 	if !ok {
-		return false
+		return false, fmt.Errorf("pid %d vanished", pid)
 	}
 	seen := map[int]bool{pid: true}
 	for p := record.ppid; p > 1; {
-		ancestor, ok := records[p]
-		if !ok || seen[p] {
-			return false
+		if seen[p] {
+			return false, fmt.Errorf("the parent chain loops at pid %d", p)
 		}
 		seen[p] = true
+		ancestor, ok := records[p]
+		if !ok {
+			return false, fmt.Errorf("ancestor pid %d vanished", p)
+		}
 		if isInfrastructureCommand(ancestor.command) {
-			return false
+			return true, nil
 		}
 		p = ancestor.ppid
 	}
-	return true
+	return false, nil
 }

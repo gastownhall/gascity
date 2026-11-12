@@ -714,15 +714,31 @@ picture is one an agent or a user started inside the box (`tmux new -d`,
 or the user's default tmux server when none was running), and it carries
 the session's `GC_SESSION_ID` like anything else started there. The scan
 skips any process with a tmux server or client among its ancestors, along
-with the server and its clients: a session's start, the orphan sweep and
-the drain-ack escalation never end a tmux session running inside a box,
-nor any process in its panes. A process that leaves such a pane and is
-adopted by init is no longer under tmux, and counts as a leftover like any
-other. The drain-ack escalation ends a wedged session's processes only when
-their parent is a tmux server, so it finds nothing to end for an exec
-script's session: the slot stays occupied until the box exits. Keep
-the processes that run a box out of any tmux server's subtree; a box
-started under one gets no process-table cleanup at all.
+with the server and its clients. When the city also runs ACP agents, gc
+applies the same rule to the ACP side's scan. A session's start and the
+drain-ack escalation therefore never end a tmux session running inside a
+box, nor any process in its panes. gc recognizes tmux by its process name:
+`tmux`, or the `<name>: server` and `<name>: client` titles tmux takes from
+the name it runs under, so a renamed tmux binary is recognized too, except
+on macOS, where only `tmux` is.
+
+The rule has costs:
+
+- A process that leaves such a pane and is adopted by init (or the user's
+  subreaper) is no longer under tmux, and counts as a leftover like any
+  other. Once a box has founded the user's default tmux server, anything
+  the user later starts there carries the session's identity, and can be
+  ended as the session's leftover once it leaves its pane and is adopted.
+- A tmux session an agent starts with `tmux new -d` inside a box is never
+  cleaned up by gc. It runs until it exits or someone ends it.
+- The drain-ack escalation ends a wedged session's processes only when
+  their parent is a tmux server, so it finds nothing to end for an exec
+  script's session: the slot stays occupied until the box exits.
+- A box whose own processes run under a tmux server gets no process-table
+  cleanup at all: gc neither ends its leftovers nor, when an inventory
+  fails, refuses a start because of them, so a failed inventory no longer
+  stops a duplicate start. Keep the processes that run a box out of any
+  tmux server's subtree.
 
 Start a process that serves several boxes, such as a multiplexer or a daemon
 the boxes run under, from the operation's own environment, never after

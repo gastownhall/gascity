@@ -199,6 +199,10 @@ func (execHostFSTrait) CanScanProcessTable() bool { return false }
 // that cannot scan.
 func (execHostFSTrait) FindRuntimesBySessionID(string) ([]LiveRuntime, error) { return nil, nil }
 
+// FenceTmuxSubtrees keeps no root: the profiled pack cannot scan, so no
+// composite consults its fence.
+func (execHostFSTrait) FenceTmuxSubtrees([]LiveRuntime) ([]LiveRuntime, error) { return nil, nil }
+
 // TerminateRuntime refuses, as exec's scanner does for a pack that cannot
 // scan.
 func (execHostFSTrait) TerminateRuntime(r LiveRuntime) error {

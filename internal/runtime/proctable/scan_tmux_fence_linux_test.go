@@ -58,6 +58,8 @@ func TestScanBySessionIDOutsideTmuxFencesTmuxSubtrees(t *testing.T) {
 	}{
 		{"sid-box", []int{11, 30}},
 		{"sid-other", []int{}},
+		// A regression guard only: the sweep's scan reads orphan candidates,
+		// so no process under the server is one even unfenced.
 		{"", []int{30}},
 	} {
 		found, err := ScanBySessionIDOutsideTmux(tc.id)
@@ -117,5 +119,61 @@ func TestScanBySessionIDOutsideTmuxLeavesOutUndecidableAncestry(t *testing.T) {
 	}
 	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{41, 50}) || HasWholeScanFailure(err) {
 		t.Fatalf("err = %v (entry pids %v), want entry errors for 41 and 50 alone", err, pids)
+	}
+}
+
+// Kills a fence that a composite cannot apply to another runtime's scan: a
+// composite whose default backend's sessions never run under tmux (auto over
+// a host-sharing exec pack) filters every other backend's roots through
+// FenceTmuxSubtrees, so the tmux runtime's scan of the same fixture, fenced,
+// is the box's program and its adopted leftover alone.
+func TestFenceTmuxSubtreesFiltersAnotherScansRoots(t *testing.T) {
+	root := tmuxFenceFixture(t)
+	SetScanRootForTesting(t, root)
+	found, err := ScanBySessionID("sid-box")
+	if err != nil {
+		t.Fatalf("ScanBySessionID: %v", err)
+	}
+	fenced, err := FenceTmuxSubtrees(found)
+	if err != nil {
+		t.Fatalf("FenceTmuxSubtrees: %v", err)
+	}
+	if got := rootPIDs(fenced); !slices.Equal(got, []int{11, 30}) {
+		t.Fatalf("FenceTmuxSubtrees(%v) = %v, want [11 30]", rootPIDs(found), got)
+	}
+}
+
+// Kills a fence that recognizes tmux by the name "tmux" alone: tmux names
+// its processes after argv[0] ("<name>: server", "<name>: client"), so a
+// tmux run as tmux3 founds a "tmux3: server". The fenced scan reports
+// neither such a server, which carries the session's id and reads as a root
+// adopted by init, nor any process in its panes.
+func TestScanBySessionIDOutsideTmuxFencesARenamedTmux(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	box := map[string]string{"GC_SESSION_ID": "sid-box"}
+	buildFakeProcUnder(t, root, 70, 1, "tmux3: server", box)
+	buildFakeProcUnder(t, root, 71, 70, "bash", box)
+	buildFakeProcUnder(t, root, 72, 1, "sleep", box)
+	buildFakeProcUnder(t, root, 73, 72, "tmux3: client", box)
+	buildFakeProcUnder(t, root, 74, 73, "agent", map[string]string{"GC_SESSION_ID": "sid-other"})
+	SetScanRootForTesting(t, root)
+	if all, err := ScanBySessionID("sid-box"); err != nil || !slices.Contains(rootPIDs(all), 70) {
+		t.Fatalf("ScanBySessionID = %v, %v; want the renamed server among its roots, or the case proves nothing", rootPIDs(all), err)
+	}
+	for _, tc := range []struct {
+		id   string
+		want []int
+	}{
+		{"sid-box", []int{72}},
+		{"sid-other", []int{}},
+	} {
+		found, err := ScanBySessionIDOutsideTmux(tc.id)
+		if err != nil {
+			t.Fatalf("ScanBySessionIDOutsideTmux(%q): %v", tc.id, err)
+		}
+		if got := rootPIDs(found); !slices.Equal(got, tc.want) {
+			t.Errorf("ScanBySessionIDOutsideTmux(%q) = %v, want %v: a renamed tmux server, its panes and its clients' children are fenced", tc.id, got, tc.want)
+		}
 	}
 }

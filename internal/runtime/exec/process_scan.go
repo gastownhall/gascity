@@ -24,14 +24,18 @@ import (
 // runtime.ConditionalProcessTableScanner): for any other pack,
 // runtime.AsProcessTableScanner reads it as having none, and its methods
 // find nothing and terminate nothing. The scanner never reports a process
-// under a tmux server or client (FindRuntimesBySessionID): no cleanup of
-// gc's ends a tmux session an agent or a user runs inside a box.
+// under a tmux server or client that gc recognizes by its process name
+// (FindRuntimesBySessionID), and an auto composite over the pack applies
+// the same fence to its ACP backend's roots (FenceTmuxSubtrees): no
+// cleanup of gc's ends a tmux session an agent or a user runs inside a box.
 
 var (
 	_ runtime.ProcessTableScanner            = (*Provider)(nil)
 	_ runtime.ConditionalProcessTableScanner = (*Provider)(nil)
+	_ runtime.TmuxSubtreeFence               = (*Provider)(nil)
 	_ runtime.ProcessTableScanner            = (*seamBackedProvider)(nil)
 	_ runtime.ConditionalProcessTableScanner = (*seamBackedProvider)(nil)
+	_ runtime.TmuxSubtreeFence               = (*seamBackedProvider)(nil)
 )
 
 // sessionlessEnviron is gc's environment (execenv.Environ) without the
@@ -86,16 +90,16 @@ func (p *Provider) CanScanProcessTable() bool {
 // box's roots. A tmux server an agent or an attached user founds inside a box
 // (`tmux new -d`, the user's default server when none was running) carries
 // the session's GC_SESSION_ID, and the shared scan would read each of its
-// panes as the session's root; reported here, a start's orphan kill, the
-// orphan sweep or the drain-ack escalation would end the pane's process
-// group. The tmux runtime's own scan is unchanged: its panes are its
-// sessions. A root is tracked
-// when a box the pack's inventory lists carries its session id. A root the
-// inventory cannot rule out (it failed, timed out or was partial, or a
-// listed box's identity is unreadable and the root names no other session)
-// is LiveUnlisted and the failure is returned, so no caller reaps a live
-// box's process on a listing it could not read. A pack that cannot scan
-// finds nothing.
+// panes as the session's root; reported here, a start's orphan kill or the
+// drain-ack escalation would end the pane's process group. The tmux
+// runtime's own scan is unchanged: its panes are its sessions.
+//
+// A root is tracked when a box the pack's inventory lists carries its
+// session id. A root the inventory cannot rule out (it failed, timed out or
+// was partial, or a listed box's identity is unreadable and the root names
+// no other session) is LiveUnlisted and the failure is returned, so no
+// caller reaps a live box's process on a listing it could not read. A pack
+// that cannot scan finds nothing.
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if !p.canScan() {
 		return nil, nil
@@ -127,6 +131,14 @@ func (p *Provider) trackingContext(id string) (context.Context, context.CancelFu
 		timeout = defaultScanListingTimeout
 	}
 	return context.WithTimeout(context.Background(), timeout)
+}
+
+// FenceTmuxSubtrees implements [runtime.TmuxSubtreeFence] with the fence
+// of its own scan (proctable.FenceTmuxSubtrees): an auto composite over this
+// pack applies it to the ACP backend's roots, whose scan still reports the
+// panes of a tmux server founded inside a box.
+func (p *Provider) FenceTmuxSubtrees(roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	return proctable.FenceTmuxSubtrees(roots)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner]: it ends a
@@ -248,6 +260,11 @@ func (s *seamBackedProvider) CanScanProcessTable() bool {
 // (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return s.raw.FindRuntimesBySessionID(id)
+}
+
+// FenceTmuxSubtrees passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) FenceTmuxSubtrees(roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	return s.raw.FenceTmuxSubtrees(roots)
 }
 
 // TerminateRuntime passes through to the underlying provider (non-seam).

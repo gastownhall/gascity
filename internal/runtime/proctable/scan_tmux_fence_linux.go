@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -28,8 +29,18 @@ func ScanBySessionIDOutsideTmux(id string) ([]runtime.LiveRuntime, error) {
 	if len(found) == 0 {
 		return found, err
 	}
-	kept, fenceErr := fenceTmuxSubtrees(scanRoot, found)
+	kept, fenceErr := FenceTmuxSubtrees(found)
 	return kept, errors.Join(err, fenceErr)
+}
+
+// FenceTmuxSubtrees keeps the roots of found that have no tmux server or
+// client among their ancestors, reading the same process table the scans
+// read. It is ScanBySessionIDOutsideTmux's fence on its own, for a composite
+// whose default backend's sessions never run under a tmux server to apply to
+// the roots another backend's scan reported (runtime.TmuxSubtreeFence). A
+// root whose ancestry cannot be read is left out with an EntryError.
+func FenceTmuxSubtrees(found []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	return fenceTmuxSubtrees(scanRoot, found)
 }
 
 // fenceTmuxSubtrees drops every root of found that descends from a tmux
@@ -51,9 +62,12 @@ func fenceTmuxSubtrees(root string, found []runtime.LiveRuntime) ([]runtime.Live
 	return kept, errors.Join(errs...)
 }
 
-// underTmux reports whether a tmux server or client (isInfrastructureCommand)
-// is an ancestor of pid, walking parent links up to init.
+// underTmux reports whether pid is a tmux server or client, or has one among
+// its ancestors (isTmuxComm), walking parent links up to init.
 func underTmux(root string, pid int) (bool, error) {
+	if tmux, err := isTmuxProcess(root, pid); err != nil || tmux {
+		return tmux, err
+	}
 	seen := map[int]bool{pid: true}
 	ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
 	if err != nil {
@@ -67,14 +81,11 @@ func underTmux(root string, pid int) (bool, error) {
 			return false, fmt.Errorf("the parent chain loops at pid %d", p)
 		}
 		seen[p] = true
-		comm, err := os.ReadFile(filepath.Join(root, strconv.Itoa(p), "comm"))
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, fmt.Errorf("ancestor pid %d vanished", p)
-		}
+		tmux, err := isTmuxProcess(root, p)
 		if err != nil {
 			return false, err
 		}
-		if isInfrastructureCommand(string(comm)) {
+		if tmux {
 			return true, nil
 		}
 		next, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(p), "stat"))
@@ -87,4 +98,28 @@ func underTmux(root string, pid int) (bool, error) {
 		p = next
 	}
 	return false, nil
+}
+
+// isTmuxProcess reports whether pid's comm names a tmux server or client
+// (isTmuxComm).
+func isTmuxProcess(root string, pid int) (bool, error) {
+	comm, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("pid %d vanished", pid)
+	}
+	if err != nil {
+		return false, err
+	}
+	return isTmuxComm(string(comm)), nil
+}
+
+// isTmuxComm reports whether a /proc comm names tmux infrastructure for the
+// fence: what isInfrastructureCommand matches, or the "<name>: server" and
+// "<name>: client" titles tmux takes from its argv[0], so a tmux run under
+// another name (tmux3, a versioned build) is fenced too. The fence errs
+// toward reporting less, so it may read more names as tmux than the shared
+// scan's root test does.
+func isTmuxComm(comm string) bool {
+	comm = strings.TrimSpace(comm)
+	return isInfrastructureCommand(comm) || strings.HasSuffix(comm, ": server") || strings.HasSuffix(comm, ": client")
 }

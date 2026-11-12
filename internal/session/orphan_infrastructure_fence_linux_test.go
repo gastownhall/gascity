@@ -13,6 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/acp"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
@@ -243,5 +245,104 @@ func TestSameSessionRestartOnHostFSExecPackNeverReachesInBoxTmux(t *testing.T) {
 	if !slices.Equal(sp.terminated, []int{programPID, leftover}) {
 		t.Fatalf("pre-start orphan kill terminated %v, want the box's leftovers [%d %d] and never the in-box tmux server %d, client %d, pane %d or vim %d",
 			sp.terminated, programPID, leftover, serverPID, clientPID, panePID, vimPID)
+	}
+}
+
+// The host-sharing exec pack of TestSameSessionRestartOnHostFSExecPackNeverReachesInBoxTmux
+// as the default backend of the auto composite gc builds when the city also
+// has ACP agents (auto(exec, acp), cmd/gc/providers.go). The composite merges
+// every leaf's scan, and the ACP leaf's own scan reports an in-box pane as an
+// untracked root of the session: unfenced, the restart's orphan kill would
+// end it through the exec leaf, whether or not the pack still lists the box.
+// The composite applies its default leaf's tmux fence to every leaf's roots,
+// so the scan reports the box's program and its leftover alone, tracked while
+// the box is listed, and the restart never reaches the in-box tmux server,
+// its client, or any process in its panes.
+func TestSameSessionRestartOnAutoOverHostFSExecPackNeverReachesInBoxTmux(t *testing.T) {
+	const (
+		holderPID  = 4100
+		programPID = 4101
+		clientPID  = 4102
+		serverPID  = 4200
+		panePID    = 4201
+		vimPID     = 4202
+		leftover   = 4300
+	)
+	for _, tc := range []struct {
+		name           string
+		boxListed      bool
+		wantTracked    bool
+		wantTerminated []int
+	}{
+		{name: "box listed", boxListed: true, wantTracked: true, wantTerminated: nil},
+		{name: "box gone", boxListed: false, wantTracked: false, wantTerminated: []int{programPID, leftover}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			city := t.TempDir()
+			execSP := sessionexec.NewSeamBackedForCity(hostFSGoldenPack(t), "c", city)
+			composite := auto.New(execSP, acp.NewSeamBackedWithDir(t.TempDir(), acp.Config{}))
+			scanner, ok := runtime.AsProcessTableScanner(composite)
+			if !ok {
+				t.Fatal("auto over the host-sharing golden pack has no process-table scanner")
+			}
+			sp := &execScanOrphanProvider{Fake: runtime.NewFake(), scanner: scanner}
+			mgr := newTestManager(t, store, sp, WithCityPath(city))
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			sp.terminated = nil
+			if tc.boxListed {
+				cfg := runtime.Config{
+					Command:              "sleep 600",
+					WorkDir:              t.TempDir(),
+					Env:                  map[string]string{"GC_SESSION_ID": info.ID, "GC_SESSION_NAME": "seat"},
+					ProcessNames:         []string{"sh", "sleep"},
+					AcceptStartupDialogs: new(bool),
+				}
+				if err := execSP.Start(context.Background(), "seat", cfg); err != nil {
+					t.Fatalf("starting the box: %v", err)
+				}
+				t.Cleanup(func() { _ = execSP.Stop("seat") })
+			}
+
+			env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+			root := t.TempDir()
+			writeFakeProcess(t, root, holderPID, 1, []string{"holder"}, []string{"PATH=/usr/bin"})
+			writeFakeProcess(t, root, programPID, holderPID, []string{"claude"}, env)
+			writeFakeProcess(t, root, clientPID, programPID, []string{"tmux: client"}, env)
+			writeFakeProcess(t, root, serverPID, 1, []string{"tmux: server"}, env)
+			writeFakeProcess(t, root, panePID, serverPID, []string{"bash"}, env)
+			writeFakeProcess(t, root, vimPID, panePID, []string{"vim"}, env)
+			writeFakeProcess(t, root, leftover, 1, []string{"sleep"}, env)
+			proctable.SetScanRootForTesting(t, root)
+
+			found, err := scanner.FindRuntimesBySessionID(info.ID)
+			if err != nil {
+				t.Fatalf("FindRuntimesBySessionID: %v", err)
+			}
+			var pids []int
+			for _, r := range found {
+				pids = append(pids, r.PID)
+				if r.IsTracked != tc.wantTracked || r.LiveUnlisted {
+					t.Errorf("root %+v: want IsTracked=%t and not LiveUnlisted", r, tc.wantTracked)
+				}
+			}
+			if !slices.Equal(pids, []int{programPID, leftover}) {
+				t.Fatalf("the composite's scan = %+v, want the box's roots [%d %d] alone: nothing in the in-box tmux server's subtree", found, programPID, leftover)
+			}
+
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if !slices.Equal(sp.terminated, tc.wantTerminated) {
+				t.Fatalf("pre-start orphan kill terminated %v, want %v, never the in-box tmux server %d, client %d, pane %d or vim %d",
+					sp.terminated, tc.wantTerminated, serverPID, clientPID, panePID, vimPID)
+			}
+		})
 	}
 }

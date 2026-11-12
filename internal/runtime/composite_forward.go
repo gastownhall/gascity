@@ -114,9 +114,27 @@ func ScanningBackends(backends []Backend) []BackendScanner {
 	return out
 }
 
+// TmuxSubtreeFence is an optional capability of a [ProcessTableScanner]
+// whose sessions never run under a tmux server, such as an exec pack whose
+// boxes share the host. Its own scan never reports a process with a tmux
+// server or client among its ancestors: a tmux server in such a session's
+// picture is one an agent or a user founded inside it, which carries the
+// session's GC_SESSION_ID, so every pane would otherwise read as one of the
+// session's roots. A composite whose default backend has it filters every
+// later backend's roots through it ([FindRuntimesAcross]), since a later
+// backend's scan (ACP's) still reports those panes.
+type TmuxSubtreeFence interface {
+	// FenceTmuxSubtrees returns the roots that have no tmux server or client
+	// among their ancestors. A root whose ancestry cannot be read is left
+	// out, with an error naming it.
+	FenceTmuxSubtrees(roots []LiveRuntime) ([]LiveRuntime, error)
+}
+
 // FindRuntimesAcross implements [ProcessTableScanner.FindRuntimesBySessionID]
 // for a composite by querying every backend [ScanningBackends] returns and
-// merging the results by PID.
+// merging the results by PID. When the default backend's scanner is a
+// [TmuxSubtreeFence], every later backend's roots pass through its fence
+// before the merge.
 //
 // Local backends scan the same host process table, so one root commonly
 // appears in several results, each backend marking tracked only the sessions
@@ -128,10 +146,21 @@ func ScanningBackends(backends []Backend) []BackendScanner {
 func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 	merged := make(map[int]LiveRuntime)
 	var errs []error
-	for _, b := range ScanningBackends(backends) {
+	scanners := ScanningBackends(backends)
+	var fence TmuxSubtreeFence
+	if len(scanners) > 0 {
+		fence, _ = scanners[0].Scanner.(TmuxSubtreeFence)
+	}
+	for i, b := range scanners {
 		found, err := b.Scanner.FindRuntimesBySessionID(id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, err))
+		}
+		if i > 0 && fence != nil && len(found) > 0 {
+			var fenceErr error
+			if found, fenceErr = fence.FenceTmuxSubtrees(found); fenceErr != nil {
+				errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, fenceErr))
+			}
 		}
 		for _, r := range found {
 			existing, ok := merged[r.PID]
