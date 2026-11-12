@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -1504,5 +1505,82 @@ func TestReadUnifiedCgroup(t *testing.T) {
 				t.Fatalf("readUnifiedCgroup = (%q, %t); want (%q, %t)", path, exists, tt.wantPath, tt.wantExists)
 			}
 		})
+	}
+}
+
+// TestUnreadableEnvironUserManagerMixedScan (ga-zpcphq): in one scan the
+// exempt manager helper adds no error, the unproven unreadable process is the
+// only entry error, and readable roots are still reported — a readable
+// credential agent carrying the session identity included, because names
+// never exempt a readable process from being a root.
+func TestUnreadableEnvironUserManagerMixedScan(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ stays readable")
+	}
+	euid := os.Geteuid()
+	readAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	saved := scanNow
+	scanNow = func() time.Time { return readAt }
+	t.Cleanup(func() { scanNow = saved })
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+
+	const (
+		helperPID  = 2642
+		runtimePID = 3700376
+		rootPID    = 512
+		agentPID   = 700
+	)
+	root := t.TempDir()
+	writeFakeBootTime(t, root, readAt.Add(-2*time.Hour))
+
+	// The exempt manager helper: (sd-pam) in the user-manager init scope.
+	buildFakeProcUnder(t, root, helperPID, 1, "(sd-pam)", nil)
+	helperDir := filepath.Join(root, strconv.Itoa(helperPID))
+	writeFakeProcessStat(t, helperDir, helperPID, 1, 3600*100)
+	writeFakeProcessCgroup(t, helperDir, scope)
+	if err := os.Chmod(filepath.Join(helperDir, "environ"), 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+	// An unreadable self-hardened runtime the proof cannot excuse.
+	buildFakeProcUnder(t, root, runtimePID, 1, "codex", nil)
+	runtimeDir := filepath.Join(root, strconv.Itoa(runtimePID))
+	writeFakeProcessStat(t, runtimeDir, runtimePID, 1, 3600*100)
+	writeFakeProcessCgroup(t, runtimeDir, "/user.slice/user-"+strconv.Itoa(euid)+".slice/session-3.scope")
+	if err := os.Chmod(filepath.Join(runtimeDir, "environ"), 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+	// A readable root of the target session.
+	buildFakeProcUnder(t, root, rootPID, 1, "gc", map[string]string{"GC_SESSION_ID": "ga-target"})
+	// A readable credential agent carrying the session identity: the rejected
+	// name exemption would have hidden it, but a readable process with
+	// GC_SESSION_ID is a root whoever names it.
+	buildFakeProcUnder(t, root, agentPID, 1, "ssh-agent", map[string]string{"GC_SESSION_ID": "ga-target"})
+
+	t.Run("id-scoped", func(t *testing.T) {
+		got, err := scanWithRoot(root, "ga-target")
+		assertMixedScan(t, got, err, runtimePID, rootPID, agentPID)
+	})
+	t.Run("orphan-candidate", func(t *testing.T) {
+		got, err := scanOrphanCandidatesWithRoot(root, 0)
+		assertMixedScan(t, got, err, runtimePID, rootPID, agentPID)
+	})
+}
+
+// assertMixedScan checks one mixed scan's outcome: the only entry error names
+// the unproven unreadable process, and the readable roots are all reported.
+func assertMixedScan(t *testing.T, got []runtime.LiveRuntime, err error, runtimePID int, wantRootPIDs ...int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("scan error = nil; want the unproven unreadable process to fail closed")
+	}
+	if pids := entryErrorPIDs(err); len(pids) != 1 || pids[0] != runtimePID {
+		t.Fatalf("entry error pids = %v (%s); want only the unproven process %d", pids, SummarizeScanError(err), runtimePID)
+	}
+	var reported []int
+	for _, live := range got {
+		reported = append(reported, live.PID)
+	}
+	if !slices.Equal(reported, wantRootPIDs) {
+		t.Fatalf("reported pids = %v; want the readable roots %v", reported, wantRootPIDs)
 	}
 }
