@@ -674,3 +674,62 @@ func TestStepReminderSingleCandidateUsesRawEdges(t *testing.T) {
 		})
 	}
 }
+
+// singleReadCountingStore is a joinDropDepListStore that counts its single-id
+// DepList reads. Its batch read goes to the store under the join, uncounted.
+type singleReadCountingStore struct {
+	*joinDropDepListStore
+	singles int
+}
+
+func (s *singleReadCountingStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.singles++
+	return s.joinDropDepListStore.DepList(id, direction)
+}
+
+// The controller resolves the reminder through the stores' live handles
+// (activeWorkStepReader). Those handles forward the batched edge read, so a
+// lone candidate's raw edge to a blocker with no row survives there too, and no
+// edge is read through bd's single-id join.
+func TestStepReminderSingleCandidateUsesRawEdgesThroughLiveHandles(t *testing.T) {
+	const ghost = "mc-ghost"
+	cases := []struct {
+		name   string
+		adjust func(t *testing.T, p *planBreakdown)
+	}{
+		{name: "routed", adjust: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+			p.workDeps = append(p.workDeps, beads.Dep{IssueID: planContent, DependsOnID: ghost, Type: "blocks"})
+		}},
+		{name: "single open step", adjust: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planRoot)
+			for _, id := range []string{planImport, planClarify, planDecompose} {
+				p.row(t, id).Status = "closed"
+			}
+			p.graphDeps = append(p.graphDeps, beads.Dep{IssueID: planIntake, DependsOnID: ghost, Type: "blocks"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanBreakdown()
+			tc.adjust(t, p)
+			store, _ := p.stores(false)
+			js := &singleReadCountingStore{joinDropDepListStore: &joinDropDepListStore{Store: store}}
+			live := beads.HandlesFor(js).Live
+			if _, ok := live.(beads.DependencyBatchLister); !ok {
+				t.Fatalf("live handle %T does not expose DepListBatch", live)
+			}
+			r := stepResolution{work: live, graph: live, logf: t.Logf}
+			got, err := r.activeStep(true, planIdentities)
+			if err != nil {
+				t.Fatalf("activeStep: %v", err)
+			}
+			if got != nil {
+				t.Errorf("the reminder names %s, want %s", describeStep(got), noReminder)
+			}
+			if js.singles != 0 {
+				t.Errorf("read %d edge lists through the single-id join, want 0", js.singles)
+			}
+		})
+	}
+}

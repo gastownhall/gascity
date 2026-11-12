@@ -441,3 +441,72 @@ func TestCachingStoreCloseAllRefreshesWithOneBatchedRead(t *testing.T) {
 		})
 	}
 }
+
+// TestLiveHandlesForwardDepListBatch pins the live handles' batched dep-edge
+// read: both the CachingStore's live handle and the logical live handle over a
+// plain store answer each anchor as DepList(id, "down") does, and a store
+// without the batch is reported with the sentinel callers fall back on.
+func TestLiveHandlesForwardDepListBatch(t *testing.T) {
+	newMem := func(t *testing.T) (*beads.MemStore, []string) {
+		t.Helper()
+		mem := beads.NewMemStore()
+		a, _ := mem.Create(beads.Bead{Title: "a"})
+		b, _ := mem.Create(beads.Bead{Title: "b"})
+		c, _ := mem.Create(beads.Bead{Title: "c", ParentID: a.ID})
+		if err := mem.DepAdd(b.ID, a.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		return mem, []string{a.ID, b.ID, c.ID}
+	}
+	handles := []struct {
+		name string
+		live func(*beads.MemStore) beads.LiveReader
+	}{
+		{name: "caching store", live: func(m *beads.MemStore) beads.LiveReader {
+			return beads.HandlesFor(beads.NewCachingStoreForTest(m, nil)).Live
+		}},
+		{name: "mem store", live: func(m *beads.MemStore) beads.LiveReader { return beads.HandlesFor(m).Live }},
+	}
+	for _, h := range handles {
+		t.Run(h.name, func(t *testing.T) {
+			mem, ids := newMem(t)
+			live := h.live(mem)
+			batch, ok := live.(beads.DependencyBatchLister)
+			if !ok {
+				t.Fatalf("live handle %T does not expose DepListBatch", live)
+			}
+			got, err := batch.DepListBatch(ids)
+			if err != nil {
+				t.Fatalf("DepListBatch: %v", err)
+			}
+			for _, id := range ids {
+				want, err := live.DepList(id, "down")
+				if err != nil {
+					t.Fatalf("DepList(%s): %v", id, err)
+				}
+				if len(want) == 0 && len(got[id]) == 0 {
+					continue
+				}
+				if !reflect.DeepEqual(got[id], want) {
+					t.Errorf("DepListBatch[%s] = %v, DepList = %v", id, got[id], want)
+				}
+			}
+		})
+	}
+	t.Run("backing without batch", func(t *testing.T) {
+		mem, ids := newMem(t)
+		plain := struct{ beads.Store }{mem}
+		for _, live := range []beads.LiveReader{
+			beads.HandlesFor(plain).Live,
+			beads.HandlesFor(beads.NewCachingStoreForTest(plain, nil)).Live,
+		} {
+			batch, ok := live.(beads.DependencyBatchLister)
+			if !ok {
+				t.Fatalf("live handle %T does not expose DepListBatch", live)
+			}
+			if _, err := batch.DepListBatch(ids); !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+				t.Errorf("%T: DepListBatch err = %v, want ErrDepListBatchUnsupported", live, err)
+			}
+		}
+	})
+}

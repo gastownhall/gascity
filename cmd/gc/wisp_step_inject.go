@@ -693,9 +693,7 @@ func blockersSatisfied(store activeStepReader, deps []beads.Dep, satisfied map[s
 // cross-store targets, while DepListBatch returns the raw edge records. An id
 // the batch answer leaves out is re-read on its own, because an absent anchor
 // is not proof of no edges: some stores omit an edge-free anchor, and bd
-// answers a batch it refuses with an empty map (sourceDepReader.prefetch). The
-// controller's live reader has no batch method yet and still takes the per-id
-// path (follow-up).
+// answers a batch it refuses with an empty map (sourceDepReader.prefetch).
 func downEdges(store activeStepReader, ids []string) (map[string][]beads.Dep, error) {
 	edges := make(map[string][]beads.Dep, len(ids))
 	if batch, ok := store.(beads.DependencyBatchLister); ok && len(ids) > 0 {

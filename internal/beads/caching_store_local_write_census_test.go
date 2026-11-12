@@ -57,6 +57,7 @@ var localWriteCensusExempt = map[string]string{
 	"cachedStoreReader.List":                             "read",
 	"cachedStoreReader.Ready":                            "read",
 	"liveStoreReader.DepList":                            "read",
+	"liveStoreReader.DepListBatch":                       "read",
 	"liveStoreReader.Get":                                "read",
 	"liveStoreReader.GetExactBatch":                      "read",
 	"liveStoreReader.List":                               "read",
