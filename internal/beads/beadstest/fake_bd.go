@@ -23,11 +23,16 @@ import (
 type FakeBd struct {
 	mu    sync.Mutex
 	store *beads.MemStore
+	// closeReasons is bd's close_reason column, by bead ID. It is kept apart
+	// from metadata.close_reason, as in bd: the metadata key is the input
+	// BdStore forwards as --reason, and the column is what bd answers with.
+	// `bd close --reason X` writes only the column.
+	closeReasons map[string]string
 }
 
 // NewFakeBd returns an empty fake bd.
 func NewFakeBd() *FakeBd {
-	return &FakeBd{store: beads.NewMemStore()}
+	return &FakeBd{store: beads.NewMemStore(), closeReasons: map[string]string{}}
 }
 
 // NewBdStore returns a BdStore whose bd commands run against f.
@@ -40,7 +45,14 @@ func (f *FakeBd) NewBdStore() *beads.BdStore {
 func (f *FakeBd) Seed(b beads.Bead) (beads.Bead, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.store.Create(b)
+	created, err := f.store.Create(b)
+	if err != nil {
+		return created, err
+	}
+	if created.Status == "closed" && created.CloseReason != "" {
+		f.closeReasons[created.ID] = created.CloseReason
+	}
+	return created, nil
 }
 
 // SeedDep stores the edge issueID -> dependsOnID of depType directly, as a
@@ -78,16 +90,22 @@ type fakeBdIssue struct {
 	DependencyType string            `json:"dependency_type,omitempty"`
 }
 
-func toFakeBdIssue(b beads.Bead) fakeBdIssue {
+// issueRow renders b as bd's JSON row, with the close_reason column read from
+// the fake's column store and never from b, whose close reason MemStore derives
+// from metadata.close_reason.
+func (f *FakeBd) issueRow(b beads.Bead) fakeBdIssue {
 	typ := b.Type
 	if typ == "" {
 		typ = "task"
 	}
 	// bd stores its default reason for a close given none, so a closed row
 	// never shows an empty close_reason on the wire.
-	closeReason := b.CloseReason
-	if b.Status == "closed" && closeReason == "" {
-		closeReason = "Closed"
+	closeReason := ""
+	if b.Status == "closed" {
+		closeReason = f.closeReasons[b.ID]
+		if closeReason == "" {
+			closeReason = "Closed"
+		}
 	}
 	return fakeBdIssue{
 		ID: b.ID, Title: b.Title, Status: b.Status, IssueType: typ,
@@ -217,7 +235,7 @@ func (f *FakeBd) create(flags map[string][]string, positional []string) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(toFakeBdIssue(created))
+	return json.Marshal(f.issueRow(created))
 }
 
 func (f *FakeBd) show(ids []string) ([]byte, error) {
@@ -227,7 +245,7 @@ func (f *FakeBd) show(ids []string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("no issue found matching %q", id)
 		}
-		out = append(out, toFakeBdIssue(b))
+		out = append(out, f.issueRow(b))
 	}
 	return json.Marshal(out)
 }
@@ -272,7 +290,7 @@ func (f *FakeBd) list(flags map[string][]string) ([]byte, error) {
 	}
 	out := make([]fakeBdIssue, 0, len(found))
 	for _, b := range found {
-		out = append(out, toFakeBdIssue(b))
+		out = append(out, f.issueRow(b))
 	}
 	return json.Marshal(out)
 }
@@ -334,7 +352,7 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 		if limit > 0 && len(out) == limit {
 			break
 		}
-		out = append(out, toFakeBdIssue(b))
+		out = append(out, f.issueRow(b))
 	}
 	return json.Marshal(out)
 }
@@ -394,7 +412,7 @@ func (f *FakeBd) depList(flags map[string][]string, ids []string) ([]byte, error
 			if err != nil {
 				continue
 			}
-			row := toFakeBdIssue(b)
+			row := f.issueRow(b)
 			row.DependencyType = e.Type
 			out = append(out, row)
 		}
@@ -499,14 +517,14 @@ func (f *FakeBd) checkUpdatePreconditions(id string, flags map[string][]string) 
 func (f *FakeBd) closeIssues(flags map[string][]string, ids []string) ([]byte, error) {
 	reason, _ := lastFlag(flags, "--reason", "-r")
 	for _, id := range ids {
-		if reason != "" {
-			if err := f.store.SetMetadata(id, "close_reason", reason); err != nil {
-				return nil, fmt.Errorf("no issue found matching %q", id)
-			}
-		}
 		if err := f.store.Close(id); err != nil {
 			return nil, fmt.Errorf("no issue found matching %q", id)
 		}
+		// bd stamps its default for a close given no reason.
+		if reason == "" {
+			reason = "Closed"
+		}
+		f.closeReasons[id] = reason
 	}
 	return f.show(ids)
 }
@@ -516,6 +534,7 @@ func (f *FakeBd) reopen(ids []string) ([]byte, error) {
 		if err := f.store.Reopen(id); err != nil {
 			return nil, fmt.Errorf("no issue found matching %q", id)
 		}
+		delete(f.closeReasons, id)
 	}
 	return f.show(ids)
 }
@@ -536,6 +555,7 @@ func (f *FakeBd) deleteIssues(ids []string) ([]byte, error) {
 		if err := f.store.Delete(id); err != nil {
 			return nil, fmt.Errorf("fake bd: delete %s: %w", id, err)
 		}
+		delete(f.closeReasons, id)
 	}
 	return []byte("{}"), nil
 }
