@@ -29,7 +29,7 @@ const (
 	// observation.
 	managedDoltJournalReset = "reset"
 	// managedDoltJournalHistoryDiagnostic records recovery history that was
-	// discarded, reset or could not be read.
+	// discarded or reset, or that could not be read or written.
 	managedDoltJournalHistoryDiagnostic = "history-diagnostic"
 	// managedDoltJournalConfigDiagnostic records an unresponsive window that
 	// fell back to its default.
@@ -58,8 +58,10 @@ type managedDoltRecoveryJournalEntry struct {
 	Port     string
 }
 
-// managedDoltRecoverCaller returns the tag of the path that requested this
-// recovery, defaulting to a direct helper invocation.
+// managedDoltRecoverCaller returns the tag that the path which spawned this
+// recovery helper process set in its environment, defaulting to a direct
+// helper invocation. A path that journals from its own process, such as the
+// provider health check, passes its own tag to the journal writers instead.
 func managedDoltRecoverCaller() string {
 	if caller := strings.TrimSpace(os.Getenv(managedDoltRecoverCallerEnv)); caller != "" {
 		return caller
@@ -102,10 +104,10 @@ func formatManagedDoltRecoveryJournalLine(at time.Time, entry managedDoltRecover
 		identity, caller)
 }
 
-// appendManagedDoltRecoveryJournal appends entry, attributed to the current
-// recovery caller, to the managed dolt log at logFile.
-func appendManagedDoltRecoveryJournal(logFile string, at time.Time, entry managedDoltRecoveryJournalEntry) error {
-	return appendManagedDoltRecoveryLogLine(logFile, entry.Action, formatManagedDoltRecoveryJournalLine(at, entry, managedDoltRecoverCaller()))
+// appendManagedDoltRecoveryJournal appends entry, attributed to caller, to the
+// managed dolt log at logFile.
+func appendManagedDoltRecoveryJournal(logFile string, at time.Time, entry managedDoltRecoveryJournalEntry, caller string) error {
+	return appendManagedDoltRecoveryLogLine(logFile, entry.Action, formatManagedDoltRecoveryJournalLine(at, entry, caller))
 }
 
 // formatManagedDoltRecoveryNoteLine renders a recovery note (a streak reset
@@ -115,26 +117,27 @@ func formatManagedDoltRecoveryNoteLine(at time.Time, action, reason, caller stri
 		at.UTC().Format(time.RFC3339Nano), action, reason, caller)
 }
 
-// appendManagedDoltRecoveryNote appends a recovery note, attributed to the
-// current recovery caller, to the managed dolt log at logFile.
-func appendManagedDoltRecoveryNote(logFile string, at time.Time, action, reason string) error {
-	return appendManagedDoltRecoveryLogLine(logFile, action, formatManagedDoltRecoveryNoteLine(at, action, reason, managedDoltRecoverCaller()))
+// appendManagedDoltRecoveryNote appends a recovery note, attributed to
+// caller, to the managed dolt log at logFile.
+func appendManagedDoltRecoveryNote(logFile string, at time.Time, action, reason, caller string) error {
+	return appendManagedDoltRecoveryLogLine(logFile, action, formatManagedDoltRecoveryNoteLine(at, action, reason, caller))
 }
 
-// reportManagedDoltRecoveryNote appends a recovery note to the managed dolt
-// log at logFile. A journal failure is reported on diag rather than failing
-// the recovery decision the note accompanies.
-func reportManagedDoltRecoveryNote(diag io.Writer, logFile string, at time.Time, action, reason string) {
-	if err := appendManagedDoltRecoveryNote(logFile, at, action, reason); err != nil {
+// reportManagedDoltRecoveryNote appends a recovery note, attributed to
+// caller, to the managed dolt log at logFile. A journal failure is reported
+// on diag rather than failing the recovery decision the note accompanies.
+func reportManagedDoltRecoveryNote(diag io.Writer, logFile string, at time.Time, action, reason, caller string) {
+	if err := appendManagedDoltRecoveryNote(logFile, at, action, reason, caller); err != nil {
 		fmt.Fprintf(diag, "gc dolt recovery: %v\n", err) //nolint:errcheck // best-effort diagnostic
 	}
 }
 
 // reportManagedDoltRecoveryDiagnostic writes a non-fatal recovery diagnostic
-// to diag and journals it in the managed dolt log at logFile as action.
-func reportManagedDoltRecoveryDiagnostic(diag io.Writer, logFile string, at time.Time, action, reason string) {
+// to diag and journals it, attributed to caller, in the managed dolt log at
+// logFile as action.
+func reportManagedDoltRecoveryDiagnostic(diag io.Writer, logFile string, at time.Time, action, reason, caller string) {
 	fmt.Fprintf(diag, "gc dolt recovery: %s\n", reason) //nolint:errcheck // best-effort diagnostic
-	reportManagedDoltRecoveryNote(diag, logFile, at, action, reason)
+	reportManagedDoltRecoveryNote(diag, logFile, at, action, reason, caller)
 }
 
 func appendManagedDoltRecoveryLogLine(logFile, action, line string) error {

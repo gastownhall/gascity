@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -97,7 +98,7 @@ func TestRecoverManagedDolt_HealthyResetWaitsForInFlightFailureWrite(t *testing.
 	ops.writeHistory = func(path string, state managedDoltRecoveryState) error {
 		once.Do(func() {
 			go func() {
-				resetDone <- clearManagedDoltUnresponsiveStreak(f.layout, writeManagedDoltRecoveryState, io.Discard)
+				resetDone <- clearManagedDoltUnresponsiveStreak(context.Background(), f.layout, writeManagedDoltRecoveryState, io.Discard, managedDoltRecoverCallerDirect)
 			}()
 			select {
 			case err := <-resetDone:
@@ -165,7 +166,7 @@ func TestRecoverManagedDolt_FailureDuringHealthyResetCannotReuseClearedStreak(t 
 		return writeManagedDoltRecoveryState(path, state)
 	}
 
-	if err := clearManagedDoltUnresponsiveStreak(f.layout, write, io.Discard); err != nil {
+	if err := clearManagedDoltUnresponsiveStreak(context.Background(), f.layout, write, io.Discard, managedDoltRecoverCallerDirect); err != nil {
 		t.Fatalf("healthy reset error = %v", err)
 	}
 	if recoverFinishedEarly {
@@ -209,18 +210,18 @@ func TestManagedDoltRecoveryState_HealthyResetBoundsLockWaitAndKeepsStreak(t *te
 
 	// With no visible streak there is nothing to clear, so a held lock does
 	// not delay the healthy return.
-	if err := clearManagedDoltUnresponsiveStreak(f.layout, writeManagedDoltRecoveryState, io.Discard); err != nil {
+	if err := clearManagedDoltUnresponsiveStreak(context.Background(), f.layout, writeManagedDoltRecoveryState, io.Discard, managedDoltRecoverCallerDirect); err != nil {
 		releaseManagedDoltLifecycleLock(holder)
 		t.Fatalf("reset with no streak error = %v, want nil", err)
 	}
 
 	cooldown := seedUnresponsiveHistory(t, f.layout, f.identity, f.now.Add(-60*time.Second), f.now.Add(-30*time.Second), 2)
 	started := time.Now()
-	err = clearManagedDoltUnresponsiveStreak(f.layout, writeManagedDoltRecoveryState, io.Discard)
+	err = clearManagedDoltUnresponsiveStreak(context.Background(), f.layout, writeManagedDoltRecoveryState, io.Discard, managedDoltRecoverCallerDirect)
 	waited := time.Since(started)
 	releaseManagedDoltLifecycleLock(holder)
-	if err == nil || !strings.Contains(err.Error(), "synchronize managed dolt recovery history") {
-		t.Fatalf("reset error = %v, want a synchronization error", err)
+	if !errors.Is(err, errManagedDoltLifecycleBusy) || !strings.Contains(err.Error(), "synchronize managed dolt recovery history") {
+		t.Fatalf("reset error = %v, want a synchronization error naming the in-flight lifecycle operation", err)
 	}
 	if waited > 5*time.Second {
 		t.Fatalf("reset waited %s, want bounded by the lock timeout", waited)
@@ -238,10 +239,69 @@ func TestManagedDoltRecoveryState_HealthyResetBoundsLockWaitAndKeepsStreak(t *te
 	if err != nil || !locked {
 		t.Fatalf("lifecycle lock after a timed-out reset: locked=%v err=%v, want it free", locked, err)
 	}
-	if err := clearManagedDoltUnresponsiveStreak(f.layout, writeManagedDoltRecoveryState, io.Discard); err != nil {
+	if err := clearManagedDoltUnresponsiveStreak(context.Background(), f.layout, writeManagedDoltRecoveryState, io.Discard, managedDoltRecoverCallerDirect); err != nil {
 		t.Fatalf("reset after the lock is free error = %v", err)
 	}
 	assertStreakClearedCooldownKept(t, f.layout, cooldown)
+}
+
+func TestAcquireManagedDoltLifecycleLockContext(t *testing.T) {
+	f := newUnresponsiveRecoveryFixture(t)
+	open := func() *os.File {
+		t.Helper()
+		lockFile, err := openManagedDoltLifecycleLockAt(f.layout)
+		if err != nil {
+			t.Fatalf("openManagedDoltLifecycleLockAt: %v", err)
+		}
+		t.Cleanup(func() { releaseManagedDoltLifecycleLock(lockFile) })
+		return lockFile
+	}
+	lockHeld := func() bool {
+		t.Helper()
+		probe := open()
+		locked, err := tryManagedDoltLifecycleLock(probe)
+		if err != nil {
+			t.Fatalf("probe lifecycle lock: %v", err)
+		}
+		releaseManagedDoltLifecycleLock(probe)
+		return !locked
+	}
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := acquireManagedDoltLifecycleLockContext(ended, open(), 10*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire with an ended ctx = %v, want context.Canceled", err)
+	}
+	if lockHeld() {
+		t.Fatal("an ended ctx took the free lifecycle lock, want it left free")
+	}
+
+	holder := open()
+	if err := acquireManagedDoltLifecycleLockContext(context.Background(), holder, time.Second); err != nil {
+		t.Fatalf("acquire a free lock = %v, want nil", err)
+	}
+	if !lockHeld() {
+		t.Fatal("lifecycle lock is free after a successful acquire")
+	}
+
+	started := time.Now()
+	err := acquireManagedDoltLifecycleLockContext(context.Background(), open(), 150*time.Millisecond)
+	if waited := time.Since(started); !errors.Is(err, errManagedDoltLifecycleBusy) || waited < 150*time.Millisecond || waited > 5*time.Second {
+		t.Fatalf("acquire a held lock = %v after %s, want errManagedDoltLifecycleBusy after the 150ms timeout", err, waited)
+	}
+
+	ctx, cancelWait := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelWait()
+	started = time.Now()
+	err = acquireManagedDoltLifecycleLockContext(ctx, open(), 10*time.Second)
+	if waited := time.Since(started); !errors.Is(err, context.DeadlineExceeded) || waited > 5*time.Second {
+		t.Fatalf("acquire a held lock under a 100ms deadline = %v after %s, want the deadline, well before the 10s timeout", err, waited)
+	}
+
+	releaseManagedDoltLifecycleLock(holder)
+	if err := acquireManagedDoltLifecycleLockContext(context.Background(), open(), time.Second); err != nil {
+		t.Fatalf("acquire after the holder released = %v, want nil", err)
+	}
 }
 
 func TestManagedDoltRecoveryState_HealthyResetReportsWriteFailure(t *testing.T) {
@@ -262,6 +322,7 @@ func TestManagedDoltRecoveryState_HealthyResetReportsWriteFailure(t *testing.T) 
 }
 
 func TestHealthBeadsProviderSuccessClearsUnresponsiveStreak(t *testing.T) {
+	t.Setenv(managedDoltRecoverCallerEnv, "")
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	writeBreakerAwarePreflightFakes(t, cityPath, "")
@@ -282,6 +343,7 @@ func TestHealthBeadsProviderSuccessClearsUnresponsiveStreak(t *testing.T) {
 	_ = healthBeadsProvider(cityPath)
 
 	assertStreakClearedCooldownKept(t, layout, cooldown)
+	assertProviderHealthJournaled(t, layout, "action=reset", `reason="healthy observation; provider cooldown preserved"`)
 }
 
 // stubManagedDoltDirectProbesHealthy makes direct SQL probes report a

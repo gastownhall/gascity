@@ -2468,12 +2468,8 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				// process checking this city. This alone breaks the low-RSS
 				// restart-loop where each tick (~60-110s apart) starts a
 				// fresh recover.
-				reserved, reserveErr := reserveManagedDoltProviderRecoverAttempt(cityPath, providerRecoverNow(), providerRecoverCooldown(), os.Stderr)
-				if reserveErr != nil {
-					return fmt.Errorf("unhealthy (%w); not recovering because the provider recovery cooldown is unavailable: %w", err, reserveErr)
-				}
-				if !reserved {
-					return err
+				if admitErr := admitProviderManagedDoltRecover(ctx, cityPath, err); admitErr != nil {
+					return admitErr
 				}
 			}
 			recoverEnv := withManagedDoltRecoverCaller(providerEnv, managedDoltRecoverCallerProviderHealth)
@@ -2489,7 +2485,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				}
 			}
 		} else if providerUsesBdStoreContract(provider) {
-			if err := clearProviderManagedDoltUnresponsiveStreak(cityPath); err != nil {
+			if err := clearProviderManagedDoltUnresponsiveStreak(ctx, cityPath); err != nil {
 				return err
 			}
 			deps := healthyManagedRuntimePublicationDeps{

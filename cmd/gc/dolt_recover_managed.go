@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,9 @@ type managedDoltRecoveryOps struct {
 	writeHistory func(path string, state managedDoltRecoveryState) error
 	// diag receives non-fatal recovery diagnostics.
 	diag io.Writer
+	// caller tags this recovery's journal lines with the path that asked for
+	// it.
+	caller string
 }
 
 // withDefaults fills unset unresponsive-window hooks with their production
@@ -64,6 +68,9 @@ func (ops managedDoltRecoveryOps) withDefaults() managedDoltRecoveryOps {
 	}
 	if ops.writeHistory == nil {
 		ops.writeHistory = writeManagedDoltRecoveryState
+	}
+	if ops.caller == "" {
+		ops.caller = managedDoltRecoverCaller()
 	}
 	return ops
 }
@@ -139,7 +146,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			}
 			// The lock holder still owns the lifecycle, so the clear waits
 			// (bounded) for the lock before reporting success.
-			if err := clearManagedDoltUnresponsiveStreak(layout, ops.writeHistory, ops.diag); err != nil {
+			if err := clearManagedDoltUnresponsiveStreak(context.Background(), layout, ops.writeHistory, ops.diag, ops.caller); err != nil {
 				return report, err
 			}
 			if err := ops.publish(cityPath); err != nil {
@@ -171,7 +178,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			// An inconclusive keep was never measured, so it leaves the streak.
 			if !report.ReadyInconclusive {
-				if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
+				if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag, ops.caller); err != nil {
 					return report, err
 				}
 			}
@@ -205,7 +212,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, port); err != nil {
 				return report, err
 			}
-			if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
+			if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag, ops.caller); err != nil {
 				return report, err
 			}
 			if err := ops.publish(cityPath); err != nil {
@@ -222,7 +229,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		}
 		stop = gated
 	}
-	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), stop); err != nil {
+	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), stop, ops.caller); err != nil {
 		fmt.Fprintf(ops.diag, "gc dolt recovery: %v\n", err) //nolint:errcheck // best-effort diagnostic
 	}
 
@@ -268,7 +275,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	}
 	// The restarted server is measured healthy; a history error here does
 	// not justify killing it.
-	if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag); err != nil {
+	if err := clearManagedDoltUnresponsiveStreakLocked(layout, ops.writeHistory, ops.diag, ops.caller); err != nil {
 		return report, err
 	}
 	if err := ops.publish(cityPath); err != nil {

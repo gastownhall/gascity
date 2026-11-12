@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -35,21 +36,43 @@ func openManagedDoltLifecycleLockAt(layout managedDoltRuntimeLayout) (*os.File, 
 	return f, nil
 }
 
-// acquireManagedDoltLifecycleLockWithin takes the lifecycle lock on f,
-// waiting at most timeout for a concurrent holder to release it. The lock is
-// released when f is closed.
-func acquireManagedDoltLifecycleLockWithin(f *os.File, timeout time.Duration) error {
+// managedDoltLifecycleLockPoll is how often a bounded wait retries a held
+// lifecycle lock.
+const managedDoltLifecycleLockPoll = 10 * time.Millisecond
+
+// errManagedDoltLifecycleBusy reports that another managed dolt lifecycle
+// operation (a recovery, start or stop) still held the lifecycle lock when a
+// bounded wait for it ended.
+var errManagedDoltLifecycleBusy = errors.New("another managed dolt lifecycle operation is in flight")
+
+// acquireManagedDoltLifecycleLockContext takes the lifecycle lock on f,
+// waiting at most timeout and never past ctx. A holder that keeps the lock
+// for the whole wait yields an error wrapping errManagedDoltLifecycleBusy,
+// and an ended ctx an error wrapping ctx's error. The lock is released when
+// f is closed.
+func acquireManagedDoltLifecycleLockContext(ctx context.Context, f *os.File, timeout time.Duration) error {
 	if f == nil {
 		return fmt.Errorf("nil managed dolt lock file")
 	}
-	if _, err := filelock.Acquire(f, filelock.Options{
-		Mode:    filelock.Exclusive,
-		Timeout: timeout,
-		Label:   f.Name(),
-	}); err != nil {
-		return fmt.Errorf("lock managed dolt lifecycle: %w", err)
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("wait for managed dolt lifecycle lock %s: %w", f.Name(), err)
+		}
+		if locked, err := tryManagedDoltLifecycleLock(f); err != nil || locked {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("%w: %s is still held after %s", errManagedDoltLifecycleBusy, f.Name(), timeout)
+		}
+		retry := time.NewTimer(min(managedDoltLifecycleLockPoll, remaining))
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+		case <-retry.C:
+		}
 	}
-	return nil
 }
 
 func tryManagedDoltLifecycleLock(f *os.File) (bool, error) {

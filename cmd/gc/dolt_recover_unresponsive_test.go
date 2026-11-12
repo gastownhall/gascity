@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func writeUnresponsiveWindowCityConfig(t *testing.T, cityPath, daemonLine string) {
@@ -522,5 +525,126 @@ func TestRecoverManagedDolt_ProviderOwnedScopeRefusedBeforeUnresponsiveGate(t *t
 	}
 	if _, statErr := os.Stat(managedDoltRecoveryStatePath(f.layout)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("recovery history stat = %v, want no history written for a provider-owned scope", statErr)
+	}
+}
+
+// listenLoopbackForIdentity opens a loopback TCP listener held by this test
+// process for the rest of the test and returns its port.
+func listenLoopbackForIdentity(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// closedLoopbackPortForIdentity returns a loopback port that had a listener
+// a moment ago and has none now.
+func closedLoopbackPortForIdentity(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	return port
+}
+
+// TestManagedDoltLiveListenerIdentity drives the production listener
+// inspection that decides whether a failing server is deferred, with real
+// listeners held by this test process standing in for the managed dolt.
+func TestManagedDoltLiveListenerIdentity(t *testing.T) {
+	self := os.Getpid()
+	startTime, err := pidutil.StartTime(self)
+	if err != nil || strings.TrimSpace(startTime) == "" {
+		t.Fatalf("pidutil.StartTime(%d) = %q, %v", self, startTime, err)
+	}
+	tests := []struct {
+		name string
+		// setup records runtime state for the city and returns the port
+		// recovery asks about and the port the identity must name (0 when
+		// no owned live listener may be found).
+		setup func(t *testing.T, cityPath string) (requested string, wantPort int)
+	}{
+		{
+			name: "recorded pid holding the requested port",
+			setup: func(t *testing.T, cityPath string) (string, int) {
+				port := listenLoopbackForIdentity(t)
+				writeRecoveryRuntimeState(t, cityPath, self, port)
+				return strconv.Itoa(port), port
+			},
+		},
+		{
+			name: "listener on the rebound port named by runtime state",
+			setup: func(t *testing.T, cityPath string) (string, int) {
+				port := listenLoopbackForIdentity(t)
+				writeRecoveryRuntimeState(t, cityPath, self, port)
+				return strconv.Itoa(closedLoopbackPortForIdentity(t)), port
+			},
+		},
+		{
+			name: "foreign holder of the requested port is not owned",
+			setup: func(t *testing.T, _ string) (string, int) {
+				return strconv.Itoa(listenLoopbackForIdentity(t)), 0
+			},
+		},
+		{
+			name: "recorded pid for another data dir is not owned",
+			setup: func(t *testing.T, cityPath string) (string, int) {
+				port := listenLoopbackForIdentity(t)
+				if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+					Running:   true,
+					PID:       self,
+					Port:      port,
+					DataDir:   filepath.Join(t.TempDir(), "other-city", ".beads", "dolt"),
+					StartedAt: time.Now().UTC().Format(time.RFC3339),
+				}); err != nil {
+					t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+				}
+				return strconv.Itoa(port), 0
+			},
+		},
+		{
+			name: "recorded pid without a listener is not live",
+			setup: func(t *testing.T, cityPath string) (string, int) {
+				port := closedLoopbackPortForIdentity(t)
+				writeRecoveryRuntimeState(t, cityPath, self, port)
+				return strconv.Itoa(port), 0
+			},
+		},
+		{
+			name: "non-numeric port is not live",
+			setup: func(_ *testing.T, _ string) (string, int) {
+				return "not-a-port", 0
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := setupRecoveryTestCity(t)
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			requested, wantPort := tt.setup(t, cityPath)
+
+			got, live := managedDoltLiveListenerIdentity(cityPath, layout, requested)
+
+			if wantPort == 0 {
+				if live {
+					t.Fatalf("managedDoltLiveListenerIdentity(%q) = %+v, live; want no owned live listener", requested, got)
+				}
+				return
+			}
+			want := managedDoltServerIdentity{PID: self, StartTime: startTime, Port: wantPort}
+			if !live || got != want {
+				t.Fatalf("managedDoltLiveListenerIdentity(%q) = %+v, live=%v; want %+v", requested, got, live, want)
+			}
+		})
 	}
 }

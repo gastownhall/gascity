@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -131,7 +133,7 @@ func gateManagedDoltUnresponsiveRestart(cityPath, port string, layout managedDol
 	}
 	window, configDiagnostics := ops.unresponsiveWindow(cityPath)
 	for _, diagnostic := range configDiagnostics {
-		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, ops.now(), managedDoltJournalConfigDiagnostic, diagnostic)
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, ops.now(), managedDoltJournalConfigDiagnostic, diagnostic, ops.caller)
 	}
 	stop.Window = max(window, 0)
 	if window <= 0 {
@@ -148,11 +150,11 @@ func gateManagedDoltUnresponsiveRestart(cityPath, port string, layout managedDol
 	}
 	now := ops.now()
 	if diagnostic != "" {
-		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic, ops.caller)
 	}
 	streak, diagnostic := continueManagedDoltUnresponsiveStreak(state.Streak, identity, now, window)
 	if diagnostic != "" {
-		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+		reportManagedDoltRecoveryDiagnostic(ops.diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic, ops.caller)
 	}
 	elapsed := now.Sub(streak.FirstFailedAt)
 	if elapsed < window {
@@ -201,7 +203,7 @@ func deferManagedDoltRestart(layout managedDoltRuntimeLayout, state managedDoltR
 		Identity: identity,
 		Port:     strconv.Itoa(identity.Port),
 	}
-	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), entry); err != nil {
+	if err := appendManagedDoltRecoveryJournal(layout.LogFile, ops.now(), entry, ops.caller); err != nil {
 		return errors.Join(deferred, err)
 	}
 	return deferred
@@ -234,8 +236,10 @@ func continueManagedDoltUnresponsiveStreak(prior *managedDoltUnresponsiveStreak,
 	return continued, ""
 }
 
-// managedDoltHistoryLockTimeout bounds how long a healthy observation that
-// does not already hold the lifecycle lock waits for it to clear a streak.
+// managedDoltHistoryLockTimeout bounds how long an observation that does not
+// already hold the lifecycle lock waits for it to write the recovery history
+// (clear a streak or reserve a provider recovery attempt). The caller's ctx
+// can end the wait sooner.
 var managedDoltHistoryLockTimeout = 10 * time.Second
 
 // clearManagedDoltUnresponsiveStreakLocked removes a pending unresponsive
@@ -246,17 +250,18 @@ var managedDoltHistoryLockTimeout = 10 * time.Second
 // readable. An unreadable history is reported on diag and in the managed
 // dolt log rather than failing the healthy return: the gate refuses to stop
 // on a history it cannot read, so that history can never authorize a
-// restart. Each reset is journaled in the managed dolt log.
-func clearManagedDoltUnresponsiveStreakLocked(layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer) error {
+// restart. Each reset and diagnostic is journaled in the managed dolt log,
+// attributed to caller.
+func clearManagedDoltUnresponsiveStreakLocked(layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer, caller string) error {
 	path := managedDoltRecoveryStatePath(layout)
 	state, diagnostic, err := readManagedDoltRecoveryState(path)
 	if err != nil {
 		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, time.Now(), managedDoltJournalHistoryDiagnostic,
-			fmt.Sprintf("cannot clear the unresponsive streak after a healthy check: %v", err))
+			fmt.Sprintf("cannot clear the unresponsive streak after a healthy check: %v", err), caller)
 		return nil
 	}
 	if diagnostic != "" {
-		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, time.Now(), managedDoltJournalHistoryDiagnostic, diagnostic)
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, time.Now(), managedDoltJournalHistoryDiagnostic, diagnostic, caller)
 	} else if state.Streak == nil {
 		return nil
 	}
@@ -266,7 +271,7 @@ func clearManagedDoltUnresponsiveStreakLocked(layout managedDoltRuntimeLayout, w
 		return fmt.Errorf("clear managed dolt unresponsive streak after a healthy check: %w", err)
 	}
 	if hadStreak {
-		reportManagedDoltRecoveryNote(diag, layout.LogFile, time.Now(), managedDoltJournalReset, managedDoltJournalResetReason)
+		reportManagedDoltRecoveryNote(diag, layout.LogFile, time.Now(), managedDoltJournalReset, managedDoltJournalResetReason, caller)
 	}
 	return nil
 }
@@ -274,9 +279,10 @@ func clearManagedDoltUnresponsiveStreakLocked(layout managedDoltRuntimeLayout, w
 // clearManagedDoltUnresponsiveStreak is clearManagedDoltUnresponsiveStreakLocked
 // for callers that do not hold the lifecycle lock. With no visible streak
 // there is nothing to clear and it returns without waiting; otherwise it
-// waits up to managedDoltHistoryLockTimeout for the lock and reports a
-// synchronization error rather than returning healthy over a stale streak.
-func clearManagedDoltUnresponsiveStreak(layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer) error {
+// waits for the lock up to managedDoltHistoryLockTimeout, and no longer than
+// ctx allows, and reports a synchronization error rather than returning
+// healthy over a stale streak.
+func clearManagedDoltUnresponsiveStreak(ctx context.Context, layout managedDoltRuntimeLayout, write func(string, managedDoltRecoveryState) error, diag io.Writer, caller string) error {
 	if state, diagnostic, err := readManagedDoltRecoveryState(managedDoltRecoveryStatePath(layout)); err == nil && diagnostic == "" && state.Streak == nil {
 		return nil
 	}
@@ -285,65 +291,155 @@ func clearManagedDoltUnresponsiveStreak(layout managedDoltRuntimeLayout, write f
 		return fmt.Errorf("synchronize managed dolt recovery history: %w", err)
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
-	if err := acquireManagedDoltLifecycleLockWithin(lockFile, managedDoltHistoryLockTimeout); err != nil {
+	if err := acquireManagedDoltLifecycleLockContext(ctx, lockFile, managedDoltHistoryLockTimeout); err != nil {
 		return fmt.Errorf("synchronize managed dolt recovery history: %w", err)
 	}
-	return clearManagedDoltUnresponsiveStreakLocked(layout, write, diag)
+	return clearManagedDoltUnresponsiveStreakLocked(layout, write, diag, caller)
 }
 
 // clearProviderManagedDoltUnresponsiveStreak clears the streak after a
 // healthy provider check, using the strict layout whose paths the provider
 // passes to its recovery helper through providerLifecycleDoltPathEnv, so both
-// resolve the same history and lock.
-func clearProviderManagedDoltUnresponsiveStreak(cityPath string) error {
+// resolve the same history and lock. Its journal lines name the provider
+// health check as their caller.
+func clearProviderManagedDoltUnresponsiveStreak(ctx context.Context, cityPath string) error {
 	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
 	if err != nil {
 		return err
 	}
-	return clearManagedDoltUnresponsiveStreak(layout, writeManagedDoltRecoveryState, os.Stderr)
+	return clearManagedDoltUnresponsiveStreak(ctx, layout, writeManagedDoltRecoveryState, os.Stderr, managedDoltRecoverCallerProviderHealth)
+}
+
+// providerRecoverAttemptCoolingDown reports whether a provider recovery
+// attempt reserved at last (nil when none was) still holds the cooldown at
+// now: it lies less than cooldown before or after now. A reservation ahead of
+// now is normally one another process made after this one read its clock;
+// only one at least a full cooldown ahead means the clock moved backwards.
+func providerRecoverAttemptCoolingDown(last *time.Time, now time.Time, cooldown time.Duration) bool {
+	if last == nil {
+		return false
+	}
+	gap := now.Sub(*last)
+	return gap < cooldown && gap > -cooldown
 }
 
 // reserveManagedDoltProviderRecoverAttempt reserves a provider-driven
-// recovery attempt at now unless one was reserved less than cooldown ago.
-// The reservation lives in the city's recovery history under the lifecycle
-// lock, so separate provider-health processes share one cooldown; it is
-// written before recovery runs and the lock is released before the caller
-// spawns the recovery helper, which takes that lock itself. A reservation
-// ahead of now (the clock moved backwards) is reset with a diagnostic. An
-// unreadable or unwritable history returns an error and reserves nothing.
-func reserveManagedDoltProviderRecoverAttempt(cityPath string, now time.Time, cooldown time.Duration, diag io.Writer) (bool, error) {
+// recovery attempt at now unless a recorded one still holds the cooldown
+// (providerRecoverAttemptCoolingDown). The reservation lives in the city's
+// recovery history, so separate provider-health processes share one
+// cooldown. A reservation still inside the cooldown is read without the
+// lifecycle lock (the history is replaced by atomic rename), so a check
+// inside the cooldown never waits on an in-flight lifecycle operation.
+// Writing a reservation takes the lock, waiting up to
+// managedDoltHistoryLockTimeout and no longer than ctx allows: a lock still
+// held after that wait returns an error wrapping errManagedDoltLifecycleBusy,
+// and an ended ctx an error wrapping ctx's error. The reservation is written
+// before recovery runs, and the lock is released before the caller spawns
+// the recovery helper, which takes that lock itself. An unreadable or
+// unwritable history returns an error and reserves nothing.
+func reserveManagedDoltProviderRecoverAttempt(ctx context.Context, cityPath string, now time.Time, cooldown time.Duration, diag io.Writer) (bool, error) {
 	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
 	if err != nil {
 		return false, err
 	}
+	if state, _, err := readManagedDoltRecoveryState(managedDoltRecoveryStatePath(layout)); err == nil && providerRecoverAttemptCoolingDown(state.LastProviderAttemptAt, now, cooldown) {
+		return false, nil
+	}
 	lockFile, err := openManagedDoltLifecycleLockAt(layout)
 	if err != nil {
-		return false, fmt.Errorf("synchronize managed dolt recovery history: %w", err)
+		return false, fmt.Errorf("reserve provider recovery attempt: %w", err)
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
-	if err := acquireManagedDoltLifecycleLockWithin(lockFile, managedDoltHistoryLockTimeout); err != nil {
-		return false, fmt.Errorf("synchronize managed dolt recovery history: %w", err)
+	if err := acquireManagedDoltLifecycleLockContext(ctx, lockFile, managedDoltHistoryLockTimeout); err != nil {
+		return false, fmt.Errorf("reserve provider recovery attempt: %w", err)
 	}
+	return reserveManagedDoltProviderRecoverAttemptLocked(layout, now, cooldown, diag)
+}
+
+// reserveManagedDoltProviderRecoverAttemptLocked is
+// reserveManagedDoltProviderRecoverAttempt for a caller holding the lifecycle
+// lock. now is read before the lock is taken, so a reservation another
+// process made while this one waited can lie slightly ahead of it; that one
+// holds the cooldown. A reservation at least a full cooldown ahead of now
+// (the clock moved backwards) is reset with a diagnostic. Diagnostics are
+// journaled as the provider health check's.
+func reserveManagedDoltProviderRecoverAttemptLocked(layout managedDoltRuntimeLayout, now time.Time, cooldown time.Duration, diag io.Writer) (bool, error) {
 	path := managedDoltRecoveryStatePath(layout)
 	state, diagnostic, err := readManagedDoltRecoveryState(path)
 	if err != nil {
 		return false, err
 	}
 	if diagnostic != "" {
-		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic)
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic, diagnostic, managedDoltRecoverCallerProviderHealth)
 	}
-	if last := state.LastProviderAttemptAt; last != nil {
-		if last.After(now) {
-			reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic,
-				fmt.Sprintf("recorded provider recovery attempt %s is ahead of now %s (clock moved backwards?); resetting it",
-					last.Format(time.RFC3339), now.Format(time.RFC3339)))
-		} else if now.Sub(*last) < cooldown {
-			return false, nil
-		}
+	last := state.LastProviderAttemptAt
+	if providerRecoverAttemptCoolingDown(last, now, cooldown) {
+		return false, nil
+	}
+	if last != nil && last.After(now) {
+		reportManagedDoltRecoveryDiagnostic(diag, layout.LogFile, now, managedDoltJournalHistoryDiagnostic,
+			fmt.Sprintf("recorded provider recovery attempt %s is ahead of now %s (clock moved backwards?); resetting it",
+				last.Format(time.RFC3339), now.Format(time.RFC3339)), managedDoltRecoverCallerProviderHealth)
 	}
 	state.LastProviderAttemptAt = &now
 	if err := writeManagedDoltRecoveryState(path, state); err != nil {
 		return false, fmt.Errorf("reserve provider recovery attempt: %w", err)
 	}
 	return true, nil
+}
+
+// providerRecoverLocalAttempts records, per city, when this process last
+// admitted a provider-driven recovery. It is the cooldown of last resort,
+// consulted only when the shared recovery history cannot be read or written.
+var providerRecoverLocalAttempts sync.Map // normalized cityPath → time.Time
+
+// admitProviderManagedDoltRecover decides whether a provider health check
+// that found the managed dolt unhealthy may run recovery now. It returns nil
+// to proceed, or the error the check reports instead: unhealthy itself while
+// an attempt is cooling down, or unhealthy annotated when another lifecycle
+// operation holds the lock or ctx ends first. When the recovery history
+// cannot be read or written, the fault is journaled and this process's own
+// cooldown decides, so a bookkeeping fault never disables recovery; the
+// recovery helper's gate still refuses to stop a live server whose history
+// it cannot read.
+func admitProviderManagedDoltRecover(ctx context.Context, cityPath string, unhealthy error) error {
+	now, cooldown := providerRecoverNow(), providerRecoverCooldown()
+	reserved, err := reserveManagedDoltProviderRecoverAttempt(ctx, cityPath, now, cooldown, os.Stderr)
+	if errors.Is(err, errManagedDoltLifecycleBusy) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("unhealthy (%w); not recovering: %w", unhealthy, err)
+	}
+	cityKey := normalizePathForCompare(cityPath)
+	if err != nil {
+		reportProviderRecoverHistoryFault(cityPath, now, err)
+		reserved = !providerRecoverAttemptCoolingDown(providerRecoverLocalAttempt(cityKey), now, cooldown)
+	}
+	if !reserved {
+		return unhealthy
+	}
+	providerRecoverLocalAttempts.Store(cityKey, now)
+	return nil
+}
+
+// providerRecoverLocalAttempt returns when this process last admitted a
+// provider-driven recovery of the city keyed cityKey, or nil when it has not.
+func providerRecoverLocalAttempt(cityKey string) *time.Time {
+	if last, ok := providerRecoverLocalAttempts.Load(cityKey); ok {
+		if at, ok := last.(time.Time); ok {
+			return &at
+		}
+	}
+	return nil
+}
+
+// reportProviderRecoverHistoryFault reports, on stderr and in the managed
+// dolt log as the provider health check's, that the shared provider recovery
+// cooldown could not be used.
+func reportProviderRecoverHistoryFault(cityPath string, at time.Time, fault error) {
+	reason := fmt.Sprintf("provider recovery cooldown history is unavailable (%v); falling back to this process's own recovery cooldown", fault)
+	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc dolt recovery: %s\n", reason) //nolint:errcheck // best-effort diagnostic
+		return
+	}
+	reportManagedDoltRecoveryDiagnostic(os.Stderr, layout.LogFile, at, managedDoltJournalHistoryDiagnostic, reason, managedDoltRecoverCallerProviderHealth)
 }

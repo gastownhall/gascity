@@ -820,6 +820,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "cmd/gc/dolt_recover_unresponsive_test.go"
+resource = "net_listen"
+calls = 2
+
+[[count]]
 path = "cmd/gc/dolt_runtime_test_helpers_test.go"
 resource = "fixed_sleep"
 calls = 1

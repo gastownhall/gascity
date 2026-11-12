@@ -863,7 +863,11 @@ func TestRecoverManagedDolt_DefersStopOfLiveListeningServerOnSingleProbeTimeout(
 	if stopCalls != 0 || startCalls != 0 || report.Restarted {
 		t.Fatalf("single probe timeout on a live listening owned server: stop calls=%d start calls=%d Restarted=%v, want no stop/start (deferral)", stopCalls, startCalls, report.Restarted)
 	}
-	if err == nil {
-		t.Fatal("expected a deferral error reporting the unhealthy store, got nil")
+	var deferred *managedDoltRecoveryDeferredError
+	if !errors.As(err, &deferred) {
+		t.Fatalf("recover error = %v, want *managedDoltRecoveryDeferredError", err)
+	}
+	if deferred.Identity.PID != os.Getpid() || deferred.Identity.Port != port {
+		t.Fatalf("deferral identity = %+v, want the listener this test holds (pid %d, port %d)", deferred.Identity, os.Getpid(), port)
 	}
 }
