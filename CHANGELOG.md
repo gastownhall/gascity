@@ -1009,6 +1009,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them (see Fixed). Correct or delete the entry, and check that the overrides
   below it, such as an `enabled = false`, still say what you want.
 
+- **macOS: the first `gc start`, `gc supervisor install`, `gc register` or
+  `gc init` after upgrading restarts the supervisor once.** It rewrites the
+  supervisor LaunchAgent plist with the new `ProcessType` and `ExitTimeOut`
+  keys (see Fixed, #8015) and reloads it; sessions are preserved. From then
+  on, a command that reloads a changed plist waits for the supervisor's
+  preserve-mode stop to finish, up to 60 s, instead of launchd killing it
+  after 5 s, so that command can take longer. Dolt, tmux and agent processes
+  that are already running keep the throttled scheduling class until they
+  restart (a reboot, or `gc supervisor stop --wait` then `gc start`, which
+  stops sessions): `taskpolicy` cannot lift a running process.
+
 ### Added
 
 - **Events: `session.created` and `session.closed`.** The city event
@@ -1345,6 +1356,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --inject` stays.
 
 ### Fixed
+
+- **macOS: launchd no longer throttles the supervisor or the work it starts,
+  and no longer kills a preserve-mode stop after 5 s** (#8015). The
+  supervisor LaunchAgent plist now sets `ProcessType` to `Interactive`, so
+  launchd no longer applies `Standard` CPU and I/O throttling to the
+  supervisor, the managed Dolt server, the city tmux server and agent
+  sessions. It also sets `ExitTimeOut` to 60, so a launchd-initiated stop
+  (bootout, logout) gives the supervisor 60 s instead of 5 s to finish its
+  preserve-mode stop before launchd sends SIGKILL.
 
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
