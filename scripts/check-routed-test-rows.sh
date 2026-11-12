@@ -12,7 +12,7 @@
 #     escape-hatch         — GC_NO_API=1, fallback, exit 0
 #
 # A row is present in a file only when it is declared as a test-case name:
-# `name: "<row>"` (any spacing after the colon). The same words also appear in
+# `name: "<row>"` (any spacing after the colon) outside a comment. The same words also appear in
 # unrelated files as ordinary values (a `wantReason: "controller-down"` refusal
 # string, a reason argument passed to a route helper); those are not matrix rows
 # and must not enroll a file in, or fail it against, the matrix.
@@ -49,13 +49,45 @@ required_rows=(
     "escape-hatch"
 )
 
+# strip_go_comments FILE -> echoes FILE with Go line and block comments removed.
+# String, raw-string and rune literals are kept intact (and a comment marker
+# inside one is not a comment), so a commented-out `name: "<row>"` is not a
+# declared case but a real one still is.
+strip_go_comments() {
+    awk '
+    BEGIN { st = 0 }   # 0 code, 1 block comment, 2 string, 3 raw string, 4 rune
+    {
+        out = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1); d = substr($0, i, 2)
+            if (st == 1) { if (d == "*/") { st = 0; i++ } continue }
+            if (st == 3) { out = out c; if (c == "`") st = 0; continue }
+            if (st == 2 || st == 4) {
+                out = out c
+                if (c == "\\") { i++; out = out substr($0, i, 1) }
+                else if ((st == 2 && c == "\"") || (st == 4 && c == "\047")) st = 0
+                continue
+            }
+            if (d == "//") break
+            if (d == "/*") { st = 1; i++; out = out " "; continue }
+            if (c == "\"") st = 2
+            else if (c == "`") st = 3
+            else if (c == "\047") st = 4
+            out = out c
+        }
+        if (st == 2 || st == 4) st = 0   # string and rune literals end at end of line
+        print out
+    }' "$1"
+}
+
 # count_rows FILE -> echoes how many of the six required rows the file declares
-# as a test-case name. Row names contain only [a-z0-9-], so they are safe in a
-# regular expression.
+# as a test-case name outside comments. Row names contain only [a-z0-9-], so
+# they are safe in a regular expression.
 count_rows() {
-    local file="$1" present=0 row
+    local code present=0 row
+    code=$(strip_go_comments "$1")
     for row in "${required_rows[@]}"; do
-        if grep -Eq "name:[[:space:]]*\"$row\"" "$file"; then
+        if grep -Eq "name:[[:space:]]*\"$row\"" <<<"$code"; then
             present=$((present + 1))
         fi
     done
