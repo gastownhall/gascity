@@ -12188,7 +12188,7 @@ func TestJsonlExportArchiveRepackCommandAndGitAutoMaintenance(t *testing.T) {
 		t.Fatalf("ReadFile(git argv log): %v", err)
 	}
 	log := string(data)
-	if want := "ARGV -C " + f.archiveRepo + " -c pack.windowMemory=64M -c pack.threads=1 repack -d -l -q --geometric=2"; !strings.Contains(log, want+"\n") {
+	if want := "ARGV -C " + f.archiveRepo + " -c core.bigFileThreshold=4g -c pack.windowMemory=64M -c pack.threads=1 repack -d -l -q --geometric=2"; !strings.Contains(log, want+"\n") {
 		t.Fatalf("expected the repack %q in the git calls:\n%s", want, log)
 	}
 	if !strings.Contains(log, "ARGV -c maintenance.auto=false -c gc.auto=0 commit ") {

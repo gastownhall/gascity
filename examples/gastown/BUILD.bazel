@@ -8,6 +8,8 @@ go_test(
         "dolt_orphan_sweep_integration_test.go",
         "embedded_pack_test.go",
         "gastown_test.go",
+        "jsonl_archive_settle_test.go",
+        "jsonl_archive_writer_test.go",
         "main_test.go",
         "maintenance_bd_integration_test.go",
         "maintenance_installed_layout_test.go",
