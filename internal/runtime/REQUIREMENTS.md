@@ -134,26 +134,16 @@ differs, fix code and prove the row with a test.
 
 ### Windows Runtime Scanning
 
-With a statically resolved city executable scope, subprocess scans skip unrelated
-unreadable images, but refuse matching or unknown images. Missing or unresolved
-scope remains strict. Config reload unions the scope with all earlier scopes in
-the controller's lifetime, including when the runtime provider is replaced.
-Once any applied config requires strict scanning, reload cannot narrow it.
-Readable roots, unscoped snapshots and kill checks are not filtered. Custom
-providers should declare `process_names` for interpreter or alias target images;
-dynamic command positions retain strict scanning. The diagnostic identifies the
-unresolved config field without logging its command contents.
+With an executable scope, a subprocess scan skips unrelated unreadable images,
+but refuses matching or unknown images. An empty or whitespace-only scope
+remains strict. Readable roots, unscoped snapshots and kill checks are not
+filtered.
 
-The scope history is not persisted across controller restarts or standalone CLI
-invocations. Keep old executable names in `process_names` until earlier sessions
-are stopped; otherwise an unreadable orphan of a removed command can fall outside
-the new controller's scope.
+Resolving the scope from city config, its reload behavior, the unresolved-field
+diagnostic and `process_names` guidance for custom providers arrive with
+split 26, together with their evidence.
 
-Evidence: `TestProcessTableRuntimeInspectionScope`, `TestConfigureProcessTableScan`,
-`TestCityRuntimeExecutablesRefusesDynamicCommands`,
-`TestCityRuntimeExecutablesReportsUnresolvedCommand`,
-`TestCityRuntimeReloadRefreshesScanScope`, `TestSeamScanScopeForwarding`,
-`TestShellCommandProgramsMatchesParser`.
+Evidence: `TestProcessTableRuntimeInspectionScope`.
 
 ### RPP v0 (Exec Protocol)
 
