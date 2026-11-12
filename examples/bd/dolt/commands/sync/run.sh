@@ -249,14 +249,16 @@ remote_env_value() {
   eval "printf '%s' \"\${GC_DOLT_REMOTE_$key:-}\""
 }
 
-# remote_allow_env_value <db> — emit the GC_DOLT_SYNC_ALLOW_REMOTE_<DB_UPPER>
-# opt-in, if any. select_remote requires it to be exactly "1" before an
-# override may push to a non-local remote; it is the push-side twin of pull's
-# GC_DOLT_PULL_ALLOW_REMOTE_<DB>.
-remote_allow_env_value() {
+# remote_allow_enabled <db> — succeed only when GC_DOLT_SYNC_ALLOW_REMOTE_<DB_UPPER>
+# is exactly "1". select_remote requires it before an override may push to a
+# non-local remote; it is the push-side twin of pull's
+# GC_DOLT_PULL_ALLOW_REMOTE_<DB>. The value is compared in place and never
+# captured with $(...), which strips trailing line feeds and would let "1"+LF
+# pass as "1".
+remote_allow_enabled() {
   key=$(db_env_key "$1") || return 1
-  [ -z "$key" ] && return 0
-  eval "printf '%s' \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\""
+  [ -z "$key" ] && return 1
+  eval "[ \"\${GC_DOLT_SYNC_ALLOW_REMOTE_$key:-}\" = 1 ]"
 }
 
 warn_refspec_fallback() {
@@ -344,8 +346,7 @@ select_remote() {
     case "$sr_url" in
       file://*) ;;
       *)
-        sr_allowed=$(remote_allow_env_value "$sr_db") || return 1
-        if [ "$sr_allowed" != "1" ]; then
+        if ! remote_allow_enabled "$sr_db"; then
           echo "  $sr_db: ERROR: GC_DOLT_REMOTE names non-local remote '$sr_override' ($sr_url) — set GC_DOLT_SYNC_ALLOW_REMOTE_<DB>=1 to allow pushing to it" >&2
           return 1
         fi
