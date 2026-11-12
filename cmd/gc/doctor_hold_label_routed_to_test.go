@@ -671,3 +671,57 @@ func TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched(t *testing.T) {
 		t.Errorf("v2-routed-to-namespace details missing %q: %#v", want, namespace)
 	}
 }
+
+// TestHoldLabelRoutedToCheckBackfillsUnboundHoldVerbatim covers ga-tkxbic
+// AC-5: a hold value with no binding-qualified alias keeps the original
+// verbatim backfill. That includes a value bound under a binding but shadowed
+// by an unbound agent of the same name, which owns the short route, so
+// v2-routed-to-namespace stays OK after the repair too.
+func TestHoldLabelRoutedToCheckBackfillsUnboundHoldVerbatim(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "planner"},
+		{Name: "planner", BindingName: "ops"},
+		{Name: "reviewer", BindingName: "ops"},
+	}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "U-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		{
+			ID: "U-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "ops.reviewer"},
+		},
+		{ID: "U-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa-lead"}},
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead U-1 has hold:planner but gc.routed_to=""; use "planner"`,
+		`city bead U-2 has hold:planner but gc.routed_to="ops.reviewer"; use "planner"`,
+		`city bead U-3 has hold:qa-lead but gc.routed_to=""; use "qa-lead"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for id, want := range map[string]string{"U-1": "planner", "U-2": "planner", "U-3": "qa-lead"} {
+		if got := holdLabelRoute(t, store, id); got != want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want verbatim %q", id, got, want)
+		}
+	}
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix hold-label-routed-to status = %v, want OK: %#v", res.Status, res)
+	}
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", res.Status, res)
+	}
+}
