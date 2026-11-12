@@ -149,7 +149,7 @@ func TestClientStartingCityIsWaitMessageNotFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "gc-management")
-	_, err := c.ListSessions("", "", false)
+	_, err := c.ListSessions(ListSessionsOpts{})
 	if err == nil {
 		t.Fatal("expected an error for a starting city, got nil")
 	}
