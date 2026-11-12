@@ -313,7 +313,8 @@ type WorkFederation struct {
 	// publication, and the two can disagree). A skipped rig is dropped before
 	// the legs are deduped, so a store it shares with a rig that is read is
 	// still read through that rig. A ref the epoch did not open is ignored;
-	// WorkRef is a plan error, since the city is never skipped.
+	// WorkRef is a plan error, since the city is never skipped, and so is any
+	// Skip under WorkReadsSuspendedRigs, which reads every rig.
 	Skip []StoreRef
 }
 

@@ -286,7 +286,13 @@ func t7e2SweepDeclared(log []string, old string) []string {
 func TestWorkFederationReadersMatchTheFrozenReaders(t *testing.T) {
 	q2Moved := map[string]int{}
 	variants := t7e2Variants()
+	// shapesRun counts the shape runs that executed: a -run filter that
+	// selects some shapes cannot judge a declaration stale.
+	shapesRun := 0
 	defer func() {
+		if shapesRun != 2*len(t7dShapes) {
+			return
+		}
 		for _, v := range variants {
 			if v.q2 && q2Moved[v.name] == 0 && !t.Failed() {
 				t.Errorf("variant %q is declared for Q2 but Q2's rule changed no status count on any shape", v.name)
@@ -309,6 +315,7 @@ func TestWorkFederationReadersMatchTheFrozenReaders(t *testing.T) {
 			}) {
 				shape := t7dShapes[shapeName]
 				t.Run(shapeName, func(t *testing.T) {
+					shapesRun++
 					templates := shape.fixtures(t)
 					// One city path for every side: it is the store-health
 					// walk's root.

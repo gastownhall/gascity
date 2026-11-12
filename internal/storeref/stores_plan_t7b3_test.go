@@ -3,6 +3,7 @@ package storeref
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -56,6 +57,21 @@ func TestWorkFederationSkipsByRefNotBySuspension(t *testing.T) {
 	}
 	if got, want := refs(WorkFederation{Kind: WorkList, CityName: "c", SuspendedRigs: WorkSkipsRigs}), `[rig:alpha rig:bravo the city work store class:gmnos]`; got != want {
 		t.Errorf("List skipping nothing = %s, want %s", got, want)
+	}
+}
+
+// TestWorkFederationRefusesASkipWhenReadingEveryRig: a reader that reads
+// every rig and also names rigs to skip has made two choices; the plan
+// refuses rather than pick one.
+func TestWorkFederationRefusesASkipWhenReadingEveryRig(t *testing.T) {
+	s := NewStores(newT2().topo, StoresOptions{})
+	for _, kind := range []WorkKind{WorkList, WorkSweep} {
+		if _, err := s.Plan(WorkFederation{Kind: kind, SuspendedRigs: WorkReadsSuspendedRigs, Skip: []StoreRef{RigRef("alpha")}}); err == nil {
+			t.Errorf("%s: a Skip under WorkReadsSuspendedRigs planned", kind)
+		}
+		if _, err := s.Plan(WorkFederation{Kind: kind, SuspendedRigs: WorkReadsSuspendedRigs}); err != nil {
+			t.Errorf("%s: reading every rig with no Skip refused: %v", kind, err)
+		}
 	}
 }
 
@@ -153,7 +169,12 @@ func TestBindLegKeepsTheShape(t *testing.T) {
 	}
 	clone := newNamedStore("clone")
 	clone.seed(t, "cl-1")
+	// handed is the store the bind was last asked about: the leg's raw store
+	// itself, never a handle over it (bdStoreBacking reads concrete types, so
+	// a handle would silently turn status's ctx-bound clone off: R12).
+	var handed beads.Store
 	bind := func(s beads.Store) (beads.Store, error) {
+		handed = s
 		if beads.IsNilStore(s) {
 			return nil, errors.New("no store to bind")
 		}
@@ -165,9 +186,13 @@ func TestBindLegKeepsTheShape(t *testing.T) {
 	}
 	i := 0
 	EachTypedLeg(plan, func(l TypedLeg) {
+		handed = nil
 		bound, err := BindLeg(l, bind)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if handed != l.planned.Leg.Store {
+			t.Errorf("leg %s: the bind was handed %T, want the leg's own store %T", legName(l.Ref), handed, l.planned.Leg.Store)
 		}
 		if bound.Ref != l.Ref || bound.Role != l.Role || bound.OnError != l.OnError {
 			t.Errorf("leg %s: bound %v/%v/%v, planned %v/%v/%v", legName(l.Ref), bound.Ref, bound.Role, bound.OnError, l.Ref, l.Role, l.OnError)
@@ -215,6 +240,9 @@ func TestSessionsLegHandsOutTheSessionsHandle(t *testing.T) {
 		{"T0", newT0(), StoresOptions{}},
 		{"T0g", newT0(), StoresOptions{Projection: taggedProjection{}}},
 		{"T2", newT2(), StoresOptions{}},
+		// Sessions in a binding of its own, apart from graph, with mail on the
+		// work store: the leg is the sessions placement, not another class's.
+		{"T5", newT5(), StoresOptions{}},
 	} {
 		s := NewStores(tc.f.topo, tc.opts)
 		leg, ok := s.SessionsLeg()
@@ -232,9 +260,13 @@ func TestSessionsLegHandsOutTheSessionsHandle(t *testing.T) {
 			t.Errorf("%s: the sessions handle is not over the epoch's sessions store", tc.name)
 		}
 		clone := newNamedStore("clone")
-		bound, err := BindLeg(leg, func(beads.Store) (beads.Store, error) { return clone, nil })
+		var handed beads.Store
+		bound, err := BindLeg(leg, func(s beads.Store) (beads.Store, error) { handed = s; return clone, nil })
 		if err != nil {
 			t.Fatal(err)
+		}
+		if handed != s.Sessions().Raw() {
+			t.Errorf("%s: the bind was handed %T, want the sessions placement's own store", tc.name, handed)
 		}
 		if h, err := SessionStoreOn(bound); err != nil || !beads.SameStore(h, clone) {
 			t.Errorf("%s: SessionStoreOn(bound) = %v, %v; want a handle over the clone", tc.name, h, err)
@@ -254,5 +286,31 @@ func TestSessionsLegHandsOutTheSessionsHandle(t *testing.T) {
 	}
 	if _, ok := NewStores(Topology{}, StoresOptions{}).SessionsLeg(); ok {
 		t.Error("an epoch with no sessions store has a sessions leg")
+	}
+}
+
+// TestWorkFederationOrdersRigsByName: the legs are in rig name order however
+// the holder handed its rigs over.
+func TestWorkFederationOrdersRigsByName(t *testing.T) {
+	f := newT2()
+	slices.Reverse(f.topo.Rigs)
+	s := NewStores(f.topo, StoresOptions{})
+	for _, in := range []WorkFederation{
+		{Kind: WorkList, CityName: "b", SuspendedRigs: WorkReadsSuspendedRigs},
+		{Kind: WorkSweep, SuspendedRigs: WorkReadsSuspendedRigs},
+	} {
+		plan, err := s.Plan(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var refs []string
+		EachTypedLeg(plan, func(l TypedLeg) { refs = append(refs, string(l.Ref)) })
+		want := `[rig:alpha  rig:bravo class:gmnos]`
+		if in.Kind == WorkSweep {
+			want = `[ rig:alpha rig:bravo class:gmnos]`
+		}
+		if got := fmt.Sprint(refs); got != want {
+			t.Errorf("%s: legs %s, want %s", in.Kind, got, want)
+		}
 	}
 }
