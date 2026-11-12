@@ -378,7 +378,7 @@ func (p *Provider) launchOrchestration(ctx context.Context, name string, cfg run
 	// branch) also re-delivers on the next reconcile tick; for every other
 	// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
 	// last resort.
-	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode); err != nil {
+	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode, cfg.NotReadyMarkers, cfg.ReadyPromptPrefix); err != nil {
 		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, err)
 	}
 	return nil

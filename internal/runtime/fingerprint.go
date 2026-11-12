@@ -119,7 +119,7 @@ func restartFingerprintExtra(extra map[string]string) map[string]string {
 // AcceptStartupDialogs, MouseOn, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
-// ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
+// ReadyDelayMs, NotReadyMarkers, ProcessNames, EmitsPermissionWarning.
 //
 // The hash is a hex-encoded SHA-256 prefixed with FingerprintVersion. Same
 // config always produces the same hash regardless of map iteration order.
