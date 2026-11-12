@@ -22,6 +22,7 @@ package storeref
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -620,14 +621,15 @@ func (s Stores) planWorkFederation(in WorkFederation) (ResolvedPlan, error) {
 	if in.SuspendedRigs != WorkReadsSuspendedRigs && in.SuspendedRigs != WorkSkipsRigs {
 		return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan needs the reader's choice about suspended rigs (WorkReadsSuspendedRigs or WorkSkipsRigs), got %d", in.Kind, in.SuspendedRigs)
 	}
+	if in.SuspendedRigs == WorkReadsSuspendedRigs && len(in.Skip) > 0 {
+		return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan that reads every rig names rigs to skip; skipping them is WorkSkipsRigs", in.Kind)
+	}
 	skip := map[StoreRef]bool{}
-	if in.SuspendedRigs == WorkSkipsRigs {
-		for _, ref := range in.Skip {
-			if ref == WorkRef {
-				return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan never skips the city work store", in.Kind)
-			}
-			skip[ref] = true
+	for _, ref := range in.Skip {
+		if ref == WorkRef {
+			return ResolvedPlan{}, fmt.Errorf("storeref: a WorkFederation(%s) plan never skips the city work store", in.Kind)
 		}
+		skip[ref] = true
 	}
 	relocated := s.relocated()
 	sessions := s.leg(coordclass.ClassSessions, s.city.Sessions.Raw(), WorkRef, RoleFederationTail, PolicyFatal)
@@ -639,15 +641,18 @@ func (s Stores) planWorkFederation(in WorkFederation) (ResolvedPlan, error) {
 	if in.Kind == WorkSweep {
 		legs = append(legs, city)
 	}
-	// s.rigs is in name order (RigLegs). WorkList lists the city among them
-	// under CityName, unless a rig of that name replaces it.
+	// The rigs in name order (a holder hands them over sorted, through
+	// RigLegs; the leg order must not depend on it). WorkList lists the city
+	// among them under CityName, unless a rig of that name replaces it.
+	rigs := slices.Clone(s.rigs)
+	slices.SortStableFunc(rigs, func(a, b rigStores) int { return strings.Compare(a.name, b.name) })
 	cityListed := in.Kind == WorkSweep
-	for _, r := range s.rigs {
+	for _, r := range rigs {
 		if r.name == in.CityName {
 			cityListed = true
 		}
 	}
-	for _, r := range s.rigs {
+	for _, r := range rigs {
 		if !cityListed && in.CityName < r.name {
 			legs, cityListed = append(legs, city), true
 		}

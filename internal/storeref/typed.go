@@ -311,5 +311,8 @@ func SessionStoreOn(l TypedLeg) (beads.SessionStore, error) {
 	if !l.sessions || beads.IsNilStore(l.planned.Leg.Store) {
 		return beads.SessionStore{}, fmt.Errorf("storeref: SessionStoreOn needs the sessions leg (Stores.SessionsLeg), got %q", legName(l.Ref))
 	}
+	// MintClassStores' sessions handle, minted by literal so NewStores stays
+	// MintClassStores' only caller; T10's removal of the handles' Store field
+	// makes this stop compiling, which is where it moves to the mint.
 	return beads.SessionStore{Store: l.planned.Leg.Store}, nil
 }
