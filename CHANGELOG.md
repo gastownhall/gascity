@@ -1165,11 +1165,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
-  the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
-  now needs Go 1.27.3 or newer. The rbe-west worker host moves with it: its
+  the toolchain Dolt 2.6.0 and beads `main` build with, and then to 1.27.4
+  for GO-2026-6859 (see Security). Building from source now needs Go 1.27.4
+  or newer. The rbe-west worker host moves with it: its
   workers install `go.mod`'s Go and, from rbe-worker `80d70774`, Dolt 2.6.0.
   Contributors: a golangci-lint built with Go 1.26 refuses this module, which
-  breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
+  breaks the pre-commit formatter. Rebuild it with Go 1.27.4:
   `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
 - **`gc init` pins the gastown pack to registry release 0.1.13 and the
@@ -1996,6 +1997,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Suspending a session shortly after it woke keeps its conversation.** An
   operator, idle or `gc stop` suspend no longer counts as a rapid crash or
   churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
+
+### Security
+
+- **gc is built with Go 1.27.4, which fixes GO-2026-6859 (CVE-2026-97054) in
+  `net/http`.** In Go 1.27.3 and earlier, when an `http.MaxBytesReader`
+  limit is exceeded, net/http sets `Connection: close` on the response
+  headers without synchronization, so an HTTP/1 handler that reads a limited
+  request body while it writes the response headers can crash the server.
+  gc's API server wraps request bodies in `http.MaxBytesReader` (webhook and
+  write-auth handlers), and govulncheck reports the advisory reachable from
+  gc. The `go.mod` floor, the Bazel `go_sdk`, the nogo analyzers' module, the
+  `contrib/k8s` Go build images and the rbe-west worker host's Go all move to
+  1.27.4. Building from source needs Go 1.27.4 or newer.
 
 ## [1.5.1] - 2026-10-24
 

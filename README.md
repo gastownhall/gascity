@@ -220,7 +220,7 @@ compromised eMudhra CA intermediates.
 
 ### Build from source
 
-Building requires `make`, Go 1.27.3+, and ICU for a transitive Dolt CGO
+Building requires `make`, Go 1.27.4+, and ICU for a transitive Dolt CGO
 dependency (`brew install icu4c` on macOS, `apt install libicu-dev` on Linux;
 on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
