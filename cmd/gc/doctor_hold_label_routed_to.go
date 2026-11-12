@@ -27,7 +27,8 @@ const holdLabelClearedValue = "cleared"
 // <value> is the short form of a binding-qualified route
 // (boundRoutedToAliases), that canonical route also matches, since it is the
 // form v2-routed-to-namespace requires.
-// --fix backfills gc.routed_to from the label value.
+// --fix backfills gc.routed_to with that canonical route, or with the label
+// value verbatim when <value> has no binding-qualified alias.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -62,13 +63,29 @@ func holdLabelValue(labels []string) (string, bool) {
 }
 
 // holdRouteTarget is a single bead whose hold:<value> label and gc.routed_to
-// metadata have drifted apart.
+// metadata have drifted apart. want is the hold value; canonicals holds every
+// binding-qualified route it is a short form of (boundRoutedToAliases), empty
+// when the value has no alias.
 type holdRouteTarget struct {
-	label  string
-	store  beads.Store
-	beadID string
-	want   string
-	got    string
+	label      string
+	store      beads.Store
+	beadID     string
+	want       string
+	got        string
+	canonicals []string
+}
+
+// route returns the gc.routed_to value that repairs t: the unique canonical
+// route when the hold value has one, otherwise the hold value itself.
+func (t holdRouteTarget) route() string {
+	if len(t.canonicals) == 1 {
+		return t.canonicals[0]
+	}
+	return t.want
+}
+
+func (t holdRouteTarget) describe() string {
+	return fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q; use %q", t.label, t.beadID, t.want, t.got, t.route())
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
@@ -108,10 +125,11 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 				continue
 			}
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			if got == want || slices.Contains(aliases[want], got) {
+			canonicals := aliases[want]
+			if got == want || slices.Contains(canonicals, got) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
+			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got, canonicals: canonicals})
 		}
 	}
 	return targets, skipped
@@ -124,7 +142,7 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	details := make([]string, 0, len(targets)+len(skipped))
 	for _, tgt := range targets {
-		details = append(details, fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q", tgt.label, tgt.beadID, tgt.want, tgt.got))
+		details = append(details, tgt.describe())
 	}
 	details = append(details, skipped...)
 	sort.Strings(details)
@@ -136,14 +154,14 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	return warnCheck(c.Name(),
 		fmt.Sprintf("%d bead(s) carry a hold:<value> label without matching gc.routed_to", len(targets)),
-		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label",
+		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label, binding-qualified when the value names a bound agent",
 		details)
 }
 
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.route()); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
 	}
