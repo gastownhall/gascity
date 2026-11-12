@@ -769,17 +769,24 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// startScanErrorLogs paces killExistingOrphans' scan-error log lines across
+// starts. Every start builds a fresh Manager, so only a log that outlives
+// managers keeps an unchanged error shape quiet across them.
+var startScanErrorLogs = &proctable.ScanErrorLog{}
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
 // nothing, when the provider claims one of them as a live runtime it does not
 // list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
 // callers gating a Start can refuse rather than race a survivor for the same
-// work. A scan error is logged and treated as fail-closed (see
-// FindRuntimesBySessionID): the orphans the scan did surface are still
-// terminated unless one of them is LiveUnlisted, which terminates none, and
-// matching the started replacement is impossible because it does not exist
-// yet.
+// work. A scan error is logged — paced by startScanErrorLogs, so an
+// unchanged error shape logs once per [proctable.ScanErrorLogRepeat] across
+// starts, while a whole-scan failure logs every time — and treated as
+// fail-closed (see FindRuntimesBySessionID): the orphans the scan did surface
+// are still terminated unless one of them is LiveUnlisted, which terminates
+// none, and matching the started replacement is impossible because it does
+// not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -787,10 +794,10 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	if err != nil && startScanErrorLogs.Report(cityPath, err, m.now()) {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
-	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {

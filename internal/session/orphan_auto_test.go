@@ -7,8 +7,10 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -94,5 +96,101 @@ func TestKillExistingOrphansSummarizesScanError(t *testing.T) {
 	want := `session: scanning for orphaned runtimes for sid-scan (failing closed): 70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)` + "\n"
 	if logged != want {
 		t.Fatalf("logged %q, want one summary line %q", logged, want)
+	}
+}
+
+// TestKillExistingOrphansPacesScanErrors (ga-zpcphq, PR #8182): a start whose
+// pre-start scan hits unreadable entries logged the bounded summary every
+// time, and a production supervisor logged the same line thousands of times
+// over days. Every start builds a fresh Manager, so only a pacer that outlives
+// managers can keep an unchanged-shape error quiet across starts: the line
+// appears initially, again when the shape changes, and again after ten
+// minutes; new PIDs or counts of the same class wait for the interval, and
+// another city's starts report their own errors.
+func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
+	entryErr := func(reason string, firstPID, lastPID int) error {
+		var err error
+		for pid := firstPID; pid < lastPID; pid++ {
+			err = errors.Join(err, &proctable.EntryError{PID: pid, Err: fmt.Errorf("%s for pid %d: permission denied", reason, pid)})
+		}
+		return err
+	}
+	environErr := func() error { return entryErr("reading environ", 1000, 1070) }
+
+	city, otherCity := t.TempDir(), t.TempDir()
+	t0 := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	var clk clock.Fake
+	clk.Time = t0
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	startManager := func(sp runtime.Provider, cityPath string) *Manager {
+		return newTestManager(t, beads.NewMemStore(), sp, WithCityPath(cityPath), WithClock(&clk))
+	}
+	scanErrLine := "session: scanning for orphaned runtimes for sid-scan"
+	logCount := func() int { return strings.Count(buf.String(), scanErrLine) }
+	run := func(sp runtime.Provider, cityPath string) {
+		t.Helper()
+		if err := startManager(sp, cityPath).killExistingOrphans(context.Background(), "sid-scan"); err != nil {
+			t.Fatalf("killExistingOrphans on %s: %v", cityPath, err)
+		}
+	}
+
+	failingScans := func(err error) runtime.Provider {
+		return &scanErrorFake{Fake: runtime.NewFake(), err: err}
+	}
+
+	// The first start reports the unreadable entries.
+	run(failingScans(environErr()), city)
+	if n := logCount(); n != 1 {
+		t.Fatalf("logged %d times after the first start, want 1", n)
+	}
+	// The same error on a reconstructed manager of the same city stays quiet.
+	clk.Advance(time.Minute)
+	run(failingScans(environErr()), city)
+	if n := logCount(); n != 1 {
+		t.Fatalf("logged %d times after an unchanged-shape repeat, want still 1", n)
+	}
+	// New PIDs and counts of the same class stay quiet too.
+	clk.Advance(time.Minute)
+	run(failingScans(entryErr("reading environ", 2000, 2071)), city)
+	if n := logCount(); n != 1 {
+		t.Fatalf("logged %d times after new pids of the same class, want still 1", n)
+	}
+	// Another city's start reports its own error.
+	clk.Advance(time.Minute)
+	run(failingScans(environErr()), otherCity)
+	if n := logCount(); n != 2 {
+		t.Fatalf("logged %d times after another city's start, want 2", n)
+	}
+	// A new kind of failure reports.
+	clk.Advance(time.Minute)
+	run(failingScans(fmt.Errorf("reading owner for pid 2100: no such device")), city)
+	if n := logCount(); n != 3 {
+		t.Fatalf("logged %d times after a shape change, want 3", n)
+	}
+	clk.Advance(time.Minute)
+	run(failingScans(environErr()), city)
+	if n := logCount(); n != 4 {
+		t.Fatalf("logged %d times after returning to the first shape, want 4", n)
+	}
+	// The same shape again within the interval stays quiet.
+	clk.Advance(time.Minute)
+	run(failingScans(environErr()), city)
+	if n := logCount(); n != 4 {
+		t.Fatalf("logged %d times within the interval, want still 4", n)
+	}
+	// Once ten minutes have passed (ScanErrorLogRepeat, asserted in
+	// proctable's own tests), the same shape reports again.
+	clk.Advance(10*time.Minute + time.Second)
+	run(failingScans(environErr()), city)
+	if n := logCount(); n != 5 {
+		t.Fatalf("logged %d times after the repeat interval, want 5", n)
 	}
 }

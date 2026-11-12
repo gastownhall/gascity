@@ -3,8 +3,11 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // entryErrors builds per-entry failures for pids the way a scan does: one
@@ -137,5 +140,72 @@ func TestScanErrorShapeIgnoresCountsAndPIDs(t *testing.T) {
 	}
 	if ScanErrorShape(b) == ScanErrorShape(c) || ScanErrorShape(b) == ScanErrorShape(d) {
 		t.Fatal("a new kind, or a whole-scan failure, left the shape unchanged")
+	}
+}
+
+// entryScanError is a scan error of unreadable entries at pids.
+func entryScanError(msg string, pids ...int) error {
+	var err error
+	for _, pid := range pids {
+		err = errors.Join(err, &EntryError{PID: pid, Err: errors.New(strings.ReplaceAll(msg, "PID", strings.Repeat("9", pid%5+1)))})
+	}
+	return err
+}
+
+// TestScanErrorLogPacesUnreadableEntries (mc-ygved, ga-zpcphq): a caller logs
+// a scan of unreadable entries once per shape, again after
+// ScanErrorLogRepeat or when the shape changes, per key; a failure of the
+// whole scan is logged every time, as it bars callers' fail-closed rules. The
+// zero value is ready to use.
+func TestScanErrorLogPacesUnreadableEntries(t *testing.T) {
+	l := &ScanErrorLog{}
+	t0 := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	perm := entryScanError("reading environ for pid PID: permission denied", 11, 12)
+	steps := []struct {
+		name string
+		key  string
+		err  error
+		at   time.Time
+		want bool
+	}{
+		{"first", "/c", perm, t0, true},
+		{"same shape, other pids and count", "/c", entryScanError("reading environ for pid PID: permission denied", 13, 14, 15), t0.Add(time.Minute), false},
+		{"another city", "/d", perm, t0.Add(time.Minute), true},
+		{"a new kind", "/c", entryScanError("reading owner for pid PID: no such device", 16), t0.Add(2 * time.Minute), true},
+		{"the new kind again", "/c", entryScanError("reading owner for pid PID: no such device", 17), t0.Add(3 * time.Minute), false},
+		{"the interval boundary", "/c", entryScanError("reading owner for pid PID: no such device", 18), t0.Add(2*time.Minute + ScanErrorLogRepeat), true},
+		{"a whole-scan failure", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13 * time.Minute), true},
+		{"the whole-scan failure again", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13*time.Minute + time.Second), true},
+		{"a joined whole-scan failure", "/c", errors.Join(entryScanError("reading environ for pid PID: permission denied", 19), errors.New("enumerating /proc: permission denied")), t0.Add(13*time.Minute + 2*time.Second), true},
+	}
+	for _, s := range steps {
+		if got := l.Report(s.key, s.err, s.at); got != s.want {
+			t.Fatalf("%s: report = %t, want %t", s.name, got, s.want)
+		}
+	}
+}
+
+// TestScanErrorLogSharedConcurrently: the sweep and the start path hammer
+// one shared log from concurrent callers; every caller's own first
+// observation reports, whatever the others are doing.
+func TestScanErrorLogSharedConcurrently(t *testing.T) {
+	l := &ScanErrorLog{}
+	err := entryScanError("reading environ for pid PID: permission denied", 21, 22)
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !l.Report("/city-"+strconv.Itoa(i), err, now) {
+				t.Errorf("caller %d: first report = false, want true", i)
+			}
+		}()
+	}
+	wg.Wait()
+	for i := range 8 {
+		if l.Report("/city-"+strconv.Itoa(i), err, now.Add(time.Minute)) {
+			t.Errorf("caller %d: second report = true, want suppressed", i)
+		}
 	}
 }

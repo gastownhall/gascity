@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -145,6 +147,52 @@ func HasWholeScanFailure(err error) bool {
 	var other []string
 	collectScanErrors(err, &entries, &other)
 	return len(other) > 0
+}
+
+// ScanErrorLogRepeat is how long an unchanged scan-error shape stays quiet
+// in a [ScanErrorLog] before the same shape reports again.
+const ScanErrorLogRepeat = 10 * time.Minute
+
+// ScanErrorLog paces repeated scan-error reports per key: a whole-scan
+// failure always reports, while unreadable-entry failures report on their
+// first appearance, on any shape change, and again only after
+// [ScanErrorLogRepeat]. The zero value is ready to use; callers whose
+// owners are rebuilt frequently (a per-start manager, a periodic sweep)
+// share one package-scoped instance so the history outlives any one owner.
+type ScanErrorLog struct {
+	mu   sync.Mutex
+	last map[string]scanErrorLogged
+}
+
+// scanErrorLogged remembers one key's last reported shape and time.
+type scanErrorLogged struct {
+	shape string
+	at    time.Time
+}
+
+// Report returns whether the caller should report err for key now, and
+// records every observation it permits, so the next report of an unchanged
+// shape waits for [ScanErrorLogRepeat] from the last permitted one. A nil
+// error never reports; a whole-scan failure always does, because it bars
+// callers' fail-closed rules; an entry-only failure reports on its first
+// appearance, on any shape change, and again after [ScanErrorLogRepeat].
+func (l *ScanErrorLog) Report(key string, err error, now time.Time) bool {
+	if err == nil {
+		return false
+	}
+	shape := ScanErrorShape(err)
+	whole := HasWholeScanFailure(err)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last == nil {
+		l.last = make(map[string]scanErrorLogged)
+	}
+	prev, ok := l.last[key]
+	if whole || !ok || prev.shape != shape || now.Sub(prev.at) >= ScanErrorLogRepeat {
+		l.last[key] = scanErrorLogged{shape: shape, at: now}
+		return true
+	}
+	return false
 }
 
 // collectScanErrors splits err's tree into per-entry failures and the
