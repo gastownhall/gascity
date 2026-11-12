@@ -1755,12 +1755,22 @@ func resolvePreparedTaskWorkDir(
 			}
 		}
 	}
+	guard := newTaskWorkDirGuard(cityPath, cfg, openSessionHomes(loadOpenSessionInfos(store)), candidate)
 	if workDirResolver != nil {
 		if workDir := workDirResolver(candidate, cfg); workDir != "" {
-			return workDir
+			// A snapshot resolver built without a home store cannot see
+			// session homes; this guard has the store, so it backstops it.
+			owner := guard.foreignOwner(workDir)
+			if owner == "" {
+				return workDir
+			}
+			log.Printf("session %q: ignoring snapshot work_dir %q: it is the home of %s", guardSessionLabel(candidate), workDir, owner)
 		}
 	}
-	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+	if store == nil {
+		return ""
+	}
+	return resolveGuardedTaskWorkDir(cityPath, store.List, store.Get, guard, taskWorkDirAssignees(candidate, cfg)...)
 }
 
 // generatedPreStartPrefixes are the exact command prefixes

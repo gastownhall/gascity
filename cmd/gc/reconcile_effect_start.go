@@ -105,7 +105,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 // launchWorkDir is the work dir prepare launches row in: the task's, the
 // row's, the template's.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), legsTriggerResolver(r.legs)); dir != "" {
+	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w, r.openSessionHomes), legsTriggerResolver(r.legs)); dir != "" {
 		return dir
 	}
 	if dir := preparedStartSessionWorkDir(row); dir != "" {
@@ -130,15 +130,21 @@ func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, tr
 		claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg))),
 		trigger:     legsTriggerResolver(r.legs),
 	}
-	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
+	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w, r.openSessionHomes), sources, &transcript)
 	return prepared, err
+}
+
+// openSessionHomes reads the open session rows the task work dir guard keeps
+// a start out of, from the sessions store.
+func (r effectReads) openSessionHomes() []session.Info {
+	return openSessionHomes(loadOpenSessionInfos(r.city))
 }
 
 // taskWorkDirs is legacy's task work dir resolver over the pass's assigned
 // work, only when that read was not partial, as the legacy tick builds it.
-func taskWorkDirs(w *World) taskWorkDirResolver {
+func taskWorkDirs(w *World, homes func() []session.Info) taskWorkDirResolver {
 	if d := w.Demand; !d.StorePartial && len(d.AssignedWork) > 0 {
-		return newAssignedTaskWorkDirResolver(w.CityPath, d.AssignedWork)
+		return newAssignedTaskWorkDirResolver(w.CityPath, d.AssignedWork, withTaskWorkDirHomes(homes))
 	}
 	return nil
 }

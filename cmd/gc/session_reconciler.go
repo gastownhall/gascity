@@ -2034,7 +2034,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	deferralMemo := reconcileOpts.deferralMemo
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
+		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads, withTaskWorkDirHomes(func() []sessionpkg.Info { return openSessionHomes(loadOpenSessionInfos(store)) }))))
 	}
 	// Starts and launch-drift relaunches read the same dispatch option sources, so
 	// a relaunch applies the trigger-bead pins its fresh start would.
@@ -7312,10 +7312,29 @@ func resolveWorkDirAgainstCity(cityPath, workDir string) string {
 // on disk, that path is returned. This lets the reconciler start the agent
 // in the worktree that the previous session (or this session's prior run)
 // created, without any prompt-side logic.
+//
+// Production starts resolve through resolveGuardedTaskWorkDir; this unguarded
+// form is the reader the resolveTaskWorkDir tests pin.
+//
+//nolint:unparam // cityPath is "" only in tests; production uses resolveGuardedTaskWorkDir.
 func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string) string {
 	if store == nil {
 		return ""
 	}
+	return resolveGuardedTaskWorkDir(cityPath, store.List, store.Get, nil, assignees...)
+}
+
+// resolveGuardedTaskWorkDir is resolveTaskWorkDir reading through list and
+// get, and skipping a task bead whose work_dir guard names as another
+// session's home: resolution goes on to the next assigned bead. A nil guard
+// admits every directory.
+func resolveGuardedTaskWorkDir(
+	cityPath string,
+	list func(beads.ListQuery) ([]beads.Bead, error),
+	get func(string) (beads.Bead, error),
+	guard *taskWorkDirGuard,
+	assignees ...string,
+) string {
 	seen := make(map[string]bool, len(assignees))
 	for _, assignee := range assignees {
 		assignee = strings.TrimSpace(assignee)
@@ -7323,7 +7342,7 @@ func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string)
 			continue
 		}
 		seen[assignee] = true
-		assigned, err := store.List(beads.ListQuery{
+		assigned, err := list(beads.ListQuery{
 			Assignee: assignee,
 			Status:   "in_progress",
 			Live:     true,
@@ -7334,7 +7353,7 @@ func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string)
 			continue
 		}
 		for _, b := range assigned {
-			if workDir := resolveTaskBeadWorkDir(cityPath, store, b); workDir != "" {
+			if workDir := resolveTaskBeadWorkDir(cityPath, get, b); workDir != "" && guard.admit(b.ID, workDir) {
 				return workDir
 			}
 		}
@@ -7342,8 +7361,11 @@ func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string)
 	return ""
 }
 
-func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
-	if sourceWorkDir := resolveDrainSourceWorkDir(cityPath, store, bead); sourceWorkDir != "" {
+// resolveTaskBeadWorkDir returns the launch dir a task bead names: its drain
+// source's worktree, else its legacy work_dir, when that directory exists.
+// Drain sources are read through get.
+func resolveTaskBeadWorkDir(cityPath string, get func(string) (beads.Bead, error), bead beads.Bead) string {
+	if sourceWorkDir := resolveDrainSourceWorkDirWith(cityPath, get, bead); sourceWorkDir != "" {
 		return sourceWorkDir
 	}
 	// Only the legacy `work_dir` key is launch authority: it is the worktree
@@ -7367,17 +7389,12 @@ func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead)
 	return ""
 }
 
-// resolveDrainSourceWorkDir returns the prepared source anchor's worktree for
-// a drain item step. The drain recipe is materialized before prepare-worktree
-// creates that directory, so copied step metadata can still name the launcher
-// checkout. The source anchor is the durable post-prepare authority.
-func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
-	return resolveDrainSourceWorkDirWith(cityPath, store.Get, bead)
-}
-
-// resolveDrainSourceWorkDirWith is resolveDrainSourceWorkDir reading the root
-// and the drain member through get, which may span stores: the root is a graph
-// row and the member a work bead.
+// resolveDrainSourceWorkDirWith returns the prepared source anchor's worktree
+// for a drain item step. The drain recipe is materialized before
+// prepare-worktree creates that directory, so copied step metadata can still
+// name the launcher checkout. The source anchor is the durable post-prepare
+// authority. The root and the drain member are read through get, which may
+// span stores: the root is a graph row and the member a work bead.
 func resolveDrainSourceWorkDirWith(cityPath string, get func(string) (beads.Bead, error), bead beads.Bead) string {
 	root := bead
 	if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != bead.ID {
@@ -7636,14 +7653,35 @@ func workBeadOptionOverrides(b beads.Bead, rp *config.ResolvedProvider) (map[str
 }
 
 type assignedTaskWorkDir struct {
+	beadID    string
 	path      string
 	createdAt time.Time
 }
 
+// assignedTaskWorkDirOption configures newAssignedTaskWorkDirResolver.
+type assignedTaskWorkDirOption func(*assignedTaskWorkDirConfig)
+
+type assignedTaskWorkDirConfig struct {
+	homes func() []sessionpkg.Info
+}
+
+// withTaskWorkDirHomes names the source of the open session rows the
+// resolver's foreign-home guard reads, called when a start needs them.
+// Without it the guard checks configured agents only.
+func withTaskWorkDirHomes(homes func() []sessionpkg.Info) assignedTaskWorkDirOption {
+	return func(c *assignedTaskWorkDirConfig) { c.homes = homes }
+}
+
 // newAssignedTaskWorkDirResolver resolves work_dir values from the
 // reconciler's snapshot; misses intentionally fall back to the live lookup.
-func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.Bead) taskWorkDirResolver {
-	index := make(map[string]assignedTaskWorkDir)
+// The index keeps every assigned bead's dir, newest first, so a bead the
+// foreign-home guard rejects falls through to the next-newest one.
+func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.Bead, opts ...assignedTaskWorkDirOption) taskWorkDirResolver {
+	var rc assignedTaskWorkDirConfig
+	for _, apply := range opts {
+		apply(&rc)
+	}
+	index := make(map[string][]assignedTaskWorkDir)
 	for _, bead := range assignedWorkBeads {
 		if bead.Status != "in_progress" {
 			continue
@@ -7661,16 +7699,29 @@ func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.B
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		current, ok := index[assignee]
-		if ok && !bead.CreatedAt.After(current.createdAt) {
-			continue
-		}
-		index[assignee] = assignedTaskWorkDir{path: workDir, createdAt: bead.CreatedAt}
+		index[assignee] = append(index[assignee], assignedTaskWorkDir{beadID: bead.ID, path: workDir, createdAt: bead.CreatedAt})
+	}
+	for _, entries := range index {
+		slices.SortStableFunc(entries, func(a, b assignedTaskWorkDir) int { return b.createdAt.Compare(a.createdAt) })
 	}
 	return func(candidate startCandidate, cfg *config.City) string {
+		var guard *taskWorkDirGuard
 		for _, assignee := range taskWorkDirAssignees(candidate, cfg) {
-			if workDir := index[strings.TrimSpace(assignee)].path; workDir != "" {
-				return workDir
+			entries := index[strings.TrimSpace(assignee)]
+			if len(entries) == 0 {
+				continue
+			}
+			if guard == nil {
+				var homes []sessionpkg.Info
+				if rc.homes != nil {
+					homes = rc.homes()
+				}
+				guard = newTaskWorkDirGuard(cityPath, cfg, homes, candidate)
+			}
+			for _, entry := range entries {
+				if guard.admit(entry.beadID, entry.path) {
+					return entry.path
+				}
 			}
 		}
 		return ""

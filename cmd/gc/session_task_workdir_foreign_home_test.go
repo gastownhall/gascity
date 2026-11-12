@@ -17,6 +17,7 @@ package main
 // working.
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,8 @@ func newForeignHomeFixture(t *testing.T, taskMeta func(f *foreignHomeFixture) ma
 		}
 	}
 	f.cfg = &config.City{
+		// The rig is what {{.Rig}} in the agents' work_dir expands to.
+		Rigs: []config.Rig{{Name: "beads", Path: filepath.Join(f.cityPath, "rigs", "beads")}},
 		Agents: []config.Agent{
 			{Name: "pm", Dir: "beads", WorkDir: ".gc/worktrees/{{.Rig}}/pm", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
 			{Name: "builder", Dir: "beads", WorkDir: ".gc/worktrees/{{.Rig}}/builder", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
@@ -146,12 +149,13 @@ func foreignHomeClock() clock.Clock {
 	return &clock.Fake{Time: time.Date(2026, 10, 30, 11, 45, 47, 0, time.UTC)}
 }
 
-// launchLive prepares the candidate through the live-lookup path.
+// launchLive prepares the candidate through the live-lookup path, in the
+// fixture's city: configured work dirs resolve against its path.
 func (f *foreignHomeFixture) launchLive(t *testing.T) *preparedStart {
 	t.Helper()
-	prepared, err := prepareStartCandidate(f.candidate(t), f.cfg, f.store, foreignHomeClock())
+	prepared, err := prepareStartCandidateForCity(f.candidate(t), f.cityPath, "", f.cfg, nil, f.store, foreignHomeClock(), io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
-		t.Fatalf("prepareStartCandidate: %v", err)
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 	return prepared
 }

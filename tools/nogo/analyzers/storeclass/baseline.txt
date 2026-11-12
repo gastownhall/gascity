@@ -1549,9 +1549,7 @@ cmd/gc/session_reconciler.go	recordResetStallIfDue	raw-param	1
 cmd/gc/session_reconciler.go	relaunchAgentForLaunchDrift	raw-param	1
 cmd/gc/session_reconciler.go	resetConfiguredNamedSessionForConfigDriftInfo	raw-param	1
 cmd/gc/session_reconciler.go	resolveDispatchOptionOverrides	raw-param	1
-cmd/gc/session_reconciler.go	resolveDrainSourceWorkDir	raw-param	1
 cmd/gc/session_reconciler.go	resolvePreservedConfiguredNamedSessionTemplate	raw-param	1
-cmd/gc/session_reconciler.go	resolveTaskBeadWorkDir	raw-param	1
 cmd/gc/session_reconciler.go	resolveTaskWorkDir	raw-param	1
 cmd/gc/session_reconciler.go	sessionAttachedForConfigDrift	mint	1
 cmd/gc/session_reconciler.go	sessionAttachedForConfigDrift	raw-param	1

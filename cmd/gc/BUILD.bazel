@@ -686,6 +686,7 @@ go_library(
         "session_startup_prompt.go",
         "session_state_helpers.go",
         "session_target.go",
+        "session_task_workdir_guard.go",
         "session_template_start.go",
         "session_types.go",
         "session_wake.go",
