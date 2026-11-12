@@ -1,7 +1,10 @@
 # rbe-west worker-env grace record (gascity tools/rbe/worker-env-grace; TESTING.md "Grace window for Go re-pins").
-# no grace window: the re-pin moves more than the go line: -dolt dolt version 2.1.8, +dolt dolt version 2.6.0
+# beads may pin sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98 until 2026-11-12T18:51:33Z; rbe-west serves it until 2026-11-12T19:51:33Z.
 version 1
-pin sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98
-sha f78779e415224ec372001245b51b9f25b4a4368b
-previous none
-reason the re-pin moves more than the go line: -dolt dolt version 2.1.8, +dolt dolt version 2.6.0
+pin sha256:54ea5bdd4c5c8a43f1cb376bd2f5888749e198a398cd8893006d48d8a4c48e72
+sha 28f93a2385a1911d6c16c22799bc274ae030368a
+previous sha256:1c13f58eb37a36d4961b8db0e37825d1ddc39ebce86a33bd58b50abb495bfd98
+go 1.27.3
+since 1794502293
+until 1794509493
+serve-until 1794513093
