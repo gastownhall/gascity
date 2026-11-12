@@ -28,7 +28,9 @@ const holdLabelClearedValue = "cleared"
 // (boundRoutedToAliases), that canonical route also matches, since it is the
 // form v2-routed-to-namespace requires.
 // --fix backfills gc.routed_to with that canonical route, or with the label
-// value verbatim when <value> has no binding-qualified alias.
+// value verbatim when <value> has no binding-qualified alias. A value bound
+// under several bindings has no single repair, so --fix leaves it for manual
+// resolution, matching v2-routed-to-namespace.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -75,17 +77,27 @@ type holdRouteTarget struct {
 	canonicals []string
 }
 
-// route returns the gc.routed_to value that repairs t: the unique canonical
-// route when the hold value has one, otherwise the hold value itself.
-func (t holdRouteTarget) route() string {
-	if len(t.canonicals) == 1 {
-		return t.canonicals[0]
+// route returns the gc.routed_to value that repairs t: the hold value itself
+// when it has no canonical route, or its unique canonical route. It reports
+// false when the hold value has several canonical routes, so no single
+// repair exists.
+func (t holdRouteTarget) route() (string, bool) {
+	switch len(t.canonicals) {
+	case 0:
+		return t.want, true
+	case 1:
+		return t.canonicals[0], true
+	default:
+		return "", false
 	}
-	return t.want
 }
 
 func (t holdRouteTarget) describe() string {
-	return fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q; use %q", t.label, t.beadID, t.want, t.got, t.route())
+	prefix := fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q", t.label, t.beadID, t.want, t.got)
+	if route, ok := t.route(); ok {
+		return fmt.Sprintf("%s; use %q", prefix, route)
+	}
+	return fmt.Sprintf("%s; use one of %s", prefix, strings.Join(t.canonicals, ", "))
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
@@ -154,14 +166,21 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	return warnCheck(c.Name(),
 		fmt.Sprintf("%d bead(s) carry a hold:<value> label without matching gc.routed_to", len(targets)),
-		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label, binding-qualified when the value names a bound agent",
+		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label, binding-qualified when the value names a bound agent; set gc.routed_to by hand where several routes are listed",
 		details)
 }
 
+// Fix writes the repair route of every target that has one. Targets whose
+// hold value names several bound routes are left untouched; doctor's
+// verifying re-run keeps reporting them.
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.route()); err != nil {
+		route, ok := tgt.route()
+		if !ok {
+			continue
+		}
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, route); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
 	}

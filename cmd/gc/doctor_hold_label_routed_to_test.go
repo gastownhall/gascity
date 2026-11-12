@@ -587,3 +587,87 @@ func TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace(t *testing.T) {
 		})
 	}
 }
+
+// TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched covers
+// ga-tkxbic AC-4: when the hold value is bound under two bindings, a route
+// naming neither candidate has no single repair. Run lists both choices, Fix
+// leaves the metadata alone without failing, and the warning survives
+// doctor's verifying re-run. A route already equal to either candidate, or to
+// the hold value itself, satisfies the hold check, and an ambiguous hold does
+// not block repairing a uniquely bound one in the same scan.
+func TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "planner", BindingName: "ops"},
+		{Name: "planner", BindingName: "other"},
+		{Name: "worker", BindingName: "ops"},
+	}}
+	held := func(id, hold, route string) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:" + hold},
+			Metadata: map[string]string{"gc.routed_to": route},
+		}
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		held("A-1", "planner", ""),
+		held("A-2", "planner", "someone-else"),
+		held("A-3", "planner", "ops.planner"),
+		held("A-4", "planner", "other.planner"),
+		held("A-5", "worker", ""),
+		held("A-6", "planner", "planner"),
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead A-1 has hold:planner but gc.routed_to=""; use one of ops.planner, other.planner`,
+		`city bead A-2 has hold:planner but gc.routed_to="someone-else"; use one of ops.planner, other.planner`,
+		`city bead A-5 has hold:worker but gc.routed_to=""; use "ops.worker"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"A-3", "A-4", "A-6"} {
+		if strings.Contains(details, notWant) {
+			t.Errorf("details should not mention %q:\n%s", notWant, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v (ambiguity alone is not an operational error)", err)
+	}
+	for id, want := range map[string]string{
+		"A-1": "", "A-2": "someone-else", "A-3": "ops.planner",
+		"A-4": "other.planner", "A-5": "ops.worker", "A-6": "planner",
+	} {
+		if got := holdLabelRoute(t, store, id); got != want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want %q", id, got, want)
+		}
+	}
+
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{}, true)
+	if report.Warned != 1 || report.Fixed != 0 || len(report.Results) != 1 {
+		t.Fatalf("doctor --fix Warned=%d Fixed=%d results=%d, want the unresolved warning kept: %#v",
+			report.Warned, report.Fixed, len(report.Results), report.Results)
+	}
+	verified := strings.Join(report.Results[0].Details, "\n")
+	for _, id := range []string{"A-1", "A-2"} {
+		if !strings.Contains(verified, "city bead "+id+" ") {
+			t.Errorf("verified details missing %s:\n%s", id, verified)
+		}
+	}
+
+	namespace := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	want := `city bead A-6 has gc.routed_to="planner"; use one of ops.planner, other.planner`
+	if !strings.Contains(strings.Join(namespace.Details, "\n"), want) {
+		t.Errorf("v2-routed-to-namespace details missing %q: %#v", want, namespace)
+	}
+}
