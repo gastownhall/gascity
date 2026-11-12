@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -250,5 +251,176 @@ func writeFakeProcStartTime(t *testing.T, root string, pid, ppid int, comm strin
 	stat := strconv.Itoa(pid) + " (" + comm + ") S " + strconv.Itoa(ppid) + " " + strings.Join(fields, " ")
 	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "stat"), []byte(stat), 0o644); err != nil {
 		t.Fatalf("write stat: %v", err)
+	}
+}
+
+// TestSweepProcessTableOrphansLeavesDetachedUserService: a process that a
+// session started as a systemd user service inherits the session's identity
+// and reparents to the user manager, but it runs in its own user-manager
+// service unit, not in the session. The sweep must leave it running while it
+// still reaps the session's own orphaned root.
+func TestSweepProcessTableOrphansLeavesDetachedUserService(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	cityPath := t.TempDir()
+	sessionEnv := []string{"PATH=/usr/bin", "GC_CITY_PATH=" + cityPath, "GC_SESSION_ID=gc-restarter"}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-restarter", Status: "closed"}}, nil)
+	root := t.TempDir()
+	uid := strconv.Itoa(os.Geteuid())
+	userManager := "0::/user.slice/user-" + uid + ".slice/user@" + uid + ".service"
+	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
+	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
+	writeFakeProcCgroup(t, root, 4300, userManager+"/app.slice/tmux-spawn-1234.scope")
+	writeFakeProcEntry(t, root, 4400, 1, "node", sessionEnv)
+	writeFakeProcCmdline(t, root, 4400, "node", "server.js")
+	writeFakeProcCgroup(t, root, 4400, userManager+"/app.slice/devserver.service")
+	proctable.SetScanRootForTesting(t, root)
+
+	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
+	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
+		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the in-session root pid 4300 (the detached user service pid 4400 left running); stderr=%q", got, sp.terminated, stderr.String())
+	}
+}
+
+// writeFakeProcCgroup writes the cgroup file naming the process's unit.
+func writeFakeProcCgroup(t *testing.T, root string, pid int, line string) {
+	t.Helper()
+	path := filepath.Join(root, strconv.Itoa(pid), "cgroup")
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
+	}
+}
+
+// TestSweepProcessTableOrphansReportsDetachedUserServiceOncePerProcess: a
+// detached user service stays exempt for as long as it runs, and the sweep
+// runs every patrol. Its exemption is reported once per process, with its
+// unit, through the same suppression as fenced infrastructure; a recycled
+// pid (new start time) is a new process and is reported again. The ordinary
+// orphan of the same session is reaped on the first sweep.
+func TestSweepProcessTableOrphansReportsDetachedUserServiceOncePerProcess(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	cityPath := t.TempDir()
+	sessionEnv := []string{"PATH=/usr/bin", "GC_CITY_PATH=" + cityPath, "GC_SESSION_ID=gc-restarter"}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-restarter", Status: "closed"}}, nil)
+	root := t.TempDir()
+	uid := strconv.Itoa(os.Geteuid())
+	userManager := "0::/user.slice/user-" + uid + ".slice/user@" + uid + ".service"
+	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
+	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
+	writeFakeProcCgroup(t, root, 4300, userManager+"/app.slice/tmux-spawn-1234.scope")
+	writeFakeProcEntry(t, root, 4400, 1, "node", sessionEnv)
+	writeFakeProcCmdline(t, root, 4400, "node", "server.js")
+	writeFakeProcStartTime(t, root, 4400, 1, "node", 1000)
+	writeFakeProcCgroup(t, root, 4400, userManager+"/app.slice/devserver.service")
+	proctable.SetScanRootForTesting(t, root)
+	t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(cityPath), nil) })
+
+	sweep := func(wantReaped int) string {
+		t.Helper()
+		sp := &procfsSweepScanner{Fake: runtime.NewFake()}
+		var stderr bytes.Buffer
+		got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
+		if got != wantReaped || len(sp.terminated) != wantReaped {
+			t.Fatalf("sweep reaped %d, terminated %v, want %d; stderr=%q", got, sp.terminated, wantReaped, stderr.String())
+		}
+		for _, live := range sp.terminated {
+			if live.PID == 4400 {
+				t.Fatalf("sweep terminated the detached user service pid 4400; stderr=%q", stderr.String())
+			}
+		}
+		return stderr.String()
+	}
+	const exempt = `leaving process-table root pid=4400 session=gc-restarter alone: detached user service devserver.service (ppid=1 name="node")`
+
+	if out := sweep(1); strings.Count(out, exempt) != 1 {
+		t.Fatalf("first sweep stderr %q, want the service's exemption reported once", out)
+	}
+	// The reaped orphan exits; the service keeps running.
+	if err := os.RemoveAll(filepath.Join(root, "4300")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if out := sweep(0); out != "" {
+			t.Fatalf("repeat sweep %d logged %q, want silence for the already-reported service", i, out)
+		}
+	}
+	// pid 4400 is recycled by a new service process: reported anew.
+	writeFakeProcStartTime(t, root, 4400, 1, "node", 3000)
+	if out := sweep(0); strings.Count(out, exempt) != 1 {
+		t.Fatalf("sweep after pid reuse stderr %q, want the new service process reported once", out)
+	}
+}
+
+// TestSweepProcessTableOrphansReapsOrphansInOwnAndSupervisorUnits: the
+// detached user-service fence spares only a foreign unit. An ended session's
+// roots in the sweeping process's own unit, or in Gas City's default or
+// suffixed supervisor unit (KillMode=process leaves residual processes there),
+// are reaped as before, while a foreign service beside them is left running.
+func TestSweepProcessTableOrphansReapsOrphansInOwnAndSupervisorUnits(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	cityPath := t.TempDir()
+	sessionEnv := []string{"PATH=/usr/bin", "GC_CITY_PATH=" + cityPath, "GC_SESSION_ID=gc-restarter"}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-restarter", Status: "closed"}}, nil)
+	root := t.TempDir()
+	uid := strconv.Itoa(os.Geteuid())
+	userManager := "0::/user.slice/user-" + uid + ".slice/user@" + uid + ".service"
+	self := os.Getpid()
+	writeFakeProcEntry(t, root, self, 1, "gc", []string{"PATH=/usr/bin"})
+	writeFakeProcCgroup(t, root, self, userManager+"/app.slice/gc-controller.service")
+	units := map[int]string{
+		4500: "gc-controller.service",
+		4501: defaultSupervisorSystemdUnit,
+		4502: supervisorSystemdUnitPrefix + "3f9a2c.service",
+		4400: "devserver.service",
+	}
+	for pid, unit := range units {
+		writeFakeProcEntry(t, root, pid, 1, "claude", sessionEnv)
+		writeFakeProcCmdline(t, root, pid, "claude", "--resume")
+		writeFakeProcCgroup(t, root, pid, userManager+"/app.slice/"+unit)
+	}
+	proctable.SetScanRootForTesting(t, root)
+	t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(cityPath), nil) })
+
+	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
+	var pids []int
+	for _, live := range sp.terminated {
+		pids = append(pids, live.PID)
+	}
+	slices.Sort(pids)
+	if got != 3 || !slices.Equal(pids, []int{4500, 4501, 4502}) {
+		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated pids %v, want 4500, 4501 and 4502 (own and supervisor units) and never the foreign service 4400; stderr=%q", got, pids, stderr.String())
+	}
+}
+
+// TestSupervisorSystemdUnitNamesMatchProctableStem pins the supervisor unit
+// stem the user-service fence excludes to the names gc installs.
+func TestSupervisorSystemdUnitNamesMatchProctableStem(t *testing.T) {
+	if want := proctable.SupervisorSystemdUnitStem + ".service"; defaultSupervisorSystemdUnit != want {
+		t.Fatalf("defaultSupervisorSystemdUnit = %q, want %q", defaultSupervisorSystemdUnit, want)
+	}
+	if want := proctable.SupervisorSystemdUnitStem + "-"; supervisorSystemdUnitPrefix != want {
+		t.Fatalf("supervisorSystemdUnitPrefix = %q, want %q", supervisorSystemdUnitPrefix, want)
+	}
+}
+
+// TestSupervisorSystemdDelegationEnvMatchesProctable pins the delegation
+// variables the user-service fence reads to the ones gc's supervisor
+// lifecycle reads, so the unit an operator delegates the supervisor to stays
+// gc's own to the fence.
+func TestSupervisorSystemdDelegationEnvMatchesProctable(t *testing.T) {
+	if proctable.SupervisorSystemdUnitEnv != supervisorSystemdUnitEnv {
+		t.Fatalf("proctable.SupervisorSystemdUnitEnv = %q, want %q", proctable.SupervisorSystemdUnitEnv, supervisorSystemdUnitEnv)
+	}
+	if proctable.SupervisorSystemdScopeEnv != supervisorSystemdScopeEnv {
+		t.Fatalf("proctable.SupervisorSystemdScopeEnv = %q, want %q", proctable.SupervisorSystemdScopeEnv, supervisorSystemdScopeEnv)
 	}
 }
