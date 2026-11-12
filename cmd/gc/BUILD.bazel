@@ -2390,6 +2390,7 @@ go_test(
         "synthetic_cache_verifier_test.go",
         "telemetry_lifecycle_metrics_test.go",
         "template_resolve_acp_omitted_args_test.go",
+        "template_resolve_beads_dir_test.go",
         "template_resolve_env_test.go",
         "template_resolve_mcp_test.go",
         "template_resolve_missing_prompt_test.go",

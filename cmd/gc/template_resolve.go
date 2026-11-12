@@ -399,9 +399,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
-	// An agent's own env may name BEADS_DIR: a pack can point its sessions'
-	// raw bd at no store, while gc bd, which pins the store it routes to,
-	// still reaches the ledger.
+	// An agent's own env BEADS_DIR replaces the generated value. Every bd gc
+	// routes to a store (gc bd, the stores gc opens) pins BEADS_DIR to that
+	// store; any other bd in the session inherits this value, including raw
+	// bd that gc runs or renders there unrouted (agent-script bd actions
+	// outside cross-store routing, prompt work-query placeholders rendered as
+	// raw bd). From bd 1.3.1 on, a BEADS_DIR that names no store leaves raw bd
+	// with no store; older bd falls back to the store it finds from its
+	// working directory.
 	if beadsDir, ok := cfgAgent.Env["BEADS_DIR"]; ok {
 		agentEnv["BEADS_DIR"] = processenv.ExpandSessionEnvValue(beadsDir)
 	}
