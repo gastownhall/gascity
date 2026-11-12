@@ -209,9 +209,11 @@ var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 // added here alongside it — two triggers for one verb, where one always fires
 // first, is a dead branch that reads as coverage.
 //
-// A city that relocates nothing has no entry to match against, so a
-// single-store `gc bd ready` is byte-identical: same argv, same bd binary, same
-// exit code. bdSQLRelocatedClassRefusal returns early on an empty relocated
+// A city that relocates nothing has no entry to match against, so this guard
+// leaves a single-store `gc bd ready` unchanged: same bd binary, same exit code.
+// (Its argv still gains the session/order-tracking exclusions added by
+// rewriteBdReadyInternalArgs; see bd_ready_internal.go.)
+// bdSQLRelocatedClassRefusal returns early on an empty relocated
 // set, before this map is consulted at all.
 //
 // Not guarded here: a `ready` hidden behind an unrecognized root flag, which
