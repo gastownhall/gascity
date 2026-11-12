@@ -224,6 +224,47 @@ func TestComputePoolTriggerBindingPatchAsleepResumeUsesConfiguredBase(t *testing
 	}
 }
 
+// A parked seat waking for its pre-assigned work resumes its conversation,
+// whose transcript is filed under the dir it ran in, so its asleep resume
+// keeps the recorded work dir as a live continuation's does (PR #8110 review
+// 5592555088). The live rule's guards hold: another row's resume, a
+// fresh-wake row, a request that is not a resume, or no parked verdict
+// re-derives the dir.
+func TestComputePoolTriggerBindingPatchParkedResumeKeepsRecordedWorkDir(t *testing.T) {
+	recorded := filepath.Join("worktrees", "fi-old-title")
+	derived := filepath.Join("integration", "worker")
+	info := session.Info{
+		ID:               "sess-1",
+		State:            session.StateAsleep,
+		TriggerBeadID:    "fi-old",
+		WorkDirCanonical: recorded,
+		WorkDir:          recorded,
+	}
+	parked := SessionRequest{Tier: "resume", SessionBeadID: "sess-1", WorkBeadID: "fi-new", ParkedContinuation: true}
+
+	patch := computePoolTriggerBindingPatch(info, parked, derived)
+	if got := patch[beadmeta.TriggerBeadIDMetadataKey]; got != "fi-new" {
+		t.Errorf("parked resume trigger patch = %q, want its pin fi-new", got)
+	}
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got, ok := patch[key]; ok {
+			t.Errorf("parked resume %s patch = %q, want the recorded %q kept", key, got, recorded)
+		}
+	}
+	for name, mutate := range map[string]func(*session.Info, *SessionRequest){
+		"another row's resume":   func(_ *session.Info, r *SessionRequest) { r.SessionBeadID = "sess-2" },
+		"a fresh-wake row":       func(i *session.Info, _ *SessionRequest) { i.WakeMode = "fresh" },
+		"a request not a resume": func(_ *session.Info, r *SessionRequest) { r.Tier = "wake-known-identity" },
+		"no parked verdict":      func(_ *session.Info, r *SessionRequest) { r.ParkedContinuation = false },
+	} {
+		i, r := info, parked
+		mutate(&i, &r)
+		if got := computePoolTriggerBindingPatch(i, r, derived)[beadmeta.WorkDirMetadataKey]; got != derived {
+			t.Errorf("%s: gc.work_dir patch = %q, want the derived %q", name, got, derived)
+		}
+	}
+}
+
 // TestWakeKnownIdentityRequestCarriesWorkBeadTitle pins the complete trigger
 // identity supplied to a replacement session, independent of workdir routing.
 func TestWakeKnownIdentityRequestCarriesWorkBeadTitle(t *testing.T) {

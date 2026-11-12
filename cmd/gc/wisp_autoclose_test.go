@@ -36,6 +36,46 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	}
 }
 
+// TestWispAutocloseLeavesAnOpenParentsAttachments is F6: a spurious
+// bead.closed for a parent that is still open (a false scan close, a replay)
+// must not close its attachments, finished or not.
+func TestWispAutocloseLeavesAnOpenParentsAttachments(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "work item", Metadata: map[string]string{"molecule_id": "gc-3"}}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "wisp", Type: "molecule", ParentID: "gc-1"})                      // gc-2
+	_, _ = store.Create(beads.Bead{Title: "attached", Type: "molecule"})                                    // gc-3
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+
+	for _, id := range []string{"gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status != "open" {
+			t.Errorf("attachment %s status = %q under an open parent, want open", id, b.Status)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+}
+
+// An open workflow root's generated spec sidecars are its live spec.
+func TestWispAutocloseLeavesAnOpenWorkflowRootsSpecSidecars(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{Title: "workflow", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	spec, _ := store.Create(beads.Bead{Title: "spec", Type: "spec", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, root.ID, &stdout, beads.GraphStore{Store: store})
+
+	if got, _ := store.Get(spec.ID); got.Status != "open" {
+		t.Fatalf("spec sidecar %s under an open workflow root, want open", got.Status)
+	}
+}
+
 func TestWispAutocloseClosesMetadataAttachedMolecule(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -166,8 +206,12 @@ func TestAttachedMoleculeIsParkedPreservesOnWalkError(t *testing.T) {
 	}
 	store := &walkFailingStore{Store: base, failID: root.ID}
 
-	if !attachedMoleculeIsParked(store, root) {
+	parked, err := attachedMoleculeIsParked(store, root)
+	if !parked {
 		t.Fatal("attachedMoleculeIsParked = false on subtree walk error, want true (fail-safe preserve)")
+	}
+	if err == nil {
+		t.Fatal("attachedMoleculeIsParked hid the walk error; the autoclose run must see it to retry")
 	}
 }
 
@@ -960,5 +1004,53 @@ func TestWispAutocloseBeadNotFound(t *testing.T) {
 
 	if stdout.String() != "" {
 		t.Errorf("missing bead should produce no output, got %q", stdout.String())
+	}
+}
+
+// TestWispAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed pins the same
+// rejected #8729 arm on the wisp hook: closing the input convoy itself is not a
+// retirement trigger. The reap discovers roots through convoys tracking the
+// CLOSED bead — the convoy's own members, never a workflow dispatched over it —
+// so an in-flight graph.v2 workflow keeps its live root and unfinished steps
+// untouched, and the claim-time input check owns the cancellation verdict.
+func TestWispAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "tracked work", Type: "task"})
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	_ = store.Close(convoy.ID)
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, convoy.ID, &stdout, beads.GraphStore{Store: store})
+
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", stdout.String())
+	}
+	for _, b := range []struct{ name, id string }{{"root", root.ID}, {"step", step.ID}} {
+		got, err := store.Get(b.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("the in-flight workflow's %s was closed by its input convoy's close; cancellation is the claim-time check's verdict", b.name)
+		}
 	}
 }

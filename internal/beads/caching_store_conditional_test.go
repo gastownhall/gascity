@@ -53,6 +53,7 @@ func TestCachingStoreConditionalWriterConformance(t *testing.T) {
 			// CachingStore forwards its errors untouched, so the wrapped row
 			// asserts Current too.
 			RestrictedUpdateFields: true,
+			LabelsGuarded:          true,
 			SuppliesCurrent:        true,
 			// Disabled is a backing-level toggle: the backing still claims the
 			// interface, returns typed unsupported per call, and CachingStore
@@ -111,4 +112,34 @@ func TestCachingStoreConditionalWriterCapabilityAbsentBacking(t *testing.T) {
 	if err != nil || got.ID != b.ID {
 		t.Fatalf("Get after unsupported verbs = (%+v, %v), want the cached bead", got, err)
 	}
+}
+
+// TestCachingStoreGuardedBatchConformance runs the guarded-batch contract
+// through a primed CachingStore over each in-tree backing that can apply one,
+// reading every result back through the cache.
+func TestCachingStoreGuardedBatchConformance(t *testing.T) {
+	openOver := func(t *testing.T, backing beads.Store) beads.Store {
+		t.Helper()
+		c := beads.NewCachingStoreForTest(backing, nil)
+		if err := c.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return c
+	}
+	beadstest.RunGuardedBatchConformance(t, "CachingStore/MemStore", func(t *testing.T) beads.Store {
+		return openOver(t, beads.NewMemStore())
+	})
+	beadstest.RunGuardedBatchConformance(t, "CachingStore/FileStore", func(t *testing.T) beads.Store {
+		fs, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+		if err != nil {
+			t.Fatalf("OpenFileStore: %v", err)
+		}
+		return openOver(t, fs)
+	})
+	beadstest.RunGuardedBatchConformance(t, "CachingStore/SQLiteStore", func(t *testing.T) beads.Store {
+		return openOver(t, newSQLiteForConformance(t))
+	})
+	beadstest.RunGuardedBatchConformance(t, "CachingStore/NativeDoltStore", func(t *testing.T) beads.Store {
+		return openOver(t, beads.NewNativeDoltStoreForGuardedBatchConformance())
+	})
 }

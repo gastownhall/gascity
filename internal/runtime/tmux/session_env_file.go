@@ -39,21 +39,26 @@ const (
 	staleStagedDirAge = time.Hour
 )
 
-// runNewSession issues a prepared new-session argv, keeping secret environment
-// values out of the process argument vector.
+// runNewSession issues a prepared new-session command list (the new-session
+// argv, then any commands that must run before tmux reads the pane's output),
+// keeping secret environment values out of the process argument vector.
 //
 // An all-inert environment keeps the plain argv path: it needs no writable temp
 // dir, so the common case cannot fail on a read-only filesystem. When a secret
 // IS present and the file cannot be written, this fails closed rather than
 // falling back to argv — a silent fallback is exactly the leak we are closing.
-func (t *Tmux) runNewSession(args []string, env map[string]string) error {
+// A one-command list renders exactly as that command alone.
+//
+// It returns the command's output (new-session -P prints the new pane's id,
+// which source-file passes through). When a later command of a list fails,
+// the error is a *tmuxOutputError carrying that output: the session exists.
+func (t *Tmux) runNewSession(cmds [][]string, env map[string]string) (string, error) {
 	if !runtime.EnvHasArgvSecrets(env) {
-		_, err := t.run(args...)
-		return err
+		return t.run(tmuxArgvList(cmds)...)
 	}
 	// source-file needs a server to talk to and, unlike new-session, cannot
 	// create one, so start-server leads.
-	return t.runFromCommandFile(args, "start-server", ";")
+	return t.runCommandListFromFile(cmds, "start-server", ";")
 }
 
 // runFromCommandFile executes one tmux command by writing it to a private
@@ -63,22 +68,33 @@ func (t *Tmux) runNewSession(args []string, env map[string]string) error {
 // It fails closed: when the file cannot be staged the command is not run at
 // all. Callers must not fall back to argv — that fallback is the leak.
 func (t *Tmux) runFromCommandFile(args []string, lead ...string) error {
+	_, err := t.runFromCommandFileOutput(args, lead...)
+	return err
+}
+
+// runFromCommandFileOutput is runFromCommandFile returning the output.
+func (t *Tmux) runFromCommandFileOutput(args []string, lead ...string) (string, error) {
+	return t.runCommandListFromFile([][]string{args}, lead...)
+}
+
+// runCommandListFromFile is runFromCommandFileOutput for a command list,
+// written as one line with bare ";" separators.
+func (t *Tmux) runCommandListFromFile(cmds [][]string, lead ...string) (string, error) {
 	// Opportunistic, best-effort: a process killed between MkdirTemp and its
 	// deferred cleanup leaves a secret-bearing file behind with nothing to
 	// remove it. Staging is the only moment we know the staging directory is in
 	// use, so it is where the previous incarnation's litter gets collected.
 	sweepStaleStagedDirs()
 
-	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLine(args))
+	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLines(cmds))
 	if err != nil {
-		return fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
+		return "", fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
 	}
 	defer cleanup()
 	sourceArgs := make([]string, 0, len(lead)+2)
 	sourceArgs = append(sourceArgs, lead...)
 	sourceArgs = append(sourceArgs, "source-file", path)
-	_, err = t.run(sourceArgs...)
-	return err
+	return t.run(sourceArgs...)
 }
 
 // stageTmuxCommandFile writes line to a private file and returns its path plus a
@@ -153,6 +169,18 @@ func tmuxCommandLine(args []string) string {
 		quoted[i] = tmuxQuote(a)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// tmuxCommandLines renders a tmux command list as a single command-file line:
+// each command as tmuxCommandLine renders it, joined by a bare " ; " that tmux
+// reads as the separator (a quoted ';' would be an argument). One command
+// renders exactly as tmuxCommandLine.
+func tmuxCommandLines(cmds [][]string) string {
+	lines := make([]string, len(cmds))
+	for i, c := range cmds {
+		lines[i] = tmuxCommandLine(c)
+	}
+	return strings.Join(lines, " ; ")
 }
 
 // tmuxQuote renders s as one literal argument in tmux's config syntax.

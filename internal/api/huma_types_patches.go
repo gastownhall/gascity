@@ -161,6 +161,7 @@ type StatusBody struct {
 	Version             string                     `json:"version,omitempty" doc:"Server version."`
 	UptimeSec           int                        `json:"uptime_sec" doc:"Server uptime in seconds."`
 	Suspended           bool                       `json:"suspended" doc:"Whether the city is suspended."`
+	StoresNotRead       bool                       `json:"stores_not_read,omitempty" doc:"True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent."`
 	AgentCount          int                        `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
 	RigCount            int                        `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
 	Running             int                        `json:"running" doc:"Number of running agent processes."`
@@ -219,7 +220,8 @@ type StatusRolloutNotice struct {
 
 // StatusAgentDetail mirrors the CLI's StatusAgentJSON with the additional
 // display hints (group name, scale label, session name) that the text
-// formatter needs when rendering pool-expanded rows.
+// formatter needs when rendering pool-expanded rows. It also carries the
+// session bead ID that `gc rig status --json` prints as session_id.
 type StatusAgentDetail struct {
 	Name          string `json:"name" doc:"Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1')."`
 	QualifiedName string `json:"qualified_name" doc:"Rig-qualified name when applicable, else the bare agent name."`
@@ -228,6 +230,7 @@ type StatusAgentDetail struct {
 	Suspended     bool   `json:"suspended" doc:"Whether the agent (or its rig) is suspended."`
 	Draining      bool   `json:"draining,omitempty" doc:"True when the pool is draining this instance."`
 	SessionName   string `json:"session_name,omitempty" doc:"tmux session name CLI drain-ops key on."`
+	SessionID     string `json:"session_id,omitempty" doc:"Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read)."`
 	GroupName     string `json:"group_name,omitempty" doc:"Pool group label for expanded rows; same as QualifiedName for singletons."`
 	ScaleLabel    string `json:"scale_label,omitempty" doc:"'scaled (min=N, max=M)' header emitted once per pool group."`
 	Expanded      bool   `json:"expanded,omitempty" doc:"True when this row is a pool-expanded instance (renderer indents differently)."`

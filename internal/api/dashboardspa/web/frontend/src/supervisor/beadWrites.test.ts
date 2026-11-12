@@ -77,7 +77,7 @@ describe('supervisor bead writes', () => {
       created_at: '2026-06-01T00:00:00Z',
     }));
     const sling = vi.fn(async () => ({
-      status: 'ok',
+      status: 'slung' as const,
       bead: 'td-new-1',
       target: 'mayor',
     }));
@@ -91,15 +91,40 @@ describe('supervisor bead writes', () => {
     });
 
     expect(result.bead.id).toBe('td-new-1');
+    // The bead is filed in the chosen rig's store, so slinging it to that
+    // rig's agent is not refused as a cross-rig route.
     expect(createBead).toHaveBeenCalledWith('test-city', {
       title: 'Route failing work',
       description: 'Please investigate.',
+      rig: 'east',
     });
     expect(sling).toHaveBeenCalledWith('test-city', {
       bead: 'td-new-1',
       rig: 'east',
       target: 'mayor',
     });
+  });
+
+  it('creates the bead in the city store when no rig is chosen', async () => {
+    const createBead = vi.fn(async () => ({
+      id: 'td-new-1',
+      title: 'Route failing work',
+      status: 'open',
+      issue_type: 'task',
+      created_at: '2026-06-01T00:00:00Z',
+    }));
+    const sling = vi.fn(async () => ({ status: 'slung' as const, bead: 'td-new-1', target: 'mayor' }));
+    setSupervisorApiForTests({ ...baseApi, createBead, sling });
+
+    await createAndSlingSupervisorBead({
+      title: 'Route failing work',
+      description: '',
+      rig: ' ',
+      target: 'mayor',
+    });
+
+    expect(createBead).toHaveBeenCalledWith('test-city', { title: 'Route failing work' });
+    expect(sling).toHaveBeenCalledWith('test-city', { bead: 'td-new-1', target: 'mayor' });
   });
 
   it('requires a title and sling target before creating a bead', async () => {
@@ -110,7 +135,7 @@ describe('supervisor bead writes', () => {
       issue_type: 'task',
       created_at: '2026-06-01T00:00:00Z',
     }));
-    const sling = vi.fn(async () => ({ status: 'ok', bead: 'td-new-1', target: 'mayor' }));
+    const sling = vi.fn(async () => ({ status: 'slung' as const, bead: 'td-new-1', target: 'mayor' }));
     setSupervisorApiForTests({ ...baseApi, createBead, sling });
 
     await expect(
@@ -147,7 +172,7 @@ describe('supervisor bead writes', () => {
       issue_type: 'task',
       created_at: '2026-06-01T00:00:00Z',
     }));
-    const sling = vi.fn(async () => ({ status: 'ok', bead: 'td-new-1', target: 'mayor' }));
+    const sling = vi.fn(async () => ({ status: 'slung' as const, bead: 'td-new-1', target: 'mayor' }));
     const closeBead = vi.fn(async () => ({ status: 'closed' }));
     setSupervisorApiForTests({
       ...baseApi,

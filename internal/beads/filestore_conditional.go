@@ -14,11 +14,15 @@ var (
 	_ AtomicConditionalCloser = (*FileStore)(nil)
 )
 
+// conditionalLabelsGuarded shadows the guard FileStore would otherwise promote
+// from its embedded MemStore: FileStore keeps refusing labels in UpdateIfMatch.
+func (fs *FileStore) conditionalLabelsGuarded() bool { return false }
+
 // UpdateIfMatch applies opts only when the bead's persisted revision matches,
 // then flushes to disk. A precondition failure or not-found leaves the store
 // unchanged (no save). A failed flush rolls back the in-memory mutation.
 func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	if err := validateConditionalUpdateOpts(opts, fs.conditionalLabelsGuarded()); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	fs.fmu.Lock()

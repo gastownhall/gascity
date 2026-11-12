@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -231,7 +235,7 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 	}
 	create := func() (sessionpkg.Info, error) {
 		bp.sessionBeads = newSessionBeadSnapshot(nil)
-		return createPoolSessionBeadWithGuardedAliasUsingLock(bp, &cfg.Agents[0], "worker", "worker", 0, nil,
+		return createPoolSessionBeadWithGuardedAliasUsingLock(poolCreateViewOf(bp), &cfg.Agents[0], "worker", "worker", 0, nil,
 			func(_ string, _ []string, fn func() error) error { return fn() })
 	}
 	for range 5 {
@@ -241,7 +245,7 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 		}
 		if info.ID != "" {
 			// Model the old retry loop, which invalidates each new pending bead.
-			closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+			closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
 		}
 	}
 	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
@@ -256,5 +260,151 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 	}
 	if info, err := create(); err != nil || info.ID == "" {
 		t.Fatalf("vacated singleton did not recover: %v", err)
+	}
+}
+
+// TestLegacyStartCommitRefusesASuspendDuringTheStart (mc-z1v39, CONTRACT S1
+// v5.6, §12.2 row 65; J16 B): a `gc session suspend` that lands while a
+// legacy start runs sticks. The async commit refuses on the user hold, even
+// over a row the heal pass projected awake (the lease verdict alone would
+// commit), stops the start's runtime, releases its in-flight lease and
+// records no session.woke; the hold stays. Without a suspend the same start
+// commits. Kills: the commit's hold check dropped, and a refusal that leaves
+// the runtime up.
+func TestLegacyStartCommitRefusesASuspendDuringTheStart(t *testing.T) {
+	for _, c := range []struct {
+		name            string
+		suspend, healed bool
+	}{
+		{name: "no suspend"},
+		{name: "suspended", suspend: true},
+		{name: "suspended, healed awake", suspend: true, healed: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const name = "worker-held"
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 10, 13, 11, 31, 0, 0, time.UTC)}
+			session, err := store.Create(beads.Bead{
+				Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: creatingMeta(map[string]string{
+					"session_name": name, "template": "worker", "generation": "3",
+					"instance_token": "tok-3", "last_woke_at": clk.Now().Format(time.RFC3339),
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range map[string]string{"GC_SESSION_ID": session.ID, "GC_INSTANCE_TOKEN": "tok-3", "GC_RUNTIME_EPOCH": "3"} {
+				if err := sp.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result := startResult{
+				prepared: preparedStart{
+					candidate: startCandidate{info: sessiontest.SeedBead(t, session), tp: TemplateParams{SessionName: name, TemplateName: "worker"}},
+					coreHash:  "core-v1",
+				},
+				outcome: "success", started: clk.Now(), finished: clk.Now(),
+			}
+			if c.suspend {
+				if _, err := sessionFrontDoor(store).OperatorSuspend(session.ID, clk.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.healed {
+				if err := store.SetMetadataBatch(session.ID, map[string]string{"state": "awake"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := events.NewFake()
+			var stderr bytes.Buffer
+			committed := commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, rec, 0, io.Discard, &stderr, nil)
+			got, err := store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			woke := slices.ContainsFunc(rec.Events, func(e events.Event) bool { return e.Type == events.SessionWoke })
+			switch {
+			case !c.suspend && (!committed || !sp.IsRunning(name) || got.Metadata["started_config_hash"] != "core-v1" || !woke):
+				t.Fatalf("committed %v, running %v, row %v, woke %v; want the start committed; stderr=%s", committed, sp.IsRunning(name), got.Metadata, woke, stderr.String())
+			case c.suspend && (committed || sp.IsRunning(name) || got.Metadata["started_config_hash"] != "" || woke):
+				t.Fatalf("committed %v, running %v, row %v, woke %v; want nothing committed and the runtime stopped; stderr=%s", committed, sp.IsRunning(name), got.Metadata, woke, stderr.String())
+			case c.suspend && got.Metadata["sleep_intent"] != "user-hold":
+				t.Fatalf("row %v; want the operator's hold kept", got.Metadata)
+			case c.healed && got.Metadata["last_woke_at"] != "":
+				t.Fatalf("row %v; want the start's in-flight lease released", got.Metadata)
+			}
+		})
+	}
+}
+
+// TestRecoverRunningPendingCreateRefusesASuspend (mc-z1v39, CONTRACT S1
+// v5.6, §12.2 row 65): recoverRunningPendingCreate is a start's commit too. A
+// pending create whose own runtime is alive after a `gc session suspend` (a
+// controller that died between the spawn and the commit), whatever state the
+// heal pass projects, is never committed over the hold: its runtime is
+// stopped, and over the next ticks the row stays held and down. Without a
+// suspend the same row is healed and keeps running. Kills: recovery's hold
+// check dropped, and a refusal that leaves the runtime up.
+func TestRecoverRunningPendingCreateRefusesASuspend(t *testing.T) {
+	for _, c := range []struct {
+		state   string
+		suspend bool
+	}{
+		{"creating", false},
+		{"creating", true},
+		{"awake", true},
+		{"active", true},
+		{"suspended", true},
+	} {
+		t.Run(fmt.Sprintf("%s suspend=%t", c.state, c.suspend), func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.desiredState["worker"] = TemplateParams{Command: "c", SessionName: "worker", TemplateName: "worker"}
+			session := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&session, map[string]string{
+				"state": c.state, "pending_create_claim": "true",
+				"last_woke_at": env.clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339), // past the in-flight window
+			})
+			if c.suspend {
+				if _, err := sessionFrontDoor(env.store).OperatorSuspend(session.ID, env.clk.Now()); err != nil {
+					t.Fatal(err)
+				}
+				if err := env.store.SetMetadata(session.ID, "state", c.state); err != nil { // the state the heal pass left
+					t.Fatal(err)
+				}
+			}
+			if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "c"}); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range map[string]string{"GC_SESSION_ID": session.ID, "GC_INSTANCE_TOKEN": session.Metadata["instance_token"]} {
+				if err := env.sp.SetMeta("worker", key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 4 {
+				b, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				env.reconcile([]beads.Bead{b})
+				env.clk.Advance(30 * time.Second)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			committed, alive := got.Metadata["started_config_hash"] != "", env.sp.IsRunning("worker")
+			switch {
+			case !c.suspend && (!committed || !alive):
+				t.Fatalf("no suspend: committed=%t alive=%t, want the heal and a running seat (%v)", committed, alive, got.Metadata)
+			case c.suspend && (committed || alive || got.Metadata["sleep_intent"] != "user-hold" || got.Metadata["state"] == "awake" || got.Metadata["state"] == "active"):
+				t.Fatalf("suspended: committed=%t alive=%t meta=%v, want no commit, the runtime down and the hold kept", committed, alive, got.Metadata)
+			}
+		})
 	}
 }

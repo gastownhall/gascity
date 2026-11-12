@@ -132,7 +132,7 @@ type DeliveryContextRecord struct {
 	LastPublishedAt   time.Time
 	LastMessageID     string
 	SourceSessionID   string
-	Metadata          map[string]string
+	Metadata          map[string]string `json:"Metadata,omitempty"`
 }
 
 // ExternalOriginEnvelope carries binding context for externally-originated messages.
@@ -214,7 +214,7 @@ type PublishReceipt struct {
 	Delivered    bool
 	FailureKind  PublishFailureKind
 	RetryAfter   time.Duration
-	Metadata     map[string]string
+	Metadata     map[string]string `json:"Metadata,omitempty"`
 }
 
 // ErrAdapterUnsupported is returned when the adapter does not support the requested operation.
@@ -256,7 +256,7 @@ type ConversationTranscriptRecord struct {
 	Attachments       []ExternalAttachment
 	SourceSessionID   string
 	CreatedAt         time.Time
-	Metadata          map[string]string
+	Metadata          map[string]string `json:"Metadata,omitempty"`
 }
 
 // MembershipBackfillPolicy controls how much transcript history a member receives.

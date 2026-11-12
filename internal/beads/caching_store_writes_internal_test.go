@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
-// SetMetadataBatch / Update / Close invocations so tests can assert when
-// CachingStore short-circuits a no-op write before the backing call.
+// SetMetadataBatch / Update / Close invocations so tests can assert that a
+// CachingStore write reaches the backing.
 type countingBackingStore struct {
 	Store
 	setMetadataCalls      int
@@ -537,234 +539,8 @@ func stringSliceContains(values []string, want string) bool {
 	return false
 }
 
-// TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches verifies that
-// SetMetadata short-circuits before the backing call when the cached bead
-// already has metadata[key]==value. Without this guard, no-op writes still
-// fire bd's on_update hook and emit a bead.updated event.
-func TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := backing.SetMetadata(bead.ID, "foo", "bar"); err != nil {
-		t.Fatalf("seed SetMetadata: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.setMetadataCalls = 0
-
-	if err := cache.SetMetadata(bead.ID, "foo", "bar"); err != nil {
-		t.Fatalf("SetMetadata: %v", err)
-	}
-	if backing.setMetadataCalls != 0 {
-		t.Errorf("backing.SetMetadata called %d times; want 0 (no-op write must short-circuit)",
-			backing.setMetadataCalls)
-	}
-}
-
-func TestCachingStoreSetMetadataFallsThroughWhenCacheStateCannotProveNoop(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		state cacheState
-	}{
-		{name: "uninitialized", state: cacheUninitialized},
-		{name: "degraded", state: cacheDegraded},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name+"/single", func(t *testing.T) {
-			t.Parallel()
-
-			backing := &countingBackingStore{Store: NewMemStore()}
-			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar"})
-			cache := staleMatchingMetadataCache(backing, bead, tt.state)
-			backing.setMetadataCalls = 0
-
-			if err := cache.SetMetadata(bead.ID, "foo", "bar"); err != nil {
-				t.Fatalf("SetMetadata: %v", err)
-			}
-			if backing.setMetadataCalls != 1 {
-				t.Fatalf("backing.SetMetadata called %d times; want 1", backing.setMetadataCalls)
-			}
-		})
-
-		t.Run(tt.name+"/batch", func(t *testing.T) {
-			t.Parallel()
-
-			backing := &countingBackingStore{Store: NewMemStore()}
-			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar", "baz": "qux"})
-			cache := staleMatchingMetadataCache(backing, bead, tt.state)
-			backing.setMetadataBatchCalls = 0
-
-			if err := cache.SetMetadataBatch(bead.ID, map[string]string{"foo": "bar", "baz": "qux"}); err != nil {
-				t.Fatalf("SetMetadataBatch: %v", err)
-			}
-			if backing.setMetadataBatchCalls != 1 {
-				t.Fatalf("backing.SetMetadataBatch called %d times; want 1", backing.setMetadataBatchCalls)
-			}
-		})
-	}
-}
-
-func createBeadWithMetadata(t *testing.T, backing Store, metadata map[string]string) Bead {
-	t.Helper()
-
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := backing.SetMetadataBatch(bead.ID, metadata); err != nil {
-		t.Fatalf("seed SetMetadataBatch: %v", err)
-	}
-	bead, err = backing.Get(bead.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	return bead
-}
-
-func staleMatchingMetadataCache(backing Store, bead Bead, state cacheState) *CachingStore {
-	cache := NewCachingStoreForTest(backing, nil)
-	cache.mu.Lock()
-	cache.beads[bead.ID] = cloneBead(bead)
-	cache.state = state
-	cache.mu.Unlock()
-	return cache
-}
-
-// TestCachingStoreSetMetadataFallsThroughOnValueMismatch verifies that a
-// real value change still propagates to the backing store.
-func TestCachingStoreSetMetadataFallsThroughOnValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := backing.SetMetadata(bead.ID, "foo", "old"); err != nil {
-		t.Fatalf("seed SetMetadata: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.setMetadataCalls = 0
-
-	if err := cache.SetMetadata(bead.ID, "foo", "new"); err != nil {
-		t.Fatalf("SetMetadata: %v", err)
-	}
-	if backing.setMetadataCalls != 1 {
-		t.Errorf("backing.SetMetadata called %d times; want 1 (real change must propagate)",
-			backing.setMetadataCalls)
-	}
-}
-
-// TestCachingStoreSetMetadataFallsThroughOnCacheMiss verifies that
-// SetMetadata calls the backing store when the cache has no entry for the
-// bead — without a primed copy we cannot prove the write is a no-op.
-func TestCachingStoreSetMetadataFallsThroughOnCacheMiss(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	bead, err := backing.Create(Bead{Title: "post-prime"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing.setMetadataCalls = 0
-
-	if err := cache.SetMetadata(bead.ID, "foo", "bar"); err != nil {
-		t.Fatalf("SetMetadata: %v", err)
-	}
-	if backing.setMetadataCalls != 1 {
-		t.Errorf("backing.SetMetadata called %d times; want 1 (cache miss must fall through)",
-			backing.setMetadataCalls)
-	}
-}
-
-// TestCachingStoreSetMetadataBatchSkipsBackingWhenAllCachedValuesMatch
-// verifies that SetMetadataBatch short-circuits when every kv pair already
-// matches the cached metadata.
-func TestCachingStoreSetMetadataBatchSkipsBackingWhenAllCachedValuesMatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	for k, v := range map[string]string{"foo": "1", "bar": "2", "baz": "3"} {
-		if err := backing.SetMetadata(bead.ID, k, v); err != nil {
-			t.Fatalf("seed SetMetadata(%s): %v", k, err)
-		}
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.setMetadataBatchCalls = 0
-
-	if err := cache.SetMetadataBatch(bead.ID, map[string]string{"foo": "1", "bar": "2"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if backing.setMetadataBatchCalls != 0 {
-		t.Errorf("backing.SetMetadataBatch called %d times; want 0 (all-match must short-circuit)",
-			backing.setMetadataBatchCalls)
-	}
-}
-
-// TestCachingStoreSetMetadataBatchFallsThroughOnAnyMismatch verifies that
-// even one mismatching kv forces the backing call — partial matches do not
-// suffice to skip the write.
-func TestCachingStoreSetMetadataBatchFallsThroughOnAnyMismatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	for k, v := range map[string]string{"foo": "1", "bar": "2"} {
-		if err := backing.SetMetadata(bead.ID, k, v); err != nil {
-			t.Fatalf("seed SetMetadata(%s): %v", k, err)
-		}
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.setMetadataBatchCalls = 0
-
-	// foo matches the cached value, bar does not. The mismatch must force
-	// the full batch to the backing store.
-	if err := cache.SetMetadataBatch(bead.ID, map[string]string{"foo": "1", "bar": "DIFFERENT"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if backing.setMetadataBatchCalls != 1 {
-		t.Errorf("backing.SetMetadataBatch called %d times; want 1 (mismatch must propagate)",
-			backing.setMetadataBatchCalls)
-	}
-}
-
 // TestCachingStoreSetMetadataBatchEmptyKVsIsNoop verifies that an empty kvs
-// map returns nil immediately without calling the backing store. This is
-// the early-return branch before metadataAlreadyMatchesCached.
+// map returns nil immediately without calling the backing store.
 func TestCachingStoreSetMetadataBatchEmptyKVsIsNoop(t *testing.T) {
 	t.Parallel()
 
@@ -785,397 +561,6 @@ func TestCachingStoreSetMetadataBatchEmptyKVsIsNoop(t *testing.T) {
 	if backing.setMetadataBatchCalls != 0 {
 		t.Errorf("backing.SetMetadataBatch called %d times; want 0 (empty kvs must short-circuit)",
 			backing.setMetadataBatchCalls)
-	}
-}
-
-// TestCachingStoreUpdateSkipsBackingWhenAllFieldsMatch verifies that Update
-// short-circuits before the backing call when every non-nil opts field
-// already matches the cached bead. Without this guard the reconciler's
-// per-tick Update calls fire bd subprocesses + post-Get refreshes even when
-// the payload is identical. See gastownhall/gascity#1978 Phase 1.
-func TestCachingStoreUpdateSkipsBackingWhenAllFieldsMatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test", Assignee: "alice"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.updateCalls = 0
-
-	assignee := "alice"
-	if err := cache.Update(bead.ID, UpdateOpts{Assignee: &assignee}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if backing.updateCalls != 0 {
-		t.Errorf("backing.Update called %d times; want 0 (no-op update must short-circuit)",
-			backing.updateCalls)
-	}
-}
-
-// TestCachingStoreUpdateFallsThroughOnValueMismatch verifies that a real
-// field change still propagates to the backing store.
-func TestCachingStoreUpdateFallsThroughOnValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test", Assignee: "alice"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.updateCalls = 0
-
-	assignee := "bob"
-	if err := cache.Update(bead.ID, UpdateOpts{Assignee: &assignee}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if backing.updateCalls != 1 {
-		t.Errorf("backing.Update called %d times; want 1 (real change must propagate)",
-			backing.updateCalls)
-	}
-}
-
-// TestCachingStoreUpdateFallsThroughOnCacheMiss verifies that Update calls
-// the backing store when the cache has no entry for the bead — without a
-// primed copy we cannot prove the write is a no-op.
-func TestCachingStoreUpdateFallsThroughOnCacheMiss(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	bead, err := backing.Create(Bead{Title: "post-prime", Assignee: "alice"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing.updateCalls = 0
-
-	assignee := "alice"
-	if err := cache.Update(bead.ID, UpdateOpts{Assignee: &assignee}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if backing.updateCalls != 1 {
-		t.Errorf("backing.Update called %d times; want 1 (cache miss must fall through)",
-			backing.updateCalls)
-	}
-}
-
-// TestCachingStoreUpdateFallsThroughOnLabelMismatch verifies that a Labels
-// opt requesting a label not yet on the bead still propagates to the backing
-// store.
-func TestCachingStoreUpdateFallsThroughOnLabelMismatch(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test", Labels: []string{"existing"}})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.updateCalls = 0
-
-	if err := cache.Update(bead.ID, UpdateOpts{Labels: []string{"new-label"}}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if backing.updateCalls != 1 {
-		t.Errorf("backing.Update called %d times; want 1 (new label must propagate)",
-			backing.updateCalls)
-	}
-}
-
-// TestCachingStoreCloseSkipsBackingWhenAlreadyClosed verifies that Close
-// short-circuits before the backing call when the cached bead is already
-// closed. The cache only holds active beads after Prime, so the close has
-// to happen through CachingStore first to seed the closed status into the
-// cache. See gastownhall/gascity#1978 Phase 1.
-func TestCachingStoreCloseSkipsBackingWhenAlreadyClosed(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	// First close: open → closed, must propagate.
-	if err := cache.Close(bead.ID); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if backing.closeCalls != 1 {
-		t.Fatalf("backing.Close after first close = %d, want 1", backing.closeCalls)
-	}
-	backing.closeCalls = 0
-
-	// Second close on the already-closed bead must short-circuit. The
-	// reconciler / cleanup paths sometimes re-close the same bead on
-	// retry; that should not generate fresh bd subprocess traffic.
-	if err := cache.Close(bead.ID); err != nil {
-		t.Fatalf("repeat Close: %v", err)
-	}
-	if backing.closeCalls != 0 {
-		t.Errorf("backing.Close called %d times on repeat close; want 0 (already-closed must short-circuit)",
-			backing.closeCalls)
-	}
-}
-
-// TestCachingStoreCloseFallsThroughWhenOpen verifies that a real close still
-// propagates to the backing store.
-func TestCachingStoreCloseFallsThroughWhenOpen(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "test"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	backing.closeCalls = 0
-
-	if err := cache.Close(bead.ID); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if backing.closeCalls != 1 {
-		t.Errorf("backing.Close called %d times; want 1 (open->closed must propagate)",
-			backing.closeCalls)
-	}
-}
-
-// TestCachingStoreCloseFallsThroughOnCacheMiss verifies that Close calls the
-// backing store when the cache has no entry for the bead.
-func TestCachingStoreCloseFallsThroughOnCacheMiss(t *testing.T) {
-	t.Parallel()
-
-	backing := &countingBackingStore{Store: NewMemStore()}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	bead, err := backing.Create(Bead{Title: "post-prime"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing.closeCalls = 0
-
-	if err := cache.Close(bead.ID); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if backing.closeCalls != 1 {
-		t.Errorf("backing.Close called %d times; want 1 (cache miss must fall through)",
-			backing.closeCalls)
-	}
-}
-
-// TestCachingStoreUpdateSkipsBackingPerFieldMatch is the per-field
-// short-circuit coverage requested in gastownhall/gascity#2199. The original
-// PR #2159 exercised Assignee + Labels-mismatch + cache-miss only; the
-// remaining 6 field branches in updateMatchesCached were asserted by
-// inspection. This table-driven test pins the short-circuit behavior for
-// each field independently so a future refactor of any single check
-// surfaces in CI.
-func TestCachingStoreUpdateSkipsBackingPerFieldMatch(t *testing.T) {
-	t.Parallel()
-
-	type fieldCase struct {
-		name string
-		seed Bead
-		opts UpdateOpts
-	}
-	strPtr := func(s string) *string { return &s }
-	intPtr := func(i int) *int { return &i }
-
-	cases := []fieldCase{
-		{
-			name: "Title",
-			seed: Bead{Title: "pinned"},
-			opts: UpdateOpts{Title: strPtr("pinned")},
-		},
-		{
-			name: "Status",
-			seed: Bead{Title: "x", Status: "open"},
-			opts: UpdateOpts{Status: strPtr("open")},
-		},
-		{
-			name: "Type",
-			seed: Bead{Title: "x", Type: "task"},
-			opts: UpdateOpts{Type: strPtr("task")},
-		},
-		{
-			name: "Priority",
-			seed: Bead{Title: "x", Priority: intPtr(2)},
-			opts: UpdateOpts{Priority: intPtr(2)},
-		},
-		{
-			name: "Description",
-			seed: Bead{Title: "x", Description: "body"},
-			opts: UpdateOpts{Description: strPtr("body")},
-		},
-		{
-			name: "ParentID",
-			seed: Bead{Title: "x", ParentID: "gc-parent"},
-			opts: UpdateOpts{ParentID: strPtr("gc-parent")},
-		},
-		{
-			name: "Metadata",
-			seed: Bead{Title: "x", Metadata: map[string]string{"k": "v"}},
-			opts: UpdateOpts{Metadata: map[string]string{"k": "v"}},
-		},
-		{
-			name: "Labels-present",
-			seed: Bead{Title: "x", Labels: []string{"a", "b"}},
-			opts: UpdateOpts{Labels: []string{"a"}},
-		},
-		{
-			name: "RemoveLabels-absent",
-			seed: Bead{Title: "x", Labels: []string{"a"}},
-			opts: UpdateOpts{RemoveLabels: []string{"z"}},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			backing := &countingBackingStore{Store: NewMemStore()}
-			bead, err := backing.Create(tc.seed)
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			cache := NewCachingStoreForTest(backing, nil)
-			if err := cache.Prime(context.Background()); err != nil {
-				t.Fatalf("Prime: %v", err)
-			}
-			backing.updateCalls = 0
-
-			if err := cache.Update(bead.ID, tc.opts); err != nil {
-				t.Fatalf("Update: %v", err)
-			}
-			if backing.updateCalls != 0 {
-				t.Errorf("backing.Update called %d times; want 0 (%s value-match must short-circuit)",
-					backing.updateCalls, tc.name)
-			}
-		})
-	}
-}
-
-// TestCachingStoreUpdateFallsThroughPerFieldMismatch is the mismatch-side
-// companion to TestCachingStoreUpdateSkipsBackingPerFieldMatch. Each
-// subtest asserts that a real change in the named field forces the
-// backing call — guarding the matcher against accidentally returning true
-// when a single field actually differs.
-func TestCachingStoreUpdateFallsThroughPerFieldMismatch(t *testing.T) {
-	t.Parallel()
-
-	type fieldCase struct {
-		name string
-		seed Bead
-		opts UpdateOpts
-	}
-	strPtr := func(s string) *string { return &s }
-	intPtr := func(i int) *int { return &i }
-
-	cases := []fieldCase{
-		{
-			name: "Title",
-			seed: Bead{Title: "before"},
-			opts: UpdateOpts{Title: strPtr("after")},
-		},
-		{
-			name: "Status",
-			seed: Bead{Title: "x", Status: "open"},
-			opts: UpdateOpts{Status: strPtr("closed")},
-		},
-		{
-			name: "Type",
-			seed: Bead{Title: "x", Type: "task"},
-			opts: UpdateOpts{Type: strPtr("epic")},
-		},
-		{
-			name: "Priority",
-			seed: Bead{Title: "x", Priority: intPtr(2)},
-			opts: UpdateOpts{Priority: intPtr(3)},
-		},
-		{
-			name: "Priority-nil-cached",
-			seed: Bead{Title: "x"},
-			opts: UpdateOpts{Priority: intPtr(2)},
-		},
-		{
-			name: "Description",
-			seed: Bead{Title: "x", Description: "before"},
-			opts: UpdateOpts{Description: strPtr("after")},
-		},
-		{
-			name: "ParentID",
-			seed: Bead{Title: "x", ParentID: "gc-a"},
-			opts: UpdateOpts{ParentID: strPtr("gc-b")},
-		},
-		{
-			name: "Metadata-value",
-			seed: Bead{Title: "x", Metadata: map[string]string{"k": "old"}},
-			opts: UpdateOpts{Metadata: map[string]string{"k": "new"}},
-		},
-		{
-			name: "Metadata-missing-key",
-			seed: Bead{Title: "x"},
-			opts: UpdateOpts{Metadata: map[string]string{"k": "v"}},
-		},
-		{
-			name: "RemoveLabels-present",
-			seed: Bead{Title: "x", Labels: []string{"a", "b"}},
-			opts: UpdateOpts{RemoveLabels: []string{"a"}},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			backing := &countingBackingStore{Store: NewMemStore()}
-			bead, err := backing.Create(tc.seed)
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			cache := NewCachingStoreForTest(backing, nil)
-			if err := cache.Prime(context.Background()); err != nil {
-				t.Fatalf("Prime: %v", err)
-			}
-			backing.updateCalls = 0
-
-			if err := cache.Update(bead.ID, tc.opts); err != nil {
-				t.Fatalf("Update: %v", err)
-			}
-			if backing.updateCalls != 1 {
-				t.Errorf("backing.Update called %d times; want 1 (%s real change must propagate)",
-					backing.updateCalls, tc.name)
-			}
-		})
 	}
 }
 
@@ -1329,5 +714,259 @@ func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
+	}
+}
+
+// TestCachingStoreWriteMatchingStaleCacheReachesBacking pins that a write the
+// cached row already reflects still reaches the backing store. The backing
+// moves underneath a primed, clean cache that never sees the change; the write
+// asks for the value the cache still holds, and the backing must end up with
+// it. A cache that skipped the write because its possibly-stale row matched
+// would leave the other writer's value in place and report success.
+func TestCachingStoreWriteMatchingStaleCacheReachesBacking(t *testing.T) {
+	t.Parallel()
+
+	strPtr := func(s string) *string { return &s }
+	intPtr := func(i int) *int { return &i }
+	cases := []struct {
+		name  string
+		seed  Bead
+		drift UpdateOpts // the write that lands around the cache
+		write func(c *CachingStore, id string) error
+		calls func(b *countingBackingStore) int
+		check func(b Bead) bool
+	}{
+		{
+			name: "SetMetadata", seed: Bead{Title: "x", Metadata: map[string]string{"k": "v"}},
+			drift: UpdateOpts{Metadata: map[string]string{"k": "other"}},
+			write: func(c *CachingStore, id string) error { return c.SetMetadata(id, "k", "v") },
+			calls: func(b *countingBackingStore) int { return b.setMetadataCalls },
+			check: func(b Bead) bool { return b.Metadata["k"] == "v" },
+		},
+		{
+			name: "SetMetadataBatch", seed: Bead{Title: "x", Metadata: map[string]string{"k": "v", "j": "w"}},
+			drift: UpdateOpts{Metadata: map[string]string{"k": "other"}},
+			write: func(c *CachingStore, id string) error {
+				return c.SetMetadataBatch(id, map[string]string{"k": "v", "j": "w"})
+			},
+			calls: func(b *countingBackingStore) int { return b.setMetadataBatchCalls },
+			check: func(b Bead) bool { return b.Metadata["k"] == "v" && b.Metadata["j"] == "w" },
+		},
+		{
+			name: "Update/Title", seed: Bead{Title: "pinned"},
+			drift: UpdateOpts{Title: strPtr("other")},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Title: strPtr("pinned")}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Title == "pinned" },
+		},
+		{
+			name: "Update/Status", seed: Bead{Title: "x", Status: "open"},
+			drift: UpdateOpts{Status: strPtr("in_progress")},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Status: strPtr("open")}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Status == "open" },
+		},
+		{
+			name: "Update/Type", seed: Bead{Title: "x", Type: "task"},
+			drift: UpdateOpts{Type: strPtr("bug")},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Type: strPtr("task")}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Type == "task" },
+		},
+		{
+			name: "Update/Priority", seed: Bead{Title: "x", Priority: intPtr(2)},
+			drift: UpdateOpts{Priority: intPtr(3)},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Priority: intPtr(2)}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Priority != nil && *b.Priority == 2 },
+		},
+		{
+			name: "Update/Description", seed: Bead{Title: "x", Description: "body"},
+			drift: UpdateOpts{Description: strPtr("other")},
+			write: func(c *CachingStore, id string) error {
+				return c.Update(id, UpdateOpts{Description: strPtr("body")})
+			},
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Description == "body" },
+		},
+		{
+			name: "Update/ParentID", seed: Bead{Title: "x", ParentID: "gc-parent"},
+			drift: UpdateOpts{ParentID: strPtr("gc-other")},
+			write: func(c *CachingStore, id string) error {
+				return c.Update(id, UpdateOpts{ParentID: strPtr("gc-parent")})
+			},
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.ParentID == "gc-parent" },
+		},
+		{
+			name: "Update/Assignee", seed: Bead{Title: "x", Assignee: "alice"},
+			drift: UpdateOpts{Assignee: strPtr("bob")},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Assignee: strPtr("alice")}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Assignee == "alice" },
+		},
+		{
+			name: "Update/Metadata", seed: Bead{Title: "x", Metadata: map[string]string{"k": "v"}},
+			drift: UpdateOpts{Metadata: map[string]string{"k": "other"}},
+			write: func(c *CachingStore, id string) error {
+				return c.Update(id, UpdateOpts{Metadata: map[string]string{"k": "v"}})
+			},
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return b.Metadata["k"] == "v" },
+		},
+		{
+			name: "Update/Labels", seed: Bead{Title: "x", Labels: []string{"a"}},
+			drift: UpdateOpts{RemoveLabels: []string{"a"}},
+			write: func(c *CachingStore, id string) error { return c.Update(id, UpdateOpts{Labels: []string{"a"}}) },
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return slices.Contains(b.Labels, "a") },
+		},
+		{
+			name: "Update/RemoveLabels", seed: Bead{Title: "x"},
+			drift: UpdateOpts{Labels: []string{"z"}},
+			write: func(c *CachingStore, id string) error {
+				return c.Update(id, UpdateOpts{RemoveLabels: []string{"z"}})
+			},
+			calls: func(b *countingBackingStore) int { return b.updateCalls },
+			check: func(b Bead) bool { return !slices.Contains(b.Labels, "z") },
+		},
+	}
+	// The SQLite leg is a store that skips same-value writes itself: the
+	// write must still reach it, and it must find the row changed.
+	backings := []struct {
+		name string
+		open func(t *testing.T) Store
+	}{
+		{"MemStore", func(*testing.T) Store { return NewMemStore() }},
+		{"SQLiteStore", func(t *testing.T) Store {
+			s, err := OpenSQLiteStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenSQLiteStore: %v", err)
+			}
+			return s
+		}},
+	}
+	for _, store := range backings {
+		for _, tc := range cases {
+			t.Run(store.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				backing := &countingBackingStore{Store: store.open(t)}
+				bead, err := backing.Create(tc.seed)
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				cache := NewCachingStoreForTest(backing, nil)
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				if err := backing.Store.Update(bead.ID, tc.drift); err != nil {
+					t.Fatalf("drift Update: %v", err)
+				}
+				before := tc.calls(backing)
+
+				if err := tc.write(cache, bead.ID); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				if got := tc.calls(backing) - before; got != 1 {
+					t.Errorf("backing write calls = %d, want 1: a stale cached match must not skip the write", got)
+				}
+				got, err := backing.Get(bead.ID)
+				if err != nil {
+					t.Fatalf("backing Get: %v", err)
+				}
+				if !tc.check(got) {
+					t.Errorf("backing row %+v does not carry the write; the stale cache turned it into a no-op", got)
+				}
+			})
+		}
+	}
+}
+
+// TestCachingStoreCloseOnStaleClosedRowReachesBacking is the Close half of
+// TestCachingStoreWriteMatchingStaleCacheReachesBacking: the cache holds the
+// row closed while the backing was reopened around it, and the close must
+// still reach the backing.
+func TestCachingStoreCloseOnStaleClosedRowReachesBacking(t *testing.T) {
+	t.Parallel()
+
+	backing := &countingBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "x"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close(bead.ID); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := backing.Reopen(bead.ID); err != nil {
+		t.Fatalf("backing Reopen: %v", err)
+	}
+	backing.closeCalls = 0
+
+	if err := cache.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if backing.closeCalls != 1 {
+		t.Errorf("backing.Close called %d times, want 1: a stale closed row must not skip the close", backing.closeCalls)
+	}
+	got, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("backing status = %q, want closed", got.Status)
+	}
+}
+
+// unconfirmedTxBackingStore runs a Tx's writes, then answers as a bd staged Tx
+// whose read-back timed out: committed, but unconfirmed.
+type unconfirmedTxBackingStore struct {
+	Store
+}
+
+func (s *unconfirmedTxBackingStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if err := s.Store.Tx(commitMsg, fn); err != nil {
+		return err
+	}
+	return fmt.Errorf("updating bead: %w: waiting for tx update projection: %w", ErrWriteUnconfirmed, context.DeadlineExceeded)
+}
+
+// TestCachingStoreTxUnconfirmedReadsTheBackingAfterward: a non-atomic
+// backing's failed Tx may have committed some or all of its writes, and an
+// unconfirmed one committed at least one. The cache must not keep serving the
+// pre-Tx row: a caller re-reading to learn the outcome (a session close that
+// re-reads for closed) would otherwise be told the close never happened.
+func TestCachingStoreTxUnconfirmedReadsTheBackingAfterward(t *testing.T) {
+	t.Parallel()
+
+	backing := &unconfirmedTxBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "unconfirmed"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	err = cache.Tx("close", func(tx Tx) error {
+		if err := tx.SetMetadataBatch(bead.ID, map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		return tx.Close(bead.ID)
+	})
+	if !errors.Is(err, ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed passed through", err)
+	}
+	cached, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if cached.Status != "closed" || cached.Metadata["tx"] != "applied" {
+		t.Fatalf("cache Get = status %q metadata %v, want the backing's closed row", cached.Status, cached.Metadata)
 	}
 }

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "acl.go",
         "artifact.go",
+        "authorship.go",
         "capture.go",
         "childstats.go",
         "condition.go",
@@ -32,6 +33,7 @@ go_library(
         "//internal/beads",
         "//internal/citylayout",
         "//internal/doltauth",
+        "//internal/events",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/pathutil",
@@ -43,10 +45,12 @@ go_test(
     srcs = [
         "acl_test.go",
         "artifact_test.go",
+        "authorship_test.go",
         "capture_test.go",
         "childstats_test.go",
         "condition_credentials_test.go",
         "condition_test.go",
+        "condition_unlaunchable_test.go",
         "create_test.go",
         "depfilter_test.go",
         "evaluate_test.go",
@@ -57,6 +61,7 @@ go_test(
         "gate_test.go",
         "handler_test.go",
         "hybrid_test.go",
+        "main_test.go",
         "manual_test.go",
         "metadata_test.go",
         "reconcile_test.go",
@@ -67,9 +72,12 @@ go_test(
         "token_test.go",
         "trigger_test.go",
     ],
+    # The authorship test parses events.go.
+    data = ["events.go"],
     embed = [":convergence"],
     deps = [
         "//internal/beads",
+        "//internal/events",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/processenv",
@@ -86,6 +94,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

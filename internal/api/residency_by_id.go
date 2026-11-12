@@ -31,6 +31,7 @@ package api
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -57,33 +58,34 @@ import (
 // Anything else is a store that could not be read, and it surfaces as a 500
 // with the store named: an unreachable store reported as a missing bead is the
 // root-loss shape this lane exists to prevent.
-func (s *Server) resolveBeadOwner(id string) (beads.Store, beads.Bead, error) {
+func (s *Server) resolveBeadOwner(id string) (beads.ResidentStore, beads.Bead, error) {
 	if strings.TrimSpace(id) == "" {
 		// The router never dispatches a by-id handler with an empty path
 		// segment, so this is unreachable in practice. It answers "absent"
 		// rather than surfacing the resolver's malformed-intent error because
 		// that is what the pre-resolver candidate scan produced, and a defensive
 		// branch is a poor place to change a status code.
-		return nil, beads.Bead{}, apierr.BeadNotFound.Msg("bead " + id + " not found")
+		return beads.ResidentStore{}, beads.Bead{}, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
-	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
+	st := s.state.Stores()
+	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s: s, st: st}}, st.Topology())
 	if err != nil {
-		return nil, beads.Bead{}, apierr.Internal.Msg(err.Error())
+		return beads.ResidentStore{}, beads.Bead{}, apierr.Internal.Msg(err.Error())
 	}
 	owner, err := storeref.ResolveOwnerRow(plan, id)
 	if err != nil {
-		return nil, beads.Bead{}, beadOwnerError(id, err)
+		return beads.ResidentStore{}, beads.Bead{}, beadOwnerError(id, err)
 	}
 	if owner.Read {
 		// A probe answered, and its read is the read this handler needed. Doing
 		// it again would double every by-id operation against the binding.
-		return owner.Store, owner.Bead, nil
+		return owner.Resident, owner.Bead, nil
 	}
-	b, err := owner.Store.Get(id)
+	b, err := owner.Resident.Get(id)
 	if err != nil {
-		return nil, beads.Bead{}, beadOwnerError(id, err)
+		return beads.ResidentStore{}, beads.Bead{}, beadOwnerError(id, err)
 	}
-	return owner.Store, b, nil
+	return owner.Resident, b, nil
 }
 
 // apiWorkAxis is this plane's by-id work-axis router, declared to the resolver.
@@ -94,100 +96,102 @@ func (s *Server) resolveBeadOwner(id string) (beads.Store, beads.Bead, error) {
 // behind it, so running the prefix arms there would let a rig configured with a
 // reserved prefix capture an id the binding mints; it would also pay a
 // routes.jsonl disk read on every molecule-id read of a relocated city.
-type apiWorkAxis struct{ s *Server }
-
-// WorkLegsForID returns the work stores that can hold id, in this plane's own
-// order: the store whose configured prefix owns the id, else the store its
-// routes.jsonl entry names, else the full scan — the city/HQ store ahead of
-// every rig work store.
 //
-// This is the pre-resolver candidate list verbatim. It is stated as legs rather
-// than stores so a partial answer, a failure and a persisted census row can all
-// name which store they came from.
-func (a apiWorkAxis) WorkLegsForID(id string) []storeref.Leg {
-	configured := a.s.configuredPrefixLegs()
-	if leg, ok := resolveLegByConfiguredIDPrefix(id, configured); ok {
-		return []storeref.Leg{leg}
-	}
-	if prefix := beadPrefix(id); prefix != "" {
-		if store := a.s.resolveStoreByPrefix(prefix); store != nil {
-			return []storeref.Leg{a.s.workLegFor(store)}
-		}
-	}
-	return a.s.unroutedWorkLegs()
+// It routes over st, the epoch the plan is planned over, so every ref it
+// answers names a leg of that plan's topology.
+type apiWorkAxis struct {
+	s  *Server
+	st storeref.Stores
 }
 
-// unroutedWorkLegs is the legacy scan: the city/HQ store first, then every rig
-// work store in rig-name order.
+// WorkLegsForID returns the work legs that can hold id, by ref, in this
+// plane's own order: the store whose configured prefix owns the id, else the
+// store its routes.jsonl entry names, else the full scan — the city/HQ store
+// ahead of every rig work store.
+//
+// This is the pre-resolver candidate list. It is stated as refs, which the
+// resolver maps to the epoch's legs, so a partial answer, a failure and a
+// persisted census row can all name which store they came from.
+func (a apiWorkAxis) WorkLegsForID(id string) []storeref.StoreRef {
+	loaded := loadedWorkLegs(a.st)
+	if ref, ok := resolveLegByConfiguredIDPrefix(id, configuredPrefixRoutes(a.s.state.Config(), loaded)); ok {
+		return []storeref.StoreRef{ref}
+	}
+	if prefix := beadPrefix(id); prefix != "" {
+		if ref, ok := a.s.resolveRefByPrefix(prefix, loaded); ok {
+			return []storeref.StoreRef{ref}
+		}
+	}
+	return unroutedWorkRefs(loaded)
+}
+
+// loadedWorkLegs is the set of work legs st's epoch holds a store for, by ref:
+// the city's when it has a work store, and every rig the epoch opened.
+func loadedWorkLegs(st storeref.Stores) map[storeref.StoreRef]bool {
+	topo := st.Topology()
+	loaded := make(map[storeref.StoreRef]bool, len(topo.Rigs)+1)
+	if topo.Work.Store != nil {
+		loaded[storeref.WorkRef] = true
+	}
+	for _, rig := range st.Rigs() {
+		loaded[storeref.RigRef(rig.Name)] = true
+	}
+	return loaded
+}
+
+// unroutedWorkRefs is the legacy scan: the city/HQ store first, then every rig
+// work store in rig-name order. The city is listed once: it is not a rig,
+// though State.BeadStores() lists it under the city's name (E4).
 //
 // It is reached by an id that matches no configured prefix and no routes.jsonl
 // entry — a routes-era id, a hand-minted one, an id from a rig whose prefix was
 // later changed — and dropping it would make every such bead unreachable by id.
 // That is why this plane declares its work axis to the resolver instead of
 // taking the resolver's own rule, which keeps only the rigs whose CONFIGURED
-// prefix covers the id and would keep none of these.
-func (s *Server) unroutedWorkLegs() []storeref.Leg {
-	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
-	legs := make([]storeref.Leg, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		legs = append(legs, storeref.Leg{Ref: storeref.WorkRef, Store: cityStore})
-	}
-	for _, rigName := range rigNames {
-		legs = append(legs, storeref.Leg{Ref: storeref.RigRef(rigName), Store: stores[rigName]})
-	}
-	return legs
-}
-
-// workLegFor names a work store this plane resolved by route. The ref is for
-// diagnostics — a leg that fails is reported by name — so an unrecognized store
-// yields an unnamed leg rather than a failure: the store still answers.
-func (s *Server) workLegFor(store beads.Store) storeref.Leg {
-	for _, leg := range s.unroutedWorkLegs() {
-		if leg.Store == store {
-			return leg
+// prefix covers the id and would keep none of these. Rigs sharing one store
+// are read once: the plan keeps the first leg over a store (storeref's
+// dedupe), as the scan kept the first rig name.
+func unroutedWorkRefs(loaded map[storeref.StoreRef]bool) []storeref.StoreRef {
+	refs := make([]storeref.StoreRef, 0, len(loaded))
+	for ref := range loaded {
+		if ref != storeref.WorkRef {
+			refs = append(refs, ref)
 		}
 	}
-	return storeref.Leg{Store: store}
+	slices.Sort(refs)
+	if loaded[storeref.WorkRef] {
+		refs = append([]storeref.StoreRef{storeref.WorkRef}, refs...)
+	}
+	return refs
 }
 
-// configuredPrefixLegs returns the loaded work stores paired with the id
+// prefixRoute is a loaded work leg and the id prefix it was CONFIGURED with.
+type prefixRoute struct {
+	ref    storeref.StoreRef
+	prefix string
+}
+
+// configuredPrefixRoutes returns the loaded work legs paired with the id
 // prefixes they were CONFIGURED with — the city/HQ prefix first, then each rig
 // in config order.
 //
-// Only stores that are actually loaded are listed: a configured prefix whose
+// Only legs that are actually loaded are listed: a configured prefix whose
 // store is missing must not win a slot, so a shorter loaded prefix can still own
 // an id (and otherwise the id is left to the scan).
-//
-// This walks every rig, which the pre-seam resolver did not: it looked the store
-// up only for a rig whose prefix already covered the id and beat the best match
-// so far. State.BeadStore is a map read under an RLock, so the widened walk
-// costs a lookup per rig and no I/O.
-func (s *Server) configuredPrefixLegs() []storeref.Leg {
-	cfg := s.state.Config()
+func configuredPrefixRoutes(cfg *config.City, loaded map[storeref.StoreRef]bool) []prefixRoute {
 	if cfg == nil {
 		return nil
 	}
-	legs := make([]storeref.Leg, 0, len(cfg.Rigs)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		legs = append(legs, storeref.Leg{
-			Ref:    storeref.WorkRef,
-			Store:  cityStore,
-			Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg)),
-		})
+	routes := make([]prefixRoute, 0, len(cfg.Rigs)+1)
+	if loaded[storeref.WorkRef] {
+		routes = append(routes, prefixRoute{ref: storeref.WorkRef, prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg))})
 	}
 	for _, rig := range cfg.Rigs {
-		store := s.state.BeadStore(rig.Name)
-		if store == nil {
-			continue
+		if ref := storeref.RigRef(rig.Name); loaded[ref] {
+			routes = append(routes, prefixRoute{ref: ref, prefix: strings.TrimSpace(rig.EffectivePrefix())})
 		}
-		legs = append(legs, storeref.Leg{
-			Ref:    storeref.RigRef(rig.Name),
-			Store:  store,
-			Prefix: strings.TrimSpace(rig.EffectivePrefix()),
-		})
 	}
-	return legs
+	return routes
 }
 
 // resolveLegByConfiguredIDPrefix routes an id on the configured (rig/HQ)
@@ -197,18 +201,18 @@ func (s *Server) configuredPrefixLegs() []storeref.Leg {
 // — so it is not the namespace-only, first-match storeref.PrefixOwner. Ties keep
 // config order (HQ first), which cannot arise between distinct prefixes: two
 // prefixes of equal length never cover the same id.
-func resolveLegByConfiguredIDPrefix(id string, configured []storeref.Leg) (storeref.Leg, bool) {
+func resolveLegByConfiguredIDPrefix(id string, configured []prefixRoute) (storeref.StoreRef, bool) {
 	if strings.TrimSpace(id) == "" {
-		return storeref.Leg{}, false
+		return "", false
 	}
-	var best storeref.Leg
+	var best storeref.StoreRef
 	bestLen := -1
 	for _, candidate := range configured {
-		if !storeref.IDInNamespace(id, candidate.Prefix) || len(candidate.Prefix) <= bestLen {
+		if !storeref.IDInNamespace(id, candidate.prefix) || len(candidate.prefix) <= bestLen {
 			continue
 		}
-		best = candidate
-		bestLen = len(candidate.Prefix)
+		best = candidate.ref
+		bestLen = len(candidate.prefix)
 	}
 	return best, bestLen >= 0
 }

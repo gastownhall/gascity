@@ -21,7 +21,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotMaterializeMissingMultiSessio
 		}},
 	}
 
-	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "gascity/claude")
+	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "gascity/claude", nil)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude) error = %v, want ErrSessionNotFound", err)
 	}
