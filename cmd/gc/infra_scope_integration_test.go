@@ -40,7 +40,8 @@ const infraScopeIntegrationSlice = "gascity-test.slice"
 // involved. It does not cover PID-namespace (bwrap --unshare-pid) seats or
 // the state-file write around the spawn. It skips
 // when no systemd user manager is reachable or when scoping would not be
-// applied to this caller (neither lingering nor under user@<uid>.service).
+// applied to this caller (infraScopeSuitsCaller: the test names a slice, so
+// it needs lingering or a cgroup under user@<uid>.service).
 //
 // Run it on a host with a user manager, keeping the test runner local and
 // passing the user bus through:
@@ -55,7 +56,7 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 	}
 	t.Setenv(infraSessionIdentityEnv, "gc-infra-scope-integration")
 	t.Setenv(infraSliceEnv, infraScopeIntegrationSlice)
-	if err := infraScopeKeepsLifetime(); err != nil {
+	if err := infraScopeSuitsCaller(); err != nil {
 		t.Skipf("infrastructure scoping does not apply to this caller: %v", err)
 	}
 	if err := userscope.Probe(infraScopeIntegrationSlice); err != nil {

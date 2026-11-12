@@ -3909,3 +3909,92 @@ func TestDoltStateWriteProviderKeepsInfraScopeForSamePID(t *testing.T) {
 		t.Fatalf("different pid: infra_scope = %q, want empty", state.InfraScope)
 	}
 }
+
+// TestRepairedManagedDoltRuntimeStateKeepsInfraScopeOnlyForItsPID: a recorded
+// infra scope names the scope of the server whose PID is recorded. A repair
+// that moves the state to the live port holder keeps it only when the holder
+// is that server; otherwise doctor would point at another server's journal.
+func TestRepairedManagedDoltRuntimeStateKeepsInfraScopeOnlyForItsPID(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	const unit = "gascity-infra-0123456789abcdef.scope"
+
+	for _, tc := range []struct {
+		name        string
+		recordedPID int
+		wantScope   string
+	}{
+		{name: "recorded for the port holder", recordedPID: listener.Process.Pid, wantScope: unit},
+		{name: "recorded for a stale pid", recordedPID: 999999, wantScope: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, doltRuntimeState{
+				Running:    true,
+				PID:        tc.recordedPID,
+				Port:       port,
+				DataDir:    layout.DataDir,
+				InfraScope: unit,
+			})
+			if !ok {
+				t.Fatal("repairedManagedDoltRuntimeState = not ok, want ok")
+			}
+			if repaired.PID != listener.Process.Pid || repaired.InfraScope != tc.wantScope {
+				t.Fatalf("repaired pid=%d infra_scope=%q, want pid=%d infra_scope=%q",
+					repaired.PID, repaired.InfraScope, listener.Process.Pid, tc.wantScope)
+			}
+		})
+	}
+}
+
+// TestRecoverManagedDoltHealthyPortRepairKeepsTheHoldersInfraScope: the
+// healthy-port repair rebuilds the provider state for the live port holder
+// from the requested port alone. The infra scope the provider state recorded
+// for that same PID survives it; one recorded for another PID does not.
+func TestRecoverManagedDoltHealthyPortRepairKeepsTheHoldersInfraScope(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	const unit = "gascity-infra-0123456789abcdef.scope"
+
+	for _, tc := range []struct {
+		name        string
+		recordedPID int
+		wantScope   string
+	}{
+		{name: "recorded for the port holder", recordedPID: listener.Process.Pid, wantScope: unit},
+		{name: "recorded for a stale pid", recordedPID: 999999, wantScope: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:    true,
+				PID:        tc.recordedPID,
+				Port:       port,
+				DataDir:    layout.DataDir,
+				StartedAt:  time.Now().UTC().Format(time.RFC3339),
+				InfraScope: unit,
+			}); err != nil {
+				t.Fatalf("write provider state: %v", err)
+			}
+			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, strconv.Itoa(port)); err != nil {
+				t.Fatalf("recoverManagedDoltRepairRuntimeStateForHealthyPort: %v", err)
+			}
+			state, err := readDoltRuntimeStateFile(layout.StateFile)
+			if err != nil {
+				t.Fatalf("read provider state: %v", err)
+			}
+			if state.PID != listener.Process.Pid || state.InfraScope != tc.wantScope {
+				t.Fatalf("provider state pid=%d infra_scope=%q, want pid=%d infra_scope=%q",
+					state.PID, state.InfraScope, listener.Process.Pid, tc.wantScope)
+			}
+		})
+	}
+}

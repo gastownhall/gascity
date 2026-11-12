@@ -97,16 +97,24 @@ gc wraps the spawn only when both hold:
    supervisor, whether a bare fork or a systemd/launchd service; a CLI run
    from a login shell; the bd provider script the supervisor launches) have
    no session cgroup to escape, so their spawns stay exactly as before.
-2. **A user scope cannot shorten the spawn's life**: the user lingers
-   (`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger
-   <user>`), or the gc process already runs under `user@<uid>.service` (for
-   example in a `GC_AGENT_SLICE` pane scope). Scopes live under
-   `user@<uid>.service`, which, unless the user lingers, systemd stops,
-   with every scope in it, when the user's last session ends. Without
-   lingering, a caller in a login session's scope can outlive logout
-   (`KillUserProcesses=no`) while a user scope would not, so gc leaves its
-   spawn where it is. A caller already under the user manager dies with it
-   anyway.
+2. **The move suits the gc process's cgroup**: it can neither shorten the
+   server's life nor undo where the operator placed it.
+
+Scopes live under `user@<uid>.service`, which systemd stops, with every
+scope in it, when the user's last session ends, unless the user lingers
+(`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger <user>`).
+Where the gc process runs decides condition 2:
+
+| Where the gc process runs | Condition 2 holds |
+|---|---|
+| Under `user@<uid>.service` (a `GC_AGENT_SLICE` pane scope, tmux's own pane scopes) | always: it dies with the user manager anyway |
+| A login session's scope (`user-<uid>.slice/session-<id>.scope`) | when the user lingers: without lingering the session's scope can outlive logout (`KillUserProcesses=no`) while a user scope would not |
+| Anywhere else: a system service or slice (the supervisor run as a system service, whose agents share its cgroup), a container's root cgroup | only when `GC_INFRA_SLICE` names a slice and the user lingers |
+
+A gc process outside the user's own sessions has no session cgroup to
+escape. Moving its server would only trade the cgroup the operator chose,
+with that cgroup's limits and memory protection, for the user manager's
+slice, so gc leaves the server in place unless the operator names a slice.
 
 | Spawn | Wrapped from a session |
 |---|---|
@@ -127,12 +135,24 @@ agent's cgroup and its limits, but nothing reserves memory for it. Defining
 a `gascity-infra.slice` unit (or naming another slice in `GC_INFRA_SLICE`)
 is up to the operator and outside what gc configures.
 
-Unlike `GC_AGENT_SLICE`, scoping is on by default: `GC_INFRA_SLICE` only
-names the slice. When it cannot be used (condition 2 does not hold (no
-lingering and the caller is outside `user@<uid>.service`); no
+Where systemd-oomd runs with its packaged defaults (Fedora, and Ubuntu
+with the `systemd-oomd` package), it also watches every
+`user@<uid>.service`: the `user@.service.d/10-oomd-user-service-defaults.conf`
+drop-in sets `ManagedOOMMemoryPressure=kill` with a 50% limit. Under
+sustained memory pressure systemd-oomd kills cgroups inside the user
+manager, a store in the infra slice included. Moving a store there from a
+login session's scope puts it under that watch.
+
+Unlike `GC_AGENT_SLICE`, scoping is on by default. `GC_INFRA_SLICE` names
+the slice, and naming one, even `gascity-infra.slice`, also opts in a gc
+process outside the user's own sessions (condition 2).
+`GC_INFRA_SLICE=off` (or `0`, `false`) turns scoping off: every spawn
+stays in its caller's cgroup exactly as before, and gc never probes the
+user manager. When scoping does not apply (condition 2 does not hold; no
 `systemd-run`; no user bus; macOS) gc checks once per process (the
 `systemd-run` probe is bounded at 5 seconds) and starts the server
-unwrapped exactly as before, warning only when `GC_INFRA_SLICE` is set.
+unwrapped exactly as before, warning only when `GC_INFRA_SLICE` names a
+slice.
 
 ### Finding a scoped server after it exits
 

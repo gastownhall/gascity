@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -22,13 +23,14 @@ import (
 // that session's cgroup: a GC_AGENT_SLICE pane scope or a runtime launcher's
 // scope. A cgroup-wide kill of the agent then takes the city's store down
 // with it. Such spawns get a transient systemd user scope of their own
-// instead, when that scope cannot shorten the server's life. Every other
-// caller (the supervisor, a CLI run from a login shell, a provider script
-// the supervisor launched) spawns exactly as before. The supervisor itself
-// is never scoped: every session it starts would follow it into the slice.
+// instead, when that scope suits the caller (infraScopeSuitsCaller). Every
+// other caller (the supervisor, a CLI run from a login shell, a provider
+// script the supervisor launched) spawns exactly as before. The supervisor
+// itself is never scoped: every session it starts would follow it into the
+// slice.
 const (
 	// infraSliceEnv names the systemd user slice infrastructure scopes are
-	// created under; empty means defaultInfraSlice.
+	// created under, or turns scoping off; see infraSlice.
 	infraSliceEnv = "GC_INFRA_SLICE"
 	// defaultInfraSlice is the slice used when infraSliceEnv is unset.
 	defaultInfraSlice = "gascity-infra.slice"
@@ -48,7 +50,7 @@ func newInfraScope() *userscope.Wrapper {
 	return &userscope.Wrapper{
 		Probe: infraScopeProbe,
 		Unavailable: func(slice string, err error) {
-			if strings.TrimSpace(os.Getenv(infraSliceEnv)) == "" {
+			if _, named := infraSlice(); !named {
 				return
 			}
 			log.Printf("gc: %s=%q set but city infrastructure cannot be scoped; it runs in the caller's cgroup: %v", infraSliceEnv, slice, err)
@@ -73,38 +75,64 @@ var infraCurrentUsername = func() (string, error) {
 // infraProcCgroupPath is this process's cgroup membership. Tests replace it.
 var infraProcCgroupPath = "/proc/self/cgroup"
 
-// infraScopeProbe accepts user scopes for infrastructure only when moving a
-// spawn into one cannot shorten its life, then checks that systemd-run and
-// the user manager respond.
+// infraScopeProbe accepts user scopes for infrastructure only when they suit
+// the caller, then checks that systemd-run and the user manager respond. A
+// caller they do not suit never runs the probe.
 func infraScopeProbe(slice string) error {
-	if err := infraScopeKeepsLifetime(); err != nil {
+	if err := infraScopeSuitsCaller(); err != nil {
 		return err
 	}
 	return userscope.Probe(slice)
 }
 
-// infraScopeKeepsLifetime reports nil when a user-manager scope lives at
-// least as long as the caller's own cgroup: the user lingers, so the user
-// manager outlives logout, or the caller already runs under
-// user@<uid>.service and dies with the user manager anyway. Without either,
-// the caller sits in a login-session scope that can survive logout
-// (KillUserProcesses=no) while a user-manager scope stops at logout.
-func infraScopeKeepsLifetime() error {
-	// Checked first: it needs only the uid, so a uid without a passwd entry
-	// (containers, sandboxes) still qualifies.
-	unit := "user@" + strconv.Itoa(os.Getuid()) + ".service"
-	under, cgroupErr := cgroupUnder(infraProcCgroupPath, unit)
-	if cgroupErr == nil && under {
+// infraCaller is where a gc process's cgroup sits relative to the current
+// user's systemd units.
+type infraCaller int
+
+const (
+	// infraCallerElsewhere is any other cgroup: a system service or slice
+	// (a supervisor run as a system service, whose agents share its
+	// cgroup), a container's root cgroup, or a cgroup file that could not
+	// be read.
+	infraCallerElsewhere infraCaller = iota
+	// infraCallerLoginSession is a login session's scope,
+	// user-<uid>.slice/session-<id>.scope.
+	infraCallerLoginSession
+	// infraCallerUserManager is anywhere under user@<uid>.service.
+	infraCallerUserManager
+)
+
+// infraScopeSuitsCaller reports nil when moving a spawn out of this gc
+// process's cgroup into a user-manager scope cannot shorten the spawn's life
+// and does not undo where the operator placed it:
+//
+//   - Under user@<uid>.service (a GC_AGENT_SLICE pane scope, tmux's own pane
+//     scopes, a launcher's user scope): always. The caller already dies with
+//     the user manager. Decided from the uid alone, so a uid without a
+//     passwd entry (containers, sandboxes) qualifies.
+//   - In a login session's scope: when the user lingers. Without lingering a
+//     user-manager scope stops at logout, while the session scope can
+//     outlive it (KillUserProcesses=no).
+//   - Anywhere else: only when GC_INFRA_SLICE names a slice and the user
+//     lingers. Such a caller has no per-session cgroup to escape, and the
+//     move would trade the cgroup the operator chose, with its memory
+//     protection, for a user slice that has none unless the operator
+//     defines it.
+func infraScopeSuitsCaller() error {
+	caller, cgroupErr := readInfraCaller(infraProcCgroupPath, os.Getuid())
+	if caller == infraCallerUserManager {
 		return nil
 	}
-	lingers, lingerNote := infraUserLingers()
-	if lingers {
-		return nil
+	if _, named := infraSlice(); caller == infraCallerElsewhere && !named {
+		if cgroupErr != nil {
+			return fmt.Errorf("reading %s: %w", infraProcCgroupPath, cgroupErr)
+		}
+		return fmt.Errorf("gc runs outside the user's login sessions and user manager, and %s names no slice", infraSliceEnv)
 	}
-	if cgroupErr != nil {
-		return fmt.Errorf("%s and reading %s: %w", lingerNote, infraProcCgroupPath, cgroupErr)
+	if lingers, lingerNote := infraUserLingers(); !lingers {
+		return fmt.Errorf("%s: a user scope would stop at logout", lingerNote)
 	}
-	return fmt.Errorf("%s and gc runs outside %s: a user scope would stop at logout", lingerNote, unit)
+	return nil
 }
 
 // infraUserLingers reports whether logind's linger marker exists for the
@@ -122,35 +150,56 @@ func infraUserLingers() (bool, string) {
 	return true, ""
 }
 
-// cgroupUnder reports whether any cgroup path in the /proc/<pid>/cgroup
-// file at path has unit as one of its components.
-func cgroupUnder(path, unit string) (bool, error) {
+// readInfraCaller classifies the cgroup paths in the /proc/<pid>/cgroup file
+// at path for the user uid. Of several hierarchies (cgroup v1), the one
+// closest to the user manager decides.
+func readInfraCaller(path string, uid int) (infraCaller, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return infraCallerElsewhere, err
 	}
+	caller := infraCallerElsewhere
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		// hierarchy-ID:controller-list:cgroup-path
-		parts := strings.SplitN(sc.Text(), ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		for _, component := range strings.Split(parts[2], "/") {
-			if component == unit {
-				return true, nil
-			}
+		if parts := strings.SplitN(sc.Text(), ":", 3); len(parts) == 3 {
+			caller = max(caller, classifyInfraCallerCgroup(parts[2], uid))
 		}
 	}
-	return false, sc.Err()
+	return caller, sc.Err()
 }
 
-// infraSlice resolves the slice city infrastructure scopes are created under.
-func infraSlice() string {
-	if slice := strings.TrimSpace(os.Getenv(infraSliceEnv)); slice != "" {
-		return slice
+// classifyInfraCallerCgroup places one cgroup path relative to the user uid's
+// systemd units, matching whole path components: a session scope counts only
+// directly under that user's user-<uid>.slice.
+func classifyInfraCallerCgroup(cgroupPath string, uid int) infraCaller {
+	components := strings.Split(cgroupPath, "/")
+	if slices.Contains(components, "user@"+strconv.Itoa(uid)+".service") {
+		return infraCallerUserManager
 	}
-	return defaultInfraSlice
+	i := slices.Index(components, "user-"+strconv.Itoa(uid)+".slice")
+	if i < 0 || i+1 >= len(components) {
+		return infraCallerElsewhere
+	}
+	if next := components[i+1]; strings.HasPrefix(next, "session-") && strings.HasSuffix(next, ".scope") {
+		return infraCallerLoginSession
+	}
+	return infraCallerElsewhere
+}
+
+// infraSlice resolves GC_INFRA_SLICE: the slice city infrastructure scopes
+// are created under, and whether the operator named it. Unset or empty is
+// defaultInfraSlice, not named. "off", "0" or "false" in any case (as for
+// the GC_INJECT_* switches) turns scoping off and returns "".
+func infraSlice() (slice string, named bool) {
+	value := strings.TrimSpace(os.Getenv(infraSliceEnv))
+	switch strings.ToLower(value) {
+	case "":
+		return defaultInfraSlice, false
+	case "off", "0", "false":
+		return "", false
+	}
+	return value, true
 }
 
 // infraUnitPrefix starts the name of every transient scope unit city
@@ -169,13 +218,15 @@ func infraUnitName() string {
 
 // infraArgv returns argv wrapped in a transient user scope under the infra
 // slice, described by description, when this gc process runs inside an
-// agent session and scoping cannot shorten the spawn's life, with the scope
-// unit's name; otherwise argv unchanged and "".
+// agent session, GC_INFRA_SLICE does not turn scoping off and the scope
+// suits the caller (infraScopeSuitsCaller), with the scope unit's name;
+// otherwise argv unchanged and "".
 func infraArgv(description string, argv []string) ([]string, string) {
-	if strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
+	slice, _ := infraSlice()
+	if slice == "" || strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
 		return argv, ""
 	}
-	scope := userscope.Scope{Slice: infraSlice(), Unit: infraUnitName(), Description: description}
+	scope := userscope.Scope{Slice: slice, Unit: infraUnitName(), Description: description}
 	wrapped, ok := infraScope.WrapScope(scope, argv)
 	if !ok {
 		return argv, ""

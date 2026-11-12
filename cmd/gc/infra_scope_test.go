@@ -39,10 +39,28 @@ const fakeInfraScopeName = "fake-infra-scope"
 // infraScopeHost describes the host facts the infrastructure scope rule
 // reads.
 type infraScopeHost struct {
-	session      bool // the gc process carries GC_SESSION_ID
-	linger       bool // /var/lib/systemd/linger/<user> exists
-	underUserMgr bool // /proc/self/cgroup is under user@<uid>.service
+	session bool   // the gc process carries GC_SESSION_ID
+	linger  bool   // /var/lib/systemd/linger/<user> exists
+	cgroup  string // the gc process's cgroup v2 path; empty means loginSessionCgroup
 }
+
+// Cgroups the fake host can place the gc process in. "<uid>" stands for the
+// test process's uid.
+const (
+	// loginSessionCgroup is a login session's scope: a shell, or a tmux
+	// server without systemd support started from an SSH login.
+	loginSessionCgroup = "/user.slice/user-<uid>.slice/session-3.scope"
+	// userManagerCgroup is a scope under the user manager, such as a
+	// GC_AGENT_SLICE pane scope.
+	userManagerCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/run-r1.scope"
+	// supervisorSliceServiceCgroup is the supervisor run as a system
+	// service in a slice of its own; its agent panes share its cgroup.
+	supervisorSliceServiceCgroup = "/gascity.slice/gascity-prod.slice/gascity-supervisor.service"
+	// systemServiceCgroup is the supervisor run as a plain system service.
+	systemServiceCgroup = "/system.slice/gascity-supervisor.service"
+	// containerRootCgroup is the root of a container's cgroup namespace.
+	containerRootCgroup = "/"
+)
 
 // installInfraScopeHost fakes the host for the infrastructure scope rule: a
 // systemd-run first on PATH that appends its argv (one invocation per line)
@@ -87,11 +105,11 @@ func installInfraScopeHost(t *testing.T, h infraScopeHost) string {
 			t.Fatalf("write linger marker: %v", err)
 		}
 	}
-	uid := strconv.Itoa(os.Getuid())
-	cgroup := "0::/user.slice/user-" + uid + ".slice/session-3.scope\n"
-	if h.underUserMgr {
-		cgroup = "0::/user.slice/user-" + uid + ".slice/user@" + uid + ".service/app.slice/run-r1.scope\n"
+	cgroup := h.cgroup
+	if cgroup == "" {
+		cgroup = loginSessionCgroup
 	}
+	cgroup = "0::" + strings.ReplaceAll(cgroup, "<uid>", strconv.Itoa(os.Getuid())) + "\n"
 	cgroupPath := filepath.Join(dir, "cgroup")
 	if err := os.WriteFile(cgroupPath, []byte(cgroup), 0o644); err != nil {
 		t.Fatalf("write cgroup file: %v", err)
@@ -246,14 +264,26 @@ func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
 		waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
 		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
 	})
-	t.Run("outside a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
-		started, _ := startDirectManagedDolt(t)
-		assertNoSystemdRun(t, logPath)
-		if started.InfraScope != "" {
-			t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
-		}
-	})
+	// Each of these stays in its caller's cgroup.
+	for _, tc := range []struct {
+		name     string
+		host     infraScopeHost
+		sliceEnv string
+	}{
+		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
+		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
+		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			t.Setenv(infraSliceEnv, tc.sliceEnv)
+			started, _ := startDirectManagedDolt(t)
+			assertNoSystemdRun(t, logPath)
+			if started.InfraScope != "" {
+				t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+			}
+		})
+	}
 }
 
 // TestManagedDoltStateRecordsInfraScope: the scope a managed Dolt server was
@@ -292,7 +322,7 @@ func TestManagedDoltStateRecordsInfraScope(t *testing.T) {
 // session-scoped keys) is set, GC_SESSION_ID is not. Its Dolt stays where
 // the supervisor's tree runs.
 func TestSupervisorLaunchedProviderSpawnStaysUnwrapped(t *testing.T) {
-	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
+	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
 	t.Setenv("BEADS_ACTOR", "gc-supervisor")
 	startDirectManagedDolt(t)
 	assertNoSystemdRun(t, logPath)
@@ -346,14 +376,24 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 			t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
 		}
 	})
-	t.Run("outside a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
-		_, started := start(t)
-		assertNoSystemdRun(t, logPath)
-		if started.InfraScope != "" {
-			t.Fatalf("unwrapped watchdog recorded infra scope %q, want none", started.InfraScope)
-		}
-	})
+	for _, tc := range []struct {
+		name     string
+		host     infraScopeHost
+		sliceEnv string
+	}{
+		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
+		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			t.Setenv(infraSliceEnv, tc.sliceEnv)
+			_, started := start(t)
+			assertNoSystemdRun(t, logPath)
+			if started.InfraScope != "" {
+				t.Fatalf("unwrapped watchdog recorded infra scope %q, want none", started.InfraScope)
+			}
+		})
+	}
 }
 
 // The supervisor is never moved into an infrastructure scope, not even when
@@ -389,7 +429,7 @@ func TestBareSupervisorForkNotWrappedInInfraScope(t *testing.T) {
 		assertNoSystemdRun(t, logPath)
 	})
 	t.Run("outside a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
 		fork(t)
 		assertNoSystemdRun(t, logPath)
 	})
@@ -414,40 +454,103 @@ func TestDriftSupervisorRespawnNotWrappedInInfraScope(t *testing.T) {
 		assertNoSystemdRun(t, logPath)
 	})
 	t.Run("outside a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, underUserMgr: true})
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
 		respawn(t)
 		assertNoSystemdRun(t, logPath)
 	})
 }
 
 // TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime is the rule's
-// truth table: a spawn is scoped only from inside an agent session, and only
-// when a user-manager scope lives as long as the caller's own cgroup
-// (lingering, or the caller already under user@<uid>.service).
+// truth table. A spawn is scoped only from inside an agent session, never
+// with GC_INFRA_SLICE=off, and only when a user-manager scope suits the
+// caller's cgroup: always under user@<uid>.service; from a login session's
+// scope when the user lingers; from anywhere else (a system service or
+// slice, a container's root) only when GC_INFRA_SLICE names a slice and the
+// user lingers. A spawn that stays unscoped never probes the host: the probe
+// itself creates a scope.
 func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
 	argv := []string{"dolt", "sql-server"}
+	cgroups := []struct {
+		name   string
+		cgroup string
+	}{
+		{"login_session", loginSessionCgroup},
+		{"user_manager", userManagerCgroup},
+		{"supervisor_slice_service", supervisorSliceServiceCgroup},
+		{"system_service", systemServiceCgroup},
+		{"container_root", containerRootCgroup},
+	}
 	for _, session := range []bool{false, true} {
 		for _, linger := range []bool{false, true} {
-			for _, underUserMgr := range []bool{false, true} {
-				h := infraScopeHost{session: session, linger: linger, underUserMgr: underUserMgr}
-				name := fmt.Sprintf("session=%t/linger=%t/under_user_manager=%t", session, linger, underUserMgr)
-				t.Run(name, func(t *testing.T) {
-					logPath := installInfraScopeHost(t, h)
-					got, unit := infraArgv(infraTestDescription, argv)
-					want := argv
-					if session && (linger || underUserMgr) {
-						want = infraTestScopeArgv(unit, argv)
-					}
-					if !slices.Equal(got, want) {
-						t.Fatalf("infraArgv = %q, want %q", got, want)
-					}
-					if !session {
-						// Outside a session the host is never probed.
-						assertNoSystemdRun(t, logPath)
-					}
-				})
+			for _, cg := range cgroups {
+				for _, sliceEnv := range []string{"", "custom-infra.slice", "off"} {
+					h := infraScopeHost{session: session, linger: linger, cgroup: cg.cgroup}
+					name := fmt.Sprintf("session=%t/linger=%t/cgroup=%s/GC_INFRA_SLICE=%q", session, linger, cg.name, sliceEnv)
+					t.Run(name, func(t *testing.T) {
+						logPath := installInfraScopeHost(t, h)
+						t.Setenv(infraSliceEnv, sliceEnv)
+						got, unit := infraArgv(infraTestDescription, argv)
+
+						var scoped bool
+						switch {
+						case !session || sliceEnv == "off":
+						case cg.cgroup == userManagerCgroup:
+							scoped = true
+						case cg.cgroup == loginSessionCgroup:
+							scoped = linger
+						default:
+							scoped = linger && sliceEnv != ""
+						}
+						want := argv
+						if scoped {
+							slice := defaultInfraSlice
+							if sliceEnv != "" {
+								slice = sliceEnv
+							}
+							want = userscope.ScopeArgv(userscope.Scope{Slice: slice, Unit: unit, Description: infraTestDescription}, argv)
+						}
+						if !slices.Equal(got, want) {
+							t.Fatalf("infraArgv = %q, want %q", got, want)
+						}
+						if !scoped {
+							assertNoSystemdRun(t, logPath)
+						}
+					})
+				}
 			}
 		}
+	}
+}
+
+// TestInfraSliceResolvesNameAndOffSwitch: GC_INFRA_SLICE names the slice, and
+// its off values (those of the GC_INJECT_* switches) turn scoping off.
+func TestInfraSliceResolvesNameAndOffSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		value     string
+		wantSlice string
+		wantNamed bool
+	}{
+		{"", defaultInfraSlice, false},
+		{"  ", defaultInfraSlice, false},
+		{"custom-infra.slice", "custom-infra.slice", true},
+		{" custom-infra.slice\n", "custom-infra.slice", true},
+		// Naming the default slice still opts in callers outside the user's
+		// login sessions and user manager.
+		{defaultInfraSlice, defaultInfraSlice, true},
+		{"off", "", false},
+		{"OFF", "", false},
+		{" Off ", "", false},
+		{"0", "", false},
+		{"false", "", false},
+		{"FALSE", "", false},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.value), func(t *testing.T) {
+			t.Setenv(infraSliceEnv, tc.value)
+			slice, named := infraSlice()
+			if slice != tc.wantSlice || named != tc.wantNamed {
+				t.Fatalf("infraSlice() = %q, %t; want %q, %t", slice, named, tc.wantSlice, tc.wantNamed)
+			}
+		})
 	}
 }
 
@@ -460,26 +563,69 @@ func TestInfraArgvWithoutUserManagerLeavesSpawnUnwrapped(t *testing.T) {
 	}
 }
 
-func TestCgroupUnderMatchesWholeComponent(t *testing.T) {
+func TestReadInfraCallerClassifiesCgroups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cgroup")
 	for _, tc := range []struct {
 		content string
-		want    bool
+		want    infraCaller
 	}{
-		{"0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope\n", true},
-		{"12:pids:/user.slice\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/init.scope\n", true},
-		{"0::/user.slice/user-1000.slice/session-2.scope\n", false},
-		{"0::/user.slice/user-10000.slice/user@10000.service/x.scope\n", false},
-		{"0::/system.slice/gascity-supervisor.service\n", false},
+		{"0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope\n", infraCallerUserManager},
+		{"12:pids:/user.slice\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/init.scope\n", infraCallerUserManager},
+		{"0::/user.slice/user-1000.slice/session-2.scope\n", infraCallerLoginSession},
+		{"0::/user.slice/user-1000.slice/session-c1.scope\n", infraCallerLoginSession},
+		{"12:pids:/user.slice\n1:name=systemd:/user.slice/user-1000.slice/session-2.scope\n", infraCallerLoginSession},
+		// Another user's units, matched by whole component.
+		{"0::/user.slice/user-10000.slice/user@10000.service/x.scope\n", infraCallerElsewhere},
+		{"0::/user.slice/user-10000.slice/session-2.scope\n", infraCallerElsewhere},
+		// A session scope counts only directly under the user's slice.
+		{"0::/system.slice/session-2.scope\n", infraCallerElsewhere},
+		{"0::/user.slice/user-1000.slice\n", infraCallerElsewhere},
+		{"0::/user.slice/user-1000.slice/user-runtime-dir@1000.service\n", infraCallerElsewhere},
+		{"0::/system.slice/gascity-supervisor.service\n", infraCallerElsewhere},
+		{"0::/gascity.slice/gascity-prod.slice/gascity-supervisor.service\n", infraCallerElsewhere},
+		{"0::/\n", infraCallerElsewhere},
+		{"", infraCallerElsewhere},
 	} {
 		if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got, err := cgroupUnder(path, "user@1000.service")
+		got, err := readInfraCaller(path, 1000)
 		if err != nil || got != tc.want {
-			t.Errorf("cgroupUnder(%q) = %t, %v; want %t", tc.content, got, err, tc.want)
+			t.Errorf("readInfraCaller(%q) = %d, %v; want %d", tc.content, got, err, tc.want)
 		}
 	}
+	if got, err := readInfraCaller(filepath.Join(t.TempDir(), "missing"), 1000); err == nil || got != infraCallerElsewhere {
+		t.Errorf("readInfraCaller(missing file) = %d, %v; want %d and the read error", got, err, infraCallerElsewhere)
+	}
+}
+
+// TestInfraScopeSuitsCallerElsewhereNeedsANamedSlice: from a cgroup outside
+// the user's login sessions and user manager an unreadable cgroup file or an
+// unset GC_INFRA_SLICE keeps the spawn in place even when the user lingers,
+// and a named slice opts it in.
+func TestInfraScopeSuitsCallerElsewhereNeedsANamedSlice(t *testing.T) {
+	t.Run("unset GC_INFRA_SLICE", func(t *testing.T) {
+		installInfraScopeHost(t, infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup})
+		err := infraScopeSuitsCaller()
+		if err == nil || !strings.Contains(err.Error(), infraSliceEnv+" names no slice") {
+			t.Fatalf("infraScopeSuitsCaller = %v, want a names-no-slice error", err)
+		}
+	})
+	t.Run("unreadable cgroup file", func(t *testing.T) {
+		installInfraScopeHost(t, infraScopeHost{session: true, linger: true})
+		infraProcCgroupPath = filepath.Join(t.TempDir(), "missing")
+		err := infraScopeSuitsCaller()
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("infraScopeSuitsCaller = %v, want the cgroup read error", err)
+		}
+	})
+	t.Run("named slice", func(t *testing.T) {
+		installInfraScopeHost(t, infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup})
+		t.Setenv(infraSliceEnv, "custom-infra.slice")
+		if err := infraScopeSuitsCaller(); err != nil {
+			t.Fatalf("infraScopeSuitsCaller = %v, want nil with a named slice and lingering", err)
+		}
+	})
 }
 
 // killFakeCgroup kills every process in the fake cgroup scope, the way a
@@ -568,14 +714,14 @@ func withInfraUsernameLookupFailing(t *testing.T) {
 	t.Cleanup(func() { infraCurrentUsername = old })
 }
 
-// TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry: being under
+// TestInfraScopeSuitsCallerUnderUserManagerWithoutPasswdEntry: being under
 // user@<uid>.service suffices on its own, so a failed username lookup must
 // not keep the spawn unwrapped.
-func TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry(t *testing.T) {
-	installInfraScopeHost(t, infraScopeHost{session: true, underUserMgr: true})
+func TestInfraScopeSuitsCallerUnderUserManagerWithoutPasswdEntry(t *testing.T) {
+	installInfraScopeHost(t, infraScopeHost{session: true, cgroup: userManagerCgroup})
 	withInfraUsernameLookupFailing(t)
-	if err := infraScopeKeepsLifetime(); err != nil {
-		t.Fatalf("infraScopeKeepsLifetime = %v, want nil under user@<uid>.service", err)
+	if err := infraScopeSuitsCaller(); err != nil {
+		t.Fatalf("infraScopeSuitsCaller = %v, want nil under user@<uid>.service", err)
 	}
 	argv := []string{"dolt", "sql-server"}
 	got, unit := infraArgv(infraTestDescription, argv)
@@ -584,17 +730,17 @@ func TestInfraScopeKeepsLifetimeUnderUserManagerWithoutPasswdEntry(t *testing.T)
 	}
 }
 
-// TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering: outside the
-// user manager, a uid whose username cannot be resolved is not lingering.
-func TestInfraScopeKeepsLifetimeTreatsFailedLookupAsNotLingering(t *testing.T) {
+// TestInfraScopeSuitsCallerTreatsFailedLookupAsNotLingering: in a login
+// session's scope, a uid whose username cannot be resolved is not lingering.
+func TestInfraScopeSuitsCallerTreatsFailedLookupAsNotLingering(t *testing.T) {
 	installInfraScopeHost(t, infraScopeHost{session: true, linger: true})
 	withInfraUsernameLookupFailing(t)
-	err := infraScopeKeepsLifetime()
+	err := infraScopeSuitsCaller()
 	if err == nil {
-		t.Fatal("infraScopeKeepsLifetime = nil, want a not-lingering error outside user@<uid>.service")
+		t.Fatal("infraScopeSuitsCaller = nil, want a not-lingering error outside user@<uid>.service")
 	}
 	if !strings.Contains(err.Error(), "does not linger") {
-		t.Fatalf("infraScopeKeepsLifetime = %v, want a not-lingering error", err)
+		t.Fatalf("infraScopeSuitsCaller = %v, want a not-lingering error", err)
 	}
 	argv := []string{"dolt", "sql-server"}
 	if got, unit := infraArgv(infraTestDescription, argv); !slices.Equal(got, argv) || unit != "" {
