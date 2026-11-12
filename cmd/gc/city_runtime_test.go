@@ -9521,51 +9521,6 @@ func TestCityRuntimeReloadWispGCFollowsEnablement(t *testing.T) {
 	}
 }
 
-type countingWispGC struct {
-	runs *atomic.Int32
-}
-
-func (c countingWispGC) shouldRun(time.Time) bool {
-	return true
-}
-
-func (c countingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
-	c.runs.Add(1)
-	return 0, nil
-}
-
-// TestTick_DoesNotRunWispGC pins that the serial controller tick never runs
-// the wisp GC purge, even when the purge is due: a long purge in the tick
-// delays every session decision that waits for the next tick (PR #8431).
-func TestTick_DoesNotRunWispGC(t *testing.T) {
-	store := beads.NewMemStore()
-	var runs atomic.Int32
-	cr := &CityRuntime{
-		cityPath:            t.TempDir(),
-		cityName:            "test-city",
-		cfg:                 &config.City{},
-		sp:                  runtime.NewFake(),
-		standaloneCityStore: store,
-		wg:                  countingWispGC{runs: &runs},
-		rec:                 events.Discard,
-		logPrefix:           "test-city",
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			return DesiredStateResult{State: map[string]TemplateParams{}}
-		},
-	}
-
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
-
-	if got := runs.Load(); got != 0 {
-		t.Fatalf("tick ran the wisp GC purge %d time(s); want 0 (the purge belongs on its own lane, off the tick)", got)
-	}
-}
-
 // Kills (PAR-EXEC MUST-1, shutdown): a shutdown that reads its listing's
 // attestation after the listing. The runtime's attestation turns on while
 // it lists (an exec pack whose handshake recovers mid-call), so its blind

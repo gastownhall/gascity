@@ -12,7 +12,7 @@ cmd/gc	raw-result	269
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
 cmd/gc	read-marker	31
-cmd/gc	unwrap	142
+cmd/gc	unwrap	141
 internal/api	mint	8
 internal/api	raw-field	7
 internal/api	raw-param	25
