@@ -156,10 +156,19 @@ func TestRBEWorkerEnvManifestNamesTheWorkerHost(t *testing.T) {
 	}
 }
 
+// rbeScriptHangBudget is how long runRBEScript lets a script run before it
+// declares the script wedged.
+const rbeScriptHangBudget = 30 * time.Second
+
 // runRBEScript runs a script with bash in dir (the test's cwd if
 // empty) and exactly env, and returns its stdout and stderr.
 func runRBEScript(dir string, env []string, script string, args ...string) (stdout, stderr string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	return runRBEScriptWithin(rbeScriptHangBudget, dir, env, script, args...)
+}
+
+// runRBEScriptWithin is runRBEScript with an explicit hang budget.
+func runRBEScriptWithin(budget time.Duration, dir string, env []string, script string, args ...string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
 	cmd.Dir = dir
