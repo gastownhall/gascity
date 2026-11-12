@@ -2067,11 +2067,15 @@ func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID, 
 
 // orderTrackingCloseReason is the close_reason for a dispatched order's
 // tracking bead: the completion sentence when failure is empty, otherwise a
-// sentence that says the run failed and carries the failure.
+// sentence that says the run failed and carries the failure. The failure can
+// hold a script's raw output, and the reason travels as one argv word to bd:
+// a NUL byte makes that spawn fail (EINVAL) and leaves the tracking bead open,
+// so NUL is dropped and a byte sequence that is not UTF-8 becomes U+FFFD.
 func orderTrackingCloseReason(failure string) string {
 	if failure == "" {
 		return completedOrderTrackingCloseReason
 	}
+	failure = strings.ToValidUTF8(strings.ReplaceAll(failure, "\x00", ""), "\uFFFD")
 	return failedOrderTrackingCloseReasonPrefix + failure
 }
 
