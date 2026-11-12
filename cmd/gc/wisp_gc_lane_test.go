@@ -924,3 +924,36 @@ func TestCityRuntimeRunJoinsAnInFlightWispGCPurgeOnExit(t *testing.T) {
 		t.Fatal("run did not return after the purge it was joining finished")
 	}
 }
+
+// panickingWispGC is an always-due tracker whose purge panics inside runGC.
+type panickingWispGC struct{}
+
+func (panickingWispGC) shouldRun(time.Time) bool { return true }
+
+func (panickingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	panic("purge boom")
+}
+
+// Kills: a purge panic that escapes the lane or leaks its cleanup. Driven
+// through safeTick as startWispGCLane drives it, a panicking purge is
+// recovered, still counts toward the lane's pacing (ran), releases its
+// store-work registration, and ends its trace cycle aborted.
+func TestWispGCLane_PurgePanicIsRecoveredAndAbortsItsCycle(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	cr.wg = panickingWispGC{}
+	ran := false
+	panicked := cr.safeTick(func() { cr.runWispGCLanePass(context.Background(), true, &ran) }, wispGCLaneSafeTickTrigger)
+	if !panicked {
+		t.Fatal("safeTick reported no panic from a purge that panicked")
+	}
+	if !ran {
+		t.Fatal("a pass whose purge panicked did not report running a purge; a recovered panic still counts toward pacing")
+	}
+	if cr.cs.storeWorkInFlight() {
+		t.Fatal("the purging pass's store-work registration outlived its recovered panic")
+	}
+	records := closeTrace(t, cr)
+	if got := passCompletion(records, "wisp_gc"); got != TraceCompletionAborted {
+		t.Errorf("a panicked purge's cycle completion = %q, want %q", got, TraceCompletionAborted)
+	}
+}
