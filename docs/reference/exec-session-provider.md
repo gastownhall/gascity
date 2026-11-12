@@ -708,6 +708,22 @@ sessions, and a session's start refuses rather than end a leftover the
 inventory could have shown. gc signals a process only while it still
 carries the session's `GC_SESSION_ID` and the start time the scan read.
 
+gc never counts a process under a tmux server as a box's leftover. A box's
+agent runs under the script's own processes, so a tmux server in that
+picture is one an agent or a user started inside the box (`tmux new -d`,
+or the user's default tmux server when none was running), and it carries
+the session's `GC_SESSION_ID` like anything else started there. The scan
+skips any process with a tmux server or client among its ancestors, along
+with the server and its clients: a session's start, the orphan sweep and
+the drain-ack escalation never end a tmux session running inside a box,
+nor any process in its panes. A process that leaves such a pane and is
+adopted by init is no longer under tmux, and counts as a leftover like any
+other. The drain-ack escalation ends a wedged session's processes only when
+their parent is a tmux server, so it finds nothing to end for an exec
+script's session: the slot stays occupied until the box exits. Keep
+the processes that run a box out of any tmux server's subtree; a box
+started under one gets no process-table cleanup at all.
+
 Start a process that serves several boxes, such as a multiplexer or a daemon
 the boxes run under, from the operation's own environment, never after
 applying a start config's `env`. A process that carries a session's

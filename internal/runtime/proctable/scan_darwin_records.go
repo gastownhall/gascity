@@ -169,3 +169,40 @@ func reportedParent(records map[int]psRecord, ppid int) (int, bool) {
 	parent, ok := records[ppid]
 	return ppid, ok && isInfrastructureCommand(parent.command)
 }
+
+// fenceTmuxSubtreeRecords is the pure half of the Darwin
+// ScanBySessionIDOutsideTmux: it keeps the roots none of whose ancestors in
+// records is a tmux server or client. A root whose ancestry the snapshot
+// cannot complete (a parent it does not hold, or a loop) is left out: it may
+// sit under a tmux server.
+func fenceTmuxSubtreeRecords(records map[int]psRecord, roots []runtime.LiveRuntime) []runtime.LiveRuntime {
+	kept := make([]runtime.LiveRuntime, 0, len(roots))
+	for _, r := range roots {
+		if recordOutsideTmux(records, r.PID) {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+// recordOutsideTmux reports whether records proves that no ancestor of pid is
+// a tmux server or client.
+func recordOutsideTmux(records map[int]psRecord, pid int) bool {
+	record, ok := records[pid]
+	if !ok {
+		return false
+	}
+	seen := map[int]bool{pid: true}
+	for p := record.ppid; p > 1; {
+		ancestor, ok := records[p]
+		if !ok || seen[p] {
+			return false
+		}
+		seen[p] = true
+		if isInfrastructureCommand(ancestor.command) {
+			return false
+		}
+		p = ancestor.ppid
+	}
+	return true
+}

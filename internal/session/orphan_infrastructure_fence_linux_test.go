@@ -6,13 +6,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // procfsOrphanProvider is orphanScanProvider backed by the real process-table
@@ -151,5 +154,94 @@ func TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim(t *
 	}
 	if len(sp.started) != 1 || sp.started[0] != info.ID {
 		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+}
+
+// execScanOrphanProvider is a fake runtime whose process-table scanner is
+// the exec provider's, over a host-sharing golden pack that runs no box,
+// recording the PIDs the start would terminate.
+type execScanOrphanProvider struct {
+	*runtime.Fake
+	scanner    runtime.ProcessTableScanner
+	terminated []int
+}
+
+func (p *execScanOrphanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	return p.scanner.FindRuntimesBySessionID(id)
+}
+
+func (p *execScanOrphanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
+	p.terminated = append(p.terminated, r.PID)
+	return nil
+}
+
+// hostFSGoldenPack writes the conformance golden reference's host-sharing
+// variant with an `exec` that runs nothing, and returns its script.
+func hostFSGoldenPack(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bodies := reference.HostFSBodies()
+	bodies["exec"] = `cat >/dev/null`
+	script := filepath.Join(dir, "golden")
+	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// A host-sharing exec pack's session whose agent founded a tmux server in
+// its box (`tmux new -d`): the server carries the session's GC_SESSION_ID,
+// so the shared scan reads its pane as the session's root. The restart's
+// orphan kill terminates the box program's leftovers (under the pack's
+// holder, and adopted by init) and never the tmux server, its client, or
+// any process in its panes: the exec scanner fences every tmux subtree.
+func TestSameSessionRestartOnHostFSExecPackNeverReachesInBoxTmux(t *testing.T) {
+	store := beads.NewMemStore()
+	city := t.TempDir()
+	scanner, ok := runtime.AsProcessTableScanner(sessionexec.NewSeamBackedForCity(hostFSGoldenPack(t), "c", city))
+	if !ok {
+		t.Fatal("the host-sharing golden pack has no process-table scanner")
+	}
+	sp := &execScanOrphanProvider{Fake: runtime.NewFake(), scanner: scanner}
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		holderPID  = 4100
+		programPID = 4101
+		clientPID  = 4102
+		serverPID  = 4200
+		panePID    = 4201
+		vimPID     = 4202
+		leftover   = 4300
+	)
+	writeFakeProcess(t, root, holderPID, 1, []string{"holder"}, []string{"PATH=/usr/bin"})
+	writeFakeProcess(t, root, programPID, holderPID, []string{"claude"}, env)
+	writeFakeProcess(t, root, clientPID, programPID, []string{"tmux: client"}, env)
+	writeFakeProcess(t, root, serverPID, 1, []string{"tmux: server"}, env)
+	writeFakeProcess(t, root, panePID, serverPID, []string{"bash"}, env)
+	writeFakeProcess(t, root, vimPID, panePID, []string{"vim"}, env)
+	writeFakeProcess(t, root, leftover, 1, []string{"sleep"}, env)
+	proctable.SetScanRootForTesting(t, root)
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !slices.Equal(sp.terminated, []int{programPID, leftover}) {
+		t.Fatalf("pre-start orphan kill terminated %v, want the box's leftovers [%d %d] and never the in-box tmux server %d, client %d, pane %d or vim %d",
+			sp.terminated, programPID, leftover, serverPID, clientPID, panePID, vimPID)
 	}
 }

@@ -33,6 +33,15 @@ type ProcessTableScannerFixtures struct {
 	// NotScanning returns a provider of the same runtime whose sessions do
 	// not share this host, so it must not claim the scanner.
 	NotScanning func(t *testing.T) runtime.Provider
+	// FencesTmuxSubtrees marks a runtime whose sessions never run under a
+	// tmux server (an exec pack's boxes run under the pack's holder), so its
+	// scanner must never report a process that has a tmux server or client
+	// among its ancestors: such a process belongs to a tmux server an agent
+	// or a user founded inside the session, which carries the session's
+	// GC_SESSION_ID, and a reported pane would be ended by a start's orphan
+	// kill. The tmux runtime's panes are its sessions, so it leaves this
+	// unset.
+	FencesTmuxSubtrees bool
 	// StartConfig is the config a case starts its session with, before the
 	// case sets Command and the session's identity env; nil starts in a
 	// fresh work dir.
@@ -103,6 +112,19 @@ func RunProcessTableScannerContract(t *testing.T, f ProcessTableScannerFixtures)
 			return
 		}
 		if err := checkInfrastructureRootReported(t, sp, leftover); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ProcessTable_TmuxSubtreeIsFenced", func(t *testing.T) {
+		if !f.FencesTmuxSubtrees {
+			t.Skip("the runtime's sessions may run under a tmux server")
+		}
+		sp, leftover := startLeftoverSession(t, f)
+		if sp == nil {
+			return
+		}
+		if err := checkTmuxSubtreeFenced(t, sp, leftover); err != nil {
 			t.Error(err)
 		}
 	})
@@ -304,6 +326,95 @@ func checkInfrastructureRootReported(t *testing.T, sp runtime.Provider, l contra
 		return fmt.Errorf("runtime contract 024: the snapshot's infrastructure argv is not fenced; the case proves nothing")
 	}
 	return nil
+}
+
+// checkTmuxSubtreeFenced reports how sp, whose sessions never run under a
+// tmux server, breaks RUNTIME-CONTRACT-024 for a process of its session that
+// sits in a tmux server's subtree, or nil when it keeps the contract: with
+// the leftover placed under a "tmux: server" adopted by init and carrying
+// the session's GC_SESSION_ID (a server founded inside the session), as the
+// pane's own process or deeper under a pane shell, neither the scan for the
+// session nor the orphan sweep's scan reports it. The same leftover outside
+// tmux is found, so the case is not vacuous.
+func checkTmuxSubtreeFenced(t *testing.T, sp runtime.Provider, l contractLeftover) error {
+	t.Helper()
+	s, err := scannerOf(sp)
+	if err != nil {
+		return err
+	}
+	found, err := findLeftover(t, s, l, l.sessionID)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(found, func(r runtime.LiveRuntime) bool { return r.PID == l.PID }) {
+		return fmt.Errorf("runtime contract 024: scan for %s outside tmux = %+v, want the leftover pid %d; the case proves nothing", l.sessionID, found, l.PID)
+	}
+	serverPID, shellPID := l.PID+1, l.PID+2
+	sessionEnv := []string{"GC_SESSION_ID=" + l.sessionID, "GC_CITY_PATH=" + l.city}
+	for _, shape := range []struct {
+		name   string
+		parent int
+	}{
+		{"the pane's process", serverPID},
+		{"under a pane shell", shellPID},
+	} {
+		root := SnapshotProcRoot(t, l.PID)
+		writeFakeProcEntry(t, root, serverPID, 1, "tmux: server", sessionEnv)
+		writeFakeProcEntry(t, root, shellPID, serverPID, "bash", nil)
+		if err := setSnapshotParent(root, l.PID, shape.parent); err != nil {
+			t.Fatal(err)
+		}
+		proctable.SetScanRootForTesting(t, root)
+		for _, id := range []string{l.sessionID, ""} {
+			found, err := s.FindRuntimesBySessionID(id)
+			if err != nil {
+				return fmt.Errorf("runtime contract 024: FindRuntimesBySessionID(%q) with the leftover %s = %w", id, shape.name, err)
+			}
+			for _, r := range found {
+				if r.PID == l.PID || r.PID == serverPID || r.PID == shellPID {
+					return fmt.Errorf("runtime contract 024: FindRuntimesBySessionID(%q) reported %+v in a tmux server's subtree (the leftover as %s); a start's orphan kill would end a tmux session run inside the session", id, r, shape.name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// writeFakeProcEntry writes a fake process into the snapshot root: its
+// environ, stat (parent ppid), comm, cmdline, and a status naming this
+// test's effective uid.
+func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, env []string) {
+	t.Helper()
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid := strconv.Itoa(os.Geteuid())
+	for name, content := range map[string]string{
+		"environ": strings.Join(env, "\x00") + "\x00",
+		"stat":    strconv.Itoa(pid) + " (" + comm + ") S " + strconv.Itoa(ppid) + strings.Repeat(" 0", 17) + " 100" + strings.Repeat(" 0", 29) + "\n",
+		"comm":    comm + "\n",
+		"cmdline": comm + "\x00",
+		"status":  "Name:\t" + comm + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// setSnapshotParent rewrites pid's parent in the snapshot root to ppid.
+func setSnapshotParent(root string, pid, ppid int) error {
+	path := filepath.Join(root, strconv.Itoa(pid), "stat")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	stat, err := withParent(string(data), ppid)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(stat), 0o644)
 }
 
 // checkNoScannerOffHost reports how sp, whose sessions do not share this
@@ -509,6 +620,11 @@ func readProcFiles(pid int) (map[string][]byte, error) {
 // reparentStat rewrites the parent pid (the field after the state, past the
 // command's closing parenthesis) of a /proc/<pid>/stat line to 1.
 func reparentStat(stat string) (string, error) {
+	return withParent(stat, 1)
+}
+
+// withParent rewrites the parent pid of a /proc/<pid>/stat line to ppid.
+func withParent(stat string, ppid int) (string, error) {
 	end := strings.LastIndexByte(stat, ')')
 	if end < 0 {
 		return "", fmt.Errorf("malformed stat %q", stat)
@@ -517,6 +633,6 @@ func reparentStat(stat string) (string, error) {
 	if len(fields) < 2 {
 		return "", fmt.Errorf("malformed stat %q", stat)
 	}
-	fields[1] = "1"
+	fields[1] = strconv.Itoa(ppid)
 	return stat[:end+1] + " " + strings.Join(fields, " ") + "\n", nil
 }

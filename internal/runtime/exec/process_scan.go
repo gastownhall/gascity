@@ -23,7 +23,9 @@ import (
 // v2-ready pack sharing the host can scan (canScan,
 // runtime.ConditionalProcessTableScanner): for any other pack,
 // runtime.AsProcessTableScanner reads it as having none, and its methods
-// find nothing and terminate nothing.
+// find nothing and terminate nothing. The scanner never reports a process
+// under a tmux server or client (FindRuntimesBySessionID): no cleanup of
+// gc's ends a tmux session an agent or a user runs inside a box.
 
 var (
 	_ runtime.ProcessTableScanner            = (*Provider)(nil)
@@ -78,7 +80,16 @@ func (p *Provider) CanScanProcessTable() bool {
 }
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] with the
-// host's process-table scan (proctable.ScanBySessionID). A root is tracked
+// host's process-table scan outside tmux (proctable.ScanBySessionIDOutsideTmux):
+// a box's agent runs under the pack's holder, never under a tmux server, so a
+// process with a tmux server or client among its ancestors is never one of a
+// box's roots. A tmux server an agent or an attached user founds inside a box
+// (`tmux new -d`, the user's default server when none was running) carries
+// the session's GC_SESSION_ID, and the shared scan would read each of its
+// panes as the session's root; reported here, a start's orphan kill, the
+// orphan sweep or the drain-ack escalation would end the pane's process
+// group. The tmux runtime's own scan is unchanged: its panes are its
+// sessions. A root is tracked
 // when a box the pack's inventory lists carries its session id. A root the
 // inventory cannot rule out (it failed, timed out or was partial, or a
 // listed box's identity is unreadable and the root names no other session)
@@ -89,7 +100,7 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 	if !p.canScan() {
 		return nil, nil
 	}
-	found, scanErr := proctable.ScanBySessionID(id)
+	found, scanErr := proctable.ScanBySessionIDOutsideTmux(id)
 	if len(found) == 0 {
 		return found, scanErr
 	}
