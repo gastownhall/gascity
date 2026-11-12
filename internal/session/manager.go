@@ -775,12 +775,15 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 }
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
-// city match the session about to start, then confirms each is dead. It returns
+// city match the session about to start, then confirms each is dead. Roots
+// owned elsewhere are left running: city infrastructure
+// (proctable.IsCityInfrastructureRoot) and detached user services
+// (proctable.DetachedUserServiceUnit). It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
 // nothing, when the provider claims one of them as a live runtime it does not
 // list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
 // callers gating a Start can refuse rather than race a survivor for the same
-// work. A detached user-manager service in a different unit is left alone.
+// work.
 //
 // The roots a failed scan did surface are still killed, unless one of them is
 // LiveUnlisted, which terminates none: a partial result is worth acting on. Where orphanScanErrorsRefuseStart is set (Windows), the scan
@@ -840,7 +843,6 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(scanErr))
 	}
 	var termErrs []error
-	ownUnit := proctable.SessionOwnUserService(found, sessionID)
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
@@ -870,11 +872,6 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
-		unit, foreign := proctable.ForeignUserService(live.PID, ownUnit)
-		if foreign {
-			log.Printf("session: leaving process-table root for %s pid=%d alone: user service %s (not the session's unit)", sessionID, live.PID, unit)
-			continue
-		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
 		// failed listing missed, or a root its failed listing cannot rule
@@ -883,13 +880,19 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate 
 		if live.LiveUnlisted {
 			return 0, refuseLiveUnlisted(sessionID, live, scanErr)
 		}
+		// A root the session started as a systemd user service runs in a
+		// user-manager unit of its own, which owns it: it is neither the
+		// session's runtime nor an orphan of it, so the restart leaves it
+		// running and proceeds. It is checked after the provider's claim so
+		// a live runtime the provider claims still refuses the start.
+		if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: detached user service %s", sessionID, live.PID, unit)
+			continue
+		}
 		orphans = append(orphans, live)
 	}
 	terminated := 0
 	for _, live := range orphans {
-		if unit, _ := proctable.ForeignUserService(live.PID, ownUnit); unit != "" {
-			log.Printf("session: reaping orphaned runtime for %s pid=%d unit=%s", sessionID, live.PID, unit)
-		}
 		if err := terminate(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

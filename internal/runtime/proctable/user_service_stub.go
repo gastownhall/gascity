@@ -2,7 +2,7 @@
 
 package proctable
 
-// UserServiceUnitOf is unavailable where the scanner does not read a
-// procfs cgroup. No user service is classified, so the reap fence does
-// not skip on this platform.
-func UserServiceUnitOf(int) (string, bool) { return "", false }
+// DetachedUserServiceUnit returns "" on platforms without a procfs cgroup
+// record to read: no detached systemd user service can be recognized there,
+// so the kill paths keep their prior behavior.
+func DetachedUserServiceUnit(int) string { return "" }
