@@ -51,17 +51,23 @@ each remaining job exactly one of:
 - **deferred to PR CI**: only for the two reasons below;
 - **not covered**: see below.
 
-Derive the job list from the merged workflow file for the commit being
-gated (`git show <commit>:.github/workflows/ci.yml`), not from memory or an
-older checkout. The set changes with the commit, and the `changes` job's
-filters decide what a diff triggers: `shared` turns on nearly everything.
+Derive the job list from the merge a PR's CI runs, not from the branch tip,
+from memory or from an older checkout. Once the target has moved, the tip's
+own `ci.yml` lists the wrong jobs. Take the merged tree with
+`git merge-tree --write-tree <target> <commit>`, then read the file with
+`git show <tree>:.github/workflows/ci.yml`; once a PR exists,
+`refs/pull/<n>/merge` is the same merge. The set changes with the merge, and
+the `changes` job's filters decide what a diff triggers: `shared` turns on
+nearly everything.
 
 "Deferred to PR CI" has two permitted reasons. Slowness, host load, "the
 local suite does not include it" and "unrelated to the diff" are not
 reasons.
 
-- The job's runner is not Linux. Today that is only
-  `credential-provider-windows`; `ci-required` has no macOS job.
+- The job's runner is not Linux: its `runs-on`, resolved through the
+  `runner-policy` outputs, is a Windows or macOS runner. Read it from the
+  merged file for each job. A job on a Linux runner cannot take this reason,
+  even when its commands cross-compile for another OS.
 - A precondition its commands need is absent on the gate host. Record the
   failing probe, its exit status and its stderr.
 
@@ -82,10 +88,11 @@ filter is false). Name the deferred and not-covered jobs in the PR
 description.
 
 Worked example: a change under `internal/beads/**` matches the `shared`
-filter, so the Windows job runs in the PR's CI although its build closure
-(`internal/credentialprovider`, `internal/loopbackport`,
+filter, so the `credential-provider-windows` job runs in the PR's CI although
+its build closure (`internal/credentialprovider`, `internal/loopbackport`,
 `internal/pathutil`, `internal/testenv`, `internal/testutil` at the time of
-writing) is untouched. Its line reads:
+writing) is untouched. That is one job's line among the merged `needs`; every
+other job gets its own. This job's line reads:
 
 ```text
 credential-provider-windows: deferred to PR CI (non-Linux runner); closure reach none; no cross-vet needed
