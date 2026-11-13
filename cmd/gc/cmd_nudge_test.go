@@ -8839,3 +8839,62 @@ func TestNudgeSessionStartOwnedByReconciler(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitStaleMailQueuedNudgesKeepsMailReminderWhenUnreadStateUnknown pins
+// the keep-on-ambiguity guard of the stale-mail withdrawal: a mail reminder is
+// withdrawn only when the target's unread count is verifiably zero. A nil mail
+// provider, a target with no session, and a failing mailbox read must each
+// keep the reminder (and surface the read error), never drop it.
+func TestSplitStaleMailQueuedNudgesKeepsMailReminderWhenUnreadStateUnknown(t *testing.T) {
+	mailItem := queuedNudge{ID: "mail-1", Agent: "worker", Source: "mail"}
+	otherItem := queuedNudge{ID: "other-1", Agent: "worker", Source: "session"}
+	items := []queuedNudge{mailItem, otherItem}
+	// "human" resolves to its own mailbox without any session store, so the
+	// only thing that varies between cases is the provider.
+	resolvable := nudgeTarget{sessionID: "human"}
+
+	for _, tc := range []struct {
+		name    string
+		target  nudgeTarget
+		mp      mail.Provider
+		wantErr bool
+	}{
+		{name: "nil-provider", target: resolvable, mp: nil},
+		{name: "empty-session-id", target: nudgeTarget{}, mp: mail.NewFake()},
+		{name: "mailbox-read-error", target: resolvable, mp: mail.NewFailFake(), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unread, err := targetHasUnreadMail(tc.target, tc.mp, nil)
+			if !unread {
+				t.Fatal("targetHasUnreadMail = false, want true (unknown unread state must count as unread)")
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("targetHasUnreadMail err = %v, wantErr %v", err, tc.wantErr)
+			}
+
+			keep, stale, err := splitStaleMailQueuedNudges(tc.target, tc.mp, nil, items)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("splitStaleMailQueuedNudges err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(stale) != 0 {
+				t.Fatalf("stale = %#v, want none (reminder must be kept)", stale)
+			}
+			if len(keep) != len(items) || keep[0].ID != mailItem.ID || keep[1].ID != otherItem.ID {
+				t.Fatalf("keep = %#v, want every item untouched, in order", keep)
+			}
+		})
+	}
+
+	// Control: with a readable, empty mailbox the same reminder IS withdrawn,
+	// so the cases above fail on the guard, not on the helper never dropping.
+	keep, stale, err := splitStaleMailQueuedNudges(resolvable, mail.NewFake(), nil, items)
+	if err != nil {
+		t.Fatalf("splitStaleMailQueuedNudges (empty mailbox): %v", err)
+	}
+	if len(stale) != 1 || stale[0].ID != mailItem.ID {
+		t.Fatalf("stale = %#v, want only the mail reminder", stale)
+	}
+	if len(keep) != 1 || keep[0].ID != otherItem.ID {
+		t.Fatalf("keep = %#v, want only the non-mail item", keep)
+	}
+}
