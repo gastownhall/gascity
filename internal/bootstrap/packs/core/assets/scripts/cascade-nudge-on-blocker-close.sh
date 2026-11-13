@@ -136,7 +136,8 @@ MEMBERS
 # readiness rule (beads.DependencySatisfied over beads.ReadinessWorkOutcome):
 # while it is not closed, and, once closed, while it closed blocked
 # (gc.work_outcome=blocked) unless it is a formula step (gc.step_ref set)
-# whose gc.outcome is pass. A pinned blocker holds whichever read serves it:
+# whose gc.outcome is a terminal verdict (pass, fail, skipped, canceled), which
+# the controls depending on it consume. A pinned blocker holds whichever read serves it:
 # the bd passthrough reports it "pinned", and the in-process class-binding
 # read folds it to "open". bd's own readiness counts it satisfied, so a
 # dependent only a pinned blocker holds goes unnudged; a seat parked on that
@@ -161,7 +162,8 @@ still_held() {
             (.metadata // {}) as $m
             | .status == "closed"
               and $m["gc.work_outcome"] == "blocked"
-              and (($m["gc.step_ref"] // "") == "" or $m["gc.outcome"] != "pass");
+              and (($m["gc.step_ref"] // "") == ""
+                   or ($m["gc.outcome"] | IN("pass", "fail", "skipped", "canceled") | not));
         def holds:
             if .external == true or (.status // "") == "" then false
             else .status != "closed" or closed_blocked end;

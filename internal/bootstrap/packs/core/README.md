@@ -121,8 +121,8 @@ readiness rule judges it
 (`gc bd dep list <dep> --direction=down --type=blocks --json`): a blocker
 other than the one that closed whose status is not `closed`, or any blocker,
 the closing one included, that closed blocked (`gc.work_outcome=blocked`),
-unless it is a formula step (`gc.step_ref` set) whose `gc.outcome` is
-`pass`. Its assignee or routed target has nothing to do yet, and a nudge to
+unless it is a formula step (`gc.step_ref` set) whose `gc.outcome` is a
+terminal verdict (`pass`, `fail`, `skipped`, or `canceled`). Its assignee or routed target has nothing to do yet, and a nudge to
 an asleep seat parked on the dependent would wake that seat for nothing; the
 seat wakes on its own once the dependent is ready. A `pinned` blocker holds
 too, whether the read reports it `pinned` (the bd passthrough) or `open` (the

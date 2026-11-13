@@ -62,15 +62,24 @@ func TestCascadeNudgeAbsorbsDuplicateCloseEvents(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		depJSON string
-		members map[string][]string
-		wantTo  string
+		name     string
+		depJSON  string
+		downJSON string
+		members  map[string][]string
+		wantTo   string
 	}{
 		{
 			name:    "assigned dependent",
 			depJSON: `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
 			wantTo:  "worker-1",
+		},
+		{
+			// The dependent's other blocker is a formula step that failed
+			// with a blocked work record: its verdict releases the dependent.
+			name:     "assigned dependent beside a failed step closed blocked",
+			depJSON:  `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+			downJSON: `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"fail"}}]`,
+			wantTo:   "worker-1",
 		},
 		{
 			name:    "routed unassigned dependent",
@@ -86,6 +95,7 @@ func TestCascadeNudgeAbsorbsDuplicateCloseEvents(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, cascadeFake{
 				eventsPath: eventsPath,
 				depJSON:    tc.depJSON,
+				downJSON:   tc.downJSON,
 				members:    tc.members,
 				failDir:    dir,
 			}.body())
@@ -608,15 +618,19 @@ exit 0
 // (ga-ylpbsy.16, RCA R4). The seat wakes on its own once the dependent is
 // ready. A blocker holds as beads.DependencySatisfied judges it: not closed,
 // or closed blocked (gc.work_outcome=blocked) and not a formula step that
-// passed.
+// reached a terminal verdict (pass, fail, skipped, canceled).
 func TestCascadeNudgeSkipsADependentStillBlocked(t *testing.T) {
 	cases := map[string]string{
 		"another blocker closed blocked": `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
 		// mol-do-work stamps gc.outcome=pass on the work bead it closes,
 		// blocked or not: without gc.step_ref it is no dispatch verdict.
 		"another work bead closed blocked with gc.outcome=pass": `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.outcome":"pass"}}]`,
-		"another formula step closed blocked that failed":       `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"fail"}}]`,
-		"the closing blocker closed blocked":                    `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
+		// A formula step with no recognized terminal verdict has nothing for
+		// a control to consume: its blocked work outcome still holds.
+		"another formula step closed blocked with no outcome":       `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step"}}]`,
+		"another formula step closed blocked with unknown outcome":  `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"unknown"}}]`,
+		"the closing formula step closed blocked with missing_root": `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"missing_root"}}]`,
+		"the closing blocker closed blocked":                        `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
 		// A row this read cannot judge proves nothing, but an open one
 		// beside it still holds the dependent.
 		"an open blocker beside an external one": `[{"id":"ga-blk","status":"closed"},{"id":"gb-ext","status":"","external":true},{"id":"ga-other","status":"open"}]`,
@@ -643,11 +657,12 @@ func TestCascadeNudgeSkipsADependentStillBlocked(t *testing.T) {
 // The close of a dependent's last blocker that holds it nudges its assignee
 // once.
 func TestCascadeNudgeNudgesOnTheLastBlockersClose(t *testing.T) {
-	for name, down := range map[string]string{
+	cases := map[string]string{
 		"every blocker closed":                               `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed"}]'`,
 		"the other blocker closed with another work outcome": `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"shipped"}}]'`,
-		// A formula step dispatch passed is advanced past: its work outcome
-		// does not gate readiness (beads.ReadinessWorkOutcome).
+		// A formula step that reached a terminal verdict has its work outcome
+		// ignored by readiness (beads.ReadinessWorkOutcome): dispatch consumes
+		// the verdict through the controls that depend on it.
 		"the other blocker a formula step closed blocked that passed":   `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"pass"}}]'`,
 		"the closing blocker a formula step closed blocked that passed": `printf '%s\n' '[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"pass"}}]'`,
 		"the closing blocker read before its close":                     `printf '%s\n' '[{"id":"ga-blk","status":"open"}]'`,
@@ -662,7 +677,13 @@ func TestCascadeNudgeNudgesOnTheLastBlockersClose(t *testing.T) {
 		"a failed blocker read":       `exit 1`,
 		"an unparseable blocker read": `printf 'not json\n'`,
 		"a blocker read not a list":   `printf '%s\n' '{"error":"unavailable"}'`,
-	} {
+	}
+	for _, outcome := range []string{"fail", "skipped", "canceled"} {
+		step := `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"` + outcome + `"}`
+		cases["the other blocker a formula step closed blocked with outcome "+outcome] = `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":` + step + `}]'`
+		cases["the closing blocker a formula step closed blocked with outcome "+outcome] = `printf '%s\n' '[{"id":"ga-blk","status":"closed","metadata":` + step + `}]'`
+	}
+	for name, down := range cases {
 		t.Run(name, func(t *testing.T) {
 			got, logged := cascadeNudgeOnce(t, down)
 			if got != 1 || !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed") {
