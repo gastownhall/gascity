@@ -295,6 +295,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Enable pane logging + run session setup (shared with the relaunch tail).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	// Answer startup dialogs (workspace trust, permissions) before the
+	// liveness probe and the initial nudge, matching the tmux adapter.
+	if k8sAcceptsStartupDialogs(cfg) {
+		p.runStartupDialogPass(ctx, name)
+	}
+
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
 
 	// Post-start liveness check: verify interactive sessions survived startup.

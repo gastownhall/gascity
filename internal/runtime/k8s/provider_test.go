@@ -782,6 +782,8 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
+	paneShowsReadyPrompt(fake)
+
 	cfg := runtime.Config{
 		Command:      "claude --settings .gc/settings.json",
 		ProcessNames: []string{"claude"},
@@ -830,6 +832,8 @@ func TestStartDetectsStalePod(t *testing.T) {
 	// After deletion and recreation, tmux works.
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	paneShowsReadyPrompt(fake)
 
 	cfg := runtime.Config{
 		Command:      "claude",
@@ -2038,6 +2042,8 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 		return "", nil
 	}
 
+	paneShowsReadyPrompt(fake)
+
 	cfg := runtime.Config{
 		Command:      "claude --resume stale-key",
 		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
@@ -2190,6 +2196,8 @@ func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
+	paneShowsReadyPrompt(fake)
+
 	cfg := runtime.Config{
 		Command:      "claude --session-id fresh-key",
 		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
@@ -2219,6 +2227,8 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
+
+	paneShowsReadyPrompt(fake)
 
 	cfg := runtime.Config{
 		Command:      "claude --session-id fresh-key",
@@ -2793,5 +2803,55 @@ func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
 	}
 	if findExecCmd(fake, "respawn-pane") != nil {
 		t.Error("the agent was respawned into a pod that could not be marked")
+	}
+}
+
+// TestStartAcceptsTrustDialogBeforeInitialNudge: when the agent shows a
+// workspace-trust dialog at startup, Start must dismiss it before typing the
+// initial nudge, or the nudge lands in the dialog and the first turn never runs.
+func TestStartAcceptsTrustDialogBeforeInitialNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	const trustDialog = "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel"
+	dialogOpen := true
+	nudgeTypedIntoDialog := false
+	nudgeTyped := false
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			if dialogOpen {
+				return trustDialog, nil
+			}
+			return "> ", nil
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "send-keys" {
+			if len(cmd) >= 6 && cmd[4] == "-l" && cmd[5] == "do the work" {
+				nudgeTyped = true
+				if dialogOpen {
+					nudgeTypedIntoDialog = true
+				}
+				return "", nil
+			}
+			if !nudgeTyped && len(cmd) >= 5 && cmd[len(cmd)-1] == "Enter" {
+				dialogOpen = false
+			}
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "claude --settings .gc/settings.json",
+		ProcessNames: []string{"claude"},
+		Nudge:        "do the work",
+		Env:          map[string]string{"GC_CITY": "/workspace"},
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !nudgeTyped {
+		t.Fatal("initial nudge was never typed")
+	}
+	if nudgeTypedIntoDialog {
+		t.Error("initial nudge was typed into the open workspace-trust dialog; Start must accept startup dialogs before nudging")
 	}
 }
