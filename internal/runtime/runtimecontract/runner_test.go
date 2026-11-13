@@ -318,6 +318,8 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputKeysDelivered, oedit("clear-scrollback", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo cleared; exit 0; `), "clear-scrollback to a running box prints a non-outcome line on exit 0"},
 		{ReqInputKeysDelivered, oedit("interrupt", `printf '%s\n' "$*" >> "$box/typed"; `, `out not_sent; `), "refuses every interrupt to a running box"},
 		{ReqInputExit80OneLine, oedit("send-keys", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; echo '{"outcome":"gone"}'; exit 80; };`), "exits 80 with two outcome lines"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; };`), "exits 80 with a gone line padded past gc's 64 KiB stdout cap"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { printf '{"outcome":"gone","detail":"%s"}\n' "$(head -c 1025 /dev/zero | tr '\0' x)"; exit 80; };`), "exits 80 with a detail past 1 KiB"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

@@ -22,12 +22,13 @@ import (
 // runtime sentinel (runtime.InputOutcome.Sentinel), so gc adds no meaning of
 // its own here.
 
-// inputOutcomeStdoutCap bounds the stdout a driving op's outcome line is
-// read from. An exit 80 printing more reads as a malformed outcome.
-const inputOutcomeStdoutCap = 64 << 10
+// InputOutcomeStdoutCap bounds the stdout, in bytes, a driving op's outcome
+// line is read from. An exit 80 printing more reads as a malformed outcome.
+const InputOutcomeStdoutCap = 64 << 10
 
-// inputOutcomeDetailCap bounds the detail an outcome's error carries.
-const inputOutcomeDetailCap = 1 << 10
+// InputOutcomeDetailCap is the documented bound, in bytes, on an outcome
+// line's detail; gc cuts a longer one (sanitizeDetail).
+const InputOutcomeDetailCap = 1 << 10
 
 // inputOutcomeWire is one outcome line. Unknown fields are ignored.
 type inputOutcomeWire struct {
@@ -94,12 +95,16 @@ func ParseInputOutcome(stdout string) (runtime.InputOutcome, string, error) {
 	return word, w.Detail, nil
 }
 
-// ReadExit80Outcome reads op's exit-80 stdout exactly as gc does: one
-// outcome line naming a non-success word op may answer. Anything else (no
-// line, two lines, a success word, an unknown word, a word op may not
-// answer) is an error wrapping the malformed-outcome failure, which gc reads
-// as untyped. It returns the word and its detail.
+// ReadExit80Outcome reads op's raw exit-80 stdout exactly as gc does: one
+// outcome line naming a non-success word op may answer, within
+// InputOutcomeStdoutCap bytes. Anything else (stdout past the cap, no line,
+// two lines, a success word, an unknown word, a word op may not answer) is an
+// error wrapping the malformed-outcome failure, which gc reads as untyped. It
+// returns the word and its detail.
 func ReadExit80Outcome(op, stdout string) (runtime.InputOutcome, string, error) {
+	if len(stdout) > InputOutcomeStdoutCap {
+		return "", "", fmt.Errorf("%w: stdout past the %d-byte cap", errMalformedOutcome, InputOutcomeStdoutCap)
+	}
 	word, detail, err := ParseInputOutcome(stdout)
 	switch {
 	case err != nil:
@@ -158,7 +163,7 @@ func outcomeError(op, name string, word runtime.InputOutcome, detail string) err
 
 // sanitizeDetail makes a pack's detail safe for errors that reach logs and
 // CLI output: control characters (newlines included) become spaces, invalid
-// UTF-8 is dropped, and the result is cut at inputOutcomeDetailCap bytes on a
+// UTF-8 is dropped, and the result is cut at InputOutcomeDetailCap bytes on a
 // character boundary, then trimmed.
 func sanitizeDetail(detail string) string {
 	var b strings.Builder
@@ -166,7 +171,7 @@ func sanitizeDetail(detail string) string {
 		if unicode.IsControl(r) {
 			r = ' '
 		}
-		if b.Len()+utf8.RuneLen(r) > inputOutcomeDetailCap {
+		if b.Len()+utf8.RuneLen(r) > InputOutcomeDetailCap {
 			break
 		}
 		b.WriteRune(r)
@@ -195,7 +200,7 @@ func (p *Provider) outcomesRead() bool {
 // Otherwise the answer is today's: stdout is ignored on exit 0 and any
 // failure is the op's untyped error.
 func (p *Provider) runDrivingOp(ctx context.Context, stdin []byte, args ...string) error {
-	out, err := p.runCapped(ctx, p.timeout, inputOutcomeStdoutCap, stdin, args...)
+	out, err := p.runCapped(ctx, p.timeout, InputOutcomeStdoutCap, stdin, args...)
 	var over *stdoutOverCapError
 	if errors.As(err, &over) {
 		// Exit 0 past the cap: still a delivery, its stdout unread.

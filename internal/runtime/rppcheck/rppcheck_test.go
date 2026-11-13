@@ -939,6 +939,7 @@ func TestRun_InputOutcomeSmoke(t *testing.T) {
 		"empty 80":     strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`, 1),
 		"another word": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out not_sent;`, 1),
 		"exit 1":       strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 1;`, 1),
+		"past the cap": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || `+goneBeyondCap+`;`, 1),
 	} {
 		if body == golden {
 			t.Fatalf("mutant %s does not apply", name)
@@ -951,10 +952,22 @@ func TestRun_InputOutcomeSmoke(t *testing.T) {
 			t.Errorf("mutant %s: %s = %s (%s), want FAIL", name, inputOutcomeCheck, c.Status, c.Detail)
 		}
 	}
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `[ -d "$box" ] || ` + goneBeyondCap + `; out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status == StatusPass && strings.Contains(c.Detail, "gone") {
+		t.Errorf("post-stop interrupt answering gone past gc's stdout cap = %s (%s), want it not read as a typed gone", c.Status, c.Detail)
+	}
 	if hasCheck(observeResult(t), inputOutcomeCheck) {
 		t.Error("a script without input-outcome reports an input-outcome check")
 	}
 }
+
+// goneBeyondCap is a shell exit-80 answer of one gone line padded with
+// trailing newlines past gc's stdout cap (sessionexec.InputOutcomeStdoutCap),
+// which gc reads as malformed.
+const goneBeyondCap = `{ echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; }`
 
 // observeResult runs the check over the base golden, which does not declare
 // input-outcome.

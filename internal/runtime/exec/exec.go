@@ -301,7 +301,7 @@ func (p *Provider) runError(runErr error, stderr string, stdout *cappedBuffer, a
 // it ended with, so a caller can read a code the contract reserves (exit 73
 // under fresh_only) without parsing text. It reads as its wrapped error.
 // stdout is empty but for a driving op's exit 80 (input-outcome), where it
-// is the outcome line, at most inputOutcomeStdoutCap bytes.
+// is the outcome line, at most InputOutcomeStdoutCap bytes.
 type opExitError struct {
 	op     string
 	code   int

@@ -44,8 +44,14 @@ type inputAnswer struct {
 }
 
 func (a inputAnswer) String() string {
+	if len(a.stdout) > answerQuoteMax {
+		return fmt.Sprintf("%s exit %d stdout %q... (%d bytes)", a.op, a.code, a.stdout[:answerQuoteMax], len(a.stdout))
+	}
 	return fmt.Sprintf("%s exit %d stdout %q", a.op, a.code, a.stdout)
 }
+
+// answerQuoteMax bounds the stdout an answer quotes in a report detail.
+const answerQuoteMax = 200
 
 // word is the answer's outcome word, when its stdout is exactly one valid
 // outcome line.
@@ -357,7 +363,8 @@ func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.Prot
 
 // probeInputExit80OneLine checks that every exit 80 carries exactly one
 // outcome line gc reads as typed (sessionexec.ReadExit80Outcome): a
-// non-success word the op may answer.
+// non-success word the op may answer, within gc's stdout cap, whose detail
+// is within the documented 1 KiB (sessionexec.InputOutcomeDetailCap).
 func probeInputExit80OneLine(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, false); !ok {
 		return StatusSkip, detail
@@ -372,8 +379,12 @@ func probeInputExit80OneLine(ctx context.Context, r *runner, hs runtime.Protocol
 			continue
 		}
 		seen++
-		if _, _, err := sessionexec.ReadExit80Outcome(a.op, a.stdout); err != nil {
+		_, detail, err := sessionexec.ReadExit80Outcome(a.op, a.stdout)
+		if err != nil {
 			return StatusFail, fmt.Sprintf("%s exited 80 with an answer gc reads as untyped (%s): %v", a.op, a, err)
+		}
+		if len(detail) > sessionexec.InputOutcomeDetailCap {
+			return StatusFail, fmt.Sprintf("%s exited 80 with a %d-byte detail, past the documented %d bytes", a.op, len(detail), sessionexec.InputOutcomeDetailCap)
 		}
 	}
 	if seen == 0 {

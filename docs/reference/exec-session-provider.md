@@ -473,7 +473,8 @@ no meaning of its own:
 
 `detail` is optional, at most 1 KiB, and must hold no secrets: gc puts it in
 the error it reports, with control characters replaced by spaces and cut at
-1 KiB on a character boundary. Unknown fields are ignored. Trailing newlines
+1 KiB on a character boundary, and conformance fails a longer one
+(`RPP-INPUT-010`). Unknown fields are ignored. Trailing newlines
 after the line are ignored on both exit codes, as everywhere gc reads stdout.
 
 The exit code is the class and the line is detail inside it. Exit 0 always
@@ -481,9 +482,11 @@ means delivered: gc ignores anything on exit 0 but the two delivered lines,
 and conformance fails anything else a driving operation prints when it
 delivers to a running box (`RPP-INPUT-001` for `nudge`, `RPP-INPUT-012` for
 the other three). An exit 80 gc cannot read as one valid line (no line,
-two lines, more than 64 KiB, a delivered word, an unknown word, or a word the
-operation may not answer) is an untyped failure, which the queue charges like
-exit 1. A `nudge` that gc cancels at its deadline reads as `unconfirmed`,
+two lines, more than 64 KiB of stdout counting trailing newlines, a
+delivered word, an unknown word, or a word the operation may not answer) is
+an untyped failure, which the queue charges like exit 1; `gc runtime
+conformance` and `gc runtime check` read exit 80 with the same rules, cap
+included. A `nudge` that gc cancels at its deadline reads as `unconfirmed`,
 because the text may already have been typed.
 
 The script's obligations:
@@ -523,7 +526,10 @@ unresolved until the fault is gone: a second identical `nudge` answers
 `unconfirmed`, and the text is typed once) and `dead` (the box holds the
 name but nothing runs in it: `observe`, when declared, reports it `dead`,
 and every driving operation answers `gone` and types nothing). It reads what was typed from
-`peek`, as a terminal shows typed input. `gc runtime check` sends a `nudge`
+`peek`, as a terminal shows typed input. When it drives one running box in
+turn it sends `interrupt` last, so a pack whose interrupt ends the box's
+command, and with it a box that lives only while its command runs, is not
+asked about the box after it. `gc runtime check` sends a `nudge`
 to a name no box holds and requires exit 80 `gone`.
 
 ### Start Config (JSON on stdin)

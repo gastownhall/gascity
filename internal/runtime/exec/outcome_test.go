@@ -106,7 +106,7 @@ func TestInputOutcomeExit80LineReachesTheOpHelpers(t *testing.T) {
 			{[]string{"send-keys", "s", "Enter"}, ""},
 		}
 		for _, tc := range cases {
-			_, err := p.runCapped(context.Background(), p.timeout, inputOutcomeStdoutCap, []byte("x"), tc.args...)
+			_, err := p.runCapped(context.Background(), p.timeout, InputOutcomeStdoutCap, []byte("x"), tc.args...)
 			var e *opExitError
 			if !errors.As(err, &e) {
 				t.Fatalf("%v: err = %v, want an opExitError", tc.args, err)
@@ -126,7 +126,7 @@ func TestInputOutcomeUndeclaredKeepsTodaysSemantics(t *testing.T) {
 		t.Run(d.op, func(t *testing.T) {
 			pk := newOpsPack(t, `"carrier.ops"`)
 			p := NewProvider(pk.script)
-			for _, stdout := range []string{`{"outcome":"not_sent"}`, `{"outcome":"delivered_unobserved"}`, "anything at all", strings.Repeat("x", 2*inputOutcomeStdoutCap)} {
+			for _, stdout := range []string{`{"outcome":"not_sent"}`, `{"outcome":"delivered_unobserved"}`, "anything at all", strings.Repeat("x", 2*InputOutcomeStdoutCap)} {
 				pk.answer(t, stdout, 0)
 				if err := d.call(p); err != nil {
 					t.Errorf("exit 0 printing %.40q = %v, want nil (stdout ignored)", stdout, err)
@@ -166,7 +166,7 @@ func TestInputOutcomeExitZeroIsAlwaysSuccess(t *testing.T) {
 		`{"outcome":"gone"}`,
 		"not json",
 		`{"outcome":"delivered"}` + "\n" + `{"outcome":"delivered"}`,
-		strings.Repeat("x", 2*inputOutcomeStdoutCap),
+		strings.Repeat("x", 2*InputOutcomeStdoutCap),
 	}
 	for _, d := range drivingCalls {
 		t.Run(d.op, func(t *testing.T) {
@@ -193,6 +193,22 @@ func TestInputOutcomeExitZeroIsAlwaysSuccess(t *testing.T) {
 	}
 }
 
+// TestReadExit80OutcomeAppliesTheStdoutCap pins that the exported reader,
+// which the conformance runner and rppcheck read exit 80 through, applies
+// gc's stdout cap: a valid line padded past InputOutcomeStdoutCap with
+// trailing newlines is malformed, as gc never reads stdout past the cap,
+// while the same line within the cap is read.
+func TestReadExit80OutcomeAppliesTheStdoutCap(t *testing.T) {
+	line := `{"outcome":"gone"}`
+	if _, _, err := ReadExit80Outcome("nudge", line+strings.Repeat("\n", InputOutcomeStdoutCap-len(line))); err != nil {
+		t.Errorf("a gone line at the cap = %v, want gone", err)
+	}
+	_, _, err := ReadExit80Outcome("nudge", line+strings.Repeat("\n", InputOutcomeStdoutCap))
+	if !errors.Is(err, errMalformedOutcome) {
+		t.Errorf("a gone line padded past the cap = %v, want errMalformedOutcome", err)
+	}
+}
+
 // TestInputOutcomeMalformedExit80IsUntyped pins that an exit 80 gc cannot
 // read as one valid non-success word allowed on the op is an untyped
 // failure: it wraps no sentinel, so a queue charges it, and it never reads
@@ -206,7 +222,8 @@ func TestInputOutcomeMalformedExit80IsUntyped(t *testing.T) {
 		"an unknown word":   `{"outcome":"ok"}`,
 		"not json":          "gone",
 		"trailing bytes":    `{"outcome":"gone"} {}`,
-		"stdout over a cap": `{"outcome":"gone","detail":"` + strings.Repeat("x", inputOutcomeStdoutCap) + `"}`,
+		"stdout over a cap": `{"outcome":"gone","detail":"` + strings.Repeat("x", InputOutcomeStdoutCap) + `"}`,
+		"newlines past cap": `{"outcome":"gone"}` + strings.Repeat("\n", InputOutcomeStdoutCap),
 	}
 	for _, d := range drivingCalls {
 		for name, stdout := range malformed {
@@ -378,7 +395,7 @@ func TestInputOutcomeTrailingNewlinesAreOneRule(t *testing.T) {
 // mid-rune, and stripped of control characters (newlines included), so it
 // cannot forge log lines or split a UTF-8 character.
 func TestInputOutcomeDetailIsSanitized(t *testing.T) {
-	long := strings.Repeat("a", inputOutcomeDetailCap-1) + "é and more"
+	long := strings.Repeat("a", InputOutcomeDetailCap-1) + "é and more"
 	for name, detail := range map[string]string{
 		"control characters": "line one\nforged: line\r\x1b[31mred\x00",
 		"cut mid-rune":       long,

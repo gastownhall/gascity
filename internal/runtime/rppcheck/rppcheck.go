@@ -154,8 +154,9 @@ type opResult struct {
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2, stderr included
 	// exitCode and failedStdout are a failed op's exit status (-1 when it
-	// had none) and its stdout, trailing newlines trimmed: under
-	// input-outcome an exit 80 carries its outcome line there.
+	// had none) and its raw stdout: under input-outcome an exit 80 carries
+	// its outcome line there, read untrimmed so gc's stdout cap reads on what
+	// the script printed (sessionexec.ReadExit80Outcome).
 	exitCode     int
 	failedStdout string
 }
@@ -216,7 +217,7 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 		if errors.As(err, &exitErr) {
 			code = exitErr.ExitCode()
 		}
-		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), exitCode: code, failedStdout: strings.TrimRight(stdout.String(), "\n")}
+		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), exitCode: code, failedStdout: stdout.String()}
 	}
 	return opResult{stdout: strings.TrimRight(stdout.String(), "\n")}
 }
@@ -455,7 +456,7 @@ func (c *checker) checkInputOutcome(ctx context.Context) {
 		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("nudge to a name no session holds exited %d, want exit %d with the outcome gone: %v", res.exitCode, runtime.ExitCodeInputOutcome, res.err))
 		return
 	}
-	word, _, err := sessionexec.ParseInputOutcome(res.failedStdout)
+	word, _, err := sessionexec.ReadExit80Outcome("nudge", res.failedStdout)
 	switch {
 	case err != nil:
 		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("exit 80 without exactly one valid outcome line: %v", err))
@@ -472,11 +473,11 @@ func (c *checker) checkInputOutcome(ctx context.Context) {
 // word, and every typed answer from a running session, is not accepted: a
 // driving op that refuses the session rppcheck started and verified running
 // is a broken op, whichever word it names.
-func (c *checker) goneAfterStop(res opResult) bool {
+func (c *checker) goneAfterStop(op string, res opResult) bool {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) || res.exitCode != runtime.ExitCodeInputOutcome {
 		return false
 	}
-	word, _, err := sessionexec.ParseInputOutcome(res.failedStdout)
+	word, _, err := sessionexec.ReadExit80Outcome(op, res.failedStdout)
 	return err == nil && word == runtime.InputOutcomeGone
 }
 
@@ -823,7 +824,7 @@ func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
 func (c *checker) checkDrivingOpAfterStop(ctx context.Context, args ...string) {
 	check := c.drivingCheckName(args[0])
 	res := c.runOp(ctx, nil, args...)
-	if c.goneAfterStop(res) {
+	if c.goneAfterStop(args[0], res) {
 		c.record(check, StatusPass, "typed outcome gone")
 		return
 	}
