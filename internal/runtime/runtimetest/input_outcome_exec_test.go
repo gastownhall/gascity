@@ -94,3 +94,29 @@ func TestInputOutcomeRefusalNeverDeliveredOnExec(t *testing.T) {
 		})
 	}
 }
+
+// TestInputOutcomeDeadBoxIsGoneOnExec pins gone to "no running box holds the
+// name" over the seam-backed exec provider for a pack declaring
+// input-outcome: a box observe reports dead (the name held, nothing running)
+// answers every driving op gone, which gc reads as runtime.ErrSessionNotFound
+// with no presence pre-check, never as delivered.
+func TestInputOutcomeDeadBoxIsGoneOnExec(t *testing.T) {
+	for name, carrierOps := range map[string]bool{"carrier.ops": true, "dedicated-op fallback": false} {
+		t.Run(name, func(t *testing.T) {
+			script := outcomeGolden(t, carrierOps, false)
+			startOutcomeBox(t, script, "corpse")
+			t.Setenv("GC_RPP_FAULT", "dead")
+			sp := sessionexec.NewSeamBacked(script)
+			for op, call := range map[string]func() error{
+				"Nudge":           func() error { return sp.Nudge("corpse", runtime.TextContent("to a dead box")) },
+				"SendKeys":        func() error { return sp.SendKeys("corpse", "Enter") },
+				"Interrupt":       func() error { return sp.Interrupt("corpse") },
+				"ClearScrollback": func() error { return sp.ClearScrollback("corpse") },
+			} {
+				if err := call(); !errors.Is(err, runtime.ErrSessionNotFound) {
+					t.Errorf("%s to a dead box = %v, want runtime.ErrSessionNotFound", op, err)
+				}
+			}
+		})
+	}
+}

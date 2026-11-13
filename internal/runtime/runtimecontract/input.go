@@ -15,8 +15,9 @@ import (
 // input-outcome, and the fault probes also SKIP without conformance-faults.
 // The faults are GC_RPP_FAULT values: unavailable (the backend cannot be
 // reached), blocked (the box's agent waits on a pending interaction),
-// lose_reply (the input is typed, then the reply is lost) and hold_send (a
-// nudge stays unresolved until the fault is gone).
+// lose_reply (the input is typed, then the reply is lost), hold_send (a
+// nudge stays unresolved until the fault is gone) and dead (the box holds the
+// name but nothing runs in it).
 
 // The fault values the input group injects through GC_RPP_FAULT.
 const (
@@ -24,6 +25,7 @@ const (
 	inputFaultBlocked     = "blocked"
 	inputFaultLoseReply   = "lose_reply"
 	inputFaultHoldSend    = "hold_send"
+	inputFaultDead        = "dead"
 )
 
 // drivingOps are the four ops input-outcome types.
@@ -373,4 +375,45 @@ func probeInputExit80OneLine(ctx context.Context, r *runner, hs runtime.Protocol
 		return StatusFail, "no driving op exited 80, not even for a name no box holds"
 	}
 	return StatusPass, fmt.Sprintf("all %d exit-80 answers carried one valid outcome line", seen)
+}
+
+// probeInputDeadBoxGone checks that a box holding the name with nothing
+// running in it answers every driving op gone and types nothing: gone is "no
+// running box holds the name", absent or dead, because gc reads the pack's
+// gone in place of its own presence check. With observe.v1 declared, observe
+// under the fault must report the box dead, so the fault is the pack's real
+// dead state and not a knob only the driving ops read.
+func probeInputDeadBoxGone(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if ok, detail := inputDeclared(hs, true); !ok {
+		return StatusSkip, detail
+	}
+	name, cleanup, status, detail := startInputBox(ctx, r)
+	defer cleanup()
+	if status != StatusPass {
+		return status, detail
+	}
+	fault := []string{"GC_RPP_FAULT=" + inputFaultDead}
+	if hs.Has(runtime.ProtocolCapabilityObserveV1) {
+		o, res := r.observe(ctx, fault, name)
+		switch {
+		case res.err != nil:
+			return StatusFail, "observe under GC_RPP_FAULT=dead failed: " + res.err.Error()
+		case o.State != "dead":
+			return StatusFail, fmt.Sprintf("observe under GC_RPP_FAULT=dead reported state %q, want dead", o.State)
+		}
+	}
+	text := inputText(name)
+	for _, op := range drivingOps {
+		if status, detail := expectWord(drive(ctx, r, inputFaultDead, op, name, text), runtime.InputOutcomeGone, "to a dead box"); status != StatusPass {
+			return status, detail
+		}
+	}
+	n, status, detail := typedCount(ctx, r, name, text)
+	if status != StatusPass {
+		return status, detail
+	}
+	if n != 0 {
+		return StatusFail, "a nudge to a dead box was typed into it"
+	}
+	return StatusPass, "every driving op to a dead box exits 80 gone, and nothing is typed"
 }

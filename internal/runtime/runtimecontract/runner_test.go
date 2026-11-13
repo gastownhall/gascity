@@ -281,6 +281,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputExitZeroIsDelivered, oedit("send-keys", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo '{"outcome":"not_sent"}'; exit 0; `), "send-keys prints not_sent on exit 0"},
 		{ReqInputHeldSendTypedOnce, oedit("nudge", `if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; `, ``), "types a redelivered nudge twice"},
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`), "exits 80 with empty stdout"},
+		{ReqInputDeadBoxGone, oedit("nudge", `if [ "$F" = dead ]; then out gone; fi; `, ``), "types a nudge into a dead box and answers delivered"},
+		{ReqInputDeadBoxGone, oedit("interrupt", `if [ "$F" = dead ]; then out gone; fi; `, `if [ "$F" = dead ]; then out not_sent; fi; `), "answers an interrupt to a dead box not_sent"},
+		{ReqInputDeadBoxGone, oedit("observe", `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead"`, `if false; then printf '{"state":"dead"`), "observe reports the dead box running"},
 		{ReqInputExit80OneLine, oedit("send-keys", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; echo '{"outcome":"gone"}'; exit 80; };`), "exits 80 with two outcome lines"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new

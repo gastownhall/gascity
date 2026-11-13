@@ -132,6 +132,7 @@ var wireOnlyCodes = map[Code]bool{
 	ReqInputExitZeroIsDelivered: true,
 	ReqInputHeldSendTypedOnce:   true,
 	ReqInputExit80OneLine:       true,
+	ReqInputDeadBoxGone:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

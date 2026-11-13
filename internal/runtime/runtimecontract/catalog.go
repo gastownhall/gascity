@@ -237,7 +237,7 @@ const (
 	// 80 with exactly one outcome line for every other outcome, each word the
 	// projection of one runtime sentinel. Every requirement is Optional: SKIP
 	// when input-outcome is not declared; the fault cases (-005, -006, -007,
-	// -009) also SKIP without conformance-faults.
+	// -009, -011) also SKIP without conformance-faults.
 	ReqInputNudgeDelivered      Code = "RPP-INPUT-001"
 	ReqInputNudgeAbsentGone     Code = "RPP-INPUT-002"
 	ReqInputKeysAbsentGone      Code = "RPP-INPUT-003"
@@ -248,6 +248,7 @@ const (
 	ReqInputExitZeroIsDelivered Code = "RPP-INPUT-008"
 	ReqInputHeldSendTypedOnce   Code = "RPP-INPUT-009"
 	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
+	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -330,6 +331,7 @@ var catalog = []Requirement{
 	{ReqInputExitZeroIsDelivered, GroupInput, "exit 0 never carries a non-success outcome word", true},
 	{ReqInputHeldSendTypedOnce, GroupInput, "under GC_RPP_FAULT=hold_send, a second identical nudge while the first is unresolved exits 80 unconfirmed, and the text is typed once after release (declared conformance-faults only)", true},
 	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one valid outcome line", true},
+	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

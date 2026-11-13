@@ -220,9 +220,14 @@ func nonTmux(b map[string]string) map[string]string {
 // typed, then the reply is lost: a nudge is unconfirmed, any other op exit
 // 1) and hold_send (a nudge is held unresolved in $box/held, and a second
 // identical one while it is held is unconfirmed again without being held
-// twice; the held text is typed once the fault is gone).
+// twice; the held text is typed once the fault is gone) and dead (the box
+// holds the name but nothing runs in it: observe reports it dead and every
+// driving op answers gone, since gone is "no running box holds the name").
 const (
-	goldenInputEntry = `F=${GC_RPP_FAULT:-}; be || out unavailable; [ -d "$box" ] || out gone; release; `
+	goldenInputEntry = `F=${GC_RPP_FAULT:-}; be || out unavailable; [ -d "$box" ] || out gone; if [ "$F" = dead ]; then out gone; fi; release; `
+
+	// goldenInputObserveDead reports a present box dead under the dead fault.
+	goldenInputObserveDead = `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead","object":{"id":"%s","created":"%s"}}\n' "$(cat "$box/id")" "$(cat "$box/created")"; exit 0; fi; `
 
 	goldenInputNudge = `txt=$(cat); ` + goldenInputEntry +
 		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
@@ -237,7 +242,8 @@ const (
 
 // InputOutcomeBodies returns b for a reference that declares input-outcome:
 // its four driving ops answer typed outcomes (exit 0 delivered, exit 80 and
-// one outcome line otherwise), and its peek shows the box's typed input.
+// one outcome line otherwise), its peek shows the box's typed input, and its
+// observe reports a box dead under the dead fault.
 func InputOutcomeBodies(b map[string]string) map[string]string {
 	b["protocol"] = strings.Replace(b["protocol"], `"server-lifecycle"`, `"server-lifecycle","input-outcome"`, 1)
 	b["nudge"] = goldenInputNudge
@@ -245,6 +251,8 @@ func InputOutcomeBodies(b map[string]string) map[string]string {
 		b[op] = goldenInputKeys
 	}
 	b["peek"] += `; release; if [ -f "$box/typed" ]; then cat "$box/typed"; fi`
+	absent := `if [ ! -d "$box" ]; then echo '{"state":"absent"}'; exit 0; fi; `
+	b["observe"] = strings.Replace(b["observe"], absent, absent+goldenInputObserveDead, 1)
 	return b
 }
 

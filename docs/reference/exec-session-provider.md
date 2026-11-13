@@ -235,7 +235,7 @@ Capabilities:
 | `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
 | `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, on a v2-ready script reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
 | `input-outcome` | The four driving operations (`nudge`, `send-keys`, `interrupt`, `clear-scrollback`) answer with a typed outcome: exit 0 when the input was delivered, exit 80 with one outcome line otherwise (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). Their exit 2 is then a failure. It changes what gc reads from the dedicated operations, so it has no effect on input the default tmux carrier delivers over `exec`. |
-| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. A script that declares `input-outcome` also honors `GC_RPP_FAULT=blocked`, `lose_reply` and `hold_send` (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). |
+| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. A script that declares `input-outcome` also honors `GC_RPP_FAULT=blocked`, `lose_reply`, `hold_send` and `dead` (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
 A successful handshake is cached for the provider's life. A failed one is
@@ -469,7 +469,7 @@ no meaning of its own:
 | `busy` | 80 | `nudge` | deferred: the session runs a turn the submit would interrupt (`ErrSessionBusy`) | retries later, no attempt |
 | `pending_interaction` | 80 | `nudge` | refused: the session waits on an interaction the text would answer (`ErrNudgeRefusedPendingInteraction`) | retries later, no attempt |
 | `unavailable` | 80 | all four | the runtime could not reach its backend (`ErrRuntimeUnavailable`) | retries later, no attempt |
-| `gone` | 80 | all four | no box holds the name (`ErrSessionNotFound`) | releases it, no attempt |
+| `gone` | 80 | all four | no running box holds the name: none holds it, or the box that does is dead (`observe` would report `dead`) (`ErrSessionNotFound`) | releases it, no attempt |
 
 `detail` is optional, at most 1 KiB, and must hold no secrets: gc puts it in
 the error it reports. Unknown fields are ignored.
@@ -503,18 +503,22 @@ charges and retries, so the script answers the same way for every Gas City.
 gc reads the outcomes from the dedicated operations: with `carrier.ops`, or
 once the script's `exec` has answered exit 2 without `proc.exec`. It then
 skips its own presence check before a driving call, because the script
-answers `gone` itself. Input the default tmux carrier delivers over `exec`
+answers `gone` itself, so `gone` must cover a dead box as well as an absent
+name: a driving operation to a box with nothing running in it answers `gone`,
+never exit 0. Input the default tmux carrier delivers over `exec`
 is unaffected. Fenced input is not on this wire: `carrier.ops` refuses it
 before any operation runs.
 
 `gc runtime conformance` checks the token as the `input` group
-(`RPP-INPUT-001` to `RPP-INPUT-010`). With `conformance-faults` it also
+(`RPP-INPUT-001` to `RPP-INPUT-011`). With `conformance-faults` it also
 injects `GC_RPP_FAULT=blocked` (the box's agent waits on a pending
 interaction: `nudge` answers `pending_interaction` and types nothing),
 `lose_reply` (the input is typed, then the reply is lost: `nudge` answers
 `unconfirmed`, the other three exit 1) and `hold_send` (a `nudge` stays
 unresolved until the fault is gone: a second identical `nudge` answers
-`unconfirmed`, and the text is typed once). It reads what was typed from
+`unconfirmed`, and the text is typed once) and `dead` (the box holds the
+name but nothing runs in it: `observe`, when declared, reports it `dead`,
+and every driving operation answers `gone` and types nothing). It reads what was typed from
 `peek`, as a terminal shows typed input. `gc runtime check` sends a `nudge`
 to a name no box holds and requires exit 80 `gone`.
 

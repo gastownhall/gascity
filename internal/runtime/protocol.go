@@ -151,8 +151,9 @@ const (
 	// InputOutcomeUnavailable is input the runtime could not deliver because
 	// it could not reach its backend: [ErrRuntimeUnavailable].
 	InputOutcomeUnavailable InputOutcome = "unavailable"
-	// InputOutcomeGone is input to a session the runtime does not hold:
-	// [ErrSessionNotFound].
+	// InputOutcomeGone is input to a name no running box holds: none holds
+	// it, or the box that does is dead (the name held, nothing running in
+	// it, as observe reports `dead`): [ErrSessionNotFound].
 	InputOutcomeGone InputOutcome = "gone"
 )
 
