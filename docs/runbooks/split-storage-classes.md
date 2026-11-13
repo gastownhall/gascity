@@ -198,12 +198,36 @@ it closes none of them that run: it records an anomaly, which escalates as
 `ESCALATION: Reaper anomalies detected` and names the count, reports
 `stale_issues_held:<N>` in its summary, and records the held step in the
 order's `order.skipped` outcome. It holds them every run until you release
-them. Review the held issues, then either raise
-`GC_REAPER_STALE_ISSUE_BURST_MAX`, or release that burst for one run with
-`GC_REAPER_STALE_ISSUE_BURST_ACK=<N>`, where `<N>` is the held count. The
-acknowledgement covers exactly that count, so a backlog that changed after
-you reviewed it is held again. `GC_REAPER_STALE_ISSUE_BURST_MAX=0` turns the
-guard off.
+them:
+
+```
+# Run the reaper by hand. It holds the burst again and prints the held issue
+# IDs and the command that releases exactly that many.
+gc order run reaper
+
+# Once you have reviewed them, release them for this one run. <N> is the
+# count the previous run held.
+gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=<N>
+```
+
+The acknowledgement compares only the count. If the backlog's size changed
+since the run you reviewed, the run holds it again and says that the
+acknowledgement does not match. If its size stayed the same while some of its
+issues changed, the run closes the ones you did not review too, so release
+right after you review.
+
+To let larger bursts close without review, raise the max in `city.toml`;
+`0` turns the guard off:
+
+```toml
+[[orders.overrides]]
+name = "reaper"
+env = { GC_REAPER_STALE_ISSUE_BURST_MAX = "100" }
+```
+
+A value set in the order's env applies to every run until you remove it.
+Never set `GC_REAPER_STALE_ISSUE_BURST_ACK` there: it would release any later
+burst of that size unseen.
 
 ## Step 4: run the migration
 

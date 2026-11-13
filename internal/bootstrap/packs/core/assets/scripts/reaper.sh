@@ -120,19 +120,23 @@ ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 # Step 5's burst guard. A city scope with more stale issues than
-# GC_REAPER_STALE_ISSUE_BURST_MAX closes none of them that run: it records an
-# anomaly, which escalates under the reaper:anomalies incident, and reports
-# stale_issues_held:<N>. A burst is what a step the run budget starved for weeks
-# looks like once something (a storage split, a smaller work store) lets it run
-# again, and closing it unseen is the one reaper action no later run can undo.
-# Release it by raising the max, or for one run with
-# GC_REAPER_STALE_ISSUE_BURST_ACK=<N>, which closes a burst of exactly N
-# candidates: a count that moved since it was read is held again. 0 turns the
-# guard off.
+# GC_REAPER_STALE_ISSUE_BURST_MAX closes none of them that run: it lists their
+# ids on stderr, records an anomaly, which escalates under the
+# reaper:anomalies incident, and reports stale_issues_held:<N>. A burst is what
+# a step the run budget starved for weeks looks like once something (a storage
+# split, a smaller work store) lets it run again, and closing it unseen is the
+# one reaper action no later run can undo. Release it for one run with
+# `gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=<N>`, which closes
+# a burst of exactly N candidates: only the count is compared, so a count that
+# moved since it was read is held again. Or raise the max; 0 turns the guard
+# off. An ACK or a max set in the order's env ([order.env], or the env of an
+# [[orders.overrides]] entry) applies to every run until it is removed, so an
+# ACK left there releases any later burst of that size unseen.
 STALE_ISSUE_BURST_MAX="${GC_REAPER_STALE_ISSUE_BURST_MAX:-25}"
 case "$STALE_ISSUE_BURST_MAX" in ''|*[!0-9]*) STALE_ISSUE_BURST_MAX=25 ;; esac
+# Kept as given: stale_issue_burst_acknowledged reports an ACK that is not a
+# count instead of dropping it unseen.
 STALE_ISSUE_BURST_ACK="${GC_REAPER_STALE_ISSUE_BURST_ACK:-}"
-case "$STALE_ISSUE_BURST_ACK" in *[!0-9]*) STALE_ISSUE_BURST_ACK="" ;; esac
 # Ids handed to one gc bd verb invocation (close/update/delete).
 VERB_BATCH="${GC_REAPER_VERB_BATCH:-200}"
 case "$VERB_BATCH" in ''|*[!0-9]*|0) VERB_BATCH=200 ;; esac
@@ -233,8 +237,9 @@ TOTAL_WORKFLOW_ROOT_CANDIDATES=0
 TOTAL_WORKFLOW_ROOTS_CHECKED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
-# Stale city issues the burst guard held back.
+# Stale city issues the burst guard held back, or would hold in a dry run.
 TOTAL_STALE_ISSUES_HELD=0
+TOTAL_WOULD_HOLD_STALE_ISSUES=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
@@ -292,21 +297,62 @@ scope_anomaly() {
     record_anomaly "${SCOPE_DB:-$SCOPE_LABEL}" "$@"
 }
 
-# stale_issue_burst_held <count> reports whether Step 5's burst guard holds
-# back the current scope's <count> stale issues, and records the hold: the
-# order outcome names the step, and an anomaly escalates it. The count is
-# written held=<N>, which the anomaly fingerprint normalizes, so a held
-# backlog that grows by a few rows a run stays one incident.
+# stale_issue_burst_over_max <count> reports whether <count> stale issues are
+# more than Step 5's burst guard lets one run close.
+stale_issue_burst_over_max() {
+    [ "$STALE_ISSUE_BURST_MAX" -gt 0 ] && [ "$1" -gt "$STALE_ISSUE_BURST_MAX" ]
+}
+
+# stale_issue_burst_acknowledged <count> reports whether
+# GC_REAPER_STALE_ISSUE_BURST_ACK releases the current scope's burst of
+# <count> stale issues, which only an ACK of exactly <count> does. An ACK that
+# is set and releases nothing says why on stderr: the run it was meant to
+# release holds the burst again, and the escalation, unchanged, stays quiet.
+stale_issue_burst_acknowledged() {
+    local count="$1"
+    case "$STALE_ISSUE_BURST_ACK" in
+        '')
+            return 1
+            ;;
+        *[!0-9]*)
+            echo "reaper: GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK is not a count, so the $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL} stay held" >&2
+            return 1
+            ;;
+    esac
+    if [ "$count" -eq "$STALE_ISSUE_BURST_ACK" ]; then
+        return 0
+    fi
+    echo "reaper: GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK does not match the $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, so they stay held: an ACK releases a burst of exactly its count" >&2
+    return 1
+}
+
+# stale_issue_burst_list <verb> <count> <rows> lists on stderr the ids of the
+# current scope's <count> stale issues (<rows> as Step 5's query returned
+# them) that the burst guard <verb> ("held", or "would hold" in a dry run),
+# with the command that releases exactly that burst, so the operator who runs
+# the order by hand to review the burst sees both.
+stale_issue_burst_list() {
+    local ids
+    ids=$(printf '%s\n' "$3" | awk -F, '$1 != "" { print $1 }')
+    echo "reaper: $1 $2 stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX: $(sanitize_output "$ids"). Once you have reviewed them, release exactly this burst with: gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=$2" >&2
+}
+
+# stale_issue_burst_held <count> <rows> reports whether Step 5's burst guard
+# holds back the current scope's <count> stale issues (<rows> as its query
+# returned them), and records the hold: stderr lists them, the order outcome
+# names the step, and an anomaly escalates it. The anomaly starts with
+# held=<N>:, and the fingerprint drops its line from there, so a held backlog
+# that grows by a few rows a run stays one incident.
 stale_issue_burst_held() {
     local count="$1"
-    [ "$STALE_ISSUE_BURST_MAX" -gt 0 ] || return 1
-    [ "$count" -gt "$STALE_ISSUE_BURST_MAX" ] || return 1
-    if [ -n "$STALE_ISSUE_BURST_ACK" ] && [ "$count" -eq "$STALE_ISSUE_BURST_ACK" ]; then
+    stale_issue_burst_over_max "$count" || return 1
+    if stale_issue_burst_acknowledged "$count"; then
         echo "reaper: closing $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, as GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK acknowledges" >&2
         return 1
     fi
+    stale_issue_burst_list held "$count" "$2"
     order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "step 5 held $count stale issue(s) over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX; none was closed"
-    scope_anomaly "stale-issue burst held=$count: that many open issues are stale (no update in $STALE_ISSUE_AGE), more than GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, so the reaper closed none of them. A burst this size usually means step 5 was starved (see budget_skipped in earlier reaper summaries) or something just released it, such as a storage split. Review them, then release the burst for one run with GC_REAPER_STALE_ISSUE_BURST_ACK=$count, or raise GC_REAPER_STALE_ISSUE_BURST_MAX"
+    scope_anomaly "stale-issue burst held=$count: that many open issues are stale (no update in $STALE_ISSUE_AGE), more than GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, so the reaper closed none of them. A burst this size usually means step 5 was starved (see budget_skipped in earlier reaper summaries) or something just released it, such as a storage split. Review them (\`gc order run reaper\` lists them), then release them for one run with \`gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=$count\`: it closes a burst of exactly that count and holds one whose count has moved. Or raise GC_REAPER_STALE_ISSUE_BURST_MAX. An ACK or a max set in [order.env] or an [[orders.overrides]] env applies to every run until removed, so an ACK left there releases any later burst of that size unseen"
     return 0
 }
 
@@ -1199,7 +1245,7 @@ reap_scope() {
         if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
             if [ "$SCOPE_KIND" != "city" ]; then
                 TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
-            elif stale_issue_burst_held "$count"; then
+            elif stale_issue_burst_held "$count" "$rows"; then
                 TOTAL_STALE_ISSUES_HELD=$((TOTAL_STALE_ISSUES_HELD + count))
             else
                 # close_mode comes from the query's per-row CASE: 'force' when
@@ -1208,6 +1254,12 @@ reap_scope() {
                 close_ids_by_mode "closing stale issues" "$rows" "stale:auto-closed by reaper"
                 TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + CLOSE_IDS_OK))
             fi
+        elif [ "$count" -gt 0 ] && [ "$SCOPE_KIND" = "city" ] \
+            && stale_issue_burst_over_max "$count" && ! stale_issue_burst_acknowledged "$count"; then
+            # A dry run holds nothing and records no anomaly, but reports and
+            # lists the burst a real run would hold.
+            TOTAL_WOULD_HOLD_STALE_ISSUES=$((TOTAL_WOULD_HOLD_STALE_ISSUES + count))
+            stale_issue_burst_list "would hold" "$count" "$rows"
         fi
     fi
 
@@ -1653,7 +1705,9 @@ order_outcome_write
 # size (held=<N>, with the line that repeats it) are normalized out of the
 # fingerprint, so a stale backup that merely grows older, or a held burst that
 # grows, stays one incident while a change of state (age=absent,
-# age=unparseable, a burst held or released) notifies at once. A
+# age=unparseable, a burst held or released) notifies at once. The burst's
+# normalization runs from held=<N>: to the end of its line, which stops at its
+# own anomaly only because record_anomaly ends each anomaly with a newline. A
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
     ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g; s/held=[0-9]+:.*/held=<dynamic>/')
@@ -1665,7 +1719,7 @@ fi
 
 SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, stale_issues_held:$TOTAL_STALE_ISSUES_HELD, mail_wisps:$TOTAL_MAIL_WISPS, budget_skipped:${BUDGET_SKIPPED:-none}"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE, would_hold_stale_issues:$TOTAL_WOULD_HOLD_STALE_ISSUES (dry run)"
 fi
 
 maintenance_done "$SUMMARY"
