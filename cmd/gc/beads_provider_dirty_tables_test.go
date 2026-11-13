@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -413,8 +414,8 @@ func TestParseSmokeCount(t *testing.T) {
 }
 
 // k8sDirtyTablesCity lays out a city whose scope init goes through the
-// gc-beads-k8s exec provider and returns the city, the rig dir, and the
-// provider string.
+// gc-beads-k8s exec provider and returns the city dir and the rig dir (a rig
+// whose Dolt endpoint differs from the city's).
 func k8sDirtyTablesCity(t *testing.T) (cityDir, rigDir string) {
 	t.Helper()
 	clearGCEnv(t)
@@ -447,161 +448,6 @@ dolt_port = "4407"
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityDir)
 	return cityDir, rigDir
-}
-
-// The gc-beads-k8s branch ran bd init once and returned whatever it said, so
-// a scope whose tables were left dirty hit beads' circular `bd dolt commit`
-// advice there too. It must take the same recovery as the gc-beads-bd branch:
-// commit the dirty tables, then run the init again.
-func TestInitBeadsForDirWithExecutorK8sRecoversFromDirtyTables(t *testing.T) {
-	cityDir, rigDir := k8sDirtyTablesCity(t)
-
-	var commits int
-	var gotCityPath, gotDatabase string
-	stubCommitDirtyScopeTables(t, func(cityPath, database string) (bool, error) {
-		commits++
-		gotCityPath, gotDatabase = cityPath, database
-		return true, nil
-	})
-	var calls int
-	execute := func(_ string, _ []string, _ ...string) error {
-		calls++
-		if calls == 1 {
-			return errors.New(bdDirtyTablesErrText)
-		}
-		return nil
-	}
-
-	if err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", execute); err != nil {
-		t.Fatalf("initBeadsForDirWithExecutor() = %v, want nil after the recovery", err)
-	}
-	if calls != 2 {
-		t.Fatalf("init attempts = %d, want 2 (initial + post-commit retry)", calls)
-	}
-	if commits != 1 {
-		t.Fatalf("commit rounds = %d, want 1", commits)
-	}
-	if gotCityPath != cityDir || gotDatabase != "frontend-db" {
-		t.Fatalf("commit target = (%q, %q), want (%q, %q)", gotCityPath, gotDatabase, cityDir, "frontend-db")
-	}
-}
-
-// A recovery that cannot commit (the real helper refuses an external or
-// cluster Dolt) must not turn into a silent success or lose either cause: the
-// caller sees the dirty-table refusal and the reason the commit did not run.
-func TestInitBeadsForDirWithExecutorK8sSurfacesCommitFailure(t *testing.T) {
-	cityDir, rigDir := k8sDirtyTablesCity(t)
-
-	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
-		return false, errors.New("dolt endpoint is external; commit its working set at the endpoint")
-	})
-	var calls int
-	execute := func(_ string, _ []string, _ ...string) error {
-		calls++
-		return errors.New(bdDirtyTablesErrText)
-	}
-
-	err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", execute)
-	if err == nil {
-		t.Fatal("initBeadsForDirWithExecutor() = nil, want the commit failure surfaced")
-	}
-	if !strings.Contains(err.Error(), "dolt endpoint is external") {
-		t.Fatalf("error %q does not carry the commit failure", err)
-	}
-	if !isBdInitDirtyTablesError(err) {
-		t.Fatalf("error %q lost the dirty-table refusal that started the recovery", err)
-	}
-	if calls != 1 {
-		t.Fatalf("init attempts = %d, want 1 (no retry after a failed commit)", calls)
-	}
-}
-
-// fakeDirtyOnceBd installs a bd that refuses its first `init` with beads'
-// dirty-table text and succeeds afterwards, and returns a reader for the
-// number of times it was invoked.
-func fakeDirtyOnceBd(t *testing.T, dir string) func() int {
-	t.Helper()
-	countPath := filepath.Join(dir, "bd-invocations")
-	script := "#!/bin/sh\n" +
-		"echo x >> \"" + countPath + "\"\n" +
-		"if [ \"$(wc -l < \"" + countPath + "\")\" -le 1 ]; then\n" +
-		"  echo '" + bdDirtyTablesErrText + "' >&2\n" +
-		"  exit 1\n" +
-		"fi\n" +
-		"exit 0\n"
-	fake := filepath.Join(dir, "bd")
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
-		t.Fatal(err)
-	}
-	t.Setenv("BD_BIN", fake)
-	return func() int {
-		data, err := os.ReadFile(countPath)
-		if err != nil {
-			return 0
-		}
-		return strings.Count(string(data), "\n")
-	}
-}
-
-// initDefaultRigBdStore is the init path for scopes the provider does not
-// own, and it wrapped bd's refusal as `bd init: ...` with no recovery. It must
-// commit the dirty tables and run bd init again.
-func TestInitDefaultRigBdStoreRecoversFromDirtyTables(t *testing.T) {
-	clearGCEnv(t)
-	city := t.TempDir()
-	rig := filepath.Join(city, "rigs", "r1")
-	if err := os.MkdirAll(rig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	invocations := fakeDirtyOnceBd(t, city)
-	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r1"}`)
-
-	var commits int
-	var gotDatabase string
-	stubCommitDirtyScopeTables(t, func(_, database string) (bool, error) {
-		commits++
-		gotDatabase = database
-		return true, nil
-	})
-
-	// The init goes on to open the store; only the bd calls and the commit are
-	// the subject, so a later failure is not asserted on, but it must not be
-	// the dirty-table refusal.
-	err := initDefaultRigBdStore(city, rig, "r1", "r1")
-	if err != nil && isBdInitDirtyTablesError(err) {
-		t.Fatalf("initDefaultRigBdStore() = %v, want the dirty-table refusal recovered", err)
-	}
-	if got := invocations(); got != 2 {
-		t.Fatalf("bd init attempts = %d, want 2 (initial + post-commit retry)", got)
-	}
-	if commits != 1 {
-		t.Fatalf("commit rounds = %d, want 1", commits)
-	}
-	if gotDatabase != "r1" {
-		t.Fatalf("commit database = %q, want %q", gotDatabase, "r1")
-	}
-}
-
-func TestInitDefaultRigBdStoreSurfacesCommitFailure(t *testing.T) {
-	clearGCEnv(t)
-	city := t.TempDir()
-	rig := filepath.Join(city, "rigs", "r1")
-	if err := os.MkdirAll(rig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	invocations := fakeDirtyOnceBd(t, city)
-	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r1"}`)
-	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
-		return false, errors.New("no managed Dolt port resolvable")
-	})
-
-	err := initDefaultRigBdStore(city, rig, "r1", "r1")
-	if err == nil || !strings.Contains(err.Error(), "no managed Dolt port resolvable") {
-		t.Fatalf("initDefaultRigBdStore() = %v, want the commit failure surfaced", err)
-	}
-	if got := invocations(); got != 1 {
-		t.Fatalf("bd init attempts = %d, want 1 (no retry after a failed commit)", got)
-	}
 }
 
 // The recovery's count query names the database it counts. Whether Dolt
@@ -643,50 +489,185 @@ func TestManagedDoltDirtyTableCountIsDatabaseQualified(t *testing.T) {
 	}
 }
 
-// A post-commit re-init that reports "already initialized" means the recovery
-// worked, as the gc-beads-bd branch already treats it. The gc-beads-k8s branch
-// must not turn a recovered scope into a hard init failure.
-func TestInitBeadsForDirWithExecutorK8sTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
-	cityDir, rigDir := k8sDirtyTablesCity(t)
-
-	var commits int
-	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
-		commits++
-		return true, nil
+// failOnDirtyTablesCommit is the tripwire on the commit seam. The two init
+// paths below do not run a Dolt gc manages, so reaching the commit at all is
+// the defect: gc would be committing a working set on a Dolt it does not own.
+func failOnDirtyTablesCommit(t *testing.T) {
+	t.Helper()
+	stubCommitDirtyScopeTables(t, func(cityPath, database string) (bool, error) {
+		t.Errorf("commitDirtyScopeTables(%q, %q) was reached: gc commits a working set only on a Dolt it manages", cityPath, database)
+		return false, errors.New("the commit seam must not be reached on this init path")
 	})
-	var calls int
-	execute := func(_ string, _ []string, _ ...string) error {
-		calls++
-		if calls == 1 {
-			return errors.New(bdDirtyTablesErrText)
-		}
-		return errors.New("bd init: already initialized")
-	}
+}
 
-	if err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", execute); err != nil {
-		t.Fatalf("initBeadsForDirWithExecutor() = %v, want nil: an already-initialized answer after the recovery is success", err)
-	}
-	if calls != 2 {
-		t.Fatalf("init attempts = %d, want 2 (initial + post-commit retry)", calls)
-	}
-	if commits != 1 {
-		t.Fatalf("commit rounds = %d, want 1", commits)
+// k8sInitRecorder is an exec-provider executor that records how often init ran
+// and the environment of the last run, and answers with err.
+type k8sInitRecorder struct {
+	calls int
+	env   []string
+	err   error
+}
+
+func (r *k8sInitRecorder) execute(_ string, env []string, _ ...string) error {
+	r.calls++
+	r.env = env
+	return r.err
+}
+
+// assertDirtyTablesRemedy checks the parts of the remedy text common to both
+// init paths. remedy is the text that follows the original refusal.
+func assertDirtyTablesRemedy(t *testing.T, remedy, wantDatabase string) {
+	t.Helper()
+	for _, want := range []string{
+		wantDatabase,
+		"gc commits a working set only on a Dolt it manages",
+		"CALL DOLT_COMMIT('-A', '-m'",
+		"bd dolt commit",
+		"same refusal",
+	} {
+		if !strings.Contains(remedy, want) {
+			t.Errorf("remedy %q does not contain %q", remedy, want)
+		}
 	}
 }
 
-// fakeDirtyThenAlreadyInitializedBd installs a bd that refuses its first `init`
-// with beads' dirty-table text and answers "already initialized" to every call
-// after it, and returns a reader for the number of times it was invoked.
-func fakeDirtyThenAlreadyInitializedBd(t *testing.T, dir string) func() int {
+// The gc-beads-k8s init branch is a Dolt gc does not manage, so a dirty-table
+// refusal there cannot be recovered by committing. It must try init once and
+// return bd's refusal, intact and first, with the remedy and the rig's own
+// endpoint after it.
+func TestInitBeadsForDirWithExecutorK8sReturnsRemedyForDirtyTables(t *testing.T) {
+	cityDir, rigDir := k8sDirtyTablesCity(t)
+	failOnDirtyTablesCommit(t)
+	refusal := errors.New(bdDirtyTablesErrText)
+	rec := &k8sInitRecorder{err: refusal}
+
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", rec.execute)
+	if err == nil {
+		t.Fatal("initBeadsForDirWithExecutor() = nil, want bd's refusal returned")
+	}
+	if rec.calls != 1 {
+		t.Errorf("init attempts = %d, want 1 (no recovery, no retry)", rec.calls)
+	}
+	if !errors.Is(err, refusal) {
+		t.Errorf("error %q does not wrap bd's refusal with %%w", err)
+	}
+	if !isBdInitDirtyTablesError(err) {
+		t.Errorf("error %q is no longer a dirty-table refusal", err)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, bdDirtyTablesErrText) {
+		t.Fatalf("error %q does not start with bd's refusal %q", msg, bdDirtyTablesErrText)
+	}
+	remedy := strings.TrimPrefix(msg, bdDirtyTablesErrText)
+	assertDirtyTablesRemedy(t, remedy, `"frontend-db"`)
+	if !strings.Contains(remedy, "rig-db.example.com:4407") {
+		t.Errorf("remedy %q does not name the rig's Dolt endpoint rig-db.example.com:4407", remedy)
+	}
+	if strings.Contains(msg, "city-db.example.com") {
+		t.Errorf("error %q names the city's Dolt endpoint, not the rig's", msg)
+	}
+	if strings.Contains(msg, "gc-beads-k8s") {
+		t.Errorf("error %q names the provider", msg)
+	}
+	// The endpoint in the message is the one the init really ran against.
+	if got := envListValue(rec.env, "GC_DOLT_HOST"); got != "rig-db.example.com" {
+		t.Errorf("init env GC_DOLT_HOST = %q, want rig-db.example.com", got)
+	}
+	if got := envListValue(rec.env, "GC_DOLT_PORT"); got != "4407" {
+		t.Errorf("init env GC_DOLT_PORT = %q, want 4407", got)
+	}
+}
+
+// An empty database name must never reach the message as an empty quoted name.
+func TestInitBeadsForDirWithExecutorK8sRemedyWithoutDatabase(t *testing.T) {
+	cityDir, rigDir := k8sDirtyTablesCity(t)
+	failOnDirtyTablesCommit(t)
+	rec := &k8sInitRecorder{err: errors.New(bdDirtyTablesErrText)}
+
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "", rec.execute)
+	if err == nil || !isBdInitDirtyTablesError(err) {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want a dirty-table refusal", err)
+	}
+	remedy := strings.TrimPrefix(err.Error(), bdDirtyTablesErrText)
+	assertDirtyTablesRemedy(t, remedy, "the scope's database")
+	if strings.Contains(remedy, `""`) {
+		t.Errorf("remedy %q carries an empty quoted database name", remedy)
+	}
+}
+
+// The init env carries the Dolt credentials to the provider; none of them may
+// reach the error, which is printed and logged.
+func TestInitBeadsForDirWithExecutorK8sRemedyOmitsCredentials(t *testing.T) {
+	cityDir, rigDir := k8sDirtyTablesCity(t)
+	failOnDirtyTablesCommit(t)
+	secrets := map[string]string{
+		"GC_DOLT_PASSWORD":              "sentinel-gc-dolt-password",
+		"BEADS_DOLT_PASSWORD":           "sentinel-beads-dolt-password",
+		"BEADS_CREDENTIALS_FILE":        "/sentinel/credentials-file",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "sentinel-credential-command",
+		registryCredentialProviderEnv:   "sentinel-credential-provider",
+	}
+	for key, value := range secrets {
+		t.Setenv(key, value)
+	}
+	rec := &k8sInitRecorder{err: errors.New(bdDirtyTablesErrText)}
+
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", rec.execute)
+	if err == nil || !isBdInitDirtyTablesError(err) {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want a dirty-table refusal", err)
+	}
+	if !strings.Contains(err.Error(), "CALL DOLT_COMMIT") {
+		t.Fatalf("error %q carries no remedy, so the credential check below proves nothing", err)
+	}
+	carried := 0
+	for key, value := range secrets {
+		if !slices.ContainsFunc(rec.env, func(kv string) bool { return strings.Contains(kv, value) }) {
+			t.Logf("init env does not carry %s", key)
+			continue
+		}
+		carried++
+		if strings.Contains(err.Error(), value) {
+			t.Errorf("error %q carries the %s value", err, key)
+		}
+	}
+	if carried == 0 {
+		t.Fatal("the init env carried none of the credential sentinels, so the check above proves nothing")
+	}
+}
+
+// What the init returns when nothing was refused is unchanged: success is nil,
+// and a failure that is not the dirty-table refusal is the very same error.
+func TestInitBeadsForDirWithExecutorK8sLeavesOtherOutcomesAlone(t *testing.T) {
+	cityDir, rigDir := k8sDirtyTablesCity(t)
+	failOnDirtyTablesCommit(t)
+
+	ok := &k8sInitRecorder{}
+	if err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", ok.execute); err != nil {
+		t.Errorf("initBeadsForDirWithExecutor() = %v, want nil", err)
+	}
+	if ok.calls != 1 {
+		t.Errorf("init attempts = %d, want 1", ok.calls)
+	}
+
+	other := errors.New("bd init: Unknown column 'agent_state' in 'issues'")
+	failing := &k8sInitRecorder{err: other}
+	if err := initBeadsForDirWithExecutor(cityDir, rigDir, "fe", "frontend-db", failing.execute); err != other { //nolint:errorlint // identity is the assertion
+		t.Errorf("initBeadsForDirWithExecutor() = %v, want the same error value, unchanged", err)
+	}
+	if failing.calls != 1 {
+		t.Errorf("init attempts = %d, want 1", failing.calls)
+	}
+}
+
+// fakeRefusingBd installs a bd that refuses every `init` with beads'
+// dirty-table text (or with failure, when given), and returns a reader for the
+// number of times it was invoked.
+func fakeRefusingBd(t *testing.T, dir, failure string) func() int {
 	t.Helper()
 	countPath := filepath.Join(dir, "bd-invocations")
 	script := "#!/bin/sh\n" +
 		"echo x >> \"" + countPath + "\"\n" +
-		"if [ \"$(wc -l < \"" + countPath + "\")\" -le 1 ]; then\n" +
-		"  echo '" + bdDirtyTablesErrText + "' >&2\n" +
-		"else\n" +
-		"  echo 'bd init: already initialized' >&2\n" +
-		"fi\n" +
+		"echo '" + failure + "' >&2\n" +
 		"exit 1\n"
 	fake := filepath.Join(dir, "bd")
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
@@ -702,35 +683,104 @@ func fakeDirtyThenAlreadyInitializedBd(t *testing.T, dir string) func() int {
 	}
 }
 
-// initDefaultRigBdStore already treated an "already initialized" answer to the
-// first bd init as success. The same answer to the post-commit retry means the
-// recovery worked, so it must not come back as a `bd init: ...` failure.
-func TestInitDefaultRigBdStoreTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+// initDefaultRigBdStore runs bd against a Dolt server bd itself resolved, and
+// gc passes it no endpoint. gc cannot say which server holds the dirty tables,
+// so it must not commit: it runs init once and wraps bd's refusal as
+// `bd init: ...`, with the remedy and the scope's .beads/ directory after it.
+func TestInitDefaultRigBdStoreReturnsRemedyForDirtyTables(t *testing.T) {
 	clearGCEnv(t)
 	city := t.TempDir()
 	rig := filepath.Join(city, "rigs", "r1")
 	if err := os.MkdirAll(rig, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	invocations := fakeDirtyThenAlreadyInitializedBd(t, city)
+	invocations := fakeRefusingBd(t, city, bdDirtyTablesErrText)
 	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r1"}`)
+	failOnDirtyTablesCommit(t)
 
-	var commits int
-	stubCommitDirtyScopeTables(t, func(_, _ string) (bool, error) {
-		commits++
-		return true, nil
-	})
-
-	// The init goes on to open the store, so a later failure is not asserted
-	// on; it must not be the already-initialized answer the retry gave.
 	err := initDefaultRigBdStore(city, rig, "r1", "r1")
-	if err != nil && strings.Contains(err.Error(), "already initialized") {
-		t.Fatalf("initDefaultRigBdStore() = %v, want the already-initialized answer to the retry treated as success", err)
+	if err == nil {
+		t.Fatal("initDefaultRigBdStore() = nil, want bd's refusal returned")
 	}
-	if got := invocations(); got != 2 {
-		t.Fatalf("bd init attempts = %d, want 2 (initial + post-commit retry)", got)
+	if got := invocations(); got != 1 {
+		t.Errorf("bd init attempts = %d, want 1 (no recovery, no retry)", got)
 	}
-	if commits != 1 {
-		t.Fatalf("commit rounds = %d, want 1", commits)
+	if !isBdInitDirtyTablesError(err) {
+		t.Errorf("error %q is no longer a dirty-table refusal", err)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "bd init: ") {
+		t.Errorf("error %q is not wrapped as `bd init: ...`", msg)
+	}
+	const refusalEnd = "(gastownhall/beads#4566)"
+	cut := strings.Index(msg, refusalEnd)
+	if cut < 0 {
+		t.Fatalf("error %q does not carry bd's refusal first", msg)
+	}
+	remedy := msg[cut+len(refusalEnd):]
+	assertDirtyTablesRemedy(t, remedy, `"r1"`)
+	for _, want := range []string{
+		filepath.Join(rig, ".beads"),
+		"does not know which Dolt server bd resolved",
+	} {
+		if !strings.Contains(remedy, want) {
+			t.Errorf("remedy %q does not contain %q", remedy, want)
+		}
+	}
+	if m := regexp.MustCompile(`:\d{2,5}\b`).FindString(remedy); m != "" {
+		t.Errorf("remedy %q names a host and port (%q); gc passed bd no endpoint", remedy, m)
+	}
+}
+
+// Any other bd init failure keeps the `bd init: ...` wrap and gains no remedy.
+func TestInitDefaultRigBdStoreLeavesOtherFailuresAlone(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocations := fakeRefusingBd(t, city, "Error: Unknown column agent_state in issues")
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"r1"}`)
+	failOnDirtyTablesCommit(t)
+
+	err := initDefaultRigBdStore(city, rig, "r1", "r1")
+	if err == nil {
+		t.Fatal("initDefaultRigBdStore() = nil, want the init failure returned")
+	}
+	if got := invocations(); got != 1 {
+		t.Errorf("bd init attempts = %d, want 1", got)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "bd init: ") || !strings.Contains(msg, "Unknown column agent_state") {
+		t.Errorf("error %q is not the `bd init: ...` wrap of bd's failure", msg)
+	}
+	if strings.Contains(msg, "DOLT_COMMIT") || isBdInitDirtyTablesError(err) {
+		t.Errorf("error %q carries a dirty-table remedy for a failure that is not one", msg)
+	}
+}
+
+// The endpoint phrase names only the host and port the init env carries, and
+// falls back to the provider's default when it carries neither.
+func TestDirtyTablesEndpointText(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "host and port", env: []string{"GC_DOLT_HOST=rig-db.example.com", "GC_DOLT_PORT=4407"}, want: "the Dolt at rig-db.example.com:4407"},
+		{name: "host only", env: []string{"GC_DOLT_HOST=rig-db.example.com"}, want: "the Dolt at rig-db.example.com"},
+		{name: "port only", env: []string{"GC_DOLT_PORT=4407"}, want: "the Dolt on port 4407"},
+		{name: "neither", env: []string{"PATH=/usr/bin"}, want: "the provider's default Dolt"},
+		{name: "empty values", env: []string{"GC_DOLT_HOST=", "GC_DOLT_PORT="}, want: "the provider's default Dolt"},
+		{name: "last entry wins", env: []string{"GC_DOLT_HOST=old", "GC_DOLT_HOST=rig-db.example.com", "GC_DOLT_PORT=4407"}, want: "the Dolt at rig-db.example.com:4407"},
+		{name: "credentials are not read", env: []string{"GC_DOLT_PASSWORD=hunter2", "BEADS_DOLT_PASSWORD=hunter2"}, want: "the provider's default Dolt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dirtyTablesEndpointText(tt.env); got != tt.want {
+				t.Fatalf("dirtyTablesEndpointText(%v) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
 	}
 }

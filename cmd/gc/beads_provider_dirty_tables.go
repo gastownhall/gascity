@@ -82,6 +82,12 @@ func isBdInitDirtyTablesError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), bdInitDirtyTablesMarker)
 }
 
+// dirtyTablesEndpointText names the Dolt an init ran against, from the host and
+// port in env.
+func dirtyTablesEndpointText(_ []string) string {
+	return ""
+}
+
 // commitDirtyScopeTables commits a scope database's uncommitted working set on
 // the managed Dolt server, reporting whether there was anything to commit. It
 // is a variable so tests can exercise the recovery loop without a live server.
