@@ -143,7 +143,7 @@ func TestControllerActiveWorkStepIsTheInProcessResolution(t *testing.T) {
 			t.Run(map[bool]string{true: "split/", false: "single store/"}[split]+name, func(t *testing.T) {
 				f := newActiveStepFixture(t, split)
 				wantID := seed(t, f)
-				want, err := resolveActiveWispStep(f.rig, f.graph(), activeStepAssignees)
+				want, err := resolveActiveWispStep(f.rig, testStores(f.rig, f.graph()), activeStepAssignees)
 				if err != nil {
 					t.Fatalf("in-process resolution: %v", err)
 				}

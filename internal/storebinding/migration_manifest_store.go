@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // ErrManifestConflict reports a durable record that cannot be replaced by the
@@ -372,7 +374,7 @@ func (s *ManifestStore) replace(name string, payload []byte) error {
 }
 
 func syncDirectory(directory string) error {
-	handle, err := os.Open(directory)
+	handle, err := filelock.OpenDirectoryForSync(directory)
 	if err != nil {
 		return fmt.Errorf("opening %s for fsync: %w", directory, err)
 	}

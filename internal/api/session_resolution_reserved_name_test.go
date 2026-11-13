@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -66,12 +67,12 @@ func TestResolveSessionTargetID_ReservedNameNotHijackedByRogueLiveSession(t *tes
 			srv := New(fs)
 			rogue := createTestSessionBead(t, fs.cityBeadStore, tc.metadata, tc.title)
 
-			resolvers := map[string]func(beads.Store, string) (string, error){
+			resolvers := map[string]func(beads.SessionStore, string) (string, error){
 				"live":        srv.resolveSessionIDWithConfig,
 				"allowClosed": srv.resolveSessionIDAllowClosedWithConfig,
 			}
 			for mode, resolve := range resolvers {
-				id, err := resolve(fs.cityBeadStore, tc.target)
+				id, err := resolve(beadstest.Sessions(fs.cityBeadStore), tc.target)
 				if id == rogue.ID {
 					t.Fatalf("%s resolution returned rogue session %q for reserved target %q", mode, id, tc.target)
 				}
@@ -95,7 +96,7 @@ func TestResolveSessionTargetID_BareLeafTargetStillFallsThroughToOrdinaryAlias(t
 		"state":        "active",
 	}, "")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err != nil || id != ordinary.ID {
 		t.Fatalf("resolution = %q, %v, want ordinary session %q", id, err, ordinary.ID)
 	}
@@ -110,7 +111,7 @@ func TestResolveSessionTargetID_ReservedNameRogueAliasSurfacesConflict(t *testin
 		"state":        "active",
 	}, "")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "myrig/worker")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if id == rogue.ID {
 		t.Fatalf("resolution returned rogue session %q for reserved identity myrig/worker", id)
 	}
@@ -137,11 +138,11 @@ func TestResolveSessionTargetID_CanonicalNamedBeadWinsOverRogue(t *testing.T) {
 		"state":        "active",
 	}, "")
 
-	for mode, resolve := range map[string]func(beads.Store, string) (string, error){
+	for mode, resolve := range map[string]func(beads.SessionStore, string) (string, error){
 		"live":        srv.resolveSessionIDWithConfig,
 		"allowClosed": srv.resolveSessionIDAllowClosedWithConfig,
 	} {
-		id, err := resolve(fs.cityBeadStore, "myrig/worker")
+		id, err := resolve(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 		if err != nil || id != canonical.ID {
 			t.Fatalf("%s resolution = %q, %v, want canonical %q", mode, id, err, canonical.ID)
 		}
@@ -156,11 +157,11 @@ func TestResolveSessionTargetID_OrdinarySessionsUnaffectedByReservedNameGuard(t 
 		"state":        "active",
 	}, "")
 
-	for mode, resolve := range map[string]func(beads.Store, string) (string, error){
+	for mode, resolve := range map[string]func(beads.SessionStore, string) (string, error){
 		"live":        srv.resolveSessionIDWithConfig,
 		"allowClosed": srv.resolveSessionIDAllowClosedWithConfig,
 	} {
-		id, err := resolve(fs.cityBeadStore, "free-agent")
+		id, err := resolve(beadstest.Sessions(fs.cityBeadStore), "free-agent")
 		if err != nil || id != ordinary.ID {
 			t.Fatalf("%s resolution = %q, %v, want %q", mode, id, err, ordinary.ID)
 		}

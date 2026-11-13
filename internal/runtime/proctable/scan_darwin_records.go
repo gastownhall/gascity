@@ -1,6 +1,7 @@
 package proctable
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -168,4 +169,66 @@ func reportedParent(records map[int]psRecord, ppid int) (int, bool) {
 	}
 	parent, ok := records[ppid]
 	return ppid, ok && isInfrastructureCommand(parent.command)
+}
+
+// scanRecordsOutsideTmux is the pure half of the Darwin
+// ScanBySessionIDOutsideTmux, over one ps snapshot: scanRecordsBySessionID's
+// roots that fenceTmuxSubtreeRecords keeps and, for the empty id (the orphan
+// sweep), only those reparented to launchd.
+func scanRecordsOutsideTmux(records map[int]psRecord, id string) ([]runtime.LiveRuntime, error) {
+	roots, err := fenceTmuxSubtreeRecords(records, scanRecordsBySessionID(records, id))
+	if id == "" {
+		roots = orphanCandidates(roots)
+	}
+	return roots, err
+}
+
+// fenceTmuxSubtreeRecords is the Darwin fence over one ps snapshot, as on
+// Linux: it keeps the roots no tmux server or client carrying a
+// GC_SESSION_ID hosts (fenceRoots over recordHostedBySessionTmux). A root
+// whose ancestry the snapshot cannot complete (a parent it does not hold, a
+// loop, or a tmux whose environment ps does not show) may sit under such a
+// tmux, so it is left out with an EntryError.
+func fenceTmuxSubtreeRecords(records map[int]psRecord, roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	return fenceRoots(roots, func(pid int) (bool, error) { return recordHostedBySessionTmux(records, pid) })
+}
+
+// recordHostedBySessionTmux reports whether records shows pid, or one of its
+// ancestors, as a tmux server or client carrying a GC_SESSION_ID
+// (recordIsSessionTmux). A pid the snapshot does not hold is errRootGone; an
+// ancestor it does not hold, or a parent chain that loops, is an error.
+func recordHostedBySessionTmux(records map[int]psRecord, pid int) (bool, error) {
+	seen := make(map[int]bool)
+	for p := pid; p > 1; {
+		if seen[p] {
+			return false, fmt.Errorf("the parent chain loops at pid %d", p)
+		}
+		seen[p] = true
+		record, ok := records[p]
+		if !ok && p == pid {
+			return false, errRootGone
+		}
+		if !ok {
+			return false, fmt.Errorf("ancestor pid %d vanished", p)
+		}
+		if hosted, err := recordIsSessionTmux(record); err != nil || hosted {
+			return hosted, err
+		}
+		p = record.ppid
+	}
+	return false, nil
+}
+
+// recordIsSessionTmux reports whether record is a tmux server or client
+// (isInfrastructureCommand) carrying a GC_SESSION_ID. A tmux whose ps line
+// shows no environment fails closed with an error: ps prints none for
+// another user's process, which may carry one.
+func recordIsSessionTmux(record psRecord) (bool, error) {
+	if !isInfrastructureCommand(record.command) {
+		return false, nil
+	}
+	if len(record.env) == 0 {
+		return false, fmt.Errorf("ps shows no environment for tmux pid %d", record.pid)
+	}
+	return record.env["GC_SESSION_ID"] != "", nil
 }

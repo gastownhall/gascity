@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -101,8 +102,8 @@ type StatusInput struct {
 // so a priming sessions binding surfaces as a "sessions:" partial error from
 // statusSessionSnapshot, never as a silent zero-session fleet.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
-	store := s.state.CityBeadStore()
-	if err := cacheLiveOr503(store); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	bp := input.toBlockingParams()
@@ -135,11 +136,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
@@ -155,7 +156,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// send ?fresh=true instead. A genuine cold cache (nothing ever built)
 		// has nothing to serve here and falls through to the synchronous
 		// build below, same as before this change.
-		if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(store)); ok {
+		if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(work)); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return out, nil
 		}
@@ -166,7 +167,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
+	f := statusCacheFreshness(resp, cacheAgeSeconds(work))
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
 }
 
@@ -190,10 +191,10 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 			if b.built == nil {
 				return nil, apierr.Internal.Msg("building the status panicked; the server's log has the stack")
 			}
-			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.CityBeadStore()))
+			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.Stores().Work()))
 			return &IndexOutput[StatusBody]{Index: b.built.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: b.built.Body}, nil
 		case <-overrun.C:
-			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.CityBeadStore())); ok {
+			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.Stores().Work())); ok {
 				return out, nil
 			}
 			// Nothing saved: wait on for the build. The timer fires only once.
@@ -375,8 +376,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// A suspended city's bead stores are not read: a read restarts the
 	// retired bd proxy the controller just stopped, and an open dashboard
 	// polling this would cycle it. The body says so (StoresNotRead) and
-	// carries no work, mail, session-count or store-health figures.
-	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg)
+	// carries no work, mail, session-count or store-health figures. The
+	// session snapshot and the work counts read one Stores() epoch.
+	st := s.state.Stores()
+	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg, st)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
@@ -505,7 +508,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var wc workCounts
 	if !lite && !citySuspended {
 		var workErrs []string
-		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
+		wc, workErrs = s.statusWorkCounts(ctx, st, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
 	}
 
@@ -787,8 +790,9 @@ func (s *Server) suspensionStateFaultChanged(err error) bool {
 // whether it is in effect. A suspended city's snapshot is empty and reads no
 // bead store: a read restarts the retired bd proxy the controller just
 // stopped, and an open dashboard polling a view built on it would cycle it.
-// Every view that reads the session snapshot goes through here.
-func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (statusSessionSnapshot, suspensionstate.State, bool) {
+// Every view that reads the session snapshot goes through here, from the
+// request's epoch st.
+func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City, st storeref.Stores) (statusSessionSnapshot, suspensionstate.State, bool) {
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	if suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()) {
 		return statusSessionSnapshot{
@@ -796,36 +800,36 @@ func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (sta
 			byTemplate:    make(map[string][]statusSessionInfo),
 		}, citySt, true
 	}
-	return s.statusSessionSnapshot(ctx), citySt, false
+	return s.statusSessionSnapshot(ctx, st), citySt, false
 }
 
 // statusSessionSnapshot reads the session-class beads every session-derived
 // field of the status body is built from: per-agent running/suspended state,
 // named-session status, the unlimited-pool expansion, and the session counts.
 //
-// It reads SessionsBeadStore(), not CityBeadStore(). Those are the same store
-// on a city that relocates nothing, so this is byte-identical there; on a city
-// with [beads.classes.sessions] relocated the session beads live in the class
-// binding, and reading them off the work ledger returned an empty fleet at
-// whatever the work ledger costs — on a cross-region hosted work store that is
+// It reads the epoch's sessions placement (st.SessionsLeg), not the city work
+// store. Those are the same store on a city that relocates nothing, so this
+// is byte-identical there; on a city with [beads.classes.sessions] relocated
+// the session beads live in the class binding, and reading them off the work
+// ledger returned an empty fleet at whatever the work ledger costs — on a
+// cross-region hosted work store that is
 // seconds, so the read blew statusStoreReadTimeout and /status reported
 // "sessions: loading session snapshot timed out after 1s" for data sitting in a
 // local store.
-func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
+func (s *Server) statusSessionSnapshot(ctx context.Context, st storeref.Stores) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	sessions := s.state.SessionsBeadStore()
-	store := sessions.Store
-	if store == nil {
+	leg, ok := st.SessionsLeg()
+	if !ok {
 		// A nil session-class store is benign only when the city has no bead
 		// store at all. When the work store IS present, the sessions binding
 		// failed to resolve and this projection cannot see the class: say so
 		// rather than reporting an empty fleet, and do NOT fall back to the
 		// work store. Reading session beads off the work ledger is precisely
 		// what kept this mis-routing invisible.
-		if s.state.CityBeadStore() != nil {
+		if !beads.IsNilStore(st.Work()) {
 			snapshot.partialErrors = []string{"sessions: session-class bead store unavailable"}
 		}
 		return snapshot
@@ -846,22 +850,25 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	done := make(chan snapshotResult, 1)
 	go func() {
 		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
-		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
-		// or (nil, nil) for non-bd backends (native/file/mem) — those read
-		// through store unchanged. Its resolution (bd env / managed-dolt
+		// ScopedStoreLike hands back the sessions leg over a bd-CLI-backed
+		// clone reqCtx can cancel, or the leg unchanged for non-bd backends
+		// (native/file/mem). Its resolution (bd env / managed-dolt
 		// connection state) is synchronous and can block on a mutex the
 		// reconcile loop holds without honoring reqCtx; kept before the select
 		// it hung the whole handler past its read budget, dragging the
 		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
 		// as the read bounds it.
-		readSessions := sessions
-		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
+		read, _, err := s.state.ScopedStoreLike(reqCtx, leg)
+		if err != nil {
 			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
 			return
-		} else if scoped != nil {
-			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
+		sessions, err := storeref.SessionStoreOn(read)
+		if err != nil {
+			done <- snapshotResult{err: err}
+			return
+		}
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(sessions))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -923,14 +930,23 @@ type statusWorkResult struct {
 	errs     []string
 }
 
-// statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work over the work-store legs GET /beads/ready
-// reads, in the same order: the city store first, then BeadStores excluding the
-// CityName alias. It reads each leg from a different source, though (see
-// statusReadyStoreWithTimeout). Stores exposing beads.Counter answer persisted
-// counts without hydrating rows — the caching layer counts matches in memory
-// when its cache is clean (#1896). Stores are queried concurrently; results
-// aggregate in deterministic city/rig order.
+// statusWorkQuery is one leg statusWorkCounts reads, with what it asks of it.
+type statusWorkQuery struct {
+	label         string
+	leg           storeref.TypedLeg
+	includeStored bool
+	includeReady  bool
+}
+
+// statusWorkCounts tallies persisted open/in_progress work across the work
+// ledger and federates canonical Ready work over the work-store legs GET
+// /beads/ready reads, in the same order: the city store first, then the work
+// legs (statusWorkQueries) excluding the CityName alias. It reads each leg
+// from a different source, though (see statusReadyStoreWithTimeout). Stores
+// exposing beads.Counter answer persisted counts without hydrating rows — the
+// caching layer counts matches in memory when its cache is clean (#1896).
+// Stores are queried concurrently; results aggregate in deterministic city/rig
+// order. Every leg comes from the request's epoch st.
 //
 // On a split city the graph binding is one more READY leg, as it is for GET
 // /beads/ready (huma_handlers_beads.go): without it the status Ready count
@@ -949,55 +965,20 @@ type statusWorkResult struct {
 // The cache-only Ready projection would decline for them anyway — reporting
 // that as a partial error made every city with a suspended rig permanently
 // partial, which greys out unrelated status tiles in the dashboard.
-func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
-	stores := s.state.BeadStores()
-	// sortedRigNames deduplicates rigs sharing one store instance, so each
-	// store's persisted statuses are counted exactly once.
-	rigNames := sortedRigNames(stores)
-	type workQuery struct {
-		label         string
-		store         beads.Store
-		includeStored bool
-		includeReady  bool
-	}
-	queries := make([]workQuery, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		queries = append(queries, workQuery{
-			label:        "city",
-			store:        cityStore,
-			includeReady: true,
-		})
-	}
-	cityName := s.state.CityName()
-	excluded := 0
-	for _, rigName := range rigNames {
-		if cacheColdRigs[rigName] {
-			excluded++
-			continue
-		}
-		queries = append(queries, workQuery{
-			label:         "rig " + rigName,
-			store:         stores[rigName],
-			includeStored: true,
-			includeReady:  rigName != cityName,
-		})
-	}
-
-	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
-		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
-	}
+func (s *Server) statusWorkCounts(ctx context.Context, st storeref.Stores, cacheColdRigs map[string]bool) (workCounts, []string) {
+	queries, excluded := statusWorkQueries(st, s.state.CityName(), cacheColdRigs)
 
 	results := make([]statusWorkResult, len(queries))
 	var wg sync.WaitGroup
 	for i, query := range queries {
 		wg.Add(1)
-		go func(i int, query workQuery) {
+		go func(i int, query statusWorkQuery) {
 			defer wg.Done()
 			results[i] = statusStoreWorkCountsFor(
 				ctx,
 				s.state,
 				query.label,
-				query.store,
+				query.leg,
 				query.includeStored,
 				query.includeReady,
 			)
@@ -1024,20 +1005,48 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 	return wc, errs
 }
 
-// statusStoreWorkCounts counts one store's persisted open/in-progress work
+// statusWorkQueries is the legs statusWorkCounts reads from the epoch st, in
+// order, and how many opened rigs cacheColdRigs leaves unread:
+//   - the city's ready leg (storeref.WorkScope), labeled "city";
+//   - the work ledger's legs (storeref.WorkList), the cold rigs dropped before
+//     the legs are deduped by store (t7b3-design.md Q2), each counted, and
+//     asked for ready work too unless it is listed under the city's name:
+//     the city's alias, or a rig named like the city, which replaces it;
+//   - the relocated graph binding, ready only.
+//
+// The only error a WorkList plan over the epoch's own rigs returns is that
+// no leg is left to read: no queries, as an empty BeadStores() gave.
+func statusWorkQueries(st storeref.Stores, cityName string, cacheColdRigs map[string]bool) ([]statusWorkQuery, int) {
+	var queries []statusWorkQuery
+	if city, ok := cityWorkLeg(st); ok {
+		queries = append(queries, statusWorkQuery{label: "city", leg: city, includeReady: true})
+	}
+	skip, excluded := coldRigRefs(st, cacheColdRigs)
+	plan, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkSkipsRigs, Skip: skip})
+	if err != nil {
+		return queries, excluded
+	}
+	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
+		if l.Role == storeref.RoleFederationTail {
+			queries = append(queries, statusWorkQuery{label: "graph", leg: l, includeReady: true})
+			return
+		}
+		name := workLegName(l, cityName)
+		queries = append(queries, statusWorkQuery{label: "rig " + name, leg: l, includeStored: true, includeReady: name != cityName})
+	})
+	return queries, excluded
+}
+
+// statusStoreWorkCountsFor counts one leg's persisted open/in-progress work
 // and independently derives ready work through the canonical live Ready
 // projection. Both reads share one per-store deadline. Operational Count
 // failures report a partial error without retrying via List — the List scan
 // would hit the same backend — but do not discard a successful Ready result.
-func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
-	return statusStoreWorkCountsFor(ctx, state, "rig "+rigName, store, true, true)
-}
-
 func statusStoreWorkCountsFor(
 	ctx context.Context,
 	state State,
 	label string,
-	store beads.Store,
+	leg storeref.TypedLeg,
 	includeStored bool,
 	includeReady bool,
 ) statusWorkResult {
@@ -1057,7 +1066,7 @@ func statusStoreWorkCountsFor(
 	if includeStored {
 		stored = nil
 		go func() {
-			wc, err := statusStoredWorkCounts(ctx, state, store)
+			wc, err := statusStoredWorkCounts(ctx, state, leg)
 			storedDone <- storedResult{wc: wc, err: err}
 		}()
 	}
@@ -1066,7 +1075,7 @@ func statusStoreWorkCountsFor(
 		// ContextReadyReader and ScopedStoreLike both guarantee cleanup before
 		// returning after cancellation. Invoke this branch synchronously so the
 		// coordinator cannot return while scoped resolution is still cleaning up.
-		rows, err := statusReadyStoreWithTimeout(ctx, state, store)
+		rows, err := statusReadyStoreWithTimeout(ctx, state, leg)
 		ready = &readyResult{rows: rows, err: err}
 	}
 
@@ -1116,16 +1125,18 @@ func statusStoreWorkCountsFor(
 
 // statusStoredWorkCounts counts the persisted open/in-progress buckets,
 // preferring the hydration-free Counter path and falling back to List only
-// when Count explicitly reports that the query shape is unsupported.
-func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store) (workCounts, error) {
-	if counter, ok := store.(beads.Counter); ok {
+// when Count explicitly reports that the query shape is unsupported. Every
+// status read goes through the leg's strict reader, as the unmarked reads of
+// the raw store did, so the split-strict gate polices them as before.
+func statusStoredWorkCounts(ctx context.Context, state State, leg storeref.TypedLeg) (workCounts, error) {
+	if counter, ok := beads.ReaderAs[beads.Counter](leg.Strict); ok {
 		wc, err := statusCountWork(ctx, counter)
 		if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
 			return wc, err
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
+	list, err := statusListStoreWithTimeout(ctx, state, leg, beads.ListQuery{AllowScan: true})
 	var wc workCounts
 	if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
 		return wc, err
@@ -1165,15 +1176,16 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
-// statusListStoreWithTimeout lists with the per-store read timeout.
-// Store.List takes no context, so on timeout the goroutine is abandoned
-// (it keeps its connection until the scan returns) — unless state offers a
-// ctx-bound scoped clone of store (bd-CLI-backed stores do; native/file/mem
-// stores don't and are read unchanged), in which case cancellation kills
-// the in-flight backend command instead of abandoning it (gascity
-// ga-cdmx6x). Counter-capable stores avoid this path entirely.
-func statusListStoreWithTimeout(ctx context.Context, state State, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	if store == nil {
+// statusListStoreWithTimeout lists leg's store with the per-store read
+// timeout. Store.List takes no context, so on timeout the goroutine is
+// abandoned (it keeps its connection until the scan returns) — unless state
+// binds the leg to a ctx-bound scoped clone of its store (bd-CLI-backed stores
+// do; native/file/mem stores don't and are read unchanged), in which case
+// cancellation kills the in-flight backend command instead of abandoning it
+// (gascity ga-cdmx6x). Counter-capable stores avoid this path entirely. A
+// zero leg lists nothing.
+func statusListStoreWithTimeout(ctx context.Context, state State, leg storeref.TypedLeg, query beads.ListQuery) ([]beads.Bead, error) {
+	if beads.IsNilStore(leg.Strict) {
 		return nil, nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
@@ -1191,14 +1203,12 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 		// slow, ctx-blind resolution (a store mutex held by the reconcile
 		// loop) is bounded by the same request deadline as the list instead of
 		// hanging the handler synchronously (gc-08qgn).
-		readStore := store
-		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
+		read, _, err := state.ScopedStoreLike(reqCtx, leg)
+		if err != nil {
 			done <- listResult{err: fmt.Errorf("resolving scoped store: %w", err)}
 			return
-		} else if scoped != nil {
-			readStore = scoped
 		}
-		rows, err := readStore.List(query)
+		rows, err := read.Strict.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
 	select {
@@ -1220,9 +1230,10 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 // stores retain their tier behavior, and the scoped clone binds bd subprocesses
 // to reqCtx so timeout cancellation cannot leak a child beyond the status
 // request. GET /beads/ready instead reads a leg whose cache cannot answer live
-// (beads.ReadyPreferCache).
-func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
-	if store == nil {
+// (beads.ReadyPreferCache). Every read goes through the leg's strict reader;
+// a zero leg reads nothing.
+func statusReadyStoreWithTimeout(ctx context.Context, state State, leg storeref.TypedLeg) ([]beads.Bead, error) {
+	if beads.IsNilStore(leg.Strict) {
 		return nil, nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
@@ -1231,7 +1242,7 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.S
 		return nil, err
 	}
 	var capabilityErr error
-	if reader, ok := store.(beads.ContextReadyReader); ok {
+	if reader, ok := beads.ReaderAs[beads.ContextReadyReader](leg.Strict); ok {
 		rows, err := reader.ReadyContext(reqCtx)
 		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
 			return rows, statusReadyError(err)
@@ -1243,11 +1254,11 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.S
 	// must finish its own cleanup before returning after reqCtx cancellation.
 	// Keep it synchronous so the status deadline cannot abandon a resolver
 	// goroutine after the response has returned.
-	scoped, err := state.ScopedStoreLike(reqCtx, store)
+	bound, cloned, err := state.ScopedStoreLike(reqCtx, leg)
 	if err != nil {
 		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
 	}
-	if scoped == nil {
+	if !cloned {
 		if capabilityErr == nil {
 			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
 		}
@@ -1257,7 +1268,7 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.S
 	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
 	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
 	// needed to enforce the deadline.
-	rows, err := beads.HandlesFor(scoped).Live.Ready()
+	rows, err := beads.LiveFor(bound.Strict).Ready()
 	return rows, statusReadyError(err)
 }
 

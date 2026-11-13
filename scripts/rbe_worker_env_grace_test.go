@@ -836,6 +836,7 @@ func TestRBEWorkerLegacyWorkflow(t *testing.T) {
 		"RBE_PRODUCT_ROOT":    "${{ steps.grace.outputs.root }}",
 		"RBE_WORKER_DIR":      "${{ steps.rbe-worker.outputs.dir }}",
 		"RBE_WORKER_REVISION": "${{ steps.rbe-worker.outputs.sha }}",
+		"RBE_DIST_MIRROR":     "${{ vars.RBE_DIST_MIRROR || '' }}",
 	}
 	if !isMeasureStep(measure) || measure.If != served || measure.ContinueOnError != "" || !reflect.DeepEqual(measure.Env, wantMeasure) {
 		t.Errorf("measure step if %q continue-on-error %q env %v; want if %s, failing the job on drift, env %v", measure.If, measure.ContinueOnError, measure.Env, served, wantMeasure)

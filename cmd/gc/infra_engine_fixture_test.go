@@ -16,8 +16,11 @@ import (
 // order-tracking rows and formula graphs, with one work bead per ten. Graph
 // steps hang off their root by parent-child and chain by blocks; every fifth
 // step waits on the previous one through a waits_for gate whose payload the
-// source reports. Work beads track a graph step and block on a session, so
-// the copy and the clear both meet cross-store edges.
+// source reports. Closed work beads track a graph step and work beads are
+// related to a session, so the clear meets cross-store edges it drops; some
+// graph steps block on a work bead (an S3b gate when both are unfinished) and
+// one holds an external: reference, so the copy meets the D9 shapes it
+// encodes. No shape the copy refuses is in it.
 type mcShapedInfraCity struct {
 	backing  *beads.MemStore
 	rows     []beads.Bead
@@ -86,7 +89,7 @@ func newMCShapedInfraCity(tb testing.TB, infraRows int) mcShapedInfraCity {
 		b.UpdatedAt = b.CreatedAt
 		rows = append(rows, b)
 	}
-	var sessions, steps []string
+	var sessions, steps, allSteps, openSteps []string
 	var root string
 	for i := 0; i < infraRows; i++ {
 		id := fmt.Sprintf("mc-%06d", i)
@@ -104,7 +107,14 @@ func newMCShapedInfraCity(tb testing.TB, infraRows int) mcShapedInfraCity {
 				root, steps = id, nil
 				continue
 			}
-			add(beads.Bead{ID: id, Title: "step", Type: "task", Status: status(i), Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: root}})
+			// One step in five is open (status alone would close every
+			// graph row): an open step blocked on open work is the copy's
+			// gate shape.
+			stepStatus := status(i)
+			if i%20 == 16 {
+				stepStatus = "open"
+			}
+			add(beads.Bead{ID: id, Title: "step", Type: "task", Status: stepStatus, Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: root}})
 			deps = append(deps, beads.Dep{IssueID: id, DependsOnID: root, Type: "parent-child"})
 			if len(steps) > 0 {
 				prev := steps[len(steps)-1]
@@ -116,13 +126,25 @@ func newMCShapedInfraCity(tb testing.TB, infraRows int) mcShapedInfraCity {
 				}
 			}
 			steps = append(steps, id)
+			allSteps = append(allSteps, id)
+			if stepStatus == "open" {
+				openSteps = append(openSteps, id)
+			}
 		}
+	}
+	if len(allSteps) > 0 {
+		deps = append(deps, beads.Dep{IssueID: allSteps[0], DependsOnID: "external:ga-upstream", Type: "blocks"})
 	}
 	for i := 0; i < infraRows/10; i++ {
 		id := fmt.Sprintf("mc-w%05d", i)
 		add(beads.Bead{ID: id, Title: "work", Type: "task", Status: status(i)})
-		if len(steps) > 0 && i%3 == 0 {
+		if len(steps) > 0 && i%3 == 0 && status(i) == "closed" {
 			deps = append(deps, beads.Dep{IssueID: id, DependsOnID: steps[i%len(steps)], Type: "tracks"})
+		}
+		if len(openSteps) > 0 && i%7 == 2 {
+			// An open step on work: gated while the work is open, dropped
+			// once it is closed.
+			deps = append(deps, beads.Dep{IssueID: openSteps[(i*3)%len(openSteps)], DependsOnID: id, Type: "blocks"})
 		}
 		if len(sessions) > 0 && i%3 == 1 {
 			deps = append(deps, beads.Dep{IssueID: id, DependsOnID: sessions[i%len(sessions)], Type: "related"})

@@ -37,8 +37,8 @@ type sessionCreateRequest struct {
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
@@ -189,7 +189,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -239,12 +239,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
-	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusAccepted // always async for agent sessions
@@ -381,7 +381,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeSessionManagerError(w, err)
 		return
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -416,7 +416,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if sendErr := s.deliverInitialMessage(r.Context(), store.Store, info.ID, msg); sendErr != nil {
+		if sendErr := s.deliverInitialMessage(r.Context(), store, info.ID, msg); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -433,12 +433,12 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	resp := sessionToResponse(info, s.state.Config())
 	asProviderSession(&resp)
-	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
+	if catalog, catErr := s.workerSessionCatalog(store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
 		}
 	}
-	if handle, handleErr := s.workerHandleForSession(store.Store, info.ID); handleErr == nil {
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
 		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false, true, true, 0)
 	}
 	statusCode := http.StatusCreated
@@ -465,7 +465,7 @@ func sessionTemplateOverridesMetadata(options map[string]string, message string)
 }
 
 func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID string) error {
-	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
+	if store == (beads.SessionStore{}) || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 	if err := s.sessionManager(store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {

@@ -140,6 +140,23 @@ func armedNonce(t *testing.T, p *Provider, name string) string {
 	return nonce
 }
 
+// declaringArm arms a capture declaring the mid-turn hold and the interrupt
+// settle, so a test that removes the capture sees both declarations go.
+var declaringArm = runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true, DecideSettle: true}
+
+// requireDeclared fails unless name's agent pane, armed under nonce by
+// declaringArm, carries both declarations bound to the pane, so a later
+// check that they are unset can fail.
+func requireDeclared(t *testing.T, p *Provider, name, nonce string) {
+	t.Helper()
+	_, pane, _ := strings.Cut(nonce, ".")
+	for _, opt := range []string{programHoldOption, programSettleOption} {
+		if got := paneOption(t, p, name, opt); got != pane {
+			t.Fatalf("armed pane %s = %q, want it bound to %s", opt, got, pane)
+		}
+	}
+}
+
 // tapRunning reports whether a tap holding nonce's rand is in the process
 // table.
 func tapRunning(t *testing.T, nonce string) bool {
@@ -395,13 +412,14 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	first := armedNonce(t, p, name)
+	requireDeclared(t, p, name, first)
 	awaitRecord(t, p, name, first, runtime.ProgramWorking)
 
 	cfg.Command = emitterCommand(emit, "report state=idle", "hang")
@@ -409,7 +427,7 @@ func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Fatalf("after an unarmed respawn %s = %q, want unset", opt, got)
 		}
@@ -455,13 +473,14 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	cfg := runtime.Config{
 		Command:       emitterCommand(emit, "report state=working", "hang"),
 		WorkDir:       t.TempDir(),
-		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+		ProgramStatus: declaringArm,
 	}
 	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
 	nonce := armedNonce(t, p, name)
+	requireDeclared(t, p, name, nonce)
 	awaitRecord(t, p, name, nonce, runtime.ProgramWorking)
 	eventually(t, "a valid working reading under on", func() bool {
 		p.cache.Invalidate()
@@ -474,7 +493,7 @@ func TestRespawnUnderSwitchOffRemovesArmedCapture(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Relaunch under off: %v", err)
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
 		if got := paneOption(t, p, name, opt); got != "" {
 			t.Errorf("after a respawn under off %s = %q, want unset", opt, got)
 		}
@@ -625,7 +644,8 @@ func TestStopKillsRelayedProgramThatIgnoresTermAndHup(t *testing.T) {
 // the pipe ours. Revived by gc's respawn under off, the pane loses its capture
 // with the respawn; revived by any other respawn, the next sweep closes the
 // pipe by the live-tap rule. Either way the tap ends and no sweep is left
-// unfinished.
+// unfinished. On a tmux that closes a pane's pipe when its program exits
+// (3.8), nothing holds the pipe: the sweep disarms the dead pane at once.
 func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 	for _, revive := range []string{"relaunch", "respawn-pane"} {
 		t.Run(revive, func(t *testing.T) {
@@ -637,13 +657,14 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			cfg := runtime.Config{
 				Command:       emitterCommand(emit, "report state=working", "interactive"),
 				WorkDir:       t.TempDir(),
-				ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+				ProgramStatus: declaringArm,
 			}
 			if err := p.Start(context.Background(), name, cfg); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
 			t.Cleanup(func() { _ = p.Stop(name) })
 			nonce := armedNonce(t, p, name)
+			requireDeclared(t, p, name, nonce)
 			target, err := p.tm.agentPaneTarget(name)
 			if err != nil {
 				t.Fatal(err)
@@ -666,11 +687,44 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 				return paneFormat("#{pane_dead}") == "1" && paneOption(t, p, name, programStatusOption) != ""
 			})
 			record := paneOption(t, p, name, programStatusOption)
-			if pipe := paneFormat("#{pane_pipe}"); pipe != "1" || !tapRunning(t, nonce) {
-				t.Fatalf("dead pane: pane_pipe %q, tap running %v; want our tap still reading its pipe", pipe, tapRunning(t, nonce))
+			// Whether a pane's pipe outlives its program is tmux's call: older
+			// tmux keeps it (our tap still reads it), tmux 3.8 closes it when
+			// the program exits, ending the tap with it. Either is a state the
+			// sweep must handle; anything else is a broken setup.
+			pipe := paneFormat("#{pane_pipe}")
+			pipeClosedAtDeath := pipe == "0"
+			if pipeClosedAtDeath {
+				eventually(t, "the tap to end with the pipe tmux closed", func() bool { return !tapRunning(t, nonce) })
+			} else if pipe != "1" || !tapRunning(t, nonce) {
+				t.Fatalf("dead pane: pane_pipe %q, tap running %v; want our tap still reading its pipe, or its pipe closed by tmux", pipe, tapRunning(t, nonce))
+			}
+			requireDisarmed := func() {
+				t.Helper()
+				for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption, programSettleOption} {
+					if got := paneOption(t, p, name, opt); got != "" {
+						t.Fatalf("revived pane %s = %q, want unset", opt, got)
+					}
+				}
+				if got := paneFormat("#{pane_pipe}"); got != "0" {
+					t.Fatalf("revived pane: pane_pipe = %q, want our tap's pipe closed", got)
+				}
+				eventually(t, "the dead incarnation's tap to end", func() bool { return !tapRunning(t, nonce) })
+				if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 0 {
+					t.Fatalf("a sweep with nothing left = %d, %d, %v, want nothing to do", n, deferred, err)
+				}
 			}
 
 			p.SetProgramStatusMode(runtime.ProgramStatusOff)
+			if pipeClosedAtDeath {
+				// Nothing holds the pipe, so there is nothing to wait for: the
+				// sweep disarms the dead pane at once, and a revive has no
+				// capture left to lose.
+				if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+					t.Fatalf("DisarmProgramCaptures = %d, %d, %v; want the dead pane of %s disarmed, its pipe already closed", n, deferred, err, nonce)
+				}
+				requireDisarmed()
+				return
+			}
 			if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 1 {
 				t.Fatalf("DisarmProgramCaptures = %d, %d, %v; want the dead pane of %s deferred", n, deferred, err, nonce)
 			}
@@ -698,18 +752,7 @@ func TestDisarmSweepDefersDeadPaneUntilRevived(t *testing.T) {
 			if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != disarmed || deferred != 0 {
 				t.Fatalf("DisarmProgramCaptures after the revive = %d, %d, %v; want %d disarmed and none deferred", n, deferred, err, disarmed)
 			}
-			for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
-				if got := paneOption(t, p, name, opt); got != "" {
-					t.Fatalf("revived pane %s = %q, want unset", opt, got)
-				}
-			}
-			if got := paneFormat("#{pane_pipe}"); got != "0" {
-				t.Fatalf("revived pane: pane_pipe = %q, want our tap's pipe closed", got)
-			}
-			eventually(t, "the dead incarnation's tap to end", func() bool { return !tapRunning(t, nonce) })
-			if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 0 {
-				t.Fatalf("a sweep with nothing left = %d, %d, %v, want nothing to do", n, deferred, err)
-			}
+			requireDisarmed()
 		})
 	}
 }

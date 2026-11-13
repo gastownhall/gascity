@@ -19,11 +19,13 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
-// splitReassignFixture is a split city whose sessions and graph classes share
-// one binding, with a city work store and the rig work store a test passes in.
+// splitReassignFixture is a split city whose sessions, messaging and graph
+// classes share one binding, as every class does on the split city the routes
+// serve, with a city work store and the rig work store a test passes in.
 // It holds the configured named session "worker", whose only row has lost
 // continuity, so the next materializing resolve of "worker" replaces it.
 type splitReassignFixture struct {
@@ -53,11 +55,11 @@ func newSplitReassignFixture(t *testing.T, rig beads.Store) splitReassignFixture
 
 	fs.cfg.Agents[0].Dir = ""
 	fs.cfg.NamedSessions[0].Dir = ""
-	spec, ok, err := srv.findNamedSessionSpecForTarget(binding, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil || !ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = %v, %v", ok, err)
 	}
-	historicalID, err := srv.materializeNamedSession(binding, spec)
+	historicalID, err := srv.materializeNamedSession(beadstest.Sessions(binding), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession(worker): %v", err)
 	}
@@ -347,25 +349,49 @@ func (s *listRecordingStore) take(assignee string) (reads, live int) {
 	return reads, live
 }
 
-// TestRetiredSessionWorkStoresIsTheSessionsStoreAloneOnASingleStoreCity: a
-// city that relocates nothing sweeps exactly the one store it always swept,
-// rigs or no rigs.
-func TestRetiredSessionWorkStoresIsTheSessionsStoreAloneOnASingleStoreCity(t *testing.T) {
+// retiredSessionSwept is the stores the retired-session sweep visits on s's
+// epoch, in order, through the writable handles Sweep hands its visitor.
+func retiredSessionSwept(t *testing.T, s *Server) []beads.ResidentStore {
+	t.Helper()
+	st := s.state.Stores()
+	plan, err := st.Plan(retiredSessionSweep(st, s.loadCacheColdRigs()))
+	if err != nil {
+		t.Fatalf("planning the sweep: %v", err)
+	}
+	var swept []beads.ResidentStore
+	if _, err := storeref.Sweep(plan, func(_ storeref.TypedLeg, w beads.ResidentStore) error {
+		swept = append(swept, w)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return swept
+}
+
+// sweeps reports whether the sweep visits store.
+func sweeps(swept []beads.ResidentStore, store beads.Store) bool {
+	return slices.ContainsFunc(swept, func(w beads.ResidentStore) bool { return beads.SameStore(w, store) })
+}
+
+// TestRetiredSessionSweepIsTheSessionsStoreAloneOnASingleStoreCity: a city
+// that relocates nothing sweeps exactly the one store it always swept, rigs
+// or no rigs.
+func TestRetiredSessionSweepIsTheSessionsStoreAloneOnASingleStoreCity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	city := fs.cityBeadStore
 	fs.stores = map[string]beads.Store{"myrig": beads.NewMemStore()}
-	if got := New(fs).retiredSessionWorkStores(city); len(got) != 1 || got[0] != city {
+	if got := retiredSessionSwept(t, New(fs)); len(got) != 1 || !sweeps(got, city) {
 		t.Fatalf("single-store sweep = %v, want only the sessions store", got)
 	}
 }
 
-// TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState: a split
+// TestRetiredSessionSweepSkipsRigsSuspendedByEffectiveState: a split
 // city's sweep leaves a rig's store untouched exactly when status and the
 // active-bead lookup do (cacheColdRigNames): the rig is suspended at runtime
 // (`gc rig suspend`), by suspended_on_start, or by the legacy suspended field,
 // and no runtime resume overrides it. A store a suspended rig shares with a
 // rig that is not suspended is swept through that rig.
-func TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState(t *testing.T) {
+func TestRetiredSessionSweepSkipsRigsSuspendedByEffectiveState(t *testing.T) {
 	suspend, resume := true, false
 	for _, tc := range []struct {
 		name    string
@@ -394,11 +420,11 @@ func TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState(t *testing.T
 					t.Fatalf("SetRigSuspended(myrig): %v", err)
 				}
 			}
-			got := New(fs).retiredSessionWorkStores(binding)
-			if swept := slices.Contains(got, beads.Store(rig)); swept != tc.swept {
+			got := retiredSessionSwept(t, New(fs))
+			if swept := sweeps(got, rig); swept != tc.swept {
 				t.Fatalf("rig store swept = %t, want %t (sweep = %v)", swept, tc.swept, got)
 			}
-			if !slices.Contains(got, fs.cityBeadStore) || !slices.Contains(got, beads.Store(binding)) {
+			if !sweeps(got, fs.cityBeadStore) || !sweeps(got, binding) {
 				t.Fatalf("split sweep = %v, want the city store and the binding", got)
 			}
 		})
@@ -415,7 +441,7 @@ func TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState(t *testing.T
 		if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, fs.cityPath, "alpha", &suspend); err != nil {
 			t.Fatalf("SetRigSuspended(alpha): %v", err)
 		}
-		if got := New(fs).retiredSessionWorkStores(binding); !slices.Contains(got, beads.Store(shared)) {
+		if got := retiredSessionSwept(t, New(fs)); !sweeps(got, shared) {
 			t.Fatalf("split sweep = %v, want the store alpha shares with beta", got)
 		}
 	})

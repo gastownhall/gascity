@@ -75,6 +75,12 @@ func beadsCommandRunnerWithContextForHostedCity(ctx context.Context, cityPath st
 // them. Bounded to a handful of iterations: real store stacks are only a few
 // layers deep (normally beadPolicyStore wrapping CachingStore wrapping the
 // raw store); the bound just guards against an unexpected wrap cycle.
+//
+// It reads concrete store types, so a typed class handle answers "not bd" and
+// the ctx-bound clone silently turns off. Its callers (scopedStoreLike, from
+// the API's ScopedStoreLike, cmd_citystatus.go's session snapshot and
+// wisp_step_api.go's activeWorkStepReader) must keep passing raw stores until
+// T9 retypes them (typed-stores T6 plan, R12).
 func bdStoreBacking(store beads.Store) (*beads.BdStore, bool) {
 	for range 8 {
 		switch v := store.(type) {

@@ -503,6 +503,31 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
 }
 
+// CheckEventStart returns the seq a standalone event check (gc order check,
+// the orders/check API) reads past for an order whose run cursor is
+// runCursor: the cursor itself once the order has run, or the event head for
+// an order that has never run.
+//
+// An event order fires on the matching events recorded after the controller
+// began watching it; history recorded before then is never replayed (the
+// controller seeds a never-run order at the head, see cmd/gc
+// eventCheckStart). A standalone check holds no record of when watching
+// began, so it reads nothing below the head and reports a never-run order not
+// due: a matching event recorded since the controller began watching fires
+// it on the controller's next pass. Without this, every check of a never-run
+// order re-read the whole event history, every archive included, and
+// reported due on history the controller would never fire on.
+func CheckEventStart(ep events.Provider, runCursor uint64) (uint64, error) {
+	if runCursor > 0 || ep == nil {
+		return runCursor, nil
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		return 0, fmt.Errorf("reading event head: %w", err)
+	}
+	return head, nil
+}
+
 // listEventsWithInFlight reads the events filter matches, including those
 // still stranded in an in-flight rotation file when the provider can read
 // them ([events.InFlightProvider]). A plain List misses them during an
