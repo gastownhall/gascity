@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -528,5 +529,72 @@ func writeTailJSONL(t *testing.T, path string, lines []map[string]any) {
 		if err := enc.Encode(line); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestReadTailWindowAtStopsAtSizeSnapshot pins readTailWindowAt's contract with
+// its caller: the window ends at the size the caller snapshotted. A caller that
+// scans two windows of one file derives both from a single Seek so the bytes
+// between them cannot fall in neither; a read that runs past the snapshot to
+// whatever EOF has become would hand the later bytes to this window as well as
+// to whoever reads from the snapshot on.
+func TestReadTailWindowAtStopsAtSizeSnapshot(t *testing.T) {
+	const body = "alpha\nbravo\ncharlie\n"
+	const appended = "delta\necho\n"
+
+	tests := []struct {
+		name          string
+		n             int64
+		want          string
+		startsMidLine bool
+		truncated     bool
+	}{
+		{name: "window narrower than the snapshot", n: 9, want: "\ncharlie\n", startsMidLine: true, truncated: true},
+		{name: "window on a line boundary", n: 8, want: "charlie\n", startsMidLine: false, truncated: true},
+		{name: "window wider than the snapshot", n: 1 << 20, want: body, startsMidLine: false, truncated: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close() //nolint:errcheck // read-only handle
+
+			size, err := f.Seek(0, io.SeekEnd)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// The writer appends between the caller's snapshot and the read.
+			w, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.WriteString(appended); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			data, startsMidLine, truncated, err := readTailWindowAt(f, size, tt.n)
+			if err != nil {
+				t.Fatalf("readTailWindowAt: %v", err)
+			}
+			if string(data) != tt.want {
+				t.Errorf("window = %q, want %q: it must end at the snapshot (offset %d), not at the appended bytes", data, tt.want, size)
+			}
+			if startsMidLine != tt.startsMidLine {
+				t.Errorf("startsMidLine = %v, want %v", startsMidLine, tt.startsMidLine)
+			}
+			if truncated != tt.truncated {
+				t.Errorf("truncated = %v, want %v", truncated, tt.truncated)
+			}
+		})
 	}
 }
