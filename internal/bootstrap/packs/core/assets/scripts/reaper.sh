@@ -119,6 +119,20 @@ SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
+# Step 5's burst guard. A city scope with more stale issues than
+# GC_REAPER_STALE_ISSUE_BURST_MAX closes none of them that run: it records an
+# anomaly, which escalates under the reaper:anomalies incident, and reports
+# stale_issues_held:<N>. A burst is what a step the run budget starved for weeks
+# looks like once something (a storage split, a smaller work store) lets it run
+# again, and closing it unseen is the one reaper action no later run can undo.
+# Release it by raising the max, or for one run with
+# GC_REAPER_STALE_ISSUE_BURST_ACK=<N>, which closes a burst of exactly N
+# candidates: a count that moved since it was read is held again. 0 turns the
+# guard off.
+STALE_ISSUE_BURST_MAX="${GC_REAPER_STALE_ISSUE_BURST_MAX:-25}"
+case "$STALE_ISSUE_BURST_MAX" in ''|*[!0-9]*) STALE_ISSUE_BURST_MAX=25 ;; esac
+STALE_ISSUE_BURST_ACK="${GC_REAPER_STALE_ISSUE_BURST_ACK:-}"
+case "$STALE_ISSUE_BURST_ACK" in *[!0-9]*) STALE_ISSUE_BURST_ACK="" ;; esac
 # Ids handed to one gc bd verb invocation (close/update/delete).
 VERB_BATCH="${GC_REAPER_VERB_BATCH:-200}"
 case "$VERB_BATCH" in ''|*[!0-9]*|0) VERB_BATCH=200 ;; esac
@@ -219,6 +233,8 @@ TOTAL_WORKFLOW_ROOT_CANDIDATES=0
 TOTAL_WORKFLOW_ROOTS_CHECKED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+# Stale city issues the burst guard held back.
+TOTAL_STALE_ISSUES_HELD=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
@@ -274,6 +290,24 @@ record_anomaly() {
 # label when the database is not known yet).
 scope_anomaly() {
     record_anomaly "${SCOPE_DB:-$SCOPE_LABEL}" "$@"
+}
+
+# stale_issue_burst_held <count> reports whether Step 5's burst guard holds
+# back the current scope's <count> stale issues, and records the hold: the
+# order outcome names the step, and an anomaly escalates it. The count is
+# written held=<N>, which the anomaly fingerprint normalizes, so a held
+# backlog that grows by a few rows a run stays one incident.
+stale_issue_burst_held() {
+    local count="$1"
+    [ "$STALE_ISSUE_BURST_MAX" -gt 0 ] || return 1
+    [ "$count" -gt "$STALE_ISSUE_BURST_MAX" ] || return 1
+    if [ -n "$STALE_ISSUE_BURST_ACK" ] && [ "$count" -eq "$STALE_ISSUE_BURST_ACK" ]; then
+        echo "reaper: closing $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, as GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK acknowledges" >&2
+        return 1
+    fi
+    order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "step 5 held $count stale issue(s) over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX; none was closed"
+    scope_anomaly "stale-issue burst held=$count: that many open issues are stale (no update in $STALE_ISSUE_AGE), more than GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, so the reaper closed none of them. A burst this size usually means step 5 was starved (see budget_skipped in earlier reaper summaries) or something just released it, such as a storage split. Review them, then release the burst for one run with GC_REAPER_STALE_ISSUE_BURST_ACK=$count, or raise GC_REAPER_STALE_ISSUE_BURST_MAX"
+    return 0
 }
 
 # workflow_root_store_ref_local_condition keeps workflow roots whose
@@ -1165,6 +1199,8 @@ reap_scope() {
         if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
             if [ "$SCOPE_KIND" != "city" ]; then
                 TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
+            elif stale_issue_burst_held "$count"; then
+                TOTAL_STALE_ISSUES_HELD=$((TOTAL_STALE_ISSUES_HELD + count))
             else
                 # close_mode comes from the query's per-row CASE: 'force' when
                 # the row carried a non-empty assignee at select time and
@@ -1613,19 +1649,21 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report. Only a measured age (age=<seconds>s) is normalized out of the
-# fingerprint, so a stale backup that merely grows older stays one incident
-# while a change of state (age=absent, age=unparseable) notifies at once. A
+# Report. Only a measured age (age=<seconds>s) and a held stale-issue burst's
+# size (held=<N>, with the line that repeats it) are normalized out of the
+# fingerprint, so a stale backup that merely grows older, or a held burst that
+# grows, stays one incident while a change of state (age=absent,
+# age=unparseable, a burst held or released) notifies at once. A
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
-    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g; s/held=[0-9]+:.*/held=<dynamic>/')
     raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
         "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
 else
     resolve_incident "reaper:anomalies" || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS, budget_skipped:${BUDGET_SKIPPED:-none}"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, stale_issues_held:$TOTAL_STALE_ISSUES_HELD, mail_wisps:$TOTAL_MAIL_WISPS, budget_skipped:${BUDGET_SKIPPED:-none}"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

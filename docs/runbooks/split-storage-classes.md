@@ -242,7 +242,20 @@ steps and acts on everything that was eligible all along: one city closed 98
 stale work beads in a single run. Before the window, look at the reaper's
 recent `order.skipped` events and its summary's `budget_skipped:` field, which
 names each `<scope>@<step>` the budget kept from running. If later steps have
-been skipped, expect that burst, and decide beforehand whether to let it run.
+been skipped, expect that burst.
+
+The reaper does not close a burst on its own. When step 5 finds more stale
+issues in the city scope than `GC_REAPER_STALE_ISSUE_BURST_MAX` (default 25),
+it closes none of them that run: it records an anomaly, which escalates as
+`ESCALATION: Reaper anomalies detected` and names the count, reports
+`stale_issues_held:<N>` in its summary, and records the held step in the
+order's `order.skipped` outcome. It holds them every run until you release
+them. Review the held issues, then either raise
+`GC_REAPER_STALE_ISSUE_BURST_MAX`, or release that burst for one run with
+`GC_REAPER_STALE_ISSUE_BURST_ACK=<N>`, where `<N>` is the held count. The
+acknowledgement covers exactly that count, so a backlog that changed after
+you reviewed it is held again. `GC_REAPER_STALE_ISSUE_BURST_MAX=0` turns the
+guard off.
 
 ## Step 4: run the migration
 
