@@ -44,7 +44,10 @@ package main
 // finishes the steps that are not. Once every step is done the restore reads
 // each restored store back (in a maintenance window opened with the restored
 // city.toml, which starts a stopped provider and stops it after) and proves
-// its rows equal to the snapshot's JSONL, row for row.
+// its rows equal to the snapshot's JSONL, row for row. The JSONL is read from
+// the live store after the copy, so a row it dates at or after the copy's
+// recorded time (snapshotExact.CopiedAt) may be in the JSONL alone: the
+// restore reports it as written during the snapshot and finishes.
 
 import (
 	"context"
@@ -53,6 +56,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -272,6 +276,7 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 	if err := migrationWindowStopProvider(cityPath); err != nil {
 		return nil, "", fmt.Errorf("stopping the managed Dolt for the copy of its data directory: %w", err)
 	}
+	copiedAt := time.Now().UTC()
 	tree, copyErr := copySnapshotTree(dir, dataDir, snapshotCityDoltDir)
 	if err := migrationWindowStartProvider(cityPath); err != nil {
 		return nil, "", errors.Join(copyErr, fmt.Errorf("starting the managed Dolt again after the copy of its data directory: %w", err))
@@ -279,7 +284,7 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 	if copyErr != nil {
 		return nil, "", copyErr
 	}
-	return &snapshotExact{Method: snapshotMethodDoltDataDir, Tree: tree}, "", nil
+	return &snapshotExact{Method: snapshotMethodDoltDataDir, Tree: tree, CopiedAt: copiedAt}, "", nil
 }
 
 // snapshotTreeBytes is the size of every regular file under root.
@@ -920,16 +925,42 @@ func verifyRestoredCity(lock *os.File, cityPath, dir string, plan cityRestorePla
 	}
 	defer func() { err = errors.Join(err, w.Close()) }()
 	for _, s := range plan.stores {
-		if err := verifyRestoredStore(cityPath, dir, s); err != nil {
+		during, err := verifyRestoredStore(cityPath, dir, s)
+		if err != nil {
 			return fmt.Errorf("%s: %w", s.rec.Name, err)
+		}
+		if len(during) > 0 {
+			fmt.Fprintf(stderr, "%s: warning: %s: %d row(s) written during the snapshot, after its copy was taken at %s and before its JSONL was read: %s. The restored store holds them as the copy found them; the JSONL records them as they were later\n", logPrefix, s.rec.Name, len(during), s.rec.Exact.CopiedAt.Format(time.RFC3339), strings.Join(during, ", ")) //nolint:errcheck // best-effort stderr
 		}
 	}
 	return nil
 }
 
+// snapshotRowWrittenAfter reports whether the JSONL row b may have been
+// written at or after copiedAt, the moment its store's copy was taken. A
+// store may keep its times to the second, so a row stamped in the copy's own
+// second counts; a row whose JSONL time is earlier was in the store before the
+// copy, so the copy holds it as the JSONL does. No copy time (a snapshot taken
+// before gc recorded one) excuses nothing.
+func snapshotRowWrittenAfter(b beads.Bead, copiedAt time.Time) bool {
+	if copiedAt.IsZero() {
+		return false
+	}
+	changed := b.UpdatedAt
+	if changed.IsZero() {
+		changed = b.CreatedAt
+	}
+	return !changed.Before(copiedAt.Truncate(time.Second))
+}
+
 // verifyRestoredStore proves one restored store's rows equal to the
-// snapshot's JSONL, row for row.
-func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) error {
+// snapshot's JSONL, row for row. A JSONL row the restored store lacks or
+// holds differently is excused when the JSONL dates it at or after the copy
+// (snapshotRowWrittenAfter): the snapshot reads its JSONL from the live store
+// after the copy, so a write in between lands in the JSONL alone. Those rows
+// are returned, sorted, as written during the snapshot. A restored row the
+// JSONL lacks has no JSONL time to judge it by, so it always fails.
+func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) (during []string, err error) {
 	want := map[string]beads.Bead{}
 	_, present, err := scanInfraBackupFile(filepath.Join(dir, s.rec.JSONL.Path), storageSnapshotJSONLFormat, s.rec.Name, func(e infraBackupEntry) error {
 		want[e.Bead.ID] = e.Bead
@@ -939,7 +970,7 @@ func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) error {
 		err = errors.New("it is missing")
 	}
 	if err != nil {
-		return fmt.Errorf("reading the snapshot's JSONL: %w", err)
+		return nil, fmt.Errorf("reading the snapshot's JSONL: %w", err)
 	}
 	var store beads.Store
 	if s.rigDir == "" {
@@ -948,27 +979,38 @@ func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) error {
 		store, err = openStorageScopeStore(s.rigDir, cityPath)
 	}
 	if err != nil {
-		return fmt.Errorf("opening the restored store: %w", err)
+		return nil, fmt.Errorf("opening the restored store: %w", err)
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // read-only
 	rows, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
-		return fmt.Errorf("listing the restored store: %w", err)
+		return nil, fmt.Errorf("listing the restored store: %w", err)
 	}
-	if len(rows) != len(want) {
-		return fmt.Errorf("the restored store holds %d row(s), the snapshot %d", len(rows), len(want))
-	}
+	copiedAt := s.rec.Exact.CopiedAt
 	for _, got := range rows {
 		w, ok := want[got.ID]
 		if !ok {
-			return fmt.Errorf("the restored store holds %s, which the snapshot does not", got.ID)
+			return nil, fmt.Errorf("the restored store holds %s, which the snapshot does not", got.ID)
 		}
+		delete(want, got.ID)
 		got.IsBlocked, got.Dependencies, w.IsBlocked, w.Dependencies = nil, nil, nil, nil
-		if diff := beadCopyDifference(w, got); diff != "" {
-			return fmt.Errorf("%s differs from the snapshot: %s", got.ID, diff)
+		diff := beadCopyDifference(w, got)
+		switch {
+		case diff == "":
+		case snapshotRowWrittenAfter(w, copiedAt):
+			during = append(during, got.ID)
+		default:
+			return nil, fmt.Errorf("%s differs from the snapshot: %s", got.ID, diff)
 		}
 	}
-	return nil
+	for _, id := range slices.Sorted(maps.Keys(want)) {
+		if !snapshotRowWrittenAfter(want[id], copiedAt) {
+			return nil, fmt.Errorf("the restored store lacks %s, which the snapshot holds", id)
+		}
+		during = append(during, id)
+	}
+	sort.Strings(during)
+	return during, nil
 }
 
 // storageCityRestoreRefusal refuses a writing storage verb while a city

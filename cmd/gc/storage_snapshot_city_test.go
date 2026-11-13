@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -617,17 +618,155 @@ func TestCityRestoreProvesTheRestoredStoreAgainstTheJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Stores[0].Exact.File = &file
-	if err := os.Remove(filepath.Join(dir, storageSnapshotManifestName)); err != nil {
-		t.Fatal(err)
-	}
-	if err := publishSnapshotManifest(context.Background(), dir, m); err != nil {
-		t.Fatal(err)
-	}
+	// The copy was taken well after every row was written, so no row of the
+	// JSONL can have been written during the snapshot: the disagreement is
+	// the copy's.
+	m.Stores[0].Exact.CopiedAt = time.Now().UTC().Add(time.Hour)
+	republishSnapshotManifest(t, dir, m)
 	code, stdout, stderr := city.restore(t, id)
 	if code == 0 || !strings.Contains(stderr, "verified: work:") {
 		t.Fatalf("restore = %d: %s%s; want the proof against the JSONL to fail", code, stdout, stderr)
 	}
 	if j, present, err := readStorageCityRestoreJournal(city.request.CityPath); err != nil || !present || j.done(cityRestoreStepVerified) {
 		t.Fatalf("journal %+v present %v (%v); want it open, the proof not done", j, present, err)
+	}
+}
+
+// republishSnapshotManifest replaces dir's manifest with m.
+func republishSnapshotManifest(t *testing.T, dir string, m snapshotManifest) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(dir, storageSnapshotManifestName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishSnapshotManifest(context.Background(), dir, m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSnapshotRecordsWhenItsCopyWasTaken: the exact copy carries the moment
+// it was taken, so a restore can tell a row written after the copy (and
+// before the JSONL read) from a copy that lost it.
+func TestSnapshotRecordsWhenItsCopyWasTaken(t *testing.T) {
+	city := newFileStoreCity(t)
+	before := time.Now().UTC()
+	city.snapshot(t)
+	after := time.Now().UTC()
+	_, m := onlySnapshot(t, city.to)
+	got := m.Stores[0].Exact.CopiedAt
+	if got.Before(before) || got.After(after) {
+		t.Fatalf("copied_at = %s, want it within the snapshot's run [%s, %s]", got, before, after)
+	}
+}
+
+// TestCityRestoreReportsRowsWrittenDuringTheSnapshot: the snapshot reads the
+// JSONL after the copy (a managed Dolt is started again for it), so a row
+// written in between is in the JSONL and not in the copy. The restore puts
+// the copy back, reports each such row as written during the snapshot, and
+// finishes: the proof does not fail forever and hold every writing storage
+// verb behind its journal.
+func TestCityRestoreReportsRowsWrittenDuringTheSnapshot(t *testing.T) {
+	city := newFileStoreCity(t)
+	// Work rows only: every reader sees them, the split-strict gate's work
+	// view included.
+	live, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(city.request.CityPath, ".gc", "beads.json"), beads.WithFileStoreIDPrefix("rc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, live, beads.Bead{Title: "more work", Type: "task"})
+	id := city.snapshot(t)
+	dir := filepath.Join(city.to, id)
+	m, err := readSnapshotManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(dir, m.Stores[0].Exact.File.Path)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, copyPath, beads.WithFileStoreIDPrefix("rc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The copy as it would be had it been taken before "real work" was
+	// created and before "more work" was retitled.
+	var created, changed string
+	var earliest time.Time
+	for _, b := range rows {
+		if earliest.IsZero() || b.CreatedAt.Before(earliest) {
+			earliest = b.CreatedAt
+		}
+		switch b.Title {
+		case "real work":
+			created = b.ID
+		case "more work":
+			changed = b.ID
+		}
+	}
+	if created == "" || changed == "" {
+		t.Fatalf("the copy lacks the rows the test changes: %+v", rows)
+	}
+	if err := store.Delete(created); err != nil {
+		t.Fatal(err)
+	}
+	title := "more work, before its retitle"
+	if err := store.Update(changed, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := hashSnapshotFile(dir, copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Stores[0].Exact.File = &file
+	m.Stores[0].Exact.CopiedAt = earliest.Add(-time.Minute)
+	republishSnapshotManifest(t, dir, m)
+
+	city.split(t)
+	code, stdout, stderr := city.restore(t, id)
+	if code != 0 {
+		t.Fatalf("restore = %d: %s%s; want rows written during the snapshot reported, not a failed proof", code, stdout, stderr)
+	}
+	for _, want := range []string{"written during the snapshot", created, changed} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if j, present, err := readStorageCityRestoreJournal(city.request.CityPath); err != nil || !present || !j.done(cityRestoreStepVerified) {
+		t.Fatalf("journal %+v present %v (%v); want the proof done", j, present, err)
+	}
+	if err := storageCityRestoreRefusal(city.request.CityPath); err != nil {
+		t.Fatalf("writing verbs still refused after the restore: %v", err)
+	}
+}
+
+// TestCityRestoreProofFailsAStoreRowTheJSONLLacks: a row the restored store
+// holds and the JSONL does not cannot be dated from the JSONL, so the copy
+// time excuses nothing about it and the proof fails.
+func TestCityRestoreProofFailsAStoreRowTheJSONLLacks(t *testing.T) {
+	city := newFileStoreCity(t)
+	id := city.snapshot(t)
+	dir := filepath.Join(city.to, id)
+	m, err := readSnapshotManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(dir, m.Stores[0].Exact.File.Path)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, copyPath, beads.WithFileStoreIDPrefix("rc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := mustCreateInfraBead(t, store, beads.Bead{Title: "only in the copy", Type: "task"})
+	file, err := hashSnapshotFile(dir, copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Stores[0].Exact.File = &file
+	m.Stores[0].Exact.CopiedAt = time.Unix(0, 0).UTC()
+	republishSnapshotManifest(t, dir, m)
+
+	city.split(t)
+	code, stdout, stderr := city.restore(t, id)
+	if code == 0 || !strings.Contains(stderr, extra.ID) {
+		t.Fatalf("restore = %d: %s%s; want the proof to fail on %s", code, stdout, stderr, extra.ID)
 	}
 }

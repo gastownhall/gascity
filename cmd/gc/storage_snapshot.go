@@ -672,11 +672,12 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, tag, 
 		}
 		rec.Exact = snapshotExact{Method: snapshotMethodBdExport, File: &file}
 	case snapshotMethodFileCopy:
+		copiedAt := time.Now().UTC()
 		file, err := copySnapshotFile(dir, filepath.Join(scope.root, ".gc", "beads.json"), filepath.Join(files, "beads.json"))
 		if err != nil {
 			return rec, err
 		}
-		rec.Exact = snapshotExact{Method: snapshotMethodFileCopy, File: &file}
+		rec.Exact = snapshotExact{Method: snapshotMethodFileCopy, File: &file, CopiedAt: copiedAt}
 	default:
 		rec.Exact = snapshotExact{Method: snapshotMethodNone}
 		rec.Notes = append(rec.Notes, "provider "+provider+" has no exact snapshot, and no tool restores a store from the JSONL yet: this snapshot is a record of the store, not a way back to it")

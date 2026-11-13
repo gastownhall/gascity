@@ -419,8 +419,8 @@ func TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps(t *testing.T) {
 		t.Fatalf("snapshot = %d: %s%s", code, stdout.String(), stderr.String())
 	}
 	id, m := onlySnapshot(t, to)
-	if m.Stores[0].Exact.Method != snapshotMethodDoltDataDir {
-		t.Fatalf("the work store's exact copy is %+v, want the data directory", m.Stores[0].Exact)
+	if m.Stores[0].Exact.Method != snapshotMethodDoltDataDir || m.Stores[0].Exact.CopiedAt.IsZero() {
+		t.Fatalf("the work store's exact copy is %+v, want the data directory with the time it was copied", m.Stores[0].Exact)
 	}
 	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 {
 		t.Fatalf("the snapshot left the managed Dolt up (pid %d)", pid)

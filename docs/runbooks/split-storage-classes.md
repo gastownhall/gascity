@@ -1428,7 +1428,10 @@ Know what each one can bring back:
   restore <id> --city --fleet-stopped` puts back the stores, city.toml and
   the city's storage records (`.gc/min-gc-version`, the served-binding and
   cleared notes), moves the binding root aside, and proves each restored
-  store against the snapshot's JSONL. A snapshot that holds a binding, a
+  store against the snapshot's JSONL. The snapshot records when it took each
+  copy and reads the JSONL after it, so a row the JSONL dates at or after the
+  copy is reported as written during the snapshot (a warning), not a failed
+  proof. A snapshot that holds a binding, a
   snapshot of a split city (one that records a served-binding or cleared
   note), a store whose copy is a Dolt tag or a bd export, and a rig imported
   since the snapshot whose store the snapshot does not hold are refused
