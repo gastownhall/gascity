@@ -219,21 +219,53 @@ fi
 # a descendant still holds the slot FD. The stamp PID is dead; flock stays
 # held. Acquire must reap that descendant instead of burning the wait bound
 # until an operator runs lsof + kill by hand.
+#
+# The leak is a plain fork that inherited the descriptor, so it stays in its
+# dead parent's process group; the reaper keys on that (ga-y5030z). leak_slot
+# reproduces the shape: the fake gate leads its own process group, forks a
+# plain sleeper (no setsid), and exits.
+#   leak_slot <slot_dir> <pidfile> [old-format]
+# Writes the sleeper's pid to <pidfile>. "old-format" rewrites the stamp to the
+# 4-field shape that predates the PGID field.
+leak_slot() {
+    local _ls_dir="$1" _ls_pidfile="$2" _ls_mode="${3:-}"
+    rm -f "$_ls_pidfile"
+    (
+        set -m
+        LIB="$LIB" DIR="$_ls_dir" PIDFILE="$_ls_pidfile" MODE="$_ls_mode" PUSH_GATE_MAX_CONCURRENT=1 \
+            bash -c '
+                . "$LIB"
+                fd=""
+                push_gate_acquire_slot "$DIR" fd "leaker" || exit 2
+                if [[ "$MODE" == old-format ]]; then
+                    printf "%s %s %s %s\n" "$$" "1970-01-01T00:00:00Z" "leaker" "somehost" >"$DIR/slot-0.lock"
+                fi
+                # Quiet stdio: a sleeper holding the harness pipe would stall
+                # any tee reading that pipe until the sleeper exits.
+                sleep 60 >/dev/null 2>&1 </dev/null &
+                echo $! >"$PIDFILE"
+                exit 0
+            ' >/dev/null 2>&1 &
+        wait $!
+    )
+}
+
+# A leak fixture that failed to pin its slot would let every reap assertion
+# below pass vacuously (acquire just takes a free slot), so check it first.
+assert_leak_pinned() {
+    local _alp_name="$1" _alp_dir="$2" _alp_pid="$3"
+    if [[ -n "$_alp_pid" ]] && kill -0 "$_alp_pid" 2>/dev/null \
+        && ! flock -n "$_alp_dir/slot-0.lock" -c 'exit 0' 2>/dev/null; then
+        record_pass "$_alp_name"
+    else
+        record_fail "$_alp_name" "fixture did not pin slot-0 with a live sleeper (pid='${_alp_pid:-}')"
+    fi
+}
+
 REAP_SLOTS="$WORK/reap-slots"
-if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; }; then
+if command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; then
     REAP_PIDFILE="$WORK/reap-sleeper.pid"
-    rm -f "$REAP_PIDFILE"
-    LIB="$LIB" DIR="$REAP_SLOTS" PIDFILE="$REAP_PIDFILE" PUSH_GATE_MAX_CONCURRENT=1 \
-        bash -c '
-            . "$LIB"
-            fd=""
-            push_gate_acquire_slot "$DIR" fd "leaker" || exit 2
-            # Detach a sleeper that inherits the slot FD, then vanish so the
-            # stamp PID is dead while the sleeper keeps the flock.
-            setsid bash -c "echo \$\$ > \"\$PIDFILE\"; exec sleep 60" &
-            sleep 0.3
-            exit 0
-        '
+    leak_slot "$REAP_SLOTS" "$REAP_PIDFILE"
     SLEEPER_PID="$(cat "$REAP_PIDFILE" 2>/dev/null || true)"
     if flock -n "$REAP_SLOTS/slot-0.lock" -c 'exit 0' 2>/dev/null; then
         record_fail "reap.leaked_descendant_holds_slot_before_acquire" \
@@ -287,7 +319,7 @@ if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || com
         wait "$PROBER_PID" 2>/dev/null || true
     fi
 else
-    echo "  skip reap.leaked_descendant_* — need setsid and lsof/fuser"
+    echo "  skip reap.leaked_descendant_* — need lsof/fuser"
 fi
 
 # ---------------- reap: holder discovery prefers fuser, falls back to lsof ----------------
@@ -365,6 +397,89 @@ if command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; then
     wait "$HOLDER_PID" 2>/dev/null || true
 else
     echo "  skip reap.spares_live_holder_writing_stamp — need lsof/fuser"
+fi
+
+# ---------------- reap: only the dead gate's process group is signalled (ga-y5030z) ----------------
+# lsof/fuser list EVERY process with the slot file open, including a live
+# gate's own poll and another reaper's probe, so "has the file open" cannot
+# pick the victim. The acquiring gate stamps its process group as a 5th field
+# and the reaper signals only holders still in that group.
+if command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; then
+    PG_SLOTS="$WORK/reap-pgid-slots"
+    PG_PIDFILE="$WORK/reap-pgid-sleeper.pid"
+    leak_slot "$PG_SLOTS" "$PG_PIDFILE"
+    PG_LEAK_PID="$(cat "$PG_PIDFILE" 2>/dev/null || true)"
+    assert_leak_pinned "reap.pgid.fixture_pins_slot" "$PG_SLOTS" "$PG_LEAK_PID"
+
+    # The stamp carries the gate's process group, which the leaked descendant
+    # inherited.
+    PG_STAMP=""
+    IFS= read -r PG_STAMP <"$PG_SLOTS/slot-0.lock" 2>/dev/null || true
+    PG_STAMP_PGID="$(printf '%s\n' "$PG_STAMP" | awk '{print $5}')"
+    PG_LEAK_PGID="$(ps -o pgid= -p "$PG_LEAK_PID" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$PG_LEAK_PGID" && "$PG_STAMP_PGID" == "$PG_LEAK_PGID" ]]; then
+        record_pass "stamp.records_gate_process_group"
+    else
+        record_fail "stamp.records_gate_process_group" \
+            "stamp '$PG_STAMP' field 5 is '$PG_STAMP_PGID', leaked descendant's pgid is '${PG_LEAK_PGID:-?}'"
+    fi
+
+    # An unrelated live process in its own process group that holds the same
+    # slot file open for the whole reap window, so the settle look cannot
+    # clear it the way it clears a probe that closes at once.
+    PG_OTHER_PIDFILE="$WORK/reap-pgid-other.pid"
+    rm -f "$PG_OTHER_PIDFILE"
+    (
+        set -m
+        bash -c 'exec 7<"$1"; exec sleep 30' _ "$PG_SLOTS/slot-0.lock" >/dev/null 2>&1 </dev/null &
+        echo $! >"$PG_OTHER_PIDFILE"
+    )
+    PG_OTHER_PID="$(cat "$PG_OTHER_PIDFILE" 2>/dev/null || true)"
+    for _ in $(seq 1 50); do
+        _push_gate_slot_holder_pids "$PG_SLOTS/slot-0.lock" | grep -qx "$PG_OTHER_PID" && break
+        sleep 0.1
+    done
+
+    PG_OUT="$(LIB="$LIB" DIR="$PG_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
+        PUSH_GATE_MAX_WAIT_SECONDS=20 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
+    assert_eq "reap.pgid.acquire_succeeds_after_reaping_leak" "$(printf '%s\n' "$PG_OUT" | tail -1)" "ACQUIRED"
+    if kill -0 "$PG_LEAK_PID" 2>/dev/null; then
+        record_fail "reap.pgid.kills_leaked_descendant_in_dead_gate_group" "sleeper pid $PG_LEAK_PID still alive"
+        kill "$PG_LEAK_PID" 2>/dev/null || true
+    else
+        record_pass "reap.pgid.kills_leaked_descendant_in_dead_gate_group"
+    fi
+    if kill -0 "$PG_OTHER_PID" 2>/dev/null; then
+        record_pass "reap.pgid.spares_holder_in_other_process_group"
+    else
+        record_fail "reap.pgid.spares_holder_in_other_process_group" \
+            "pid $PG_OTHER_PID is not in the dead gate's process group and was killed: $PG_OUT"
+    fi
+    kill "$PG_OTHER_PID" 2>/dev/null || true
+
+    # A slot stamped before the PGID field existed (4 fields) names no group to
+    # match, so the reaper must not guess: it leaves the holder alone, says so,
+    # and the acquire falls back to waiting out the bound.
+    OLD_SLOTS="$WORK/reap-oldformat-slots"
+    OLD_PIDFILE="$WORK/reap-oldformat-sleeper.pid"
+    leak_slot "$OLD_SLOTS" "$OLD_PIDFILE" old-format
+    OLD_LEAK_PID="$(cat "$OLD_PIDFILE" 2>/dev/null || true)"
+    assert_leak_pinned "reap.pgid.old_format_fixture_pins_slot" "$OLD_SLOTS" "$OLD_LEAK_PID"
+    OLD_OUT="$(LIB="$LIB" DIR="$OLD_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
+        PUSH_GATE_MAX_WAIT_SECONDS=3 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
+    assert_eq "reap.pgid.old_format_slot_not_reaped_so_acquire_waits" "$(printf '%s\n' "$OLD_OUT" | tail -1)" "DENIED"
+    assert_contains "reap.pgid.old_format_slot_says_not_reaping" "$OLD_OUT" "not reaping"
+    if kill -0 "$OLD_LEAK_PID" 2>/dev/null; then
+        record_pass "reap.pgid.old_format_holder_left_alive"
+    else
+        record_fail "reap.pgid.old_format_holder_left_alive" \
+            "pid $OLD_LEAK_PID held a slot with no stamped process group and was killed: $OLD_OUT"
+    fi
+    kill "$OLD_LEAK_PID" 2>/dev/null || true
+else
+    echo "  skip reap.pgid.* — need lsof/fuser"
 fi
 
 # ---------------- missing flock(1): degrade best-effort, never block ----------------
