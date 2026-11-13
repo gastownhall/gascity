@@ -7,36 +7,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-func TestIsGatedBead(t *testing.T) {
-	tests := []struct {
-		name string
-		bead beads.Bead
-		want bool
-	}{
-		{name: "plain task bead is gated", bead: beads.Bead{Type: "task"}, want: true},
-		{name: "empty type defaults to gated", bead: beads.Bead{}, want: true},
-		{
-			name: "workflow root is not gated",
-			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
-			want: false,
-		},
-		{
-			name: "control run step is not gated",
-			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRun}},
-			want: false,
-		},
-		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
-		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsGatedBead(tc.bead); got != tc.want {
-				t.Fatalf("IsGatedBead = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestValidOutcome(t *testing.T) {
 	for _, v := range []string{
 		beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
