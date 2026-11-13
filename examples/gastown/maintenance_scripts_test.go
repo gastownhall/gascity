@@ -1,8 +1,13 @@
+//go:build unix
+
 package gastown_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +18,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -1542,8 +1549,10 @@ exit 1
 	if !strings.Contains(log, "--rig project session list --json") {
 		t.Fatalf("rig-scoped session list was not queried:\n%s", log)
 	}
-	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session") {
-		t.Fatalf("rig orphan bead was not reset:\n%s", log)
+	// The release names the rig the claim was listed from, so it runs in
+	// that rig's store whatever its arguments' prefixes say.
+	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session --rig project") {
+		t.Fatalf("rig orphan bead was not reset in its rig:\n%s", log)
 	}
 	if !strings.Contains(log, "bd release-if-current ga-rig-closed-default-filtered project__worker-gc-closed") {
 		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
@@ -1941,7 +1950,12 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			}
 			log := string(logData)
 			lines := nonEmptyLogLines(log)
+			// A rig orphan's release names the rig it was listed from; an HQ
+			// orphan's names none.
 			orphanUpdate := "bd release-if-current " + tt.orphanID + " " + tt.orphanAssignee
+			if tt.scope != "hq" {
+				orphanUpdate += " --rig " + tt.scope
+			}
 			if got := countExactLine(lines, orphanUpdate); got != 1 {
 				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
 			}
@@ -2062,6 +2076,10 @@ if [ "$*" = "rig list --json" ]; then
   printf '{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}\n'
   exit 0
 fi
+if [ "$*" = "ready --status in_progress --json" ]; then
+  printf '%s\n' "${ORPHAN_SWEEP_FEDERATED_JSON:-[]}"
+  exit 0
+fi
 if [ "$*" = "bd list --rig project-alpha --status=in_progress --json --limit=0" ]; then
   printf '%s\n' "$ORPHAN_SWEEP_RIG_JSON"
   exit 0
@@ -2078,10 +2096,12 @@ if [ "$*" = "session list --json" ]; then
   fi
   exit 0
 fi
-if [ "$*" = "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE" ]; then
-  printf 'released\n'
-  exit 0
-fi
+case "$*" in
+  "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE"|"bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --rig "*)
+    printf 'released\n'
+    exit 0
+    ;;
+esac
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
   printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
   exit 0
@@ -2089,9 +2109,11 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
-if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
-  exit 0
-fi
+case "$*" in
+  "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched"|"bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched --rig "*)
+    exit 0
+    ;;
+esac
 case "$*" in
   "mail send human "*) exit 0 ;;
 esac
@@ -2598,9 +2620,11 @@ exit 1
 // TestOrphanSweepRecordsCauseNoteOnEveryReset covers ga-7p4aab fix 4 (the
 // bead's ask 1): every reset must leave a durable, one-line trace on the work
 // bead naming orphan-sweep as the actor and the assignee it was taken from.
-// Before the fix, reset_orphan_if_current called only gc bd
+// Before that fix, reset_orphan_if_current called only gc bd
 // release-if-current, which writes no note, no mail, and no gc metadata --
-// bd's events.actor was the only trace anywhere.
+// bd's events.actor was the only trace anywhere. The trace is the
+// gc.orphan_sweep_reason metadata stamp, a write every store serves
+// (ga-xeb16e.91): a class-owned graph step refuses notes writes.
 func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -2688,11 +2712,9 @@ exit 1
 	if !strings.Contains(log, "bd release-if-current ga-genuinely-dead gastown.longgone") {
 		t.Fatalf("dead-assigned bead was not reset:\n%s", log)
 	}
-	if !strings.Contains(log, "bd update ga-genuinely-dead --append-notes") {
-		t.Fatalf("reset did not append a cause note to the bead via bd update --append-notes:\n%s", log)
-	}
-	if !strings.Contains(log, "orphan-sweep") {
-		t.Fatalf("cause note did not name orphan-sweep as the actor:\n%s", log)
+	wantStamp := "bd update ga-genuinely-dead --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gastown.longgone -- no live session matched"
+	if got := countExactLine(nonEmptyLogLines(log), wantStamp); got != 1 {
+		t.Fatalf("cause stamp count = %d, want 1 (%q):\n%s", got, wantStamp, log)
 	}
 }
 
@@ -4587,6 +4609,16 @@ func TestReaperWorkflowRootCensusKeepsItsClosesWhenTheRunBudgetRunsOut(t *testin
 			if !ok || !out.hasScope("city", "run budget exhausted; remaining work carries to the next run") {
 				t.Fatalf("outcome = %+v (declared %v), want the city's remaining work carried to the next run", out, ok)
 			}
+			// ga-efurfu: the steps the budget kept from running are named, so
+			// a city whose later steps never run is visible in the outcome and
+			// the summary rather than only in a generic partial.
+			stopped := map[string]string{"wisp": "2-issue-roots", "issue": "3"}[kind]
+			if !out.hasScope("city", "run budget exhausted before step "+stopped+"; it and every later step did not run in this scope") {
+				t.Fatalf("outcome = %+v, want the city's skipped steps from step %s named", out, stopped)
+			}
+			if gcText := f.read(t, f.gcLog); !strings.Contains(gcText, "budget_skipped:city@"+stopped) {
+				t.Fatalf("summary does not name the steps the budget skipped (want budget_skipped:city@%s):\n%s", stopped, gcText)
+			}
 			gcText := f.read(t, f.gcLog)
 			if strings.Contains(gcText, "ESCALATION") {
 				t.Fatalf("a spent run budget is not an anomaly:\n%s", gcText)
@@ -5647,7 +5679,7 @@ func TestReaperStaleAutoClosePreservesDurableExtmsgRecords(t *testing.T) {
 func TestReaperPreservedExtmsgRoomStillRoutesInboundAndAdvancesTranscript(t *testing.T) {
 	ctx := context.Background()
 	store := beads.NewMemStore()
-	services := extmsg.NewServices(store)
+	services := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "reaper-integration-test"}
 	room := extmsg.ConversationRef{
 		ScopeID:        "test-city",
@@ -6357,6 +6389,50 @@ func TestDoltDoctorScriptUsesExplicitSQLTarget(t *testing.T) {
 	}
 }
 
+// spawnStormReadyArm answers the read spawn-storm-detect takes its candidates
+// from, `gc ready --unassigned --json`. It logs the argv to
+// $GC_CALL_LOG, then answers $SPAWN_STORM_READY_JSON (default []), or writes
+// $SPAWN_STORM_READY_ERR to stderr and exits $SPAWN_STORM_READY_EXIT when that
+// is set.
+const spawnStormReadyArm = `if [ "${1:-}" = "ready" ]; then
+  if [ -n "${GC_CALL_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$GC_CALL_LOG"
+  fi
+  if [ -n "${SPAWN_STORM_READY_EXIT:-}" ]; then
+    printf '%s\n' "${SPAWN_STORM_READY_ERR:-}" >&2
+    exit "$SPAWN_STORM_READY_EXIT"
+  fi
+  printf '%s\n' "${SPAWN_STORM_READY_JSON:-[]}"
+  exit 0
+fi
+`
+
+// writeSpawnStormGCStub writes a maintenance gc stub that answers `gc ready`
+// with spawnStormReadyArm before it runs body.
+func writeSpawnStormGCStub(t *testing.T, path, body string) {
+	t.Helper()
+	const shebang = "#!/bin/sh\n"
+	if !strings.HasPrefix(body, shebang) {
+		t.Fatalf("gc stub must start with %q", strings.TrimSpace(shebang))
+	}
+	writeMaintenanceGCStub(t, path, shebang+spawnStormReadyArm+strings.TrimPrefix(body, shebang))
+}
+
+// readSpawnStormLedger reads the spawn-storm ledger at path. It must stay a
+// plain {id: count} map, the shape every older copy of the script reads.
+func readSpawnStormLedger(t *testing.T, path string) map[string]int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(data, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, data)
+	}
+	return counts
+}
+
 func TestSpawnStormDetectPersistsNewLedgerCounts(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6365,27 +6441,25 @@ func TestSpawnStormDetectPersistsNewLedgerCounts(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6409,6 +6483,11 @@ exit 0
 	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
 		t.Fatalf("gc log missing spawn storm notification:\n%s", gcData)
 	}
+	// The one bead the ledger tracks is in the pool, so nothing can be pruned
+	// and the rig list, a read that probes every rig's sessions, is not taken.
+	if strings.Contains(string(gcData), "rig list") {
+		t.Fatalf("read the rig list with no ledger entry outside the pool\ngc log:\n%s", gcData)
+	}
 }
 
 func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
@@ -6419,9 +6498,6 @@ func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf 'temporary backend failure\n' >&2
     exit 1
@@ -6429,18 +6505,19 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6480,24 +6557,22 @@ func TestSpawnStormDetectFailsOnMalformedOpenBeadJSON(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf 'not-json\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":           cityDir,
-		"GC_CITY_PATH":      cityDir,
-		"GC_PACK_STATE_DIR": stateDir,
-		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_READY_JSON": `not-json`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	script := coreScriptPath("spawn-storm-detect.sh")
@@ -6530,9 +6605,6 @@ func TestSpawnStormDetectPrunesClosedAndDeletedLedgerEntries(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     # gc writes diagnostics to stderr on a read (scope disclosure, doctor
     # warnings). The prune loop must not fold them into the JSON it parses,
@@ -6554,16 +6626,17 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"SPAWN_STORM_THRESHOLD": "99",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_THRESHOLD":  "99",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6604,9 +6677,6 @@ func TestSpawnStormDetectPreservesLedgerOnTransientShowFailure(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     case "$2" in
       ga-transient)
@@ -6621,16 +6691,17 @@ case "$1" in
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"SPAWN_STORM_THRESHOLD": "99",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"SPAWN_STORM_THRESHOLD":  "99",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6655,7 +6726,9 @@ exit 0
 // half of the edge trigger. With -eq, a count left sitting AT the threshold
 // never equals it again, so a sweep whose alert could not be delivered has to
 // put the count back where it was or the storm is never reported at all. The
-// failure must also reach the controller log, which takes a non-zero exit.
+// failure must also reach the controller log, which takes a non-zero exit. A
+// bead that waits in the pool counts only once, so the rollback must also undo
+// that this sweep found it, or the retry never counts it again.
 func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6664,19 +6737,17 @@ func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	// Every mail send fails the way an unreachable backend does.
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	// While SPAWN_STORM_MAIL_FAIL is set, every mail send fails the way an
+	// unreachable backend does.
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "${1:-}" = "mail" ]; then
+if [ "${1:-}" = "mail" ] && [ -n "${SPAWN_STORM_MAIL_FAIL:-}" ]; then
   printf 'mail backend unavailable\n' >&2
   exit 1
 fi
@@ -6684,12 +6755,14 @@ exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "1",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:00:00Z","metadata":{"recovered":"true"}}]`,
+		"SPAWN_STORM_MAIL_FAIL":  "1",
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6720,6 +6793,21 @@ exit 0
 	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
 		t.Fatalf("gc log missing the attempted spawn storm notification:\n%s", gcData)
 	}
+
+	// The mail backend is back and the bead still waits in the pool, unchanged:
+	// the next sweep counts it again and delivers the alert.
+	delete(env, "SPAWN_STORM_MAIL_FAIL")
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+	if retried := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))["ga-loop"]; retried != 1 {
+		t.Fatalf("ledger count for ga-loop after the retry = %d, want 1", retried)
+	}
+	gcData, err = os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if sent := strings.Count(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x"); sent != 2 {
+		t.Fatalf("spawn storm notification sent %d times, want 2 (the failed attempt, then the retry)\ngc log:\n%s", sent, gcData)
+	}
 }
 
 // TestSpawnStormDetectAlertsOnceAtThresholdCrossing pins the edge trigger
@@ -6741,27 +6829,25 @@ func TestSpawnStormDetectAlertsOnceAtThresholdCrossing(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
-  list)
-    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
-    ;;
   show)
     printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
     ;;
 esac
 exit 0
 `)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":               cityDir,
-		"GC_CITY_PATH":          cityDir,
-		"GC_PACK_STATE_DIR":     stateDir,
-		"GC_CALL_LOG":           gcLog,
-		"SPAWN_STORM_THRESHOLD": "2",
-		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "2",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
@@ -6789,6 +6875,642 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectIgnoresEmptyRejectionReason pins that a key left set to
+// the empty string is not a rejection. jq reads "" as not null, so a cleared
+// rejection_reason written as "" used to count on every sweep and raised a
+// storm alert for a bead nothing had reset.
+func TestSpawnStormDetectIgnoresEmptyRejectionReason(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if _, ok := counts["ga-empty"]; ok {
+		t.Fatalf("ledger counted ga-empty, whose rejection_reason and recovered are empty strings\nledger: %s", ledgerData)
+	}
+	if got := counts["ga-rejected"]; got != 1 {
+		t.Fatalf("ledger count for ga-rejected = %d, want 1\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM: bead ga-empty") {
+		t.Fatalf("alerted on ga-empty, whose rejection_reason is empty\ngc log:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectListsOnlyUnassignedBeads pins the read filter. The sweep
+// must ask gc ready for --unassigned beads; an assigned bead carrying a
+// rejection_reason is being worked, not reset to pool. The stub behaves like gc
+// ready: it drops assigned rows only for --unassigned.
+func TestSpawnStormDetectListsOnlyUnassignedBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "ready" ]; then
+  case " $* " in
+    *" --unassigned "*)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+      ;;
+    *)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"worker-1","metadata":{"rejection_reason":"tests red"}}]\n'
+      ;;
+  esac
+fi
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if _, ok := counts["ga-held"]; ok {
+		t.Fatalf("ledger counted ga-held, which is assigned; the read must filter with --unassigned\nledger: %s", ledgerData)
+	}
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %s", got, ledgerData)
+	}
+}
+
+// TestSpawnStormDetectCountsResetBeadsInEveryStore pins where the sweep reads.
+// gc bd list answers from one store, the city store for this city-scoped order,
+// and bd leaves the wisp plane out of a plain list. A bead reset in a rig
+// store, in the graph store a split city keeps workflow steps in, or on the
+// wisp plane never reached the count. gc ready --unassigned reads them all.
+func TestSpawnStormDetectCountsResetBeadsInEveryStore(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// The city store's durable tier holds none of them.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_PACK_STATE_DIR":      stateDir,
+		"GC_CALL_LOG":            gcLog,
+		"SPAWN_STORM_THRESHOLD":  "1",
+		"SPAWN_STORM_READY_JSON": `[{"id":"gcg-12","status":"open","metadata":{"recovered":"true"}},{"id":"rig-7","status":"open","metadata":{"rejection_reason":"tests red"}},{"id":"hq-wisp-3","status":"open","ephemeral":true,"metadata":{"recovered":"true"}}]`,
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "ready --unassigned --json") {
+		t.Fatalf("sweep did not read with gc ready --unassigned --json\ngc log:\n%s", gcData)
+	}
+	for _, id := range []string{"gcg-12", "rig-7", "hq-wisp-3"} {
+		if got := counts[id]; got != 1 {
+			t.Errorf("ledger count for %s = %d, want 1\nledger: %s", id, got, ledgerData)
+		}
+		if !strings.Contains(string(gcData), "SPAWN_STORM: bead "+id+" reset 1x") {
+			t.Errorf("no spawn storm notification for %s\ngc log:\n%s", id, gcData)
+		}
+	}
+}
+
+// TestSpawnStormDetectFailsLoudWhenTheOpenBeadReadFails pins the failure path.
+// The sweep used to exit 0 when it could not read, and the controller logs an
+// exec order's output only on a non-zero exit, so a store it could not read
+// looked like a city with no storms. It must exit non-zero, say why, and leave
+// the ledger as it was.
+func TestSpawnStormDetectFailsLoudWhenTheOpenBeadReadFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "read fails",
+			env:  map[string]string{"SPAWN_STORM_READY_EXIT": "1", "SPAWN_STORM_READY_ERR": "gc ready: graph store: unreachable"},
+			want: "gc ready: graph store: unreachable",
+		},
+		{
+			name: "answer is not an array",
+			env:  map[string]string{"SPAWN_STORM_READY_JSON": `{"error":"partial"}`},
+			want: "did not answer a JSON array",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"ga-existing":2}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// The city store answers, so a sweep that still read through gc bd
+			// list would count ga-loop, rewrite the ledger and exit 0.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":               cityDir,
+				"GC_CITY_PATH":          cityDir,
+				"GC_PACK_STATE_DIR":     stateDir,
+				"GC_CALL_LOG":           gcLog,
+				"SPAWN_STORM_THRESHOLD": "1",
+				"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			if err == nil {
+				t.Fatalf("spawn-storm-detect exited 0 on a failed read; want non-zero so the controller logs it\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Fatalf("output does not say why the read failed (want %q):\n%s", tc.want, out)
+			}
+			ledgerData, readErr := os.ReadFile(ledger)
+			if readErr != nil {
+				t.Fatalf("ReadFile(ledger): %v", readErr)
+			}
+			if got, want := string(ledgerData), `{"ga-existing":2}`; got != want {
+				t.Fatalf("ledger changed after a failed read: got %s, want %s", got, want)
+			}
+			if gcData, _ := os.ReadFile(gcLog); strings.Contains(string(gcData), "mail send") {
+				t.Fatalf("mailed after a failed read\ngc log:\n%s", gcData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectLeavesSuspendedRigBeadsUnread pins the prune step's
+// quiescence. The ledger can hold beads of any rig the sweep counted, and a
+// suspended rig is left cold: a bd read of one of its beads restarts the
+// store proxy the controller retired. Such a bead keeps its count, unread,
+// until the rig resumes; the other ledger entries are pruned as before. A bead
+// belongs to the HQ or rig with the longest prefix its id starts with, in any
+// case, as gc bd routes it: a prefix can hold a hyphen, so the first
+// dash-separated token of an id is not its prefix. A bead this sweep found in
+// the pool is open, so it is not read either.
+func TestSpawnStormDetectLeavesSuspendedRigBeadsUnread(t *testing.T) {
+	const hq = `{"name":"city","prefix":"ga","hq":true,"suspended":false}`
+	for _, tc := range []struct {
+		name string
+		rigs string
+		// cold is a tracked bead of the suspended rig: kept, unread.
+		cold string
+		// closed is a closed tracked bead of a live rig or the HQ: read and
+		// pruned.
+		closed string
+	}{
+		{
+			name:   "rig prefix",
+			rigs:   `{"rigs":[` + hq + `,{"name":"warm","prefix":"warm","hq":false,"suspended":false},{"name":"cold","prefix":"cold","hq":false,"suspended":true}]}`,
+			cold:   "cold-abc",
+			closed: "ga-closed",
+		},
+		{
+			name:   "hyphenated rig prefix",
+			rigs:   `{"rigs":[` + hq + `,{"name":"agent-diagnostics","prefix":"agent-diagnostics","hq":false,"suspended":true}]}`,
+			cold:   "agent-diagnostics-hnn",
+			closed: "ga-closed",
+		},
+		{
+			name:   "suspended rig whose prefix begins a live rig's",
+			rigs:   `{"rigs":[` + hq + `,{"name":"agent","prefix":"agent","hq":false,"suspended":true},{"name":"agent-diagnostics","prefix":"agent-diagnostics","hq":false,"suspended":false}]}`,
+			cold:   "agent-x1",
+			closed: "agent-diagnostics-hnn",
+		},
+		{
+			name:   "prefix in another case",
+			rigs:   `{"rigs":[` + hq + `,{"name":"cold","prefix":"Cold","hq":false,"suspended":true}]}`,
+			cold:   "cold-abc",
+			closed: "ga-closed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"`+tc.cold+`":2,"`+tc.closed+`":1}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			// Were the cold bead read, it would answer not found and be pruned.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    case "$2" in
+      "$SPAWN_STORM_COLD")
+        printf 'issue not found\n' >&2
+        exit 1
+        ;;
+      "$SPAWN_STORM_CLOSED")
+        printf '[{"id":"%s","status":"closed","title":"Closed bead"}]\n' "$2"
+        ;;
+      *)
+        printf '[{"id":"%s","status":"open","title":"Open bead"}]\n' "$2"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"GC_CITY":                cityDir,
+				"GC_CITY_PATH":           cityDir,
+				"GC_PACK_STATE_DIR":      stateDir,
+				"GC_CALL_LOG":            gcLog,
+				"SPAWN_STORM_THRESHOLD":  "99",
+				"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+				"SPAWN_STORM_COLD":       tc.cold,
+				"SPAWN_STORM_CLOSED":     tc.closed,
+				"FAKE_RIG_LIST_JSON":     tc.rigs,
+				"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+			counts := readSpawnStormLedger(t, ledger)
+			if got := counts[tc.cold]; got != 2 {
+				t.Fatalf("suspended rig's bead %s count = %d, want 2 (kept, unread)\nledger: %v", tc.cold, got, counts)
+			}
+			if _, ok := counts[tc.closed]; ok {
+				t.Fatalf("closed bead %s was not pruned: %v", tc.closed, counts)
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), "show "+tc.cold+" ") {
+				t.Fatalf("read %s, a bead of a suspended rig\ngc log:\n%s", tc.cold, gcData)
+			}
+			if strings.Contains(string(gcData), "show ga-loop ") {
+				t.Fatalf("read ga-loop, which this sweep found in the pool\ngc log:\n%s", gcData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectLeavesTheLedgerUnprunedWhenTheRigListFails pins the
+// prune step's fail-safe. Which rigs are suspended comes from gc rig list, a
+// read separate from gc ready that can fail on its own. Taken as "no rig is
+// suspended", a failed rig list sent the sweep into the beads of cold rigs,
+// waking their retired store proxies, pruned their counts and exited 0. The
+// sweep must read no bead, keep every count and the record of when each was
+// last found in the pool, save what it counted, and exit non-zero saying why.
+func TestSpawnStormDetectLeavesTheLedgerUnprunedWhenTheRigListFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "rig list fails",
+			env:  map[string]string{"FAKE_RIG_LIST_FAIL": "1", "FAKE_RIG_LIST_ERR": "gc rig list: session provider unavailable"},
+			want: "gc rig list: session provider unavailable",
+		},
+		{
+			name: "answer is not a rig list",
+			env:  map[string]string{"FAKE_RIG_LIST_JSON": `{"schema_version":"1","ok":false,"error":{"code":"config_load_failed"}}`},
+			want: "did not answer a rig list",
+		},
+		{
+			name: "answer is not JSON",
+			env:  map[string]string{"FAKE_RIG_LIST_JSON": `not-json`},
+			want: "did not answer a rig list",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"cold-abc":2,"ga-closed":1}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seen := filepath.Join(stateDir, "spawn-storm-seen.json")
+			if err := os.WriteFile(seen, []byte(`{"cold-abc":""}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Were either tracked bead read, it would be pruned.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    case "$2" in
+      cold-abc)
+        printf 'issue not found\n' >&2
+        exit 1
+        ;;
+      ga-closed)
+        printf '[{"id":"ga-closed","status":"closed","title":"Closed bead"}]\n'
+        ;;
+      *)
+        printf '[{"id":"%s","status":"open","title":"Open bead"}]\n' "$2"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":                cityDir,
+				"GC_CITY_PATH":           cityDir,
+				"GC_PACK_STATE_DIR":      stateDir,
+				"GC_CALL_LOG":            gcLog,
+				"SPAWN_STORM_THRESHOLD":  "99",
+				"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+				"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			if err == nil {
+				t.Fatalf("spawn-storm-detect exited 0 with an unread rig list; want non-zero so the controller logs it\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Fatalf("output does not say why the ledger was not pruned (want %q):\n%s", tc.want, out)
+			}
+			counts := readSpawnStormLedger(t, ledger)
+			for id, want := range map[string]int{"cold-abc": 2, "ga-closed": 1, "ga-loop": 1} {
+				if got := counts[id]; got != want {
+					t.Errorf("ledger count for %s = %d, want %d\nledger: %v", id, got, want, counts)
+				}
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), "bd show") {
+				t.Fatalf("read a tracked bead without knowing which rigs are suspended\ngc log:\n%s", gcData)
+			}
+			// cold-abc was found in the pool before its rig was suspended, and a
+			// sweep that cannot tell whether it reads cold-abc must not forget it.
+			seenData, err := os.ReadFile(seen)
+			if err != nil {
+				t.Fatalf("ReadFile(seen): %v", err)
+			}
+			var records map[string]string
+			if err := json.Unmarshal(seenData, &records); err != nil {
+				t.Fatalf("Unmarshal(seen): %v\n%s", err, seenData)
+			}
+			if got, ok := records["cold-abc"]; !ok || got != "" {
+				t.Fatalf("record for cold-abc = %q (present %v), want it kept as \"\"\nrecords: %s", got, ok, seenData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectReadsOnlyClaimableBeads pins the read to the pool, the
+// beads a worker can claim. gc ready --status open also lists beads no worker
+// can claim (deferred, blocked, or parked in a custom status), which bd reads
+// as open, and one that carries an old rejection is not coming back to the
+// pool. The stub behaves like gc ready: --status open adds the parked row.
+func TestSpawnStormDetectReadsOnlyClaimableBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "ready" ]; then
+  case " $* " in
+    *" --status "*)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-parked","status":"open","defer_until":"2099-01-01T00:00:00Z","metadata":{"rejection_reason":"tests red"}}]\n'
+      ;;
+    *)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+      ;;
+  esac
+fi
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if _, ok := counts["ga-parked"]; ok {
+		t.Fatalf("ledger counted ga-parked, which no worker can claim; the read must be ready work, not --status open\nledger: %v", counts)
+	}
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %v", got, counts)
+	}
+}
+
+// TestSpawnStormDetectCountsComebacksNotSweeps pins what one count is: a bead
+// coming back to the pool, not a sweep finding it there. Counting sweeps made
+// one recovery that waited through two 5m sweeps mail a storm. Every reset is
+// a write, so a comeback carries a new updated_at; a bead that waits in the
+// pool, or leaves it and comes back unwritten, carries the one it had. A row
+// with no updated_at, which a bd store leaves off many rows, counts when the
+// last sweep that read it did not find it in the pool. A sweep of an empty
+// pool reads it; one that leaves it unread, its rig suspended, does not.
+func TestSpawnStormDetectCountsComebacksNotSweeps(t *testing.T) {
+	type sweep struct {
+		pool string
+		// rigs is the gc rig list answer, when the sweep reads one.
+		rigs string
+	}
+	var (
+		reset      = sweep{pool: `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:00:00Z","metadata":{"recovered":"true"}}]`}
+		resetAgain = sweep{pool: `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:12:00Z","metadata":{"recovered":"true"}}]`}
+		untimed    = sweep{pool: `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`}
+		elsewhere  = sweep{pool: `[{"id":"ga-other","status":"open","updated_at":"2026-11-03T07:00:00Z"}]`}
+		empty      = sweep{pool: `[]`}
+		suspended  = sweep{pool: `[]`, rigs: `{"rigs":[{"name":"city","prefix":"gc","hq":true,"suspended":false},{"name":"loop","prefix":"ga","hq":false,"suspended":true}]}`}
+	)
+	for _, tc := range []struct {
+		name   string
+		sweeps []sweep
+		want   int
+	}{
+		{name: "waits in the pool", sweeps: []sweep{reset, reset, reset}, want: 1},
+		{name: "claimed and reset again between two sweeps", sweeps: []sweep{reset, resetAgain}, want: 2},
+		{name: "leaves the pool and comes back reset again", sweeps: []sweep{reset, elsewhere, resetAgain}, want: 2},
+		{name: "leaves the pool and comes back unwritten", sweeps: []sweep{reset, elsewhere, reset}, want: 1},
+		{name: "no updated_at, waits in the pool", sweeps: []sweep{untimed, untimed}, want: 1},
+		{name: "no updated_at, leaves the pool and comes back", sweeps: []sweep{untimed, empty, untimed}, want: 2},
+		{name: "no updated_at, its rig suspended and resumed", sweeps: []sweep{untimed, suspended, untimed}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":               cityDir,
+				"GC_CITY_PATH":          cityDir,
+				"GC_PACK_STATE_DIR":     stateDir,
+				"GC_CALL_LOG":           gcLog,
+				"SPAWN_STORM_THRESHOLD": "2",
+				"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for _, sw := range tc.sweeps {
+				env["SPAWN_STORM_READY_JSON"] = sw.pool
+				delete(env, "FAKE_RIG_LIST_JSON")
+				if sw.rigs != "" {
+					env["FAKE_RIG_LIST_JSON"] = sw.rigs
+				}
+				runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			}
+
+			counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+			if got := counts["ga-loop"]; got != tc.want {
+				t.Fatalf("ledger count for ga-loop = %d after %d sweeps, want %d\nledger: %v", got, len(tc.sweeps), tc.want, counts)
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if mailed := strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 2x"); mailed != (tc.want == 2) {
+				t.Fatalf("storm mailed = %v, want %v at count %d with threshold 2\ngc log:\n%s", mailed, tc.want == 2, tc.want, gcData)
+			}
+		})
+	}
+}
+
 func runScript(t *testing.T, script string, env map[string]string) {
 	t.Helper()
 	out, err := runScriptResult(t, script, env)
@@ -6806,10 +7528,16 @@ func runScriptResult(t *testing.T, script string, env map[string]string) ([]byte
 // working directory.
 func runScriptResultInDir(t *testing.T, dir, script string, env map[string]string) ([]byte, error) {
 	t.Helper()
+	return scriptCmd(dir, script, env).CombinedOutput()
+}
+
+// scriptCmd is the command that runs script from dir (an empty dir keeps the
+// test's working directory) with env merged over the test environment.
+func scriptCmd(dir, script string, env map[string]string) *exec.Cmd {
 	cmd := exec.Command(script)
 	cmd.Dir = dir
 	cmd.Env = mergeTestEnv(env)
-	return cmd.CombinedOutput()
+	return cmd
 }
 
 func runReaperCloseFixture(t *testing.T, fixture string) (doltLog string, gcLog string) {
@@ -7062,7 +7790,13 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //   - backup status reports the timestamp in $BEADS_DIR/backup/backup_state.json
 //     (written by writeFreshBackupState) or BD_BACKUP_STATUS_JSON verbatim;
 //     BD_BACKUP_STATUS_FAIL makes it fail with that text.
-//   - close/update/delete succeed unless BD_CLOSE_FAIL is set.
+//   - close/update/delete succeed unless BD_CLOSE_FAIL is set. delete
+//     answers --json in bd's two shapes: a --from-file batch with exactly
+//     one non-empty line gets the single-id reply (deleted as a string, no
+//     count), any other batch gets {"deleted_count":N}. BD_DELETE_JSON, when
+//     set, is printed by delete verbatim instead of the shaped reply.
+//   - `<verb> --help` prints a help line followed by BD_VERB_HELP_EXTRA.
+//   - `config get --json <key>` reports BD_TYPES_RETAINED as the value.
 //
 // maintenanceBdPurgeAndBackupVerbs answers `bd prune`, `bd purge` and `bd backup status`
 // the way maintenanceBdStubBody does, for test-specific bd doubles that
@@ -7097,7 +7831,14 @@ const maintenanceBdStubBody = `#!/bin/sh
 if [ -n "${BD_CALL_LOG:-}" ]; then
   printf 'pwd=%s beads=%s scope=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "${GC_FAKE_SCOPE:-}" "$*" >> "$BD_CALL_LOG"
 fi
+if [ "${2:-}" = "--help" ]; then
+  printf 'bd %s help\n%s\n' "$1" "${BD_VERB_HELP_EXTRA:-}"
+  exit 0
+fi
 case "$1" in
+  config)
+    printf '{"key":"%s","value":%s}\n' "${4:-}" "$(printf '%s' "${BD_TYPES_RETAINED:-}" | jq -Rs .)"
+    ;;
   prune)
     printf '{"pruned_count":%s}\n' "${BD_PRUNE_COUNT:-0}"
     ;;
@@ -7144,14 +7885,26 @@ case "$1" in
       printf '%s\n' "$BD_CLOSE_FAIL" >&2
       exit 1
     fi
+    if [ -n "${BD_DELETE_JSON:-}" ]; then
+      printf '%s\n' "$BD_DELETE_JSON"
+      exit 0
+    fi
     n=0
+    file=""
     while [ $# -gt 0 ]; do
       if [ "$1" = "--from-file" ]; then
-        n=$(grep -c . "$2")
+        file=$2
+        n=$(grep -c . "$file")
       fi
       shift
     done
-    printf '{"deleted_count":%s}\n' "$n"
+    # bd routes a one-id --from-file batch through its single-id delete
+    # path, whose --json reply carries the id in deleted and no count.
+    if [ "$n" = "1" ]; then
+      printf '{"deleted":"%s","dependencies_removed":0,"references_updated":0,"schema_version":1}\n' "$(grep . "$file")"
+    else
+      printf '{"deleted_count":%s}\n' "$n"
+    fi
     ;;
 esac
 exit 0
@@ -7193,15 +7946,19 @@ const maintenanceBdAppliedIDsJSON = `    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
 //   - serves `export --all -o FILE` from the same store, converting the
 //     stub's issues rows into bd export JSONL (one record per line);
 //   - refuses scopes listed in FAKE_NOT_BD_SCOPES the way gc refuses a
-//     non-bd beads provider;
+//     non-bd beads provider, and rigs listed in FAKE_UNBOUND_SCOPES
+//     ("rig:api") the way gc refuses a rig with no path binding;
 //   - fails for scopes listed in FAKE_UNREACHABLE_SCOPES or in the
 //     unreachable-scopes file next to the stub (writeUnreachableScopesStub);
+//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES with
+//     bd's refusal for an embedded store, which still serves its other verbs
+//     (an HTTP workspace refuses `sql` with other text, not modeled here);
 //   - hands every other verb to the `bd` test double on PATH (a default one
 //     is installed next to gc unless the test brings its own), exporting the
 //     scope as GC_FAKE_SCOPE.
 //
 // `gc rig list --json` prints FAKE_RIG_LIST_JSON (default: no rigs), or fails
-// when FAKE_RIG_LIST_FAIL is set.
+// when FAKE_RIG_LIST_FAIL is set, writing FAKE_RIG_LIST_ERR to stderr.
 func writeMaintenanceGCStub(t *testing.T, path, body string) {
 	t.Helper()
 	const shebang = "#!/bin/sh\n"
@@ -7228,6 +7985,9 @@ const maintenanceGCScopeRoute = `if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" 
     printf '%s\n' "$*" >> "$GC_CALL_LOG"
   fi
   if [ -n "${FAKE_RIG_LIST_FAIL:-}" ]; then
+    if [ -n "${FAKE_RIG_LIST_ERR:-}" ]; then
+      printf '%s\n' "$FAKE_RIG_LIST_ERR" >&2
+    fi
     exit 1
   fi
   if [ -n "${FAKE_RIG_LIST_JSON:-}" ]; then
@@ -7263,6 +8023,12 @@ if [ "${1:-}" = "bd" ]; then
       exit 1
       ;;
   esac
+  case " ${FAKE_UNBOUND_SCOPES:-} " in
+    *" $fake_scope "*)
+      printf 'gc bd: rig "%s" is declared but has no path binding — run ` + "`gc rig add <dir> --name %s`" + ` to bind it before scoping bd commands\n' "${fake_scope#rig:}" "${fake_scope#rig:}" >&2
+      exit 1
+      ;;
+  esac
   fake_unreachable="${FAKE_UNREACHABLE_SCOPES:-}"
   if [ -f "$(dirname "$0")/unreachable-scopes" ]; then
     fake_unreachable="$fake_unreachable $(cat "$(dirname "$0")/unreachable-scopes")"
@@ -7287,6 +8053,12 @@ if [ "${1:-}" = "bd" ]; then
   done
   case "${1:-}" in
     sql)
+      case " ${FAKE_SQL_UNSUPPORTED_SCOPES:-} " in
+        *" $fake_scope "*)
+          echo "Error: 'bd sql' is not yet supported in embedded mode" >&2
+          exit 1
+          ;;
+      esac
       fake_format=csv
       if [ "${2:-}" = "--json" ]; then
         fake_format=json
@@ -7417,7 +8189,9 @@ func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 		{"config", "user.email", "test@example.invalid"},
 		{"config", "user.name", "test"},
 		{"add", "-A"},
-		{"commit", "-q", "-m", "seed"},
+		// Git 2.55 and newer start a detached maintenance run after a
+		// commit, which would repack a fixture's objects behind its tests.
+		{"-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-q", "-m", "seed"},
 	}
 	for _, args := range steps {
 		full := append([]string{"-C", archiveRepo}, args...)
@@ -7753,6 +8527,13 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 	return remoteRepo
 }
 
+func initEmptyArchiveRemoteOnBranch(t *testing.T, archiveRepo string, prevCount int, branch string) string {
+	t.Helper()
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, prevCount)
+	runGit(t, archiveRepo, "branch", "-m", branch)
+	return remoteRepo
+}
+
 // initSeedArchiveWithUnreachableRemote seeds the archive and adds an `origin`
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
@@ -7828,6 +8609,61 @@ func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 	log := string(gcData)
 	if !strings.Contains(log, "records: 3") {
 		t.Fatalf("expected MAINTENANCE_DONE summary to report records: 3 (jq counted .rows length); got:\n%s", log)
+	}
+}
+
+// TestJsonlExportFirstRunNeverLeavesTheArchivePathWithoutGit is ga-ooxzxz:
+// the first export ran mkdir on the archive path and then git init, so for
+// the length of the init the path existed with no .git. A gc doctor run in
+// that window, as on a freshly started city whose first jsonl-export order
+// was firing, failed its blocking jsonl-archive check ("archive repo ... is
+// malformed (no .git)"). A git shim records the archive path's state each
+// time git init runs: it must be absent or already a repo, never a bare
+// directory, and the finished archive is a repo.
+func TestJsonlExportFirstRunNeverLeavesTheArchivePathWithoutGit(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "packs", "core", "jsonl-archive")
+	initLog := filepath.Join(t.TempDir(), "git-init.log")
+
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	shim := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = init ]; then\n" +
+		"    if [ -d \"$ARCHIVE_PROBE\" ] && [ ! -d \"$ARCHIVE_PROBE/.git\" ]; then echo bare >>\"$INIT_LOG\"; else echo ok >>\"$INIT_LOG\"; fi\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["ARCHIVE_PROBE"] = archiveRepo
+	env["INIT_LOG"] = initLog
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	data, err := os.ReadFile(initLog)
+	if err != nil {
+		t.Fatalf("git init never ran: %v", err)
+	}
+	if strings.Contains(string(data), "bare") {
+		t.Fatalf("git init ran while the archive path existed without .git (%q): a doctor run then reports the archive malformed", strings.TrimSpace(string(data)))
+	}
+	if _, err := os.Stat(filepath.Join(archiveRepo, ".git")); err != nil {
+		t.Fatalf("archive repo not initialized: %v", err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(archiveRepo), ".jsonl-archive-init.*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("init staging dirs left behind: %v (%v)", leftovers, err)
 	}
 }
 
@@ -8855,6 +9691,90 @@ func TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing(t *testing.T) {
 	}
 	if strings.Contains(string(stateData), `"pending_archive_push":true`) {
 		t.Fatalf("expected pending_archive_push to clear after bootstrap push, got:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushUsesExistingArchiveBranch(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemoteOnBranch(t, archiveRepo, 3, "archive")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive")
+	if remoteHead != localHead {
+		t.Fatalf("remote archive branch = %s, want local HEAD %s", remoteHead, localHead)
+	}
+}
+
+func TestJsonlExportPushHonorsArchiveBranchOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_ARCHIVE_BRANCH"] = "archive-x"
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive-x")
+	if remoteHead != localHead {
+		t.Fatalf("remote archive-x = %s, want local HEAD %s", remoteHead, localHead)
+	}
+	if branch := runGitOut(t, archiveRepo, "symbolic-ref", "--short", "HEAD"); branch != "main" {
+		t.Fatalf("local branch = %q, want main (override must not rename it)", branch)
+	}
+}
+
+func TestJsonlExportPushBootstrapFromDetachedHeadCreatesRemoteMain(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
+	runGit(t, archiveRepo, "checkout", "-q", "--detach")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/main")
+	if remoteHead != localHead {
+		t.Fatalf("remote main = %s, want local HEAD %s", remoteHead, localHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != nil && got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want unset or 0\nstate: %s", got, stateData)
 	}
 }
 
@@ -10248,6 +11168,7 @@ const archiveLimitOutOfReach = "1000000000"
 type archiveObjectStats struct {
 	looseObjects int
 	looseKB      int
+	packs        int
 	packKB       int
 }
 
@@ -10268,6 +11189,8 @@ func readArchiveObjectStats(t *testing.T, archiveRepo string) archiveObjectStats
 			stats.looseObjects = n
 		case "size":
 			stats.looseKB = n
+		case "packs":
+			stats.packs = n
 		case "size-pack":
 			stats.packKB = n
 		}
@@ -10289,7 +11212,7 @@ func commitArchiveBloat(t *testing.T, archiveRepo string, sizeKB int) string {
 		t.Fatalf("WriteFile(bloat.bin): %v", err)
 	}
 	runGit(t, archiveRepo, "add", "bloat.bin")
-	runGit(t, archiveRepo, "commit", "-q", "-m", "bloat")
+	runGit(t, archiveRepo, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-q", "-m", "bloat")
 	return runGitOut(t, archiveRepo, "rev-parse", "HEAD:bloat.bin")
 }
 
@@ -10406,8 +11329,8 @@ func (f archiveMaintenanceFixture) mail(t *testing.T) string {
 }
 
 // limitPackingToSnapshot places the loose-object limit one above the
-// archive's current count, so the check before the export stays under it and
-// only the run's snapshot commit reaches it.
+// archive's current count, so the archive is under it until the run's snapshot
+// commit reaches it and maintenance packs after the export.
 func (f archiveMaintenanceFixture) limitPackingToSnapshot(t *testing.T) {
 	t.Helper()
 	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(readArchiveObjectStats(t, f.archiveRepo).looseObjects + 1)
@@ -10419,14 +11342,166 @@ func (f archiveMaintenanceFixture) headSubject(t *testing.T) string {
 	return runGitOut(t, f.archiveRepo, "log", "-1", "--format=%s")
 }
 
-func (f archiveMaintenanceFixture) failGitGC(t *testing.T) {
+func lookPathGit(t *testing.T) string {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatalf("LookPath(git): %v", err)
 	}
-	writeGitSubcommandFailureStub(t, f.binDir, realGit, "gc")
+	return realGit
 }
+
+func (f archiveMaintenanceFixture) failGitRepack(t *testing.T) {
+	t.Helper()
+	writeGitSubcommandFailureStub(t, f.binDir, lookPathGit(t), "repack")
+}
+
+// runSeparate is run with stdout and stderr kept apart.
+func (f archiveMaintenanceFixture) runSeparate(t *testing.T) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := scriptCmd("", coreScriptPath("jsonl-export.sh"), f.env)
+	var so, se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	err = cmd.Run()
+	return so.String(), se.String(), err
+}
+
+// gcCalls is the log of every `gc` call the runs so far made.
+func (f archiveMaintenanceFixture) gcCalls(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(f.env["GC_CALL_LOG"])
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc call log): %v", err)
+	}
+	return string(data)
+}
+
+// startNewGCCallLog points the next run at an empty gc call log.
+func (f archiveMaintenanceFixture) startNewGCCallLog(t *testing.T) {
+	t.Helper()
+	f.env["GC_CALL_LOG"] = filepath.Join(t.TempDir(), "gc-calls.log")
+}
+
+// runKilledAtRepack runs the export with a git whose repack never returns.
+// The repack signals on fd 3 when it starts, and the run's process group is
+// then killed, so what the archive holds is what the export had done before
+// maintenance began. It returns the output captured up to the kill.
+func (f archiveMaintenanceFixture) runKilledAtRepack(t *testing.T) string {
+	t.Helper()
+	writeExecutable(t, filepath.Join(f.binDir, "git"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = repack ]; then
+        echo started >&3
+        exec sleep 3600
+    fi
+done
+exec '%s' "$@"
+`, lookPathGit(t)))
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	cmd := scriptCmd("", coreScriptPath("jsonl-export.sh"), f.env)
+	cmd.ExtraFiles = []*os.File{pw}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting jsonl-export.sh: %v", err)
+	}
+	_ = pw.Close()
+	kill := func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// A run stuck before its repack ends at the deadline instead of hanging.
+	watchdog := time.AfterFunc(2*time.Minute, kill)
+	defer watchdog.Stop()
+	// The read returns when the repack signals, or at EOF when every holder
+	// of the pipe's write end has exited without reaching a repack.
+	started, _ := bufio.NewReader(pr).ReadString('\n')
+	_ = pr.Close()
+	kill()
+	_ = cmd.Wait()
+	if started == "" {
+		t.Fatalf("the export ended without starting a repack:\n%s", out.String())
+	}
+	return out.String()
+}
+
+// writeGitArgvLogStub installs a git that logs each call's arguments to
+// logFile, and any GIT_CONFIG_* variable that injects configuration, before it
+// runs the real git.
+func writeGitArgvLogStub(t *testing.T, binDir, realGit, logFile string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+printf 'ARGV %%s\n' "$*" >> '%s'
+env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_|PARAMETERS)' | sed 's/^/ENV /' >> '%s'
+exec '%s' "$@"
+`, logFile, logFile, realGit))
+}
+
+// largestArchivePack is the path of the archive's biggest .pack file.
+func largestArchivePack(t *testing.T, archiveRepo string) string {
+	t.Helper()
+	packs, err := filepath.Glob(filepath.Join(archiveRepo, ".git", "objects", "pack", "pack-*.pack"))
+	if err != nil || len(packs) == 0 {
+		t.Fatalf("archive has no pack (glob err: %v)", err)
+	}
+	largest, largestSize := "", int64(-1)
+	for _, pack := range packs {
+		info, err := os.Stat(pack)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", pack, err)
+		}
+		if info.Size() > largestSize {
+			largest, largestSize = pack, info.Size()
+		}
+	}
+	return largest
+}
+
+func fileSHA256(t *testing.T, path string) [sha256.Size]byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return sha256.Sum256(data)
+}
+
+// seedLargePackAndBacklog packs the archive around a 512 KiB blob and 300
+// small files into one large pack, then leaves three small commits loose on
+// top. A geometric repack weighs packs by object count, so the large pack
+// holds far more objects than the backlog adds. It returns the large pack's
+// path.
+func (f archiveMaintenanceFixture) seedLargePackAndBacklog(t *testing.T) string {
+	t.Helper()
+	filesDir := filepath.Join(f.archiveRepo, "files")
+	if err := os.MkdirAll(filesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filesDir, err)
+	}
+	for i := 0; i < 300; i++ {
+		if err := os.WriteFile(filepath.Join(filesDir, fmt.Sprintf("f%03d.txt", i)), []byte(fmt.Sprintf("file %d\n", i)), 0o644); err != nil {
+			t.Fatalf("WriteFile(file %d): %v", i, err)
+		}
+	}
+	runGit(t, f.archiveRepo, "add", "files")
+	commitArchiveBloat(t, f.archiveRepo, 512)
+	runGit(t, f.archiveRepo, "gc", "--quiet")
+	for i := 0; i < 3; i++ {
+		commitArchiveBloat(t, f.archiveRepo, 4)
+	}
+	return largestArchivePack(t, f.archiveRepo)
+}
+
+// exportOnce runs the export so the archive holds the fixture's data, and the
+// next run with the same data has nothing to export.
+func (f archiveMaintenanceFixture) exportOnce(t *testing.T) {
+	t.Helper()
+	if out, err := f.run(t); err != nil {
+		t.Fatalf("first export run failed: %v\n%s", err, out)
+	}
+}
+
+var archiveMaintenanceTelemetry = regexp.MustCompile(`jsonl-export: archive maintenance: mode=(\S+) wall=(\d+)s loose_before=(\d+) loose_after=(\d+) packs_before=(\d+) packs_after=(\d+) pack_kb_after=(\d+)`)
 
 func TestJsonlExportPacksArchiveWhenLooseObjectLimitReached(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
@@ -10463,11 +11538,10 @@ func TestJsonlExportPacksArchiveWhenLooseSizeLimitReached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
 	}
-	// Reaching the limit exactly packs in the pass before the export, which
-	// still sees only the seed's loose objects.
-	want := fmt.Sprintf("packing archive object database (loose_objects=%d, loose_kb=%d)", seed.looseObjects, seed.looseKB)
-	if !strings.Contains(out, want) {
-		t.Fatalf("expected the size limit to trigger packing before the export (%q):\n%s", want, out)
+	// The pass runs after the export, so it counts the snapshot's loose
+	// objects on top of the seed's.
+	if want := "packing archive object database (loose_objects="; !strings.Contains(out, want) {
+		t.Fatalf("expected the size limit to trigger packing (%q):\n%s", want, out)
 	}
 	loosePath := filepath.Join(f.archiveRepo, ".git", "objects", bloat[:2], bloat[2:])
 	if _, err := os.Stat(loosePath); !os.IsNotExist(err) {
@@ -10483,46 +11557,88 @@ func TestJsonlExportLeavesSmallArchiveLooseUnderDefaultLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
 	}
-	if strings.Contains(out, "packing archive object database") {
-		t.Fatalf("default limits must not pack a small archive:\n%s", out)
+	if strings.Contains(out, "packing archive object database") || strings.Contains(out, "archive maintenance:") {
+		t.Fatalf("default limits must not pack a small archive or report on it:\n%s", out)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got == 0 {
 		t.Fatalf("small archive was packed under the default limits:\n%s", out)
 	}
 }
 
-func TestJsonlExportArchiveMaintenanceFailureStopsExport(t *testing.T) {
+// The export comes first: a failed archive repack still leaves the snapshot
+// committed, clean and pushed, reports the run's summary on stderr and fails
+// the run without telling the maintenance agent it finished.
+func TestJsonlExportCommitsAndPushesSnapshotBeforeArchiveMaintenanceFails(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
+	remoteRepo := f.addOrigin(t)
 	seedHead := f.head(t)
-	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(readArchiveObjectStats(t, f.archiveRepo).looseObjects)
-	f.failGitGC(t)
+	f.limitPackingToSnapshot(t)
+	f.failGitRepack(t)
 
-	out, err := f.run(t)
-	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the run:\n%s", out)
+	stdout, stderr, err := f.runSeparate(t)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 from the failed archive repack, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
-	if !strings.Contains(out, "archive object database maintenance failed") {
-		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
+	if !strings.Contains(stderr, "archive object database maintenance failed") {
+		t.Fatalf("expected the maintenance failure diagnostic:\n%s", stderr)
 	}
-	if head := f.head(t); head != seedHead {
-		t.Fatalf("maintenance failure must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+	if !regexp.MustCompile(`jsonl-export: jsonl — exported \d+/\d+, records: 5, push: ok; archive maintenance failed`).MatchString(stderr) {
+		t.Fatalf("expected the run summary with the maintenance failure on stderr:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "jsonl-export: jsonl — exported") {
+		t.Fatalf("the summary of a failed run belongs on stderr only:\n%s", stdout)
+	}
+	head := f.head(t)
+	if head == seedHead {
+		t.Fatalf("a failed archive repack must not hold back the snapshot commit:\n%s", stderr)
 	}
 	if status := runGitOut(t, f.archiveRepo, "status", "--short"); status != "" {
-		t.Fatalf("maintenance failure must stop the export before it writes snapshots:\n%s", status)
+		t.Fatalf("the snapshot must leave the archive clean:\n%s", status)
+	}
+	if got := f.originMain(t, remoteRepo); got != head {
+		t.Fatalf("origin main = %s, want the snapshot %s pushed:\n%s", got, head, stderr)
+	}
+	if calls := f.gcCalls(t); strings.Contains(calls, "MAINTENANCE_DONE") {
+		t.Fatalf("a failed run must not send MAINTENANCE_DONE:\n%s", calls)
+	}
+}
+
+// A repack that never returns costs the run its time, not the export: the
+// snapshot is committed, clean and pushed before the repack starts.
+func TestJsonlExportCommitsSnapshotBeforeRepackThatNeverReturns(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	remoteRepo := f.addOrigin(t)
+	seedHead := f.head(t)
+	f.limitPackingToSnapshot(t)
+
+	out := f.runKilledAtRepack(t)
+	head := f.head(t)
+	if head == seedHead {
+		t.Fatalf("expected the snapshot committed before the repack started:\n%s", out)
+	}
+	if status := runGitOut(t, f.archiveRepo, "status", "--short"); status != "" {
+		t.Fatalf("the snapshot must leave the archive clean:\n%s", status)
+	}
+	if got := f.originMain(t, remoteRepo); got != head {
+		t.Fatalf("origin main = %s, want the snapshot %s pushed before the repack:\n%s", got, head, out)
+	}
+	if calls := f.gcCalls(t); strings.Contains(calls, "MAINTENANCE_DONE") {
+		t.Fatalf("a killed run must not have sent MAINTENANCE_DONE:\n%s", calls)
 	}
 }
 
 func TestJsonlExportHaltSendsSpikeAlertBeforeArchiveMaintenance(t *testing.T) {
 	// The [HALT] baseline commit reaches the loose-object limit and the
-	// archive gc fails: the run must still fail, with the spike alert
+	// archive repack fails: the run must still fail, with the spike alert
 	// already sent.
 	f := newArchiveMaintenanceFixture(t, 100, 10)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the HALT run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the HALT run:\n%s", out)
 	}
 	if !strings.Contains(out, "archive object database maintenance failed") {
 		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
@@ -10552,13 +11668,13 @@ func TestJsonlExportArchiveMaintenanceRefusesWithoutFreeSpace(t *testing.T) {
 		t.Fatalf("expected the free-space refusal to name its setting:\n%s", out)
 	}
 	if strings.Contains(out, "packing archive object database") {
-		t.Fatalf("archive gc must not start without free space:\n%s", out)
+		t.Fatalf("archive repack must not start without free space:\n%s", out)
 	}
-	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != seed.looseObjects {
-		t.Fatalf("loose objects = %d, want the untouched %d:\n%s", got, seed.looseObjects, out)
+	if got := readArchiveObjectStats(t, f.archiveRepo).packs; got != seed.packs {
+		t.Fatalf("packs = %d, want no pack written (%d):\n%s", got, seed.packs, out)
 	}
-	if head := f.head(t); head != seedHead {
-		t.Fatalf("free-space refusal must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+	if head := f.head(t); head == seedHead {
+		t.Fatalf("free-space refusal comes after the export: HEAD %s must have advanced:\n%s", head, out)
 	}
 
 	// The check counts loose objects at full size, so the refusal names the
@@ -10600,60 +11716,94 @@ func TestJsonlExportArchiveMaintenancePacksWhenFreeSpaceUnreadable(t *testing.T)
 }
 
 // writeArchiveFreeSpaceDFStub replaces df with one that reports the queried
-// repository's current object size plus marginKB as free, so a test can place
-// the free-space floor exactly against the size the check sees.
-func writeArchiveFreeSpaceDFStub(t *testing.T, binDir string, marginKB int) {
+// repository's repack need plus marginKB as free, so a test can place the
+// free-space floor exactly against the need the check compares. The need of a
+// full repack is the loose and packed size; of a repack that keeps the largest
+// pack as is, that size less the largest .pack file (in whole KiB).
+func writeArchiveFreeSpaceDFStub(t *testing.T, binDir, need string, marginKB int) {
 	t.Helper()
+	if need != "full" && need != "non-largest" {
+		t.Fatalf("unknown repack need %q", need)
+	}
 	writeExecutable(t, filepath.Join(binDir, "df"), fmt.Sprintf(`#!/bin/sh
 for repo; do :; done
-archive_kb=$(git -C "$repo" count-objects -v | awk -F': ' '$1 == "size" || $1 == "size-pack" { kb += $2 } END { print kb }') || exit 1
+need_kb=$(git -C "$repo" count-objects -v | awk -F': ' '$1 == "size" || $1 == "size-pack" { kb += $2 } END { print kb }') || exit 1
+if [ %q = non-largest ]; then
+    largest=$(ls -S "$repo"/.git/objects/pack/pack-*.pack | head -n 1)
+    need_kb=$((need_kb - $(wc -c < "$largest") / 1024))
+fi
 echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
-echo "stub 0 0 $((archive_kb + %d)) 0%% /"
-`, marginKB))
+echo "stub 0 0 $((need_kb + %d)) 0%% /"
+`, need, marginKB))
 }
 
 func TestJsonlExportArchiveMaintenanceKeepsFreeSpaceFloor(t *testing.T) {
-	// Packing writes another copy of the archive, so it needs the archive's
-	// size plus GC_JSONL_GC_MIN_FREE_KB free.
+	// A full repack writes another copy of the archive and needs its size plus
+	// GC_JSONL_GC_MIN_FREE_KB free. Short of that, a repack that keeps the
+	// largest pack as is needs only the rest of the archive plus the floor.
+	// Short of both, the run refuses.
 	for _, tc := range []struct {
 		name     string
 		floor    string
+		need     string
 		marginKB int
-		wantPack bool
+		wantMode string // empty: the check refuses
 	}{
-		{"margin equal to the floor packs", "512", 512, true},
-		{"margin below the floor refuses", "512", 511, false},
-		{"floor with a leading zero is decimal", "0512", 511, false},
-		{"zero floor disables the check", "0", -1, true},
+		{"full need plus the floor repacks whole", "512", "full", 512, "geometric"},
+		{"below full need keeps the largest pack", "512", "full", 511, "geometric-keep-largest"},
+		{"non-largest need plus the floor keeps the largest pack", "512", "non-largest", 512, "geometric-keep-largest"},
+		{"one KiB below the non-largest need refuses", "512", "non-largest", 511, ""},
+		{"floor with a leading zero is decimal", "0512", "non-largest", 511, ""},
+		{"zero floor disables the check", "0", "non-largest", -1, "geometric"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newArchiveMaintenanceFixture(t, 3, 5)
-			// Pack the seed and commit loose objects on top, so the archive
-			// size the check counts has both a packed and a loose part.
-			runGit(t, f.archiveRepo, "gc", "--quiet")
-			commitArchiveBloat(t, f.archiveRepo, 4)
+			largestPack := f.seedLargePackAndBacklog(t)
+			largestSum := fileSHA256(t, largestPack)
 			seed := readArchiveObjectStats(t, f.archiveRepo)
-			if seed.packKB == 0 || seed.looseKB == 0 {
+			if seed.packs == 0 || seed.looseKB == 0 {
 				t.Fatalf("seed archive must hold both packed and loose objects, got %+v", seed)
 			}
 			seedHead := f.head(t)
+			argvLog := filepath.Join(t.TempDir(), "git-argv.log")
 			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = strconv.Itoa(seed.looseObjects)
 			f.env["GC_JSONL_GC_MIN_FREE_KB"] = tc.floor
-			writeArchiveFreeSpaceDFStub(t, f.binDir, tc.marginKB)
+			writeArchiveFreeSpaceDFStub(t, f.binDir, tc.need, tc.marginKB)
+			writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
 
 			out, err := f.run(t)
-			packed := strings.Contains(out, "packing archive object database")
-			if tc.wantPack {
-				if err != nil || !packed {
-					t.Fatalf("expected packing with %d KiB beyond the archive free under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.floor, err, out)
+			if head := f.head(t); head == seedHead {
+				t.Fatalf("the export comes before the free-space check: HEAD %s must have advanced:\n%s", head, out)
+			}
+			if tc.wantMode == "" {
+				if err == nil || strings.Contains(out, "packing archive object database") || !strings.Contains(out, "set GC_JSONL_GC_MIN_FREE_KB=0") {
+					t.Fatalf("expected the check to refuse %d KiB beyond the %s need under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.need, tc.floor, err, out)
+				}
+				if got := readArchiveObjectStats(t, f.archiveRepo).packs; got != seed.packs {
+					t.Fatalf("packs = %d, want no pack written (%d):\n%s", got, seed.packs, out)
 				}
 				return
 			}
-			if err == nil || packed || !strings.Contains(out, "set GC_JSONL_GC_MIN_FREE_KB=0") {
-				t.Fatalf("expected the free-space check to refuse %d KiB beyond the archive under a %s KiB floor (err=%v):\n%s", tc.marginKB, tc.floor, err, out)
+			if err != nil {
+				t.Fatalf("expected packing with %d KiB beyond the %s need under a %s KiB floor: %v\n%s", tc.marginKB, tc.need, tc.floor, err, out)
 			}
-			if head := f.head(t); head != seedHead {
-				t.Fatalf("free-space refusal must stop the export before it commits: HEAD %s, want %s", head, seedHead)
+			if want := "mode=" + tc.wantMode + " "; !strings.Contains(out, want) {
+				t.Fatalf("expected %q in the maintenance report:\n%s", want, out)
+			}
+			argv, readErr := os.ReadFile(argvLog)
+			if readErr != nil {
+				t.Fatalf("ReadFile(git argv log): %v", readErr)
+			}
+			keep := "--keep-pack=" + filepath.Base(largestPack)
+			if tc.wantMode == "geometric-keep-largest" {
+				if !strings.Contains(string(argv), keep) {
+					t.Fatalf("expected the repack to pass %s:\n%s", keep, argv)
+				}
+				if fileSHA256(t, largestPack) != largestSum {
+					t.Fatalf("the kept pack %s was rewritten:\n%s", largestPack, out)
+				}
+			} else if strings.Contains(string(argv), "--keep-pack") {
+				t.Fatalf("a repack with room to spare must not keep a pack:\n%s", argv)
 			}
 		})
 	}
@@ -10699,11 +11849,11 @@ func TestJsonlExportPushesSnapshotWhenArchivePackingFails(t *testing.T) {
 	remoteRepo := f.addOrigin(t)
 	seedHead := f.head(t)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the run:\n%s", out)
 	}
 	if !strings.Contains(out, "archive object database maintenance failed") {
 		t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
@@ -10753,7 +11903,7 @@ func TestJsonlExportPushesPendingSnapshotWhenArchiveCannotBePacked(t *testing.T)
 
 			writeMultiRecordDoltStub(t, f.binDir, 11)
 			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
-			f.failGitGC(t)
+			f.failGitRepack(t)
 
 			out, err := f.run(t)
 			if err == nil {
@@ -10762,11 +11912,14 @@ func TestJsonlExportPushesPendingSnapshotWhenArchiveCannotBePacked(t *testing.T)
 			if !strings.Contains(out, "archive object database maintenance failed") {
 				t.Fatalf("expected the maintenance failure diagnostic:\n%s", out)
 			}
-			if head := f.head(t); head != haltHead {
-				t.Fatalf("archive HEAD = %s, want no new export on top of %s while the archive cannot be packed:\n%s", head, haltHead, out)
+			// The export runs before maintenance, so this run exports on top of
+			// the HALT snapshot and pushes both.
+			head := f.head(t)
+			if head == haltHead {
+				t.Fatalf("archive HEAD = %s, want a new export on top of the HALT snapshot:\n%s", head, out)
 			}
-			if got := f.originMain(t, remoteRepo); got != haltHead {
-				t.Fatalf("origin main = %s, want the pending snapshot %s pushed:\n%s", got, haltHead, out)
+			if got := f.originMain(t, remoteRepo); got != head {
+				t.Fatalf("origin main = %s, want both snapshots pushed (%s):\n%s", got, head, out)
 			}
 			if pending := f.state(t)["pending_archive_push"]; pending == true {
 				t.Fatalf("pending_archive_push must clear once the snapshot is pushed:\n%s", out)
@@ -10781,11 +11934,11 @@ func TestJsonlExportKeepsSpikeAlertWhileArchiveCannotBePacked(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 100, 10)
 	writeJsonlExportGCStubWithMailExitCode(t, f.binDir, 1)
 	f.limitPackingToSnapshot(t)
-	f.failGitGC(t)
+	f.failGitRepack(t)
 
 	out, err := f.run(t)
 	if err == nil {
-		t.Fatalf("expected the failed archive gc to fail the HALT run:\n%s", out)
+		t.Fatalf("expected the failed archive repack to fail the HALT run:\n%s", out)
 	}
 	if subject := f.headSubject(t); !strings.HasPrefix(subject, "[HALT]") {
 		t.Fatalf("HEAD subject = %q, want the [HALT] baseline commit", subject)
@@ -10850,7 +12003,7 @@ func TestJsonlExportPacksArchiveWhenIoniceCannotRun(t *testing.T) {
 	}
 }
 
-// Where ionice works, git gc runs under it in the idle I/O class, with -t so
+// Where ionice works, git repack runs under it in the idle I/O class, with -t so
 // a class the host refuses does not stop git, and under nice.
 func TestJsonlExportPacksArchiveUnderIoniceAndNice(t *testing.T) {
 	f := newArchiveMaintenanceFixture(t, 3, 5)
@@ -10873,25 +12026,336 @@ exec "$@"
 		t.Fatalf("ReadFile(ionice log): %v\n%s", err, out)
 	}
 	if want := "-t -c 3 nice -n 19 git -C " + f.archiveRepo + " "; !strings.Contains(string(calls), want) {
-		t.Fatalf("expected git gc to run as ionice %s...; ionice calls:\n%s", want, calls)
+		t.Fatalf("expected git repack to run as ionice %s...; ionice calls:\n%s", want, calls)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
 		t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
 	}
 }
 
+// A run with nothing to export still packs a backlog above the limit, after
+// pushing the snapshot an earlier run left unpushed. A failed repack fails the
+// run without MAINTENANCE_DONE, with the pending snapshot already pushed.
+func TestJsonlExportPacksBacklogWhenThereIsNothingToExport(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pendingPush bool
+		repackFails bool
+	}{
+		{"no changes", false, false},
+		{"no changes with repack failing", false, true},
+		{"pending push", true, false},
+		{"pending push with repack failing", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var f archiveMaintenanceFixture
+			var remoteRepo string
+			if tc.pendingPush {
+				// The first run halts on the spike: it commits locally and
+				// skips the push. The second run's data is unchanged.
+				f = newArchiveMaintenanceFixture(t, 100, 10)
+				remoteRepo = f.addOrigin(t)
+				f.exportOnce(t)
+			} else {
+				// The first run pushes, so it clears the pending push; the
+				// second run then has nothing to push either and leaves by
+				// the "No changes." exit. Without an origin the flag is never
+				// cleared and the second run takes the pending-push exit.
+				f = newArchiveMaintenanceFixture(t, 3, 5)
+				remoteRepo = f.addOrigin(t)
+				f.exportOnce(t)
+			}
+			f.seedLargePackAndBacklog(t)
+			if !tc.pendingPush {
+				// The backlog commits must not read as unpushed work.
+				runGit(t, f.archiveRepo, "push", "-q", "origin", "main")
+			}
+			// Any backlog commits sit on top of the unpushed snapshot.
+			headBefore := f.head(t)
+			wantPushed := headBefore
+			f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+			f.startNewGCCallLog(t)
+			if tc.repackFails {
+				f.failGitRepack(t)
+			}
+
+			out, err := f.run(t)
+			if f.head(t) != headBefore {
+				t.Fatalf("a run with nothing to export must not commit:\n%s", out)
+			}
+			if remoteRepo != "" {
+				if got := f.originMain(t, remoteRepo); got != wantPushed {
+					t.Fatalf("origin main = %s, want the pending snapshot %s pushed first:\n%s", got, wantPushed, out)
+				}
+			}
+			if tc.repackFails {
+				if err == nil || !strings.Contains(out, "archive object database maintenance failed") {
+					t.Fatalf("expected the failed repack to fail the run (err=%v):\n%s", err, out)
+				}
+				if strings.Contains(f.gcCalls(t), "MAINTENANCE_DONE") {
+					t.Fatalf("a failed run must not send MAINTENANCE_DONE:\n%s", f.gcCalls(t))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+			}
+			if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
+				t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
+			}
+			if !strings.Contains(f.gcCalls(t), "MAINTENANCE_DONE") {
+				t.Fatalf("expected MAINTENANCE_DONE after a successful pass:\n%s", f.gcCalls(t))
+			}
+		})
+	}
+}
+
+// Maintenance leaves the archive's large pack alone and packs the loose
+// backlog beside it.
+func TestJsonlExportArchiveMaintenanceKeepsLargePackAsIs(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	f.exportOnce(t)
+	largestPack := f.seedLargePackAndBacklog(t)
+	largestSum := fileSHA256(t, largestPack)
+	headBefore := f.head(t)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	if fileSHA256(t, largestPack) != largestSum {
+		t.Fatalf("the large pack %s was rewritten:\n%s", largestPack, out)
+	}
+	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {
+		t.Fatalf("loose objects after packing = %d, want 0:\n%s", got, out)
+	}
+	runGit(t, f.archiveRepo, "fsck")
+	if head := f.head(t); head != headBefore {
+		t.Fatalf("maintenance moved HEAD from %s to %s", headBefore, head)
+	}
+}
+
+// Packs too alike in size to form a geometric progression merge among
+// themselves; the large pack still stays as it is.
+func TestJsonlExportArchiveMaintenanceMergesSmallPacksBesideLargePack(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	f.exportOnce(t)
+	largestPack := f.seedLargePackAndBacklog(t)
+	for i := 0; i < 5; i++ {
+		runGit(t, f.archiveRepo, "repack", "-q", "-d")
+		commitArchiveBloat(t, f.archiveRepo, 4)
+	}
+	largestSum := fileSHA256(t, largestPack)
+	before := readArchiveObjectStats(t, f.archiveRepo)
+	headBefore := f.head(t)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	if fileSHA256(t, largestPack) != largestSum {
+		t.Fatalf("the large pack %s was rewritten:\n%s", largestPack, out)
+	}
+	after := readArchiveObjectStats(t, f.archiveRepo)
+	if after.looseObjects != 0 || after.packs >= before.packs {
+		t.Fatalf("expected the loose backlog packed and the small packs merged: before %+v, after %+v\n%s", before, after, out)
+	}
+	runGit(t, f.archiveRepo, "fsck")
+	if head := f.head(t); head != headBefore {
+		t.Fatalf("maintenance moved HEAD from %s to %s", headBefore, head)
+	}
+}
+
+// The repack is a geometric one, run under the archive's own window-memory
+// and thread settings, and git's own maintenance stays out of the archive:
+// the snapshot commit turns it off for that call only.
+func TestJsonlExportArchiveRepackCommandAndGitAutoMaintenance(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	argvLog := filepath.Join(t.TempDir(), "git-argv.log")
+	writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
+	f.limitPackingToSnapshot(t)
+	f.env["GC_JSONL_GC_WINDOW_MEMORY"] = "64M"
+	configBefore := runGitOut(t, f.archiveRepo, "config", "--local", "--list")
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("ReadFile(git argv log): %v", err)
+	}
+	log := string(data)
+	if want := "ARGV -C " + f.archiveRepo + " -c pack.windowMemory=64M -c pack.threads=1 repack -d -l -q --geometric=2"; !strings.Contains(log, want+"\n") {
+		t.Fatalf("expected the repack %q in the git calls:\n%s", want, log)
+	}
+	if !strings.Contains(log, "ARGV -c maintenance.auto=false -c gc.auto=0 commit ") {
+		t.Fatalf("expected the snapshot commit to turn off git's own maintenance:\n%s", log)
+	}
+	if regexp.MustCompile(`(?m)^ARGV (.* )?gc( |$)`).MatchString(log) {
+		t.Fatalf("the archive must not run git gc:\n%s", log)
+	}
+	if strings.Contains(log, "ENV ") {
+		t.Fatalf("the script must not inject git configuration through GIT_CONFIG_*:\n%s", log)
+	}
+	if config := runGitOut(t, f.archiveRepo, "config", "--local", "--list"); config != configBefore {
+		t.Fatalf("the script must not write to the archive config:\nbefore the run:\n%s\nafter:\n%s", configBefore, config)
+	}
+}
+
+// The archive's fetches and rebases turn git's own maintenance off for each
+// call, as the snapshot commit does. Origin advances before the run and again
+// during its first push, so the run fetches and rebases both before its push
+// and on the retry.
+func TestJsonlExportArchiveFetchAndRebaseDisableGitAutoMaintenance(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	remoteRepo := f.addOrigin(t)
+	realGit := lookPathGit(t)
+	advanceDir := filepath.Join(t.TempDir(), "advance")
+	runGit(t, f.archiveRepo, "clone", "-q", remoteRepo, advanceDir)
+	runGit(t, advanceDir, "checkout", "-q", "main")
+	runGit(t, advanceDir, "config", "user.email", "test@example.invalid")
+	runGit(t, advanceDir, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(advanceDir, "remote-advance.txt"), []byte("remote advance before the run\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(remote-advance.txt): %v", err)
+	}
+	runGit(t, advanceDir, "add", "-A")
+	runGit(t, advanceDir, "commit", "-q", "-m", "remote advance before the run")
+	runGit(t, advanceDir, "push", "-q", "origin", "main")
+	raceDir := t.TempDir()
+	writeGitPushRemoteAdvanceRaceStub(t, raceDir, realGit, remoteRepo, filepath.Join(t.TempDir(), "git-push.log"))
+	argvLog := filepath.Join(t.TempDir(), "git-argv.log")
+	writeGitArgvLogStub(t, f.binDir, filepath.Join(raceDir, "git"), argvLog)
+	configBefore := runGitOut(t, f.archiveRepo, "config", "--local", "--list")
+
+	out, err := f.run(t)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "push succeeded on retry attempt 2") {
+		t.Fatalf("expected the push to succeed on its retry:\n%s", out)
+	}
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("ReadFile(git argv log): %v", err)
+	}
+	log := string(data)
+	calls := map[string]int{}
+	for _, line := range strings.Split(log, "\n") {
+		match := regexp.MustCompile(`^ARGV (?:.* )?(fetch|rebase)(?: |$)`).FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		calls[match[1]]++
+		if !strings.Contains(line, "-c maintenance.auto=false -c gc.auto=0 "+match[1]+" ") {
+			t.Errorf("the %s must turn off git's own maintenance: %q", match[1], line)
+		}
+	}
+	if calls["fetch"] < 2 || calls["rebase"] < 2 {
+		t.Fatalf("expected a fetch and rebase before the push and on its retry, got %v:\n%s", calls, log)
+	}
+	if strings.Contains(log, "ENV ") {
+		t.Fatalf("the script must not inject git configuration through GIT_CONFIG_*:\n%s", log)
+	}
+	if config := runGitOut(t, f.archiveRepo, "config", "--local", "--list"); config != configBefore {
+		t.Fatalf("the script must not write to the archive config:\nbefore the run:\n%s\nafter:\n%s", configBefore, config)
+	}
+	if got := f.originMain(t, remoteRepo); got != f.head(t) {
+		t.Fatalf("origin main = %s, want the rebased snapshot %s pushed:\n%s", got, f.head(t), out)
+	}
+}
+
+// A git without --geometric (before 2.32) fails the pass through the normal
+// failure path and names the version it needs.
+func TestJsonlExportArchiveMaintenanceNamesGitVersionWhenRepackRejectsGeometric(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 3, 5)
+	realGit := lookPathGit(t)
+	writeExecutable(t, filepath.Join(f.binDir, "git"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+    --geometric=*)
+        echo "error: unknown option geometric=2" >&2
+        exit 129
+        ;;
+    esac
+done
+exec '%s' "$@"
+`, realGit))
+	f.limitPackingToSnapshot(t)
+	seedHead := f.head(t)
+
+	out, err := f.run(t)
+	if err == nil {
+		t.Fatalf("expected a git without --geometric to fail the run:\n%s", out)
+	}
+	for _, want := range []string{"archive object database maintenance failed", "git 2.32"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in the failure:\n%s", want, out)
+		}
+	}
+	if f.head(t) == seedHead {
+		t.Fatalf("the snapshot must be committed before maintenance fails:\n%s", out)
+	}
+}
+
+// A pass that reaches the repack reports what it did; a failing pass reports
+// what it knew before it failed.
+func TestJsonlExportArchiveMaintenanceReportsTelemetry(t *testing.T) {
+	t.Run("working pass", func(t *testing.T) {
+		f := newArchiveMaintenanceFixture(t, 3, 5)
+		f.exportOnce(t)
+		f.seedLargePackAndBacklog(t)
+		before := readArchiveObjectStats(t, f.archiveRepo)
+		f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "1"
+
+		out, err := f.run(t)
+		if err != nil {
+			t.Fatalf("jsonl-export.sh failed: %v\n%s", err, out)
+		}
+		match := archiveMaintenanceTelemetry.FindStringSubmatch(out)
+		if match == nil {
+			t.Fatalf("expected the maintenance report line:\n%s", out)
+		}
+		after := readArchiveObjectStats(t, f.archiveRepo)
+		want := []string{"geometric", "", strconv.Itoa(before.looseObjects), "0", strconv.Itoa(before.packs), strconv.Itoa(after.packs), strconv.Itoa(after.packKB)}
+		for i, field := range []string{"mode", "wall", "loose_before", "loose_after", "packs_before", "packs_after", "pack_kb_after"} {
+			if field != "wall" && match[i+1] != want[i] {
+				t.Errorf("%s = %s, want %s\n%s", field, match[i+1], want[i], out)
+			}
+		}
+	})
+	t.Run("failing pass", func(t *testing.T) {
+		f := newArchiveMaintenanceFixture(t, 3, 5)
+		f.limitPackingToSnapshot(t)
+		f.failGitRepack(t)
+
+		out, err := f.run(t)
+		if err == nil {
+			t.Fatalf("expected the failed repack to fail the run:\n%s", out)
+		}
+		if !regexp.MustCompile(`jsonl-export: archive maintenance: mode=geometric wall=\d+s loose_before=\d+ .*status=failed`).MatchString(out) {
+			t.Fatalf("expected the failing pass to report its fields and status=failed:\n%s", out)
+		}
+	})
+}
+
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
-// PATH-shimmed bd stub that logs every call to BD_LOG.
+// PATH-shimmed bd stub that logs every call to BD_LOG. Every store the tests
+// list has its own database, as in a city whose rigs keep their own stores;
+// a test of shared databases sets FAKE_SCOPE_DBS itself.
 func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
 	t.Helper()
 	binDir = t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 	env = map[string]string{
-		"BD_LOG":       bdLog,
-		"GC_CITY":      t.TempDir(),
-		"GC_CITY_PATH": t.TempDir(),
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG":         bdLog,
+		"FAKE_SCOPE_DBS": "city=citydb rig:api=apidb rig:web=webdb rig:hq=hqdb rig:old=olddb",
+		"GC_CITY":        t.TempDir(),
+		"GC_CITY_PATH":   t.TempDir(),
+		"PATH":           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	return binDir, bdLog, env
 }
@@ -11006,6 +12470,421 @@ esac
 	if err == nil {
 		t.Fatalf("gate-sweep should exit non-zero when the timer-gate bd call fails (no || true suppression on that line); got success\n%s", out)
 	}
+}
+
+// writeGateSweepScopeBd installs a bd double that logs "<scope> <args>" to
+// BD_LOG, then runs failure (a shell snippet that may exit non-zero) and
+// otherwise exits 0.
+func writeGateSweepScopeBd(t *testing.T, binDir, failure string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
+		`printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"`+"\n"+
+		failure+"\nexit 0\n")
+}
+
+// readGateSweepLog returns the bd double's log, or "" when bd never ran.
+func readGateSweepLog(t *testing.T, bdLog string) string {
+	t.Helper()
+	data, err := os.ReadFile(bdLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	return string(data)
+}
+
+// gateSweepChecks are the bd calls a sweep of one store issues.
+var gateSweepChecks = []string{
+	"gate check --type=timer --escalate",
+	"gate check --type=gh --escalate",
+}
+
+// requireGateSweepChecked fails unless the bd log shows both the timer and
+// the gh gate check against every scope.
+func requireGateSweepChecked(t *testing.T, log string, scopes ...string) {
+	t.Helper()
+	for _, scope := range scopes {
+		for _, check := range gateSweepChecks {
+			if want := scope + " " + check; !strings.Contains(log, want) {
+				t.Errorf("missing %q in bd log:\n%s", want, log)
+			}
+		}
+	}
+}
+
+// TestGateSweepChecksTimerAndGhGatesInEveryRigStore verifies that the
+// sweep reaches each configured rig's bead store, not just the city store:
+// a timer or gh gate stored in a rig must be evaluated too.
+func TestGateSweepChecksTimerAndGhGatesInEveryRigStore(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false},{"name":"web","hq":false}]}`
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
+}
+
+// TestGateSweepSkipsHQAndSuspendedRigs verifies that the hq pseudo-rig and
+// suspended rigs are not swept as rigs, while the other rigs still are.
+func TestGateSweepSkipsHQAndSuspendedRigs(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"hq","hq":true},{"name":"old","suspended":true},{"name":"api"}]}`
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	log := readGateSweepLog(t, bdLog)
+	requireGateSweepChecked(t, log, "rig:api")
+	for _, skipped := range []string{"rig:hq ", "rig:old "} {
+		if strings.Contains(log, skipped) {
+			t.Errorf("gate-sweep swept %q; bd log:\n%s", strings.TrimSpace(skipped), log)
+		}
+	}
+}
+
+// gateSweepReport returns the lines gate-sweep itself printed (prefixed
+// "gate-sweep:") that mention scope.
+func gateSweepReport(out, scope string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "gate-sweep:") && strings.Contains(line, scope) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// gateSweepLastLine returns the last non-empty line of out.
+func gateSweepLastLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// TestGateSweepKeepsSweepingAfterATimerFailure verifies that a failing timer
+// check in one store is reported on stderr naming the store and fails the
+// run, while that store's gh gates and the other stores are still checked.
+// bd exits non-zero when a single gate could not be checked or closed, after
+// it has applied the others, so a failed timer check must not hide the
+// store's gh gates. The last stderr line names every failed store: the
+// controller keeps only the tail of a failing run's output.
+func TestGateSweepKeepsSweepingAfterATimerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure string
+		env     map[string]string
+		failed  []string
+		swept   []string
+	}{
+		{
+			name: "bd could not check one gate in a rig store",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "rig:api "*--type=timer*)
+    echo "✗ api-xwi: error checking - no timeout set" >&2
+    echo "Error: 1 gate(s) could not be checked or closed" >&2
+    exit 1
+    ;;
+esac`,
+			failed: []string{"rig:api"},
+			swept:  []string{"city", "rig:api", "rig:web"},
+		},
+		{
+			name: "bd fails the city timer check",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			failed: []string{"city"},
+			swept:  []string{"city", "rig:api", "rig:web"},
+		},
+		{
+			name: "timer checks fail in two stores",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*|"rig:web "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			failed: []string{"city", "rig:web"},
+			swept:  []string{"city", "rig:api", "rig:web"},
+		},
+		{
+			name:   "gc cannot reach a rig store",
+			env:    map[string]string{"FAKE_UNREACHABLE_SCOPES": "rig:api"},
+			failed: []string{"rig:api"},
+			swept:  []string{"city", "rig:web"},
+		},
+		{
+			name: "the rig list fails after a city timer failure",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			env:    map[string]string{"FAKE_RIG_LIST_FAIL": "1"},
+			failed: []string{"city"},
+			swept:  []string{"city"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, tc.failure)
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatalf("gate-sweep exited 0 after the timer check failed in %v\nstdout:\n%s\nstderr:\n%s", tc.failed, stdout.String(), stderr.String())
+			}
+			for _, failed := range tc.failed {
+				if len(gateSweepReport(stderr.String(), failed)) == 0 {
+					t.Errorf("stderr does not report the failing store %s:\n%s", failed, stderr.String())
+				}
+			}
+			if got, want := gateSweepLastLine(stderr.String()), "gate-sweep: timer gate check failed in: "+strings.Join(tc.failed, " "); got != want {
+				t.Errorf("last stderr line = %q, want %q\nstderr:\n%s", got, want, stderr.String())
+			}
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), tc.swept...)
+		})
+	}
+}
+
+// gateSweepCheckCount returns how many gate checks of kind ("timer" or "gh")
+// the bd log records, across every store.
+func gateSweepCheckCount(log, kind string) int {
+	return strings.Count(log, "gate check --type="+kind+" --escalate")
+}
+
+// TestGateSweepSweepsASharedDatabaseOnce verifies that stores served by one
+// database (a rig bound to the city store, or two rigs on one database) are
+// swept once a run: bd escalates an escalated gh gate on every check, so a
+// second pass would send each escalation twice.
+func TestGateSweepSweepsASharedDatabaseOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dbs      string
+		swept    []string
+		notSwept string
+	}{
+		{
+			name:     "rig bound to the city store",
+			dbs:      "city=citydb rig:api=citydb rig:web=webdb",
+			swept:    []string{"city", "rig:web"},
+			notSwept: "rig:api",
+		},
+		{
+			name:     "two rigs on one database",
+			dbs:      "city=citydb rig:api=shared rig:web=shared",
+			swept:    []string{"city", "rig:api"},
+			notSwept: "rig:web",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, "")
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			env["FAKE_SCOPE_DBS"] = tc.dbs
+
+			runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+			log := readGateSweepLog(t, bdLog)
+			requireGateSweepChecked(t, log, tc.swept...)
+			if strings.Contains(log, tc.notSwept+" gate check") {
+				t.Errorf("%s shares a database already swept this run but was swept again; bd log:\n%s", tc.notSwept, log)
+			}
+			for _, kind := range []string{"timer", "gh"} {
+				if got := gateSweepCheckCount(log, kind); got != len(tc.swept) {
+					t.Errorf("%d %s gate checks, want one per database (%d); bd log:\n%s", got, kind, len(tc.swept), log)
+				}
+			}
+		})
+	}
+}
+
+// TestGateSweepSweepsStoresWhoseDatabaseCannotBeProbed verifies that a store
+// bd will not name a database for (an embedded store or an HTTP workspace,
+// where bd serves gate checks but not `sql`) is still swept: the database
+// probe only finds shared databases, and it must never keep a store's gates
+// unchecked.
+func TestGateSweepSweepsStoresWhoseDatabaseCannotBeProbed(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+	env["FAKE_SQL_UNSUPPORTED_SCOPES"] = "city rig:api"
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
+}
+
+// gcGateCheckCalls returns the `gc bd ... gate check` calls GC_CALL_LOG
+// recorded against scope ("city" or "rig:<name>"), whether or not gc let
+// them reach bd.
+func gcGateCheckCalls(t *testing.T, gcLog, scope string) []string {
+	t.Helper()
+	data, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	rig, onRig := strings.CutPrefix(scope, "rig:")
+	var calls []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "bd ") || !strings.Contains(line, " gate check ") {
+			continue
+		}
+		if (onRig && strings.Contains(line, " --rig "+rig+" gate check ")) ||
+			(!onRig && !strings.Contains(line, " --rig ")) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// TestGateSweepSkipsStoresGcWillNotScope verifies that a store gc refuses to
+// point bd at (a non-bd beads provider, or a rig with no path binding on this
+// site) holds no bd gates: it is named as skipped on stdout, no gate check is
+// issued against it, the other stores are swept, and the run exits 0.
+func TestGateSweepSkipsStoresGcWillNotScope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		skipped string
+		swept   []string
+	}{
+		{
+			name:    "rig is not bd-backed",
+			env:     map[string]string{"FAKE_NOT_BD_SCOPES": "rig:api"},
+			skipped: "rig:api",
+			swept:   []string{"city", "rig:web"},
+		},
+		{
+			name:    "rig has no path binding",
+			env:     map[string]string{"FAKE_UNBOUND_SCOPES": "rig:api"},
+			skipped: "rig:api",
+			swept:   []string{"city", "rig:web"},
+		},
+		{
+			name:    "city is not bd-backed",
+			env:     map[string]string{"FAKE_NOT_BD_SCOPES": "city"},
+			skipped: "city",
+			swept:   []string{"rig:api", "rig:web"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, "")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			env["GC_CALL_LOG"] = gcLog
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("gate-sweep should exit 0 when gc will not scope %s; got %v\nstdout:\n%s\nstderr:\n%s", tc.skipped, err, stdout.String(), stderr.String())
+			}
+			if len(gateSweepReport(stdout.String(), tc.skipped)) == 0 {
+				t.Errorf("stdout does not name the skipped store %s:\n%s", tc.skipped, stdout.String())
+			}
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), tc.swept...)
+			if calls := gcGateCheckCalls(t, gcLog, tc.skipped); len(calls) != 0 {
+				t.Errorf("gate checks issued against %s, which gc will not scope:\n%s", tc.skipped, strings.Join(calls, "\n"))
+			}
+			if calls := gcGateCheckCalls(t, gcLog, tc.swept[0]); len(calls) == 0 {
+				t.Errorf("gc call log records no gate check against %s, so it cannot show %s was skipped", tc.swept[0], tc.skipped)
+			}
+		})
+	}
+}
+
+// TestGateSweepFailsLoudWhenRigsCannotBeListed verifies that a sweep that
+// cannot list the rigs still sweeps the city store, says on stderr that the
+// rig stores were not checked, and fails the run instead of quietly
+// narrowing to the city store.
+func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, binDir string, env map[string]string)
+		reason string
+	}{
+		{
+			name: "gc rig list fails",
+			setup: func(_ *testing.T, _ string, env map[string]string) {
+				env["FAKE_RIG_LIST_FAIL"] = "1"
+			},
+			reason: "gc rig list",
+		},
+		{
+			name: "jq is not installed",
+			setup: func(t *testing.T, binDir string, env map[string]string) {
+				for _, tool := range []string{"bash", "cat", "date", "dirname", "head", "mktemp", "rm", "sed", "tail", "tr"} {
+					target, err := exec.LookPath(tool)
+					if err != nil {
+						t.Fatalf("LookPath(%s): %v", tool, err)
+					}
+					if err := os.Symlink(target, filepath.Join(binDir, tool)); err != nil {
+						t.Fatalf("Symlink(%s): %v", tool, err)
+					}
+				}
+				env["PATH"] = binDir
+			},
+			reason: "jq",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, "")
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"}]}`
+			tc.setup(t, binDir, env)
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatalf("gate-sweep exited 0 though it could not list the rigs\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			}
+			report := gateSweepReport(stderr.String(), "rig stores were not checked")
+			if len(report) == 0 || !strings.Contains(report[0], tc.reason) {
+				t.Errorf("stderr does not say the rig stores were not checked because of %s:\n%s", tc.reason, stderr.String())
+			}
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city")
+		})
+	}
+}
+
+// TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
+// holds per store: a rig's failing gh check neither fails the run nor stops
+// the next rig's sweep, and that rig's timer gates are still checked.
+func TestGateSweepToleratesRigGhGateBdFailures(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, `case "$GC_FAKE_SCOPE $*" in
+  "rig:api "*--type=gh*)
+    echo "bd: simulated gh-gate failure (e.g., missing gh auth)" >&2
+    exit 1
+    ;;
+esac`)
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 when only a rig's gh-gate check fails; got %v\n%s", err, out)
+	}
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
 }
 
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
@@ -11215,223 +13094,6 @@ func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 	}
 }
 
-// wispTimestampLayout produces no-Z timestamps that both GNU `date -d` and
-// BSD `date -j -f "%Y-%m-%dT%H:%M:%S"` accept; wisp-compact.sh also accepts
-// RFC3339 timestamps with trailing Z.
-const wispTimestampLayout = "2006-01-02T15:04:05"
-
-// wispCompactEnv installs a `bd` stub that returns the supplied beadsJSON on
-// `bd list --json --all -n 0` and logs all other bd subcommands to BD_LOG.
-// BD_LOG is pre-created empty so skip-path tests can still assert on its
-// (empty) contents. TZ=UTC is pinned for cross-platform date parsing — see
-// wispTimestampLayout. jq is whatever is on PATH.
-func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[string]string) {
-	t.Helper()
-	binDir := t.TempDir()
-	bdLog = filepath.Join(t.TempDir(), "bd.log")
-	if err := os.WriteFile(bdLog, nil, 0o644); err != nil {
-		t.Fatalf("WriteFile(bd log): %v", err)
-	}
-
-	stubPath := filepath.Join(binDir, "bd")
-	// Stub fails fast on any subcommand or flag shape the script doesn't
-	// currently use. This pins the script's bd contract — a regression that
-	// dropped `--json` or `--all` from `bd list` would otherwise silently
-	// pass because cat would still emit valid JSON.
-	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
-case "$1" in
-  list)
-    case "$*" in
-      *"--json"*"--all"*"-n 0"*)
-        cat <<'EOF'
-%s
-EOF
-        exit 0
-        ;;
-      *)
-        echo "bd list called with unexpected args: $*" >&2
-        exit 2
-        ;;
-    esac
-    ;;
-  update|comment|delete)
-    printf '%%s\n' "$*" >> "$BD_LOG"
-    exit 0
-    ;;
-  *)
-    echo "bd called with unexpected subcommand: $*" >&2
-    exit 2
-    ;;
-esac
-`, beadsJSON))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
-
-	env = map[string]string{
-		"BD_LOG":       bdLog,
-		"GC_CITY":      t.TempDir(),
-		"GC_CITY_PATH": t.TempDir(),
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TZ":           "UTC",
-	}
-	return bdLog, env
-}
-
-func TestWispCompactDeletesClosedPastTTL(t *testing.T) {
-	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-old","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
-]`, pastTTL)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	if !strings.Contains(s, "delete ga-old --force") {
-		t.Fatalf("expected `bd delete ga-old --force`; bd log:\n%s", s)
-	}
-	for _, banned := range []string{"update ga-old --persistent", "comment ga-old"} {
-		if strings.Contains(s, banned) {
-			t.Fatalf("closed+past-TTL+no-comments should be deleted, not %q; bd log:\n%s", banned, s)
-		}
-	}
-}
-
-func TestWispCompactReportsSummaryForActions(t *testing.T) {
-	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
-	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-old","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
-  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
-]`, pastTTL, withinTTL)
-
-	_, env := wispCompactEnv(t, beads)
-	out, err := runScriptResult(t, coreScriptPath("wisp-compact.sh"), env)
-	if err != nil {
-		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
-	}
-	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1"; got != want {
-		t.Fatalf("summary = %q, want %q", got, want)
-	}
-}
-
-func TestWispCompactPromotesNonClosedPastTTL(t *testing.T) {
-	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-stuck","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
-]`, pastTTL)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	if !strings.Contains(s, "update ga-stuck --persistent") {
-		t.Fatalf("expected `bd update ga-stuck --persistent`; bd log:\n%s", s)
-	}
-	if !strings.Contains(s, "stuck detection") {
-		t.Fatalf("expected promotion comment to mention stuck detection; bd log:\n%s", s)
-	}
-	if strings.Contains(s, "delete ga-stuck") {
-		t.Fatalf("non-closed wisp must be promoted, not deleted; bd log:\n%s", s)
-	}
-}
-
-func TestWispCompactPromotesClosedWispsWithComments(t *testing.T) {
-	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-discussed","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":3,"labels":[]}
-]`, pastTTL)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	if !strings.Contains(s, "update ga-discussed --persistent") {
-		t.Fatalf("expected `bd update ga-discussed --persistent`; bd log:\n%s", s)
-	}
-	if !strings.Contains(s, "proven value") {
-		t.Fatalf("expected promotion comment to mention proven value; bd log:\n%s", s)
-	}
-	if strings.Contains(s, "delete ga-discussed") {
-		t.Fatalf("wisp with comments must be preserved, not deleted; bd log:\n%s", s)
-	}
-}
-
-func TestWispCompactSkipsBeadsWithinTTL(t *testing.T) {
-	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
-]`, withinTTL)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	for _, banned := range []string{"delete ga-fresh", "update ga-fresh", "comment ga-fresh"} {
-		if strings.Contains(s, banned) {
-			t.Fatalf("within-TTL bead must not be touched; saw %q in bd log:\n%s", banned, s)
-		}
-	}
-}
-
-func TestWispCompactRespectsHeartbeatTTL(t *testing.T) {
-	// wisp_type:heartbeat has a 6h TTL. A bead aged 7h should be acted on
-	// (delete, since closed + no comments + no keep label) even though the
-	// default 24h TTL would skip it.
-	aged7h := time.Now().Add(-7 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-hb","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":["wisp_type:heartbeat"]}
-]`, aged7h)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	if !strings.Contains(s, "delete ga-hb --force") {
-		t.Fatalf("heartbeat aged 7h should be deleted past 6h TTL; bd log:\n%s", s)
-	}
-}
-
-func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
-	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
-	beads := fmt.Sprintf(`[
-  {"id":"ga-perm","status":"closed","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":[]}
-]`, pastTTL)
-
-	bdLog, env := wispCompactEnv(t, beads)
-	runScript(t, coreScriptPath("wisp-compact.sh"), env)
-
-	log, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	s := string(log)
-	for _, banned := range []string{"delete ga-perm", "update ga-perm", "comment ga-perm"} {
-		if strings.Contains(s, banned) {
-			t.Fatalf("non-ephemeral bead must be ignored; saw %q in bd log:\n%s", banned, s)
-		}
-	}
-}
-
 // crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
 //   - `bd query 'status=closed AND closed>"..."' --json --limit 0` → returns closedJSON
 //   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON
@@ -11595,145 +13257,6 @@ func TestCrossRigDepsHandlesEmptyDepsForClosedBead(t *testing.T) {
 	}
 }
 
-func TestWispCompactReportsNonZeroCounters(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	bdLog := filepath.Join(t.TempDir(), "bd.log")
-
-	pastTTL := "2020-01-01T00:00:00Z"
-	withinTTL := time.Now().UTC().Format(time.RFC3339)
-	beadsJSON := fmt.Sprintf(`[
-  {"id":"ga-old-1","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
-  {"id":"ga-old-2","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
-  {"id":"ga-stuck","status":"open","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]},
-  {"id":"ga-fresh","status":"closed","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":[]}
-]`, pastTTL, pastTTL, pastTTL, withinTTL)
-
-	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> "$BD_LOG"
-case "$1 $2" in
-  "list --json")
-    cat <<'JSON'
-%s
-JSON
-    ;;
-esac
-exit 0
-`, beadsJSON))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
-
-	env := map[string]string{
-		"BD_LOG":       bdLog,
-		"GC_CITY":      cityDir,
-		"GC_CITY_PATH": cityDir,
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}
-
-	script := coreScriptPath("wisp-compact.sh")
-	cmd := exec.Command(script)
-	cmd.Env = mergeTestEnv(env)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
-	}
-
-	logData, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	if !strings.Contains(string(logData), "list --json --all -n 0") {
-		t.Fatalf("bd list call not observed:\n%s", logData)
-	}
-
-	want := "wisp-compact: promoted=1 deleted=2 skipped=1"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("wisp-compact summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s", want, out)
-	}
-}
-
-func TestWispCompactBSDDateZFallbackUsesUTC(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	bdLog := filepath.Join(t.TempDir(), "bd.log")
-	dateLog := filepath.Join(t.TempDir(), "date.log")
-
-	nearBoundary := "2033-05-17T20:33:20Z"
-	beadsJSON := fmt.Sprintf(`[
-  {"id":"ga-heartbeat","status":"open","ephemeral":true,"updated_at":"%s","comment_count":0,"labels":["wisp_type:heartbeat"]}
-]`, nearBoundary)
-
-	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> "$BD_LOG"
-case "$1 $2" in
-  "list --json")
-    cat <<'JSON'
-%s
-JSON
-    ;;
-esac
-exit 0
-`, beadsJSON))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
-
-	writeExecutable(t, filepath.Join(binDir, "date"), fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> "$DATE_LOG"
-if [ "$1" = "+%%s" ]; then
-  echo 2000000000
-  exit 0
-fi
-if [ "$1" = "-d" ]; then
-  exit 1
-fi
-if [ "$1" = "-ju" ] && [ "$2" = "-f" ] && [ "$4" = "%s" ]; then
-  echo 1999974800
-  exit 0
-fi
-if [ "$1" = "-j" ] && [ "$2" = "-f" ] && [ "$4" = "%s" ]; then
-  echo 2000000000
-  exit 0
-fi
-exit 1
-`, nearBoundary, nearBoundary))
-
-	env := map[string]string{
-		"BD_LOG":       bdLog,
-		"DATE_LOG":     dateLog,
-		"GC_CITY":      cityDir,
-		"GC_CITY_PATH": cityDir,
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TZ":           "America/Los_Angeles",
-	}
-
-	script := coreScriptPath("wisp-compact.sh")
-	cmd := exec.Command(script)
-	cmd.Env = mergeTestEnv(env)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
-	}
-
-	want := "wisp-compact: promoted=1 deleted=0 skipped=0"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("wisp-compact should parse BSD Z timestamps as UTC at the heartbeat TTL boundary\nwant substring: %q\ngot output:\n%s", want, out)
-	}
-
-	dateData, err := os.ReadFile(dateLog)
-	if err != nil {
-		t.Fatalf("ReadFile(date log): %v", err)
-	}
-	if !strings.Contains(string(dateData), "-ju -f %Y-%m-%dT%H:%M:%SZ "+nearBoundary+" +%s") {
-		t.Fatalf("BSD Z fallback did not force UTC:\n%s", dateData)
-	}
-
-	bdData, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
-		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
-	}
-}
-
 func TestCrossRigDepsReportsNonZeroCounter(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -11846,6 +13369,16 @@ const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]
   if [ -n "${ORPHAN_SWEEP_GATE_LINGER:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_LINGER"; fi
   exit 0
 fi
+if [ "$1" = "ready" ] && [ "$2" = "--status" ] && [ "$3" = "in_progress" ]; then
+  if [ -n "${ORPHAN_SWEEP_FEDERATED_EXIT:-}" ]; then
+    echo "${ORPHAN_SWEEP_FEDERATED_ERR:-gc ready: graph store: unreadable}" >&2
+    exit "$ORPHAN_SWEEP_FEDERATED_EXIT"
+  fi
+  cat <<FEDERATED_EOF
+${ORPHAN_SWEEP_FEDERATED_BEADS_JSON:-[]}
+FEDERATED_EOF
+  exit 0
+fi
 `
 
 // orphanSweepSharedRigFakeGC fakes a city that shares the rig store "shared"
@@ -11862,7 +13395,14 @@ fi
 // foreign-identity gate (orphanSweepGateStubArm). ORPHAN_SWEEP_GATE_EXIT makes
 // it answer "unknown" with that exit code instead, and ORPHAN_SWEEP_GATE_ABSENT
 // models a binary without the verb (exit 1, no JSON). ORPHAN_SWEEP_MAIL_EXIT
-// is the exit code of `mail send`.
+// is the exit code of `mail send`. ORPHAN_SWEEP_CLASS_OWNED_IDS lists ids (one
+// per line) that a split city's class binding owns: `bd update` of one refuses
+// --notes and --append-notes with exit 1, as gc bd's by-id door does, because
+// notes have no representation in the class store contract; every other update
+// exits 0. `bd show` fails for every id listed in ORPHAN_SWEEP_SHOW_FAIL_IDS,
+// listed work beads included, and `bd release-if-current` prints
+// ORPHAN_SWEEP_RELEASE_OUTPUT (default "released") and exits
+// ORPHAN_SWEEP_RELEASE_EXIT (default 0).
 const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
@@ -11913,7 +13453,10 @@ EOF
       exit 0
     fi
     if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
-      row=$(printf '%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
+      if [ -n "${ORPHAN_SWEEP_SHOW_FAIL_IDS:-}" ] && printf '%s\n' "$ORPHAN_SWEEP_SHOW_FAIL_IDS" | grep -Fxq -- "$3"; then
+        exit 1
+      fi
+      row=$(printf '%s\n%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_FEDERATED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
       if [ -n "$row" ]; then
         printf '[%s]\n' "$row"
         exit 0
@@ -11921,10 +13464,20 @@ EOF
       exit 1
     fi
     if [ "$2" = "release-if-current" ]; then
-      printf 'released\n'
-      exit 0
+      printf '%s\n' "${ORPHAN_SWEEP_RELEASE_OUTPUT:-released}"
+      exit "${ORPHAN_SWEEP_RELEASE_EXIT:-0}"
     fi
     if [ "$2" = "update" ]; then
+      if [ -n "${ORPHAN_SWEEP_CLASS_OWNED_IDS:-}" ] && echo "$ORPHAN_SWEEP_CLASS_OWNED_IDS" | grep -Fxq -- "$3"; then
+        for arg; do
+          case "$arg" in
+            --notes | --notes=* | --append-notes | --append-notes=*)
+              echo "gc bd: $3 is owned by binding infra, and gc bd update is not served in process (${arg%%=*} has no representation in the class store contract); refusing rather than running it against the work store, which does not hold the authoritative copy" >&2
+              exit 1
+              ;;
+          esac
+        done
+      fi
       exit 0
     fi
     ;;
@@ -12104,10 +13657,11 @@ func TestOrphanSweepKeepsForeignClaimsOnSharedRigAndReleasesDeadLocal(t *testing
 // orphanSweepGateRow is one in-progress work bead, or one session bead served
 // by `bd show`, in an orphanSweepSharedRigFakeGC fixture.
 type orphanSweepGateRow struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Assignee  string `json:"assignee,omitempty"`
-	IssueType string `json:"issue_type,omitempty"`
+	ID        string            `json:"id"`
+	Status    string            `json:"status"`
+	Assignee  string            `json:"assignee,omitempty"`
+	IssueType string            `json:"issue_type,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // orphanSweepGateRun is one orphanSweepSharedRigFakeGC sweep's results.
@@ -12204,6 +13758,18 @@ func inProgress(id, assignee string) orphanSweepGateRow {
 	return orphanSweepGateRow{ID: id, Status: "in_progress", Assignee: assignee}
 }
 
+// hookClaim is an in-progress work bead claimed through `gc hook` by the
+// session sessionID: the assignee is the session bead id, and the claim stamps
+// gc.session_id and gc.session_name (hookClaimIdentityPatch) plus any extra
+// metadata.
+func hookClaim(beadID, sessionID, sessionName string, extra map[string]string) orphanSweepGateRow {
+	metadata := map[string]string{"gc.session_id": sessionID, "gc.session_name": sessionName}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	return orphanSweepGateRow{ID: beadID, Status: "in_progress", Assignee: sessionID, Metadata: metadata}
+}
+
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
 // city's own store, as the Go sweep does for every store: a claim under an
 // identity this city cannot vouch for (a person, a typo, a decommissioned
@@ -12233,6 +13799,131 @@ func TestOrphanSweepProtectsHQClaimsItCannotVouchFor(t *testing.T) {
 	}
 	if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "retired-hand" || !strings.Contains(outcome.Scopes[0].Reason, "hq-retired") {
 		t.Fatalf("outcome scopes = %+v, want one for retired-hand naming hq-retired", outcome.Scopes)
+	}
+}
+
+// TestOrphanSweepJudgesClaimsOnlyTheFederatedReaderReturns is the split-city
+// regression: on a city whose [storage.classes] serves the graph class from a
+// binding, every molecule root and step lives there, and `gc bd list` answers
+// from a work store only, so it lists none of their claims (exit 0, empty).
+// The sweep reads them through `gc ready --status in_progress`, and judges
+// them like any other claim: a dead local holder is released, a holder this
+// city cannot vouch for is kept and named.
+func TestOrphanSweepJudgesClaimsOnlyTheFederatedReaderReturns(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d3", Status: "closed", IssueType: "session"}},
+		[]string{"human/alice"},
+		map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, []orphanSweepGateRow{
+			inProgress("gcg-1026", "human/alice"),
+			inProgress("gcg-1027", "gc-d34d3"),
+		})})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("gcg-1027") {
+		t.Fatalf("dead local claim on a graph step was not released\n%s", run.context())
+	}
+	if run.released("gcg-1026") {
+		t.Fatalf("graph-step claim held by an identity this city cannot vouch for was released\n%s", run.context())
+	}
+	if want := `"human/alice" (1: gcg-1026)`; !strings.Contains(run.out, want) {
+		t.Fatalf("output does not name the protected graph-step claim %s:\n%s", want, run.out)
+	}
+}
+
+// TestOrphanSweepJudgesAClaimBothReadersReturnOnce: on every city the
+// federated reader also returns the work stores' claims the scope reads
+// already staged. Each claim is judged once.
+func TestOrphanSweepJudgesAClaimBothReadersReturnOnce(t *testing.T) {
+	row := []orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}
+	run := runOrphanSweepGateFixture(t, row, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, row)})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	lines := nonEmptyLogLines(run.log)
+	if got := countExactLine(lines, "bd release-if-current hq-local-dead gc-d34d2"); got != 1 {
+		t.Fatalf("release-if-current count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd show hq-local-dead --json"); got != 1 {
+		t.Fatalf("revalidation count = %d, want 1\n%s", got, run.context())
+	}
+}
+
+// TestOrphanSweepDeclaresAFederatedReadItCouldNotComplete: gc ready fails on a
+// store it cannot read instead of answering short. The sweep must not read
+// that as "no claims": it says so on stderr and in a partial outcome, and
+// still judges the claims the scope reads returned.
+func TestOrphanSweepDeclaresAFederatedReadItCouldNotComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hq   []orphanSweepGateRow
+	}{
+		{"with scope claims", []orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}},
+		{"with no scope claims", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t, tc.hq, nil,
+				[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+				nil,
+				map[string]string{
+					"ORPHAN_SWEEP_FEDERATED_EXIT": "1",
+					"ORPHAN_SWEEP_FEDERATED_ERR":  "gc ready: graph store: database is locked",
+				})
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if tc.hq != nil && !run.released("hq-local-dead") {
+				t.Fatalf("a failed federated read stopped the scope claims from being judged\n%s", run.context())
+			}
+			if want := "database is locked"; !strings.Contains(run.out, want) {
+				t.Fatalf("output does not report the failed federated read (%q):\n%s", want, run.out)
+			}
+			outcome, ok := run.outcome(t)
+			if !ok || outcome.Outcome != "partial" {
+				t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+			}
+			found := false
+			for _, scope := range outcome.Scopes {
+				if strings.Contains(scope.Reason, "database is locked") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("outcome scopes = %+v, want one naming the failed federated read", outcome.Scopes)
+			}
+		})
+	}
+}
+
+// TestOrphanSweepRecordsTheResetCauseOnAClassOwnedStep (ga-xeb16e.91 triage
+// repro): on a split city a released claim can be a graph step the class
+// binding owns. gc bd serves an update of it in process and refuses --notes and
+// --append-notes whole, because notes have no representation in the class
+// store contract. The reset cause must still be recorded, with a write every
+// store serves.
+func TestOrphanSweepRecordsTheResetCauseOnAClassOwnedStep(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d3", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{
+			"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, []orphanSweepGateRow{inProgress("gcg-1027", "gc-d34d3")}),
+			"ORPHAN_SWEEP_CLASS_OWNED_IDS":      "gcg-1027",
+		})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("gcg-1027") {
+		t.Fatalf("dead local claim on a graph step was not released\n%s", run.context())
+	}
+	if strings.Contains(run.out, "failed to record") {
+		t.Fatalf("the reset cause was not recorded on the class-owned step:\n%s", run.context())
+	}
+	want := "bd update gcg-1027 --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gc-d34d3 -- no live session matched"
+	if got := countExactLine(nonEmptyLogLines(run.log), want); got != 1 {
+		t.Fatalf("cause stamp count = %d, want 1 (%q)\n%s", got, want, run.context())
 	}
 }
 
@@ -12425,11 +14116,11 @@ func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
 
 // TestOrphanSweepNeverVouchesForAnEmptyIdentity keeps the gate's memo from
 // answering for an identity the gate was never asked about. A newline in an
-// assignee splits its row, so the tail reads as a row of its own whose bead ID
-// is attacker-chosen text and whose assignee is empty. Once a dead local claim
-// has been vouched for, the memo must not vouch for "" too: that would release
-// an unrelated in-progress bead that has no assignee at all, a bead the sweep
-// never selects on its own.
+// assignee would split its row, so the tail would read as a row of its own
+// whose bead ID is attacker-chosen text and whose assignee is empty; vouched
+// for by the memo, it would release an unrelated in-progress bead that has no
+// assignee at all. The row is kept whole instead, protected as untrusted and
+// never asked about, and the unassigned bead is never selected.
 func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	run := runOrphanSweepGateFixture(t, nil,
 		[]orphanSweepGateRow{
@@ -12445,17 +14136,18 @@ func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	}
 	for _, bead := range []string{"sh-split", "sh-unassigned"} {
 		if run.released(bead) {
-			t.Fatalf("%s was released under an empty identity the gate never vouched for\n%s", bead, run.context())
+			t.Fatalf("%s was released under an identity the gate never vouched for\n%s", bead, run.context())
 		}
 	}
-	if !strings.Contains(run.out, `"" (2: sh-split, sh-unassigned)`) {
-		t.Fatalf("output does not name the claims kept under the empty identity:\n%s", run.out)
+	if !strings.Contains(run.out, `" sh-unassigned" (1: sh-split)`) {
+		t.Fatalf("output does not name the untrusted claim as one row:\n%s", run.out)
 	}
-	// An empty identity cannot name a scope; it must not shift its reason into
-	// the scope name either.
+	if strings.Contains(run.log, "agent is-foreign --json -- \n") || strings.Contains(run.log, "agent is-foreign --json -- sh-unassigned") {
+		t.Fatalf("the gate was asked about the untrusted claim\n%s", run.context())
+	}
 	outcome, ok := run.outcome(t)
-	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 0 {
-		t.Fatalf("outcome = %+v (written %v), want partial with no scope", outcome, ok)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 || !strings.Contains(outcome.Scopes[0].Reason, "tab or line break") {
+		t.Fatalf("outcome = %+v (written %v), want partial with the untrusted claim's scope and reason", outcome, ok)
 	}
 }
 
@@ -12693,5 +14385,477 @@ func TestOrphanSweepReadsAZeroPaddedGateBudgetInBaseTen(t *testing.T) {
 	}
 	if !run.released("sh-local-dead") {
 		t.Fatalf("dead local claim was not released under an 8s budget\n%s", run.context())
+	}
+}
+
+// TestOrphanSweepReleasesHookClaimOfClosedPoolSession is the
+// gastownhall/gascity#7686 regression. A pool claim stamps gc.session_name
+// with the runtime name PoolSessionName gives it, "<template>-<session bead
+// id>", which is never a bead id. The sweep used to probe that name with
+// `gc bd show`, count the guaranteed miss as unverifiable, and keep the claim
+// of a dead holder forever, though the claim's own gc.session_id read back as
+// a closed session. A name that is the runtime name of a session bead the
+// sweep read as terminal adds nothing, so it is not probed.
+func TestOrphanSweepReleasesHookClaimOfClosedPoolSession(t *testing.T) {
+	const (
+		beadID      = "ga-hook-dead"
+		sessionID   = "gc-d34d1"
+		sessionName = "gastown__polecat-gc-d34d1"
+	)
+	for _, tc := range []struct {
+		name         string
+		sessionName  string
+		session      orphanSweepGateRow
+		extraBeads   []orphanSweepGateRow
+		wantReleased bool
+	}{
+		{
+			name: "closed session bead", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"}, wantReleased: true,
+		},
+		{
+			name: "open session in state closed", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "closed"}}, wantReleased: true,
+		},
+		{
+			name: "open session in state orphaned", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "orphaned"}}, wantReleased: true,
+		},
+		{
+			name: "open session in state failed-create", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "failed-create"}}, wantReleased: true,
+		},
+		{
+			name: "open session marked closed", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"closed": "true"}}, wantReleased: true,
+		},
+		{
+			name: "stamped name is also a closed non-session bead", sessionName: sessionName,
+			session:      orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"},
+			extraBeads:   []orphanSweepGateRow{{ID: sessionName, Status: "closed", IssueType: "task"}},
+			wantReleased: true,
+		},
+		{
+			name: "stamped name is the assignee", sessionName: sessionID,
+			session: orphanSweepGateRow{ID: sessionID, Status: "closed", IssueType: "session"}, wantReleased: true,
+		},
+		{
+			name: "active session keeps the claim", sessionName: sessionName,
+			session: orphanSweepGateRow{ID: sessionID, Status: "open", IssueType: "session", Metadata: map[string]string{"state": "active"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim(beadID, sessionID, tc.sessionName, nil)},
+				nil,
+				append([]orphanSweepGateRow{tc.session}, tc.extraBeads...),
+				nil, nil)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if strings.Contains(run.out, "unverifiable") {
+				t.Fatalf("hook claim counted as unverifiable:\n%s", run.context())
+			}
+			if strings.Contains(run.log, "bd show "+sessionName+" --json") {
+				t.Fatalf("stamped runtime name %q was probed as a bead id\n%s", sessionName, run.context())
+			}
+			if !tc.wantReleased {
+				if run.released(beadID) {
+					t.Fatalf("claim of a live session was released\n%s", run.context())
+				}
+				if outcome, ok := run.outcome(t); ok {
+					t.Fatalf("a sweep that kept a live claim declared outcome %+v", outcome)
+				}
+				return
+			}
+			if !strings.Contains(run.log, "bd release-if-current "+beadID+" "+sessionID+"\n") {
+				t.Fatalf("hook claim of a closed session was not released under %s\n%s", sessionID, run.context())
+			}
+			if !strings.Contains(run.out, "orphan-sweep: reset 1 orphaned beads") {
+				t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+			}
+		})
+	}
+}
+
+// TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable: a stamped
+// gc.session_name that is not the runtime name of a session bead the sweep
+// read (a named session, a tmux alias, a route-time prediction) may name a
+// live holder the sweep cannot see. Its failed probe keeps the claim, even
+// when the claim's gc.session_id reads back closed.
+func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T) {
+	const stampedName = "gastown__named-worker"
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-named", "gc-d34d1", stampedName, nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd show "+stampedName+" --json") {
+		t.Fatalf("unresolvable stamped name %q was never probed\n%s", stampedName, run.context())
+	}
+	if run.released("ga-hook-named") {
+		t.Fatalf("claim whose stamped session name could not be read was released\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint: a terminal record
+// under the claim's gc.session_id does not outvote a legacy session hint the
+// sweep could not read. Any unreadable holder candidate keeps the claim.
+func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
+	for _, key := range []string{"gc.session_bead_id", "session_id"} {
+		t.Run(key, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim("ga-hook-legacy", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{key: "gc-legacy9"})},
+				nil,
+				[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+				nil, nil)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if run.released("ga-hook-legacy") {
+				t.Fatalf("claim with an unreadable legacy %s hint was released\n%s", key, run.context())
+			}
+			if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+				t.Fatalf("unexpected orphan-sweep output:\n%s", run.out)
+			}
+		})
+	}
+}
+
+// TestOrphanSweepDeclaresLocalSkipsAsPartialScopes: the controller logs an
+// exit-0 run's output nowhere (#4543), so a local claim the sweep leaves in
+// place is declared as a partial outcome with one scope per claim, naming the
+// bead, its holder and the check that failed.
+func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
+	const beadID = "ga-hook-dead"
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		extra     map[string]string
+		env       map[string]string
+		// releaseAttempted: the sweep deems the holder dead and tries the
+		// conditional release, which the fake fails; the claim is still
+		// counted and declared, never reset.
+		releaseAttempted bool
+		wantReason       []string
+	}{
+		{
+			name: "holder unverifiable", sessionID: "gc-d34d1",
+			extra:      map[string]string{"gc.session_bead_id": "gc-legacy9"},
+			wantReason: []string{"gc-d34d1", "gc-legacy9"},
+		},
+		{
+			name: "work bead re-read failed", sessionID: "gc-d34d2",
+			env:        map[string]string{"ORPHAN_SWEEP_SHOW_FAIL_IDS": beadID},
+			wantReason: []string{"gc-d34d2", "re-read"},
+		},
+		{
+			name: "conditional release failed", sessionID: "gc-d34d3",
+			env:              map[string]string{"ORPHAN_SWEEP_RELEASE_EXIT": "1"},
+			releaseAttempted: true,
+			wantReason:       []string{"gc-d34d3", "release"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim(beadID, tc.sessionID, "gastown__polecat-"+tc.sessionID, tc.extra)},
+				nil,
+				[]orphanSweepGateRow{{ID: tc.sessionID, Status: "closed", IssueType: "session"}},
+				nil, tc.env)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if run.released(beadID) != tc.releaseAttempted {
+				t.Fatalf("release attempt = %v, want %v\n%s", run.released(beadID), tc.releaseAttempted, run.context())
+			}
+			if !strings.Contains(run.out, "skipped 1 unverifiable") {
+				t.Fatalf("claim was not counted as skipped:\n%s", run.context())
+			}
+			if tc.releaseAttempted {
+				if want := "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable"; !strings.Contains(run.out, want) {
+					t.Fatalf("a failed conditional release was not counted unverifiable:\n%s", run.out)
+				}
+			}
+			outcome, ok := run.outcome(t)
+			if !ok {
+				t.Fatalf("no outcome declared for a skipped local claim\n%s", run.context())
+			}
+			if outcome.Outcome != "partial" {
+				t.Fatalf("outcome = %q, want partial", outcome.Outcome)
+			}
+			if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != beadID {
+				t.Fatalf("outcome scopes = %+v, want exactly one for %s", outcome.Scopes, beadID)
+			}
+			for _, want := range tc.wantReason {
+				if !strings.Contains(outcome.Scopes[0].Reason, want) {
+					t.Errorf("scope reason %q does not name %q", outcome.Scopes[0].Reason, want)
+				}
+			}
+		})
+	}
+}
+
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes: a pass that both protects a
+// claim behind the foreign-identity gate and leaves a local claim in place
+// declares one partial outcome. The gate's scope and reason stand, and the
+// top-level reason states both counts.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	const gateReason = "protected 1 claim(s) held by identities this city could not vouch for; each scope names the identity and why"
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-hook-legacy", "gc-d34d5", "gastown__polecat-gc-d34d5", map[string]string{"gc.session_bead_id": "gc-legacy9"}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d5", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-foreign") || run.released("ga-hook-legacy") {
+		t.Fatalf("a kept claim was released\n%s", run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	if len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want the identity scope and the bead scope", outcome.Scopes)
+	}
+	scopes := map[string]string{}
+	for _, scope := range outcome.Scopes {
+		scopes[scope.Scope] = scope.Reason
+	}
+	if reason, ok := scopes["project/dalinar"]; !ok || !strings.Contains(reason, "ga-foreign") || !strings.Contains(reason, "absent_from_roster") {
+		t.Errorf("identity scope = %q (present %v), want the gate's reason naming ga-foreign", reason, ok)
+	}
+	if reason, ok := scopes["ga-hook-legacy"]; !ok || !strings.Contains(reason, "gc-legacy9") {
+		t.Errorf("bead scope = %q (present %v), want one naming the unreadable candidate", reason, ok)
+	}
+	if !strings.HasPrefix(outcome.Reason, gateReason) {
+		t.Errorf("outcome reason %q does not keep the gate's reason %q", outcome.Reason, gateReason)
+	}
+	if !strings.Contains(outcome.Reason, "1 local claim(s)") {
+		t.Errorf("outcome reason %q does not state the local skip count", outcome.Reason)
+	}
+}
+
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace keeps the benign races
+// quiet: `bd release-if-current` printing "skipped" lost its race (the bead
+// changed after listing), which is not a failure to declare -- the sweep did
+// everything it exists to do and the bead moved on. No summary, no outcome
+// declaration, exit 0. On the unfixed script this fails only because the
+// stuck claim never reaches the release; the declaration assertions are the
+// guard proper.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-raced", "gc-d34d1", "gastown__polecat-gc-d34d1", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd release-if-current ga-hook-raced gc-d34d1") {
+		t.Fatalf("the dead holder's claim was never offered for release\n%s", run.context())
+	}
+	if strings.Contains(run.out, "orphan-sweep:") {
+		t.Fatalf("a benign release race produced a summary:\n%s", run.out)
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a benign release race declared outcome %+v", outcome)
+	}
+}
+
+// TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename covers the window
+// between the first run's "archive path absent" check and its rename of the
+// staging repo into place: another exporter (or anything else) can create
+// the archive path in it. POSIX mv then moves the staging repo INSIDE the
+// directory that appeared, and macOS mv has no -T to refuse that. A mv shim
+// creates the archive path right before the rename. The run must not leave
+// the staging repo nested in the archive path. It falls back to the
+// in-place init, so the archive is still a repo.
+func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "packs", "core", "jsonl-archive")
+	raceLog := filepath.Join(t.TempDir(), "mv-race.log")
+
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+	realMv, err := exec.LookPath("mv")
+	if err != nil {
+		t.Skip("mv not on PATH")
+	}
+	shim := "#!/bin/sh\n" +
+		"for last in \"$@\"; do :; done\n" +
+		"case \"$1\" in\n" +
+		"  */.jsonl-archive-init.*)\n" +
+		"    if [ \"$last\" = \"$ARCHIVE_PROBE\" ] && [ ! -e \"$ARCHIVE_PROBE\" ]; then mkdir -p \"$ARCHIVE_PROBE\"; echo raced >>\"$RACE_LOG\"; fi ;;\n" +
+		"esac\n" +
+		"exec " + realMv + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mv"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["ARCHIVE_PROBE"] = archiveRepo
+	env["RACE_LOG"] = raceLog
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	if data, err := os.ReadFile(raceLog); err != nil || !strings.Contains(string(data), "raced") {
+		t.Fatalf("the mv shim never created the archive path before the rename (%q, %v)", data, err)
+	}
+	nested, err := filepath.Glob(filepath.Join(archiveRepo, ".jsonl-archive-init.*"))
+	if err != nil || len(nested) != 0 {
+		t.Fatalf("staging repo moved inside the archive path: %v (%v)", nested, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(archiveRepo), ".jsonl-archive-init.*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("init staging dirs left behind: %v (%v)", leftovers, err)
+	}
+	if _, err := os.Stat(filepath.Join(archiveRepo, ".git")); err != nil {
+		t.Fatalf("archive repo not initialized after the race: %v", err)
+	}
+}
+
+// TestOrphanSweepRefusesForgedClaimRows is the row-forging regression: the
+// sweep re-reads its claims as tab-separated rows, so an assignee carrying a
+// newline and a tab spells a whole claim row of its own, naming another bead
+// under another holder. A row whose bead id or assignee holds a tab, newline
+// or carriage return is protected and named instead: never asked about and
+// never released.
+func TestOrphanSweepRefusesForgedClaimRows(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("hq-1", "retired-hand"),
+			inProgress("hq-9", "zz\nhq-1\tgc-d34d2"),
+			inProgress("hq-2", "carriage\rreturn"),
+		}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		[]string{"retired-hand"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, bead := range []string{"hq-1", "hq-9", "hq-2"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released through a forged claim row\n%s", bead, run.context())
+		}
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate calls = %d, want 1 (retired-hand; the untrusted rows are never asked)\n%s", got, run.context())
+	}
+	for _, want := range []string{
+		`"retired-hand" (1: hq-1)`,
+		`"zz hq-1 gc-d34d2" (1: hq-9)`,
+		`"carriage return" (1: hq-2)`,
+	} {
+		if !strings.Contains(run.out, want) {
+			t.Fatalf("output missing %q:\n%s", want, run.out)
+		}
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	named := false
+	for _, scope := range outcome.Scopes {
+		if scope.Scope == "zz hq-1 gc-d34d2" && strings.Contains(scope.Reason, "tab or line break") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("outcome scopes = %+v, want the forged row named with why it was kept", outcome.Scopes)
+	}
+}
+
+// TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest: a rig listing that
+// does not parse is dropped for the pass (its claims kept), while the other
+// scopes are still swept.
+func TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{"ORPHAN_SWEEP_SHARED_BEADS_JSON": `[{"id":"sh-x","status":"in_progress","assignee":"neighbor"}] not json`})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("one unreadable rig listing stopped the HQ sweep\n%s", run.context())
+	}
+	if run.released("sh-x") {
+		t.Fatalf("a claim from an unreadable listing was released\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the unreadable listing:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepSkipsAListingThatIsNotAnArray: a listing that is a lone
+// object carries rows no scope tag reaches. It is dropped like one that does
+// not parse: its rows are neither asked about nor released, never read as HQ
+// rows, and the other scopes are still swept.
+func TestOrphanSweepSkipsAListingThatIsNotAnArray(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{
+			"ORPHAN_SWEEP_SHARED_BEADS_JSON": `{"wrap":{"id":"sh-x","status":"in_progress","assignee":"neighbor"}}`,
+		})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, line := range nonEmptyLogLines(run.log) {
+		if strings.HasPrefix(line, "agent is-foreign ") && strings.HasSuffix(line, " neighbor") {
+			t.Fatalf("a row of a listing that is not an array was asked about: %s\n%s", line, run.context())
+		}
+	}
+	if run.released("sh-x") {
+		t.Fatalf("a row of a listing that is not an array was released\n%s", run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("a rig listing that is not an array stopped the HQ sweep\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the listing that is not an array:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepReleasesARigClaimInItsRig: a dead pool session's claim in a
+// rig is released, and its cause recorded, with --rig naming the rig it was
+// listed from, so the release runs in that rig's store whatever the prefixes
+// of its arguments say. The rig's scope read wins over the federated read's
+// row for the same claim, which names no scope. An HQ claim names no rig.
+func TestOrphanSweepReleasesARigClaimInItsRig(t *testing.T) {
+	shared := []orphanSweepGateRow{inProgress("sh-dead", "gc-session-d34d2")}
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-dead", "gc-d34d3")}, shared,
+		[]orphanSweepGateRow{
+			{ID: "gc-session-d34d2", Status: "closed", IssueType: "session"},
+			{ID: "gc-d34d3", Status: "closed", IssueType: "session"},
+		},
+		nil, map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, shared)})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	lines := nonEmptyLogLines(run.log)
+	if got := countExactLine(lines, "bd release-if-current sh-dead gc-session-d34d2 --rig shared"); got != 1 {
+		t.Fatalf("rig release with --rig shared count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd update sh-dead --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gc-session-d34d2 -- no live session matched --rig shared"); got != 1 {
+		t.Fatalf("rig reset cause with --rig shared count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd release-if-current hq-dead gc-d34d3"); got != 1 {
+		t.Fatalf("HQ release without a rig count = %d, want 1\n%s", got, run.context())
 	}
 }

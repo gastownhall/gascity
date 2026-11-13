@@ -1,11 +1,15 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -949,5 +953,171 @@ func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
 	}
 	if got[0].Path != "/tmp/café" {
 		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
+	}
+}
+
+// installBlockingGit puts a fake git first on PATH that appends its argv to a
+// log and then execs sleep, so a deadline kill reaps the sleeper directly. It
+// returns the log path.
+func installBlockingGit(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readGitCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read fake git log: %v", err)
+	}
+	return string(data)
+}
+
+// A probe that misses its deadline returns the ctx error and no branch: it
+// must never invent "main" for a probe that did not answer.
+func TestDefaultBranchCtx_DeadlineReturnsErrorNotMain(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if err == nil {
+		t.Fatalf("DefaultBranchCtx = %q, nil; want a deadline error", branch)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty on a missed deadline", branch)
+	}
+}
+
+// runCtx itself appends ctx.Err() to a failed run: a git killed by a missed
+// deadline surfaces as errors.Is(err, context.DeadlineExceeded), not only as
+// the exec "signal: killed" exit error.
+func TestRunCtx_MissedDeadlineWrapsContextDeadlineExceeded(t *testing.T) {
+	installBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	out, err := New(t.TempDir()).runCtx(ctx, "status")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCtx err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if out != "" {
+		t.Fatalf("runCtx out = %q, want empty on a failed run", out)
+	}
+}
+
+// A ctx that is already done spawns no git process at all.
+func TestDefaultBranchCtx_DoneContextSpawnsNothing(t *testing.T) {
+	logPath := installBlockingGit(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty", branch)
+	}
+	if calls := readGitCalls(t, logPath); calls != "" {
+		t.Fatalf("a done ctx spawned git:\n%s", calls)
+	}
+}
+
+// An ordinary non-zero exit (origin/HEAD unset) keeps walking the candidate
+// chain under a live deadline: a master-only repo answers "master".
+func TestDefaultBranchCtx_NonZeroExitKeepsCandidateChain(t *testing.T) {
+	clone := t.TempDir()
+	runGit(t, clone, "init")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	got, err := New(clone).DefaultBranchCtx(ctx)
+	if err != nil {
+		t.Fatalf("DefaultBranchCtx: %v", err)
+	}
+	if got != "master" {
+		t.Fatalf("DefaultBranchCtx = %q, want master", got)
+	}
+}
+
+// DefaultBranch keeps its no-deadline contract: with nothing answering it
+// still returns "main" and a nil error.
+func TestDefaultBranch_NoDeadlineStillFallsBackToMain(t *testing.T) {
+	got, err := New(t.TempDir()).DefaultBranch()
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", got)
+	}
+}
+
+// installShowRefBlockingGit puts a fake git first on PATH that fails
+// symbolic-ref at once (origin/HEAD unset) and blocks on anything else, so a
+// deadline lands inside the main/master show-ref loop. It returns the log path.
+func installShowRefBlockingGit(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"case \"$1\" in symbolic-ref) exit 1 ;; esac\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write show-ref blocking git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// A deadline that lands while the main/master show-ref loop is running returns
+// the ctx error and no branch. Falling through to the "main" fallback would
+// present a guess as an answer for a probe that never completed.
+func TestDefaultBranchCtx_DeadlineDuringShowRefReturnsErrorNotMain(t *testing.T) {
+	logPath := installShowRefBlockingGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+	calls := readGitCalls(t, logPath)
+	if !strings.Contains(calls, "show-ref") {
+		t.Fatalf("the deadline fired before the show-ref loop started; calls:\n%s", calls)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DefaultBranchCtx = %q, %v; want errors.Is(context.DeadlineExceeded)", branch, err)
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty: the loop must not fall back to a guessed main", branch)
+	}
+	if n := strings.Count(calls, "show-ref"); n != 1 {
+		t.Fatalf("show-ref ran %d times, want 1: a done ctx must stop the loop at main\n%s", n, calls)
 	}
 }

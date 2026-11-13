@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -382,26 +383,34 @@ func TestExecutionBackstopKeepsTheActivityClockWhenTheSnapshotIsIndeterminate(t 
 	}
 }
 
-// The scan is known to read only some families' busy indicators. For any other
-// session, and for any session over ACP, a snapshot is evidence of nothing, so
-// those sessions keep the activity clock: the backstop nudges, exhausts its
-// attempts and escalates, without paying for a snapshot.
-func TestExecutionBackstopKeepsTheActivityClockWhereTheSnapshotCannotReadBusy(t *testing.T) {
+// Which families' busy readings count is the runtime leaf's policy, not
+// cmd/gc's: the tmux leaf answers runtime.ErrIdleIndeterminate for a family
+// whose busy indicator it does not trust. So the backstop takes the snapshot
+// for every non-ACP session, and a family the leaf does not trust keeps the
+// activity clock: the backstop nudges, exhausts its attempts and escalates. A
+// session over ACP pays for no snapshot at all, even one that would read busy.
+func TestExecutionBackstopKeepsTheActivityClockWhereTheLeafCannotReadBusy(t *testing.T) {
+	indeterminate := fmt.Errorf("untrusted family: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
 		name string
 		meta map[string]string
+		acp  bool
 	}{
 		{name: "no recorded provider"},
 		{name: "grok", meta: map[string]string{"provider": "grok"}},
 		{name: "kimi", meta: map[string]string{"provider": "kimi"}},
-		{name: "claude over ACP", meta: map[string]string{"provider": "claude", "transport": "acp"}},
+		{name: "gemini", meta: map[string]string{"provider": "gemini"}},
+		{name: "claude over ACP", meta: map[string]string{"provider": "claude", "transport": "acp"}, acp: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			if tc.meta != nil {
 				f.setSessionMeta(t, tc.meta)
 			}
-			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: false}
+			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, err: indeterminate}
+			if tc.acp {
+				snap.err = nil // a busy reading: it must never be taken
+			}
 			f.provider = snap
 
 			f.tickStale(t)
@@ -412,10 +421,70 @@ func TestExecutionBackstopKeepsTheActivityClockWhereTheSnapshotCannotReadBusy(t 
 			if len(f.drained) != 1 || f.drained[0] != f.sessName {
 				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
 			}
-			if snap.calls != 0 {
-				t.Fatalf("idle snapshots taken = %d, want 0 for a session the snapshot cannot read as busy", snap.calls)
+			if taken := snap.calls != 0; taken == tc.acp {
+				t.Fatalf("idle snapshots taken = %d, want them taken only off ACP (acp=%t)", snap.calls, tc.acp)
 			}
 		})
+	}
+}
+
+// Regression for moving the busy-trust policy into the runtime leaf: for the
+// families the leaf trusts (claude, codex, and an alias built on one) the
+// backstop's snapshot veto reads exactly as it did when cmd/gc gated on the
+// family itself. A busy reading holds, a failed snapshot holds, an
+// indeterminate one keeps the activity clock, an idle one advances, and over
+// ACP no snapshot is taken.
+func TestExecutionBackstopVetoForTrustedFamiliesIsUnchanged(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
+	for _, family := range []map[string]string{
+		{"provider": "claude"},
+		{"provider": "codex"},
+		{"provider": "team-claude", "builtin_ancestor": "claude"},
+	} {
+		for _, tc := range []struct {
+			name   string
+			acp    bool
+			idle   bool
+			err    error
+			hold   string // the breadcrumb's gate; "" when the clock decides
+			snaps  bool
+			nudges int
+		}{
+			{name: "busy", hold: executionHoldSnapshotNotIdle, snaps: true},
+			{name: "snapshot failed", err: errors.New("capture failed"), hold: executionHoldSnapshotError, snaps: true},
+			{name: "indeterminate", err: indeterminate, snaps: true, nudges: idleClaimNudgeMaxAttempts},
+			{name: "idle", idle: true, snaps: true, nudges: idleClaimNudgeMaxAttempts},
+			{name: "busy over ACP", acp: true, nudges: idleClaimNudgeMaxAttempts},
+		} {
+			t.Run(family["provider"]+"/"+tc.name, func(t *testing.T) {
+				f := newExecutionBackstopFixture(t)
+				meta := maps.Clone(family)
+				if tc.acp {
+					meta["transport"] = "acp"
+				}
+				f.setSessionMeta(t, meta)
+				snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: tc.idle, err: tc.err}
+				f.provider = snap
+
+				f.tickStale(t)
+
+				if got := f.nudgeCount(); got != tc.nudges {
+					t.Fatalf("delivered nudges = %d, want %d; stdout=%s", got, tc.nudges, f.stdout.String())
+				}
+				if taken := snap.calls != 0; taken != tc.snaps {
+					t.Fatalf("idle snapshots taken = %d, want taken=%t", snap.calls, tc.snaps)
+				}
+				if tc.hold == "" {
+					return
+				}
+				if len(f.drained) != 0 {
+					t.Fatalf("drain requests = %v, want none while the veto holds", f.drained)
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, tc.hold+" ") {
+					t.Fatalf("hold breadcrumb = %q, want %s", got, tc.hold)
+				}
+			})
+		}
 	}
 }
 
@@ -684,9 +753,9 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 }
 
-// driveToEscalation spends the attempt budget on the fixture's claim and
-// confirms the escalation drained the session exactly once.
-func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+// driveToLastNudge observes the fixture's claim and spends every attempt on
+// it, leaving f.now at the pass that reserved the last one.
+func driveToLastNudge(t *testing.T, f *executionBackstopFixture) {
 	t.Helper()
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -695,6 +764,16 @@ func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("last-nudge precondition: delivered nudges = %d, want %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+}
+
+// driveToEscalation spends the attempt budget on the fixture's claim and
+// confirms the escalation drained the session exactly once.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+	t.Helper()
+	driveToLastNudge(t, f)
 	f.now = f.now.Add(idleClaimNudgeBackoff)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -1524,5 +1603,162 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *test
 	}
 	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting+" ") {
 		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
+
+// TestExecutionBackstopTheLastNudgeGetsItsFullBackoff (ga-uns4sw): every
+// earlier nudge gets idleClaimNudgeBackoff to be answered before the next
+// step, and so does the last. A pass inside its backoff latches nothing,
+// reports nothing, drains nothing and nudges no more: a seat answering it by
+// running its claim hook gets the time to do so.
+func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	for _, after := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		f.now = lastNudge.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 0 {
+			t.Fatalf("drain requests %s after the last nudge (inside its %s backoff) = %v, want none; stdout=%s",
+				after, idleClaimNudgeBackoff, f.drained, f.stdout.String())
+		}
+		if got := f.stalledEvents(); got != 0 {
+			t.Fatalf("execution.step_stalled events %s after the last nudge = %d, want 0", after, got)
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != "" {
+			t.Fatalf("stalled latch %s after the last nudge = %q, want none", after, got)
+		}
+		if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+			t.Fatalf("delivered nudges %s after the last nudge = %d, want still %d", after, got, idleClaimNudgeMaxAttempts)
+		}
+	}
+}
+
+// TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed (ga-uns4sw): the
+// last nudge's backoff is the whole answer window, not a grace on top of it.
+// The first pass at or after it records exactly one latch, one
+// execution.step_stalled event and one drain request, and later passes inside
+// executionStalledLatchRetryAfter add none.
+func TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff - time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("one second before the last backoff ends: drains %v, events %d; want neither yet", f.drained, f.stalledEvents())
+	}
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests once the last backoff passed = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 1 {
+		t.Fatalf("execution.step_stalled events once the last backoff passed = %d, want 1", got)
+	}
+	latchedAt := f.sessionMeta(t, executionClaimNudgeStalledKey)
+	if latchedAt != f.now.UTC().Format(time.RFC3339) {
+		t.Fatalf("stalled latch = %q, want the escalating pass %s", latchedAt, f.now.UTC().Format(time.RFC3339))
+	}
+
+	escalatedAt := f.now
+	for _, after := range []time.Duration{time.Second, idleClaimNudgeBackoff, executionStalledLatchRetryAfter - time.Second} {
+		f.now = escalatedAt.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 || f.stalledEvents() != 1 {
+		t.Fatalf("inside the latch window: drains %v, events %d; want still one of each", f.drained, f.stalledEvents())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != latchedAt {
+		t.Fatalf("stalled latch inside its window = %q, want unchanged %q", got, latchedAt)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want still %d", got, idleClaimNudgeMaxAttempts)
+	}
+}
+
+// TestExecutionBackstopANewClaimStartsWithoutTheOldLatch (ga-uns4sw): a seat
+// that escalated claim A and then, in the same incarnation, holds only claim
+// B opens B's window without A's latch. B gets its own grace, nudges and last
+// backoff, then its own escalation, though A's latch is still inside
+// executionStalledLatchRetryAfter.
+func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	latchedA := f.now
+
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing claim A: %v", err)
+	}
+	claimB, err := f.store.Create(beads.Bead{
+		Title: "claimed step B",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:  "root-1",
+			beadmeta.StepIDMetadataKey:      "step-2",
+			beadmeta.SessionIDMetadataKey:   f.session.ID,
+			beadmeta.SessionNameMetadataKey: f.sessName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding claim B: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(claimB.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming B: %v", err)
+	}
+
+	// One pass sees the same incarnation holding only B: a fresh window.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != claimB.ID {
+		t.Fatalf("marker work after B's first pass = %q, want %q", got, claimB.ID)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("marker count after B's first pass = %q, want 0", got)
+	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want A's latch cleared", key, got)
+		}
+	}
+
+	// B, quiet and unstarted, spends its own budget and then escalates.
+	nudgesBefore := f.nudgeCount()
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 1 {
+			t.Fatalf("drain requests during B's nudge %d = %v, want only A's", i+1, f.drained)
+		}
+	}
+	if got := f.nudgeCount() - nudgesBefore; got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("nudges delivered for B = %d, want its own %d", got, idleClaimNudgeMaxAttempts)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if !f.now.Before(latchedA.Add(executionStalledLatchRetryAfter)) {
+		t.Fatalf("B escalated at %s, not inside A's latch window ending %s", f.now, latchedA.Add(executionStalledLatchRetryAfter))
+	}
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests once B's budget is spent = %v, want a second escalation; stdout=%s", f.drained, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want one per escalated claim", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
+		t.Fatalf("latch token after B's escalation = %q, want incarnation-1", got)
 	}
 }

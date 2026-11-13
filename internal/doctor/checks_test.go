@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -70,12 +70,17 @@ func holdControllerLock(t *testing.T, cityDir string) {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock controller lock file: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	})
 }
@@ -220,6 +225,38 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Errorf("status = %d, want Error", r.Status)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs:      []config.Rig{{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Federation: config.RigFederationRig}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigSharingADirectory(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: shared, Prefix: "al"},
+			{Name: "beta", Path: shared, Prefix: "be", Federation: config.RigFederationRig},
+		},
+	}
+	c := NewConfigValidCheck(cfg)
+	// A nil context must not panic.
+	r := c.Run(nil)
+	if r.Status != StatusError || !strings.Contains(r.Message, "needs its own store directory") {
+		t.Errorf("status = %d, msg = %q; want the shared-directory error", r.Status, r.Message)
 	}
 }
 
@@ -2898,6 +2935,24 @@ func TestWorktreeCheckAllValid(t *testing.T) {
 	}
 }
 
+func TestWorktreeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	wtDir := filepath.Join(configuredRoot, "myrig", "agent1")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /nonexistent/configured-target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := (&WorktreeCheck{}).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
+	}
+}
+
 func TestWorktreeCheckBroken(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 
@@ -4211,24 +4266,24 @@ func TestCompareDoltVersion(t *testing.T) {
 
 func TestDoltVersionCheck_OK(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.1\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.1") {
+	if !strings.Contains(r.Message, "2.6.1") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.0\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.0") {
+	if !strings.Contains(r.Message, "2.6.0") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -4246,23 +4301,29 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 }
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
-	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.6\n", nil }
-	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-	if !strings.Contains(r.Message, "below minimum") {
-		t.Errorf("message = %q, want below-minimum text", r.Message)
+	// 2.5.1 is the last release below the 2.6.0 floor, and 2.1.0 the
+	// previous floor: both final releases a managed city may still run.
+	for _, version := range []string{"2.5.1", "2.1.0", "2.0.6"} {
+		t.Run(version, func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return "dolt version " + version + "\n", nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "below minimum 2.6.0") || !strings.Contains(r.Message, version) {
+				t.Errorf("message = %q, want below-minimum text naming %s and 2.6.0", r.Message, version)
+			}
+		})
 	}
 }
 
 func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 	cases := []string{
-		"dolt version 2.1.0-rc1\n",
-		"dolt version 2.1.0-rc1+build.5\n",
-		"dolt version 2.1.0-dev.0\n",
-		"dolt version 2.1.1-rc1\n",
+		"dolt version 2.6.0-rc1\n",
+		"dolt version 2.6.0-rc1+build.5\n",
+		"dolt version 2.6.0-dev.0\n",
+		"dolt version 2.6.1-rc1\n",
 	}
 	for _, version := range cases {
 		t.Run(strings.TrimSpace(version), func(t *testing.T) {
@@ -4272,7 +4333,7 @@ func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 			if r.Status != StatusError {
 				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 			}
-			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.1.0") {
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.6.0") {
 				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
 			}
 		})
@@ -4535,5 +4596,59 @@ func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "not applicable") {
 		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
+	}
+}
+
+// TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope: a managed
+// Dolt server gc started in a transient systemd user scope leaves no unit
+// behind once it exits (--collect). When the store is not reachable, doctor
+// names the recorded scope and where its journal records are.
+func TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope(t *testing.T) {
+	const unit = "gascity-infra-0123456789abcdef.scope"
+	for _, tc := range []struct {
+		name       string
+		infraScope string
+	}{
+		{name: "started in an infra scope", infraScope: unit},
+		{name: "started unscoped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			fs := fsys.OSFS{}
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+			_ = ln.Close()
+			runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
+			if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q,"infra_scope":%q}`,
+				os.Getpid(), port, filepath.Join(dir, ".beads", "dolt"), tc.infraScope)
+			if err := os.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			mentions := strings.Contains(r.FixHint, "journalctl --user-unit="+unit) &&
+				strings.Contains(r.FixHint, fmt.Sprintf("pid %d", os.Getpid()))
+			if want := tc.infraScope != ""; mentions != want {
+				t.Fatalf("fix hint names the infra scope journal = %t, want %t; hint = %q", mentions, want, r.FixHint)
+			}
+			if tc.infraScope == "" && strings.Contains(r.FixHint, "journalctl") {
+				t.Fatalf("fix hint for an unscoped server mentions journalctl: %q", r.FixHint)
+			}
+		})
 	}
 }

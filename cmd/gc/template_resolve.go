@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -156,6 +157,30 @@ type TemplateParams struct {
 	// MCPServers is the effective ACP session/new MCP server set for this
 	// concrete session context.
 	MCPServers []runtime.MCPServerConfig
+	// ACPLaunch is the provider's ACP launch for a template that resolves
+	// the CLI transport on a provider that supports ACP. A session whose
+	// recorded transport is ACP keeps starting with it
+	// (templateParamsForSession). Nil for ACP templates and providers
+	// without ACP support.
+	ACPLaunch *TemplateACPLaunch
+	// ProgramStatusArm is the OSC 7501 capture arm for the template's
+	// resolved transport (config.ProgramStatusLaunchFor): the provider's
+	// declaration, armed by the leaf only under its live switch. It stays out of Hints:
+	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
+	// launch whose transport is not ACP, so a session kept on its ACP launch
+	// (templateParamsForSession) starts disarmed.
+	ProgramStatusArm runtime.ProgramStatusArm
+	// ProgramStatusEnv is the declared provider's forced session env that goes
+	// with ProgramStatusArm, already expanded. It stays out of Env, so an ACP
+	// launch keeps the value Env resolved for any key it names.
+	ProgramStatusEnv map[string]string
+}
+
+// TemplateACPLaunch is the ACP launch command and session/new MCP server set
+// a template would use if it resolved the ACP transport.
+type TemplateACPLaunch struct {
+	Command    string
+	MCPServers []runtime.MCPServerConfig
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -219,9 +244,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	var acpCommand string
+	if sessionTransport != config.SessionTransportACP && resolved.SupportsACP {
+		acpCommand, err = config.ProviderTemplateCommand(resolved, config.SessionTransportACP, installHooks, p.providers)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: building ACP launch: %w", qualifiedName, err)
+		}
+	}
 	if p.stderr != nil {
 		for _, pin := range resolved.UnhonoredOptionPins() {
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
+		}
+		if sessionTransport == config.SessionTransportACP {
+			if dropped := resolved.ACPDroppedArgs(cfgAgent); len(dropped) > 0 {
+				fmt.Fprintln(p.stderr, config.FormatACPOmittedArgs(qualifiedName, resolved.Name, command, dropped)) //nolint:errcheck
+			}
 		}
 	}
 	var sa string
@@ -235,6 +272,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	if sa != "" {
 		command = command + " " + sa
+		if acpCommand != "" {
+			acpCommand = acpCommand + " " + sa
+		}
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {
 			// .gc/settings.json is managed by gc (regenerated on binary upgrade).
@@ -289,7 +329,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := session.ExactMetadataSessionCandidates(p.beadStore, false, map[string]string{"session_name": sessName}); err == nil {
+		if all, err := session.ExactMetadataSessionCandidates(beads.SessionStore{Store: p.beadStore}, false, map[string]string{"session_name": sessName}); err == nil {
 			for _, b := range all {
 				if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 					continue
@@ -359,6 +399,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
+	// An agent's own env BEADS_DIR replaces the generated value. Every bd gc
+	// routes to a store (gc bd, the stores gc opens) pins BEADS_DIR to that
+	// store; any other bd in the session inherits this value, including raw
+	// bd that gc runs or renders there unrouted (agent-script bd actions
+	// outside cross-store routing, prompt work-query placeholders rendered as
+	// raw bd). From bd 1.3.1 on, a BEADS_DIR that names no store leaves raw bd
+	// with no store; older bd falls back to the store it finds from its
+	// working directory.
+	if beadsDir, ok := cfgAgent.Env["BEADS_DIR"]; ok {
+		agentEnv["BEADS_DIR"] = processenv.ExpandSessionEnvValue(beadsDir)
+	}
 
 	// configDir is the directory agent config-relative paths (pre-start
 	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
@@ -389,7 +440,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// prompt template to render.
 	defaultBranch := ""
 	if cfgAgent.PromptTemplate != "" {
-		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+		defaultBranch = p.defaultBranch(rigName, workDir)
 	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
@@ -404,6 +455,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// The controller's own routes are the right source; threading them into
 	// this plumbing is a change to controller wiring, not part of swapping
 	// the reader, so it stays with the claim-routing slice (ga-601v2).
+	//
+	// The four discovery placeholders are a separate question from that
+	// storage-route fact. They run verbatim in the agent's own shell, with no
+	// hook-style store fan-out around them, so they render against
+	// promptQueryTopology, which federates them for a cross-store-eligible agent
+	// on a city with configured rigs and asks no storage route. SlingQuery is
+	// not a discovery reader and keeps the raw topology.
+	promptTopo := promptQueryTopology(topo, cfgAgent, p.rigs)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -415,10 +474,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranch,
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(topo), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(promptTopo), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(promptTopo), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(promptTopo), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(promptTopo), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
@@ -436,6 +495,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	includePrimeInstruction := !hasHooks && prompt == ""
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
+
+	// The session runtime as the skill/MCP materialization gates read it
+	// (steps 9b, 11b, 11c).
+	materializationRT := materializationRuntimeFor(p.city, p.cityName, p.cityPath, p.sessionProvider)
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -464,8 +527,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
@@ -557,6 +620,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
+	// Step 10c: program status (OSC 7501). The arm is the provider's
+	// switch-independent declaration (empty for ACP or an undeclared
+	// provider), which the leaf arms only under its live switch, so a cached
+	// resolution follows a flip either way; the forced env is empty unless the
+	// switch is shadow or on. The arm and the forced env stay out of hints and env:
+	// templateParamsToConfig applies them to a launch whose transport is not
+	// ACP, so a session kept on its ACP launch starts disarmed with this env.
+	programStatusArm, programStatusEnv := config.ProgramStatusLaunchFor(p.city, resolved, sessionTransport)
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -593,6 +664,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		expanded := expandSessionSetup([]string{command}, setupCtx)
 		command = expanded[0]
 	}
+	if strings.Contains(acpCommand, "{{") {
+		expanded := expandSessionSetup([]string{acpCommand}, setupCtx)
+		acpCommand = expanded[0]
+	}
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
@@ -613,7 +688,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
-	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+	if isStage2EligibleSession(materializationRT, cfgAgent) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 		wsProvider := ""
@@ -678,35 +753,46 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			mcpCity.PackMCPDir = cityMCPDir
 		}
 	}
-	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
+	// Shared-layer servers the provider cannot receive are left out of
+	// mcpCatalog and mcpProjection (the agent starts without them; stage 1
+	// warns), while agent-local ones fail this agent's start. An ACP session
+	// receives every server in-band (session/new), whatever its harness's
+	// file projection can carry.
+	mcpInBand := sessionTransport == config.SessionTransportACP
+	mcp, err := resolveAgentMCPProjection(
 		p.cityPath,
 		mcpCity,
 		cfgAgent,
 		qualifiedName,
 		workDir,
 		resolvedProviderLaunchFamily(resolved),
+		mcpInBand,
 	)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
+	mcpCatalog, mcpProjection := mcp.Catalog, mcp.Projection
+	if resolvedServers := len(mcpCatalog.Servers) + len(mcp.Skipped); mcpCityIsSynthetic && resolvedServers > 0 {
 		return TemplateParams{}, fmt.Errorf(
 			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) - "+
 				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
 				"cannot see import/implicit/bootstrap layers and would diverge from production)",
-			qualifiedName, len(mcpCatalog.Servers),
+			qualifiedName, resolvedServers,
 		)
 	}
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+	if mcpProjection.Provider != "" && len(mcpProjection.Servers) > 0 {
+		stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
 		case stage1Delivers || stage2Delivers:
 			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
 			if stage2Delivers {
 				projectAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
+				warnStage2MCPAdoptionRefusal(p.cityPath, qualifiedName, mcpProjection, p.fs, p.stderr)
 			}
+		case mcpInBand:
+			// No file reaches this session; session/new carries the servers.
 		default:
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
@@ -715,8 +801,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == config.SessionTransportACP {
+	if mcpInBand {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
+	}
+	var acpLaunch *TemplateACPLaunch
+	if acpCommand != "" {
+		acpLaunch = &TemplateACPLaunch{
+			Command:    acpCommand,
+			MCPServers: materialize.RuntimeMCPServers(mcpCatalog.Servers),
+		}
 	}
 
 	// Step 12: Build startup hints.
@@ -771,6 +864,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
+		ACPLaunch:        acpLaunch,
+		ProgramStatusArm: programStatusArm,
+		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
@@ -830,6 +926,10 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	// Only withholdMirroredManagedDoltPort marks a target managed-local. The
+	// explicit empty value also outranks a marker that passthroughEnv copies
+	// from the controller's own environment.
+	env["GC_DOLT_MANAGED_LOCAL"] = ""
 	applySessionSharedServerOptOut(env, cityPath, rigRoot)
 
 	// Session env projection must not trigger provider recovery. Session setup
@@ -857,6 +957,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
+		} else {
+			// The projection carries the live port; withhold it when the
+			// scope's own port mirror already carries the same fact, so the
+			// session's raw bd follows the mirror across a managed Dolt
+			// restart onto a new port (gastownhall/gascity#1656).
+			withholdMirroredManagedDoltPort(env, cityPath, cityPath)
 		}
 		return env, nil
 	}
@@ -871,6 +977,12 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
+	} else {
+		// Same withhold as the city branch, judged against the rig's own
+		// .beads/dolt-server.port mirror: an inherited-city rig session's
+		// raw bd should follow the mirror gc reconciles, not the port dolt
+		// ran on when the session was spawned (gastownhall/gascity#1656).
+		withholdMirroredManagedDoltPort(env, cityPath, rigRoot)
 	}
 	return env, nil
 }
@@ -902,35 +1014,10 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
-	// in the pure promptDelivery derivation.
-	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
-	configuredMode := "arg"
-	switch {
-	case tp.IsACP:
-		configuredMode = "acp"
-	case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode != "":
-		configuredMode = tp.ResolvedProvider.PromptMode
-	}
+	// in the shared startup prompt plan.
+	plan, err := planStartupPrompt(tp.startupPromptSource(), startupPromptFreshLaunch)
 	if err != nil {
-		logOversizedPromptDelivery(slog.Default().Error,
-			"startup prompt exceeds argv-safety threshold; no fallback delivery available",
-			tp, configuredMode, "hard-fail")
-		return runtime.Config{}, promptDeliveryResult{}, fmt.Errorf("template %q (session %q): %w", tp.TemplateName, tp.SessionName, err)
-	}
-	if delivery.OversizedFallback {
-		logOversizedPromptDelivery(slog.Default().Warn,
-			"startup prompt exceeds argv-safety threshold; falling back to nudge delivery",
-			tp, configuredMode, "nudge-fallback")
-	}
-	promptSuffix := delivery.PromptSuffix
-	promptFlag := delivery.PromptFlag
-	nudge := delivery.Nudge
-	env := maps.Clone(tp.Env)
-	if delivery.Delivered {
-		if env == nil {
-			env = map[string]string{}
-		}
-		env[startupPromptDeliveredEnv] = "1"
+		return runtime.Config{}, promptDeliveryResult{}, err
 	}
 	// Startup-hint fields project through the single StartupHints →
 	// runtime.Config mapping (agent.StartupHints.ToRuntimeConfig) so a hint
@@ -942,17 +1029,18 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg := tp.Hints.ToRuntimeConfig()
 	cfg.Command = tp.Command
 	cfg.Upstream = tp.Upstream
-	cfg.PromptSuffix = promptSuffix
-	cfg.PromptFlag = promptFlag
-	cfg.Env = env
+	cfg.Env = maps.Clone(tp.Env)
 	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
+	} else {
+		applyTemplateProgramStatus(&cfg, tp)
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
-	// Prompt delivery may prepend the startup prompt to the configured nudge.
-	cfg.Nudge = nudge
+	// The plan owns the startup prompt payload (it may prepend the prompt to the
+	// configured nudge) and the delivered marker.
+	plan.applyTo(&cfg)
 	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
 	// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
 	// when the agent config sets no mouse_mode. This is the managed,
@@ -963,8 +1051,27 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
-	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg, delivery, nil
+	applyT3BridgeRuntimeConfig(tp, cfg.Env)
+	return cfg, plan.Delivery, nil
+}
+
+// applyTemplateProgramStatus applies a template's OSC 7501 program status to a
+// launch whose transport is not ACP: the capture arm, and the forced env
+// written over the template env. resolveTemplate's managed pins (the
+// usage-metrics opt-out and the controller-only keys) stay the last writers.
+// The forced env never reaches OperatorEnv, so it stays off the launch
+// fingerprint.
+func applyTemplateProgramStatus(cfg *runtime.Config, tp TemplateParams) {
+	cfg.ProgramStatus = tp.ProgramStatusArm
+	if len(tp.ProgramStatusEnv) == 0 {
+		return
+	}
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string, len(tp.ProgramStatusEnv))
+	}
+	maps.Copy(cfg.Env, tp.ProgramStatusEnv)
+	cfg.Env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	maps.Copy(cfg.Env, processenv.ControllerOnlyEnvOverlay())
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record
@@ -975,15 +1082,15 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 // content. log is *slog.Logger's Warn or Error method, passed as a value so
 // the fallback (Warn) and hard-fail (Error) call sites can share one record
 // shape.
-func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, tp TemplateParams, configuredMode, effectiveMode string) {
+func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, src startupPromptSource, effectiveMode string) {
 	log(msg,
-		slog.String("session", tp.SessionName),
-		slog.String("agent", tp.InstanceName),
-		slog.String("configured_mode", configuredMode),
+		slog.String("session", src.SessionName),
+		slog.String("agent", src.InstanceName),
+		slog.String("configured_mode", src.configuredMode()),
 		slog.String("effective_mode", effectiveMode),
-		slog.String("runtime", tp.EffectiveSessionProvider),
-		slog.Int("raw_bytes", len(tp.Prompt)),
-		slog.Int("argv_bytes", len(shellquote.Quote(tp.Prompt))),
+		slog.String("runtime", src.RuntimeName),
+		slog.Int("raw_bytes", len(src.Prompt)),
+		slog.Int("argv_bytes", len(shellquote.Quote(src.Prompt))),
 		slog.Int("raw_threshold", maxPromptSuffixRawBytes),
 		slog.Int("argv_threshold", maxPromptSuffixQuotedBytes),
 	)

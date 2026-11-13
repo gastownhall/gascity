@@ -236,10 +236,12 @@ name = "frontend"
 	out := stdout.String()
 	for _, want := range []string{
 		"Would change in the city and its rigs:",
-		"adopt " + filepath.Join(rigPath, ".mcp.json") + " (claude): save its current content under " + filepath.Join(rigPath, ".gc", "mcp-adopted", "claude") + ", then replace it with 1 MCP server",
+		// The rig's own server keeps gc from adopting its .mcp.json, so the
+		// rig's .gitignore covers only the Gemini settings gc projects there.
+		"leave " + filepath.Join(rigPath, ".mcp.json") + ` (claude) as it is: gc does not manage it yet, and adopting it would drop MCP server "team-db"; to let gc manage it, `,
 		"create " + filepath.Join(cityPath, ".mcp.json") + " (claude) with 1 MCP server",
 		"link 1 skill in " + filepath.Join(cityPath, ".claude", "skills"),
-		"create " + filepath.Join(rigPath, ".gitignore") + ": add .mcp.json",
+		"create " + filepath.Join(rigPath, ".gitignore") + ": add /.gemini/settings.json\n",
 		"frontend/coder",
 		"No agents started (--dry-run). Only gc's own state may have been written: the bead store, the pack cache, and .gc/ runtime directories.",
 	} {

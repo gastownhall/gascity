@@ -366,9 +366,11 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconcile.go:healStatePatchWithRollbackInfo":              "legacy reconciler",
 	"cmd/gc/session_reconcile.go:providerTerminalErrorPatch":                  "patch builder (C5a2's abandon)",
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
+	"cmd/gc/session_reconciler_interrupted_close.go:finishInterruptedClose":   "trace payload, not a row",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
 	"internal/session/disposition.go:dispositionMeta":                         "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
+	"internal/session/resume.go:resumeHeldLife":                               "patch builder (operator resume that starts nothing: a suspended row goes asleep)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch":          "patch builder",
 	"internal/session/lifecycle_transition.go:ArchivePatch":                   "patch builder",
@@ -562,26 +564,36 @@ func TestTranscriptOfReadsObservePaths(t *testing.T) {
 // Kills v2's probes reading every observed root for a launch whose Claude
 // config dir the operator names (mc-bm1af, ruling A): PreWake's transcriptOf
 // and the failure Call's probe both search only that dir's projects, so a
-// conversation left under another observed root reads gone.
+// conversation left under another observed root reads gone. A dir the launch
+// is only handed (tp.Env, passed through) is searched too, so a conversation
+// kept there reads present with no observed root covering it (#6677).
 func TestV2ProbesTheLaunchConfigDir(t *testing.T) {
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir)
 	for _, c := range []struct {
-		name  string
-		dir   string
-		found bool
+		name       string
+		dir        string // the operator's
+		ambient    string // passed through to the launch only
+		unobserved bool   // no [daemon] observe_paths covers root
+		found      bool
 	}{
-		{"no config dir named", "", true},
-		{"the old config dir named", filepath.Dir(root), true},
-		{"moved to a new config dir", t.TempDir(), false},
+		{"no config dir named", "", "", false, true},
+		{"the old config dir named", filepath.Dir(root), "", false, true},
+		{"moved to a new config dir", t.TempDir(), "", false, false},
+		{"a passed-through config dir holding the transcript", "", filepath.Dir(root), true, true},
 	} {
 		k := startKit(t, intentStart, "creating")
-		k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		if !c.unobserved {
+			k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		}
 		row := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", workDir,
 			"session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0")
 		tp := TemplateParams{TemplateName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider()}
 		if c.dir != "" {
 			tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": c.dir}
+		}
+		if c.ambient != "" {
+			tp.Env = map[string]string{"CLAUDE_CONFIG_DIR": c.ambient}
 		}
 		if got := transcriptOf(effectReads{}, k.p.World, sessionInfoFromBead(row), tp); (got == sessTranscriptPresent) != c.found {
 			t.Errorf("%s: transcriptOf = %v, want found %v", c.name, got, c.found)

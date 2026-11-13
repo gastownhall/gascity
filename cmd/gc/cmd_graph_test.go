@@ -331,8 +331,8 @@ func closeWithWorkOutcome(t *testing.T, store beads.Store, outcome, handoff stri
 	}
 }
 
-// graphRow returns the table row that starts with id.
-func graphRow(t *testing.T, out, id string) string {
+// graphTableRow returns the table row that starts with id.
+func graphTableRow(t *testing.T, out, id string) string {
 	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, id+" ") {
@@ -388,7 +388,7 @@ func TestGraphNonBlockedOutcomesSatisfyDependent(t *testing.T) {
 			if !strings.Contains(out, "1 ready") {
 				t.Errorf("gc-2 should be ready behind a %s blocker:\n%s", outcome, out)
 			}
-			if strings.Contains(graphRow(t, out, "gc-2"), "handoff") {
+			if strings.Contains(graphTableRow(t, out, "gc-2"), "handoff") {
 				t.Errorf("a %s blocker must not surface a handoff hint:\n%s", outcome, out)
 			}
 		})
@@ -408,7 +408,7 @@ func TestGraphBlockedCloseSurfacesHandoffPointer(t *testing.T) {
 	if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if row := graphRow(t, stdout.String(), "gc-2"); !strings.Contains(row, "gc-1 (handoff: gc-9)") {
+	if row := graphTableRow(t, stdout.String(), "gc-2"); !strings.Contains(row, "gc-1 (handoff: gc-9)") {
 		t.Errorf("gc-2 row should name the handoff successor, got %q", row)
 	}
 
@@ -449,7 +449,7 @@ func TestGraphBlockedCloseWithoutHandoffShowsNoHint(t *testing.T) {
 	if code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if row := graphRow(t, stdout.String(), "gc-2"); strings.Contains(row, "handoff") {
+	if row := graphTableRow(t, stdout.String(), "gc-2"); strings.Contains(row, "handoff") {
 		t.Errorf("no pointer was stamped, row should not mention a handoff: %q", row)
 	}
 }

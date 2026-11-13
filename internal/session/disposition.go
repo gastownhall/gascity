@@ -257,6 +257,31 @@ func (d Disposition) BlocksConsume(now time.Time) bool {
 	return d.SuppressesWake(now) || d.Unknown&unreadableTimers != 0
 }
 
+// ConsumeHolds names each hold BlocksConsume counts on d at now, in a fixed
+// order, for a reason a client reads: a suspend (an operator's or a soft
+// one), an agent's wait, an agent's heartbeat and a quarantine with the
+// instant each ends, and an unreadable timer. It is empty exactly when
+// BlocksConsume is false.
+func (d Disposition) ConsumeHolds(now time.Time) []string {
+	var holds []string
+	if d.Operator != OperatorNone || d.Until.After(now) {
+		holds = append(holds, "a suspend")
+	}
+	if d.Wait {
+		holds = append(holds, "an agent's wait")
+	}
+	if d.Heartbeat.After(now) {
+		holds = append(holds, "an agent's heartbeat until "+formatDispositionTime(d.Heartbeat))
+	}
+	if d.Quarantine.After(now) {
+		holds = append(holds, "a quarantine until "+formatDispositionTime(d.Quarantine))
+	}
+	if d.Unknown&unreadableTimers != 0 {
+		holds = append(holds, "an unreadable hold timer")
+	}
+	return holds
+}
+
 // RefusesPreWake reports a hold that refuses the controller's PreWake (C5a1,
 // S1): an operator's suspend or a live timer. A soft suspend does not
 // (CONTRACT v5.9u): it is no hold, and legacy's state heal and assigned-work

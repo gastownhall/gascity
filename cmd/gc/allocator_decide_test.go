@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // allocNow is the decide tests' one clock.
@@ -1174,6 +1175,37 @@ func TestAllocator_HonoredExplicitWakeIsNeverDrained(t *testing.T) {
 		if e := entryOf(t, d, "gc-1"); e.Desired != c.want || e.WakeHonored != c.honored || (c.honored && e.DrainReason != "") {
 			t.Errorf("%s: %s/%s honored %t drain %q, want %s honored %t", c.name, e.Desired, e.Reason, e.WakeHonored, e.DrainReason, c.want, c.honored)
 		}
+	}
+}
+
+// Kills a resume: true that consumes an operator's suspend on a pool row
+// without recording its wake (session.Store.ResumeHeld, SESSION-START-022):
+// the suspend alone kept the row, so a pass that read it before the lane
+// host's own wake request landed drained it as orphaned and A21 closed it,
+// failing the message it was resumed for. The resumed row's explicit wake is
+// honored, and A21 proposes no close.
+func TestAllocator_ResumedPoolRowWakesAndIsNotClosed(t *testing.T) {
+	store := censusStore(poolRow("gc-1", "worker", 1, "asleep", "slept_at", ago(2*time.Hour)))
+	sessions := session.NewStore(beads.SessionStore{Store: store})
+	if _, err := sessions.OperatorSuspend("gc-1", allocNow.Add(-time.Hour)); err != nil {
+		t.Fatalf("OperatorSuspend: %v", err)
+	}
+	if err := sessions.ResumeHeld("gc-1", allocNow.Add(-time.Second), allocNow.Add(-time.Second)); err != nil {
+		t.Fatalf("ResumeHeld: %v", err)
+	}
+	resumed, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}).sessions(resumed).inputs()
+	d := mustDecide(t, in)
+	e := entryOf(t, d, "gc-1")
+	if e.Desired != desireWake || !e.WakeHonored || e.DrainReason != "" {
+		t.Fatalf("resumed pool row = %s/%s honored %t drain %q, want its wake honored", e.Desired, e.Reason, e.WakeHonored, e.DrainReason)
+	}
+	w := &World{Now: allocNow, Census: in.Census, Mislabelled: map[rowKey]bool{}}
+	if it, _ := decideRow(w, &d, e.Key); it.Kind == intentClose {
+		t.Fatalf("A21 = %s on the resumed row, want no close", it.Reason)
 	}
 }
 

@@ -26,6 +26,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
+// rootIsCityInfrastructure classifies a scanned root before the pre-start
+// orphan kill. It is a variable so tests can supply a classification the host
+// does not produce under `go test`.
+var rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+
 // State represents the runtime state of a chat session.
 type State string
 
@@ -307,6 +312,10 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageClosePending is the RAW usage_close_pending metadata: "true" while a
+	// close's awake interval awaits the compute-usage lane. A reopened row keeps
+	// it, so the lane settles that interval from the open snapshot too.
+	UsageClosePending string // usage_close_pending (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)
@@ -454,6 +463,11 @@ type Info struct {
 	// / _key), the same shape as the named pair above but for the attached path.
 	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
 	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt is the RAW config_drift_escalated_at metadata, the
+	// marker that the deferral episode named by ConfigDriftDeferredKey has
+	// emitted its single past-horizon escalation. It is valid only while its
+	// timestamp lies between ConfigDriftDeferredAt and now.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
@@ -631,7 +645,7 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store                   beads.Store
+	store                   beads.SessionStore
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
@@ -762,23 +776,71 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// a non-nil error when an orphan could not be confirmed dead, or, terminating
+// nothing, when the provider claims one of them as a live runtime it does not
+// list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
+// callers gating a Start can refuse rather than race a survivor for the same
+// work.
+//
+// The roots a failed scan did surface are still killed, unless one of them is
+// LiveUnlisted, which terminates none: a partial result is worth acting on. Where orphanScanErrorsRefuseStart is set (Windows), the scan
+// error is then fatal to the gate too, joined with any termination failures
+// rather than logged, because an incomplete scan cannot establish the one fact
+// this gate exists to establish. Elsewhere it is only logged, as
+// ProcessTableScanner allows.
+//
+// On Windows the gate also refuses while a session a more elevated gc started
+// in this city could still be running, since the scan here cannot read it, and
+// records a start made from above medium integrity for the same reason. Both
+// apply to every provider, whether or not it can scan the process table: the
+// elevation fence is about the city, and nothing here tells where a provider
+// runs its processes, so no provider is exempt from it.
+//
+// Where terminating a root can leave a descendant the termination could not
+// reach (proctable.RescanAfterTermination), that descendant still carries the
+// session's identity and is reported as a root by any scan made after it lost
+// its parent. The gate scans again until a pass terminates nothing, and
+// refuses if the orphans keep coming after maxOrphanPasses.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
+	if err := checkElevatedSessions(m.cityPath); err != nil {
+		return err
+	}
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
-		return nil
-	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
+		return recordElevatedSessionStart(m.cityPath)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	for pass := 1; ; pass++ {
+		terminated, err := m.killOrphanPass(scanner, scanner.TerminateRuntime, sessionID, cityPath)
+		if err != nil {
+			return err
+		}
+		if terminated == 0 || !proctable.RescanAfterTermination {
+			break
+		}
+		if pass == maxOrphanPasses {
+			return fmt.Errorf("orphaned runtimes for %s were still appearing after %d passes of termination", sessionID, maxOrphanPasses)
+		}
+	}
+	return recordElevatedSessionStart(m.cityPath)
+}
+
+// maxOrphanPasses bounds how many scans the pre-start gate makes for orphans
+// its own terminations surfaced.
+const maxOrphanPasses = 3
+
+// killOrphanPass scans once for sessionID's untracked roots in cityPath and
+// terminates each with terminate, reporting how many it terminated.
+// killExistingOrphans passes the scanner's TerminateRuntime, so the runtime
+// verb is referenced, and lease-checked, in killExistingOrphans itself.
+func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate func(runtime.LiveRuntime) error, sessionID, cityPath string) (int, error) {
+	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
+	if scanErr != nil && !orphanScanErrorsRefuseStart {
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(scanErr))
+	}
 	var termErrs []error
+	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -790,20 +852,69 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		// that merely inherited it: a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from this session's shell. Terminating it
 		// signals its process group and takes the city's Dolt server down
-		// (#6316), so a same-session restart must never reach it.
-		if proctable.IsCityInfrastructureRoot(live.PID) {
+		// (#6316), so a same-session restart must never reach it. A root that
+		// cannot be classified is left running rather than terminated on a
+		// command line nobody read; where orphanScanErrorsRefuseStart is set
+		// the start is then refused, since the survivor may be this session's
+		// runtime.
+		infrastructure, err := rootIsCityInfrastructure(live)
+		if err != nil {
+			log.Printf("session: leaving process-table root for %s pid=%d running: %v", sessionID, live.PID, err)
+			if orphanScanErrorsRefuseStart {
+				termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			}
+			continue
+		}
+		if infrastructure {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
-		if err := scanner.TerminateRuntime(live); err != nil {
+		// The provider claims this root as a live runtime of its own that it
+		// does not list: a pane of its socket that it cannot reach or that a
+		// failed listing missed, or a root its failed listing cannot rule
+		// out. It is not an orphan, and a replacement would race it for the
+		// session's work, so the start refuses and terminates nothing.
+		if live.LiveUnlisted {
+			return 0, refuseLiveUnlisted(sessionID, live, scanErr)
+		}
+		orphans = append(orphans, live)
+	}
+	terminated := 0
+	for _, live := range orphans {
+		if err := terminate(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			continue
 		}
+		terminated++
 	}
 	if len(termErrs) > 0 {
-		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		unconfirmed := fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		if scanErr != nil && orphanScanErrorsRefuseStart {
+			return terminated, errors.Join(unconfirmed, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr))
+		}
+		return terminated, unconfirmed
 	}
-	return nil
+	if scanErr != nil && orphanScanErrorsRefuseStart {
+		return terminated, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr)
+	}
+	return terminated, nil
+}
+
+// refuseLiveUnlisted logs and returns killExistingOrphans' refusal to start
+// sessionID over live, a root its provider claims as a live runtime it does
+// not list. When the scan's tracking failed (scanErr holds a whole-scan
+// failure), the claim rests on a listing that could not rule the root out,
+// so the refusal names that failure rather than say the root is the
+// provider's. The reconciler defers a refused start without recording a
+// failure, so the refusal is logged here.
+func refuseLiveUnlisted(sessionID string, live runtime.LiveRuntime, scanErr error) error {
+	claim := "belongs to the provider but is not listed by it"
+	if proctable.HasWholeScanFailure(scanErr) {
+		claim = "may belong to the provider, whose listing could not rule it out (" + proctable.SummarizeScanError(scanErr) + ")"
+	}
+	log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d %s", sessionID, live.PID, live.PPID, claim)
+	return fmt.Errorf("live runtime pid=%d ppid=%d for session %s %s: %w", live.PID, live.PPID, sessionID, claim, runtime.ErrRuntimeUnavailable)
 }
 
 func (m *Manager) now() time.Time {
@@ -892,7 +1003,7 @@ func WithClock(clk clock.Clock) ManagerOption {
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
-func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
+func NewManagerWithOptions(store beads.SessionStore, sp runtime.Provider, opts ...ManagerOption) *Manager {
 	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
@@ -1134,6 +1245,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its
@@ -1433,7 +1545,10 @@ const (
 // with an illegal transition made every restart SKIP them, so they survived
 // as live panes still holding their pool slot names (ga-rxhu2). The runtime
 // is torn down and the bead is left in draining for the drain machinery or
-// the reconciler to finish.
+// the reconciler to finish. A creating seat gets the same sweep-only
+// teardown, also writing nothing: the row is its start's, and the
+// last_woke_at its PreWake stamped is what keeps the next start's
+// stuck-creating reap from closing a start the stop cut short.
 func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
 	if err := m.checkActor(by); err != nil {
 		return err
@@ -1527,6 +1642,31 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// release no pool name while silently losing the drain. Only a close frees
 		// the name, and CmdClose is already legal from draining.
 		if current == StateDraining && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
+		// creating is the same shape of problem as draining above, and likewise
+		// only for the SHUTDOWN sweep: only a start's commit moves its row from
+		// creating to active, after the provider's Start returns, and the city
+		// stop cancels its starts first, so the sweep can reach a live runtime
+		// whose row still reads creating (a forced stop's late re-list can reach
+		// one whose Start has not returned). Rejecting it here made the stop fail
+		// and the runtime survive the shutdown.
+		//
+		// Scoped to the sweep on purpose: an operator naming ONE session in creating
+		// still gets the illegal transition (TestConformance_SuspendStillRejectsOtherIllegalStates).
+		// Idle auto-suspend of creating is refused the same way.
+		//
+		// The early return writes NOTHING, last_woke_at included. The row belongs
+		// to its start: a start the stop canceled never commits it active, so
+		// the next controller start settles the row the sweep leaves, and the
+		// last_woke_at PreWake stamped is the marker it reads. With it, the
+		// stuck-creating reap keeps a claimless row for the reconciler to
+		// relaunch (mc-5a1ma), and a pending create keeps its started-create
+		// lease rather than the 10-minute never-started one. A `gc rig restart`
+		// sweep runs beside a live controller, so its stop can land under a
+		// start still in flight, which settles the row as it does any runtime
+		// that dies under it (SESSION-START-026).
+		if current == StateCreating && intent == suspendIntentShutdown {
 			return m.tearDownRuntimeForSuspend(sessName)
 		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
@@ -1765,7 +1905,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
 		}
@@ -1778,17 +1918,18 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		// named session's identifiers, on the incarnation this close stopped.
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
+		maps.Copy(terminal, UsageClosePatch(m.now()))
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
 		case res == CommitMoved:
 			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
 		case res == CommitContended:
-			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, operatorSuspendAttempts)
 		case res != CommitLanded && res != CommitClosed:
 			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}
@@ -2175,7 +2316,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(b.ID, time.Now().UTC())
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
 		}
@@ -2341,7 +2482,7 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 // persisted read half of the read model — pair it with EnrichInfo for the live
 // overlay (the worker catalog's Get composes exactly that).
 func (m *Manager) PersistedStore() *Store {
-	return NewStore(beads.SessionStore{Store: m.store})
+	return NewStore(m.store)
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template
@@ -2397,9 +2538,27 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 // dedup cursor must live on the session bead, not in memory.
 const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
 
+// MetadataKeyUsageClosePending marks a session row closed while it may still
+// hold an unaccounted awake interval ("true"); see UsageClosePatch.
+const MetadataKeyUsageClosePending = "usage_close_pending"
+
+// MetadataKeyUsageClosedAt is the close time (RFC3339Nano) that ends the
+// interval a pending usage close accounts; see UsageClosePatch.
+const MetadataKeyUsageClosedAt = "usage_closed_at"
+
+// MetadataKeyUsageClosedAwakeStartedAt is the awake_started_at of the interval
+// a pending usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedAwakeStartedAt = "usage_closed_awake_started_at"
+
+// MetadataKeyUsageClosedSessionKey is the session_key of the interval a pending
+// usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedSessionKey = "usage_closed_session_key"
+
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.
+// A closed session is accepted: the usage lane sweeps a closed row's last
+// interval, and its cursor must advance past the turns it billed.
 // Empty id or cursor is a no-op.
 func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	cursor = strings.TrimSpace(cursor)
@@ -2407,7 +2566,7 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 		return nil
 	}
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
 			return err
 		}
 		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {

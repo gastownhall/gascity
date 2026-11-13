@@ -134,10 +134,10 @@ func (g *graphStores) storeFor(id string) (beads.Store, error) {
 
 // memberClasses names the classes a convoy expansion spans. Naming a class is
 // what makes it participate; an unnamed Graph leaves members as placeholders.
-func (g *graphStores) memberClasses(convoyStore beads.Store) convoycore.MemberClasses {
+func (g *graphStores) memberClasses(convoyStore beads.WorkStore) convoycore.MemberClasses {
 	// A constructor INPUT, not a residency answer: it names the legs convoycore
 	// resolves against, and storeFor above is this type's actual answer.
-	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph} // residency:allow — constructor input to convoycore.MemberClasses
+	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.WorkStore{{Store: g.work}}, Graph: beads.GraphStore{Store: g.graph}} // residency:allow — constructor input to convoycore.MemberClasses
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory
@@ -255,9 +255,27 @@ func doGraph(stores *graphStores, args []string, opts graphOpts, stdout, stderr 
 		nodes = append(nodes, graphNode{bead: b, blockedBy: blockedBy})
 	}
 
-	// Second pass: compute open blockers by cross-referencing status. A
-	// dependency is satisfied by the same predicate the store backends use, so a
-	// blocker that closed work_outcome=blocked still holds its dependents.
+	attachOpenBlockers(nodes)
+
+	switch {
+	case opts.JSON:
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", buildGraphJSONResult(args, nodes))
+	case opts.Mermaid:
+		printMermaid(nodes, stdout)
+	case opts.Tree:
+		printTree(nodes, stdout)
+	default:
+		printTable(nodes, stdout)
+	}
+	return 0
+}
+
+// attachOpenBlockers is the second pass over the fetched nodes: it computes
+// each node's open blockers by cross-referencing status. A dependency is
+// satisfied by the same predicate the store backends use, so a blocker that
+// closed work_outcome=blocked still holds its dependents, and a handoff pointer
+// on such a blocker is carried to the dependents it holds.
+func attachOpenBlockers(nodes []graphNode) {
 	satisfied := make(map[string]bool, len(nodes))
 	handoff := make(map[string]string, len(nodes))
 	for _, n := range nodes {
@@ -283,18 +301,6 @@ func doGraph(stores *graphStores, args []string, opts graphOpts, stdout, stderr 
 			}
 		}
 	}
-
-	switch {
-	case opts.JSON:
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", buildGraphJSONResult(args, nodes))
-	case opts.Mermaid:
-		printMermaid(nodes, stdout)
-	case opts.Tree:
-		printTree(nodes, stdout)
-	default:
-		printTable(nodes, stdout)
-	}
-	return 0
 }
 
 func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
@@ -364,7 +370,7 @@ func resolveGraphInput(stores *graphStores, args []string, stderr io.Writer) ([]
 		if beads.IsContainerType(b.Type) {
 			// Membership edges come from the convoy's own store; members
 			// resolve across both legs.
-			children, err := convoycore.MembersIn(stores.memberClasses(store), b.ID, false)
+			children, err := convoycore.MembersIn(stores.memberClasses(beads.WorkStore{Store: store}), b.ID, false)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

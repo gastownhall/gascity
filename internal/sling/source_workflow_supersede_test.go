@@ -112,8 +112,7 @@ func (s sourceWorkflowGetFailStore) Get(string) (beads.Bead, error) {
 // singleton guard: the relocated class binding first and strict, then the work
 // ledger the migration left its retained copies in.
 func convergedSplitCityDeps(binding, work beads.Store) SlingDeps {
-	return SlingDeps{
-		Store:    work,
+	return withStore(SlingDeps{
 		StoreRef: supersedeSourceStoreRef,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -122,7 +121,7 @@ func convergedSplitCityDeps(binding, work beads.Store) SlingDeps {
 			}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) {},
-	}
+	}, work)
 }
 
 // TestListSourceWorkflowRootsLetsClosedBindingRowSupersedeRetainedTwin is the
@@ -232,8 +231,7 @@ func TestListSourceWorkflowRootsLeavesSingleStoreCityEnumerationUnchanged(t *tes
 	newRetainedWorkflowTwin(t, rigStore, root.ID)
 	noProbe := errors.New("no probe belongs on a city that relocates nothing")
 
-	deps := SlingDeps{
-		Store:    cityStore,
+	deps := withStore(SlingDeps{
 		StoreRef: supersedeSourceStoreRef,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -242,7 +240,7 @@ func TestListSourceWorkflowRootsLeavesSingleStoreCityEnumerationUnchanged(t *tes
 			}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) {},
-	}
+	}, cityStore)
 
 	roots, err := listSourceWorkflowRoots(deps, supersedeSourceBeadID)
 	if err != nil {

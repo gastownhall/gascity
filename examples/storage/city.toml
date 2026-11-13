@@ -22,6 +22,11 @@
 # packs, which `gc doctor --fix` adds.
 #
 # To use: gc init --from examples/storage ~/storage-city
+#
+# Where gc init would start a new city single-store (a bd a split city's gc bd
+# refuses, or a remote session runtime), that copy is refused and nothing is
+# copied: a copy can leave out only the [storage] of city.toml, not the
+# binding storage-bindings.toml defines.
 
 include = ["storage-bindings.toml"]
 

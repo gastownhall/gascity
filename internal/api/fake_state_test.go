@@ -11,13 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -25,6 +27,9 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -49,13 +54,21 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	mailBeadStore     beads.Store // relocated messaging store (Stores().Mail only); nil follows a relocated sessions store, as a whole split relocates both, else cityBeadStore (default backend)
 	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
 	// the nudges store.
 	nudgeQueue NudgeQueue
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
-	bindingRelics     map[beads.Store]bool
+	bindingRelics map[beads.Store]bool
+	// classRefusals is a plane's per-class refusal (cmd/gc's worker site):
+	// the class's handle refuses, while the topology keeps the binding.
+	classRefusals map[coordclass.Class]storeref.RefusingClassStore
+	// rigBits are the per-rig bits a holder's epoch carries for its rigs:
+	// the S4 relic-free bit and the suspension set (Leg.RelicFree,
+	// Leg.Suspended). Zero is none of either, as a holder that knows neither.
+	rigBits           fakeRigBits
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -79,12 +92,25 @@ type fakeState struct {
 	// matching the real implementation's answer for the MemStore fakes most
 	// tests use.
 	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
+	// startupPromptFn backs ApplyStartupPrompt. Nil (the default) returns the
+	// hints unchanged — a state with no startup prompt to deliver — so tests that
+	// do not care about prompt delivery are unaffected.
+	startupPromptFn func(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 func newFakeState(t testing.TB) *fakeState {
 	t.Helper()
 	store := beads.NewMemStore()
-	mp := beadmail.New(store)
+	// Mail is messaging-class: under GC_TEST_SPLIT_STRICT=1 it reads the city
+	// store through the gate's class view (identity otherwise).
+	mp := newTestBeadMail(splittest.GateClassView(store))
+	// Under GC_TEST_SPLIT_STRICT=1 the city store exists, as it does on
+	// every real city: without one the class accessors had no store and the
+	// fixture's rows could only be read through rig views.
+	var cityStore beads.Store
+	if splittest.GateEnabled() {
+		cityStore = store
+	}
 	return &fakeState{
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
@@ -101,13 +127,14 @@ func newFakeState(t testing.TB) *fakeState {
 				"test-agent": {DisplayName: "Test Agent"},
 			},
 		},
-		sp:           runtime.NewFake(),
-		stores:       map[string]beads.Store{"myrig": store},
-		cityMailProv: mp,
-		eventProv:    events.NewFake(),
-		cityName:     "test-city",
-		cityPath:     beadstest.GuardedTempDir(t),
-		startedAt:    time.Now(),
+		sp:            runtime.NewFake(),
+		stores:        map[string]beads.Store{"myrig": store},
+		cityBeadStore: cityStore,
+		cityMailProv:  mp,
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      beadstest.GuardedTempDir(t),
+		startedAt:     time.Now(),
 	}
 }
 
@@ -118,8 +145,26 @@ func (f *fakeState) SessionProvider() runtime.Provider {
 	}
 	return f.sp
 }
-func (f *fakeState) BeadStore(rig string) beads.Store    { return f.stores[rig] }
-func (f *fakeState) BeadStores() map[string]beads.Store  { return f.stores }
+
+// BeadStore and BeadStores hand out work stores: under GC_TEST_SPLIT_STRICT=1
+// each is the gate's work view of the physical store (split_strict_gate_test.go).
+func (f *fakeState) BeadStore(rig string) beads.Store { return splittest.GateWorkView(f.stores[rig]) }
+
+// BeadStores is shaped as controllerState.BeadStores is (typed-stores T6
+// plan, OD-5): a fresh map holding the city store under the city's name when
+// there is one, then every rig, so a rig named like the city replaces it.
+// Callers that need an order sort the names, so the city sits at its name's
+// sorted position, not first.
+func (f *fakeState) BeadStores() map[string]beads.Store {
+	out := make(map[string]beads.Store, len(f.stores)+1)
+	if f.cityBeadStore != nil {
+		out[f.cityName] = splittest.GateWorkView(f.cityBeadStore)
+	}
+	for rig, store := range f.stores {
+		out[rig] = splittest.GateWorkView(store)
+	}
+	return out
+}
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }
 func (f *fakeState) MailProviders() map[string]mail.Provider {
 	if f.cityMailProv == nil {
@@ -140,7 +185,8 @@ func (f *fakeState) Version() string                       { return "test" }
 func (f *fakeState) StartedAt() time.Time                  { return f.startedAt }
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
-func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) CityBeadStore() beads.Store            { return splittest.GateWorkView(f.cityBeadStore) }
+
 func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
 	if f.scopedStoreFn == nil {
 		return nil, nil
@@ -148,40 +194,102 @@ func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (
 	return f.scopedStoreFn(ctx, existing)
 }
 
-func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
-	if f.nudgesBeadStore != nil {
-		return beads.NudgesStore{Store: f.nudgesBeadStore}
-	}
-	return beads.NudgesStore{Store: f.cityBeadStore}
-}
-
 func (f *fakeState) NudgeQueue() NudgeQueue {
 	if f.nudgeQueue != nil {
 		return f.nudgeQueue
 	}
-	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.Stores().Nudges()}
 }
 
-func (f *fakeState) SessionsBeadStore() beads.SessionStore {
-	if f.sessionsBeadStore != nil {
-		return beads.SessionStore{Store: f.sessionsBeadStore}
-	}
-	return beads.SessionStore{Store: f.cityBeadStore}
+// Stores mints the fake's class handles per call from its raw fields, through
+// the same router production uses (storeref.NewStores): the city store is the
+// work store, every rig in stores is a rig scope, and a class a test relocated
+// to a different store is a one-class binding. A class left on the city store
+// (unset, or set to the city store itself) wraps the city store, through the
+// gate's class view under GC_TEST_SPLIT_STRICT=1. The split-strict gate's views
+// are the projection, so the work and rig handles wrap exactly the stores
+// CityBeadStore and BeadStore return (TestFakeStateStoresWrapTheResidueAccessors).
+func (f *fakeState) Stores() storeref.Stores {
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents, f.rigBits)
 }
 
-func (f *fakeState) GraphBeadStore() beads.GraphStore {
-	if f.graphBeadStore != nil {
-		return beads.GraphStore{Store: f.graphBeadStore}
-	}
-	return beads.GraphStore{Store: f.cityBeadStore}
+// fakeRigBits are a fake holder's per-rig epoch bits, by rig name.
+type fakeRigBits struct {
+	relicFree map[string]bool
+	suspended map[string]bool
 }
 
-func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
-	if f.ordersBeadStore != nil {
-		return beads.OrdersStore{Store: f.ordersBeadStore}
+// relocatedClasses is every class a test relocated off the city store.
+// Messaging a test left unset follows a relocated sessions store: the split
+// the routes serve relocates every class into one binding, so the two never
+// part in production.
+func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
+	mail := f.mailBeadStore
+	if mail == nil {
+		mail = f.sessionsBeadStore
 	}
-	return beads.OrdersStore{Store: f.cityBeadStore}
+	out := map[coordclass.Class]beads.Store{}
+	for class, relocated := range map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:     f.graphBeadStore,
+		coordclass.ClassSessions:  f.sessionsBeadStore,
+		coordclass.ClassOrders:    f.ordersBeadStore,
+		coordclass.ClassNudges:    f.nudgesBeadStore,
+		coordclass.ClassMessaging: mail,
+	} {
+		if relocated != nil && relocated != f.cityBeadStore {
+			out[class] = relocated
+		}
+	}
+	return out
 }
+
+// mintFakeStores mints a fake city's handles: city is the work store, rigs
+// the rig scopes, and the classes in relocated are grouped by store into
+// bindings, as a production plane groups its routes (storeref.BuildBindings);
+// a nil store there is a binding that failed to open, whose handle is zero.
+// opts carries the split-strict gate's projection (none for stores that
+// already carry it) and any per-class refusal. cfg supplies the configured prefixes and relics the census a test
+// recorded (nil: none), so the handles' Topology is the one the API plane
+// derives from the same fake (TestFakeStateTopologyMatchesProduction). bits
+// marks each rig leg relic-free and suspended as a production holder marks
+// it (cmd/gc's mintCityStores).
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, opts storeref.StoresOptions, cfg *config.City, relics func(beads.Store) bool, bits fakeRigBits) storeref.Stores {
+	var order []beads.Store
+	byStore := map[beads.Store][]coordclass.Class{}
+	for _, class := range coordclass.Classes() {
+		store, ok := relocated[class]
+		if !ok {
+			continue
+		}
+		if _, seen := byStore[store]; !seen {
+			order = append(order, store)
+		}
+		byStore[store] = append(byStore[store], class)
+	}
+	bindings, refused := storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
+	topo := storeref.Topology{
+		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: city},
+		Rigs:     storeref.RigLegs(rigs),
+		Bindings: bindings,
+		Refused:  refused,
+	}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+		if name, ok := storeref.ScopeRigContext(string(topo.Rigs[i].Ref)); ok {
+			topo.Rigs[i].RelicFree, topo.Rigs[i].Suspended = bits.relicFree[name], bits.suspended[name]
+		}
+	}
+	return storeref.NewStores(topo, opts)
+}
+
+// gateProjection is the split-strict gate's views as the router's projection:
+// identity unless the gate is on.
+type gateProjection struct{}
+
+func (gateProjection) WorkView(s beads.Store) beads.Store  { return splittest.GateWorkView(s) }
+func (gateProjection) ClassView(s beads.Store) beads.Store { return splittest.GateClassView(s) }
 
 // ClassBindingHasLegacyResidents replays whatever census a test recorded in
 // bindingRelics. A store with no entry — the default for every test that never
@@ -245,6 +353,13 @@ func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgS
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
 
+func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
+	if f.startupPromptFn != nil {
+		return f.startupPromptFn(info, resolved, transport, hints)
+	}
+	return hints, nil
+}
+
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {
 		return f.rawCfg
@@ -262,6 +377,10 @@ type fakeMutatorState struct {
 	// assert mutations route through it.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	// createRigErr, when set, is what CreateRig returns instead of adding the
+	// rig: the refusal the real provisioning would answer.
+	createRigErr error
 
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
@@ -338,18 +457,9 @@ func (f *fakeMutatorState) SuspendRig(name string) error {
 	if !found {
 		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
-	tmpl := cfg.Workspace.SessionTemplate
-	for _, a := range cfg.Agents {
-		if a.Dir != name {
-			continue
-		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
-		for _, ea := range expanded {
-			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
-			_ = f.sp.SetMeta(sessionName, "suspended", "true")
-		}
-	}
-	return nil
+	// As the controller's SuspendRig does (configedit.Editor.SuspendRig).
+	suspended := true
+	return suspensionstate.SetRigSuspended(fsys.OSFS{}, f.cityPath, name, &suspended)
 }
 
 func (f *fakeMutatorState) ResumeRig(name string) error {
@@ -364,18 +474,9 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 	if !found {
 		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
-	tmpl := cfg.Workspace.SessionTemplate
-	for _, a := range cfg.Agents {
-		if a.Dir != name {
-			continue
-		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
-		for _, ea := range expanded {
-			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
-			_ = f.sp.RemoveMeta(sessionName, "suspended")
-		}
-	}
-	return nil
+	// As the controller's ResumeRig does (configedit.Editor.ResumeRig).
+	suspended := false
+	return suspensionstate.SetRigSuspended(fsys.OSFS{}, f.cityPath, name, &suspended)
 }
 
 func (f *fakeMutatorState) SuspendCity() error { f.cfg.Workspace.Suspended = true; return nil }
@@ -419,6 +520,9 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+	if f.createRigErr != nil {
+		return f.createRigErr
+	}
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }
@@ -697,3 +801,10 @@ func (f *fakeMutatorState) DeleteProviderPatch(name string) error {
 }
 
 func intPtr(n int) *int { return &n }
+
+// newTestBeadMail is the stateless beadmail provider over one store serving
+// both the messaging and the sessions class, as a single-store city's store
+// does.
+func newTestBeadMail(store beads.Store) *beadmail.Provider {
+	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
+}

@@ -805,6 +805,11 @@ func (tp *takePlan) planUnit(rp rulesPlan, e entry, probe Probe, now time.Time) 
 	}
 	target := i.Scope.Turn
 	switch {
+	case caps.ContentOnly:
+		// This host runs no control: the unit waits, undecided, for one
+		// that does, and content waits behind it.
+		tp.waitEntry(e, WaitNotLive, "", time.Time{})
+		tp.controlLeft = true
 	case !caps.Live:
 		tp.waitEntry(e, WaitNotLive, "", time.Time{})
 	case caps.MaxText > 0 && !(textBudget{max: caps.MaxText, style: caps.Text}).fits([]Op{m}):

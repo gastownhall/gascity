@@ -71,6 +71,10 @@ type recorderInstruments struct {
 	// Histograms — Phase 2 (1)
 	poolCheckDurationHist metric.Float64Histogram
 
+	// Nudge queue lock instrumentation
+	nudgeQueueLockWaitHist metric.Float64Histogram
+	nudgeQueueLockHoldHist metric.Float64Histogram
+
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
@@ -174,6 +178,16 @@ func initInstruments() {
 		// Histograms — Phase 2
 		inst.poolCheckDurationHist, _ = m.Float64Histogram("gc.pool.check.duration_ms",
 			metric.WithDescription("Pool scale_check command latency in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+
+		// Nudge queue lock
+		inst.nudgeQueueLockWaitHist, _ = m.Float64Histogram("gc.nudge_queue.lock.wait_ms",
+			metric.WithDescription("Time a nudge queue verb waited for the queue lock, in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+		inst.nudgeQueueLockHoldHist, _ = m.Float64Histogram("gc.nudge_queue.lock.hold_ms",
+			metric.WithDescription("Time a nudge queue verb held the queue lock, in milliseconds"),
 			metric.WithUnit("ms"),
 		)
 
@@ -636,6 +650,19 @@ func RecordPoolCheck(ctx context.Context, agent string, durationMs float64, desi
 	)
 }
 
+// RecordNudgeQueueLock records one acquisition of the nudge queue's lock: the
+// verb that took it, its outcome ("ok", "error", "busy"), and how long it
+// waited for and held the lock.
+func RecordNudgeQueueLock(ctx context.Context, verb, outcome string, waitMs, holdMs float64) {
+	initInstruments()
+	attrs := metric.WithAttributes(
+		attribute.String("verb", verb),
+		attribute.String("outcome", outcome),
+	)
+	inst.nudgeQueueLockWaitHist.Record(ctx, waitMs, attrs)
+	inst.nudgeQueueLockHoldHist.Record(ctx, holdMs, attrs)
+}
+
 // RecordMailOp records a mail operation (metrics + log event).
 // operation is "send", "read", "reply", "delete", "archive", "mark_read", "mark_unread".
 func RecordMailOp(ctx context.Context, operation string, err error) {
@@ -712,7 +739,9 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 // unrecordedReason says why a request ran unrecorded or, in require mode, was
 // refused (store_unavailable, type_unregistered, no_namespace,
 // payload_too_large, invalid_key, invalid_request, unmaterialized_target,
-// no_generation, unreadable_target, propose_error), or, for a sweeper pass
+// no_generation, unreadable_target, propose_error, or not_recorded_by_default
+// for a gate auto only by its builtin default over a sessions store that is
+// not SQLite-backed), or, for a sweeper pass
 // that failed as a whole, the failure's degrade class (store_error,
 // contention, conditional_writes_unsupported, type_unregistered,
 // no_namespace); it is empty for every other result. Every value is a closed
