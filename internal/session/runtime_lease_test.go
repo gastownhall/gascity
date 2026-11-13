@@ -1363,3 +1363,53 @@ func TestRuntimeLeaseExtendRecordRefusesAMovedRecord(t *testing.T) {
 		})
 	}
 }
+
+// TestRuntimeLeaseExtendRecordLosesARacingAcquire (AC-6): a contender that
+// takes the expired record between the extension's read and its conditional
+// write wins; the write is refused, its re-read returns ErrRuntimeLeaseLost,
+// and the contender's record stands.
+func TestRuntimeLeaseExtendRecordLosesARacingAcquire(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	created := seedPatchFenceSession(t, backing, "s-lease")
+	recorder := &rowWriteRecorder{Store: backing}
+	store := &racingStore{rowWriteRecorder: recorder}
+	f := leaseFixture{store: backing, front: NewStore(beads.SessionStore{Store: store}), id: created.ID}
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	late := leaseT0.Add(2 * leaseTTL)
+	l.now = func() time.Time { return late }
+	direct := leaseFixture{store: backing, front: NewStore(beads.SessionStore{Store: backing}), id: created.ID}
+	var taker *RuntimeLease
+	var contender map[string]string
+	store.race = func() {
+		taker, err = TryRuntimeLease(direct.front, direct.req(t.TempDir(), late))
+		if err != nil {
+			t.Errorf("the contender's acquire of the expired record: %v", err)
+			return
+		}
+		contender = direct.meta(t)
+	}
+	recorder.writes = nil
+	if err := l.ExtendRecord(leaseTTL); !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("ExtendRecord over a racing acquire = %v, want ErrRuntimeLeaseLost", err)
+	}
+	if taker == nil {
+		t.Fatal("the race did not run")
+	}
+	defer taker.Release()
+	if len(recorder.writes) != 1 || recorder.writes[0] != "UpdateIfMatch" {
+		t.Fatalf("extension writes = %v, want one refused UpdateIfMatch", recorder.writes)
+	}
+	got := direct.meta(t)
+	for _, key := range []string{RuntimeLeaseHolderKey, RuntimeLeaseEpochKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey} {
+		if got[key] != contender[key] {
+			t.Fatalf("%s = %q after the refused extension, want the contender's %q", key, got[key], contender[key])
+		}
+	}
+	if contender[RuntimeLeaseEpochKey] != "2" || !taker.HoldsMeta(got) {
+		t.Fatalf("record %v, want the contender's epoch 2", got)
+	}
+}
