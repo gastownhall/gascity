@@ -146,6 +146,15 @@ func seedReadyParityCorpus(t *testing.T, s beads.Store) {
 	}); err != nil {
 		t.Fatalf("CloseAll(%s): %v", failedBlocker.ID, err)
 	}
+	failedStep := mk(beads.Bead{Title: "closed failed-step blocker"})
+	dep(mk(beads.Bead{Title: "released by failed step"}), failedStep.ID, "blocks")
+	if _, err := s.CloseAll([]string{failedStep.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.OutcomeMetadataKey:     beadmeta.OutcomeFail,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", failedStep.ID, err)
+	}
 
 	future := readyParityFarFuture
 	mk(beads.Bead{Title: "deferred", DeferUntil: &future})

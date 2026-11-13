@@ -7,11 +7,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep keeps the drain-ack and
+// TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep keeps the drain-ack and
 // divergence classifiers in agreement with Ready(): a blocker closed with
 // gc.work_outcome=blocked still blocks, unless it is a formula step whose
-// control-plane step passed.
-func TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep(t *testing.T) {
+// control-plane step closed with a terminal gc.outcome.
+func TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		metadata map[string]string
@@ -21,6 +21,21 @@ func TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep(t *testing.T) {
 		{
 			"passed step is met despite a blocked work outcome",
 			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
+			"failed step is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
+			"skipped step is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
+			"canceled step is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			false,
 		},
 		{

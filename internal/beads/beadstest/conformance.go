@@ -963,6 +963,59 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyIncludesDependentWhenTerminalStepClosedWithWorkOutcomeBlocked", func(t *testing.T) {
+		// A formula step (gc.step_ref) that closed with any terminal gc.outcome
+		// releases its dependents even when its worker recorded
+		// gc.work_outcome=blocked: the retry, scope-check, and finalize
+		// controls that consume the verdict depend on the step, and they are
+		// only ever served from Ready(). The recorded work outcome is kept.
+		for _, outcome := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail, beadmeta.OutcomeSkipped, beadmeta.OutcomeCanceled} {
+			for _, depType := range []string{"blocks", "waits-for", "conditional-blocks"} {
+				t.Run(outcome+"/"+depType, func(t *testing.T) {
+					s := newStore()
+					blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := s.DepAdd(dependent.ID, blocker.ID, depType); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.Close(blocker.ID); err != nil {
+						t.Fatal(err)
+					}
+					stamped := map[string]string{
+						beadmeta.StepRefMetadataKey:     "review",
+						beadmeta.OutcomeMetadataKey:     outcome,
+						beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+					}
+					if err := s.SetMetadataBatch(blocker.ID, stamped); err != nil {
+						t.Fatal(err)
+					}
+					got, err := s.Ready()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(got) != 1 || got[0].Title != "dependent" {
+						t.Fatalf("Ready() = %v, want [dependent]: a formula step closed gc.outcome=%s must satisfy its %s dependent whatever its gc.work_outcome", titlesOf(got), outcome, depType)
+					}
+					after, err := s.Get(blocker.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for k, v := range stamped {
+						if after.Metadata[k] != v {
+							t.Fatalf("blocker metadata %s = %q after Ready(), want %q unchanged", k, after.Metadata[k], v)
+						}
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("ReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})

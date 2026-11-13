@@ -1772,7 +1772,8 @@ func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string,
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
 // closed, or closed with gc.work_outcome=blocked unless it is a formula step
-// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
+// (gc.step_ref) that reached a terminal verdict (gc.outcome in
+// terminalStepOutcomes; see ReadinessWorkOutcome). A target missing from this
 // store (deleted, or another store's id) has no status and so blocks. Ready
 // negates it and enrichReadyProjectionForCache selects it, so the store and a
 // cache over it cannot disagree about which rows are blocked.
@@ -1796,7 +1797,7 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			             SELECT 1 FROM metadata o
 			             WHERE o.bead_id = blocker.id
 			               AND o.meta_key = '%s'
-			               AND o.meta_value = '%s'
+			               AND o.meta_value IN (%s)
 			           )
 			           AND EXISTS (
 			             SELECT 1 FROM metadata r
@@ -1807,7 +1808,17 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, sqliteQuotedList(terminalStepOutcomes), beadmeta.StepRefMetadataKey)
+}
+
+// sqliteQuotedList renders constant values as a comma-separated list of SQL
+// string literals for an IN clause, doubling any embedded quote.
+func sqliteQuotedList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

@@ -10,8 +10,9 @@ import (
 // TestCachingStoreReadyDefersToAPassedStep checks the cached ready verdict
 // against both shapes of a closed blocker that recorded
 // gc.work_outcome=blocked: alone it withholds its dependent, but when the
-// blocker's control-plane step passed (gc.outcome=pass) the dependent is ready,
-// matching the backing stores.
+// blocker's control-plane step reached a terminal verdict (gc.outcome pass,
+// fail, skipped, or canceled) the dependent is ready, matching the backing
+// stores.
 func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -26,6 +27,21 @@ func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 		{
 			"passed step releases the dependent despite a blocked work outcome",
 			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"failed step releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"skipped step releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"canceled step releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			true,
 		},
 		{

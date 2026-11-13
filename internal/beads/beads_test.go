@@ -186,14 +186,12 @@ func TestIsReadyCandidate(t *testing.T) {
 	}
 }
 
-// TestDependencySatisfied pins the exact truth table a blocking dependency
-// must satisfy before its dependent can be considered ready: a dependency
-// that is still open never satisfies (regardless of any work_outcome value
-// left over from a prior close/reopen cycle), and a closed dependency
-// satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
-// closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
-// case) must still satisfy — that's the backward-compat guarantee.
-func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+// TestReadinessWorkOutcomeDefersToATerminalStep pins which closed
+// dependencies have their gc.work_outcome masked for readiness: a formula step
+// (gc.step_ref) that closed with a terminal gc.outcome (pass, fail, skipped,
+// canceled) reports no work outcome, so the controls that consume its verdict
+// are offered; everything else reports its recorded gc.work_outcome verbatim.
+func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 	tests := []struct {
 		name     string
 		metadata map[string]string
@@ -202,8 +200,9 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 		{"no metadata", nil, ""},
 		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
-		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"failed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"skipped step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"canceled step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
 		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
 		// A plain work bead (no gc.step_ref) is not a control-plane step: the
 		// core mol-do-work formula stamps gc.outcome=pass on the work bead
@@ -217,12 +216,19 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
 			}
 			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
-				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+				t.Fatalf("a closed dependency whose step reached a terminal verdict must satisfy its dependents (%v)", tt.metadata)
 			}
 		})
 	}
 }
 
+// TestDependencySatisfied pins the exact truth table a blocking dependency
+// must satisfy before its dependent can be considered ready: a dependency
+// that is still open never satisfies (regardless of any work_outcome value
+// left over from a prior close/reopen cycle), and a closed dependency
+// satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
+// closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
+// case) must still satisfy — that's the backward-compat guarantee.
 func TestDependencySatisfied(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -570,6 +576,33 @@ func TestBdIssueRejectsInvalidRevision(t *testing.T) {
 			var issue bdIssue
 			if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":`+raw+`}`), &issue); err == nil {
 				t.Fatalf("json.Unmarshal revision %s succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+// TestTerminalFormulaStepReleasesDependentsDespiteBlockedWorkOutcome pins
+// issue #8153: a formula step (gc.step_ref) that closed with a terminal
+// gc.outcome must release the control beads that depend on it, even when the
+// worker recorded gc.work_outcome=blocked. Otherwise the retry/scope control
+// that has to consume the verdict is never ready and the workflow root
+// strands.
+func TestTerminalFormulaStepReleasesDependentsDespiteBlockedWorkOutcome(t *testing.T) {
+	for _, outcome := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail, beadmeta.OutcomeSkipped, beadmeta.OutcomeCanceled} {
+		t.Run(outcome, func(t *testing.T) {
+			step := map[string]string{
+				beadmeta.StepRefMetadataKey:     "review",
+				beadmeta.OutcomeMetadataKey:     outcome,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			}
+			if !DependencySatisfied("closed", ReadinessWorkOutcome(step)) {
+				t.Fatalf("closed formula step with gc.outcome=%s and gc.work_outcome=blocked does not satisfy its dependents (ReadinessWorkOutcome=%q): the control consuming the verdict is never ready", outcome, ReadinessWorkOutcome(step))
+			}
+			if DependencySatisfied("open", ReadinessWorkOutcome(step)) {
+				t.Fatalf("an open formula step with gc.outcome=%s must still withhold its dependents", outcome)
+			}
+			if step[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeBlocked {
+				t.Fatalf("ReadinessWorkOutcome mutated the step metadata: %v", step)
 			}
 		})
 	}
