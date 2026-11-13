@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -76,6 +77,47 @@ func TestLintAllowsParallelRunners(t *testing.T) {
 	}
 	if !config.Run.AllowParallelRunners {
 		t.Fatalf("run.allow-parallel-runners must be true: concurrent lint runs on a shared host otherwise fail with %q before analysis (ga-88dvlm)", "parallel golangci-lint is running")
+	}
+}
+
+// TestLintExcludesNodeModules pins that golangci-lint skips gitignored npm
+// packages. A local `npm ci` in the dashboard drops flatted's Go port under
+// node_modules, and without an exclusion `make lint` and `make fmt-check`
+// report issues in it that CI never sees (ga-nab5ci).
+func TestLintExcludesNodeModules(t *testing.T) {
+	configPath := filepath.Join(repoRoot(t), ".golangci.yml")
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	type exclusions struct {
+		Exclusions struct {
+			Paths []string `yaml:"paths"`
+		} `yaml:"exclusions"`
+	}
+	var config struct {
+		Linters    exclusions `yaml:"linters"`
+		Formatters exclusions `yaml:"formatters"`
+	}
+	if err := yaml.Unmarshal(body, &config); err != nil {
+		t.Fatalf("parse %s: %v", configPath, err)
+	}
+	const vendored = "internal/api/dashboardspa/web/node_modules/flatted/golang/pkg/flatted/flatted.go"
+	for name, section := range map[string]exclusions{"linters": config.Linters, "formatters": config.Formatters} {
+		excluded := false
+		for _, pattern := range section.Exclusions.Paths {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				t.Fatalf("%s.exclusions.paths entry %q is not a valid regexp: %v", name, pattern, err)
+			}
+			if re.MatchString(vendored) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			t.Errorf("%s.exclusions.paths must match %s so a local dashboard npm install does not turn lint red", name, vendored)
+		}
 	}
 }
 
