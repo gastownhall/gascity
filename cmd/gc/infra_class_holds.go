@@ -141,7 +141,10 @@ func (h infraParkedHold) deferUntil() (*time.Time, error) {
 // store, with the hold its stamp records restored: the raw status and the
 // defer_until it had. The stamp is removed either way. A bead released in the
 // split city (no longer open, or its deferral changed from
-// infraParkedDeferUntil) keeps what the split city made of it. It refuses a
+// infraParkedDeferUntil) keeps what the split city made of it, except a
+// deferral still at infraParkedDeferUntil: that is the copy's, not the
+// row's, and a row reopened later in its source store would stay hidden
+// behind it, so it goes back as the defer_until the row had. It refuses a
 // stamp that does not parse.
 func reverseParkedHold(b beads.Bead) (beads.Bead, error) {
 	raw, ok := b.Metadata[beadmeta.MigratedParkedHoldMetadataKey]
@@ -162,11 +165,13 @@ func reverseParkedHold(b beads.Bead) (beads.Bead, error) {
 	}
 	delete(metadata, beadmeta.MigratedParkedHoldMetadataKey)
 	b.Metadata = metadata
-	if b.Status != "open" || b.DeferUntil == nil || !b.DeferUntil.Equal(infraParkedDeferUntil) {
-		return b, nil
+	sentinel := b.DeferUntil != nil && b.DeferUntil.Equal(infraParkedDeferUntil)
+	if sentinel {
+		b.DeferUntil = until
 	}
-	b.Status = hold.Status
-	b.DeferUntil = until
+	if b.Status == "open" && sentinel {
+		b.Status = hold.Status
+	}
 	return b, nil
 }
 
