@@ -1313,3 +1313,53 @@ func TestRuntimeLeaseExtendRecord(t *testing.T) {
 		t.Fatal("ExtendRecord took a TTL below the minimum")
 	}
 }
+
+// TestRuntimeLeaseExtendRecordRefusesAMovedRecord (AC-5): a row that records
+// another holder or epoch, or is closed, refuses the extension with
+// ErrRuntimeLeaseLost; a released lease refuses it with
+// ErrRuntimeLeaseAfterRelease. Neither writes.
+func TestRuntimeLeaseExtendRecordRefusesAMovedRecord(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		move func(t *testing.T, f leaseFixture, l *RuntimeLease)
+		want error
+	}{
+		{"another holder", func(t *testing.T, f leaseFixture, _ *RuntimeLease) {
+			f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "host-b/7/n"})
+		}, ErrRuntimeLeaseLost},
+		{"another epoch", func(t *testing.T, f leaseFixture, _ *RuntimeLease) {
+			f.write(t, MetadataPatch{RuntimeLeaseEpochKey: "9"})
+		}, ErrRuntimeLeaseLost},
+		{"a closed row", func(t *testing.T, f leaseFixture, _ *RuntimeLease) {
+			if err := f.store.Close(f.id); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrRuntimeLeaseLost},
+		{"a released lease", func(_ *testing.T, _ leaseFixture, l *RuntimeLease) {
+			l.Release()
+		}, ErrRuntimeLeaseAfterRelease},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLeaseFixture(t)
+			l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Release()
+			expires := l.Expires()
+			c.move(t, f, l)
+			before := mustBead(t, f.store, f.id)
+			if err := l.ExtendRecord(leaseTTL); !errors.Is(err, c.want) {
+				t.Fatalf("ExtendRecord = %v, want %v", err, c.want)
+			}
+			after := mustBead(t, f.store, f.id)
+			if after.Revision != before.Revision || after.Metadata[RuntimeLeaseExpiresKey] != before.Metadata[RuntimeLeaseExpiresKey] {
+				t.Fatalf("refused extension wrote the row: revision %d -> %d, expiry %q -> %q", before.Revision, after.Revision,
+					before.Metadata[RuntimeLeaseExpiresKey], after.Metadata[RuntimeLeaseExpiresKey])
+			}
+			if !l.Expires().Equal(expires) {
+				t.Fatalf("refused extension moved Expires to %v, want %v kept", l.Expires(), expires)
+			}
+		})
+	}
+}
