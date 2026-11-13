@@ -958,8 +958,13 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 // destination is a genesis city's empty proven copy and marker, which record
 // that a city with nothing to move has nothing to move. That is the zero-row
 // degenerate of the copy the operator command performs, not a copy of its own.
-func checkInfraClassConvergence(cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
-	return checkInfraClassConvergenceWithSource(openInfraMigrationSource, cityPath, cfg, "gc start", stderr)
+//
+// logPrefix stays a parameter so the four-argument form existing tests call is
+// unchanged; production reaches the check through checkInfraClassConvergenceWithSource.
+//
+//nolint:unparam // four-argument form is the seam the storage-boot tests call.
+func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return checkInfraClassConvergenceWithSource(openInfraMigrationSource, cityPath, cfg, logPrefix, stderr)
 }
 
 // checkInfraClassConvergenceWithSource is checkInfraClassConvergence reading
