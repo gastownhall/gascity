@@ -703,6 +703,13 @@ func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt
 	}
 }
 
+// sessionExpectedOneShot reports the session's configured agent exits after one
+// unit of work, so its exit is expected completion rather than churn.
+func sessionExpectedOneShot(info sessionpkg.Info, cfg *config.City) bool {
+	agent := findSessionAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
+	return agent != nil && agent.Lifecycle == config.AgentLifecycleOneShot
+}
+
 // clearLastWokeAt clears last_woke_at on the session bead and returns the
 // snapshot Info with that clear folded in (front-door migration Step 6d,
 // write-returns-Info). It emits a single SetMetadata op (SetMarker) so the store
@@ -987,7 +994,14 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 			return info, true
 		}
 		defer release()
-		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+		// A one-shot agent's own exit is expected completion, so it accrues no
+		// churn; the classification above still decides its handling, and its
+		// conversation still resets for the next unit's fresh start.
+		if sessionExpectedOneShot(info, cfg) {
+			info = resetConversationForChurn(info, sessFront)
+		} else {
+			info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+		}
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
 		info = clearLastWokeAt(info, sessFront)
@@ -1050,9 +1064,9 @@ func isDeliberateSleepReason(reason string) bool {
 	return sessionpkg.IsDeliberateSleepReason(reason)
 }
 
-// recordChurn increments the churn counter and clears session_key on every
-// churn event to force a fresh conversation on next wake. When the counter
-// reaches defaultMaxChurnCycles, the session is quarantined.
+// recordChurn increments the churn counter and, through
+// resetConversationForChurn, forces a fresh conversation on next wake. When the
+// counter reaches defaultMaxChurnCycles, the session is quarantined.
 //
 // It returns the snapshot Info advanced by every write it made (front-door
 // migration Step 6d, write-returns-Info):
@@ -1065,18 +1079,7 @@ func isDeliberateSleepReason(reason string) bool {
 // agentIdentity is the start-path-joinable agent label for gc.agent.quarantines.total.
 func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	count, _ := strconv.Atoi(info.ChurnCount)
-
-	// Clear automatic-session keys on churn — context exhaustion means the
-	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall. A committed manual conversation keeps its
-	// identity under the same retry/quarantine accounting; replacing it takes
-	// an explicit reset. Best-effort store write (error ignored, as before)
-	// with an unconditional Info fold.
-	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
-		reset := sessionpkg.ConversationResetPatch(false)
-		_ = sessFront.ApplyPatch(info.ID, reset)
-		info = info.ApplyPatch(reset)
-	}
+	info = resetConversationForChurn(info, sessFront)
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
@@ -1090,6 +1093,23 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 	next := accrual.Patch["churn_count"]
 	_ = sessFront.SetMarker(info.ID, "churn_count", next)
 	return info.ApplyPatch(map[string]string{"churn_count": next})
+}
+
+// resetConversationForChurn clears an automatic session's conversation on a
+// churn event — context exhaustion means the conversation itself is the
+// problem. A fresh conversation avoids re-hitting the same wall. A committed
+// manual conversation keeps its identity under the same retry/quarantine
+// accounting; replacing it takes an explicit reset. Best-effort store write
+// (error ignored, as before) with an unconditional Info fold. The one-shot exit
+// path calls it too, so its exit resets the conversation while accruing no
+// churn (SESSION-RECON-011).
+func resetConversationForChurn(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
+	if info.SessionKey == "" || sessionpkg.HasStartedManualConversation(info) {
+		return info
+	}
+	reset := sessionpkg.ConversationResetPatch(false)
+	_ = sessFront.ApplyPatch(info.ID, reset)
+	return info.ApplyPatch(reset)
 }
 
 // clearChurn resets the churn counter for a productive session. It returns the
