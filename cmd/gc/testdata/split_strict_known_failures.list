@@ -248,6 +248,7 @@ TestSplitEnvTopologies	fails under the gate: resolveClassStore("graph") on the s
 TestSplitEnvTopologiesWithRigLeg	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitTopologyConformance	fails under the gate: minted wisp gc-2 has Ephemeral=true, want false: policy-wrapped=false (a wrapped front door maps the wisp policy onto the ephemeral tier under bd-1.0.5; a reloc
 TestStorageGateServesAConvergedCityFromTheBinding	fails under the gate: work stopped resolving to the work store on a converged city
+TestStorageSplitDemandRepairsRunAfterTheSnapshot	fails under the gate: the binding's step is routed to "packs/worker-2", want the repaired "packs/worker": P2 runs legacy's demand repairs on a city that is not split yet, whose routed graph rows live in its work store, and the gate projects every unsplit city as split, so the sweep's work-store opens get the WORK view, which hides the routed graph step. On a real unsplit city the sweep reads the step in the work store and repairs it, which the unit lane pins.
 TestStoreOpensWithoutTheMemoStayOwned	fails under the gate: store 0 closed 0 times, want 1
 TestSweepOrderTrackingCommandClosesAllStaleTracking	fails under the gate: Get(gcg-1): bead "gcg-1" is not in this store: bead not found
 TestSweepOrderTrackingCommandIncludeWispsRequiresOrderBeforePruning	fails under the gate: gcg-1 should be preserved after invalid command: bead "gcg-1" is not in this store: bead not found
