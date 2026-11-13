@@ -5465,6 +5465,10 @@ It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
 reports exactly that and exits non-zero — author the split first.
 
+It names every check that would refuse, not only the first: a check that
+blocks does not stop the report, and a check that depends on one that blocked
+is printed as [SKIP] with the check it needs.
+
 It exits non-zero when the migration would refuse for a reason you have to go
 and fix first. That is a different question from gc storage status,
 which exits non-zero whenever the city is not yet serving from its binding — the
@@ -5483,7 +5487,8 @@ they need, and how many times --time-budget would pause the run. The
 estimates come from the row and edge counts read here and from rates measured
 on a loaded host, both printed with them. It starts no bead-store provider: on
 a city whose provider is down, or with a proxied server stopped, it reports
-that and what lets a later run read, and checks nothing that reads a store. A
+that and what lets a later run read, runs every check that reads no store,
+and skips each that reads one. A
 suspended rig or city is left stopped; a proxied server that retired on its
 idle timeout while the city's controller runs is read, as gc doctor reads it,
 which restarts it as any bd read would. Reading a binding already there (a
