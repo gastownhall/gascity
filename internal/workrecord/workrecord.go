@@ -1,8 +1,9 @@
-// Package workrecord analyzes bead close-time work-record coverage: which
-// gated beads carry a valid gc.work_outcome and which do not.
 package workrecord
 
 import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -15,17 +16,26 @@ type CoverageReport struct {
 	MissingIDs []string `json:"missing_ids,omitempty"`
 }
 
-// IsGatedBead reports whether bead is subject to the work-record close gate.
-func IsGatedBead(_ beads.Bead) bool {
-	return false
-}
-
-// ValidOutcome reports whether v is a recognized gc.work_outcome value.
-func ValidOutcome(_ string) bool {
-	return false
-}
-
-// AnalyzeCoverage computes work-record coverage across beadList.
-func AnalyzeCoverage(_ []beads.Bead) CoverageReport {
-	return CoverageReport{}
+// AnalyzeCoverage computes work-record coverage across beadList: of the
+// gated beads (per Gated), how many carry a valid gc.work_outcome (per
+// ValidOutcome) and which do not.
+func AnalyzeCoverage(beadList []beads.Bead) CoverageReport {
+	var r CoverageReport
+	for _, b := range beadList {
+		if !Gated(b) {
+			continue
+		}
+		r.TotalGated++
+		outcome := strings.TrimSpace(b.Metadata[beadmeta.WorkOutcomeMetadataKey])
+		if outcome != "" && ValidOutcome(outcome) {
+			r.Covered++
+		} else {
+			r.Missing++
+			r.MissingIDs = append(r.MissingIDs, b.ID)
+		}
+	}
+	if r.TotalGated > 0 {
+		r.Coverage = float64(r.Covered) / float64(r.TotalGated)
+	}
+	return r
 }

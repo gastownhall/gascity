@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -56,9 +57,14 @@ func TestAnalyzeWorkRecordFromStoreOnlyScansClosed(t *testing.T) {
 	if err := analyzeWorkRecordFromStore(store, 100, true, &buf); err != nil {
 		t.Fatalf("analyzeWorkRecordFromStore: %v", err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, `"total_gated": 0`) {
-		t.Fatalf("expected zero gated beads scanned (in_progress bead must be excluded); got:\n%s", out)
+	var parsed struct {
+		TotalGated int `json:"total_gated"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &parsed); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, buf.String())
+	}
+	if parsed.TotalGated != 0 {
+		t.Fatalf("expected zero gated beads scanned (in_progress bead must be excluded); got total_gated=%d (raw: %s)", parsed.TotalGated, buf.String())
 	}
 }
 
