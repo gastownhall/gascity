@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -37,8 +38,23 @@ type fakePane struct {
 	// history is scrollback left in the pane by an earlier agent.
 	history string
 
+	// failOn makes the named tmux events fail with a transport error.
+	failOn map[string]error
+	// cancelOn names the event whose first occurrence calls cancel.
+	cancelOn string
+	cancel   context.CancelFunc
+
 	nudgeIntoDialog bool
 	log             []string
+}
+
+// record appends event to the log and fires cancel on the cancelOn event.
+func (f *fakePane) record(event string) {
+	f.log = append(f.log, event)
+	if f.cancel != nil && event == f.cancelOn {
+		f.cancel()
+		f.cancel = nil
+	}
 }
 
 func (f *fakePane) exec(_ string, cmd []string) (string, error) {
@@ -47,17 +63,23 @@ func (f *fakePane) exec(_ string, cmd []string) (string, error) {
 	}
 	switch {
 	case cmd[0] == "sh" && len(cmd) >= 3 && strings.Contains(cmd[2], "respawn-pane"):
-		f.log = append(f.log, "respawn")
+		f.record("respawn")
 	case cmd[0] != "tmux":
 	case cmd[1] == "has-session":
-		f.log = append(f.log, "has-session")
+		f.record("has-session")
 	case cmd[1] == "pipe-pane":
-		f.log = append(f.log, "setup")
+		f.record("setup")
 	case cmd[1] == "clear-history":
-		f.log = append(f.log, "clear-history")
+		f.record("clear-history")
+		if err := f.failOn["clear-history"]; err != nil {
+			return "", err
+		}
 		f.history = ""
 	case cmd[1] == "capture-pane":
-		f.log = append(f.log, "capture")
+		f.record("capture")
+		if err := f.failOn["capture"]; err != nil {
+			return "", err
+		}
 		return f.screen(), nil
 	case cmd[1] == "send-keys":
 		f.sendKeys(cmd[2:])
@@ -91,7 +113,7 @@ func (f *fakePane) sendKeys(args []string) {
 		args = args[2:]
 	}
 	if len(args) >= 1 && args[0] == "-l" {
-		f.log = append(f.log, "nudge-text")
+		f.record("nudge-text")
 		if f.dialogOpen {
 			f.nudgeIntoDialog = true
 		}
@@ -100,7 +122,7 @@ func (f *fakePane) sendKeys(args []string) {
 	for _, key := range args {
 		switch key {
 		case "Up", "Down":
-			f.log = append(f.log, "move")
+			f.record("move")
 			if !f.movesIgnored {
 				f.cursorOnTrust = true
 			}
@@ -108,12 +130,12 @@ func (f *fakePane) sendKeys(args []string) {
 			switch {
 			case f.dialogOpen && f.cursorOnTrust:
 				f.dialogOpen = false
-				f.log = append(f.log, "accept")
+				f.record("accept")
 			case f.dialogOpen:
 				f.dialogOpen = false
-				f.log = append(f.log, "enter-wrong-row")
+				f.record("enter-wrong-row")
 			default:
-				f.log = append(f.log, "submit")
+				f.record("submit")
 			}
 		}
 	}
@@ -413,5 +435,123 @@ func TestStartupDialogsSkippedWhenNotEnabled(t *testing.T) {
 				})
 			})
 		}
+	}
+}
+
+// TestStartupDialogsCancellation covers AC-4: a ctx that ends while the
+// startup-dialog pass (or Relaunch's history clearing) runs fails the
+// operation with the ctx error and skips the post-pass liveness probe and the
+// nudge. Start removes the pod it created; Relaunch keeps the warm pod.
+func TestStartupDialogsCancellation(t *testing.T) {
+	cases := []struct {
+		name     string
+		relaunch bool
+		cancelOn string
+		deadline bool
+	}{
+		{name: "start canceled while polling", cancelOn: "capture"},
+		{name: "start deadline while polling", deadline: true},
+		{name: "relaunch canceled while polling", relaunch: true, cancelOn: "capture"},
+		{name: "relaunch deadline while polling", relaunch: true, deadline: true},
+		{name: "relaunch canceled while clearing history", relaunch: true, cancelOn: "clear-history"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// A blank pane keeps the pass polling until the ctx ends.
+				pane := &fakePane{blankFrames: 1 << 30, cancelOn: tc.cancelOn}
+				p := newDialogProvider(pane)
+				fake := p.ops.(*fakeK8sOps)
+
+				var ctx context.Context
+				var cancel context.CancelFunc
+				want := context.Canceled
+				if tc.deadline {
+					ctx, cancel = context.WithTimeout(context.Background(), runtime.StartupDialogTimeout()/2)
+					want = context.DeadlineExceeded
+				} else {
+					ctx, cancel = context.WithCancel(context.Background())
+					pane.cancel = cancel
+				}
+				defer cancel()
+
+				var err error
+				if tc.relaunch {
+					addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+					err = p.Relaunch(ctx, "gc-test-agent", dialogStartConfig())
+				} else {
+					err = p.Start(ctx, "gc-test-agent", dialogStartConfig())
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("error = %v, want %v", err, want)
+				}
+
+				passStart := pane.index("clear-history")
+				if passStart < 0 {
+					passStart = pane.index("capture")
+				}
+				if passStart < 0 {
+					t.Fatalf("the startup-dialog pass never ran; log = %v", pane.log)
+				}
+				if pane.lastIndex("has-session") > passStart {
+					t.Fatalf("liveness probed after the canceled pass; log = %v", pane.log)
+				}
+				if pane.count("nudge-text") != 0 || pane.count("submit") != 0 {
+					t.Fatalf("nudge sent after the canceled pass; log = %v", pane.log)
+				}
+				_, podLeft := fake.pods["gc-test-agent"]
+				if tc.relaunch {
+					if !podLeft || podMutations(p) != 0 {
+						t.Fatalf("Relaunch did not keep the warm pod (left=%v, mutations=%d)", podLeft, podMutations(p))
+					}
+				} else if podLeft {
+					t.Fatal("Start left the pod it created after the canceled pass")
+				}
+			})
+		})
+	}
+}
+
+// TestStartupDialogsTransportFailuresAreBestEffort: with a live ctx, a pane
+// capture or history-clear failure is reported on stderr, naming the session,
+// and the operation still probes liveness and nudges.
+func TestStartupDialogsTransportFailuresAreBestEffort(t *testing.T) {
+	transportErr := errors.New("error dialing backend: connection refused")
+	cases := []struct {
+		name     string
+		relaunch bool
+		failOn   string
+	}{
+		{name: "start capture fails", failOn: "capture"},
+		{name: "relaunch capture fails", relaunch: true, failOn: "capture"},
+		{name: "relaunch history clear fails", relaunch: true, failOn: "clear-history"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{failOn: map[string]error{tc.failOn: transportErr}}
+				p := newDialogProvider(pane)
+				var stderr strings.Builder
+				p.stderr = &stderr
+
+				var err error
+				if tc.relaunch {
+					addRunningPod(p.ops.(*fakeK8sOps), "gc-test-agent", "gc-test-agent")
+					err = p.Relaunch(context.Background(), "gc-test-agent", dialogStartConfig())
+				} else {
+					err = p.Start(context.Background(), "gc-test-agent", dialogStartConfig())
+				}
+				if err != nil {
+					t.Fatalf("a best-effort %s failure failed the operation: %v", tc.failOn, err)
+				}
+				if got := stderr.String(); !strings.Contains(got, `"gc-test-agent"`) || !strings.Contains(got, transportErr.Error()) {
+					t.Fatalf("stderr = %q, want a warning naming the session and the failure", got)
+				}
+				nudge := pane.index("nudge-text")
+				if nudge < 0 || pane.lastIndex("has-session") > nudge || pane.lastIndex("has-session") < pane.index(tc.failOn) {
+					t.Fatalf("liveness then nudge did not follow the failed %s; log = %v", tc.failOn, pane.log)
+				}
+			})
+		})
 	}
 }
