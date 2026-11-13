@@ -168,6 +168,12 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 		if !shouldEmitLoadCityConfigWarning(warning) {
 			continue
 		}
+		// The always+fresh advisory describes a deliberate configuration and
+		// would repeat on every command; `gc config show` and the start
+		// command print it where configuration is inspected.
+		if config.IsAlwaysFreshWakeModeWarning(warning) {
+			continue
+		}
 		if _, dup := seen[warning]; dup {
 			continue
 		}
