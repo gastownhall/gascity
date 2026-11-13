@@ -201,6 +201,12 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver graphroute.DirectSessionResolver
+	// WorkQueryProbe runs the target agent's own work_query and returns its
+	// raw output, mirroring the probe `gc hook` issues for that agent. Used
+	// by finalize's post-routing postcondition check to confirm a routed
+	// bead is actually visible to whatever will pick it up next. nil = skip
+	// the postcondition check.
+	WorkQueryProbe func(a config.Agent) (output string, err error)
 }
 
 // moleculeTargetFor is the molecule target a compiled recipe's molecule is
