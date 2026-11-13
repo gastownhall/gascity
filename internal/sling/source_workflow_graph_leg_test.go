@@ -117,7 +117,7 @@ func TestCheckLegacySourceWorkflowConflictLeavesSourceBeadRootsUnmarked(t *testi
 	store := beads.NewMemStore()
 	root := newLiveWorkflowRoot(t, store, "mc-source", "city:test")
 
-	deps := SlingDeps{Store: store, StoreRef: "city:test"}
+	deps := withStore(SlingDeps{StoreRef: "city:test"}, store)
 	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
