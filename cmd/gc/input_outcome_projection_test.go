@@ -303,6 +303,43 @@ func TestQueuedNudgeAcksGenericDeliveredUnobserved(t *testing.T) {
 		}
 		assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
 	})
+
+	t.Run("sling nudge", func(t *testing.T) {
+		clearGCEnv(t)
+		disableManagedDoltRecoveryForTest(t)
+		clearInheritedCityRoutingEnv(t)
+		t.Setenv("GC_BEADS", "file")
+		dir := t.TempDir()
+		store := openNudgeBeadStore(dir)
+		fake := runtime.NewFake()
+		mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		fake.WaitForIdleErrors[info.SessionName] = nil
+		fake.NudgeErrors = map[string]error{info.SessionName: errGenericUnobserved}
+		target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "claude"}, sessionName: info.SessionName}
+		var stdout, stderr bytes.Buffer
+		deliverSlingNudge(target, fake, store, store, dir, "", &stdout, &stderr)
+		if n := fake.CountCalls("NudgeNow", info.SessionName) + fake.CountCalls("Nudge", info.SessionName); n != 1 {
+			t.Fatalf("direct nudge calls = %d, want exactly 1", n)
+		}
+		pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+		if err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+		if len(pending)+len(inFlight)+len(dead) != 0 {
+			t.Fatalf("pending=%d inFlight=%d dead=%d, want no duplicate sling nudge queued (stdout %q)", len(pending), len(inFlight), len(dead), stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "Nudged worker") {
+			t.Fatalf("stdout %q, want the delivered-but-unobserved sling nudge reported as delivered", stdout.String())
+		}
+		assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
+	})
 }
 
 // unobservedProvider delivers every nudge through the fake and answers it
