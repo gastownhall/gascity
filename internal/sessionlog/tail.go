@@ -123,7 +123,10 @@ func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
 }
 
 // readTailWindowAt is readTailWindow against a size snapshot the caller already
-// took.
+// took. The read is bounded to that snapshot: bytes appended after the caller
+// measured size are not part of the window, so two windows derived from one
+// snapshot never count the same appended bytes twice. A file that shrank below
+// the snapshot yields the shorter data that is actually there.
 func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error) {
 	offset := size - n
 	if offset < 0 {
@@ -132,7 +135,7 @@ func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error
 	if _, err := r.Seek(offset, io.SeekStart); err != nil {
 		return nil, false, false, err
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, size-offset))
 	if err != nil {
 		return nil, false, false, err
 	}
