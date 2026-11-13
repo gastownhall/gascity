@@ -700,10 +700,15 @@ func (s *BdStore) SetPurgeRunner(fn PurgeRunnerFunc) {
 // Purge runs "bd purge" to remove closed ephemeral beads from the given
 // beads directory. Uses a 60-second timeout as a safety circuit breaker.
 // The beadsDir is the .beads/ directory path; bd runs from its parent.
+// A real purge passes --force: without it bd purge only previews and exits
+// non-zero when anything matches. A dry run passes --dry-run and never
+// --force.
 func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	args := []string{"purge", "--json"}
 	if dryRun {
 		args = append(args, "--dry-run")
+	} else {
+		args = append(args, "--force")
 	}
 
 	dir := filepath.Dir(beadsDir)
