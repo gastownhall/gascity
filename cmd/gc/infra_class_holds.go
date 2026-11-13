@@ -27,15 +27,25 @@ package main
 // S5 §8.1): a `blocks` edge onto unfinished work crosses as a cross-store gate
 // in the binding, and another blocking type onto unfinished work is refused by
 // id. This file carries the status holds (owner decision D-a): a parked bead
-// crosses with its defer_until set to infraParkedDeferUntil, which keeps it
-// out of every ready and claimable view the binding serves, and with
+// crosses with its defer_until set to infraParkedDeferUntil, and with
 // beadmeta.MigratedParkedHoldMetadataKey recording the status and the
-// defer_until it had, so nothing about the hold is lost. Clearing the
-// deferral in the split city releases the bead; `gc storage migrate
-// --to-work` restores the recorded status and defer_until from the stamp
+// defer_until it had, so nothing about the hold is lost. The deferral keeps
+// it out of every ready and claimable view the binding serves, and out of the
+// binding's Live "open", which the seat-work gates and the controller's
+// demand reads count as live work: a SQLite store leaves out a row deferred
+// into the future there, as bd leaves out a parked status, and refuses to
+// claim it, as bd claims only a bead in its raw open. A status write keeps
+// the deferral, so `gc bd update` moves a deferred bead to no status but open
+// or closed (bdByIDDeferredStatusConflict). No gc bd verb clears a binding
+// bead's deferral, so the bead stays parked in the split city until
+// it is closed or the reverse (`gc storage migrate --to-work`, or --to-rigs
+// for a rig's bead) returns it with the recorded status and defer_until
 // (reverseParkedHold). A dated deferral is not parked: it crosses as its
 // date, which the binding honors, and one already due wakes there as bd's
-// own sweep would wake it.
+// own sweep would wake it. A row whose own defer_until is already
+// infraParkedDeferUntil crosses as it is, with its status and that date
+// recorded the same way, so the reverse does not take it for a parked row
+// whose record was lost.
 //
 // The carry is a pure function of the row, with no clock, so every stage that
 // compares a source row with the row the copy wrote (the equality stage, a
@@ -54,7 +64,7 @@ import (
 
 // infraParkedDeferUntil is the defer_until a parked bead carries in a class
 // binding: far enough ahead that no clock reaches it, so the bead stays
-// deferred until someone releases it.
+// deferred there.
 var infraParkedDeferUntil = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // infraParkedHold is the content of beadmeta.MigratedParkedHoldMetadataKey:
@@ -86,12 +96,43 @@ func infraParkedStatus(b beads.Bead) string {
 	return b.SourceStatus
 }
 
+// infraRawStatus is b's status in its source store: the raw status a
+// bd-backed read keeps beside the folded one, else the folded one.
+func infraRawStatus(b beads.Bead) string {
+	switch {
+	case b.SourceStatus != "":
+		return b.SourceStatus
+	case b.IndefinitelyDeferred:
+		return "deferred"
+	}
+	return b.Status
+}
+
+// infraCarriedStatus is the status a class binding holds a row with whose
+// status in its source store is raw: the binding records only open,
+// in_progress and closed, and a bd-backed read folds every other status to
+// open.
+func infraCarriedStatus(raw string) string {
+	switch raw {
+	case "in_progress", "closed":
+		return raw
+	}
+	return "open"
+}
+
 // infraCarryParkedHold returns b as a class binding holds it when its source
 // store parks it (infraParkedStatus): deferred to infraParkedDeferUntil, the
-// hold recorded in beadmeta.MigratedParkedHoldMetadataKey. Any other b is
-// returned unchanged. It does not mutate the caller's metadata map.
+// hold recorded in beadmeta.MigratedParkedHoldMetadataKey. A row its source
+// store already defers to exactly infraParkedDeferUntil, with no record, keeps
+// its own status and deferral and gets the same record of them: without it,
+// the reverse would refuse the row as a parked one whose record was lost. Any
+// other b, a row already carried among them, is returned unchanged. It does
+// not mutate the caller's metadata map.
 func infraCarryParkedHold(b beads.Bead) beads.Bead {
 	status := infraParkedStatus(b)
+	if _, recorded := b.Metadata[beadmeta.MigratedParkedHoldMetadataKey]; status == "" && !recorded && b.DeferUntil != nil && b.DeferUntil.Equal(infraParkedDeferUntil) {
+		status = infraRawStatus(b)
+	}
 	if status == "" {
 		return b
 	}
@@ -140,15 +181,22 @@ func (h infraParkedHold) deferUntil() (*time.Time, error) {
 // reverseParkedHold returns b, a binding row on its way back to its source
 // store, with the hold its stamp records restored: the raw status and the
 // defer_until it had. The stamp is removed either way. A bead released in the
-// split city (no longer open, or its deferral changed from
-// infraParkedDeferUntil) keeps what the split city made of it, except a
-// deferral still at infraParkedDeferUntil: that is the copy's, not the
-// row's, and a row reopened later in its source store would stay hidden
-// behind it, so it goes back as the defer_until the row had. It refuses a
-// stamp that does not parse.
+// split city (no longer in the status the copy carried it with, or its
+// deferral changed from infraParkedDeferUntil) keeps what the split city made
+// of it, except a deferral still at infraParkedDeferUntil: that is the
+// copy's, not the row's, and a row reopened later in its source store would
+// stay hidden behind it, so it goes back as the defer_until the row had. It
+// refuses a stamp that does not parse, and a row deferred to
+// infraParkedDeferUntil with no stamp: the copy parked it, and with the
+// record gone nothing says what it had, so returned as it is it would stay
+// hidden for good.
 func reverseParkedHold(b beads.Bead) (beads.Bead, error) {
+	sentinel := b.DeferUntil != nil && b.DeferUntil.Equal(infraParkedDeferUntil)
 	raw, ok := b.Metadata[beadmeta.MigratedParkedHoldMetadataKey]
 	if !ok {
+		if sentinel {
+			return b, fmt.Errorf("deferred until %s, the copy's parked hold, with no record of the hold it had", infraParkedDeferUntil.Format("2006-01-02"))
+		}
 		return b, nil
 	}
 	hold, err := parseInfraParkedHold(raw)
@@ -165,14 +213,32 @@ func reverseParkedHold(b beads.Bead) (beads.Bead, error) {
 	}
 	delete(metadata, beadmeta.MigratedParkedHoldMetadataKey)
 	b.Metadata = metadata
-	sentinel := b.DeferUntil != nil && b.DeferUntil.Equal(infraParkedDeferUntil)
 	if sentinel {
 		b.DeferUntil = until
 	}
-	if b.Status == "open" && sentinel {
+	if sentinel && b.Status == infraCarriedStatus(hold.Status) {
 		b.Status = hold.Status
 	}
 	return b, nil
+}
+
+// infraParkedHoldNote is what a refused claim or status write of b adds when b
+// carries the record of a hold the storage migration carried, or "" when it
+// does not: the status the record holds, and the ways out of the deferral,
+// which no gc bd verb lifts. The reverse puts that status back only on a row
+// still in the status the copy carried it with, open for a parked one
+// (reverseParkedHold), so a parked bead the split city closed returns closed.
+func infraParkedHoldNote(b beads.Bead) string {
+	hold, err := parseInfraParkedHold(b.Metadata[beadmeta.MigratedParkedHoldMetadataKey])
+	if err != nil {
+		return ""
+	}
+	reverse := storageReverseInstruction(reverseToWork, nil)
+	if rig, ok := strings.CutPrefix(b.Metadata[infraMigrationStampKey], rigImportStamp("")); ok && rig != "" {
+		reverse = storageReverseInstruction(reverseToRigs, []string{rig})
+	}
+	return fmt.Sprintf("; the storage migration carried it so, recording the status it had before the split (%q) in %s. No gc bd verb lifts that deferral: close the bead, or `%s` returns it, with that status if it is still open",
+		hold.Status, beadmeta.MigratedParkedHoldMetadataKey, reverse)
 }
 
 // infraParkedRows names, for preflight, each open row of rows the copy

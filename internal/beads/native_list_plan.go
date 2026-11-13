@@ -94,7 +94,10 @@ func nativeListPushableStatus(status string) bool {
 // A Live read is a lifecycle gate asking for the backing's own answer, and
 // every other backing gives the RAW status for Live Status:"open": BdStore
 // passes --status=open to bd, while SQLiteStore, DoltliteReadStore and MemStore
-// match the stored status exactly. The callers are written against that
+// match the stored status exactly. SQLiteStore stores only gc's three
+// statuses, so it records a deferral as its defer_until alone, and its raw
+// open also leaves out a row deferred into the future
+// (sqliteListLeavesOutDeferred). The callers are written against that
 // answer: the controller's demand reads; the seat-work gates (config-drift
 // deferral, max session age, slot-freeable, the drain-ack close gate); route
 // recovery; and the orphan sweep. To them a blocked or deferred bead is
@@ -120,8 +123,8 @@ func nativeListPushableStatus(status string) bool {
 // List fallback, or the raw one when that List is Live.
 //
 // CachingStore's Live stale-row sweep (staleLiveCacheIDs) skips a cached row
-// whose SourceStatus is another status, so the parked rows this leaves out
-// cost no read.
+// whose SourceStatus is another status, or that is deferred into the future,
+// so the parked rows this leaves out cost no read.
 //
 // This is the one plan predicate that is not a superset of the query: it
 // leaves out rows that ApplyListQuery's folded "open" would keep. That is

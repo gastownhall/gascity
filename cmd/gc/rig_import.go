@@ -1298,10 +1298,11 @@ func rigEdgeDispositions(plan rigImportPlan) map[string]string {
 	return out
 }
 
-// rigBackupEntry is one cleared row with its out-edges and its in-edges from
-// rows that stay, each marked with what the import did with it.
+// rigBackupEntry is one cleared row, with the raw-status signals its JSON
+// leaves out, its out-edges and its in-edges from rows that stay, each marked
+// with what the import did with it.
 func rigBackupEntry(rigStore beads.Store, b beads.Bead, down, up []beads.Dep, clearing map[string]bool, disposition map[string]string) (infraBackupEntry, error) {
-	entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String()}
+	entry := newInfraBackupEntry(b)
 	for _, d := range down {
 		if d.IssueID == "" {
 			d.IssueID = b.ID

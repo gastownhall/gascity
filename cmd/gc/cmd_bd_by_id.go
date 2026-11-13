@@ -1544,7 +1544,7 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 			fmt.Fprintf(stderr, "%s\n", classFlipRefusalText("gc bd update "+op.ID, flip)) //nolint:errcheck // best-effort stderr
 			return 1, true
 		}
-		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+		return doBdByIDUpdate(resolution.Graph, op, resolution.Bead, door.bindingName(), stdout, stderr), true
 	case bdByIDClose:
 		return doBdByIDClose(resolution.Graph, op, resolution.Bead, door.bindingName(), stdout, stderr), true
 	case bdByIDReopen:
@@ -1896,18 +1896,58 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 		return 1
 	}
 	if !ok {
-		reason := "it is held by another claimant"
-		if current, getErr := graph.Get(id); getErr == nil {
-			if held := strings.TrimSpace(current.Assignee); held != "" {
-				reason = fmt.Sprintf("it is held by %q", held)
-			} else {
-				reason = fmt.Sprintf("its status is %q", current.Status)
-			}
-		}
-		fmt.Fprintf(stderr, "gc bd: %s was not claimed for %q: %s\n", id, assignee, reason) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %s was not claimed for %q: %s\n", id, assignee, bdByIDClaimConflict(graph, id)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return printBdByIDBead(claimed, jsonOut, binding, stdout, stderr)
+}
+
+// bdByIDClaimConflict says why a claim of id was a conflict, from the row as
+// it now stands: deferred into the future (outside the store's raw open, so
+// not claimable), held by another claimant, or in a status no claim takes.
+func bdByIDClaimConflict(graph storebinding.GraphStore, id string) string {
+	current, err := graph.Get(id)
+	if err != nil {
+		return "it is held by another claimant"
+	}
+	if current.Status == "open" && beads.LiveOpenLeavesOut(current, time.Now()) {
+		return bdByIDDeferral(current) + ", and a deferred bead is not claimable" + infraParkedHoldNote(current)
+	}
+	if held := strings.TrimSpace(current.Assignee); held != "" {
+		return fmt.Sprintf("it is held by %q", held)
+	}
+	return fmt.Sprintf("its status is %q", current.Status)
+}
+
+// bdByIDDeferral names b's deferral, with its date when it has one.
+func bdByIDDeferral(b beads.Bead) string {
+	if b.DeferUntil == nil {
+		return "it is deferred"
+	}
+	return "it is deferred until " + b.DeferUntil.UTC().Format(time.RFC3339)
+}
+
+// bdByIDDeferredStatusConflict says why a by-id update may not give current
+// the status u names, or "" when it may.
+//
+// A status write keeps the row's defer_until, so a bead deferred to a future
+// date is moved to no status but open or closed until then. Every hook read
+// drops a deferred row whatever its status, and only an open one is left out
+// of the live work the seat-work gates and the controller's demand reads
+// count (beads.LiveOpenLeavesOut). In progress it would be work nobody is
+// handed, the state SQLiteStore.Claim refuses to make. A deferral held in the
+// status alone (bd's undated deferred status) is lifted by the write, and a
+// write that names the status the row already has moves nothing, so both are
+// served as they are.
+func bdByIDDeferredStatusConflict(current beads.Bead, u beads.UpdateOpts, now time.Time) string {
+	if u.Status == nil {
+		return ""
+	}
+	if status := *u.Status; status == current.Status || status == "open" || status == "closed" ||
+		current.DeferUntil == nil || !current.DeferUntil.After(now) {
+		return ""
+	}
+	return bdByIDDeferral(current) + ", and a status write keeps that date, so until then the bead takes no status but open or closed: in progress, it would be work the controller counts and every hook drops" + infraParkedHoldNote(current)
 }
 
 // doBdByIDReleaseIfCurrent applies the conditional release through the closed
@@ -2218,7 +2258,11 @@ func bdByIDUpdateMutation(u beads.UpdateOpts) coordclass.Mutation {
 // The re-read is deliberate. bd prints the row after a mutation and callers
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
-func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+//
+// current is the row the door just resolved. A status write that would keep
+// a future defer_until on a bead neither open nor closed is refused before
+// anything is written (bdByIDDeferredStatusConflict).
+func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, current beads.Bead, binding string, stdout, stderr io.Writer) int {
 	// bd validates every --set-metadata and --unset-metadata key before it
 	// writes anything (storage.ValidateMetadataKey), so an invalid one fails
 	// the whole command with nothing applied. Matching that keeps a typo from
@@ -2236,6 +2280,10 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 			fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+	}
+	if conflict := bdByIDDeferredStatusConflict(current, op.Update, time.Now()); conflict != "" {
+		fmt.Fprintf(stderr, "gc bd update %s: refused: %s. Nothing was written.\n", op.ID, conflict) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if err := graph.Update(op.ID, op.Update); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr

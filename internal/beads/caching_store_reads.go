@@ -520,6 +520,7 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		return nil
 	}
 
+	now := c.clockNow()
 	var stale []string
 	for id, bead := range c.beads {
 		if _, ok := freshIDs[id]; ok {
@@ -537,6 +538,14 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		// cache holds it as "open" until that change's event or the next
 		// reconcile installs it; this sweep does not.
 		if query.Status != "" && bead.SourceStatus != "" && bead.SourceStatus != query.Status {
+			continue
+		}
+		// A row deferred into the future is absent from a Live "open" by
+		// design too: a SQLite store records a deferral as its defer_until
+		// alone and leaves the row out of its raw open
+		// (sqliteListLeavesOutDeferred). Another process's close or claim of
+		// such a row waits for its event or the next reconcile, as above.
+		if query.Status == "open" && LiveOpenLeavesOut(bead, now) {
 			continue
 		}
 		stale = append(stale, id)

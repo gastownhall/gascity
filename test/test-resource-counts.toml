@@ -962,6 +962,11 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/infra_parked_hold_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/infra_scope_integration_test.go"
 resource = "subprocess"
 calls = 1

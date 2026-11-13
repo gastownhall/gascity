@@ -1503,9 +1503,10 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// The edges that cross the boundary (D9), decided before the destination
 	// is touched: a refused shape writes nothing.
 	//
-	// Every hold is judged before any refusal returns, so one refusal names
-	// them all: the edge holds (the boundary plan) and the holds bd keeps in
-	// a carried bead's status (infra_class_holds.go).
+	// Every edge hold the boundary plan cannot carry is judged before the
+	// refusal returns, so one refusal names them all. The holds bd keeps in a
+	// carried bead's status are no refusal: they cross as parked holds
+	// (infraCarryParkedHold).
 	if err := infraCopyHoldsRefusal(cityPath, nil, &plan, all, from == infraMigrationFromBackup); err != nil {
 		return fail(err)
 	}
