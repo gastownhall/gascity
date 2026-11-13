@@ -6,9 +6,9 @@ package main
 // A city is more than its stores. What it serves from is decided by
 // city.toml's [storage], what a gc may run on it by .gc/min-gc-version, and
 // what a split has done by the storage records under .gc (the served-binding
-// note, the cleared notes). `gc storage snapshot --work` also records those
-// (snapshotCityRecord): city.toml's bytes, and each record's bytes or its
-// absence.
+// note, the cleared notes, the guided split's journal). `gc storage snapshot
+// --work` also records those (snapshotCityRecord): city.toml's bytes, and each
+// record's bytes or its absence.
 //
 // A managed Dolt's exact copy is its data directory, copied with the server
 // stopped (D-c; the five live rollbacks before this verb did exactly that).
@@ -317,6 +317,7 @@ func snapshotCityRecordRels(cityPath string) ([]string, error) {
 		filepath.Join(".gc", minGCVersionFileName),
 		rel(cityPath, infraClearedNotePath(cityPath)),
 		rel(cityPath, bornSplitServedNotePath(cityPath)),
+		rel(cityPath, storageSplitJournalPath(cityPath)),
 	}
 	notes, err := filepath.Glob(rigGraphClearedNotePath(cityPath, "*"))
 	if err != nil {
