@@ -41,6 +41,10 @@
 //     controller's filesystem view and user) that no runtime.Provider method
 //     states; gc's side of it, host staging, is runtimetest's
 //     RunHostStagingContract.
+//   - input (the input-outcome token), but for the missing-session and
+//     running-session requirements the signaling cases back: the wire
+//     words, the faults and the exit-code shapes have no runtime.Provider
+//     method of their own; gc's reading of them is the exec provider's.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -70,6 +74,7 @@ const (
 	GroupObserve    Group = "observe"
 	GroupServer     Group = "server"
 	GroupFSHost     Group = "fshost"
+	GroupInput      Group = "input"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -225,6 +230,26 @@ const (
 	ReqFSHostRunsWhatItCarries Code = "RPP-FSHOST-004"
 	ReqFSHostAgentPIDOnHost    Code = "RPP-FSHOST-005"
 	ReqFSHostHomeView          Code = "RPP-FSHOST-006"
+
+	// The input group checks the input-outcome token (RUNTIME-RPP-028): a
+	// script declaring it answers the four driving ops (nudge, send-keys,
+	// interrupt, clear-scrollback) with exit 0 for delivered input and exit
+	// 80 with exactly one outcome line for every other outcome, each word the
+	// projection of one runtime sentinel. Every requirement is Optional: SKIP
+	// when input-outcome is not declared; the fault cases (-005, -006, -007,
+	// -009, -011) also SKIP without conformance-faults.
+	ReqInputNudgeDelivered      Code = "RPP-INPUT-001"
+	ReqInputNudgeAbsentGone     Code = "RPP-INPUT-002"
+	ReqInputKeysAbsentGone      Code = "RPP-INPUT-003"
+	ReqInputWordsAllowedOnOp    Code = "RPP-INPUT-004"
+	ReqInputBlockedNotTyped     Code = "RPP-INPUT-005"
+	ReqInputUnavailable         Code = "RPP-INPUT-006"
+	ReqInputLostReplyUnknown    Code = "RPP-INPUT-007"
+	ReqInputExitZeroIsDelivered Code = "RPP-INPUT-008"
+	ReqInputHeldSendTypedOnce   Code = "RPP-INPUT-009"
+	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
+	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
+	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -296,6 +321,19 @@ var catalog = []Requirement{
 	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, a failing pre_start fails start and leaves no box, and a config carrying neither stages and runs nothing (declared fs.host only)", true},
 	{ReqFSHostAgentPIDOnHost, GroupFSHost, "observe reports a running box's agent_pid as a live host process the caller's user may signal (declared fs.host with observe.v1 only)", true},
 	{ReqFSHostHomeView, GroupFSHost, "a box's command reads a file the caller wrote under its HOME, at the same path: the box sees the caller's home directory, not only the work dir (declared fs.host only)", true},
+
+	{ReqInputNudgeDelivered, GroupInput, "nudge to a running box exits 0 with stdout empty or one success outcome line (declared input-outcome only)", true},
+	{ReqInputNudgeAbsentGone, GroupInput, "nudge to a name no box holds exits 80 with the outcome gone, never 0", true},
+	{ReqInputKeysAbsentGone, GroupInput, "send-keys, interrupt and clear-scrollback to a name no box holds exit 80 with the outcome gone", true},
+	{ReqInputWordsAllowedOnOp, GroupInput, "each op answers only its own words: busy, pending_interaction, unconfirmed and delivered_unobserved on nudge only", true},
+	{ReqInputBlockedNotTyped, GroupInput, "under GC_RPP_FAULT=blocked, a nudge exits 80 pending_interaction and types nothing (declared conformance-faults only)", true},
+	{ReqInputUnavailable, GroupInput, "under GC_RPP_FAULT=unavailable, every driving op exits 80 unavailable and types nothing (declared conformance-faults only)", true},
+	{ReqInputLostReplyUnknown, GroupInput, "under GC_RPP_FAULT=lose_reply (typed, reply lost), a nudge exits 80 unconfirmed and send-keys, interrupt and clear-scrollback exit 1: never not_sent (declared conformance-faults only)", true},
+	{ReqInputExitZeroIsDelivered, GroupInput, "exit 0 never carries a non-success outcome word", true},
+	{ReqInputHeldSendTypedOnce, GroupInput, "under GC_RPP_FAULT=hold_send, a second identical nudge while the first is unresolved exits 80 unconfirmed, and the text is typed once after release (declared conformance-faults only)", true},
+	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
+	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
+	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

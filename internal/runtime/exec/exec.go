@@ -204,7 +204,7 @@ func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit in
 	err := cmd.Run()
 	if err == nil {
 		if stdout.over {
-			return "", fmt.Errorf("exec provider %s %s: stdout over %d bytes", p.script, strings.Join(args, " "), limit)
+			return "", fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), &stdoutOverCapError{limit: limit})
 		}
 		return strings.TrimRight(stdout.buf.String(), "\n"), nil
 	}
@@ -219,7 +219,15 @@ func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit in
 	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
-	return "", p.runError(err, stderr.String(), args)
+	return "", p.runError(err, stderr.String(), &stdout, args)
+}
+
+// stdoutOverCapError is a successful op whose stdout ran past runCapped's
+// cap: the op failed, without echoing any of its output.
+type stdoutOverCapError struct{ limit int }
+
+func (e *stdoutOverCapError) Error() string {
+	return fmt.Sprintf("stdout over %d bytes", e.limit)
 }
 
 // cappedBuffer collects stdout up to limit bytes (0: no limit) and records
@@ -267,8 +275,10 @@ var startCollisionPhrases = []string{"already exists", "already running"}
 
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
 // provider's contract via [classifyExecExit]. A failure that is not an exit
-// status (the script could not run at all) classifies as no exit code.
-func (p *Provider) runError(runErr error, stderr string, args []string) error {
+// status (the script could not run at all) classifies as no exit code. stdout
+// (nil when the caller captured none) is discarded, except the outcome line
+// of a driving op's exit 80, which the error keeps (keepsOutcomeStdout).
+func (p *Provider) runError(runErr error, stderr string, stdout *cappedBuffer, args []string) error {
 	code := -1
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
@@ -283,18 +293,21 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 		op = args[0]
 	}
 	strict := code == 2 && p.exitTwoIsStrict(op)
-	base := &opExitError{op: op, code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
+	base := &opExitError{op: op, code: code, msg: errMsg, stdout: keepsOutcomeStdout(op, code, stdout), err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
 	return classifyExecExit(op, code, errMsg, strict, base)
 }
 
 // opExitError is an op's failure with the op, exit code and stderr message
 // it ended with, so a caller can read a code the contract reserves (exit 73
 // under fresh_only) without parsing text. It reads as its wrapped error.
+// stdout is empty but for a driving op's exit 80 (input-outcome), where it
+// is the outcome line, at most InputOutcomeStdoutCap bytes.
 type opExitError struct {
-	op   string
-	code int
-	msg  string
-	err  error
+	op     string
+	code   int
+	msg    string
+	stdout string
+	err    error
 }
 
 func (e *opExitError) Error() string { return e.err.Error() }
@@ -346,10 +359,15 @@ func exitTwoIsFailure(op string) bool {
 // implement (strictWhenReady), or from a driving op of a pack that selected
 // carrier.ops (opsCarrierDrivingOp), which declared the op and has no other
 // way to drive the session, so a nudge it never delivered is not reported
-// delivered. It reads the op's name before the handshake, so the `protocol`
-// op's own failure never re-enters the handshake it is answering.
+// delivered. A driving op of a pack declaring input-outcome is declared
+// too, so its exit 2 fails. It reads the op's name before the handshake, so
+// the `protocol` op's own failure never re-enters the handshake it is
+// answering.
 func (p *Provider) exitTwoIsStrict(op string) bool {
 	if strictWhenReady(op) && p.v2Ready() {
+		return true
+	}
+	if inputOutcomeOp(op) && p.inputOutcomesDeclared() {
 		return true
 	}
 	return opsCarrierDrivingOp(op) && p.opsCarrierSelected()
@@ -954,8 +972,7 @@ func (p *Provider) nudgeOp(ctx context.Context, name string, content []runtime.C
 	if message == "" {
 		return nil
 	}
-	_, err := p.runWithContext(ctx, p.timeout, []byte(message), "nudge", name)
-	return err
+	return p.runDrivingOp(ctx, []byte(message), "nudge", name)
 }
 
 // peekOp runs the `peek` op. A v2-ready script's exit 66
@@ -972,19 +989,18 @@ func (p *Provider) peekOp(ctx context.Context, name string, lines int) (string, 
 	return out, err
 }
 
+// sendKeysOp, interruptOp and clearScrollbackOp, like nudgeOp, read the
+// pack's typed outcome under input-outcome (runDrivingOp).
 func (p *Provider) sendKeysOp(ctx context.Context, name string, keys ...string) error {
-	_, err := p.runWithContext(ctx, p.timeout, nil, append([]string{"send-keys", name}, keys...)...)
-	return err
+	return p.runDrivingOp(ctx, nil, append([]string{"send-keys", name}, keys...)...)
 }
 
 func (p *Provider) interruptOp(ctx context.Context, name string) error {
-	_, err := p.runWithContext(ctx, p.timeout, nil, "interrupt", name)
-	return err
+	return p.runDrivingOp(ctx, nil, "interrupt", name)
 }
 
 func (p *Provider) clearScrollbackOp(ctx context.Context, name string) error {
-	_, err := p.runWithContext(ctx, p.timeout, nil, "clear-scrollback", name)
-	return err
+	return p.runDrivingOp(ctx, nil, "clear-scrollback", name)
 }
 
 // Interrupt sends a soft interrupt through the selected carrier. Without a

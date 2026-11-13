@@ -2015,7 +2015,11 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 				Source:   "sling",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
-			if nudgeErr == nil && result.Delivered {
+			// A nudge whose turn start went unobserved
+			// (runtime.ErrNudgeDeliveredUnobserved, from any runtime) was
+			// still delivered: queueing it too would type it twice.
+			delivered := nudgeErr == nil && result.Delivered
+			if delivered || nudgeErr != nil && runtime.NudgeDelivered(nudgeErr) {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 				var sessFront *session.Store
 				if store != nil {

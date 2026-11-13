@@ -93,6 +93,8 @@ be() { if [ "${GC_RPP_FAULT:-}" = unavailable ]; then echo "backend unavailable"
 ident() { printf '{'; sep=''; for k in GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES; do if [ -f "$box/meta.$k" ]; then printf '%s"%s":"%s"' "$sep" "$k" "$(cat "$box/meta.$k")"; sep=','; fi; done; printf '}'; }
 alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")" ]; then return 0; fi; done; return 1; }
 reap() { if [ -f "$1/pid" ]; then p=$(cat "$1/pid"); pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; fi; return 0; }
+out() { printf '{"outcome":"%s"}\n' "$1"; exit 80; }
+release() { if [ "${GC_RPP_FAULT:-}" != hold_send ] && [ -f "$box/held" ]; then cat "$box/held" >> "$box/typed"; rm -f "$box/held"; fi; }
 `
 
 // Bodies returns the op bodies of the golden reference: a
@@ -205,6 +207,69 @@ func nonTmux(b map[string]string) map[string]string {
 			b[op] += `cat >/dev/null`
 		}
 	}
+	return b
+}
+
+// The input-outcome op bodies (InputOutcomeBodies). Every driving op reads
+// the backend first (be: unavailable under GC_RPP_FAULT=unavailable), answers
+// a name no box holds with gone, and releases any held nudge (release) before
+// it types. The box's typed-input log is $box/typed, which peek shows after
+// the screen, as a terminal echoes what is typed into it. The fault knobs,
+// all under conformance-faults: blocked (the box's agent waits on a pending
+// interaction, which a nudge's text would answer), lose_reply (the input is
+// typed, then the reply is lost: a nudge is unconfirmed, any other op exit
+// 1) and hold_send (a nudge is held unresolved in $box/held, and a second
+// identical one while it is held is unconfirmed again without being held
+// twice; the held text is typed once the fault is gone) and dead (the box
+// holds the name but nothing runs in it: observe reports it dead and every
+// driving op answers gone, since gone is "no running box holds the name").
+const (
+	goldenInputEntry = `F=${GC_RPP_FAULT:-}; be || out unavailable; [ -d "$box" ] || out gone; if [ "$F" = dead ]; then out gone; fi; release; `
+
+	// goldenInputObserveDead reports a present box dead under the dead fault.
+	goldenInputObserveDead = `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead","object":{"id":"%s","created":"%s"}}\n' "$(cat "$box/id")" "$(cat "$box/created")"; exit 0; fi; `
+
+	goldenInputNudge = `txt=$(cat); ` + goldenInputEntry +
+		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
+		`if [ "$F" = hold_send ]; then if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; printf '%s\n' "$txt" >> "$box/held"; out unconfirmed; fi; ` +
+		`printf '%s\n' "$txt" >> "$box/typed"; ` +
+		`if [ "$F" = lose_reply ]; then out unconfirmed; fi`
+
+	goldenInputKeys = goldenInputEntry +
+		`printf '%s\n' "$*" >> "$box/typed"; ` +
+		`if [ "$F" = lose_reply ]; then echo "reply lost" >&2; exit 1; fi`
+)
+
+// InputOutcomeBodies returns b for a reference that declares input-outcome:
+// its four driving ops answer typed outcomes (exit 0 delivered, exit 80 and
+// one outcome line otherwise), its peek shows the box's typed input, and its
+// observe reports a box dead under the dead fault.
+func InputOutcomeBodies(b map[string]string) map[string]string {
+	b["protocol"] = strings.Replace(b["protocol"], `"server-lifecycle"`, `"server-lifecycle","input-outcome"`, 1)
+	b["nudge"] = goldenInputNudge
+	for _, op := range []string{"send-keys", "interrupt", "clear-scrollback"} {
+		b[op] = goldenInputKeys
+	}
+	b["peek"] += `; release; if [ -f "$box/typed" ]; then cat "$box/typed"; fi`
+	absent := `if [ ! -d "$box" ]; then echo '{"state":"absent"}'; exit 0; fi; `
+	b["observe"] = strings.Replace(b["observe"], absent, absent+goldenInputObserveDead, 1)
+	return b
+}
+
+// goldenInterruptEnds is the interrupt body InterruptEndsBoxBodies adds
+// after the interrupt is typed: the box's command ends on it, and the box
+// with it.
+const goldenInterruptEnds = `reap "$box"; rm -rf "$box"; `
+
+// InterruptEndsBoxBodies returns b, input-outcome bodies
+// (InputOutcomeBodies), for a reference whose box lives only while its
+// command runs: a delivered interrupt ends the command, so the box is gone
+// after it and every later op on the name answers as for an absent name.
+// It is the shape of a pack whose interrupt is a real Ctrl-C to a box that
+// exists only while its command runs.
+func InterruptEndsBoxBodies(b map[string]string) map[string]string {
+	b["interrupt"] = strings.Replace(b["interrupt"], `printf '%s\n' "$*" >> "$box/typed"; `,
+		`printf '%s\n' "$*" >> "$box/typed"; `+goldenInterruptEnds, 1)
 	return b
 }
 
