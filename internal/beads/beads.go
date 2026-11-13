@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -854,7 +855,7 @@ func IsReadyBlockingDependencyType(t string) bool {
 // open rather than newly stalling dependents it doesn't understand.
 //
 // Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
-// so a dependency whose control-plane step passed is never vetoed.
+// so a dependency whose control-plane step reached a verdict is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
@@ -862,22 +863,37 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
 }
 
+// terminalStepOutcomes are the gc.outcome verdicts with which a closed formula
+// step releases its dependents whatever its gc.work_outcome. The SQLite ready
+// statement renders its IN list from this collection.
+var terminalStepOutcomes = []string{
+	beadmeta.OutcomePass,
+	beadmeta.OutcomeFail,
+	beadmeta.OutcomeSkipped,
+	beadmeta.OutcomeCanceled,
+}
+
 // ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
 // work-record disposition (ADR-0009); the two vocabularies are disjoint and can
-// disagree. A step that closed with gc.outcome=pass has already been advanced
-// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
-// strands them: the graph waits on work that readiness never offers to any
-// worker. When the step passed, its work outcome does not gate readiness.
+// disagree. A step that closed with a terminal gc.outcome (pass, fail, skipped,
+// canceled) has a verdict that the controls depending on it — retry,
+// scope-check, workflow-finalize — must consume, and those controls are only
+// ever served from Ready(). Letting gc.work_outcome=blocked veto them strands
+// the workflow: the graph waits on work that readiness never offers. So when
+// the step reached a terminal verdict, its work outcome does not gate
+// readiness; dispatch decides what the verdict means. The stored work record is
+// left unchanged.
 //
 // The override applies only to formula step beads (those carrying
-// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
-// mol-do-work formula stamps it on the work bead it closes, blocked or not —
-// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
-// keeps withholding dependents.
+// gc.step_ref) with an exactly matching terminal verdict. A plain work bead can
+// also carry gc.outcome=pass — the core mol-do-work formula stamps it on the
+// work bead it closes, blocked or not — and there gc.outcome is not a dispatch
+// verdict, so its blocked work outcome keeps withholding dependents. A step
+// with a missing or unrecognized gc.outcome keeps its blocked work outcome too.
 func ReadinessWorkOutcome(metadata map[string]string) string {
-	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && slices.Contains(terminalStepOutcomes, metadata[beadmeta.OutcomeMetadataKey]) {
 		return ""
 	}
 	return metadata[beadmeta.WorkOutcomeMetadataKey]
