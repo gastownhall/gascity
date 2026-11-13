@@ -1479,6 +1479,10 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if !ok {
 		fmt.Fprintf(stderr, "%s: this city serves every class from its work stores; there is nothing to import\n", logPrefix) //nolint:errcheck // best-effort stderr
 		return 1

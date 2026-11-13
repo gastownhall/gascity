@@ -232,6 +232,31 @@ func TestDoltConfigWriteManagedCmd_AutoGCCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestWriteManagedDoltConfigFile_AutoGCCommentNamesDoltIgnoreHazard(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+	// The comment sits above the auto_gc_behavior block: an operator weighing
+	// an auto_gc_enabled override must see the hazard next to the journal-growth
+	// rationale, not only the benefit.
+	idx := strings.Index(text, "auto_gc_behavior:")
+	if idx < 0 {
+		t.Fatalf("config missing auto_gc_behavior block:\n%s", text)
+	}
+	comment := text[:idx]
+	for _, want := range []string{"dolt_ignore", "ga-vrq5pu"} {
+		if !strings.Contains(comment, want) {
+			t.Fatalf("auto-GC comment missing %q:\n%s", want, comment)
+		}
+	}
+}
+
 func TestWriteManagedDoltConfigFile_AutoGCDefaultsOn(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
 	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{}); err != nil {

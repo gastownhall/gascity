@@ -7,6 +7,7 @@ go_library(
         "batchfile_windows.go",
         "execenv.go",
         "process_env.go",
+        "session_identity.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/execenv",
     visibility = ["//:__subpackages__"],
@@ -19,6 +20,7 @@ go_test(
         "execenv_test.go",
         "execrequest_test.go",
         "process_env_test.go",
+        "session_identity_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

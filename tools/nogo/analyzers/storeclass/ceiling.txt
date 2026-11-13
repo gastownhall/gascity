@@ -3,22 +3,21 @@
 # exactly these totals, so a shrink lowers a row here in the same commit and a
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
-cmd/gc	cache-peel	22
-cmd/gc	cap-assert	100
-cmd/gc	mint	166
-cmd/gc	raw-field	178
-cmd/gc	raw-param	1092
-cmd/gc	raw-result	269
+cmd/gc	cache-peel	20
+cmd/gc	cap-assert	98
+cmd/gc	mint	164
+cmd/gc	raw-field	177
+cmd/gc	raw-param	1079
+cmd/gc	raw-result	268
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
-cmd/gc	read-marker	31
-cmd/gc	unwrap	142
-internal/api	mint	8
-internal/api	raw-field	10
-internal/api	raw-param	38
-internal/api	raw-result	22
-internal/api	read-marker	20
-internal/api	unwrap	14
+cmd/gc	read-marker	15
+cmd/gc	unwrap	141
+internal/api	mint	6
+internal/api	raw-field	1
+internal/api	raw-result	3
+internal/api	read-marker	4
+internal/api	unwrap	2
 internal/dispatch	mint	5
 internal/dispatch	raw-field	2
 internal/dispatch	raw-param	14

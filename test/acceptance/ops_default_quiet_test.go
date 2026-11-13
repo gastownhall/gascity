@@ -27,7 +27,9 @@ func TestOpsDefaultAutoIsQuietOnAProxiedDefaultCity(t *testing.T) {
 
 func TestOpsDefaultAutoIsQuietOnAFileCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	// A born-split city's sessions store is SQLite, which records ops; this
+	// test's subject is a single-store file city.
+	c.InitSingleStore("claude")
 	assertOpsDefaultQuiet(t, c, testEnv)
 }
 

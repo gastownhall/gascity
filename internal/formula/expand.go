@@ -78,16 +78,18 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, resolveOverrideVars(rule.Vars, parentVars))
+		conditionVars := mergeConditionVars(parentVars, vars)
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
 		}
-		expandedSteps, err = materializeExpandedStepConditions(expandedSteps, mergeConditionVars(parentVars, vars))
+		expandedSteps, err = materializeExpandedStepConditions(expandedSteps, conditionVars)
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
 		}
+		bindCheckMaxAttemptsVars(expandedSteps, conditionVars)
 		if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("expand %q", rule.Target)); err != nil {
 			return nil, err
 		}
@@ -121,6 +123,7 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, resolveOverrideVars(rule.Vars, parentVars))
+		conditionVars := mergeConditionVars(parentVars, vars)
 
 		// Find all matching steps (including nested children)
 		// Rebuild stepMap to capture any changes from previous expansions
@@ -138,10 +141,11 @@ func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
 			}
-			expandedSteps, err = materializeExpandedStepConditions(expandedSteps, mergeConditionVars(parentVars, vars))
+			expandedSteps, err = materializeExpandedStepConditions(expandedSteps, conditionVars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
 			}
+			bindCheckMaxAttemptsVars(expandedSteps, conditionVars)
 			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("map %q -> %q", rule.Select, targetStep.ID)); err != nil {
 				return nil, err
 			}
@@ -784,6 +788,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
 			}
+			bindCheckMaxAttemptsVars(expandedSteps, conditionVars)
 			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("inline expand on step %q", step.ID)); err != nil {
 				return nil, err
 			}
