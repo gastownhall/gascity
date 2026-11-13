@@ -76,6 +76,8 @@ var defaultWorkDirExportExcludes = []string{
 	// which the reverse reads.
 	".gc/storage-reverse.json",
 	".gc/storage-split.journal.json",
+	// The city restore's journal (gc storage snapshot restore --city).
+	".gc/storage-city-restore.json",
 	".gc/scope-ownership.json",
 	// gc bd's trust state for this host's bd binaries: the verdict cache,
 	// its lock, the walks' scratch dirs, and the operator's vouches.
