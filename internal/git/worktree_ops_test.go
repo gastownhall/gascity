@@ -334,6 +334,9 @@ func TestBaseRefMissing(t *testing.T) {
 		{"full remote-tracking ref", "headfork/restack/foo", false},
 		{"unknown ref", "no-such-base", true},
 		{"typo of a real ref", local + "x", true},
+		// A probe that fails for any reason but git's "no such ref" status
+		// (here, an argument git would read as an option) proves nothing.
+		{"unprobeable ref", "-x", false},
 	}
 	for _, tt := range tests {
 		if got := g.BaseRefMissing(tt.ref); got != tt.want {

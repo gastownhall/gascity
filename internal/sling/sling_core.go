@@ -130,6 +130,15 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Refuse a formula launch whose base_branch resolves to no ref before
+	// anything is written: the reassign reopen below would otherwise leave a
+	// claimed bead open and unassigned by a sling that then fails.
+	if formulaName, beadID := slingLaunchFormula(opts, a); formulaName != "" {
+		if err := checkSlingBaseBranch(formulaName, beadID, opts, deps, a); err != nil {
+			return result, err
+		}
+	}
+
 	// Reassign: make the bead claimable by the target pool/agent before
 	// routing — clear any existing assignee and reopen it if a prior actor
 	// left it in_progress. Without this, a bead claimed by `bd update --claim`
@@ -161,6 +170,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// slingLaunchFormula names the formula DoSling will launch for opts and the
+// bead it attaches to ("" for a standalone formula), or "" when the sling
+// routes a plain bead. It mirrors DoSling's dispatch.
+func slingLaunchFormula(opts SlingOpts, a config.Agent) (formulaName, beadID string) {
+	switch {
+	case opts.IsFormula:
+		return opts.BeadOrFormula, ""
+	case opts.OnFormula != "":
+		return opts.OnFormula, opts.BeadOrFormula
+	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
+		return a.EffectiveDefaultSlingFormula(), opts.BeadOrFormula
+	}
+	return "", ""
 }
 
 // resolveIdempotentShortCircuit runs the plain-bead pre-flight idempotency
@@ -485,9 +509,6 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
 	searchPaths := SlingFormulaSearchPaths(deps, a)
-	if err := checkSlingBaseBranch(opts.BeadOrFormula, "", opts, deps, a); err != nil {
-		return SlingResult{Target: a.QualifiedName()}, err
-	}
 	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -657,9 +678,6 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, fallbackToPlainOnMoleculeConflict bool, result SlingResult) (SlingResult, error) {
 	depsWork := beads.WorkStore{Store: deps.Store}
 	a := opts.Target
-	if err := checkSlingBaseBranch(formulaName, beadID, opts, deps, a); err != nil {
-		return result, err
-	}
 	formulaVars := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	graphInv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), formulaName, beadID, opts, deps, a)

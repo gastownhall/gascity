@@ -44,15 +44,21 @@ func (g *Git) BranchExists(branch string) (bool, error) {
 
 // BaseRefMissing reports true only when g is a git repository in which ref
 // resolves to no commit, either as the remote-tracking ref origin/<ref> or as
-// the literal ref. Anything it cannot decide (not a repository, git
-// unavailable) reports false, so a caller that refuses on true never blocks
-// work it could not actually check. It reads local refs and never fetches.
+// the literal ref, and git said so with its "no such ref" exit status. Anything
+// it cannot decide (not a repository, git unavailable, a probe that failed any
+// other way) reports false, so a caller that refuses on true never blocks work
+// it could not actually check. It reads local refs and never fetches.
 func (g *Git) BaseRefMissing(ref string) bool {
 	if !g.IsRepo() {
 		return false
 	}
 	for _, candidate := range []string{"origin/" + ref, ref} {
-		if _, err := g.RevParseVerifyCommit(candidate); err == nil {
+		_, err := g.RevParseVerifyCommit(candidate)
+		if err == nil {
+			return false
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 			return false
 		}
 	}

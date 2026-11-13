@@ -1132,8 +1132,11 @@ func checkSlingBaseBranch(formulaName, beadID string, opts SlingOpts, deps Sling
 	if ref == "" {
 		return nil
 	}
-	if deps.Branches.BaseRefMissing(SlingFormulaRepoDir(beadID, deps, a), ref) {
-		return fmt.Errorf("base_branch %q resolves to no ref (neither origin/%s nor %s) in the build repository; fetch it or correct base_branch, do not retry unchanged", ref, ref, ref)
+	repoDir := SlingFormulaRepoDir(beadID, deps, a)
+	if deps.Branches.BaseRefMissing(repoDir, ref) {
+		// Name the repository by its base name only: the API echoes this error
+		// to clients, and an absolute path is host detail they should not see.
+		return fmt.Errorf("base_branch %q resolves to no ref (neither origin/%s nor %s) in the build repository %q; fetch it or correct base_branch, do not retry unchanged", ref, ref, ref, filepath.Base(repoDir))
 	}
 	return nil
 }
