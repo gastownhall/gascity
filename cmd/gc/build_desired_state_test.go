@@ -5890,7 +5890,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 
 	select {
 	case <-store.firstCreateStarted:
-	case <-time.After(time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("first pool create did not start")
 	}
 
@@ -5904,7 +5904,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 		select {
 		case <-store.secondCreateStarted:
 			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
+		case <-time.After(hangBudget):
 			t.Fatal("second pool create did not start after first create completed")
 		}
 	}
