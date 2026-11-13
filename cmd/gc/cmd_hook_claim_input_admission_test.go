@@ -53,8 +53,8 @@ func TestHookClaimNativeInputAdmission(t *testing.T) {
 				f.afterClaim = func(string) { park() }
 			}
 			ops := f.ops()
-			ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
-				return "", false, nil
+			ops.InputVerdict = func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+				return workflowInputVerdict{}, nil
 			}
 			stores := sourceworkflow.InputStores{Graph: beadstest.Graph(f.store), Work: []beads.WorkStore{beadstest.Work(f.store)}}
 			ops.InputAdmission = func(ctx context.Context, _ string, _ []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
@@ -86,6 +86,72 @@ func TestHookClaimNativeInputAdmission(t *testing.T) {
 			}
 			if got := f.get(input.ID).Assignee; got != "another-lane" {
 				t.Fatalf("input reassigned to %q", got)
+			}
+		})
+	}
+}
+
+// A purged convoy retires before admission can reject its missing input;
+// a live held input withholds execution while leaving its workflow open.
+func TestHookClaimInputRetirementAndAdmission(t *testing.T) {
+	for _, state := range []string{"ready", "held", "purged"} {
+		t.Run(state, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			input := f.create(beads.Bead{Title: "input"})
+			conv := f.create(beads.Bead{Title: "inputs", Type: "convoy"})
+			if err := f.store.DepAdd(conv.ID, input.ID, "tracks"); err != nil {
+				t.Fatal(err)
+			}
+			root := f.root("root", "")
+			if err := f.store.SetMetadata(root.ID, "gc.input_convoy_id", conv.ID); err != nil {
+				t.Fatal(err)
+			}
+			step := f.step("step", root.ID, nil)
+			f.served = []string{step.ID}
+			if state == "held" {
+				if err := f.store.Update(input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "purged" {
+				if err := f.store.Delete(conv.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := f.ops()
+			ops.InputVerdict = func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+				return workflowInputDone(ctx, beadstest.Work(f.store), candidate, ids, prove)
+			}
+			ops.RetireWorkflow = func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+				if verdict.State == workflowInputPurged {
+					return failPurgedWorkflow(ctx, f.store, verdict.RootID)
+				}
+				return skipDoneWorkflow(f.store, verdict.RootID)
+			}
+			prover := &recordingProver{absent: map[string]bool{conv.ID: state == "purged"}}
+			ops.ProveInputAbsent = prover.prove
+			admissions := 0
+			ops.InputAdmission = func(ctx context.Context, _ string, _ []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
+				admissions++
+				return (sourceworkflow.InputStores{Graph: beadstest.Graph(f.store), Work: []beads.WorkStore{beadstest.Work(f.store)}}).Admission(ctx, candidate)
+			}
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", t.TempDir(), hookClaimOptions{
+				Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true, DrainAck: true,
+			}, ops, &stdout, &stderr)
+			if code != 0 || strings.Contains(stdout.String(), `"action":"work"`) != (state == "ready") {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if state == "purged" {
+				assertPurgeRetired(t, f.store, root.ID, step.ID)
+				if admissions != 0 {
+					t.Fatalf("purged input reached admission %d times", admissions)
+				}
+			} else if f.get(root.ID).Status != "open" {
+				t.Fatal("retired a workflow with live input")
+			}
+			if state != "ready" && len(f.claims) != 0 {
+				t.Fatalf("claimed withheld work: %v", f.claims)
 			}
 		})
 	}
@@ -250,8 +316,8 @@ func TestHookCityStandaloneInputAdmission(t *testing.T) {
 				city := newHookCity(t.TempDir(), &config.City{})
 				ops := f.ops()
 				ops.InputAdmission = city.claimOps().InputAdmission
-				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
-					return "", false, nil
+				ops.InputVerdict = func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+					return workflowInputVerdict{}, nil
 				}
 				stamps, starts := 0, 0
 				ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error { stamps++; return nil }

@@ -148,7 +148,7 @@ func TestCityStoresAgreeWithTheLegacyResolver(t *testing.T) {
 func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	first := beads.NewMemStore()
 	cs := &controllerState{cityName: "c", cityBeadStore: first}
-	if got := cs.sessionsBeadStore().Store; got != splitStrictClassView(first) {
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(first) {
 		t.Fatalf("sessions = %p, want the city store %p", got, first)
 	}
 	epoch := cs.stores.current.Load()
@@ -161,7 +161,7 @@ func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	cs.mu.Lock()
 	cs.cityBeadStore = second
 	cs.mu.Unlock()
-	if got := cs.GraphBeadStore().Store; got != splitStrictClassView(second) {
+	if got := cs.Stores().Graph().Store; got != splitStrictClassView(second) {
 		t.Errorf("graph after the swap = %p, want the new city store %p", got, second)
 	}
 
@@ -246,7 +246,7 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 	engine := beads.NewMemStore()
 	routes := messagingSplitRoutes(engine)
 	cs := &controllerState{cityName: "c", storageRoutes: routes, cityBeadStore: beads.NewMemStore()}
-	if got := cs.SessionsBeadStore().Store; got != beads.Store(engine) {
+	if got := cs.Stores().Sessions().Store; got != beads.Store(engine) {
 		t.Fatalf("pre-cache sessions = %T, want the engine", got)
 	}
 	routes.withControllerCache(t.Context(), nil)
@@ -255,7 +255,7 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 		t.Fatalf("withControllerCache left sessions on %T", cached)
 	}
 	t.Cleanup(func() { _ = routes.close() })
-	if got := cs.SessionsBeadStore().Store; got != cached {
+	if got := cs.Stores().Sessions().Store; got != cached {
 		t.Errorf("sessions after withControllerCache = %T, want the controller's cache", got)
 	}
 }
@@ -269,7 +269,7 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	cs := &controllerState{cityName: "c", cityBeadStore: beads.NewMemStore(), storageRoutes: graphOnly}
 	// Mint the first epoch before any swap, so a key that missed the work
 	// store would keep it deterministically rather than by scheduling.
-	_ = cs.SessionsBeadStore()
+	_ = cs.Stores().Sessions()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -282,8 +282,8 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 					return
 				default:
 				}
-				_ = cs.SessionsBeadStore()
-				_ = cs.GraphBeadStore()
+				_ = cs.Stores().Sessions()
+				_ = cs.Stores().Graph()
 				_ = cs.cityWorkStore()
 				_, _ = cs.Stores().Rig("r")
 			}
@@ -307,10 +307,10 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(lastRig) {
 		t.Errorf("rig after the swaps = %v, %v; want the final rig store %p", got.Store, ok, lastRig)
 	}
-	if got := cs.SessionsBeadStore().Store; got != splitStrictClassView(last) {
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(last) {
 		t.Errorf("sessions after the swaps = %p, want the final city store %p", got, last)
 	}
-	if got := cs.GraphBeadStore().Store; got != beads.Store(binding) {
+	if got := cs.Stores().Graph().Store; got != beads.Store(binding) {
 		t.Errorf("graph after the swaps = %p, want the binding", got)
 	}
 	if got := cs.cityWorkStore().Store; got != splitStrictWorkView(last) {
@@ -438,7 +438,7 @@ func BenchmarkResolveClassStore(b *testing.B) {
 	b.Run("cs-accessor-cached-epoch", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_ = cs.SessionsBeadStore()
+			_ = cs.Stores().Sessions()
 		}
 	})
 }
@@ -470,6 +470,31 @@ func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
 			}
 			if !beads.SameStore(want, wantStore) {
 				t.Errorf("the messaging store is %v, want %v", resolvedKey(want), resolvedKey(wantStore))
+			}
+		})
+	}
+}
+
+// TestControllerMessagingStoreIsTheSessionsStore pins the premise the API's
+// named-session hand-off rests on (typed-stores T6b, R13): it reassigns a
+// retired session's external-message bindings and participants through the
+// city's messaging handle, where they always went through its sessions
+// store. On both topologies the controller serves, a single store and the
+// whole split, the two handles are one store.
+func TestControllerMessagingStoreIsTheSessionsStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"whole split":  messagingSplitRoutes,
+		"single store": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			binding := splittest.NewBindingStore(t)
+			cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: splittest.NewWorkStore(t, "mc"), storageRoutes: routes(binding)}
+			st := cs.Stores()
+			if !beads.SameStore(st.Mail(), st.Sessions()) {
+				t.Errorf("Mail() wraps %v, Sessions() %v: the hand-off would move bindings in a store other than the sessions store", resolvedKey(st.Mail().Store), resolvedKey(st.Sessions().Store))
+			}
+			if name == "whole split" && !beads.SameStore(st.Mail(), binding) {
+				t.Errorf("Mail() wraps %v, want the binding", resolvedKey(st.Mail().Store))
 			}
 		})
 	}
@@ -510,5 +535,29 @@ func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
 		if _, err := binding.Get(id); err != nil {
 			t.Errorf("auto-handoff %s is not the binding's: %v", id, err)
 		}
+	}
+}
+
+// TestControllerNudgeQueueShadowsLiveInTheNudgesStore pins the API nudge
+// queue's shadow store to the nudges class (typed-stores T6c: it reads
+// Stores() since the exported accessor went), on routes that relocate every
+// class to its own store.
+func TestControllerNudgeQueueShadowsLiveInTheNudgesStore(t *testing.T) {
+	work := beads.NewMemStore()
+	graph, sessions, orders, nudges, mail := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:     graph,
+		coordclass.ClassSessions:  sessions,
+		coordclass.ClassOrders:    orders,
+		coordclass.ClassNudges:    nudges,
+		coordclass.ClassMessaging: mail,
+	}, binding: "infra"}
+	cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: work, storageRoutes: routes}
+	q, ok := cs.NudgeQueue().(*fileNudgeQueue)
+	if !ok {
+		t.Fatalf("NudgeQueue = %T, want the file queue", cs.NudgeQueue())
+	}
+	if q.store.Store != beads.Store(nudges) {
+		t.Errorf("the API nudge queue's shadows live in %p, want the nudges store %p", q.store.Store, nudges)
 	}
 }

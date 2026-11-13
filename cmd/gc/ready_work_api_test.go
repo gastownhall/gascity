@@ -568,7 +568,8 @@ func overtakeLegReads(t *testing.T, change func()) *atomic.Int64 {
 	reads := &atomic.Int64{}
 	prev := readyWorkScopedStore
 	readyWorkScopedStore = func(_ context.Context, _ string, _ *config.City, store beads.Store) (beads.Store, error) {
-		return overtakenStore{Store: store, overtake: func() {
+		// The scoped reader needs stable identity when its class handles are minted.
+		return &overtakenStore{Store: store, overtake: func() {
 			reads.Add(1)
 			once.Do(change)
 		}}, nil

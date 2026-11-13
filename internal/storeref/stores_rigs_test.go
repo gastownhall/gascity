@@ -8,6 +8,41 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
+// Admission follows the work scope that served an existing graph, while
+// GraphFor continues to place new graphs in the relocated binding.
+func TestStoresGraphInWorkScopes(t *testing.T) {
+	refusal := refusingStore{beads.NewMemStore()}
+	for _, f := range rigTopologies() {
+		for name, opts := range map[string]StoresOptions{
+			"plain":         {},
+			"projection":    {Projection: taggedProjection{}},
+			"graph refused": {ClassRefusals: map[coordclass.Class]RefusingClassStore{coordclass.ClassGraph: refusal}},
+		} {
+			s := NewStores(f.topo, opts)
+			for _, ref := range []StoreRef{WorkRef, RigRef("alpha"), RigRef("bravo")} {
+				want := f.topo.Work.Store
+				if ref != WorkRef {
+					rig, _ := ScopeRigContext(string(ref))
+					want = f.rigs[rig]
+				}
+				if opts.Projection != nil {
+					want = opts.Projection.ClassView(want)
+				}
+				got, ok := s.GraphInWork(ref)
+				if !ok || got.Store != want {
+					t.Errorf("%s/%s: GraphInWork(%s) = %v, %v; want scope's class view %v", f.name, name, ref, got, ok, want)
+				}
+			}
+			if got, ok := s.GraphInWork(RigRef("unknown")); ok || !beads.IsNilStore(got) {
+				t.Errorf("GraphInWork(unknown) = %v, %v", got, ok)
+			}
+			if got, ok := s.GraphInWork(ClassRef([]coordclass.Class{coordclass.ClassGraph})); ok || !beads.IsNilStore(got) {
+				t.Errorf("GraphInWork(binding) = %v, %v", got, ok)
+			}
+		}
+	}
+}
+
 // rigTopologies are the topology shapes the rig scope must answer over, each
 // with two rigs: single store, whole split, refused, per-class split with
 // graph relocated, and per-class split with graph left on the work stores.

@@ -338,7 +338,7 @@ func applyWorkerCreateRuntimeInputs(sessionCfg *worker.ResolvedSessionConfig, cf
 	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
-	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusArmFor(cfg, resolved, transport)
+	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Stage provider-overlay hooks on the CLI create path the same way the
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
@@ -450,7 +450,7 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	if cfg != nil {
 		workspaceEnv = cfg.Workspace.Env
 	}
-	_, programStatusEnv := config.ProgramStatusArmFor(cfg, resolved, transport)
+	_, programStatusEnv := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
 		expandEnvMap(workspaceEnv),
@@ -755,7 +755,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
 	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
-	programStatusArm, _ := config.ProgramStatusArmFor(cfg, resolved, transport)
+	programStatusArm, _ := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty

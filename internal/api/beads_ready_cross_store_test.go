@@ -128,14 +128,26 @@ func TestBeadsReadyDropsALegItCannotGate(t *testing.T) {
 // Ready must apply native input admission in both storage layouts, without
 // losing unrelated rows from the serving leg when an input is held.
 func TestBeadsReadyNativeInputAdmission(t *testing.T) {
-	for _, split := range []bool{false, true} {
-		t.Run(map[bool]string{false: "unified", true: "split"}[split], func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		split     bool
+		rig       bool
+		workGraph bool
+	}{
+		{name: "city unified"},
+		{name: "city split", split: true},
+		{name: "rig unified", rig: true},
+		{name: "rig split", split: true, rig: true},
+		{name: "city work graph with binding", workGraph: true},
+		{name: "rig work graph with binding", rig: true, workGraph: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			work := beads.NewMemStoreFrom(0, []beads.Bead{
 				{ID: "input", Status: "open"},
 				{ID: "convoy", Type: "convoy", Status: "open"},
 			}, []beads.Dep{{IssueID: "convoy", DependsOnID: "input", Type: "tracks"}})
 			graph := work
-			if split {
+			if tc.split {
 				graph = beads.NewMemStoreFrom(100, nil, nil)
 			}
 			create := func(b beads.Bead) beads.Bead {
@@ -152,6 +164,16 @@ func TestBeadsReadyNativeInputAdmission(t *testing.T) {
 			fs := newFakeState(t)
 			fs.cityBeadStore, fs.graphBeadStore = work, graph
 			fs.stores = map[string]beads.Store{}
+			if tc.rig {
+				fs.cityBeadStore = beads.NewMemStore()
+				fs.stores["myrig"] = work
+				if !tc.split {
+					fs.graphBeadStore = nil
+				}
+			}
+			if tc.workGraph {
+				fs.graphBeadStore = beads.NewMemStoreFrom(100, nil, nil)
+			}
 			h := newTestCityHandler(t, fs)
 			for _, held := range []bool{false, true} {
 				if held {

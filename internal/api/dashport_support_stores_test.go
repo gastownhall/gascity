@@ -49,24 +49,21 @@ func TestSeededStateClassStoresAreTheCityStore(t *testing.T) {
 	}
 }
 
-func TestSeededStateWorkScopeStores(t *testing.T) {
-	city, rig := beads.NewMemStore(), beads.NewMemStore()
-	s := newSeededState(SeededCityDeps{CityName: "seeded", Config: &config.City{}, CityBeadStore: city, RigStores: map[string]beads.Store{"rig": rig}})
-	for _, tc := range []struct {
-		name string
-		want beads.Store
-	}{{"", city}, {"rig", rig}, {"missing", nil}} {
-		t.Run(tc.name, func(t *testing.T) {
-			work, graph := s.WorkScopeStores(tc.name)
-			if tc.want == nil {
-				if !beads.IsNilStore(work) || !beads.IsNilStore(graph) {
-					t.Fatal("unknown rig returned a store")
-				}
-				return
-			}
-			if !beads.SameStore(work, tc.want) || !beads.SameStore(graph, tc.want) {
-				t.Fatal("work and graph handles do not point to the requested scope")
-			}
-		})
+// TestSeededStateTopologyMatchesProduction: the seeded city's minted Stores
+// carry the topology the API plane derives from the same state
+// (residencyTopology), configured prefixes included.
+func TestSeededStateTopologyMatchesProduction(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "seeded", Prefix: "tc"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", Prefix: "mr"}},
+	}
+	s := newSeededState(SeededCityDeps{
+		CityName: "seeded", CityPath: t.TempDir(), Config: cfg,
+		CityBeadStore: beads.NewMemStore(),
+		RigStores:     map[string]beads.Store{"myrig": beads.NewMemStore()},
+	})
+	assertAPITopologyAgrees(t, "seeded", s)
+	if topo := s.Stores().Topology(); len(topo.Rigs) != 1 || topo.Rigs[0].Prefix != "mr" || topo.Work.Prefix != "tc" {
+		t.Errorf("seeded topology = %+v, want the configured prefixes", topo)
 	}
 }

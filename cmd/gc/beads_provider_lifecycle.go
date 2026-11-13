@@ -2653,6 +2653,9 @@ type doltRuntimeState struct {
 	Port      int    `json:"port"`
 	DataDir   string `json:"data_dir"`
 	StartedAt string `json:"started_at"`
+	// InfraScope names the transient systemd user scope unit the server was
+	// started in (see infraArgv); empty when it was started unscoped.
+	InfraScope string `json:"infra_scope,omitempty"`
 }
 
 // currentDoltPort returns the controller-managed Dolt port for the city.
@@ -3715,6 +3718,12 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	if _, _, err := providerScopeOwnership(cityPath, cityPath); err != nil {
 		return nil, err
 	}
+	// The base env passes this process's GC_SESSION_ID through. City
+	// infrastructure scoping depends on it: an agent's gc autostarts the store
+	// via the provider script (gc-beads-bd.sh start -> gc dolt-state
+	// start-managed), and that inner gc knows it was started from a session,
+	// and so scopes the Dolt server, only through this variable. Pinned by
+	// TestProviderLifecycleEnvCarriesSessionIdentity.
 	env, err := cityRuntimeProcessEnvWithError(cityPath)
 	if err != nil {
 		return nil, err

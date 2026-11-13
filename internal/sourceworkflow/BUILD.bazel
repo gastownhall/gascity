@@ -17,6 +17,7 @@ go_library(
         "//internal/coordclass",
         "//internal/molecule",
         "//internal/pathutil",
+        "//internal/platform/filelock",
     ],
 )
 

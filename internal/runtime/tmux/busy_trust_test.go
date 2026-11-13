@@ -215,8 +215,9 @@ func TestTurnRunningUntrustedFamilyIsIndeterminate(t *testing.T) {
 
 // The wait-idle pre-read over the tmux leaf (runtime.IdleBoundaryNow): an
 // open permission prompt or AskUserQuestion dialog reads indeterminate from
-// the pane scan and the leaf's Pending names it, so the pre-read is pending
-// and the nudge queues at once. The same dialogs answered, with the idle
+// the pane scan (a permission prompt's numbered options as a pending
+// choice), and the leaf's Pending names it, so the pre-read is pending and
+// the nudge queues at once. The same dialogs answered, with the idle
 // composer back underneath, read at the boundary, a busy claude pane reads
 // busy, and a busy pane of a family the leaf does not trust, or a pane
 // showing neither a prompt nor a dialog, cannot tell.

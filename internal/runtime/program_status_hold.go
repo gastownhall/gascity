@@ -5,21 +5,28 @@ import "time"
 // The mid-turn hold (the OSC 7501 cutover's hold slice): a provider whose
 // program aborts a turn that input is typed into declares it (program_status
 // hold_mid_turn), and its pane is armed carrying the declaration
-// ([ProgramStatus.HoldDeclared]). Under the switch on, the one decision
-// that types into a session whose activity clock calls it busy, a starved
-// queue's bypass of the quiescence gate, re-reads the program's record
-// fresh, past the state cache's snapshot, and defers while the record says
-// a turn is running ([ProgramTypingHolds]), judged with the pane's own
-// activity within the record's hold bound ([ProgramStatus.HoldLive]). The
-// bound is on the record's staleness: a turn that keeps drawing holds past
-// it, and a record no activity refreshed holds nothing once it passes.
+// ([ProgramStatus.HoldDeclared]). Under the switch on, two decisions re-read
+// the program's record fresh, past the state cache's snapshot, and defer
+// while the record says a turn is running ([ProgramTypingHolds]), judged
+// with the pane's own activity within the record's hold bound
+// ([ProgramStatus.HoldLive]): a starved queue's bypass of the quiescence
+// gate, which types into a session whose activity clock calls it busy, and
+// the conversation lane's quiescence boundary, whose quiet reading the
+// screen can give while a turn runs (the second shadow: 54 of 350 Codex
+// deliveries there typed into a running turn). The bound is on the record's
+// staleness: a turn that keeps drawing holds past it, and a record no
+// activity refreshed holds nothing once it passes.
 //
-// Every other delivery decides as it does without the record: a program
-// may report working with no turn running (Codex while a background
-// terminal runs), and the activity clock already holds a running turn that
-// keeps its pane drawing. Under off or shadow nothing is read; a reading
-// that is not valid, a pane that does not declare the hold, and a read that
-// fails hold nothing.
+// A program may report working with no turn running (Codex while a
+// background terminal runs). Those two decisions hold on such a record too:
+// a lane delivery to a Codex session idle at its composer with a background
+// terminal open waits until the record leaves working or its hold bound
+// passes (no output for ProgramStatusHoldLimit), a residual the second
+// shadow did not see harm from. Every other delivery decides as it does
+// without the record, since the activity clock already holds a running turn
+// that keeps its pane drawing. Under off or shadow nothing is read; a
+// reading that is not valid, a pane that does not declare the hold, and a
+// read that fails hold nothing.
 
 // ProgramHoldReading is one fresh reading taken for a hold decision: the
 // agent pane's judged record and the pane's own last activity, read together.

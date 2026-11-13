@@ -12,7 +12,7 @@ import (
 )
 
 // Handlers for the durable-wait wire (GET /v0/city/{cityName}/waits and
-// /wait/{id}). Both read through session.Store over SessionsBeadStore(), so a
+// /wait/{id}). Both read through session.Store over Stores().Sessions(), so a
 // [beads.classes.sessions] relocation serves relocated wait beads that the
 // generic ListBeads(label=gc:wait) leg (which reads CityBeadStore/BeadStores())
 // would miss. Bead serialization is confined to session.Store + waitViewFromInfo.
@@ -21,15 +21,15 @@ import (
 // list is created-DESC (the CLI applies its own stable ascending sort); a capped
 // lookup surfaces the truncation via body.capped rather than an error.
 func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*WaitListOutput, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	if err := cacheLiveOr503(store.Store); err != nil {
+	if err := cacheLiveOr503(store); err != nil {
 		return nil, err
 	}
 	waits, err := session.NewStore(store).ListWaits(input.State, input.Session)
-	freshness := cacheAgeSeconds(store.Store)
+	freshness := cacheAgeSeconds(store)
 	out := &WaitListOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	if err != nil {
 		switch {
@@ -57,11 +57,11 @@ func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*W
 // durable wait maps to the same wait-not-found type with a machine-matchable
 // "not_a_wait: <id>" 404 detail the CLI branches on.
 func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*WaitGetOutput, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	if err := cacheLiveOr503(store.Store); err != nil {
+	if err := cacheLiveOr503(store); err != nil {
 		return nil, err
 	}
 	w, err := session.NewStore(store).GetWait(input.ID)
@@ -77,7 +77,7 @@ func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*Wai
 		}
 		return nil, humaStoreError(err)
 	}
-	freshness := cacheAgeSeconds(store.Store)
+	freshness := cacheAgeSeconds(store)
 	out := &WaitGetOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	out.Body = waitViewFromInfo(w)
 	return out, nil

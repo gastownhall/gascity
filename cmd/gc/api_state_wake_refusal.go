@@ -56,21 +56,8 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 	controllerPool := (info.PoolManaged || strings.TrimSpace(info.PoolSlot) != "") &&
 		!isManualSessionInfoForAgent(info, agent) && !isNamedSessionInfo(info)
 	certain = !controllerPool
-	switch scope, name, suspended := agentSuspensionCauseWith(d.cfg, d.cityPath, agent, loadSuspensionStateBestEffort(d.cityPath)); {
-	case info.DependencyOnly:
-		return "it is a dependency-only session; it starts with its dependents", true
-	case suspended && scope == "city":
-		return "the city is suspended; run `gc resume`", true
-	case suspended:
-		return fmt.Sprintf("%s %q is suspended; run `gc %s resume %s`", scope, name, scope, name), true
-	case sessionpkg.DemandOnlySingletonWakeRefused(d.cfg, agent, info):
-		return sessionpkg.DemandOnlySingletonExplanation(agent.QualifiedName()), true
-	case controllerPool && isDrainedSessionInfo(info):
-		return "it is a drained pool seat; the pool restarts seats only for demand", true
-	case sessionWakeCreateAbandonedInfo(info, d.cfg.Session.StartupTimeoutDuration()):
-		return "its create never completed; use `gc session close` to release the slot", true
-	case info.SessionCircuitState == sessionpkg.SessionCircuitStateOpen && (d.runsV2 == nil || !d.runsV2()):
-		return fmt.Sprintf("its respawn circuit breaker is open; `gc session reset %s` clears it", info.ID), true
+	if why := wakeGateRefusal(info, d, agent, controllerPool); why != "" {
+		return why, true
 	}
 	if name := info.SessionNameMetadata; name != "" && d.sessFront != nil {
 		if ep, err := d.sessFront.LoadStartupHealthEpisode(startupHealthEpisodeKey(info, name)); err == nil && ep.QuarantinedUntil.After(now) {
@@ -78,9 +65,13 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 		}
 	}
 	policy := resolveSessionSleepPolicyInfo(info, d.cfg, d.sp)
-	// The idle latch yields to pin_awake, to assigned work, and (for a
-	// non-interactive policy) to pool demand, which this read cannot see.
+	// The idle latch yields to pin_awake, to the explicit wake just recorded
+	// while no sleep intent outranks it (the reconciler's demand override,
+	// wakeDemandOverridesSleepSuppression, starts the session on it), to
+	// assigned work, and (for a non-interactive policy) to pool demand, which
+	// this read cannot see.
 	if pinned || d.work.store == nil || policy.Class == config.SessionSleepNonInteractive ||
+		(explicitWakePendingInfo(info) && explicitSleepIntentInfo(info) == "") ||
 		!configWakeSuppressedInfo(info, policy, d.sp, clock.Real{}) {
 		return "", certain
 	}
@@ -91,10 +82,35 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 	return "its idle sleep policy holds it asleep until work or demand wakes it; send with `resume: true` (or `gc session attach`) to start it now", true
 }
 
+// wakeGateRefusal is wakeWillNotStart's arm for the gates on the session, its
+// agent and its city that outlive the wake: why one holds the session (a
+// dependency-only session, a suspended city, rig or agent, a demand-only
+// singleton, a drained seat of a controller pool, an abandoned create, or an
+// open respawn circuit under legacy), or "" when none does.
+func wakeGateRefusal(info sessionpkg.Info, d wakeVerdictDeps, agent *config.Agent, controllerPool bool) string {
+	switch scope, name, suspended := agentSuspensionCauseWith(d.cfg, d.cityPath, agent, loadSuspensionStateBestEffort(d.cityPath)); {
+	case info.DependencyOnly:
+		return "it is a dependency-only session; it starts with its dependents"
+	case suspended && scope == "city":
+		return "the city is suspended; run `gc resume`"
+	case suspended:
+		return fmt.Sprintf("%s %q is suspended; run `gc %s resume %s`", scope, name, scope, name)
+	case sessionpkg.DemandOnlySingletonWakeRefused(d.cfg, agent, info):
+		return sessionpkg.DemandOnlySingletonExplanation(agent.QualifiedName())
+	case controllerPool && isDrainedSessionInfo(info):
+		return "it is a drained pool seat; the pool restarts seats only for demand"
+	case sessionWakeCreateAbandonedInfo(info, d.cfg.Session.StartupTimeoutDuration()):
+		return "its create never completed; use `gc session close` to release the slot"
+	case info.SessionCircuitState == sessionpkg.SessionCircuitStateOpen && (d.runsV2 == nil || !d.runsV2()):
+		return fmt.Sprintf("its respawn circuit breaker is open; `gc session reset %s` clears it", info.ID)
+	}
+	return ""
+}
+
 // WakeStartRefusal is api.WakeStartRefuser over wakeWillNotStart.
 func (cs *controllerState) WakeStartRefusal(info sessionpkg.Info) (string, bool) {
 	return wakeWillNotStart(info, wakeVerdictDeps{
-		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.SessionsBeadStore()),
+		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.Stores().Sessions()),
 		sp: cs.SessionProvider(), work: cityWorkLegOf(cs.cityWorkStore()), rigStores: cs.wakeRigStores,
 		runsV2: cs.wakeOf().runsV2,
 	}, time.Now())

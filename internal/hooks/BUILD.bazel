@@ -27,6 +27,7 @@ go_test(
         "hooks_family_test.go",
         "hooks_marker_normalize_test.go",
         "hooks_test.go",
+        "kiro_agents_md_test.go",
         "overlay_provider_hook_path_shape_test.go",
         "plugin_node_test.go",
         "preserve_test.go",

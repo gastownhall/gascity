@@ -13,11 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -32,7 +35,6 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
-	"github.com/spf13/cobra"
 )
 
 func init() {
@@ -310,6 +312,43 @@ func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead
 	return storeDir, store, "", ""
 }
 
+// slingCoordinationBeadRefusal refuses a sling of id when the city's class
+// binding holds it and work, the store the sling acts on, does not: a bead in
+// the reserved coordination-class namespace, such as the workflow root a v2
+// gc formula cook mints on a split city. gc sling routes work-ledger beads and
+// cannot route one the binding holds (#5974); without this the sling reports
+// the bead missing and points at --force, which cannot route it either. When
+// work holds the id (the prefix is only advisory on work stores) the bead
+// routes as before, and an id no store holds keeps the missing-bead path. A
+// work store that cannot be read is left to the sling's own read of it, which
+// reports the failure.
+//
+// A binding that cannot be read, when work does not hold the id, leaves
+// whether the binding holds it unknown: that is probeErr, a read failure the
+// caller reports as such, never the refusal.
+func slingCoordinationBeadRefusal(cityPath, id string, work sling.BeadQuerier) (refusal, probeErr error) {
+	if _, reserved := reservedClassPrefixForID(id); !reserved || !isBeadIDCandidate(id) {
+		return nil, nil
+	}
+	binding := slingResidenceBinding(cityPath)
+	if binding == nil {
+		return nil, nil
+	}
+	if work != nil {
+		if held, err := sling.ProbeBeadInStore(work, id); err != nil || held {
+			return nil, nil
+		}
+	}
+	held, err := sling.ProbeBeadInStore(binding, id)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not in the work ledger, and the city's infrastructure store, which mints ids like it, could not be read: %w", id, err)
+	}
+	if !held {
+		return nil, nil
+	}
+	return fmt.Errorf("%s is in this city's infrastructure store (workflow roots and steps, sessions, mail, order runs, queued nudges), and gc sling routes only work-ledger beads. To run a formula, launch it with gc sling <target> <formula> --formula, or with --on <formula> against a work bead; gc formula cook only creates a workflow's beads", id), nil
+}
+
 // applySlingInlineBead resolves inline-text mode: when the sling argument is prose
 // rather than a bead ID (and not a formula), it creates a task bead from the text
 // and returns the new bead ID, or under --dry-run marks it preview-only. It is the
@@ -463,6 +502,15 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if errCode != "" {
 		return fail(errCode, errMsg)
 	}
+	if !isFormula && !fromStdin && !sourceBead.exists {
+		refusal, probeErr := slingCoordinationBeadRefusal(cityPath, beadOrFormula, store)
+		if probeErr != nil {
+			return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", probeErr))
+		}
+		if refusal != nil {
+			return fail("bead_not_slingable", fmt.Sprintf("gc sling: %v", refusal))
+		}
+	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
 	if err != nil {
@@ -521,14 +569,33 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
 	}
+	// The sling's scope stores: store as the work store, and the graph class
+	// at that scope, the binding on a city that relocates it.
+	cs := cliStores(cityPath, store)
+	// Session beads live in the city's sessions store, never in a rig store.
+	// That is the scope's sessions handle at city scope and on a city that
+	// relocates the sessions class (the binding); a rig-scope sling on a city
+	// that does not opens the city store to read them. A city store that does
+	// not open leaves the sling reading sessions in its rig store, as it did
+	// before, with a warning: the sling's own work is in the rig ledger.
+	sessions := cs.Sessions()
+	if _, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions); !relocated && !samePath(storeDir, cityPath) { // residency:allow — asks only whether the sessions class is relocated, to decide whether the scope's handle already is the city's
+		if cityStore, err := openCityStoreAtWithConfig(cityPath, cfg); err != nil {
+			fmt.Fprintf(stderr, "warning: gc sling: opening the city store for session lookups: %v; reading sessions in the rig store\n", err) //nolint:errcheck // best-effort stderr
+		} else if cityStore != nil {
+			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
+			sessions = cliStores(cityPath, cityStore).Sessions()
+		}
+	}
 	deps := slingDeps{
 		CityName:           cityName,
 		CityPath:           cityPath,
 		Cfg:                cfg,
 		SP:                 sp,
 		Runner:             runner,
-		Store:              store,
-		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Store:              cs.Work(),
+		GraphStore:         cs.Graph(),
+		Sessions:           sessions,
 		Events:             eventRecorder,
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
@@ -561,7 +628,10 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	}
 
 	inheritSlingInitiator(&opts, slingClaimStoresFor(cfg, cityPath, cityName, openSourceWorkflowViews), os.Getenv, stderr)
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	nudge := func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, cityName, cityPath, cfg, sp, store, beadID, stdout, stderr)
+	}
+	return doSlingBatchWithJSON(opts, deps, deps.Store, nudge, jsonOutput, humanStdout, stdout, stderr)
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
@@ -839,11 +909,13 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	// The core names the store that holds the bead when it is not the work
 	// store (a --formula wisp root lives in the graph binding, #6054).
-	store := req.Store
-	if store == nil {
+	var store beads.Writer
+	switch {
+	case !req.Store.Absent():
+		store = req.Store
+	case r.deps.Store != (beads.WorkStore{}):
 		store = r.deps.Store
-	}
-	if store == nil {
+	default:
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
@@ -1046,10 +1118,23 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 
 // doSlingBatch creates a Sling instance and dispatches batch or single.
 func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdout, stderr io.Writer) int {
-	return doSlingBatchWithJSON(opts, deps, querier, false, stdout, stdout, stderr)
+	return doSlingBatchWithJSON(opts, deps, querier, depsSlingNudge(deps), false, stdout, stdout, stderr)
 }
 
-func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
+// slingNudge nudges the agent a sling routed beadID to (doSlingNudge).
+type slingNudge func(a *config.Agent, beadID string, stdout, stderr io.Writer)
+
+// depsSlingNudge is the slingNudge over deps' own work store. `gc sling`
+// nudges over the raw scope store it opened instead: the nudge's session
+// lookups go through cliSessionStore, whose emission wrap reads the store's
+// own type, which a class handle over it hides.
+func depsSlingNudge(deps slingDeps) slingNudge {
+	return func(a *config.Agent, beadID string, stdout, stderr io.Writer) {
+		doSlingNudge(a, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, beadID, stdout, stderr)
+	}
+}
+
+func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, nudge slingNudge, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
 	populateSlingDepsCallbacks(&deps, stderr)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
@@ -1123,7 +1208,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return dryRunSingle(opts, deps, querier, humanStdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, result.BeadID, humanStdout, stderr)
+		nudge(result.NudgeAgent, result.BeadID, humanStdout, stderr)
 	}
 	// Success only (never dry-run or error): surface a dashboard deep link
 	// when one resolves. Resolution failure degrades silently to no link.
@@ -2358,11 +2443,7 @@ func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName st
 	if formulaName == "" {
 		return 0, true
 	}
-	graphStore := deps.GraphStore
-	if graphStore == nil {
-		graphStore = deps.Store
-	}
-	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName)
+	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, opts.BeadOrFormula, formulaName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: pre-check inconclusive: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0, false

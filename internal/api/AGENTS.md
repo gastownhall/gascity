@@ -624,12 +624,21 @@ payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
 set only on the op routes and `op.changed`; a session command's answer keeps
 `conversationOpWire`.
 
+`session.created` and `session.closed` are the controller's too: its bead
+event watcher derives them from session beads' `bead.*` notifications
+(SESSION-OBSERVE-LIST-EVENTS in `internal/session/REQUIREMENTS.md`), and
+`POST /v0/events` and `gc event emit` refuse them
+(`events.IsSessionListDerived`).
+
 ## Native input readiness
 
 `/beads/ready` applies `readywork.LegGate` in both unified and split layouts.
-Compose each work leg with `State.WorkScopeStores` and the relocated graph leg
-with `State.GraphBeadStore`; never mint class handles in the handler or bypass
-input admission when no class binding exists. The domain predicate owns input
-relations and parks; the handler only projects its result and read failures.
+Compose work legs with one `State.Stores()` epoch's `Work`/`Rig` and
+`GraphInWork` handles and the relocated graph leg with its `Graph` handle.
+Admission follows the work scope that served an existing graph; `GraphFor`
+places new graphs and may point to a different, relocated store. Never
+mint class handles in the handler or bypass input admission when no class binding
+exists. The domain predicate owns input relations and parks; the handler only
+projects its result and read failures.
 Retain failed readiness scopes in the named input frame: a missing read cannot
 prove unique residence for another scope's native inputs.

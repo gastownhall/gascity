@@ -64,12 +64,9 @@ type NudgeQueue interface {
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //
-// The per-coordination-class store seam is exposed as named accessors
-// (GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
-// backend becomes a change in the implementation rather than at every call
-// site. Callers that need the store for a specific bead class route through
-// those accessors; on a single-store city every one collapses to the same
-// concrete store CityBeadStore() returns, so they are byte-identical today.
+// A handler reaches the store of a coordination class only through Stores():
+// the class's handle, minted by the controller's router. On a single-store
+// city every handle wraps the concrete store CityBeadStore() returns.
 type State interface {
 	// Config returns the current city config snapshot. A changed config is
 	// served as a new snapshot; a served one is never mutated in place
@@ -90,8 +87,9 @@ type State interface {
 
 	// BeadStore returns the bead store for a rig (by name).
 	// Returns nil if the rig doesn't exist. BeadStore, BeadStores,
-	// CityBeadStore, ScopedStoreLike and ClassBindingHasLegacyResidents stay
-	// raw until T7's federated readers: callers are the T7 residue.
+	// CityBeadStore and ScopedStoreLike stay raw until T7's federated
+	// readers: callers are the T7 residue. The binding census the API plans
+	// by-id reads against crosses as Stores().Topology(), not here.
 	BeadStore(rig string) beads.Store
 
 	// BeadStores returns all rig names and their stores.
@@ -151,76 +149,9 @@ type State interface {
 	// and finish any work they start before returning after cancellation.
 	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
 
-	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
-	// (gc:nudge). At the default backend this is the same store as
-	// CityBeadStore; when [beads.classes.nudges] is relocated it is the
-	// per-class store, so nudge-shadow ops (e.g. withdrawing wait nudges on
-	// session close/wake) reach the relocated beads instead of orphaning them
-	// on the work store. The strongly-typed beads.NudgesStore return makes the
-	// nudges class statically visible at the call site; its embedded .Store is
-	// nil when no store is available.
-	NudgesBeadStore() beads.NudgesStore
-
 	// NudgeQueue returns the city's nudge queue, through which the API queues
 	// deferred submits and withdraws wait nudges.
 	NudgeQueue() NudgeQueue
-
-	// SessionsBeadStore returns the store backing session-class beads — session
-	// lifecycle (type=session/gc:session) and durable session waits
-	// (type=gate/gc:wait). At the default backend this is the same store as
-	// CityBeadStore; when [beads.classes.sessions] is relocated it is the
-	// per-class store, so session/wait reads and writes reach the relocated
-	// beads instead of the work store. Session handlers source their store from
-	// here (not CityBeadStore); cross-class WORK-bead reads stay on
-	// CityBeadStore. The strongly-typed beads.SessionStore return makes the
-	// session class statically visible at the call site; its embedded .Store is
-	// nil when no store is available.
-	SessionsBeadStore() beads.SessionStore
-
-	// GraphBeadStore returns the store backing graph-class beads — the formula-v2
-	// execution topology and control lane (molecules, wisps, convoys, control
-	// steps). At the default backend this is the same store as CityBeadStore;
-	// when [beads.classes.graph] is relocated it is the dedicated graph store at
-	// the legacy <cityPath>/.gc/beads.sqlite (SQLite) or the gcg Postgres schema,
-	// so graph reads and writes reach the relocated beads instead of the work
-	// store. This is the class-aware graph leg; cross-class WORK-bead reads stay
-	// on CityBeadStore. The strongly-typed beads.GraphStore return makes the graph
-	// class statically visible at the call site; its embedded .Store is nil when no
-	// store is available.
-	GraphBeadStore() beads.GraphStore
-
-	// WorkScopeStores returns named handles for a work leg and its co-resident
-	// legacy workflow graphs. Empty rig selects the city scope. Relocated graph
-	// rows use GraphBeadStore instead; input relations use every work scope.
-	WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore)
-
-	// OrdersBeadStore returns the store backing orders-class beads — the
-	// order-tracking / order-run records that gate repeat order firing. At the
-	// default backend this is the same store as CityBeadStore; when
-	// [beads.classes.orders] is relocated it is the per-class store, which is
-	// where the controller now creates every tracking bead. Without this
-	// accessor the API layer is structurally unable to route orders: the order
-	// feed and the check/history reads would scan the work store and report a
-	// split city's orders as never having run. The strongly-typed
-	// beads.OrdersStore return makes the orders class statically visible at the
-	// call site; its embedded .Store is nil when no store is available.
-	OrdersBeadStore() beads.OrdersStore
-
-	// ClassBindingHasLegacyResidents reports whether store — one of the
-	// per-class stores above — still holds a bead, open or closed, under an id
-	// outside the namespaces its classes declare: a row `gc storage migrate`
-	// carried across under its original work-shaped id, reachable only by
-	// probing the binding.
-	//
-	// The API never opens a binding and cannot take that census itself, so the
-	// verdict crosses this surface from the boot that did. It exists because
-	// both planes plan by-id reads against the same bindings, and a plane that
-	// kept probing after the other retired would resolve one id to two stores.
-	//
-	// TRUE is the answer for every store this State cannot speak for —
-	// unknown included. An unread binding has said nothing about its residents,
-	// and "nothing" is not the claim that retires a probe.
-	ClassBindingHasLegacyResidents(store beads.Store) bool
 
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.

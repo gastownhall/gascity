@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -48,9 +49,34 @@ type Provider struct {
 	handshakeInfo     runtime.ProtocolInfo
 	handshakeErr      error
 
+	// execUnsupported remembers an `exec` exit 2 from a pack whose
+	// successful handshake does not declare proc.exec, so the driving
+	// methods stop spawning `exec` before every dedicated op. An exit 2
+	// while the handshake is failing is not remembered (see Exec).
+	execUnsupported atomic.Bool
+
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
 	readyPrompts sync.Map
+
+	// setupTimeout and setupMaxTimeout budget each host pre_start and
+	// session_setup command gc runs for a pack sharing the host filesystem
+	// (hoststage.go; WithSetupTimeouts). setupWarnings receives the non-fatal
+	// diagnostics of that work and of a start's best-effort ready-prompt
+	// publish (warnings); nil is os.Stderr.
+	setupTimeout    time.Duration
+	setupMaxTimeout time.Duration
+	setupWarnings   io.Writer
+
+	// scanListingTimeout bounds the listing the orphan sweep's
+	// process-table scan reads to track its roots (process_scan.go); zero
+	// is defaultScanListingTimeout.
+	scanListingTimeout time.Duration
+
+	// hostSetupDue holds the names whose `provision` config gc stripped of
+	// its host work (provisionBox), so the launch that follows runs their
+	// session_setup on the host (execTransport.Launch).
+	hostSetupDue sync.Map
 }
 
 type startupWatchEvent struct {
@@ -64,34 +90,64 @@ const startupWatchCloseTimeout = 200 * time.Millisecond
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
-func NewProvider(script string) *Provider {
-	return &Provider{
+func NewProvider(script string, opts ...Option) *Provider {
+	p := &Provider{
 		script:       script,
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
+		setupTimeout: defaultSetupTimeout,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // NewProviderForCity returns an exec [Provider] for the given script that
 // runs every op with GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH set to the city
 // it serves, so a script shared by several cities on one backend can scope
 // its boxes and listings to this one.
-func NewProviderForCity(script, cityName, cityPath string) *Provider {
-	p := NewProvider(script)
+func NewProviderForCity(script, cityName, cityPath string, opts ...Option) *Provider {
+	p := NewProvider(script, opts...)
 	p.cityName, p.cityPath, p.citySet = cityName, cityPath, true
 	return p
 }
 
 // cityEnv returns the env an op of a provider built for a city runs with:
-// gc's environment, read through execenv.Environ, plus the city. It is nil
-// otherwise, so the op inherits gc's environment unchanged. Read it before
-// arming the op's deadline: execenv.Environ waits out an in-flight native
-// store open, and that wait is not the op's.
+// gc's environment, read through execenv.Environ without a session's
+// identity (sessionlessEnviron), plus the city. It is nil otherwise. Read
+// it before arming the op's deadline: execenv.Environ waits out an
+// in-flight native store open, and that wait is not the op's.
 func (p *Provider) cityEnv() []string {
 	if !p.citySet {
 		return nil
 	}
-	return append(execenv.Environ(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+	return append(sessionlessEnviron(), "GC_EXEC_CITY_NAME="+p.cityName, "GC_EXEC_CITY_PATH="+p.cityPath)
+}
+
+// opEnv returns the env a bounded op runs with: cityEnv for a provider built
+// for a city, else gc's environment read through execenv.Environ, without
+// a session's identity (sessionlessEnviron). Like cityEnv, read it before
+// arming the op's deadline.
+func (p *Provider) opEnv() []string {
+	if env := p.cityEnv(); env != nil {
+		return env
+	}
+	return sessionlessEnviron()
+}
+
+// withDeadline returns env plus GC_EXEC_DEADLINE_MS: the milliseconds left,
+// rounded down and never negative, until ctx's deadline — the earlier of the
+// op's own timeout and any deadline its parent already carried. A ctx with
+// no deadline leaves env as it is. Call it with the op's armed ctx, on the
+// env opEnv read before arming it.
+func withDeadline(ctx context.Context, env []string) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return env
+	}
+	ms := max(time.Until(deadline).Milliseconds(), 0)
+	return append(env, "GC_EXEC_DEADLINE_MS="+strconv.FormatInt(ms, 10))
 }
 
 // run executes the script with the given args using the default timeout.
@@ -120,12 +176,12 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 // cap). Output past the cap is discarded and fails the op, without echoing
 // any of it.
 func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cmd.Env = env
+	cmd.Env = withDeadline(ctx, env)
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -226,9 +282,7 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	if len(args) > 0 {
 		op = args[0]
 	}
-	// Only the ops strictExitTwo names consult the handshake, so the
-	// `protocol` op's own failure never re-enters it.
-	strict := code == 2 && strictWhenReady(op) && p.v2Ready()
+	strict := code == 2 && p.exitTwoIsStrict(op)
 	base := &opExitError{op: op, code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
 	return classifyExecExit(op, code, errMsg, strict, base)
 }
@@ -254,12 +308,13 @@ func (e *opExitError) Unwrap() error { return e.err }
 // start (a pack that cannot start is not a provider), provision (it runs only
 // for a pack that declared proc.provision), is-attached (it runs only for a
 // pack that declared report-attachment; [Provider.IsAttachedWithError]
-// reports its failure as "could not tell"), and the observe.v1 ops. strict
-// is a v2-ready script's exit 2 from an op observe.v1 obliges it to
-// implement, which fails as strictExitTwo maps it. A start-op name collision
-// maps to [runtime.ErrSessionExists]; a start-op [runtime.ExitCodeTempFail]
-// is an endpoint capacity refusal ([runtime.CapacityError]); everything else
-// is base unchanged.
+// reports its failure as "could not tell"), the observe.v1 ops, and
+// server-stop (it runs only for a pack that declared server-lifecycle). strict
+// is an exit 2 the pack's declarations oblige it not to give
+// (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A
+// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
+// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
+// ([runtime.CapacityError]); everything else is base unchanged.
 func classifyExecExit(op string, code int, msg string, strict bool, base error) error {
 	switch {
 	case code == 2 && strict:
@@ -279,11 +334,25 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object":
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false
 	}
+}
+
+// exitTwoIsStrict reports whether this pack's exit 2 from op is a failure
+// rather than the unknown-op no-op: from an op a v2-ready script must
+// implement (strictWhenReady), or from a driving op of a pack that selected
+// carrier.ops (opsCarrierDrivingOp), which declared the op and has no other
+// way to drive the session, so a nudge it never delivered is not reported
+// delivered. It reads the op's name before the handshake, so the `protocol`
+// op's own failure never re-enters the handshake it is answering.
+func (p *Provider) exitTwoIsStrict(op string) bool {
+	if strictWhenReady(op) && p.v2Ready() {
+		return true
+	}
+	return opsCarrierDrivingOp(op) && p.opsCarrierSelected()
 }
 
 // strictWhenReady reports an op a v2-ready script must implement, whose
@@ -297,12 +366,24 @@ func strictWhenReady(op string) bool {
 	}
 }
 
-// strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
-// nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
-// ([runtime.ErrMetaUnsupported]), or a peek that read nothing (the op's
-// failure, never an empty screen). (is-running needs no entry: its exit 2
-// already reads as no answer. A v2-ready listing is `inventory`, whose
-// exit 2 is a failure like any other.)
+// opsCarrierDrivingOp reports one of the five driving ops carrier.ops
+// selects in place of tmux over exec.
+func opsCarrierDrivingOp(op string) bool {
+	switch op {
+	case "nudge", "peek", "send-keys", "interrupt", "clear-scrollback":
+		return true
+	default:
+		return false
+	}
+}
+
+// strictExitTwo is a strict exit 2 from op (Provider.exitTwoIsStrict): a stop
+// that stopped nothing ([runtime.ErrStopUnsupported]), a metadata op with no
+// store ([runtime.ErrMetaUnsupported]), or a driving op, a peek included,
+// that did nothing (the op's failure, never an empty screen or a delivered
+// nudge). (is-running needs no entry: its exit 2 already reads as no answer.
+// A v2-ready listing is `inventory`, whose exit 2 is a failure like any
+// other.)
 func strictExitTwo(op string, base error) error {
 	switch op {
 	case "stop":
@@ -329,7 +410,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	cmd.Env = p.cityEnv()
+	cmd.Env = p.opEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -344,6 +425,15 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 //
+// For a pack sharing the host filesystem, Start first stages the work dir
+// and runs pre_start on the host (fatal: no box is created), leaves that
+// work out of the start config, and runs session_setup on the host once the
+// agent is up (hoststage.go). It does that host work only into a name the
+// pack reports holding no live box (vacant, or held by a dead box the start
+// recycles): into a name a running box holds it would re-run pre_start in a
+// live session's work dir, and a name whose occupancy read fails may be
+// one, so there it sends the full config instead.
+//
 // A [runtime.Config.FreshOnly] start is startFresh's.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if cfg.FreshOnly {
@@ -354,12 +444,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
 	// question the teardown below actually depends on.
-	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
+	before := p.readOccupancy(name)
+	occupiedBefore, occupancyKnown := before.occupied, before.definite
 	foreignBox := occupancyKnown && occupiedBefore
 
-	data, err := marshalStartConfig(cfg)
+	hostWork := before.holdsNoLiveBox() && p.sharesHostFS()
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling start config: %w", err)
+		return err
 	}
 	var saved savedPaneFence
 	if !occupancyKnown || occupiedBefore {
@@ -379,6 +471,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
+	}
+	if hostWork {
+		p.runHostSessionSetup(ctx, name, cfg)
 	}
 	return nil
 }
@@ -445,28 +540,41 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
 // (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
-// over. Otherwise the welded `start` op provisions and launches in one shot
-// (compat). Gates [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
+// over, using the default tmux carrier. carrier.ops never enables it. Otherwise
+// the welded `start` op provisions and launches in one shot (compat). Gates
+// [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
 func (p *Provider) supportsSeparableLaunch() bool {
-	return p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
+	return !p.opsCarrierSelected() &&
+		p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
 		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
 }
 
 // provisionBox creates the box for name. When the pack supports a separable
 // launch it runs the `provision` op (box + staging + pre_start, NO agent); the
 // agent is launched separately by launchAgent. Otherwise it falls back to the
-// welded Start (which both provisions and launches). (Un-weld B3b.)
+// welded Start (which both provisions and launches). (Un-weld B3b.) For a pack
+// sharing the host filesystem, and as in Start only into a name the pack
+// reports holding no live box, the host work precedes `provision` and is
+// left out of its config; session_setup then follows the launch
+// (execTransport.Launch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
-	data, err := marshalStartConfig(cfg)
+	p.hostSetupDue.Delete(name)
+	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
+	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
-		return fmt.Errorf("exec provider: marshaling provision config: %w", err)
+		return err
 	}
-	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
-	return err
+	if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+		return err
+	}
+	if hostWork {
+		p.hostSetupDue.Store(name, struct{}{})
+	}
+	return nil
 }
 
 // launchAgent starts the agent in the in-box tmux session over the `exec` op, for
@@ -513,14 +621,23 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
 // ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// the agent in the warm box over the exec op (launchAgent) — no reprovision —
+// and, for a pack sharing the host filesystem, then runs session_setup on the
+// host again, as the launch after provision does and as tmux re-runs it on a
+// relaunch. Pre_start and staging are not redone: the box is warm. A
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
 // degrades to a full reprovision (Stop+Start), which is still correct. On a
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.supportsSeparableLaunch() {
-		return p.launchAgent(ctx, name, cfg)
+		if err := p.launchAgent(ctx, name, cfg); err != nil {
+			return err
+		}
+		if p.sharesHostFS() {
+			p.runHostSessionSetup(ctx, name, cfg)
+		}
+		return nil
 	}
 	if err := p.Stop(name); err != nil {
 		return err
@@ -580,10 +697,10 @@ func (p *Provider) startStartupWatch(
 	name string,
 	firstEventTimeout time.Duration,
 ) (<-chan string, func() error, bool, error) {
-	env := p.cityEnv()
+	env := p.opEnv()
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(watchCtx, env)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -798,38 +915,46 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// execTmuxSession is the in-box tmux session the carrier addresses. An exec-pack
-// runtime runs one agent per box in a tmux session named "main" (the tmux-in-box
-// convention shared with the Kubernetes provider), so the driving verbs are
-// reproduced as tmux commands over the exec op rather than dedicated
-// nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+// execTmuxSession is the in-box session the undeclared tmux carrier addresses.
+// carrier.ops packs instead use their dedicated driving ops.
 const execTmuxSession = "main"
 
 // defaultLaunchShell is the in-box command launchAgent runs when the config
 // carries no Command (a holding shell, matching the welded packs' default).
 const defaultLaunchShell = "/bin/sh"
 
-// carrier drives the in-box tmux session over this provider's own exec op.
+// opsCarrierSelected requires an explicit successful handshake declaration.
+// Unknown tokens and a failed handshake retain the undeclared tmux default.
+func (p *Provider) opsCarrierSelected() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityCarrierOps)
+}
+
+// carrier selects the pack's driving wire, never from proc.exec alone.
 func (p *Provider) carrier() runtime.Carrier {
+	if p.opsCarrierSelected() {
+		return opsCarrier{p}
+	}
 	return runtime.NewTmuxCarrier(p, execTmuxSession)
 }
 
-// The dedicated-wire-op driving helpers. The public driving methods
-// (Nudge/Peek/SendKeys/Interrupt/ClearScrollback) try the tmux carrier over the
-// exec op first and fall back to these when the runtime does not implement exec
-// (ErrExecUnsupported): a pack that ships exec + tmux-in-box is
-// driven over the carrier, while a pack that only implements the older dedicated
-// driving ops (the gc-session-k8s reference) keeps working unchanged. The
+// The dedicated-wire-op driving helpers back carrier.ops directly, which
+// makes their exit 2 a failure (exitTwoIsStrict). Without that declaration,
+// the public driving methods (Nudge/Peek/SendKeys/Interrupt/ClearScrollback)
+// try the tmux carrier over the exec op first and fall back to these when the
+// runtime does not implement exec (ErrExecUnsupported): a pack that ships
+// exec + tmux-in-box is driven over the carrier, while a pack that only
+// implements the older dedicated driving ops (the gc-session-k8s reference)
+// keeps working unchanged, its exit 2 still the unknown-op no-op. The
 // startup readiness + dialog-dismissal subsystem calls the same public methods,
 // so it inherits the same carrier-then-fallback behavior. (watch-startup, a
 // streaming op the request/response exec connection cannot carry, remains a
 // direct wire op.)
-func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
+func (p *Provider) nudgeOp(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	message := runtime.FlattenText(content)
 	if message == "" {
 		return nil
 	}
-	_, err := p.run([]byte(message), "nudge", name)
+	_, err := p.runWithContext(ctx, p.timeout, []byte(message), "nudge", name)
 	return err
 }
 
@@ -838,8 +963,8 @@ func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
 // whose screen is gone): an empty screen with no error, for every caller, so
 // a start whose agent exits while its startup dialogs are read sees a blank
 // screen, not a failed start.
-func (p *Provider) peekOp(name string, lines int) (string, error) {
-	out, err := p.run(nil, "peek", name, strconv.Itoa(lines))
+func (p *Provider) peekOp(ctx context.Context, name string, lines int) (string, error) {
+	out, err := p.runWithContext(ctx, p.timeout, nil, "peek", name, strconv.Itoa(lines))
 	var e *opExitError
 	if errors.As(err, &e) && e.code == runtime.ExitCodeNoScreen && p.v2Ready() {
 		return "", nil
@@ -847,29 +972,31 @@ func (p *Provider) peekOp(name string, lines int) (string, error) {
 	return out, err
 }
 
-func (p *Provider) sendKeysOp(name string, keys ...string) error {
-	_, err := p.run(nil, append([]string{"send-keys", name}, keys...)...)
+func (p *Provider) sendKeysOp(ctx context.Context, name string, keys ...string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, append([]string{"send-keys", name}, keys...)...)
 	return err
 }
 
-func (p *Provider) interruptOp(name string) error {
-	_, err := p.run(nil, "interrupt", name)
+func (p *Provider) interruptOp(ctx context.Context, name string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, "interrupt", name)
 	return err
 }
 
-func (p *Provider) clearScrollbackOp(name string) error {
-	_, err := p.run(nil, "clear-scrollback", name)
+func (p *Provider) clearScrollbackOp(ctx context.Context, name string) error {
+	_, err := p.runWithContext(ctx, p.timeout, nil, "clear-scrollback", name)
 	return err
 }
 
-// Interrupt sends a soft interrupt (Ctrl-C) to the in-box tmux session over the
-// exec connection, falling back to the dedicated interrupt op when the runtime
-// does not implement exec.
+// Interrupt sends a soft interrupt through the selected carrier. Without a
+// declaration it tries tmux over exec, then interrupt on ErrExecUnsupported.
 func (p *Provider) Interrupt(name string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().Interrupt(context.Background(), name)
+	}
 	if err := p.carrier().Interrupt(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.interruptOp(name)
+	return p.interruptOp(context.Background(), name)
 }
 
 // IsRunning checks if the session is alive: script is-running <name>
@@ -887,14 +1014,43 @@ func (p *Provider) IsRunning(name string) bool {
 // A caller deciding whether it may destroy the box needs the distinction:
 // "no" authorizes a teardown, "I don't know" must not.
 func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
+	o := p.readOccupancy(name)
+	return o.occupied, o.definite
+}
+
+// occupancy is one read of whether a box holds a name: occupied by a live
+// or a dead box, live only by a running one, and definite when the pack
+// answered.
+type occupancy struct {
+	occupied, live, definite bool
+}
+
+// holdsNoLiveBox reports a definite answer that no running box holds the
+// name: it is vacant, or held only by a dead box.
+func (o occupancy) holdsNoLiveBox() bool {
+	return o.definite && !o.live
+}
+
+// readOccupancy reads boxOccupancy's answer, telling a running box from a
+// dead one where the pack can: on a v2-ready pack from `observe`; otherwise
+// `is-running`, whose true is taken as a live box.
+func (p *Provider) readOccupancy(name string) occupancy {
 	if p.v2Ready() {
 		o, err := p.observe(context.Background(), name, nil)
 		if err != nil {
-			return false, false
+			return occupancy{}
 		}
-		return o.present(), true
+		return occupancy{occupied: o.present(), live: o.state == stateRunning, definite: true}
 	}
-	return p.isRunningOp(name)
+	running, definite := p.isRunningOp(name)
+	return occupancy{occupied: running, live: running, definite: definite}
+}
+
+// holdsNoLiveBox reports whether the pack definitely reports no live box
+// holding name: vacant, or held by a dead box, which a start recycles. A
+// failed read reports nothing: the name may be held by a live session.
+func (p *Provider) holdsNoLiveBox(name string) bool {
+	return p.readOccupancy(name).holdsNoLiveBox()
 }
 
 // isRunningOp asks `is-running <name>` and reports both the answer and
@@ -915,6 +1071,32 @@ func (p *Provider) isRunningOp(name string) (running, definite bool) {
 	default:
 		return false, false
 	}
+}
+
+// requirePresent reports a session the pack can tell is gone as an error
+// wrapping [runtime.ErrSessionNotFound], so a driving call to it is never
+// reported delivered. On a v2-ready pack it reads `observe`: an absent or
+// dead box is gone, and a failed read wraps [runtime.ErrRuntimeUnavailable].
+// Otherwise it asks `is-running`, and only a definite "false" is gone; a pack
+// that cannot tell is let through, as before.
+//
+// The seam-backed driving verbs call it; the raw driving methods do not,
+// because the startup dialog loops drive a box through them.
+func (p *Provider) requirePresent(name string) error {
+	if p.v2Ready() {
+		o, err := p.observe(context.Background(), name, nil)
+		if err != nil {
+			return fmt.Errorf("session %q: %w", name, err)
+		}
+		if o.state != stateRunning {
+			return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+		}
+		return nil
+	}
+	if running, definite := p.isRunningOp(name); definite && !running {
+		return fmt.Errorf("session %q: %w", name, runtime.ErrSessionNotFound)
+	}
+	return nil
 }
 
 // IsAttached reports terminal attachment via `script is-attached <name>`
@@ -952,14 +1134,17 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return s == "" || s == "true"
 }
 
-// Nudge delivers content as input to the in-box tmux session (typed, then
-// submitted) over the exec connection, falling back to the dedicated nudge op
-// when the runtime does not implement exec. Empty content is a no-op.
+// Nudge delivers content and submits through the selected carrier. Without a
+// declaration it tries tmux over exec, then nudge on ErrExecUnsupported.
+// Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().Nudge(context.Background(), name, content)
+	}
 	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.nudgeOp(name, content)
+	return p.nudgeOp(context.Background(), name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>
@@ -981,13 +1166,16 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// Peek captures the last `lines` of the in-box tmux pane (all scrollback when
-// lines <= 0) over the exec connection, falling back to the dedicated peek op
-// when the runtime does not implement exec.
+// Peek reads the last lines through the selected carrier, all scrollback when
+// lines <= 0. Without a declaration it tries tmux over exec, then peek only
+// on ErrExecUnsupported.
 func (p *Provider) Peek(name string, lines int) (string, error) {
+	if p.opsCarrierSelected() {
+		return p.carrier().Peek(context.Background(), name, lines)
+	}
 	out, err := p.carrier().Peek(context.Background(), name, lines)
 	if errors.Is(err, runtime.ErrExecUnsupported) {
-		return p.peekOp(name, lines)
+		return p.peekOp(context.Background(), name, lines)
 	}
 	return out, err
 }
@@ -1010,14 +1198,17 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-// ClearScrollback clears the in-box tmux session's scrollback over the exec
-// connection, falling back to the dedicated clear-scrollback op when the runtime
-// does not implement exec.
+// ClearScrollback clears the selected carrier's scrollback. Without a
+// declaration it tries tmux over exec, then clear-scrollback only on
+// ErrExecUnsupported.
 func (p *Provider) ClearScrollback(name string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().ClearScrollback(context.Background(), name)
+	}
 	if err := p.carrier().ClearScrollback(context.Background(), name); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.clearScrollbackOp(name)
+	return p.clearScrollbackOp(context.Background(), name)
 }
 
 // CheckImage verifies that a container image exists locally by invoking:
@@ -1036,15 +1227,17 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	return err
 }
 
-// SendKeys sends bare tmux-style keystrokes (e.g. "Enter", "Down") to the in-box
-// tmux session over the exec connection; used for dialog dismissal and other
-// non-text input. Falls back to the dedicated send-keys op when the runtime does
-// not implement exec.
+// SendKeys sends bare keystrokes through the selected carrier, for dialog
+// dismissal and other non-text input. Without a declaration it tries tmux
+// over exec, then send-keys only on ErrExecUnsupported.
 func (p *Provider) SendKeys(name string, keys ...string) error {
+	if p.opsCarrierSelected() {
+		return p.carrier().SendKeys(context.Background(), name, keys...)
+	}
 	if err := p.carrier().SendKeys(context.Background(), name, keys...); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.sendKeysOp(name, keys...)
+	return p.sendKeysOp(context.Background(), name, keys...)
 }
 
 // RunLive re-applies session_live commands. For exec providers, runs
@@ -1067,9 +1260,9 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 }
 
 // SleepCapability reports the idle-sleep capability the pack's handshake
-// supports. A pack that declares report-activity, report-attachment and
-// proc.exec gets full idle sleep: it has an activity clock, an attachment
-// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// supports. Full idle sleep needs report-activity, report-attachment,
+// idle-boundary and either carrier.ops or the default carrier's proc.exec.
+// WaitForIdle reads through the selected carrier.
 // Every other pack keeps the timed-only floor. The floor is never disabled:
 // non-interactive sleep and the queued-nudge poller rely on timed-only for
 // exec runtimes that report no activity.
@@ -1123,20 +1316,24 @@ var (
 // v0 wire op carries the command on stdin and the runtime runs it, e.g. via
 // `sh -c "$(cat)"`), and the op's exit code is the command's exit code. A
 // runtime whose script does not implement exec (exit 2) yields
-// [runtime.ErrExecUnsupported]; the driving methods then fall back to the
-// dedicated nudge/peek/send-keys/interrupt/clear-scrollback wire ops.
+// [runtime.ErrExecUnsupported] when proc.exec is undeclared. The default
+// carrier's driving methods then fall back to dedicated wire ops. carrier.ops
+// selects those ops directly, independently of this connection.
 //
 // Because the v0 `exec` op uses stdin for the command itself, the command's
 // own stdin is not separately available; the driving ops reproduced over Exec
 // (tmux send-keys / capture-pane / …) do not need it.
 func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
+	if p.execUnsupported.Load() {
+		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
+	}
 	command := shellQuote(argv)
-	env := p.cityEnv()
+	env := p.opEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cmd.Env = env
+	cmd.Env = withDeadline(cmdCtx, env)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1160,9 +1357,16 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 				// exit code). A runtime that DECLARES the exec connection in its
 				// handshake implements the op, so exit 2 is the command's own exit
 				// code; only an UNDECLARED runtime means "op unimplemented" — fall
-				// back to the dedicated driving ops.
-				if p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec) {
+				// back to the dedicated driving ops. Only a successful
+				// handshake's answer is remembered: a failed one reads as
+				// undeclared until its retry, and remembering that would pin
+				// a proc.exec pack to the dedicated ops for the provider's life.
+				info, herr := p.Protocol()
+				if herr == nil && info.Has(runtime.ProtocolCapabilityConnectionExec) {
 					return stdout.Bytes(), 2, nil
+				}
+				if herr == nil {
+					p.execUnsupported.Store(true)
 				}
 				return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 			}

@@ -119,6 +119,14 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrProcessNotConfirmedDead reports that a provider-managed process was sent
+// SIGKILL but had not left the run/ready set when the bounded reap wait ran
+// out (a process in uninterruptible sleep can outlive its own SIGKILL). The
+// process may still be alive, so the error is retryable and is never "gone":
+// [IsSessionGone] is false for it, and a teardown caller must keep the
+// session's bookkeeping instead of treating Stop as having succeeded.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
@@ -290,6 +298,12 @@ func MetaValue(v string, err error) (string, error) {
 // A wrap over a join is judged by the join, not by the wrap's text. An error
 // tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
+	// A process that may still be alive is never gone, whatever else the error
+	// says: a join with a "not found" leaf or a wrapped ErrSessionNotFound must
+	// not certify it dead.
+	if errors.Is(err, ErrProcessNotConfirmedDead) {
+		return false
+	}
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
 	case nil:
 		return false
@@ -724,6 +738,15 @@ type IdleSnapshotProvider interface {
 // message. It is not evidence of a running turn; callers fall back to the
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
+
+// ErrIdlePendingChoice reports an [IdleSnapshotProvider] observation that saw
+// a menu waiting for a choice: its highlighted option is drawn where the
+// ready prompt would be, so text sent now would pick an option instead of
+// reaching the composer. It wraps [ErrIdleIndeterminate], which is what every
+// caller that does not ask for it by name reads; the wait-idle pre-read
+// ([IdleBoundaryNow]) reads it as pending, since a menu does not close by
+// itself within a short wait.
+var ErrIdlePendingChoice = fmt.Errorf("%w: a menu awaits a choice", ErrIdleIndeterminate)
 
 // ErrWaitUnobserved reports that an idle or interrupt-boundary wait
 // ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
@@ -1239,7 +1262,8 @@ type LiveRuntime struct {
 // artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
-// interface. Callers must use a type assertion and continue safely when the
+// interface, or report false through [ConditionalProcessTableScanner].
+// Callers must use [AsProcessTableScanner] and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying

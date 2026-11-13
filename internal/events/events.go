@@ -262,6 +262,15 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionConfigDriftDeferred fires when the reconciler defers a
+	// config-drift restart because an ordinary seat holds assigned work. It
+	// fires once when the deferral episode is first recorded and once more,
+	// with escalated=true, when the episode outlives [daemon]
+	// drift_deferral_escalate_after. It is a signal only: the held work stays
+	// protected and the controller never drains, restarts or kills the session
+	// for it. Delivery is best-effort; a write the reconciler loses emits
+	// nothing and a later pass retries. See gastownhall/gascity#8345.
+	SessionConfigDriftDeferred = "session.config_drift_deferred"
 	// SessionWakeRefused fires when a durable explicit wake request
 	// (wake_request=explicit) is refused before the session ever reaches a
 	// live runtime — held, quarantined, or asleep past its idle-sleep
@@ -348,10 +357,20 @@ const (
 	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
-	ConvoyCreated         = "convoy.created"
-	ConvoyClosed          = "convoy.closed"
-	ControllerStarted     = "controller.started"
-	ControllerStopped     = "controller.stopped"
+	// SessionCreated fires when a session joins the city's set of open
+	// sessions (a session bead created open, or a closed one reopened) and
+	// SessionClosed when one leaves it (its session bead closed), so a client
+	// tracks the session list from the stream instead of polling. The
+	// controller derives each from the ledger's session-bead notifications,
+	// once per transition (session.ListTransitions); the envelope's Subject
+	// and SessionID are the session bead.
+	SessionCreated = "session.created"
+	SessionClosed  = "session.closed"
+
+	ConvoyCreated     = "convoy.created"
+	ConvoyClosed      = "convoy.closed"
+	ControllerStarted = "controller.started"
+	ControllerStopped = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -639,6 +658,17 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+	// StorageBindingStranded reports a converged city whose work store holds
+	// infrastructure-class rows the binding does not serve — a write gc could
+	// not fence, such as an agent's plain `bd create` carrying
+	// gc.root_bead_id. The payload's serving field says whether the city
+	// serves degraded around them (the stranded rows invisible to their class
+	// readers) or refuses, because a stranded id is held in the binding by a
+	// different bead. The controller publishes it at boot and from its periodic
+	// read-only recheck whenever the stranded set changes, and a converged
+	// event once it is empty again. Alerting subscribes to this type: a
+	// stranded city no longer announces itself by refusing to start.
+	StorageBindingStranded = "storage.binding.stranded"
 
 	// StorageRigImport is published once per rig by `gc storage migrate
 	// --from-rigs`: what the import did for that rig (imported, clean,
@@ -660,6 +690,15 @@ func IsJournalDerived(eventType string) bool {
 	return eventType == OpChanged || eventType == FactRecorded
 }
 
+// IsSessionListDerived reports whether eventType is one the controller
+// derives from session beads' bead.* notifications (session.created,
+// session.closed). No writer may author one: a client applies it to the
+// session list it read, and only the session bead can say whether the session
+// is open.
+func IsSessionListDerived(eventType string) bool {
+	return eventType == SessionCreated || eventType == SessionClosed
+}
+
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every
 // event type has a registered payload — a missing registration is a
@@ -674,6 +713,7 @@ var KnownEventTypes = []string{
 	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionStrandedClaims,
 	SessionUnknownState,
+	SessionConfigDriftDeferred,
 	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
@@ -684,6 +724,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
+	SessionCreated, SessionClosed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
@@ -728,7 +769,7 @@ var KnownEventTypes = []string{
 	OpChanged, FactRecorded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
-	StorageBindingNotConfigured,
+	StorageBindingNotConfigured, StorageBindingStranded,
 	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed

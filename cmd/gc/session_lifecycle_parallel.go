@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -658,6 +659,9 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// admitted counts the starts handed out by start and not yet finished, for
+	// busy. It is read without mu, from the controller's tick.
+	admitted atomic.Int64
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -670,7 +674,20 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.admitted.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.admitted.Add(-1)
+			t.wg.Done()
+		})
+	}, true
+}
+
+// busy reports whether any start handed out by start (an async session start
+// or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
+func (t *asyncStartTracker) busy() bool {
+	return t != nil && t.admitted.Load() > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -2019,6 +2036,11 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2070,7 +2092,7 @@ func runPreparedStartCandidate(
 	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
@@ -2857,17 +2879,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -2888,12 +2904,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
