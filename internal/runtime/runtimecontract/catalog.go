@@ -42,7 +42,7 @@
 //     states; gc's side of it, host staging, is runtimetest's
 //     RunHostStagingContract.
 //   - input (the input-outcome token), but for the missing-session and
-//     running-session nudge requirements the signaling cases back: the wire
+//     running-session requirements the signaling cases back: the wire
 //     words, the faults and the exit-code shapes have no runtime.Provider
 //     method of their own; gc's reading of them is the exec provider's.
 //
@@ -249,6 +249,7 @@ const (
 	ReqInputHeldSendTypedOnce   Code = "RPP-INPUT-009"
 	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
 	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
+	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -330,8 +331,9 @@ var catalog = []Requirement{
 	{ReqInputLostReplyUnknown, GroupInput, "under GC_RPP_FAULT=lose_reply (typed, reply lost), a nudge exits 80 unconfirmed and send-keys, interrupt and clear-scrollback exit 1: never not_sent (declared conformance-faults only)", true},
 	{ReqInputExitZeroIsDelivered, GroupInput, "exit 0 never carries a non-success outcome word", true},
 	{ReqInputHeldSendTypedOnce, GroupInput, "under GC_RPP_FAULT=hold_send, a second identical nudge while the first is unresolved exits 80 unconfirmed, and the text is typed once after release (declared conformance-faults only)", true},
-	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one valid outcome line", true},
+	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
 	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
+	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

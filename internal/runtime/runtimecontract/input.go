@@ -352,7 +352,8 @@ func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.Prot
 }
 
 // probeInputExit80OneLine checks that every exit 80 carries exactly one
-// valid outcome line.
+// outcome line gc reads as typed (sessionexec.ReadExit80Outcome): a
+// non-success word the op may answer.
 func probeInputExit80OneLine(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, false); !ok {
 		return StatusSkip, detail
@@ -367,8 +368,8 @@ func probeInputExit80OneLine(ctx context.Context, r *runner, hs runtime.Protocol
 			continue
 		}
 		seen++
-		if _, _, err := sessionexec.ParseInputOutcome(a.stdout); err != nil {
-			return StatusFail, fmt.Sprintf("%s exited 80 without exactly one valid outcome line (%s): %v", a.op, a, err)
+		if _, _, err := sessionexec.ReadExit80Outcome(a.op, a.stdout); err != nil {
+			return StatusFail, fmt.Sprintf("%s exited 80 with an answer gc reads as untyped (%s): %v", a.op, a, err)
 		}
 	}
 	if seen == 0 {
@@ -416,4 +417,32 @@ func probeInputDeadBoxGone(ctx context.Context, r *runner, hs runtime.ProtocolIn
 		return StatusFail, "a nudge to a dead box was typed into it"
 	}
 	return StatusPass, "every driving op to a dead box exits 80 gone, and nothing is typed"
+}
+
+// probeInputKeysDelivered checks that send-keys, interrupt and
+// clear-scrollback to a running box exit 0 with no line or one delivered
+// line: gc reads any exit 80 as a failure, so a key op that answers a
+// delivery on exit 80 fails every startup-dialog key and every interrupt.
+func probeInputKeysDelivered(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if ok, detail := inputDeclared(hs, false); !ok {
+		return StatusSkip, detail
+	}
+	name, cleanup, status, detail := startInputBox(ctx, r)
+	defer cleanup()
+	if status != StatusPass {
+		return status, detail
+	}
+	for _, op := range drivingOps[1:] {
+		a := drive(ctx, r, "", op, name, "")
+		if a.unsupported || a.code != 0 {
+			return StatusFail, fmt.Sprintf("%s to a running box answered %s, want exit 0", op, a)
+		}
+		if a.stdout == "" {
+			continue
+		}
+		if w, ok := a.word(); !ok || w != runtime.InputOutcomeDelivered {
+			return StatusFail, fmt.Sprintf("%s to a running box exited 0 with stdout %q, want nothing or one delivered line", op, a.stdout)
+		}
+	}
+	return StatusPass, "send-keys, interrupt and clear-scrollback to a running box exit 0"
 }

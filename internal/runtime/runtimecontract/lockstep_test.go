@@ -79,10 +79,10 @@ var contractCoverage = map[string]classification{
 	"ClearScrollback_NoError": {Deferred: "observation group not yet ported"},
 	"CopyTo_NoError":          {Deferred: "observation group not yet ported"},
 
-	// --- Signaling group (deferred) ---
-	"SendKeys_RunningSession":  {Deferred: "signaling group not yet ported"},
+	// --- Signaling group (the input group backs it under input-outcome) ---
+	"SendKeys_RunningSession":  {Code: ReqInputKeysDelivered},
 	"SendKeys_MissingSession":  {Code: ReqInputKeysAbsentGone},
-	"Interrupt_RunningSession": {Deferred: "signaling group not yet ported"},
+	"Interrupt_RunningSession": {Code: ReqInputKeysDelivered},
 	"Interrupt_MissingSession": {Code: ReqInputKeysAbsentGone},
 	"Nudge_RunningSession":     {Code: ReqInputNudgeDelivered},
 	"Nudge_MissingSession":     {Code: ReqInputNudgeAbsentGone},
@@ -124,7 +124,7 @@ var wireOnlyCodes = map[Code]bool{
 	// The input group's typed answers under the faults, the per-op words and
 	// the exit-code shapes (input-outcome): no runtime.Provider method states
 	// them; gc reads them in the exec provider. The missing-session and
-	// running-session nudges back the signaling cases.
+	// running-session answers back the signaling cases.
 	ReqInputWordsAllowedOnOp:    true,
 	ReqInputBlockedNotTyped:     true,
 	ReqInputUnavailable:         true,

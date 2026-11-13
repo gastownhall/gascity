@@ -91,6 +91,24 @@ func ParseInputOutcome(stdout string) (runtime.InputOutcome, string, error) {
 	return word, w.Detail, nil
 }
 
+// ReadExit80Outcome reads op's exit-80 stdout exactly as gc does: one
+// outcome line naming a non-success word op may answer. Anything else (no
+// line, two lines, a success word, an unknown word, a word op may not
+// answer) is an error wrapping the malformed-outcome failure, which gc reads
+// as untyped. It returns the word and its detail.
+func ReadExit80Outcome(op, stdout string) (runtime.InputOutcome, string, error) {
+	word, detail, err := ParseInputOutcome(stdout)
+	switch {
+	case err != nil:
+		return "", "", err
+	case word.Success():
+		return "", "", fmt.Errorf("%w: success word %q on exit %d", errMalformedOutcome, word, runtime.ExitCodeInputOutcome)
+	case !InputOutcomeAllowed(op, word):
+		return "", "", fmt.Errorf("%w: %s may not answer %q", errMalformedOutcome, op, word)
+	}
+	return word, detail, nil
+}
+
 // InputOutcomeError is the error the exec provider returns when a pack
 // declaring input-outcome answers op on session name with exit code and
 // stdout: nil for a delivery, runtime.ErrNudgeDeliveredUnobserved for a nudge
@@ -115,14 +133,9 @@ func inputOutcomeAnswer(op, name string, code int, stdout string, base error) er
 		}
 		return nil
 	case runtime.ExitCodeInputOutcome:
-		word, detail, err := ParseInputOutcome(stdout)
-		switch {
-		case err != nil:
+		word, detail, err := ReadExit80Outcome(op, stdout)
+		if err != nil {
 			return fmt.Errorf("%w: %w", err, base)
-		case word.Success():
-			return fmt.Errorf("%w: success word %q on exit %d: %w", errMalformedOutcome, word, code, base)
-		case !InputOutcomeAllowed(op, word):
-			return fmt.Errorf("%w: %s may not answer %q: %w", errMalformedOutcome, op, word, base)
 		}
 		return outcomeError(op, name, word, detail)
 	default:

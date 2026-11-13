@@ -475,8 +475,10 @@ no meaning of its own:
 the error it reports. Unknown fields are ignored.
 
 The exit code is the class and the line is detail inside it. Exit 0 always
-means delivered: gc ignores anything on exit 0 but the two delivered lines
-(conformance fails it). An exit 80 gc cannot read as one valid line (no line,
+means delivered: gc ignores anything on exit 0 but the two delivered lines,
+and conformance fails anything else a driving operation prints when it
+delivers to a running box (`RPP-INPUT-001` for `nudge`, `RPP-INPUT-012` for
+the other three). An exit 80 gc cannot read as one valid line (no line,
 two lines, more than 64 KiB, a delivered word, an unknown word, or a word the
 operation may not answer) is an untyped failure, which the queue charges like
 exit 1. A `nudge` that gc cancels at its deadline reads as `unconfirmed`,
@@ -510,7 +512,7 @@ is unaffected. Fenced input is not on this wire: `carrier.ops` refuses it
 before any operation runs.
 
 `gc runtime conformance` checks the token as the `input` group
-(`RPP-INPUT-001` to `RPP-INPUT-011`). With `conformance-faults` it also
+(`RPP-INPUT-001` to `RPP-INPUT-012`). With `conformance-faults` it also
 injects `GC_RPP_FAULT=blocked` (the box's agent waits on a pending
 interaction: `nudge` answers `pending_interaction` and types nothing),
 `lose_reply` (the input is typed, then the reply is lost: `nudge` answers

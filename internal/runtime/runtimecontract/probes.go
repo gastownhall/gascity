@@ -98,6 +98,7 @@ var probes = map[Code]probe{
 	ReqInputHeldSendTypedOnce:   probeInputHeldSendTypedOnce,
 	ReqInputExit80OneLine:       probeInputExit80OneLine,
 	ReqInputDeadBoxGone:         probeInputDeadBoxGone,
+	ReqInputKeysDelivered:       probeInputKeysDelivered,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {

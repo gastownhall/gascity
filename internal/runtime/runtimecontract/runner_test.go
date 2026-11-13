@@ -284,6 +284,10 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputDeadBoxGone, oedit("nudge", `if [ "$F" = dead ]; then out gone; fi; `, ``), "types a nudge into a dead box and answers delivered"},
 		{ReqInputDeadBoxGone, oedit("interrupt", `if [ "$F" = dead ]; then out gone; fi; `, `if [ "$F" = dead ]; then out not_sent; fi; `), "answers an interrupt to a dead box not_sent"},
 		{ReqInputDeadBoxGone, oedit("observe", `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead"`, `if false; then printf '{"state":"dead"`), "observe reports the dead box running"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out delivered;`), "exits 80 with a success word"},
+		{ReqInputKeysDelivered, oedit("send-keys", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; out delivered; `), "send-keys to a running box exits 80 delivered"},
+		{ReqInputKeysDelivered, oedit("clear-scrollback", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo cleared; exit 0; `), "clear-scrollback to a running box prints a non-outcome line on exit 0"},
+		{ReqInputKeysDelivered, oedit("interrupt", `printf '%s\n' "$*" >> "$box/typed"; `, `out not_sent; `), "refuses every interrupt to a running box"},
 		{ReqInputExit80OneLine, oedit("send-keys", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; echo '{"outcome":"gone"}'; exit 80; };`), "exits 80 with two outcome lines"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
