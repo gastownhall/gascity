@@ -1200,6 +1200,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every agent session now starts with `GIT_SSH_COMMAND` set to `ssh -o
+  ServerAliveInterval=20 -o ServerAliveCountMax=90` (#5661).** A `git push`
+  over SSH died with exit 141 (SIGPIPE) when a long pre-push hook outlasted
+  GitHub's idle-transport timeout; the keepalive holds the connection open for
+  up to 30 minutes. Git ranks `GIT_SSH_COMMAND` above `core.sshCommand`, and gc
+  does not read a clone's `core.sshCommand`, so a city that pins a deploy key
+  or a custom ssh wrapper there loses it for any git run from an agent
+  session. To keep it, export your own `GIT_SSH_COMMAND` where gc starts
+  sessions or in the agent's `env`: gc merges into an existing value, adding
+  the keepalive flags to an `ssh` command and leaving a non-ssh wrapper as it
+  is. A city whose remotes are all HTTPS is unaffected.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to
