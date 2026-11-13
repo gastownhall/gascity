@@ -505,7 +505,7 @@ func frozenWorkRecordRepoDir(s *Server, store beads.Store, bead beads.Bead) stri
 // update this note rather than find it silently wrong.
 func frozenWorkRecordLegacyRepoDir(s *Server, store beads.Store, dirs workRecordScopeDirs) string {
 	for _, rig := range dirs.rigs {
-		if !beads.SameStore(s.state.BeadStore(rig.Name), store) {
+		if !beads.SameStore(t7b2FrozenBeadStore(s.state, rig.Name), store) {
 			continue
 		}
 		// The path comes off the rig that MATCHED, not from a second lookup by

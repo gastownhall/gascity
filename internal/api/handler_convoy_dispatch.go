@@ -47,23 +47,15 @@ func logWorkflowSQLFallback(workflowID string, err error) {
 const workflowGraphStoreRefPrefix = sourceworkflow.GraphStoreRefPrefix
 
 // workflowStoreInfo is one leg of the workflow-root federation, as the API
-// names and reads it (workflowLegs), or one store an order read reads
-// (orderStoreInfosForState, appendOrdersClassStoreInfo).
+// names and reads it (workflowLegs), or one leg of the order-history
+// federation (orderHistoryLegs).
 type workflowStoreInfo struct {
 	ref       string
 	scopeKind string
 	scopeRef  string
-	// leg reads a workflow leg: Reader in the plan leg's gate role, Strict
-	// for a read that carried no marker. Zero on an order read's entry.
+	// leg reads the leg: Reader in the plan leg's gate role, Strict for a
+	// read that carried no marker.
 	leg storeref.TypedLeg
-	// store is what an order read reads: the store itself on an order entry,
-	// the leg's strict writable handle on a workflow leg an order read takes
-	// (workflowWritableStores, workflowStoreByRef). It is nil on the entries
-	// workflowStores and workflowStoresIncludingRetiredRigs hand out, which
-	// no order read takes; every order read skips an entry with no store.
-	// T7f gives the order reads legs; until then this is the raw field they
-	// read.
-	store beads.Store
 }
 
 type workflowRootMatch struct {
@@ -633,8 +625,7 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 }
 
 // workflowStores is the workflow legs (workflowLegs) the workflow readers
-// read. Its entries carry no store (workflowStoreInfo.store); an order read
-// takes workflowWritableStores.
+// read.
 func workflowStores(state State) []workflowStoreInfo {
 	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
 	return infos
@@ -645,18 +636,6 @@ func workflowStores(state State) []workflowStoreInfo {
 // subject), which a relic-free rig still holds.
 func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
 	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{includeRetiredRigs: true})
-	return infos
-}
-
-// workflowWritableStores is workflowStores for the order reads that still
-// take a store (huma_handlers_orders.go, orders_feed.go; T7f converts them):
-// each entry's store is the strict writable handle on its leg, so those reads
-// see what they saw over the raw store.
-func workflowWritableStores(state State) []workflowStoreInfo {
-	infos, resident := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
-	for i := range infos {
-		infos[i].store = resident(infos[i])
-	}
 	return infos
 }
 
@@ -753,30 +732,15 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		// One epoch for the request: the legs and the shared-store fallback
 		// read the same rig set.
 		st := state.Stores()
-		infos, resident := workflowLegs(st, state.CityName(), workflowLegQuery{includeRetiredRigs: true, keepRigNamedLikeCity: true})
-		info, ok := workflowLegNamed(st, infos, kind+":"+scopeRef)
-		if !ok {
-			return workflowStoreInfo{}, false
-		}
-		info.store = resident(info)
-		return info, true
+		infos, _ := workflowLegs(st, state.CityName(), workflowLegQuery{includeRetiredRigs: true, keepRigNamedLikeCity: true})
+		return workflowLegNamed(st, infos, kind+":"+scopeRef)
 	case ordersClassStoreRefPrefix:
-		// Round-trip the orders-class ref minted by appendOrdersClassStoreInfo: the
-		// order history list hands it to a client as the store_ref for every
-		// binding-resident tracking bead, and the detail endpoint takes it back. On
-		// a default city (orders == city) there is no orders entry to name, so this
-		// resolves nothing and callers fall back to the store scan.
-		ordersStore := state.Stores().Orders().Store
-		cityName := workflowCityScopeRef(state.CityName())
-		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
-			return workflowStoreInfo{}, false
-		}
-		return workflowStoreInfo{
-			ref:       ordersClassStoreRefPrefix + ":" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     ordersStore,
-		}, true
+		// Round-trip the orders-class ref the order history names a
+		// binding-resident tracking bead's store by (orderHistoryLegs); the
+		// detail endpoint takes it back. On a city whose orders handle is its
+		// work handle there is no orders leg to name, so this resolves nothing
+		// and callers fall back to the store scan.
+		return orderHistoryOrdersRef(state.Stores(), state.CityName(), scopeRef)
 	}
 	return workflowStoreInfo{}, false
 }

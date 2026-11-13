@@ -146,12 +146,9 @@ func TestFakeStateStoresWrapTheResidueAccessors(t *testing.T) {
 var reviewedResidueCallers = map[string]int{
 	// Not the accessor: SeededCityDeps' field of the same name, read by the
 	// integration-tag dashport seam (OD-6). The guard matches by name.
-	"dashport_support.go newSeededState CityBeadStore":              1,
-	"handler_convoy_dispatch.go workflowStoreByRef CityBeadStore":   1,
-	"handler_sling.go Server.sourceWorkflowStores BeadStores":       2,
-	"handler_sling.go Server.sourceWorkflowStores CityBeadStore":    1,
-	"huma_handlers_orders.go orderStoreInfosForState BeadStore":     1,
-	"huma_handlers_orders.go orderStoreInfosForState CityBeadStore": 1,
+	"dashport_support.go newSeededState CityBeadStore":           1,
+	"handler_sling.go Server.sourceWorkflowStores BeadStores":    2,
+	"handler_sling.go Server.sourceWorkflowStores CityBeadStore": 1,
 }
 
 // TestStateResidueAccessorCallers holds the production uses of State's raw

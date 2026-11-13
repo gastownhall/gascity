@@ -29,6 +29,17 @@ package api
 //
 // Neither kind can hide a change of which store a read or write touched.
 //
+// T7d.2 retyped these copies, and changed nothing they do: workflowStoreInfo
+// became t7dFrozenInfo (production dropped its store field), a frozen root
+// match keeps its frozen entry beside the live match selectWorkflowRootMatch
+// takes, the live pure scope helpers take info.live(), state.BeadStore became
+// t7b2FrozenBeadStore (production dropped it from State), rigGraphRelicReporter
+// became t7b2FrozenRigGraphRelicReporter (T7d.2 deleted it), and the two order
+// helpers T7d.2 converted (orderTrackingUpdatedAt,
+// orderHistoryBeadAcrossStoreInfos) became their frozen copies from main
+// 8d2fb3120c (order_history_handlers_reference_test.go), the code these
+// copies called when they were taken.
+//
 // The SQL fast paths are left out: no fixture here has a Dolt server, so the
 // live code takes the store scan too (the table asserts it).
 //
@@ -88,20 +99,20 @@ func (s *frozenPrefetchedDepStore) DepList(id, direction string) ([]beads.Dep, e
 	return result, nil
 }
 
-func frozenWorkflowStores(state State) []workflowStoreInfo {
+func frozenWorkflowStores(state State) []t7dFrozenInfo {
 	return frozenWorkflowStoresWith(state, false)
 }
 
 // frozenWorkflowStoresIncludingRetiredRigs is frozenWorkflowStores with every rig leg,
 // relic-free or not, for a reader that may be looking for rig WORK (an event
 // subject), which a relic-free rig still holds.
-func frozenWorkflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
+func frozenWorkflowStoresIncludingRetiredRigs(state State) []t7dFrozenInfo {
 	return frozenWorkflowStoresWith(state, true)
 }
 
-func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowStoreInfo {
+func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []t7dFrozenInfo {
 	beadStores := state.BeadStores()
-	stores := make([]workflowStoreInfo, 0, len(beadStores)+2)
+	stores := make([]t7dFrozenInfo, 0, len(beadStores)+2)
 	cityName := workflowCityScopeRef(state.CityName())
 	cityStore := state.CityBeadStore()
 
@@ -114,7 +125,7 @@ func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowSt
 	// scope metadata, which workflowSnapshotScope prefers) but a distinct ref so the
 	// store-scan dedup never conflates it with the city store.
 	if graphStore := state.Stores().Graph().Store; graphStore != nil && graphStore != cityStore {
-		stores = append(stores, workflowStoreInfo{
+		stores = append(stores, t7dFrozenInfo{
 			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
@@ -123,7 +134,7 @@ func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowSt
 	}
 
 	if cityStore != nil {
-		stores = append(stores, workflowStoreInfo{
+		stores = append(stores, t7dFrozenInfo{
 			ref:       "city:" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
@@ -135,7 +146,7 @@ func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowSt
 		if rigName == cityName {
 			continue
 		}
-		store := state.BeadStore(rigName)
+		store := t7b2FrozenBeadStore(state, rigName)
 		if store == nil {
 			continue
 		}
@@ -147,7 +158,7 @@ func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowSt
 		if !includeRetiredRigs && frozenRigGraphLegRetired(state, rigName) {
 			continue
 		}
-		stores = append(stores, workflowStoreInfo{
+		stores = append(stores, t7dFrozenInfo{
 			ref:       "rig:" + rigName,
 			scopeKind: beadmeta.ScopeKindRig,
 			scopeRef:  rigName,
@@ -158,19 +169,19 @@ func frozenWorkflowStoresWith(state State, includeRetiredRigs bool) []workflowSt
 	return stores
 }
 
-func frozenWorkflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
+func frozenWorkflowStoreByRef(state State, ref string) (t7dFrozenInfo, bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return workflowStoreInfo{}, false
+		return t7dFrozenInfo{}, false
 	}
 
 	kind, scopeRef, ok := strings.Cut(ref, ":")
 	if !ok {
-		return workflowStoreInfo{}, false
+		return t7dFrozenInfo{}, false
 	}
 	scopeRef = strings.TrimSpace(scopeRef)
 	if scopeRef == "" {
-		return workflowStoreInfo{}, false
+		return t7dFrozenInfo{}, false
 	}
 
 	switch strings.TrimSpace(kind) {
@@ -178,9 +189,9 @@ func frozenWorkflowStoreByRef(state State, ref string) (workflowStoreInfo, bool)
 		cityStore := state.CityBeadStore()
 		cityName := workflowCityScopeRef(state.CityName())
 		if cityStore == nil || scopeRef != cityName {
-			return workflowStoreInfo{}, false
+			return t7dFrozenInfo{}, false
 		}
-		return workflowStoreInfo{
+		return t7dFrozenInfo{
 			ref:       "city:" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
@@ -193,9 +204,9 @@ func frozenWorkflowStoreByRef(state State, ref string) (workflowStoreInfo, bool)
 		graphStore := state.Stores().Graph().Store
 		cityName := workflowCityScopeRef(state.CityName())
 		if graphStore == nil || graphStore == state.CityBeadStore() || scopeRef != cityName {
-			return workflowStoreInfo{}, false
+			return t7dFrozenInfo{}, false
 		}
-		return workflowStoreInfo{
+		return t7dFrozenInfo{
 			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
@@ -210,27 +221,27 @@ func frozenWorkflowStoreByRef(state State, ref string) (workflowStoreInfo, bool)
 		ordersStore := state.Stores().Orders().Store
 		cityName := workflowCityScopeRef(state.CityName())
 		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
-			return workflowStoreInfo{}, false
+			return t7dFrozenInfo{}, false
 		}
-		return workflowStoreInfo{
+		return t7dFrozenInfo{
 			ref:       ordersClassStoreRefPrefix + ":" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
 			store:     ordersStore,
 		}, true
 	case beadmeta.ScopeKindRig:
-		store := state.BeadStore(scopeRef)
+		store := t7b2FrozenBeadStore(state, scopeRef)
 		if store == nil {
-			return workflowStoreInfo{}, false
+			return t7dFrozenInfo{}, false
 		}
-		return workflowStoreInfo{
+		return t7dFrozenInfo{
 			ref:       "rig:" + scopeRef,
 			scopeKind: beadmeta.ScopeKindRig,
 			scopeRef:  scopeRef,
 			store:     store,
 		}, true
 	}
-	return workflowStoreInfo{}, false
+	return t7dFrozenInfo{}, false
 }
 
 // frozenSortedRigNames returns rig names from the store map in deterministic sorted order,
@@ -262,7 +273,7 @@ func frozenSortedRigNames(stores map[string]beads.Store) []string {
 // single-store city never retires a rig leg, because there the rig store is
 // where the rig's graph rows live.
 func frozenRigGraphLegRetired(state State, rig string) bool {
-	reporter, ok := state.(rigGraphRelicReporter)
+	reporter, ok := state.(t7b2FrozenRigGraphRelicReporter)
 	if !ok || rig == "" {
 		return false
 	}
@@ -271,7 +282,7 @@ func frozenRigGraphLegRetired(state State, rig string) bool {
 
 // frozenWorkflowRigLegRetired is frozenRigGraphLegRetired for a workflow store entry: only
 // a rig entry can be retired.
-func frozenWorkflowRigLegRetired(state State, info workflowStoreInfo) bool {
+func frozenWorkflowRigLegRetired(state State, info t7dFrozenInfo) bool {
 	if info.scopeKind != beadmeta.ScopeKindRig {
 		return false
 	}
@@ -281,13 +292,13 @@ func frozenWorkflowRigLegRetired(state State, info workflowStoreInfo) bool {
 // frozenWorkflowGraphStoreInfo returns the graph binding's workflow store entry on a
 // city that relocates the graph class, and false on every other city (where
 // the graph store IS the city store and no separate probe is needed).
-func frozenWorkflowGraphStoreInfo(state State) (workflowStoreInfo, bool) {
+func frozenWorkflowGraphStoreInfo(state State) (t7dFrozenInfo, bool) {
 	graphStore := state.Stores().Graph().Store
 	if graphStore == nil || graphStore == state.CityBeadStore() {
-		return workflowStoreInfo{}, false
+		return t7dFrozenInfo{}, false
 	}
 	cityName := workflowCityScopeRef(state.CityName())
-	return workflowStoreInfo{
+	return t7dFrozenInfo{
 		ref:       workflowGraphStoreRefPrefix + ":" + cityName,
 		scopeKind: beadmeta.ScopeKindCity,
 		scopeRef:  cityName,
@@ -362,13 +373,13 @@ func frozenWorkflowEventBeadFromSubject(state State, subjectID string) (beads.Be
 	return beads.Bead{}, false
 }
 
-func frozenWorkflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.Bead, bool) {
+func frozenWorkflowEventRoot(state State, bead beads.Bead) (t7dFrozenInfo, beads.Bead, bool) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" && workflowKind(bead) == "workflow" {
 		rootID = bead.ID
 	}
 	if rootID == "" {
-		return workflowStoreInfo{}, beads.Bead{}, false
+		return t7dFrozenInfo{}, beads.Bead{}, false
 	}
 
 	// gc.root_store_ref is the run's SCOPE, never its location (S4 §2.1). On a
@@ -391,7 +402,7 @@ func frozenWorkflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, b
 		}
 	}
 
-	matches := make([]workflowRootMatch, 0, 2)
+	matches := make([]t7dFrozenRootMatch, 0, 2)
 	for _, info := range frozenWorkflowStores(state) {
 		if info.store == nil || frozenWorkflowRigLegRetired(state, info) {
 			continue
@@ -408,13 +419,13 @@ func frozenWorkflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, b
 			return nil
 		})
 		if ok {
-			matches = append(matches, workflowRootMatch{info: info, root: root})
+			matches = append(matches, t7dFrozenRootMatch{info: info, root: root})
 		}
 	}
 	if len(matches) == 1 {
 		return matches[0].info, matches[0].root, true
 	}
-	return workflowStoreInfo{}, beads.Bead{}, false
+	return t7dFrozenInfo{}, beads.Bead{}, false
 }
 
 func frozenWorkflowRootInStore(store beads.Store, rootID string) (beads.Bead, bool) {
@@ -444,13 +455,15 @@ func frozenBuildWorkflowSnapshot(s *Server, workflowID, fallbackScopeKind, fallb
 	seenStoreRefs := make(map[string]bool, len(stores))
 	matches := make([]workflowRootMatch, 0)
 	seenMatches := make(map[workflowMatchKey]bool)
-	addMatch := func(info workflowStoreInfo, root beads.Bead) {
+	frozenOf := make(map[workflowMatchKey]t7dFrozenInfo)
+	addMatch := func(info t7dFrozenInfo, root beads.Bead) {
 		key := workflowMatchKey{ref: info.ref, id: root.ID}
 		if seenMatches[key] {
 			return
 		}
 		seenMatches[key] = true
-		matches = append(matches, workflowRootMatch{info: info, root: root})
+		frozenOf[key] = info
+		matches = append(matches, workflowRootMatch{info: info.live(), root: root})
 	}
 	// cityScopeRef feeds the legacy city-on-rig preserve path. Derive it from
 	// the city name directly (as the SQL path does) instead of harvesting it
@@ -536,7 +549,7 @@ func frozenBuildWorkflowSnapshot(s *Server, workflowID, fallbackScopeKind, fallb
 		return nil, errWorkflowNotFound
 	}
 
-	return frozenSnapshotFromStore(s, match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
+	return frozenSnapshotFromStore(s, frozenOf[workflowMatchKey{ref: match.info.ref, id: match.root.ID}], match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
 }
 
 // frozenSnapshotFromStore builds a workflow snapshot for one store. Both of its
@@ -561,7 +574,7 @@ func frozenBuildWorkflowSnapshot(s *Server, workflowID, fallbackScopeKind, fallb
 // doc says must not exist. Fixing it moves this read onto beads.DirectMembers
 // (or onto TierBoth), which changes what this endpoint returns for wisp
 // molecules; that is its own slice.
-func frozenSnapshotFromStore(_ *Server, info workflowStoreInfo, root beads.Bead, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, storesScanned []string, listPartial bool, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
+func frozenSnapshotFromStore(_ *Server, info t7dFrozenInfo, root beads.Bead, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, storesScanned []string, listPartial bool, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Try direct SQL path — ~500x faster than N+1 bd subprocess calls.
 	var (
 		workflowBeads []beads.Bead
@@ -629,7 +642,7 @@ func frozenSnapshotFromStore(_ *Server, info workflowStoreInfo, root beads.Bead,
 
 	workflowDeps, partial := frozenCollectWorkflowDeps(store, beadIndex)
 	partial = partial || listPartial
-	scopeKind, scopeRef := workflowSnapshotScope(info, root, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
+	scopeKind, scopeRef := workflowSnapshotScope(info.live(), root, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
 
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
@@ -1236,7 +1249,7 @@ func frozenBuildWorkflowRunProjections(state State, requestedScopeKind, requeste
 				continue
 			}
 
-			scopeKind, scopeRef := workflowProjectionScope(info, bead, cityScopeRef, requestedScopeKind, requestedScopeRef)
+			scopeKind, scopeRef := workflowProjectionScope(info.live(), bead, cityScopeRef, requestedScopeKind, requestedScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
 				continue
 			}
@@ -1373,7 +1386,7 @@ func frozenBuildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, 
 				continue
 			}
 
-			scopeKind, scopeRef := workflowProjectionScope(info, root, cityScopeRef, requestedScopeKind, requestedScopeRef)
+			scopeKind, scopeRef := workflowProjectionScope(info.live(), root, cityScopeRef, requestedScopeKind, requestedScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
 				continue
 			}
@@ -1499,7 +1512,7 @@ func frozenBuildOrderRunFeedItems(state State, requestedScopeKind, requestedScop
 				continue
 			}
 
-			updatedAt := orderTrackingUpdatedAt(front, run, latestOpenCache)
+			updatedAt := t7d2FrozenOrderTrackingUpdatedAt(front, run, latestOpenCache)
 			orderDef, ok := orderByScopedName[run.Scoped]
 			title := orderTrackingTitle(run.Scoped, orderDef, ok)
 			target := orderTrackingTarget(orderDef, ok, run)
@@ -1547,7 +1560,7 @@ func frozenBuildOrderRunFeedItems(state State, requestedScopeKind, requestedScop
 // every city that relocates nothing: Stores().Orders() wraps CityBeadStore()
 // there, so the read stays byte-identical rather than scanning one database
 // twice.
-func frozenAppendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, cityName string) []workflowStoreInfo {
+func frozenAppendOrdersClassStoreInfo(infos []t7dFrozenInfo, state State, cityName string) []t7dFrozenInfo {
 	ordersStore := state.Stores().Orders().Store
 	if ordersStore == nil {
 		return infos
@@ -1557,7 +1570,7 @@ func frozenAppendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, ci
 			return infos
 		}
 	}
-	return append(infos, workflowStoreInfo{
+	return append(infos, t7dFrozenInfo{
 		ref:       ordersClassStoreRefPrefix + ":" + cityName,
 		scopeKind: beadmeta.ScopeKindCity,
 		scopeRef:  cityName,
@@ -1581,9 +1594,9 @@ func frozenHumaHandleOrderHistoryDetail(_ context.Context, s *Server, input *Ord
 		if !ok {
 			return nil, apierr.ScopeNotFound.Msg("store_ref does not resolve to a known scope")
 		}
-		storeInfos = []workflowStoreInfo{info}
+		storeInfos = []t7dFrozenInfo{info}
 	}
-	result, err := orderHistoryBeadAcrossStoreInfos(storeInfos, input.BeadID)
+	result, err := t7d2FrozenOrderHistoryBeadAcrossStoreInfos(storeInfos, input.BeadID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.BeadNotFound.Msg("bead not found")

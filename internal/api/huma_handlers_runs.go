@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // runResourcePath is the canonical Run resource URL for one run — the value a
@@ -533,8 +534,9 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 
 	for _, target := range targets {
 		for _, rootID := range target.workflows {
-			// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			n, err := cancelWorkflowRoot(beads.GraphMolecule(beads.GraphStore{Store: target.store}), rootID)
+			// The run root's class (a graph workflow or a v1 work molecule)
+			// types the target; every nested drain item root shares its store.
+			n, err := cancelWorkflowRoot(storeref.MoleculeAt(target.store, target.root), rootID)
 			res.closed += n
 			if err != nil {
 				return res, err
@@ -575,8 +577,7 @@ func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) 
 // gc.root_bead_id) rather than from a further subtree read, which the close
 // makes for itself, so that no read beyond the walk delays the interrupts.
 func planRunCancel(target *runCancelTarget) ([]string, error) {
-	// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	tree, err := sourceworkflow.WorkflowTree(beads.GraphMolecule(beads.GraphStore{Store: target.store}), target.root.ID)
+	tree, err := sourceworkflow.WorkflowTree(storeref.MoleculeAt(target.store, target.root), target.root.ID)
 	if err != nil {
 		return nil, err
 	}

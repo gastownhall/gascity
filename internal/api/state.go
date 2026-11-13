@@ -85,16 +85,11 @@ type State interface {
 	// on the Server.
 	Stores() storeref.Stores
 
-	// BeadStore returns the bead store for a rig (by name).
-	// Returns nil if the rig doesn't exist. BeadStore, BeadStores and
-	// CityBeadStore stay raw until their last readers convert: the order
-	// readers (T7f), the orders-class workflow ref (T7d) and sling's source
-	// workflow stores (T7i), the T7 residue reviewedResidueCallers lists. The
-	// binding census the API plans by-id reads against crosses as
-	// Stores().Topology(), not here.
-	BeadStore(rig string) beads.Store
-
-	// BeadStores returns all rig names and their stores.
+	// BeadStores returns all rig names and their stores. BeadStores and
+	// CityBeadStore stay raw until their last reader converts: sling's source
+	// workflow stores (T7i), the T7 residue reviewedResidueCallers lists. A
+	// rig's store crosses as Stores().Rig(name); the binding census the API
+	// plans by-id reads against as Stores().Topology().
 	BeadStores() map[string]beads.Store
 
 	// MailProvider returns the mail provider for a rig.
