@@ -20,13 +20,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // stopSocketReplyMargin is how much longer a cross-process stop waits for the
-// owner's "ok" than the stop grace itself, covering the SIGKILL and reap that
-// follow an expired grace.
+// owner's reply than the owner's own stop and reap graces, covering scheduling
+// and the socket round trip.
 const stopSocketReplyMargin = 2 * time.Second
 
 // Config holds ACP provider settings.
@@ -73,9 +74,9 @@ func (c *Config) stopGrace() time.Duration {
 }
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies
-// only after its grace has run out and the process is gone.
+// only after its stop grace and the post-SIGKILL reap grace have both run out.
 func (c *Config) stopSocketTimeout() time.Duration {
-	return c.stopGrace() + stopSocketReplyMargin
+	return c.stopGrace() + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {
@@ -98,6 +99,7 @@ type Provider struct {
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
 	fenceChecked  func(name string)                                                            // test seam: runs between a fence check and its send
+	environFunc   func() []string                                                              // test seam: replaces execenv.Environ
 }
 
 // Compile-time check.
@@ -154,7 +156,34 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("acp start for %q: %w", name, err)
+	}
+	// Build environment: inherit parent env + apply overrides. Empty overrides
+	// withhold inherited variables, as they do for the other session runtimes.
+	// The parent env is read through execenv.Environ so a native beads store
+	// open projecting its scope's BEADS_* variables cannot leak into the session.
+	// It is read before the lifecycle lock and the startup reservation:
+	// execenv.Environ waits out an in-flight open and cannot be canceled, and
+	// Stop must not wait with it. A Stop during the wait finds no session, as
+	// one before Start does; a canceled ctx, checked again after the wait,
+	// abandons the start instead.
+	env := p.environ()
+	if len(cfg.Env) > 0 {
+		keys := make([]string, 0, len(cfg.Env))
+		for k := range cfg.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
+			env = append(env, k+"="+cfg.Env[k])
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("acp start for %q: %w", name, err)
 	}
 	lock, err := p.lockLifecycle(name, true)
 	if err != nil {
@@ -255,23 +284,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		cmd.Dir = cfg.WorkDir
 	}
 
-	// Build environment: inherit parent env + apply overrides. Empty overrides
-	// withhold inherited variables, as they do for the other session runtimes.
-	env := os.Environ()
-	if len(cfg.Env) > 0 {
-		keys := make([]string, 0, len(cfg.Env))
-		for k := range cfg.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = envWithoutKey(env, k)
-			if cfg.Env[k] == "" {
-				continue
-			}
-			env = append(env, k+"="+cfg.Env[k])
-		}
-	}
 	// The control-socket marker lets any gc process attribute this agent, and
 	// the tool children that inherit its environment, to a live owner; see
 	// [Provider.FindRuntimesBySessionID]. It is appended after the cfg.Env
@@ -530,6 +542,15 @@ func (p *Provider) openCapture(name string, env map[string]string, pid int) *tra
 	return c
 }
 
+// environ reads the parent environment a session inherits: execenv.Environ,
+// unless a test replaced it.
+func (p *Provider) environ() []string {
+	if p.environFunc != nil {
+		return p.environFunc()
+	}
+	return execenv.Environ()
+}
+
 func envWithoutKey(env []string, key string) []string {
 	prefix := key + "="
 	out := make([]string, 0, len(env))
@@ -606,6 +627,10 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
+//
+// A process that outlives SIGKILL yields [runtime.ErrProcessNotConfirmedDead],
+// in-process or relayed from the owner's control socket. Stop then keeps the
+// session's sidecars and socket for the retry: the process may still be alive.
 //
 // A dead connection whose name another provider has already rebound is not
 // this provider's to tear down. Stop evicts its own stale bookkeeping and
@@ -1211,7 +1236,9 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace and replies
+// [runtime.StopReplyNotConfirmedDead] instead of "ok" when the process outlives
+// SIGKILL. An "interrupt"
 // is fire-and-forget: it replies at once and runs owner.interrupt, the owner's
 // session/cancel-and-settle logic, in the background. "turn" and
 // "interrupt-turn <id>" answer from the owner's turn record (see
@@ -1232,8 +1259,11 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 	case controlTurn:
 		fmt.Fprintf(conn, "%s\n", owner.turn()) //nolint:errcheck
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply := "ok\n"
+		if err := runtime.TerminateManagedProcess(cmd, done, stopGrace); errors.Is(err, runtime.ErrProcessNotConfirmedDead) {
+			reply = runtime.StopReplyNotConfirmedDead + "\n"
+		}
+		conn.Write([]byte(reply)) //nolint:errcheck
 	case "interrupt":
 		// The settle can take the whole cancel_timeout plus the SIGINT
 		// retries, far longer than the caller's socket deadline, and the
@@ -1327,8 +1357,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 				return err
 			}
 			scanner := bufio.NewScanner(conn)
-			if scanner.Scan() && scanner.Text() == "ok" {
-				return nil
+			if scanner.Scan() {
+				switch scanner.Text() {
+				case "ok":
+					return nil
+				case runtime.StopReplyNotConfirmedDead:
+					return runtime.ErrProcessNotConfirmedDead
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				return err

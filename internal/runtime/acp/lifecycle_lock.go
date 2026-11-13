@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -18,20 +18,22 @@ func (p *Provider) lockLifecycle(name string, nonblocking bool) (*os.File, error
 		return nil, err
 	}
 	path := filepath.Join(p.dir, metaFilePrefix(name)+".lifecycle-lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	f, err := openLifecycleLockFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening lifecycle lock for %q: %w", name, err)
 	}
-	mode := syscall.LOCK_EX
-	if nonblocking {
-		mode |= syscall.LOCK_NB
-	}
-	if err := syscall.Flock(int(f.Fd()), mode); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: nonblocking,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, fmt.Errorf("%w: session %q lifecycle operation in progress", runtime.ErrSessionExists, name)
 		}
 		return nil, fmt.Errorf("locking lifecycle for %q: %w", name, err)
 	}
+	_ = lock
 	return f, nil
 }

@@ -100,7 +100,7 @@ func TestReadyReaderEscalatesThePlansPartialLegs(t *testing.T) {
 	}
 }
 
-func readyWireIDs(rows []readywork.Row) []string {
+func readyWireIDs(rows []readywork.ReadyBead) []string {
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.ID)
@@ -342,7 +342,7 @@ func (s readyCanonicalLegStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, 
 // beads.Bead is the domain model: it changes for internal reasons, and every one
 // of those changes would be published as a silent break in an array other
 // programs parse. The reader therefore projects onto its dedicated wire type,
-// readywork.Row.
+// readywork.ReadyBead, which `gc ready` and GET /v0/city/{cityName}/work/ready share.
 func TestReadyEmitsADedicatedWireTypeNotTheDomainBead(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})
@@ -352,8 +352,8 @@ func TestReadyEmitsADedicatedWireTypeNotTheDomainBead(t *testing.T) {
 		t.Fatalf("gc ready: %v", err)
 	}
 	elem := reflect.TypeOf(rows).Elem()
-	if elem != reflect.TypeOf(readywork.Row{}) {
-		t.Fatalf("gc ready emits []%s from %q; the external bd-compatible array must be the dedicated wire type readywork.Row, not a domain type whose fields move for internal reasons", elem.Name(), elem.PkgPath())
+	if elem != reflect.TypeOf(readywork.ReadyBead{}) {
+		t.Fatalf("gc ready emits []%s from %q; the external bd-compatible array must be the dedicated wire type readywork.ReadyBead, not a domain type whose fields move for internal reasons", elem.Name(), elem.PkgPath())
 	}
 	if elem == reflect.TypeOf(beads.Bead{}) {
 		t.Fatal("gc ready emits []beads.Bead, the domain model")
@@ -398,9 +398,9 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 		"labels", "metadata", "needs", "no_history", "parent", "priority",
 		"ref", "status", "title", "updated_at",
 	}
-	got := jsonFieldNames(reflect.TypeOf(readywork.Row{}))
+	got := jsonFieldNames(reflect.TypeOf(readywork.ReadyBead{}))
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("readywork.Row JSON fields = %v, want %v", got, want)
+		t.Fatalf("readywork.ReadyBead JSON fields = %v, want %v", got, want)
 	}
 	stored := make([]string, 0, len(got))
 	for _, field := range got {
@@ -410,7 +410,7 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 	}
 	domain := jsonFieldNames(reflect.TypeOf(beads.Bead{}))
 	if !reflect.DeepEqual(stored, domain) {
-		t.Fatalf("readywork.Row's stored JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", stored, domain)
+		t.Fatalf("readywork.ReadyBead's stored JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", stored, domain)
 	}
 }
 
@@ -418,7 +418,7 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 // gc's JSON surfaces, at the bytes.
 func TestReadyRowMarshalsUnderBdWireTags(t *testing.T) {
 	created := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
-	row := readywork.ToRow(beads.Bead{
+	row := readywork.ToReadyBead(beads.Bead{
 		ID:        "gcg-1",
 		Title:     "graph step",
 		Status:    "open",
@@ -604,7 +604,7 @@ func TestReadySingleStoreCityFederatesOneLeg(t *testing.T) {
 	}
 }
 
-func containsReadyID(rows []readywork.Row, id string) bool {
+func containsReadyID(rows []readywork.ReadyBead, id string) bool {
 	for _, r := range rows {
 		if r.ID == id {
 			return true
@@ -669,7 +669,7 @@ func TestReadyFailsLoudWhenALegErrors(t *testing.T) {
 		mustCreateReadyBead(t, cityStore, beads.Bead{Title: "city work", Type: "task"})
 
 		var stdout, stderr bytes.Buffer
-		code := cmdReady(readywork.Query{}, &stdout, &stderr)
+		code := cmdReady(readyFlags{}, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("gc ready exited 0 with the %q rig leg unopened; stdout=%s — a short array is indistinguishable from \"no work\", and stderr is not part of the answer any work query parses", readyBrokenRigName, stdout.String())
 		}
@@ -966,7 +966,7 @@ func TestReadyResultSchemaDescribesTheEmittedArray(t *testing.T) {
 		got = append(got, name)
 	}
 	slices.Sort(got)
-	if want := jsonFieldNames(reflect.TypeOf(readywork.Row{})); !reflect.DeepEqual(got, want) {
+	if want := jsonFieldNames(reflect.TypeOf(readywork.ReadyBead{})); !reflect.DeepEqual(got, want) {
 		t.Fatalf("schemas/ready/result.schema.json declares %v, but gc ready emits %v", got, want)
 	}
 }
@@ -1053,13 +1053,13 @@ func TestCmdReadyOnALegacyCityFederatesCityAndRigStores(t *testing.T) {
 // runCmdReady runs the command against the ambient city and decodes its array,
 // asserting the payload is the bd contract: it must decode BOTH as the wire type
 // and as []beads.Bead, which is the whole drop-in claim.
-func runCmdReady(t *testing.T, opts readywork.Query) []readywork.Row {
+func runCmdReady(t *testing.T, opts readywork.Query) []readywork.ReadyBead {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(opts, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{query: opts}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc ready = %d, stderr:\n%s", code, stderr.String())
 	}
-	var rows []readywork.Row
+	var rows []readywork.ReadyBead
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("gc ready emitted %q, which does not decode as the bd array: %v", stdout.String(), err)
 	}
@@ -1336,7 +1336,7 @@ func TestReadyLoadsCityConfigOnce(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
@@ -1356,7 +1356,7 @@ func TestReadyResolvesTheCityWithoutARigContext(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
@@ -1371,7 +1371,7 @@ func TestReadyResolvesTheCityWithoutARigContext(t *testing.T) {
 func TestReadyRejectsAMalformedQueryBeforeOpeningAnyStore(t *testing.T) {
 	newReadyCityWithBrokenRig(t)
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{Status: "bogus"}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readyFlags{query: readywork.Query{Status: "bogus"}}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc ready --status bogus exited 0; stdout=%s", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), `unknown --status "bogus"`) {
@@ -1484,7 +1484,7 @@ func TestDrainAckReleaseLoadsCityConfigOnce(t *testing.T) {
 
 	var stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	releaseUnexecutedClaimsForSession(cityDir, "worker-drained", &stderr)
+	releaseUnexecutedClaimsForSession(cityDir, "worker-drained", drainAckCaller{}, &stderr)
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
 		t.Fatalf("drain-ack release loaded the city config %d times over %d bound rigs, want exactly 1; stderr=%s", grew, len(readyCountedRigNames), stderr.String())
 	}
@@ -1524,7 +1524,7 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionClose([]string{sessionBead.ID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionClose with %d rigs = %d, want 0; stdout=%s stderr=%s", len(rigNames), code, stdout.String(), stderr.String())
 	}
 	return loadCityConfigCalls.Load() - before

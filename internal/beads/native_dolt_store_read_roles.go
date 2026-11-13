@@ -65,7 +65,9 @@ import (
 // three-value projection (mapBdStatus, ListQuery.Matches) is the only
 // definition of them and runs Go-side. The two statuses that map one-to-one
 // onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
-// which keeps the pinned-flag default lifted under a named status.
+// which keeps the pinned-flag default lifted under a named status. One
+// exception: a Live "open" is pushed as bd's raw "open" (nativeListPushesRawOpen).
+// That is the backing's own answer, and Live callers are owed it.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -89,14 +91,14 @@ func nativeListReadRequest() issueops.ListRequest {
 // Get retrieves a bead by ID: the row from the reader role's detail view, the
 // edges from EdgeReader.
 //
-// THE DETAIL VIEW IS THE ONE TOKEN SOURCE. issueops.IssueDetails.Revision is
-// the only place the optimistic-concurrency token is published to a client: the
-// row's own RowVersion is json:"-" and never crosses a wire, so a store that
-// read RowVersion off a served row would hand every guarded write a fabricated
-// 0 — which, being a real value that matches an un-mutated legacy row, is the
-// one wrong answer a CAS cannot detect. A LIST row publishes no token at all,
-// and Bead.Revision is left at zero there deliberately: absent is absent, never
-// 0, and a caller that means to act on a row it listed re-reads it here first.
+// THE TOKEN IS THE DETAIL VIEW'S. issueops.IssueDetails.Revision is the only
+// place the optimistic-concurrency token is published to a client: the row's
+// own RowVersion is json:"-" and never crosses a wire, so a store that read
+// RowVersion off a served row would hand every guarded write a fabricated 0 —
+// which, being a real value that matches an un-mutated legacy row, is the one
+// wrong answer a CAS cannot detect. In process there is no wire: the view's
+// Revision is the row's RowVersion, and the same RowVersion rides every list
+// row (beadFromNativeIssueRow), so List and Get agree.
 //
 // THE EDGES ARE THE STORED ROWS, read by the same door DepList's DOWN leg uses.
 // The detail view lists the far-end ISSUES rather than the edge rows, so an
@@ -744,7 +746,8 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 //     ExcludeStatus and gc's "open" is every bd status but closed and
 //     in_progress. "in_progress" and "closed" are exact: mapBdStatus maps them
 //     one-to-one, and AllFlag keeps the pinned-flag default lifted under a
-//     named status. See nativeListReadRequest.
+//     named status. See nativeListReadRequest. The exception is a Live
+//     "open", which travels as bd's raw "open" (nativeListPushesRawOpen).
 //   - TYPE outside the store's pushable set (nativeListPushableTypesFor),
 //     because BuildListFilter VALIDATES it against the workspace vocabulary
 //     and fails a request naming an unknown one, where the raw filter answered
@@ -780,7 +783,7 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
 	}
-	if nativeListPushableStatus(query.Status) {
+	if nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query) {
 		req.Status = query.Status
 	}
 	if pushableTypes[query.Type] {
@@ -814,9 +817,10 @@ func nativeListLimitPushdown(query ListQuery) int {
 		return 0
 	}
 	// The status, type and tier predicates below are applied, or re-applied,
-	// by ApplyListQuery: gc's "open" and the tier never reach the backing, and
-	// a pushed type is dropped again if the backend refuses it. A backing limit
-	// under any of them would cut rows before the residual filter.
+	// by ApplyListQuery: gc's "open" and the tier never reach the backing (a
+	// Live "open" reaches it only as bd's raw status, nativeListPushesRawOpen),
+	// and a pushed type is dropped again if the backend refuses it. A backing
+	// limit under any of them would cut rows before the residual filter.
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
@@ -941,11 +945,16 @@ func beadFromNativeIssueDetails(details *issueops.IssueDetails, edges issueops.A
 
 // beadFromNativeIssueRow converts one row of a listing or a ready page.
 //
-// Bead.Revision is cleared, not merely left alone: the page publishes no token,
-// and the row's RowVersion — zero on every served row, because it never crosses
-// the wire — would fence a guarded write against a value that means "absent"
-// while reading as the real revision 0. beadFromNativeIssue stamps it for the
-// detail view, so the row path has to undo that rather than rely on a zero.
+// Bead.Revision is the row's RowVersion, as beadFromNativeIssue stamps it. The
+// in-process readers (Dolt server and embedded) scan row_lock into RowVersion
+// on every row they return, list rows included, so a listed row carries the
+// same token the detail view publishes for it, and a conditional write fenced
+// on it compares against row_lock inside its own transaction. A legacy row
+// still at the default 0 lists at 0, which is its real revision: the first
+// fenced write moves it off 0 and a write fenced on 0 after that is refused.
+// A reader that drops RowVersion (it is json:"-", so a served page cannot
+// carry it) lists every row at 0; C0.7 refuses v2 over such a store
+// (CheckListRevisionFidelity).
 //
 // The computed parent beside the row is preferred over the edge scan when the
 // row carries one: a page hydrates it with a dedicated join, and a projection
@@ -958,7 +967,6 @@ func beadFromNativeIssueRow(row *issueops.IssueWithCounts) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
-	bead.Revision = 0
 	if row.Parent != nil && *row.Parent != "" {
 		bead.ParentID = *row.Parent
 	}

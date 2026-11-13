@@ -1,7 +1,8 @@
 package main
 
 // The leg assembly behind `gc ready`. The reader over the legs is
-// internal/readywork, and this command is its only caller.
+// internal/readywork, shared with the supervisor's GET
+// /v0/city/{cityName}/work/ready.
 //
 // # Why this exists
 //
@@ -289,6 +290,11 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 	}
 	stores, failures := openStandaloneRigStores(rigs, cityPath, readyRigStoreOpener(cfg), readyLegFanOut)
 	if len(failures) == 0 {
+		if readyRigLegStoreFault != nil {
+			for name, store := range stores {
+				stores[name] = readyRigLegStoreFault(name, store)
+			}
+		}
 		return stores, nil
 	}
 	for _, store := range stores {
@@ -300,6 +306,11 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 	}
 	return nil, errors.Join(errs...)
 }
+
+// readyRigLegStoreFault, when set, wraps each opened rig leg store: a test
+// seam that injects a read fault into one rig of a file-backed city. Nil in
+// production.
+var readyRigLegStoreFault func(rig string, store beads.Store) beads.Store
 
 // readyServingRigs is the rig half of the frame `gc ready` federates: the
 // configured rigs that are not suspended, in config order. Over a readable

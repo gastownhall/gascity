@@ -14,8 +14,9 @@ import (
 // decideRow's drift arms (CONTRACT v5 §4, A14 and A16; plan C7b1): config
 // drift on an alive row, in legacy's order (session_reconciler.go's drift
 // block), and the execution backstop's drain request (NUDGE-022). A
-// version-mismatched stored hash is A8's to rebaseline, never A14's to
-// repair or drain. A live drift's RunLive (SESS-565) and an asleep named
+// version-artifact stored hash (runtime.IsCoreHashArtifact; a v6 one of
+// changed config is a drift) is A8's to rebaseline, never A14's to repair
+// or drain. A live drift's RunLive (SESS-565) and an asleep named
 // row's repair (SESS-566/568) are C7b2-1's; a named row's restart in place
 // (SESS-557) on the stop verb, with its deferrals (SESS-555), and a
 // launch-only relaunch (SESS-556/560) with its fallback are C7b2-2's.
@@ -31,6 +32,13 @@ const (
 	decideDriftRelaunch = "drift-relaunch"          // SESS-556/560
 )
 
+// SESS-559's deferral over open work, its episode stamped and signaled
+// (#8345), then escalated once past its horizon.
+const (
+	decideDriftHeldWork  = "drift-deferred:held-work"
+	decideDriftEscalated = "drift-deferred:escalated"
+)
+
 // armConfigDrift is A14 on an alive desired row whose stored config hash
 // differs from this generation's (a missing one never drifts, #127):
 //   - attached, or its attach unknown (SESS-552/553): the attached
@@ -40,8 +48,10 @@ const (
 //     restart; another named row is restarted in place (SESS-557), or
 //     relaunched for a launch-only drift its provider can relaunch
 //     (SESS-556), each effect deferring on the row's use (SESS-555);
-//   - a pending interaction (SESS-558) or open assigned work (SESS-559):
-//     defer, A19's lenses canceling a cancelable drain;
+//   - a pending interaction (SESS-558): defer, A19's lenses canceling a
+//     cancelable drain;
+//   - open assigned work (SESS-559): defer the same way, the episode's
+//     first observation stamped and signaled (driftHeldWork, #8345);
 //   - a launch-only drift its provider can relaunch is relaunched (SESS-560),
 //     falling back to the drain;
 //   - otherwise the config-drift drain (SESS-561), unless a stop request is
@@ -62,13 +72,14 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	if e.Liveness != livenessAlive {
-		return r.driftRepair(stored, core)
+		return r.driftRepair(cfg, stored, core)
 	}
 	if stored == core {
-		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey != "" {
+		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey+info.ConfigDriftEscalatedAt != "" {
 			return r.heal(intentRowHeal, decideDriftResolved, session.MetadataPatch{
 				namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 				sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
+				configDriftEscalatedAtMetadata: "",
 			})
 		}
 		return r.liveApply(cfg)
@@ -76,7 +87,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
 	_, active := activeStop(r.row)
 	launchOnly := r.w.Env.relaunches() && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" && // a conjoined runtime takes the full path
-		info.StartedProvisionHash == runtime.ProvisionFingerprint(cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
+		runtime.ProvisionHashMatches(info.StartedProvisionHash, cfg) && !runtime.LaunchHashMatches(info.StartedLaunchHash, cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:
 		if driftStampFresh(info.AttachedConfigDriftDeferredKey, info.AttachedConfigDriftDeferredAt, key, now, sessionAttachedConfigDriftRefreshInterval) {
@@ -92,8 +103,10 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
 	case isNamedSessionInfo(info):
 		return r.driftRestart(launchOnly)
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active || driftRequestStands(r.row):
+	case containsWakeReason(e.WakeReasons, WakePending) || active || driftRequestStands(r.row):
 		return intent{}, false
+	case e.AssignedWork != nil:
+		return r.driftHeldWork(cfg, key, e.AssignedWork.BeadID)
 	case launchOnly:
 		return r.driftRestart(true)
 	}
@@ -102,6 +115,31 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	}
 	res, _ := r.w.Templates.lookup(info)
 	return r.drainBegin(drainConfigDrift, &events.Event{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: info.ID})
+}
+
+// driftHeldWork is SESS-559's deferral over open work bead workBeadID,
+// signaled (#8345): the episode's first observation, and its one escalation
+// past the horizon, is a row heal carrying session.config_drift_deferred,
+// which the effect records only once the write lands; otherwise the episode
+// waits with no intent, so the arms after A14 still decide the row, and A14
+// requeued at the horizon.
+func (r *rowFacts) driftHeldWork(cfg runtime.Config, key, workBeadID string) (intent, bool) {
+	info, now := r.row.Info, r.w.Now
+	step := driftEpisode(info, key, now, driftDeferralHorizon(worldCfg(r.w)))
+	if step.Patch == nil {
+		if !step.Due.IsZero() {
+			r.after(requeueUntil(now, step.Due))
+		}
+		return intent{}, false
+	}
+	reason := decideDriftHeldWork
+	if step.Escalated {
+		reason = decideDriftEscalated
+	}
+	it, ok := r.heal(intentRowHeal, reason, step.Patch)
+	ev := configDriftDeferredEvent(info, runtime.CoreFingerprintDriftFieldsFromJSON(info.CoreHashBreakdown, cfg), workBeadID, step.Since, now, step.Escalated)
+	it.Event = &ev
+	return it, ok
 }
 
 // driftRequestStands reports that the row already carries this
@@ -127,10 +165,11 @@ func (r *rowFacts) driftRestart(relaunch bool) (intent, bool) {
 	return r.heal(intentDriftRestart, decideDriftRestart, nil)
 }
 
-// liveApply is SESS-565: a live hash of this binary's version that differs
-// from the template's (A8, decided first, backfills an empty one with no
-// session_live and rebaselines another version's) has session_live run
-// again on the row's own runtime, then the live hashes recorded.
+// liveApply is SESS-565: a live hash of this binary's version, or a v6 one
+// of another session_live, that differs from the template's (A8, decided
+// first, backfills an empty one with no session_live and rebaselines another
+// version's) has session_live run again on the row's own runtime, then the
+// live hashes recorded.
 func (r *rowFacts) liveApply(cfg runtime.Config) (intent, bool) {
 	stored, live := r.row.Info.StartedLiveHash, runtime.LiveFingerprint(cfg)
 	if stored == live || stored == "" && len(cfg.SessionLive) == 0 || !r.freshOwnAlive() {
@@ -155,9 +194,9 @@ func liveHashPatch(live string) session.MetadataPatch {
 // as legacy repairs and then starts it: its key cleared, so the PreWake's
 // set-once fill mints the fresh conversation's, never resuming the old one
 // on the drifted config.
-func (r *rowFacts) driftRepair(stored, core string) (intent, bool) {
+func (r *rowFacts) driftRepair(cfg runtime.Config, stored, core string) (intent, bool) {
 	info, now := r.row.Info, r.w.Now
-	if stored == core || !isNamedSessionInfo(info) || runtime.IsLegacyOrMismatchedVersion(stored) ||
+	if stored == core || !isNamedSessionInfo(info) || runtime.IsCoreHashArtifact(stored, cfg) ||
 		pendingResumePreservingNamedRestartAt(info, now, r.w.startupTimeout()) || !r.freshGone() {
 		return intent{}, false
 	}
@@ -169,6 +208,7 @@ func (r *rowFacts) driftRepair(stored, core string) (intent, bool) {
 	maps.Copy(patch, session.MetadataPatch{
 		namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 		sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
+		configDriftEscalatedAtMetadata: "",
 	})
 	repair, _ := r.heal(intentDriftRepair, decideDriftRepair, patch) // its own kind: a fresh read that decides another heal refuses
 

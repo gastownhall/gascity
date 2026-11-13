@@ -118,7 +118,8 @@ func (p *Provider) refence(name string, f runtime.InputFence, threadID string) f
 // session is a miss finding it dead, since T3 would relaunch a provider for
 // the turn. A transient retry goes out only after a fresh read re-proves the
 // fence on the same thread. T3 starts turns without an idle wait, so
-// n.Immediate changes nothing.
+// n.Immediate changes nothing. n.Receipt, when set, gets NudgeKeyed's
+// receipt once the turn start succeeded.
 func (p *Provider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -130,11 +131,15 @@ func (p *Provider) NudgeFenced(ctx context.Context, name string, content []runti
 	if err := p.requireLiveSession(name, thread); err != nil {
 		return err
 	}
-	if err := p.nudgeThreadFor(ctx, name, thread, binding, content, n.DeliveryKey, p.refence(name, n.Fence, binding.ThreadID)); err != nil {
+	r, err := p.nudgeThreadFor(ctx, name, thread, binding, content, n.DeliveryKey, p.refence(name, n.Fence, binding.ThreadID))
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			return fmt.Errorf("nudging %q: %w: %w", name, ctxErr, err)
 		}
 		return err
+	}
+	if n.Receipt != nil {
+		*n.Receipt = r
 	}
 	return nil
 }

@@ -41,3 +41,13 @@ jobs:
 
       - name: Verify installed gc version
         run: gc version
+
+      # The live formula installs the companion from the first release that
+      # ships it; an older formula is reported, not failed.
+      - name: Verify installed gc-osc7501 companion
+        run: |
+          if brew cat gastownhall/gascity/gascity | grep -q '"gc-osc7501"'; then
+            gc-osc7501 version
+          else
+            echo "::notice::live gascity formula predates gc-osc7501; companion check skipped"
+          fi

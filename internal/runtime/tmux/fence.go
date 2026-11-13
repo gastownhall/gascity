@@ -124,7 +124,8 @@ func inputCtx(ctx context.Context) context.Context {
 // checks the agent pane's fence before any input or wait (adopting the
 // session's own identity once if the pane holds none), and then runs every
 // input command body sends through the guard (Tmux.runCtx). Any miss wins
-// over body's own result. textOnly is set for a nudge: only its text (and
+// over body's own result; a check that fails otherwise sent nothing
+// (runtime.ErrInputNotSent). textOnly is set for a nudge: only its text (and
 // what follows it) makes a miss partial, not the preparatory keys before.
 func (p *Provider) fenced(ctx context.Context, name string, f runtime.InputFence, textOnly bool, body func(context.Context) error) error {
 	if err := f.Validate(); err != nil {
@@ -142,7 +143,7 @@ func (p *Provider) fenced(ctx context.Context, name string, f runtime.InputFence
 	g := newPaneGuard(name, f.Digest(), textOnly)
 	ctx = withPaneGuard(ctx, g)
 	if err := g.verify(ctx, p.tm); err != nil {
-		return err
+		return g.notSent(err)
 	}
 	return g.finish(body(ctx))
 }
@@ -314,18 +315,42 @@ func (g *paneGuard) verifiedPane() string {
 }
 
 // finish is the operation's result: its miss when it had one, else err, or
-// the server it lost when body swallowed that.
+// the server it lost when body swallowed that. A server lost after input
+// reached the fenced incarnation also wraps
+// runtime.ErrNudgeDeliveryUnconfirmed: that input may have delivered.
 func (g *paneGuard) finish(err error) error {
 	if miss := g.missed(); miss != nil {
 		return miss
 	}
 	g.mu.Lock()
-	unavailable := g.unavailable
+	unavailable, applied := g.unavailable, g.applied
 	g.mu.Unlock()
 	if err == nil && unavailable != nil {
-		return unavailable
+		err = unavailable
+	}
+	var lost *fenceUnavailableError
+	if applied && errors.As(err, &lost) && !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		return fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed, err)
 	}
 	return err
+}
+
+// notSent marks err, a failure before any of the operation's effect was
+// applied (as a miss's Partial counts it), as runtime.ErrInputNotSent:
+// checking the fence or staging text failed, so nothing reached the
+// incarnation. A miss and a lost server say so already and pass through.
+func (g *paneGuard) notSent(err error) error {
+	var miss *runtime.FenceMismatchError
+	if err == nil || errors.As(err, &miss) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return err
+	}
+	g.mu.Lock()
+	applied := g.applied
+	g.mu.Unlock()
+	if applied {
+		return err
+	}
+	return fmt.Errorf("fenced input to %q: %w: %w", g.name, runtime.ErrInputNotSent, err)
 }
 
 // gone turns an error the unfenced path would absorb as "session gone, so
@@ -598,7 +623,9 @@ func isDigits(s string) bool {
 // target pane being live and holding the guard's digest as its own fence.
 // Text never enters a command string or argv: send-keys -l TEXT is staged
 // into a private file, loaded into a named buffer, and pasted under the
-// guard. After the operation's first miss nothing more is sent.
+// guard; staging that fails before the operation's effect is
+// runtime.ErrInputNotSent. After the operation's first miss nothing more is
+// sent.
 func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, error) {
 	if miss := g.missed(); miss != nil {
 		return "", miss
@@ -619,7 +646,7 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 		}
 		buffer, err = t.loadPasteBuffer(ctx, in.keys[0])
 		if err != nil {
-			return "", err
+			return "", g.notSent(err)
 		}
 		inner = []string{"paste-buffer", "-d", "-r", "-b", buffer, "-t", in.target}
 	case args[0] == "paste-buffer":

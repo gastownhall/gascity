@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // The required-artifact gate resolves {attempt} from the subject's own
@@ -48,7 +49,7 @@ func TestResolveRequiredArtifactPathResolvesIterationSeparatelyFromAttempt(t *te
 	}
 	resolve := func(t *testing.T, subject beads.Bead, template string) string {
 		t.Helper()
-		got, _, reason, err := resolveRequiredArtifactPath(store, subject, template, ProcessOptions{})
+		got, _, reason, err := resolveRequiredArtifactPath(beadstest.Graph(store), subject, template, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactPath(%q) = (%v, %q), want success", template, err, reason)
 		}
@@ -106,13 +107,13 @@ func TestResolveRequiredArtifactPathRefusesToGuessAMissingIteration(t *testing.T
 		},
 	})
 
-	_, _, reason, err := resolveRequiredArtifactPath(store, beads.Bead{
+	_, _, reason, err := resolveRequiredArtifactPath(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":      "pass",
 			"gc.root_bead_id": root.ID,
 			"gc.attempt":      "3",
 		},
-	}, ".gc/reviews/{root}/attempt-{iteration}/synthesis.md", ProcessOptions{})
+	}, ".gc/reviews/{root}/attempt-{iteration}/synthesis.md", ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("resolveRequiredArtifactPath error = %v, want nil", err)
 	}
@@ -137,12 +138,12 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"work_dir": t.TempDir()},
 		})
-		got, _, reason, err := resolveRequiredArtifactPath(store, beads.Bead{
+		got, _, reason, err := resolveRequiredArtifactPath(beadstest.Graph(store), beads.Bead{
 			Metadata: map[string]string{
 				"gc.root_bead_id": root.ID,
 				"gc.work_dir":     worktree,
 			},
-		}, "synthesis.md", ProcessOptions{})
+		}, "synthesis.md", ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactPath = (%v, %q), want success", err, reason)
 		}
@@ -159,7 +160,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"gc.work_dir": worktree},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
+		got, reason, err := resolveRequiredArtifactWorktree(beadstest.Graph(store), root.ID, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}
@@ -181,7 +182,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"gc.source_bead_id": source.ID},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
+		got, reason, err := resolveRequiredArtifactWorktree(beadstest.Graph(store), root.ID, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}
@@ -200,7 +201,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"work_dir": worktree},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
+		got, reason, err := resolveRequiredArtifactWorktree(beadstest.Graph(store), root.ID, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}

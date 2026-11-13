@@ -52,6 +52,55 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
+# escalate_refused_incident_flags RC STDERR is true when an escalate.sh override
+# refused the incident flags as a usage error, as one written before them (the
+# 1.5.0 contract) does: with exit 2, the usage-error status (the 1.5.0
+# escalate.sh, argparse, Go's flag package), or with a message that names the
+# flag (getopt-style parsers exit 1). The core escalate.sh next to this script
+# takes the flags, so no failure of it is read as a refusal.
+escalate_refused_incident_flags() {
+    [ "$1" -ne 0 ] || return 1
+    if [ "$ESCALATE_SCRIPT" -ef "$SCRIPT_DIR/escalate.sh" ]; then
+        return 1
+    fi
+    [ "$1" -ne 2 ] || return 0
+    case "$2" in
+        *incident-key*|*--fingerprint*|*resolve-incident*) return 0 ;;
+    esac
+    return 1
+}
+
+# raise_incident KEY FINGERPRINT SUBJECT MESSAGE escalates MESSAGE as incident
+# KEY, which escalate.sh keeps quiet while FINGERPRINT is unchanged. An override
+# that refuses the incident flags is sent the alert again without them, so it
+# keeps alerting, undeduplicated, rather than losing the alert.
+raise_incident() {
+    local rc=0 err
+    # stdout passes through; stderr is held to tell a refusal from a failure.
+    { err=$("$ESCALATE_SCRIPT" --subject "$3" --message "$4" \
+        --incident-key "$1" --fingerprint "$2" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
+    if ! escalate_refused_incident_flags "$rc" "$err"; then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        return "$rc"
+    fi
+    echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
+    "$ESCALATE_SCRIPT" --subject "$3" --message "$4"
+}
+
+# resolve_incident KEY tells escalate.sh that incident KEY cleared, so its next
+# occurrence alerts at once. An override that refuses the flag keeps no
+# incidents, so there is nothing to clear.
+resolve_incident() {
+    local rc=0 err
+    err=$("$ESCALATE_SCRIPT" --resolve-incident "$1" 2>&1 >/dev/null) || rc=$?
+    if escalate_refused_incident_flags "$rc" "$err"; then
+        echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --resolve-incident); its alerts are not deduplicated" >&2
+        return 0
+    fi
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    return "$rc"
+}
+
 maintenance_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
@@ -70,6 +119,24 @@ SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
+# Step 5's burst guard. A city scope with more stale issues than
+# GC_REAPER_STALE_ISSUE_BURST_MAX closes none of them that run: it lists their
+# ids on stderr, records an anomaly, which escalates under the
+# reaper:anomalies incident, and reports stale_issues_held:<N>. A burst is what
+# a step the run budget starved for weeks looks like once something (a storage
+# split, a smaller work store) lets it run again, and closing it unseen is the
+# one reaper action no later run can undo. Release it for one run with
+# `gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=<N>`, which closes
+# a burst of exactly N candidates: only the count is compared, so a count that
+# moved since it was read is held again. Or raise the max; 0 turns the guard
+# off. An ACK or a max set in the order's env ([order.env], or the env of an
+# [[orders.overrides]] entry) applies to every run until it is removed, so an
+# ACK left there releases any later burst of that size unseen.
+STALE_ISSUE_BURST_MAX="${GC_REAPER_STALE_ISSUE_BURST_MAX:-25}"
+case "$STALE_ISSUE_BURST_MAX" in ''|*[!0-9]*) STALE_ISSUE_BURST_MAX=25 ;; esac
+# Kept as given: stale_issue_burst_acknowledged reports an ACK that is not a
+# count instead of dropping it unseen.
+STALE_ISSUE_BURST_ACK="${GC_REAPER_STALE_ISSUE_BURST_ACK:-}"
 # Ids handed to one gc bd verb invocation (close/update/delete).
 VERB_BATCH="${GC_REAPER_VERB_BATCH:-200}"
 case "$VERB_BATCH" in ''|*[!0-9]*|0) VERB_BATCH=200 ;; esac
@@ -106,6 +173,14 @@ STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-
 # wisp that an open, hooked or in-progress wisp still depends on through
 # parent-child, tracks or blocks.
 PURGE_PLANE_FLAG="${GC_REAPER_PURGE_PLANE_FLAG:---wisps-plane}"
+# Op-journal rows (issue_type op) are no-history rows whose ids are
+# idempotency keys. The purge's wisps plane and the session prune both select
+# closed no-history rows, and bd deletes them with no tombstone unless it
+# honors types.retained and the scope's database names op there. So on a
+# scope that holds op rows both are held back until then (op_rows_guard). The
+# doctor's ops-recording check applies the same rule (cmd/gc/reaper_op_rows.go).
+OP_ROW_TYPE="op"
+RETAINED_TYPES_KEY="types.retained"
 # Closed wisps deleted per bd purge call, and the wall-clock budget (seconds,
 # shared by every scope) the purge step may spend per run. Both keep a large
 # backlog from outrunning the order timeout.
@@ -127,6 +202,12 @@ RUN_DEADLINE=$(( $(date +%s) + RUN_BUDGET_SECS ))
 # shellcheck disable=SC2034
 SCOPE_DEADLINE="$RUN_DEADLINE"
 RUN_BUDGET_HIT=0
+# BUDGET_SKIPPED lists, space-separated, each "<scope>@<step>" the run budget
+# kept from running: the step it stopped before (and every later step of
+# that scope), "all" for a scope it never started, "6" for the session
+# prune. A city whose later steps never run is then visible in the outcome
+# and the summary every run (ga-efurfu).
+BUDGET_SKIPPED=""
 
 # Convert Go-style hour durations to SQL INTERVAL hours.
 duration_to_hours() {
@@ -156,6 +237,9 @@ TOTAL_WORKFLOW_ROOT_CANDIDATES=0
 TOTAL_WORKFLOW_ROOTS_CHECKED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+# Stale city issues the burst guard held back, or would hold in a dry run.
+TOTAL_STALE_ISSUES_HELD=0
+TOTAL_WOULD_HOLD_STALE_ISSUES=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
@@ -173,6 +257,21 @@ run_budget_exhausted() {
         order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "run budget exhausted; remaining work carries to the next run"
     fi
     return 0
+}
+
+# budget_stops_before <step> reports whether the run budget is spent before
+# <step> of the current scope, naming the steps that do not run on the
+# outcome and in the summary.
+budget_stops_before() {
+    run_budget_exhausted || return 1
+    budget_skipped "${SCOPE_LABEL:-city}" "$1" "run budget exhausted before step $1; it and every later step did not run in this scope"
+    return 0
+}
+
+# budget_skipped <scope> <step> <reason> records what the run budget skipped.
+budget_skipped() {
+    order_outcome_scope_skipped "$1" "$3"
+    BUDGET_SKIPPED="${BUDGET_SKIPPED:+$BUDGET_SKIPPED }$1@$2"
 }
 
 sanitize_output() {
@@ -196,6 +295,65 @@ record_anomaly() {
 # label when the database is not known yet).
 scope_anomaly() {
     record_anomaly "${SCOPE_DB:-$SCOPE_LABEL}" "$@"
+}
+
+# stale_issue_burst_over_max <count> reports whether <count> stale issues are
+# more than Step 5's burst guard lets one run close.
+stale_issue_burst_over_max() {
+    [ "$STALE_ISSUE_BURST_MAX" -gt 0 ] && [ "$1" -gt "$STALE_ISSUE_BURST_MAX" ]
+}
+
+# stale_issue_burst_acknowledged <count> reports whether
+# GC_REAPER_STALE_ISSUE_BURST_ACK releases the current scope's burst of
+# <count> stale issues, which only an ACK of exactly <count> does. An ACK that
+# is set and releases nothing says why on stderr: the run it was meant to
+# release holds the burst again, and the escalation, unchanged, stays quiet.
+stale_issue_burst_acknowledged() {
+    local count="$1"
+    case "$STALE_ISSUE_BURST_ACK" in
+        '')
+            return 1
+            ;;
+        *[!0-9]*)
+            echo "reaper: GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK is not a count, so the $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL} stay held" >&2
+            return 1
+            ;;
+    esac
+    if [ "$count" -eq "$STALE_ISSUE_BURST_ACK" ]; then
+        return 0
+    fi
+    echo "reaper: GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK does not match the $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, so they stay held: an ACK releases a burst of exactly its count" >&2
+    return 1
+}
+
+# stale_issue_burst_list <verb> <count> <rows> lists on stderr the ids of the
+# current scope's <count> stale issues (<rows> as Step 5's query returned
+# them) that the burst guard <verb> ("held", or "would hold" in a dry run),
+# with the command that releases exactly that burst, so the operator who runs
+# the order by hand to review the burst sees both.
+stale_issue_burst_list() {
+    local ids
+    ids=$(printf '%s\n' "$3" | awk -F, '$1 != "" { print $1 }')
+    echo "reaper: $1 $2 stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX: $(sanitize_output "$ids"). Once you have reviewed them, release exactly this burst with: gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=$2" >&2
+}
+
+# stale_issue_burst_held <count> <rows> reports whether Step 5's burst guard
+# holds back the current scope's <count> stale issues (<rows> as its query
+# returned them), and records the hold: stderr lists them, the order outcome
+# names the step, and an anomaly escalates it. The anomaly starts with
+# held=<N>:, and the fingerprint drops its line from there, so a held backlog
+# that grows by a few rows a run stays one incident.
+stale_issue_burst_held() {
+    local count="$1"
+    stale_issue_burst_over_max "$count" || return 1
+    if stale_issue_burst_acknowledged "$count"; then
+        echo "reaper: closing $count stale issue(s) in ${SCOPE_DB:-$SCOPE_LABEL}, over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, as GC_REAPER_STALE_ISSUE_BURST_ACK=$STALE_ISSUE_BURST_ACK acknowledges" >&2
+        return 1
+    fi
+    stale_issue_burst_list held "$count" "$2"
+    order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "step 5 held $count stale issue(s) over GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX; none was closed"
+    scope_anomaly "stale-issue burst held=$count: that many open issues are stale (no update in $STALE_ISSUE_AGE), more than GC_REAPER_STALE_ISSUE_BURST_MAX=$STALE_ISSUE_BURST_MAX, so the reaper closed none of them. A burst this size usually means step 5 was starved (see budget_skipped in earlier reaper summaries) or something just released it, such as a storage split. Review them (\`gc order run reaper\` lists them), then release them for one run with \`gc order run reaper --var GC_REAPER_STALE_ISSUE_BURST_ACK=$count\`: it closes a burst of exactly that count and holds one whose count has moved. Or raise GC_REAPER_STALE_ISSUE_BURST_MAX. An ACK or a max set in [order.env] or an [[orders.overrides]] env applies to every run until removed, so an ACK left there releases any later burst of that size unseen"
+    return 0
 }
 
 # workflow_root_store_ref_local_condition keeps workflow roots whose
@@ -274,6 +432,69 @@ get_sql_rows() {
     rm -f "$stderr_file"
 
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | sed '/^[[:space:]]*$/d')
+}
+
+# retained_types_name_op reads `gc bd config get --json` output on stdin and
+# reports whether its types.retained value names the op row type. It parses the
+# value as bd's sweep does (ParseTypeList): a JSON array of type names, else a
+# comma list, each name trimmed. So a mis-spelled list such as [op] or "op"
+# names no op here, as for bd. The doctor reads the setting the same way
+# (cmd/gc/reaper_op_rows.go).
+retained_types_name_op() {
+    jq -e --arg type "$OP_ROW_TYPE" '
+        def trimmed: sub("^\\s+"; "") | sub("\\s+$"; "");
+        (.value // "" | trimmed) as $value
+        | (if $value | startswith("[") then $value | try fromjson catch null else null end) as $list
+        | if ($list | type) == "array" and all($list[]; type == "string" or type == "null")
+          then $list | map(values)
+          else $value | split(",")
+          end
+        | any(.[]; trimmed == $type)
+    ' >/dev/null 2>&1
+}
+
+# op_rows_guard VERB reports whether VERB (purge or prune) may delete closed
+# rows on the current scope. It may when the scope holds no op row, or when
+# the scope's bd honors types.retained (VERB's help names the setting) and the
+# database's types.retained names op, so bd itself keeps the op rows. Anything
+# else holds VERB back, a census that cannot be read included, and
+# OP_ROWS_GUARD_REASON says why.
+OP_ROWS_GUARD_REASON=""
+op_rows_guard() {
+    local verb="$1"
+    local help
+    local setting
+
+    OP_ROWS_GUARD_REASON=""
+    if ! get_sql_count "op row" "
+        SELECT COUNT(*) FROM (
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.wisps WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_wisp
+            UNION ALL
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.issues WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_issue
+        ) AS op_row_census
+    "; then
+        OP_ROWS_GUARD_REASON="op rows could not be counted"
+        return 1
+    fi
+    [ "$SQL_COUNT_RESULT" -gt 0 ] || return 0
+    if ! help=$(scope_bd "$verb" --help 2>/dev/null) || [[ "$help" != *"$RETAINED_TYPES_KEY"* ]]; then
+        OP_ROWS_GUARD_REASON="holds op rows and its bd does not honor $RETAINED_TYPES_KEY"
+        return 1
+    fi
+    if ! setting=$(scope_bd config get --json "$RETAINED_TYPES_KEY" 2>/dev/null) ||
+        ! printf '%s' "$setting" | retained_types_name_op; then
+        OP_ROWS_GUARD_REASON="holds op rows and $RETAINED_TYPES_KEY does not name $OP_ROW_TYPE"
+        return 1
+    fi
+    return 0
+}
+
+# op_rows_hold_back STEP records that STEP did not run on the current scope
+# because op_rows_guard held it back.
+op_rows_hold_back() {
+    local reason="$1 skipped: $OP_ROWS_GUARD_REASON"
+    echo "reaper: $SCOPE_LABEL: $reason"
+    order_outcome_scope_skipped "$SCOPE_LABEL" "$reason"
 }
 
 count_lines() {
@@ -878,7 +1099,7 @@ reap_scope() {
         fi
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 2 && return 0
 
     # Step 2: close stale inactive workflow roots. This is the finalize-crash
     # safety net: it only reaps old, unassigned topology roots whose stamped
@@ -896,7 +1117,7 @@ reap_scope() {
     fi
     reap_workflow_roots wisp "workflow_wisp_root_candidates" "wisps" "w" "'message'"
 
-    run_budget_exhausted && return 0
+    budget_stops_before 2-issue-roots && return 0
 
     if get_sql_count "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
@@ -909,7 +1130,7 @@ reap_scope() {
         reap_workflow_roots issue "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 3 && return 0
 
     # Step 3: purge closed wisps past purge_age through gc bd purge, which keeps
     # a closed wisp that a live wisp still depends on (parent-child, tracks,
@@ -917,7 +1138,7 @@ reap_scope() {
     # and events with it.
     reap_scope_purge
 
-    run_budget_exhausted && return 0
+    budget_stops_before 4 && return 0
 
     # Step 4: close gc:nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
@@ -978,7 +1199,7 @@ reap_scope() {
         fi
     fi
 
-    run_budget_exhausted && return 0
+    budget_stops_before 5 && return 0
 
     # Step 5: auto-close stale issues (exclude P0/P1, epics, durable extmsg
     # records, TTL-stamped beads and beads with an active dependency in either
@@ -1024,6 +1245,8 @@ reap_scope() {
         if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
             if [ "$SCOPE_KIND" != "city" ]; then
                 TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
+            elif stale_issue_burst_held "$count" "$rows"; then
+                TOTAL_STALE_ISSUES_HELD=$((TOTAL_STALE_ISSUES_HELD + count))
             else
                 # close_mode comes from the query's per-row CASE: 'force' when
                 # the row carried a non-empty assignee at select time and
@@ -1031,6 +1254,12 @@ reap_scope() {
                 close_ids_by_mode "closing stale issues" "$rows" "stale:auto-closed by reaper"
                 TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + CLOSE_IDS_OK))
             fi
+        elif [ "$count" -gt 0 ] && [ "$SCOPE_KIND" = "city" ] \
+            && stale_issue_burst_over_max "$count" && ! stale_issue_burst_acknowledged "$count"; then
+            # A dry run holds nothing and records no anomaly, but reports and
+            # lists the burst a real run would hold.
+            TOTAL_WOULD_HOLD_STALE_ISSUES=$((TOTAL_WOULD_HOLD_STALE_ISSUES + count))
+            stale_issue_burst_list "would hold" "$count" "$rows"
         fi
     fi
 
@@ -1070,6 +1299,10 @@ reap_scope_purge() {
     local batches=0
     local purge_args=(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)
 
+    if ! op_rows_guard purge; then
+        op_rows_hold_back purge
+        return 0
+    fi
     if [ -n "$DRY_RUN" ]; then
         purge_args+=(--dry-run)
     else
@@ -1136,7 +1369,8 @@ reap_scope_purge() {
 
 # Scopes are resolved first so that scopes sharing one database (a rig bound
 # to the city store) are reaped once, with every sharing rig's store ref.
-# A scope bd cannot reach is recorded and skipped; the others still run.
+# A scope bd cannot reach is recorded and skipped; the others still run. A
+# scope bd reaches but serves no SQL is skipped without an anomaly.
 SCOPE_TABLE=""
 resolve_scope_row() {
     scope_select "$@"
@@ -1144,6 +1378,11 @@ resolve_scope_row() {
         if [ "$SCOPE_NOT_BD" -eq 1 ]; then
             echo "reaper: $SCOPE_LABEL is not a bd bead store; nothing to reap there"
             order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
+            return 0
+        fi
+        if [ "$SCOPE_SQL_UNSUPPORTED" -eq 1 ]; then
+            echo "reaper: $SCOPE_LABEL is a bd store that serves no SQL (embedded mode); its selections cannot run there"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "bead store serves no SQL (bd embedded mode)"
             return 0
         fi
         record_anomaly "$SCOPE_LABEL" "bead store unreachable through gc bd: $(sanitize_output "$SCOPE_LAST_ERROR")"
@@ -1180,7 +1419,7 @@ while IFS= read -r scope_db; do
     fi
     SCOPE_DB="$scope_db"
     if run_budget_exhausted; then
-        order_outcome_scope_skipped "$SCOPE_LABEL" "run budget exhausted before this scope"
+        budget_skipped "$SCOPE_LABEL" all "run budget exhausted before this scope"
         continue
     fi
     TOTAL_SCOPES=$((TOTAL_SCOPES + 1))
@@ -1205,10 +1444,67 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
     SCOPE_DB="$CITY_DB"
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
         # ── gc bd prune path (pattern-configurable) ──────────────────────────────
+        # The pattern is checked first, then the prune's own candidates are
+        # counted; the backup-age and type-scope gates guard only a prune that
+        # has something to delete.
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
+        _PRUNE_SKIP=0
+
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into the SQL
+        # LIKE literals below (candidate count, type-scope gate) and passed as
+        # bd's own --pattern flag. A value outside this charset (e.g. a single
+        # quote) would corrupt those COUNT queries -- id LIKE 'x' OR '1'='1'
+        # always matches, silently defeating the guard. Fail closed before any
+        # SQL is built.
+        case "$SESSION_BEAD_PATTERN" in
+            ''|*[!A-Za-z0-9_.*?-]*)
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+                _PRUNE_SKIP=1
+                ;;
+        esac
+
+        # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A literal %
+        # or _ in a custom pattern would not round-trip. An age not given in
+        # hours (e.g. 30d) counts every closed match: more than bd prunes,
+        # never less.
+        _PRUNE_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
+        _PRUNE_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
+        case "$_PRUNE_AGE_H" in ''|*[!0-9]*) _PRUNE_AGE_H=0 ;; esac
+
+        # Candidate count: `gc bd prune` deletes closed, non-ephemeral beads
+        # that match the pattern and closed before its cutoff, in the issues
+        # table and among the no-history rows of the wisps table. This counts
+        # every closed match in both tables, which covers that set. With none,
+        # the prune would delete nothing, so the gates below have nothing to
+        # protect: skip them and the prune without an anomaly. A count that
+        # cannot be computed is recorded by get_sql_count, and the gates
+        # decide as before.
+        if [ "$_PRUNE_SKIP" -eq 0 ] && get_sql_count "session prune candidate" "
+            SELECT COUNT(*) FROM (
+                SELECT id FROM \`$CITY_DB\`.issues
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+                UNION ALL
+                SELECT id FROM \`$CITY_DB\`.wisps
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+            ) AS session_prune_candidates
+        " && [ "$SQL_COUNT_RESULT" -eq 0 ]; then
+            echo "reaper: session prune: nothing to prune (no closed bead matching $SESSION_BEAD_PATTERN is older than $SESSION_PURGE_AGE)"
+            _PRUNE_SKIP=1
+        fi
+
+        # Op-row gate: the prune selects closed no-history rows too, which is
+        # where op rows live (see op_rows_guard).
+        if [ "$_PRUNE_SKIP" -eq 0 ] && ! op_rows_guard prune; then
+            op_rows_hold_back "session prune"
+            _PRUNE_SKIP=1
+        fi
 
         # Backup-age gate: skip bulk prune unless bd reports a backup of the
         # city store newer than the threshold. bd owns the backup (the dolt
@@ -1220,84 +1516,71 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # JSONL-era backup state must not open the gate while the Dolt backup
         # is stale or never ran); only a scope with no Dolt destination is
         # judged on bd's legacy backup state.
-        _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
-        case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        _PRUNE_SKIP=0
-        _PRUNE_SKIP_REASON=""
-        _PRUNE_BACKUP_UNSUPPORTED=0
-        _BACKUP_TS=""
-        _BACKUP_ERR_FILE=$(mktemp)
-        if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
-            _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
-                (if (.dolt.configured // false) == true
-                 then (.dolt.last_sync // empty)
-                 else (.backup.timestamp // empty) end)
-                | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
-            if [ -z "$_BACKUP_TS" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
-                _PRUNE_SKIP=1
-            fi
-        else
-            _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
-            case "$_BACKUP_STATUS" in
-                *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
-                    # This bd cannot back up the city scope's transport, so no
-                    # backup evidence can exist yet. The prune waits; the run
-                    # reports it without escalating every cooldown.
-                    _PRUNE_BACKUP_UNSUPPORTED=1
-                    ;;
-            esac
-            _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
-            _PRUNE_SKIP=1
-        fi
-        rm -f "$_BACKUP_ERR_FILE"
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$_BACKUP_TS" in
-                [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
-                *)
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                    _PRUNE_SKIP=1
-                    ;;
-            esac
-        fi
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # bd timestamps are RFC3339 (possibly with fractional seconds).
-            # Truncate to whole seconds, as Step 4's SQL does.
-            case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
-            _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || echo "")
-            if [ -z "$_BACKUP_EPOCH" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                _PRUNE_SKIP=1
-            else
-                _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
-                if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+            _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
+            case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+            _PRUNE_SKIP_REASON=""
+            _PRUNE_BACKUP_UNSUPPORTED=0
+            _BACKUP_TS=""
+            _BACKUP_ERR_FILE=$(mktemp)
+            if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
+                _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
+                    (if (.dolt.configured // false) == true
+                     then (.dolt.last_sync // empty)
+                     else (.backup.timestamp // empty) end)
+                    | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
+                if [ -z "$_BACKUP_TS" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
                     _PRUNE_SKIP=1
                 fi
+            else
+                _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
+                case "$_BACKUP_STATUS" in
+                    *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
+                        # This bd cannot back up the city scope's transport, so no
+                        # backup evidence can exist yet. The prune waits; the run
+                        # reports it without escalating every cooldown.
+                        _PRUNE_BACKUP_UNSUPPORTED=1
+                        ;;
+                esac
+                _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
+                _PRUNE_SKIP=1
             fi
-        fi
-
-        if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
-            order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
-        elif [ "$_PRUNE_SKIP" -eq 1 ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
-            order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
-        fi
-
-        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into a SQL
-        # LIKE literal below (type-scope gate) and passed as bd's own --pattern
-        # flag. A value outside this charset (e.g. a single quote) would corrupt
-        # the guard's own COUNT query -- id LIKE 'x' OR '1'='1' always matches,
-        # silently defeating the guard. Fail closed before any SQL is built.
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$SESSION_BEAD_PATTERN" in
-                ''|*[!A-Za-z0-9_.*?-]*)
-                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+            rm -f "$_BACKUP_ERR_FILE"
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                case "$_BACKUP_TS" in
+                    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
+                    *)
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
+                        _PRUNE_SKIP=1
+                        ;;
+                esac
+            fi
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                # bd timestamps are RFC3339 (possibly with fractional seconds).
+                # Truncate to whole seconds, as Step 4's SQL does.
+                case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
+                _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || echo "")
+                if [ -z "$_BACKUP_EPOCH" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
                     _PRUNE_SKIP=1
-                    ;;
-            esac
+                else
+                    _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
+                    if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+                        _PRUNE_SKIP=1
+                    fi
+                fi
+            fi
+
+            if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
+                order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
+            elif [ "$_PRUNE_SKIP" -eq 1 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+                order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
+            fi
         fi
 
         # Type-scope gate: bd's prune has no issue_type filter (only ID glob +
@@ -1307,16 +1590,11 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # rows, and fail closed on a nonzero hit or on a count that could not
         # be computed.
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
-            # literal % or _ in a custom pattern would not round-trip.
-            _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
-            _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
-            case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
             if ! get_sql_count "type scope guard" "
                 SELECT COUNT(*) FROM \`$CITY_DB\`.issues
-                WHERE id LIKE '$_TYPE_GUARD_LIKE'
+                WHERE id LIKE '$_PRUNE_LIKE'
                 AND status = 'closed'
-                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
                 AND issue_type != 'session'
             "; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: type-scope guard count could not be computed (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
@@ -1333,7 +1611,7 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); else BD_PRUNE_ARGS+=(--dry-run); fi
         BD_PRUNE_ARGS+=(--json)
         if [ "$_PRUNE_SKIP" -eq 0 ] && run_budget_exhausted; then
-            order_outcome_scope_skipped "city" "session prune skipped: run budget exhausted"
+            budget_skipped city 6 "session prune skipped: run budget exhausted"
             _PRUNE_SKIP=1
         fi
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
@@ -1377,7 +1655,9 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
                 DELETED_COUNT=""
                 if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // empty' 2>/dev/null || true)
+                    # gc bd delete --json: a batch reply has deleted_count; a one-id
+                    # reply has deleted as a non-empty string and no count.
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (if (.deleted | type) == "string" and .deleted != "" then 1 else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)
@@ -1421,24 +1701,25 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report. Only a measured age (age=<seconds>s) is normalized out of the
-# fingerprint, so a stale backup that merely grows older stays one incident
-# while a change of state (age=absent, age=unparseable) notifies at once. A
+# Report. Only a measured age (age=<seconds>s) and a held stale-issue burst's
+# size (held=<N>, with the line that repeats it) are normalized out of the
+# fingerprint, so a stale backup that merely grows older, or a held burst that
+# grows, stays one incident while a change of state (age=absent,
+# age=unparseable, a burst held or released) notifies at once. The burst's
+# normalization runs from held=<N>: to the end of its line, which stops at its
+# own anomaly only because record_anomaly ends each anomaly with a newline. A
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
-    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
-    "$ESCALATE_SCRIPT" \
-        --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" \
-        --incident-key "reaper:anomalies" \
-        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g; s/held=[0-9]+:.*/held=<dynamic>/')
+    raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
+        "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
 else
-    "$ESCALATE_SCRIPT" --resolve-incident "reaper:anomalies" >/dev/null || true
+    resolve_incident "reaper:anomalies" || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, stale_issues_held:$TOTAL_STALE_ISSUES_HELD, mail_wisps:$TOTAL_MAIL_WISPS, budget_skipped:${BUDGET_SKIPPED:-none}"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE, would_hold_stale_issues:$TOTAL_WOULD_HOLD_STALE_ISSUES (dry run)"
 fi
 
 maintenance_done "$SUMMARY"

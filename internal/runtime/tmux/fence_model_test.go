@@ -48,6 +48,10 @@ type fenceModel struct {
 	beforeGuard func(m *fenceModel, n int)
 	// failGuard makes the n-th guard (1-based) fail with its error, unrun.
 	failGuard map[int]error
+	// failLoad makes the n-th load-buffer (1-based) fail with its error,
+	// unrun.
+	failLoad map[int]error
+	loads    int
 	// beforeRead runs before the n-th read of a pane's fence (1-based;
 	// display-message of fenceReadFormat), with m locked.
 	beforeRead func(m *fenceModel, n int)
@@ -128,6 +132,10 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 	}
 	switch args[0] {
 	case "load-buffer":
+		m.loads++
+		if err := m.failLoad[m.loads]; err != nil {
+			return "", err
+		}
 		data, err := os.ReadFile(args[len(args)-1])
 		if err != nil {
 			return "", err

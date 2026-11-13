@@ -59,6 +59,7 @@ type SQLiteStoreOptions struct {
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
 	readOnly                bool
+	readOnlyNoMmap          bool
 	privateRecovery         bool
 }
 
@@ -148,6 +149,17 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 func WithSQLiteStoreReadOnly() SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
 		o.readOnly = true
+	}
+}
+
+// WithSQLiteStoreReadOnlyNoMmap opens an existing database read-only, as
+// WithSQLiteStoreReadOnly, without the mmap window: for a reader that walks a
+// whole database once (a storage snapshot's JSONL), where mapping it counts
+// every page it touches, on every pooled connection, against the resident set.
+func WithSQLiteStoreReadOnlyNoMmap() SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.readOnly = true
+		o.readOnlyNoMmap = true
 	}
 }
 
@@ -309,6 +321,9 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// sqliteStorePerStoreConnections times, not once. sqliteStoreDSNWithMode
 	// keeps that budget honest.
 	dsn := sqliteStoreDSN(dbPath, cfg.readOnly)
+	if cfg.readOnlyNoMmap {
+		dsn = sqliteSnapshotSourceDSN(dbPath)
+	}
 	if cfg.privateRecovery {
 		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
 	}
@@ -770,10 +785,10 @@ func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 }
 
 // insertRevision is the revision upsertBeadTx inserts a new row at: 1, as on
-// MemStore, so a row nothing has written since its insert still carries a
-// usable token (zero means "no usable token" under the REVISION CONTRACT on
-// ConditionalWriter); 0 on a layout with no revision column, whose reads
-// carry none.
+// MemStore, so an insert mints a nonzero token as every other write does (a
+// row at 0 is one an older binary inserted, whose 0 is a real token under the
+// REVISION CONTRACT on ConditionalWriter); 0 on a layout with no revision
+// column, whose reads carry none.
 func (s *SQLiteStore) insertRevision() int64 {
 	if !s.hasRevisionColumn {
 		return 0
@@ -1236,6 +1251,11 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			b.Metadata[k] = v
 		}
 	}
+	// Removing the key from the map is an exact unset, not an empty value:
+	// upsertBeadTx deletes every metadata row of the bead and re-inserts only
+	// the keys b.Metadata still carries. An absent key leaves the row
+	// unchanged, which rewriteBead commits as a no-op.
+	unsetMetadataKeys(b.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 {
 		b.Labels = append(b.Labels, opts.Labels...)
 	}
@@ -1267,10 +1287,14 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 // bumping the claim fence when the edit moves ownership. An edit that leaves
 // the stored row as it is commits nothing: the store decides the no-op against
 // the row its own transaction read, so the revision and updated_at stay put
-// and no CAS token another writer holds goes stale.
+// and no CAS token another writer holds goes stale. A read-only store refuses
+// every edit up front, so a same-value one is refused as a changing one is.
 func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
+	}
+	if s.readOnly {
+		return fmt.Errorf("sqlite update %q: store is read-only", id)
 	}
 	return retryOnBusy(func() error {
 		ctx := context.Background()
@@ -1522,6 +1546,23 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, residual("b.assignee")+"=?")
 		args = append(args, q.Assignee)
 	}
+	if len(q.Assignees) > 0 {
+		// The assignee column holds exactly the bead's assignee, and SQLite
+		// compares TEXT byte for byte, so this keeps precisely the rows
+		// ListQuery.Matches keeps: it only stops the rest from being decoded.
+		// A mailbox read is this shape, and every open message used to be
+		// decoded to keep the session's own. The predicate is indexable: a
+		// listing with an issue-type filter keeps idx_beads_type, and one with
+		// none (a session's in-progress work) now reads only its identities'
+		// rows through idx_beads_assignee instead of scanning. Beside a
+		// metadata equality it is residual like the other columns.
+		placeholders := make([]string, len(q.Assignees))
+		for i, assignee := range q.Assignees {
+			placeholders[i] = "?"
+			args = append(args, assignee)
+		}
+		where = append(where, residual("b.assignee")+" IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if q.ParentID != "" {
 		where = append(where, "b.parent_id=?")
 		args = append(args, q.ParentID)
@@ -1583,11 +1624,11 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 
 // sqliteListCanPushLimit reports whether SQLite can apply q.Limit before the
 // Go-side ListQuery match. A source-side limit is only exact when every active
-// filter is represented by sqliteListSQL: the wisp tier, plural assignees, and
-// seek boundary remain residual filters over decoded Beads. Applying LIMIT
-// before any of those filters can discard a later matching row permanently.
+// filter is represented by sqliteListSQL: the wisp tier and the seek boundary
+// remain residual filters over decoded Beads. Applying LIMIT before either can
+// discard a later matching row permanently.
 func sqliteListCanPushLimit(q ListQuery) bool {
-	return q.TierMode != TierWisps && len(q.Assignees) == 0 && q.SeekAfter == nil
+	return q.TierMode != TierWisps && q.SeekAfter == nil
 }
 
 // ListOpen returns non-closed beads in creation order by default.
@@ -1698,11 +1739,19 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 // excluded labels) and then sorts into the canonical ready order, so a
 // source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
+	return sqliteReadyCandidateSQL(q, projection, "NOT "+sqliteReadyBlockerExists("b.id"))
+}
+
+// sqliteReadyCandidateSQL is sqliteReadySQL with the blocking clause supplied:
+// Ready negates sqliteReadyBlockerExists, and ReadyBlockedByAbsent selects the
+// rows an absent target blocks (sqliteAbsentBlockerExists). Every other filter
+// is the same, so the two cannot disagree about what a ready candidate is.
+func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		"NOT " + sqliteReadyBlockerExists("b.id"),
+		blocking,
 	}
 	switch q.TierMode {
 	case TierWisps:

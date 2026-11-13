@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // noSleep is a sleep stub so the confirm loop runs instantly under test.
@@ -22,7 +24,7 @@ func TestSubmitEnterAndConfirmReEntersWhileIdle(t *testing.T) {
 	// Busy only becomes true once a second Enter has been sent, i.e. the first
 	// Enter raced the paste and was dropped.
 	busy := func() (bool, error) { return enters >= 2, nil }
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -41,7 +43,7 @@ func TestSubmitEnterAndConfirmReEntersWhileIdle(t *testing.T) {
 func TestSubmitEnterAndConfirmStopsWhenBusy(t *testing.T) {
 	var enters int
 	busy := func() (bool, error) { return enters >= 1, nil }
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -67,7 +69,7 @@ func TestSubmitEnterAndConfirmNoDoubleSubmitOnFastTurn(t *testing.T) {
 		// pre-re-send check.
 		return busyCalls > 1+submitConfirmPollsPerSend, nil
 	}
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -93,7 +95,7 @@ func TestSubmitEnterAndConfirmPreCheckConfirmsShortTurn(t *testing.T) {
 		// Busy only at send 1's pre-re-send check.
 		return busyCalls == 1+submitConfirmPollsPerSend+1, nil
 	}
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -113,7 +115,7 @@ func TestSubmitEnterAndConfirmPreCheckConfirmsShortTurn(t *testing.T) {
 func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	var enters int
 	busy := func() (bool, error) { return false, nil }
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, sawIdle, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -136,7 +138,7 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 // historical "nil == handed to tmux" contract.
 func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
 	var enters int
-	sendEnter := func() error {
+	sendEnter := func(int) error {
 		enters++
 		if enters == 1 {
 			return errors.New("transient: no server yet")
@@ -186,7 +188,7 @@ func TestSubmitEnterAndConfirmIgnoresPreexistingBusyOnFirstSend(t *testing.T) {
 			return true, nil
 		}
 	}
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -209,7 +211,7 @@ func TestSubmitEnterAndConfirmIgnoresPreexistingBusyOnFirstSend(t *testing.T) {
 func TestSubmitEnterAndConfirmNeverCreditsPreexistingBusy(t *testing.T) {
 	var enters int
 	busy := func() (bool, error) { return true, nil }
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, sawIdle, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -248,7 +250,7 @@ func TestSubmitEnterAndConfirmKeepsWatchingAfterSkippedReSend(t *testing.T) {
 			return true, nil
 		}
 	}
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -275,7 +277,7 @@ func TestSubmitEnterAndConfirmFailedReadIsNotIdle(t *testing.T) {
 		}
 		return true, nil
 	}
-	sendEnter := func() error { enters++; return nil }
+	sendEnter := func(int) error { enters++; return nil }
 
 	confirmed, sawIdle, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
 	if err != nil {
@@ -297,7 +299,7 @@ func TestSubmitEnterAndConfirmFailedReadIsNotIdle(t *testing.T) {
 func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	sendErr := errors.New("no server")
 	var enters int
-	sendEnter := func() error { enters++; return sendErr }
+	sendEnter := func(int) error { enters++; return sendErr }
 	busy := func() (bool, error) { return false, nil }
 
 	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
@@ -312,6 +314,138 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	}
 }
 
+// TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed proves a re-send that
+// fails after an earlier send reached the pane reports the submit
+// unconfirmed, not failed: the first send may already have submitted the
+// message, so a caller that must not deliver twice may not retry it.
+func TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed(t *testing.T) {
+	sendErr := errors.New("server exited")
+	var enters int
+	sendEnter := func(int) error {
+		enters++
+		if enters == 1 {
+			return nil
+		}
+		return sendErr
+	}
+	busy := func() (bool, error) { return false, nil }
+
+	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	if confirmed {
+		t.Fatal("confirmed = true, want false")
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) || !errors.Is(err, sendErr) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed wrapping sendErr", err)
+	}
+}
+
+// submitKeysRecorder is a sendSubmit fake that records the keys each submit
+// would have sent: the family's full sequence for a first submit and the
+// retry derivation for a later one, the rule NudgeSession's sendSubmit applies.
+type submitKeysRecorder struct {
+	full     []string
+	attempts []int
+	keys     [][]string
+}
+
+func (r *submitKeysRecorder) send(attempt int) error {
+	keys := r.full
+	if attempt > 0 {
+		keys = nudgeSubmitRetryKeySequence(r.full)
+	}
+	r.attempts = append(r.attempts, attempt)
+	r.keys = append(r.keys, keys)
+	return nil
+}
+
+// TestSubmitAndConfirmSendsTheFullSequenceOnlyOnTheFirstSubmit: the first
+// submit carries the family's full key sequence and every later one the commit
+// key alone, so a retry cannot fuse its leading key into the commit key.
+func TestSubmitAndConfirmSendsTheFullSequenceOnlyOnTheFirstSubmit(t *testing.T) {
+	rec := &submitKeysRecorder{full: []string{"Escape", "Enter"}}
+	// The third submit is the one that lands.
+	busy := func() (bool, error) { return len(rec.keys) >= 3, nil }
+
+	confirmed, _, sent, err := submitAndConfirm(rec.send, func() {}, busy, nil, noSleep)
+	if err != nil || !confirmed || sent != 3 {
+		t.Fatalf("submitAndConfirm = %t, sent %d, %v; want confirmed after 3 submits", confirmed, sent, err)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(rec.attempts, want) {
+		t.Fatalf("attempts = %v, want %v", rec.attempts, want)
+	}
+	want := [][]string{{"Escape", "Enter"}, {"Enter"}, {"Enter"}}
+	if !slices.EqualFunc(rec.keys, want, slices.Equal[[]string]) {
+		t.Fatalf("keys per submit = %q, want %q", rec.keys, want)
+	}
+}
+
+// TestSubmitAndConfirmRecoversAFusedFirstSubmitWithTheCommitKey narrates the
+// ga-oqhooe incident: attempt 0 sends Escape+Enter but the pane never goes busy
+// (codex read the pair as Alt+Enter, a newline), so the draft is still staged.
+// Attempt 1 sends Enter alone and the turn starts: one retry, no second Escape.
+func TestSubmitAndConfirmRecoversAFusedFirstSubmitWithTheCommitKey(t *testing.T) {
+	rec := &submitKeysRecorder{full: []string{"Escape", "Enter"}}
+	busy := func() (bool, error) { return len(rec.keys) >= 2, nil }
+
+	confirmed, _, sent, err := submitAndConfirm(rec.send, func() {}, busy,
+		func() (bool, error) { return true, nil }, noSleep)
+	if err != nil || !confirmed {
+		t.Fatalf("submitAndConfirm = %t, %v; want confirmed", confirmed, err)
+	}
+	if sent != 2 || len(rec.keys) != 2 {
+		t.Fatalf("submits = %d (reported %d), want exactly 2", len(rec.keys), sent)
+	}
+	if !slices.Equal(rec.keys[0], []string{"Escape", "Enter"}) {
+		t.Fatalf("first submit keys = %q, want [Escape Enter]", rec.keys[0])
+	}
+	if !slices.Equal(rec.keys[1], []string{"Enter"}) {
+		t.Fatalf("retry keys = %q, want [Enter] alone", rec.keys[1])
+	}
+}
+
+// TestSubmitAndConfirmCountsOnlySubmitsThatReachedThePane: a send that failed
+// at the tmux layer put nothing in the pane, so the next send is still the
+// first submit and carries attempt 0.
+func TestSubmitAndConfirmCountsOnlySubmitsThatReachedThePane(t *testing.T) {
+	var attempts []int
+	send := func(attempt int) error {
+		attempts = append(attempts, attempt)
+		if len(attempts) == 1 {
+			return errors.New("transient: no server yet")
+		}
+		return nil
+	}
+	busy := func() (bool, error) { return len(attempts) >= 2, nil }
+
+	confirmed, _, _, err := submitAndConfirm(send, func() {}, busy, nil, noSleep)
+	if err != nil || !confirmed {
+		t.Fatalf("submitAndConfirm = %t, %v; want confirmed", confirmed, err)
+	}
+	if want := []int{0, 0}; !slices.Equal(attempts, want) {
+		t.Fatalf("attempts = %v, want %v (the failed send delivered nothing)", attempts, want)
+	}
+}
+
+// TestRecoverStagedDraftSendsOnlyRetries: recovery runs after the confirm
+// window already sent the submit, so every send it makes is a retry and
+// carries a non-zero attempt.
+func TestRecoverStagedDraftSendsOnlyRetries(t *testing.T) {
+	pane := &stagedDraftPane{swallow: 3}
+
+	got := recoverStagedDraft(true, pane.sendSubmit, func() {}, pane.observe, pane.sleep)
+	if got != stagedDraftSubmittedBusy {
+		t.Fatalf("outcome = %v, want stagedDraftSubmittedBusy", got)
+	}
+	if len(pane.attempts) != pane.swallow+1 {
+		t.Fatalf("sends = %d, want %d", len(pane.attempts), pane.swallow+1)
+	}
+	for i, attempt := range pane.attempts {
+		if attempt < 1 {
+			t.Fatalf("send %d carried attempt %d, want >= 1 (a retry never sends the full sequence)", i, attempt)
+		}
+	}
+}
+
 // stagedDraftPane models a codex composer holding a large pasted draft while
 // the TUI is still ingesting it: the first swallow submits are eaten, the next
 // one submits, and the turn then renders busy (or, with busyNever, finishes
@@ -322,13 +456,18 @@ type stagedDraftPane struct {
 	busyNever bool
 	noDraft   bool // the composer never showed a staged draft
 	sends     int
+	attempts  []int // the attempt each submit carried
 	observes  int
 	sleeps    []time.Duration
 }
 
 func (p *stagedDraftPane) submitted() bool { return p.sends > p.swallow }
 
-func (p *stagedDraftPane) sendSubmit() error { p.sends++; return nil }
+func (p *stagedDraftPane) sendSubmit(attempt int) error {
+	p.sends++
+	p.attempts = append(p.attempts, attempt)
+	return nil
+}
 
 func (p *stagedDraftPane) observe() (paneSubmitObservation, error) {
 	p.observes++
@@ -417,7 +556,7 @@ func TestRecoverStagedDraftBusyAtEntrySendsNothing(t *testing.T) {
 			sends := 0
 			got := recoverStagedDraft(
 				tt.sawIdle,
-				func() error { sends++; return nil },
+				func(int) error { sends++; return nil },
 				func() {},
 				// Busy with the draft still on screen: busy wins, so recovery
 				// never submits into a running turn.
@@ -471,7 +610,7 @@ func TestRecoverStagedDraftStopsOnProbeError(t *testing.T) {
 	sends := 0
 	got := recoverStagedDraft(
 		true,
-		func() error { sends++; return nil },
+		func(int) error { sends++; return nil },
 		func() {},
 		func() (paneSubmitObservation, error) { return paneSubmitObservation{}, errors.New("capture failed") },
 		noSleep,
@@ -490,7 +629,7 @@ func TestRecoverStagedDraftStopsOnSendError(t *testing.T) {
 	sends := 0
 	got := recoverStagedDraft(
 		true,
-		func() error { sends++; return errors.New("no server") },
+		func(int) error { sends++; return errors.New("no server") },
 		func() {},
 		func() (paneSubmitObservation, error) { return paneSubmitObservation{drafted: true}, nil },
 		noSleep,
@@ -801,11 +940,12 @@ func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 }
 
 // TestNudgeSessionCodexBusyThroughoutIsNotCredited is the codex twin of the
-// Claude test above. codex's composer starts with "› ", so the drained-composer
-// check must read that prompt. Through Claude's "❯ " a codex composer is never
-// observed, and every nudge into a busy codex pane would requeue although codex
-// consumed it, each re-paste led by an Escape that cancels the turn the last
-// copy started. Every row sends exactly one Escape+Enter submit.
+// Claude test above, with the opposite outcome, because Codex reads its
+// submit's leading Escape as "interrupt the running turn": a nudge that finds
+// a codex turn running for the whole ready wait types nothing and presses
+// nothing, whatever the composer holds, and defers with
+// runtime.ErrSessionBusy. It used to type and send Escape+Enter, which
+// aborted the very turn it meant to inform.
 func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 	const message = "reminder: please respond to the review"
 	turn := []string{"• Ran make test", "  └ ok  ./...", "", "◦ Working (48s • esc to interrupt)", ""}
@@ -815,13 +955,11 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 		session  string
 		attached string
 		composer []string
-		want     error
-		keys     []string
 	}{
-		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}, ErrNudgeSubmitDeliveredUnobserved, []string{"C-u", "Escape", "Enter"}},
-		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}, ErrNudgeSubmitDeliveredUnobserved, []string{"Escape", "Enter"}},
-		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Escape", "Enter"}},
-		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Escape", "Enter"}},
+		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}},
+		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}},
+		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}},
+		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -838,11 +976,16 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 
 				err := tm.NudgeSession(tt.session, message)
-				if !errors.Is(err, tt.want) {
-					t.Fatalf("NudgeSession = %v, want %v", err, tt.want)
+				if !errors.Is(err, runtime.ErrSessionBusy) {
+					t.Fatalf("NudgeSession = %v, want runtime.ErrSessionBusy", err)
 				}
-				if keys := ex.sentKeys(); !slices.Equal(keys, tt.keys) {
-					t.Fatalf("sent keys = %q, want %q (one Escape+Enter submit, none into the running turn)", keys, tt.keys)
+				if keys := ex.sentKeys(); len(keys) != 0 {
+					t.Fatalf("sent keys = %q, want none: Escape aborts the running codex turn", keys)
+				}
+				for _, call := range ex.calls {
+					if slices.Contains(call, "send-keys") && slices.Contains(call, "-l") {
+						t.Fatalf("typed %q into the busy codex pane, want nothing", call)
+					}
 				}
 			})
 		})
@@ -1001,5 +1144,25 @@ func TestSnapshotPaneIdleWithPrefixHourSpinner(t *testing.T) {
 				t.Errorf("snapshotPaneIdleWithPrefix idle = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNudgeSessionLockTimeoutIsNotSent proves a nudge that times out waiting
+// for the session's nudge lock reports that nothing was sent: it fails before
+// its first key, so a retry cannot deliver the message twice.
+func TestNudgeSessionLockTimeoutIsNotSent(t *testing.T) {
+	tm := NewTmuxWithConfig(Config{SocketName: "gc-test-lock-timeout-unused", NudgeLockTimeout: time.Millisecond})
+	const session = "gc-test-lock-timeout"
+	if !acquireNudgeLock(session, time.Second) {
+		t.Fatal("could not acquire the nudge lock for setup")
+	}
+	defer releaseNudgeLock(session)
+
+	err := tm.NudgeSession(session, "hello")
+	if !errors.Is(err, runtime.ErrNudgeNotSent) {
+		t.Fatalf("NudgeSession = %v, want ErrNudgeNotSent", err)
+	}
+	if errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("NudgeSession = %v, a lock timeout is not unconfirmed", err)
 	}
 }

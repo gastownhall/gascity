@@ -15,9 +15,9 @@
 # at runtime. Use GC_DOCKER_HOME_MOUNT or your own volume mounts to
 # provide them. Never bake credentials into the image.
 
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.3-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
-ARG CLAUDE_CODE_VERSION=2.1.101
+ARG CLAUDE_CODE_VERSION=2.1.308
 
 # tmux is a hard requirement of scripts/gc-session-docker (it execs
 # `tmux new-session` inside the container and dies if tmux is absent).

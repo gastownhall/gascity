@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -127,6 +128,29 @@ func newProvider(dir string) *Provider {
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	// Build environment: inherit parent env + apply overrides. An empty override
+	// spells withholding, matching the tmux adapter: remove the inherited entry
+	// instead of passing KEY=, so namespace isolation remains real to children.
+	// The parent env is read through execenv.Environ so a native beads store
+	// open projecting its scope's BEADS_* variables cannot leak into the session.
+	// It is read before p.mu: execenv.Environ waits out an in-flight open, and
+	// the provider's other calls must not wait with it.
+	env := execenv.Environ()
+	if len(cfg.Env) > 0 {
+		keys := make([]string, 0, len(cfg.Env))
+		for k := range cfg.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
+			env = append(env, k+"="+cfg.Env[k])
+		}
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()
@@ -180,24 +204,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
 
-	// Build environment: inherit parent env + apply overrides. An empty override
-	// spells withholding, matching the tmux adapter: remove the inherited entry
-	// instead of passing KEY=, so namespace isolation remains real to children.
-	env := os.Environ()
-	if len(cfg.Env) > 0 {
-		keys := make([]string, 0, len(cfg.Env))
-		for k := range cfg.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = envWithoutKey(env, k)
-			if cfg.Env[k] == "" {
-				continue
-			}
-			env = append(env, k+"="+cfg.Env[k])
-		}
-	}
 	cmd.Env = env
 
 	// Validate immediately before process creation so hostile pre-creation
@@ -285,7 +291,10 @@ func envWithoutKey(env []string, key string) []string {
 }
 
 // Stop terminates the named session. Returns nil if it doesn't exist
-// (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
+// (idempotent). Sends SIGTERM first, then SIGKILL after a grace period. A
+// process that outlives SIGKILL yields [runtime.ErrProcessNotConfirmedDead]:
+// the session is no longer tracked in memory, so IsRunning answers from the
+// control socket while the process lives, and a later Stop retries through it.
 func (p *Provider) Stop(name string) error {
 	euid := os.Geteuid()
 	p.mu.Lock()
@@ -808,8 +817,11 @@ func handleSessionConn(conn net.Conn, sc *sessionConn) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = terminateSessionConn(sc)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply := "ok\n"
+		if err := terminateSessionConn(sc); errors.Is(err, runtime.ErrProcessNotConfirmedDead) {
+			reply = runtime.StopReplyNotConfirmedDead + "\n"
+		}
+		conn.Write([]byte(reply)) //nolint:errcheck
 	case "interrupt":
 		_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -879,7 +891,9 @@ func (p *Provider) probeSessionSocket(name string, euid int) (bool, error) {
 }
 
 // sendSocketCommand connects to the session's control socket, sends a
-// command, and waits for "ok". Returns nil on success.
+// command, and waits for "ok". Returns nil on success, and an error satisfying
+// errors.Is([runtime.ErrProcessNotConfirmedDead]) when the owner replies
+// [runtime.StopReplyNotConfirmedDead].
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
 	return p.sendSocketCommandAt(name, command, timeout, os.Geteuid())
 }
@@ -917,8 +931,13 @@ func (p *Provider) sendSocketCommandAt(name, command string, timeout time.Durati
 				return err
 			}
 			scanner := bufio.NewScanner(conn)
-			if scanner.Scan() && scanner.Text() == "ok" {
-				return nil
+			if scanner.Scan() {
+				switch scanner.Text() {
+				case "ok":
+					return nil
+				case runtime.StopReplyNotConfirmedDead:
+					return runtime.ErrProcessNotConfirmedDead
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				return err
@@ -951,7 +970,7 @@ func (p *Provider) stopBySocket(name string) error {
 }
 
 func (p *Provider) stopBySocketAt(name string, euid int) error {
-	err := p.sendSocketCommandAt(name, "stop", 7*time.Second, euid)
+	err := p.sendSocketCommandAt(name, "stop", stopSocketTimeout(), euid)
 	if err != nil {
 		if isUnavailableSocketError(err) {
 			// Socket doesn't exist or can't connect — session is dead (idempotent).
@@ -963,17 +982,37 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 	return nil
 }
 
+// stopSocketReplyMargin is how much longer a cross-process stop waits for the
+// owner's reply than the owner's own stop and reap graces, covering scheduling
+// and the socket round trip.
+const stopSocketReplyMargin = 2 * time.Second
+
+// stopSocketTimeout bounds a cross-process stop request: the owner replies only
+// after its stop grace and the post-SIGKILL reap grace have both run out.
+func stopSocketTimeout() time.Duration {
+	return sessionStopGrace + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
+}
+
 func isUnavailableSocketError(err error) bool {
 	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }
 
 // --- In-memory process helpers ---
 
+// sessionStopGrace is how long a stopped session's process group gets between
+// SIGTERM and SIGKILL. A variable so tests can shorten it.
+var sessionStopGrace = runtime.ManagedProcessStopGrace
+
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked
 // process and returns once reap has finished, so a stopped session's sidecar
-// is gone when Stop (or a socket "stop") returns.
+// is gone when Stop (or a socket "stop") returns. A process that outlives
+// SIGKILL is reported as [runtime.ErrProcessNotConfirmedDead] without waiting
+// for reap, which cannot finish while the process lives.
 func terminateSessionConn(sc *sessionConn) error {
-	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, sessionStopGrace)
+	if errors.Is(err, runtime.ErrProcessNotConfirmedDead) {
+		return err
+	}
 	<-sc.reaped
 	return err
 }

@@ -47,6 +47,48 @@ func (r *scaleCheckResult) partial(template string) bool {
 	return !ok
 }
 
+// countOf is template's count in r, and whether r has one: false for a
+// template the run did not evaluate, or with no run.
+func (r *scaleCheckResult) countOf(template string) (int, bool) {
+	if r == nil {
+		return 0, false
+	}
+	n, ok := r.Counts[template]
+	return n, ok
+}
+
+// sameChecks is r limited to the templates whose scale_check is the same
+// in from and to, for serving a run of from's config under to's: a template
+// whose check changed, or that has none in to, reads partial until a run of
+// to's ends. Nil stays nil.
+func (r *scaleCheckResult) sameChecks(from, to *config.City) *scaleCheckResult {
+	if r == nil || from == to {
+		return r
+	}
+	checks := func(cfg *config.City) map[string]string {
+		m := make(map[string]string)
+		if cfg != nil {
+			for i := range cfg.Agents {
+				if check := strings.TrimSpace(cfg.Agents[i].ScaleCheck); check != "" {
+					m[cfg.Agents[i].QualifiedName()] = check
+				}
+			}
+		}
+		return m
+	}
+	before, after := checks(from), checks(to)
+	out := &scaleCheckResult{Counts: make(map[string]int)}
+	for template, n := range r.Counts {
+		if check, ok := after[template]; ok && check == before[template] {
+			out.Counts[template] = n
+			if r.Partial[template] {
+				out.Partial = markScaleCheckPartialTemplate(out.Partial, template)
+			}
+		}
+	}
+	return out
+}
+
 // runCustomScaleChecks runs every custom scale_check once over env.
 func runCustomScaleChecks(env externalReadsEnv, runner ScaleCheckRunner, queryEnv probeEnvFunc, stderr io.Writer) *scaleCheckResult {
 	work, envFailed := customScaleCheckWork(env.CityName, env.CityPath, env.Cfg, env.SuspendedRigPaths, queryEnv, stderr)

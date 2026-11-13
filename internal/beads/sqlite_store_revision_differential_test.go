@@ -186,11 +186,17 @@ func TestSQLiteStoreRevisionMovesWhereMemStoreDoes(t *testing.T) {
 }
 
 // TestSQLiteStoreCreateMintsAUsableRevision pins that a new row starts at a
-// nonzero revision, as MemStore's does: zero is "no usable token" (the
-// REVISION CONTRACT on beads.ConditionalWriter), so a row nothing has written
-// since its insert would refuse every caller that fences only on a real
-// token. Create and Tx.Create both return the revision the row reads back
-// with, and a fence at it holds.
+// nonzero revision, as MemStore's does: an insert mints a token as every
+// other write does, so a row at revision 0 is one an older binary inserted
+// (a real token under the REVISION CONTRACT on beads.ConditionalWriter).
+// Create and Tx.Create both return the revision the row reads back with, and
+// a fence at it holds.
+//
+// Where the revision column exists no write leaves a row at 0, so a fence
+// landing at 0 is pinned on a MemStore row seeded there instead
+// (TestStampStrandedFencesARevisionZeroClaim in cmd/gc); SQLite's exact
+// compare at 0 is pinned from the refusal side, by the conformance row
+// zero_revision_refused_after_mutation.
 func TestSQLiteStoreCreateMintsAUsableRevision(t *testing.T) {
 	s := newSQLiteForConformance(t)
 	created, err := s.Create(beads.Bead{Title: "created assigned", Assignee: "worker"})

@@ -613,3 +613,203 @@ func TestFoldTurnStopReasonDetail(t *testing.T) {
 		})
 	}
 }
+
+// inferIdle is o for a source whose ends may be inferred at idle (T3 V1).
+func inferIdle(o TurnObservation) TurnObservation {
+	o.InferIdleEnds = true
+	return o
+}
+
+// afterInferredR is c once R's end was inferred at idle: R is the turn
+// journaled last, and Seen, which an inferred end never moves, does not name
+// it.
+func afterInferredR(c TurnCells) TurnCells {
+	c.LastID, c.LastEnd, c.LastAt = "R", TurnEndEnded, ts(4)
+	return c
+}
+
+// Kills a fold that reads a source's normal unrecorded end (T3 V1 clears
+// latestTurn at most turn ends: running T, then idle with T missing from
+// Recent) as a gap, or that reads a real gap on such a source as an end.
+func TestFoldTurnInfersIdleEnds(t *testing.T) {
+	known := func(c TurnCells) TurnCells {
+		c.LastID, c.LastEnd, c.LastAt, c.Seen = "R", TurnEndCompleted, ts(4), "R"
+		return c
+	}
+	olderR := ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}
+	cases := []struct {
+		name         string
+		prev         TurnCells
+		obs          TurnObservation
+		interrupting InterruptRef
+		next         TurnCells
+		facts        []Fact
+	}{
+		{
+			name: "running T, idle, T absent: an inferred end",
+			prev: running(3, "T", ts(5)),
+			obs:  inferIdle(obsAt(3, "", time.Time{})),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndEnded, LastAt: ts(100), ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndEnded, FactBasisObserved, ts(100))},
+		},
+		{
+			name: "running T, idle, T absent, an older known turn in Recent: an inferred end",
+			prev: known(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, olderR)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndEnded, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndEnded, FactBasisObserved, ts(100))},
+		},
+		{
+			name: "running T, idle, T absent, the inferred R restored after T ran: an inferred end, the cells left on T",
+			prev: afterInferredR(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, olderR)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndEnded, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndEnded, FactBasisObserved, ts(100))},
+		},
+		{
+			name: "running T, idle, T absent, a later turn past the inferred R in Recent: still a gap",
+			prev: afterInferredR(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "U", StartedAt: ts(9), EndedAt: ts(12), Status: TurnSourceCompleted}, olderR)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "U", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "U", ObservedAt: ts(100),
+			},
+			facts: []Fact{
+				endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100)),
+				started(3, "U", ts(9)),
+				endedFact("U", TurnEndCompleted, FactBasisRuntime, ts(12)),
+			},
+		},
+		{
+			name:         "running T, idle, T absent, gc interrupting T: interrupted",
+			prev:         running(3, "T", ts(5)),
+			obs:          inferIdle(obsAt(3, "", time.Time{})),
+			interrupting: InterruptRef{Op: stopOp, Turn: "T"},
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndInterrupted, LastAt: ts(100), ObservedAt: ts(100),
+			},
+			facts: []Fact{func() Fact {
+				f := endedFact("T", TurnEndInterrupted, FactBasisObserved, ts(100))
+				f.CauseOps = []string{stopOp}
+				return f
+			}()},
+		},
+		{
+			name: "running T, current U, T absent: still a gap",
+			prev: running(3, "T", ts(5)),
+			obs:  inferIdle(obsAt(3, "U", ts(9))),
+			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "T", LastEnd: TurnEndUnobserved, LastAt: ts(100), ObservedAt: ts(100)},
+			facts: []Fact{
+				endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100)),
+				started(3, "U", ts(9)),
+			},
+		},
+		{
+			name: "running T, idle, T absent, an unrelated later turn in Recent: still a gap",
+			prev: known(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "U", StartedAt: ts(9), EndedAt: ts(12), Status: TurnSourceCompleted})),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "U", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "U", ObservedAt: ts(100),
+			},
+			facts: []Fact{
+				endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100)),
+				started(3, "U", ts(9)),
+				endedFact("U", TurnEndCompleted, FactBasisRuntime, ts(12)),
+			},
+		},
+		{
+			name: "running T, the session gone with T absent: session_gone",
+			prev: running(3, "T", ts(5)),
+			obs: func() TurnObservation {
+				o := inferIdle(obsAt(3, "", time.Time{}))
+				o.SessionGone = true
+				return o
+			}(),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndSessionGone, LastAt: ts(100), ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndSessionGone, FactBasisObserved, ts(100))},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			next, facts, write := FoldTurn(c.prev, c.obs, c.interrupting)
+			if !write {
+				t.Fatal("write = false, want true")
+			}
+			if !reflect.DeepEqual(next, c.next) {
+				t.Fatalf("next\n got %+v\nwant %+v", next, c.next)
+			}
+			if !reflect.DeepEqual(facts, c.facts) {
+				t.Fatalf("facts\n got %+v\nwant %+v", facts, c.facts)
+			}
+			for _, f := range facts {
+				if _, err := EncodeFact("gc", f); err != nil {
+					t.Fatalf("fact %+v does not encode: %v", f, err)
+				}
+			}
+			again, refacts, rewrite := FoldTurn(next, c.obs, c.interrupting)
+			if rewrite || refacts != nil || !reflect.DeepEqual(again, next) {
+				t.Fatalf("folding the same observation again: write %v, facts %+v, cells %+v", rewrite, refacts, again)
+			}
+		})
+	}
+}
+
+// Kills an InferredIdleEnd that disagrees with the fold: it names the
+// running turn exactly when the fold infers that turn's end at idle.
+func TestInferredIdleEndMatchesTheFold(t *testing.T) {
+	later := ObservedTurnEnd{ID: "U", StartedAt: ts(9), EndedAt: ts(12), Status: TurnSourceCompleted}
+	restoredR := ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}
+	cases := []struct {
+		name string
+		prev TurnCells
+		obs  TurnObservation
+		want string
+	}{
+		{"idle, T absent", running(3, "T", ts(5)), inferIdle(obsAt(3, "", time.Time{})), "T"},
+		{"the inferred R restored to Recent", afterInferredR(running(3, "T", ts(5))), inferIdle(obsAt(3, "", time.Time{}, restoredR)), "T"},
+		{"a later turn past the restored R", afterInferredR(running(3, "T", ts(5))), inferIdle(obsAt(3, "", time.Time{}, later, restoredR)), ""},
+		{"the source records every end", running(3, "T", ts(5)), obsAt(3, "", time.Time{}), ""},
+		{"T current", running(3, "T", ts(5)), inferIdle(obsAt(3, "T", ts(5))), ""},
+		{"another turn current", running(3, "T", ts(5)), inferIdle(obsAt(3, "U", ts(9))), ""},
+		{"T in Recent", running(3, "T", ts(5)), inferIdle(obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "T", Status: TurnSourceCompleted})), ""},
+		{"a later turn in Recent", running(3, "T", ts(5)), inferIdle(obsAt(3, "", time.Time{}, later)), ""},
+		{"nothing running", ended("R", TurnEndCompleted, ts(4)), inferIdle(obsAt(3, "", time.Time{})), ""},
+		{"another generation", running(2, "T", ts(5)), inferIdle(obsAt(3, "", time.Time{})), ""},
+		{"the session gone", running(3, "T", ts(5)), func() TurnObservation {
+			o := inferIdle(obsAt(3, "", time.Time{}))
+			o.SessionGone = true
+			return o
+		}(), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.obs.InferredIdleEnd(c.prev); got != c.want {
+				t.Fatalf("InferredIdleEnd = %q, want %q", got, c.want)
+			}
+			_, facts, _ := FoldTurn(c.prev, c.obs, InterruptRef{})
+			inferred := ""
+			for _, f := range facts {
+				if f.Kind == FactTurnEnded && f.Turn == c.prev.ID && f.Reason == string(TurnEndEnded) {
+					inferred = f.Turn
+				}
+			}
+			if inferred != c.want {
+				t.Fatalf("the fold inferred the end of %q, want %q", inferred, c.want)
+			}
+		})
+	}
+}

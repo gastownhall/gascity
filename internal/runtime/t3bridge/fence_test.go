@@ -295,8 +295,8 @@ func TestT3FencedNudgeRetryRechecksTheFence(t *testing.T) {
 		server.setSnapshots(fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(next)))
 	})
 	err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1"})
-	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("NudgeFenced after a rebind between attempts = %v, want ErrRuntimeUnavailable", err)
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("NudgeFenced after a rebind between attempts = %v, want ErrRuntimeUnavailable, unconfirmed: T3 took the first attempt", err)
 	}
 	if got := server.commandPayloads("thread.turn.start"); len(got) != 1 {
 		t.Fatalf("turn starts = %d, want the first attempt only", len(got))
@@ -318,8 +318,8 @@ func TestT3FencedNudgeRetryRechecksTheFence(t *testing.T) {
 	server.setCommandHook(func(map[string]interface{}) {
 		server.setSnapshots(fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(next)))
 	})
-	if err := p.InterruptFenced(t.Context(), turnFenceSession, t3Fence); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("InterruptFenced after a rebind between attempts = %v, want ErrRuntimeUnavailable", err)
+	if err := p.InterruptFenced(t.Context(), turnFenceSession, t3Fence); !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("InterruptFenced after a rebind between attempts = %v, want ErrRuntimeUnavailable and no nudge outcome", err)
 	}
 	if got := server.commandPayloads("thread.turn.interrupt"); len(got) != 1 {
 		t.Fatalf("interrupts = %d, want the first attempt only", len(got))
@@ -358,6 +358,9 @@ func TestT3FencedRetryNeedsTheSameThreadAndALiveSession(t *testing.T) {
 				err := call.run(p)
 				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
 					t.Fatalf("%s = %v, want ErrRuntimeUnavailable", op, err)
+				}
+				if got, want := errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed), op == "nudge"; got != want {
+					t.Fatalf("%s = %v, unconfirmed %v, want %v: T3 took the first attempt unanswered", op, err, got, want)
 				}
 				if got := server.commandPayloads(call.command); len(got) != 1 {
 					t.Fatalf("%s: %s commands = %d, want the first attempt only", op, call.command, len(got))

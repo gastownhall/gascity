@@ -13,6 +13,7 @@ package readywork
 // sleeps or bounds wall-clock time (TESTING.md: wait for facts).
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -125,7 +126,7 @@ func TestFederateReadyBeadsReadsEveryLegAtOnce(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _, err = federate(gatedLegs(legCount, probe), readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
+			_, _, err = federate(context.Background(), gatedLegs(legCount, probe), readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
 		}()
 		synctest.Wait()
 		if got := probe.Running(); got != legCount {
@@ -152,7 +153,7 @@ func TestFederateReadyBeadsBoundsTheLegFanOut(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			rows, _, err = federate(gatedLegs(legCount, probe), readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
+			rows, _, err = federate(context.Background(), gatedLegs(legCount, probe), readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
 		}()
 		synctest.Wait()
 		if got := probe.Running(); got != int64(LegFanOut) {
@@ -169,6 +170,41 @@ func TestFederateReadyBeadsBoundsTheLegFanOut(t *testing.T) {
 	})
 }
 
+// TestReadStartsNoLegReadOnceItsContextEnds pins cancellation at the leg
+// fan-out: with every slot held by a parked read and one leg still waiting for
+// a slot, ending the context means that leg is never read, and the answer is
+// the context's error rather than rows.
+func TestReadStartsNoLegReadOnceItsContextEnds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		legCount := LegFanOut + 1
+		probe := fanouttest.NewProbe()
+		defer probe.Open()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var rows []ReadyBead
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			rows, err = ReadContext(ctx, gatedLegs(legCount, probe), Query{})
+		}()
+		synctest.Wait()
+		if got := probe.Running(); got != int64(LegFanOut) {
+			t.Fatalf("%d legs being read at once, want the bound %d with one leg waiting for a slot", got, LegFanOut)
+		}
+		cancel()
+		probe.Open()
+		<-done
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadContext = %v, %v; want the context's error once it ended", rows, err)
+		}
+		if got := len(probe.SortedVisits()); got != LegFanOut {
+			t.Fatalf("%d of %d legs were read, want only the %d already in flight when the context ended", got, legCount, LegFanOut)
+		}
+	})
+}
+
 // TestFederateListBeadsWithOwnerReadsEveryLegAtOnce is the same property for
 // the crash-recovery arm, which restates the merge loop rather than sharing it.
 func TestFederateListBeadsWithOwnerReadsEveryLegAtOnce(t *testing.T) {
@@ -181,7 +217,7 @@ func TestFederateListBeadsWithOwnerReadsEveryLegAtOnce(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _, err = federate(gatedLegs(legCount, probe), listRead(beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier}))
+			_, _, err = federate(context.Background(), gatedLegs(legCount, probe), listRead(beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier}))
 		}()
 		synctest.Wait()
 		if got := probe.Running(); got != legCount {
@@ -224,7 +260,7 @@ func TestFederateReadyBeadsDedupeIsByLegPositionNotCompletion(t *testing.T) {
 			testLeg("city", readyOrderedStore{Store: work, waitFor: graphFirst}),
 			testLeg("graph", readyOrderedStore{Store: graph, signal: graphFirst}),
 		}
-		rows, _, err := federate(legs, readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
+		rows, _, err := federate(context.Background(), legs, readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
 		if err != nil {
 			t.Fatalf("federate: %v", err)
 		}
@@ -252,7 +288,7 @@ func TestFederateListBeadsWithOwnerResolvesOwnershipByLegPosition(t *testing.T) 
 			testLeg("city", readyOrderedStore{Store: work, waitFor: graphFirst}),
 			testLeg("graph", readyOrderedStore{Store: graph, signal: graphFirst}),
 		}
-		rows, owners, err := federate(legs, listRead(beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier}))
+		rows, owners, err := federate(context.Background(), legs, listRead(beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier}))
 		if err != nil {
 			t.Fatalf("federate: %v", err)
 		}
@@ -281,7 +317,7 @@ func TestFederateReadyBeadsReportsTheFirstFailingLegByPosition(t *testing.T) {
 			testLeg("rig alpha", readyOrderedStore{Store: beads.NewMemStore(), waitFor: laterFailsFirst, err: errors.New("alpha is locked")}),
 			testLeg("rig beta", readyOrderedStore{Store: beads.NewMemStore(), signal: laterFailsFirst, err: errors.New("beta is locked")}),
 		}
-		rows, _, err := federate(legs, readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
+		rows, _, err := federate(context.Background(), legs, readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier}))
 		if err == nil {
 			t.Fatalf("two dead legs produced an answer of %d rows; a short array is indistinguishable from \"no work\"", len(rows))
 		}

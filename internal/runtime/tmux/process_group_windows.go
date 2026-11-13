@@ -11,3 +11,7 @@ func signalPID(_ int, signal processSignal) error {
 func isProcessSignalGoneError(error) bool {
 	return false
 }
+
+func isProcessSignalDeniedError(error) bool {
+	return false
+}

@@ -4,6 +4,7 @@ go_test(
     name = "workflows_test",
     srcs = [
         "needs_lifecycle_test.go",
+        "nightly_aggregate_test.go",
         "testenv_import_test.go",
     ],
     data = [

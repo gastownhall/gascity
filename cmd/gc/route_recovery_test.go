@@ -427,12 +427,11 @@ func TestRouteRecoveryBackstopLegSkipsHeldBead(t *testing.T) {
 // TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee pins the visibility half
 // of the tick's routed-demand narrowing (ga-l7jdg).
 //
-// The controller's demand read is binding-only, so a routed bead left on a work
-// leg is demanded by nothing and no seat is ever spawned for it. That is a
-// migration defect rather than a demand bug — but only if somebody counts it.
-// This lane already reads every leg's open corpus on its own cadence, so the
-// count is free and the assumption "there is no routed work out there" becomes
-// checkable instead of load-bearing.
+// The runtime plane's routed-work collection is binding-only, so a routed bead
+// left on a work leg of a split city is invisible to it. This lane already reads
+// every leg's open corpus on its own cadence, so the count is free and the
+// assumption "there is no routed work out there" becomes checkable instead of
+// load-bearing. A city with no binding has no such leg (#7410).
 func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
 	routed := func(id, assignee string) beads.Bead {
 		return beads.Bead{
@@ -451,22 +450,30 @@ func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
 		because string
 	}{
 		{
-			name: "unassigned routed work on a work leg",
-			leg:  planeLeg{label: "city"},
+			name: "unassigned routed work on a work leg of a split city",
+			leg:  planeLeg{label: "city", planHasBinding: true},
 			seed: routed("ga-off-plane", ""),
-			want: 1, because: "the tick's demand read refuses this leg, so nothing spawns for the bead",
+			want: 1, because: "the runtime plane's collection refuses this leg, so it is counted",
 		},
 		{
 			name: "the same bead on the binding",
-			leg:  planeLeg{label: "class:gmnos", binding: true},
+			leg:  planeLeg{label: "class:gmnos", binding: true, planHasBinding: true},
 			seed: routed("gcg-on-plane", ""),
 			want: 0, because: "the runtime plane reads the binding, so this bead IS demanded",
 		},
 		{
 			name: "a routed bead on a work leg that already has a holder",
-			leg:  planeLeg{label: "city"},
+			leg:  planeLeg{label: "city", planHasBinding: true},
 			seed: routed("ga-held", "worker-1"),
 			want: 0, because: "an assigned bead needs no seat spawned for it",
+		},
+		{
+			// #7410: a city with no binding has no off-plane leg; its work
+			// store is the runtime plane's store.
+			name: "unassigned routed work on a single-store city",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-single-store", ""),
+			want: 0, because: "a city that relocates nothing reads its work store on the runtime plane",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

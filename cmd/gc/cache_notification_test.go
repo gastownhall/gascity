@@ -117,7 +117,13 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 	send(events.BeadDeleted, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadUpdated, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)
-	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`) // only updates are suppressed
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)       // an identical create repeats nothing
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // a different one is recorded
+	send(events.BeadClosed, "gc-3", `{"id":"gc-3","v":2}`)
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // the close forgot it
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`)
+	send(events.BeadCreated, "gc-4", `{"id":"gc-4"}`) // a create repeats only a create
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`) // the same as the create
 
 	var got []string
 	for _, evt := range ep.Events {
@@ -133,10 +139,58 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 		`bead.deleted gc-2 {"id":"gc-2","v":2}`,
 		`bead.updated gc-2 {"id":"gc-2","v":2}`,
 		`bead.created gc-3 {"id":"gc-3"}`,
-		`bead.created gc-3 {"id":"gc-3"}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.closed gc-3 {"id":"gc-3","v":2}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.updated gc-4 {"id":"gc-4"}`,
+		`bead.created gc-4 {"id":"gc-4"}`,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("recorded:\n%v\nwant:\n%v", got, want)
+	}
+}
+
+// refreshingCreateStore refreshes the new row through the cache before its
+// Create returns: a journal feed's refresh landing between the backing create
+// and the cache's absorb.
+type refreshingCreateStore struct {
+	*beads.MemStore
+	cache *beads.CachingStore
+}
+
+func (s *refreshingCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.MemStore.Create(b)
+	if err == nil && s.cache != nil {
+		_, _ = s.cache.RefreshRow(created.ID)
+	}
+	return created, err
+}
+
+// TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate is the
+// createWith race: a refresh installs the new row, and announces it, before
+// the create's absorb announces it again with the same payload. One
+// bead.created is recorded.
+func TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate(t *testing.T) {
+	backing := &refreshingCreateStore{MemStore: beads.NewMemStore()}
+	ep := events.NewFake()
+	store := wrapWithCachingStore(context.Background(), backing, ep, true)
+	cache, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("wrapWithCachingStore returned %T, want *beads.CachingStore", store)
+	}
+	backing.cache = cache
+	created, err := cache.Create(beads.Bead{Title: "raced"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	creates := 0
+	for _, evt := range ep.Events {
+		if evt.Type == events.BeadCreated && evt.Subject == created.ID {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("recorded %d bead.created for %s, want 1 (events %v)", creates, created.ID, beadEventsFor(ep, created.ID))
 	}
 }
 
@@ -269,7 +323,12 @@ func TestCacheChangeRecorderDedupIsPerCache(t *testing.T) {
 // the reconcile scan's synthetic close (mc-zndi7.43).
 func graphStepFixture(t *testing.T, store beads.Store) (step, convoy beads.Bead, payload json.RawMessage) {
 	t.Helper()
-	convoy, err := store.Create(beads.Bead{ID: "gcg-convoy", Type: "convoy"})
+	// A convoy is work class, so it carries a work-ledger id ("gc-"), never a
+	// class-namespace id ("gcg-") only the binding mints. Every row here sits in
+	// the one store, a single-store city; the id is what a split city would
+	// give the convoy, where autoclose reads a binding step's work parent from
+	// the work ledger (convoyAutocloseHomes).
+	convoy, err := store.Create(beads.Bead{ID: "gc-convoy", Type: "convoy"})
 	if err != nil {
 		t.Fatal(err)
 	}

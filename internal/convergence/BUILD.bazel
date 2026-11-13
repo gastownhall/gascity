@@ -48,6 +48,7 @@ go_test(
         "authorship_test.go",
         "capture_test.go",
         "childstats_test.go",
+        "condition_actor_test.go",
         "condition_credentials_test.go",
         "condition_test.go",
         "condition_unlaunchable_test.go",
@@ -61,6 +62,7 @@ go_test(
         "gate_test.go",
         "handler_test.go",
         "hybrid_test.go",
+        "main_test.go",
         "manual_test.go",
         "metadata_test.go",
         "reconcile_test.go",
@@ -77,6 +79,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/events",
+        "//internal/execenv",
         "//internal/fsys",
         "//internal/gchome",
         "//internal/processenv",

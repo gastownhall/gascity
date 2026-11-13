@@ -60,6 +60,21 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 // → 500). Absence keeps the beads.ErrNotFound chain (→ 404) unchanged. This
 // mirrors the GET-lane bridge at internal/api/session_get_read.go exactly.
 func sessionRecordViaManager(m *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	info, pr, err := sessionRecordPersisted(m, id)
+	if err != nil {
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, err
+	}
+	return m.EnrichInfo(info), pr, nil
+}
+
+// sessionRecordPersisted is sessionRecordViaManager without the live runtime
+// overlay: the persisted read, the empty-type heal and the error bridge, and no
+// provider call. Info.Transport, State, Attached and LastActive are therefore
+// the stored values, not the live ones (Manager.EnrichInfo rewrites exactly
+// those four). Use it where a stalled provider must not be waited on and only
+// the stored identity (ID, SessionName, Provider, Template, AgentName, Alias) or
+// the metadata is read: the worker operation event.
+func sessionRecordPersisted(m *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
 	front := m.PersistedStore()
 	info, pr, err := front.GetPersistedResponse(id)
 	if err != nil {
@@ -69,7 +84,7 @@ func sessionRecordViaManager(m *sessionpkg.Manager, id string) (sessionpkg.Info,
 		front.RepairTypeBestEffort(id)
 		info.Type = sessionpkg.BeadType
 	}
-	return m.EnrichInfo(info), pr, nil
+	return info, pr, nil
 }
 
 // bridgeSessionRecordError maps a session.Store persisted-read error back to the

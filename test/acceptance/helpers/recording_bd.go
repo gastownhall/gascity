@@ -40,7 +40,8 @@ const recordingBDRecordDir = "invocations.d"
 //
 // The recording is a side effect of a real bd run, not a replacement for one:
 // the shim execs the pinned binary, so the city under test behaves exactly as
-// it would without it.
+// it would without it. A split-storage city is the exception: its gc bd
+// forwards only to bd's own Go binary and refuses the shim (Env.WithRealBD).
 type RecordingBD struct {
 	// Path is the shim, to be handed to gc as BD_BIN.
 	Path string

@@ -39,7 +39,8 @@ var knownStatuses = []string{StatusOpen, StatusInProgress, StatusBlocked, Status
 // KnownStatuses is the closed set of statuses --status accepts.
 func KnownStatuses() []string { return slices.Clone(knownStatuses) }
 
-// Query is one ready-work question: the `gc ready` flags.
+// Query is one ready-work question: the `gc ready` flags, and the parameters of
+// GET /v0/city/{cityName}/work/ready.
 //
 // --include-ephemeral and --json have no field. Every leg is read across both
 // storage tiers (beads.FederatedReadTier) and the answer is always a JSON array,
@@ -64,10 +65,10 @@ type Query struct {
 	// Sort is "" for the canonical ready order (priority, created_at, id),
 	// SortOldest, or SortNewest.
 	Sort string
-	// Limit bounds the answer to its first Limit rows; zero or less is
-	// unlimited. It is applied after the merge and after the order, so the
-	// answer is the city's top N rather than the top N of whichever store
-	// answered first.
+	// Limit bounds the answer to its first Limit rows; zero is unlimited, and a
+	// negative limit is refused, as the API refuses it. It is applied after the
+	// merge and after the order, so the answer is the city's top N rather than
+	// the top N of whichever store answered first.
 	Limit int
 	// Status is "" for ready work, or one of the statuses in knownStatuses to
 	// list beads in that status instead.
@@ -94,6 +95,9 @@ func (q Query) Validate() error {
 }
 
 func compile(q Query) (compiled, error) {
+	if q.Limit < 0 {
+		return compiled{}, fmt.Errorf("--limit %d is negative (0 is unlimited)", q.Limit)
+	}
 	metadata, err := parseMetadataFieldFilters(q.MetadataFields)
 	if err != nil {
 		return compiled{}, err

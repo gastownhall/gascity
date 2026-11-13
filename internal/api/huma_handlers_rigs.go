@@ -47,6 +47,11 @@ var (
 )
 
 // humaHandleRigList is the Huma-typed handler for GET /v0/rigs.
+//
+// It reports no cache age (X-GC-Cache-Age-S is 0): the rows come from config,
+// the suspension state and runtime probes, not from the bead cache, so the
+// cache's age says nothing about them. The session snapshot a pool seat's
+// lookup may read only names the session to probe.
 func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*ListOutput[rigResponse], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -57,29 +62,35 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
-	store := s.state.CityBeadStore()
-	if err := cacheLiveOr503(store); err != nil {
+	if err := cacheLiveOr503(s.state.Stores().Work()); err != nil {
 		return nil, err
 	}
 	wantGit := input.Git
 
+	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+	pools := newRequestSessionListing(sp)
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := s.buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, sp, pools, runtimeSessions, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
 		rigs = append(rigs, resp)
 	}
+	partialErrors := runtimeSessions.partialErrors()
 	return &ListOutput[rigResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store),
-		Body:      ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
+		Index: index,
+		Body: ListBody[rigResponse]{
+			Items:         rigs,
+			Total:         len(rigs),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		},
 	}, nil
 }
 
 // humaHandleRigGet is the Huma-typed handler for GET /v0/rig/{name}.
-func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
+func (s *Server) humaHandleRigGet(ctx context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
 	index := s.latestIndex()
 	name := input.Name
 	cfg := s.state.Config()
@@ -88,7 +99,9 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {
-			resp := s.buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
+			cityName := s.state.CityName()
+			runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+			resp := s.buildRigResponse(cfg, rig, sp, newRequestSessionListing(sp), runtimeSessions, cityName, s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}
@@ -171,8 +184,8 @@ func (s *Server) rigCreateAsync(ctx context.Context, sm StateMutator, body RigCr
 		return nil, huma.Error400BadRequest("invalid rig name")
 	}
 
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.Stores().Work()
+	if store == (beads.WorkStore{}) {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 	city := s.rigIdemCity()
@@ -289,7 +302,7 @@ func (s *Server) mapRigAdmitError(err error) error {
 // G14 atomic rollback (drop-then-mark), the re-clone poison pre-drop, its
 // terminal drop + durable mark + terminal event.
 func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProvision, body RigCreateBody, gitURL string, recloneManifest RigProvisionManifest) {
-	store := s.state.CityBeadStore()
+	store := s.state.Stores().Work()
 	reqID := entry.requestID
 	name := body.Name
 
@@ -395,7 +408,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 // but the live entry is dropped so the retry routes to re-clone (which pre-drops)
 // rather than hanging on a dead replay. Either way the terminal request.failed
 // carries the classified error_code.
-func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.Store, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
+func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.WorkStore, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
 	reqID := entry.requestID
 	// Teardown runs under a FRESH bounded context: the provisioning context may
 	// already be canceled (a provision-timeout is exactly what routes here), and
@@ -475,7 +488,8 @@ func (s *Server) rigIdemCity() string {
 // request.failed error_code. A blocked host (the SSRF fence) is checked before
 // the clone sentinel because the fence returns before git runs; a git.Clone
 // failure carries rig.ErrCloneFailed across the StateMutator boundary and maps
-// to the dedicated clone_failed code (C4c §5).
+// to the dedicated clone_failed code (C4c §5). A rig prefix in a split city's
+// reserved namespace is the request's own error, as on the synchronous create.
 func rigProvisionFailureCode(err error) string {
 	switch {
 	case errors.Is(err, ssrf.ErrBlockedHost):
@@ -484,7 +498,7 @@ func rigProvisionFailureCode(err error) string {
 		return "already_exists"
 	case errors.Is(err, rig.ErrCloneFailed):
 		return "clone_failed"
-	case errors.Is(err, configedit.ErrValidation):
+	case errors.Is(err, configedit.ErrValidation), errors.Is(err, config.ErrReservedBeadPrefix):
 		return "invalid_request"
 	default:
 		return "provision_failed"

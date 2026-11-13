@@ -62,6 +62,7 @@ type cityStatusSnapshot struct {
 	CityName        string
 	CityPath        string
 	EffectiveAPIURL string
+	APIURL          string // config-derived api_url for --json (cityStatusAPIURL)
 	Controller      ControllerJSON
 	Suspended       bool
 	Beads           *beads.BeadsDiagnostic
@@ -179,6 +180,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		Controller:      controllerStatusForCity(cityPath),
 		Suspended:       suspended,
 	}
+	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
@@ -494,6 +496,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		CityName:          snapshot.CityName,
 		Workspace:         WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
 		CityPath:          snapshot.CityPath,
+		APIURL:            snapshot.APIURL,
 		Controller:        snapshot.Controller,
 		Running:           running,
 		Suspended:         snapshot.Suspended,

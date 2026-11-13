@@ -95,3 +95,36 @@ func TestSQLiteStoreSameValueWriteCommitsNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestSQLiteStoreReadOnlyRefusesSameValueWrites pins that the in-transaction
+// no-op skip does not make a read-only store answer success for a write: a
+// same-value write is refused exactly as a changing one is.
+func TestSQLiteStoreReadOnlyRefusesSameValueWrites(t *testing.T) {
+	dir := t.TempDir()
+	writable, err := beads.OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	created, err := writable.Create(beads.Bead{Title: "row", Metadata: map[string]string{"k": "v"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := writable.(*beads.SQLiteStore).CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	store, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreReadOnly())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
+	title := "row"
+	for name, write := range map[string]func() error{
+		"same-value SetMetadata": func() error { return store.SetMetadata(created.ID, "k", "v") },
+		"same-value Update":      func() error { return store.Update(created.ID, beads.UpdateOpts{Title: &title}) },
+		"changing SetMetadata":   func() error { return store.SetMetadata(created.ID, "k", "changed") },
+	} {
+		if err := write(); err == nil {
+			t.Errorf("%s on a read-only store succeeded, want refused", name)
+		}
+	}
+}

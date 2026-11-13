@@ -44,11 +44,15 @@ when the context ends. Take the bound from the caller's own context.
 - At most one observation per key is in flight. While an earlier one has not
   returned, a new call gets `ErrObservationOutstanding` (also
   `runtime.ErrRuntimeUnavailable`) and starts nothing, so a wedged session
-  costs one goroutine, not one per call.
-- The key names what is observed: one session in one city. Every caller that
-  observes the same session must derive the key the same way, or the
-  one-in-flight limit no longer holds. `cmd/gc` derives it in
-  `postStartObservationKey`.
+  costs one goroutine per key, not one per call.
+- The key names what is observed, one session in one city, within a caller
+  namespace. Every caller in a namespace must derive the key the same way, or
+  the one-in-flight limit no longer holds. `cmd/gc` has two namespaces, so a
+  wedged session can hold one goroutine in each: session lifecycle keys by
+  session name (`postStartObservationKey`), and the conversation lane's
+  executor keys by session bead ID under the `lane` prefix
+  (`laneObservationKey`), so a wedged lane probe never blocks a lifecycle
+  observation.
 - `worker.ObserveShared` is the form for reads several callers make of one key
   at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
   idle overlay). A call
@@ -59,7 +63,40 @@ when the context ends. Take the bound from the caller's own context.
   with one type: a joiner of another type's observation gets an unavailable
   error, not its answer. Turn keys (`turnObservationKey`) name the city
   directory and the session, for a `SessionHandle` and a `RuntimeHandle` alike
-  (`RuntimeHandleConfig.CityPath`).
+  (`RuntimeHandleConfig.CityPath`). A turn read made under the session
+  mutation lock (the turn-scoped interrupt's check, and its settle after the
+  keys) joins no shared read: its session load and runtime probes go through
+  `ObserveBounded` under a `locked-` turn key of their own
+  (`observeTurnRead`), so a shared read that began before the lock, holding
+  the session as it was then, never answers it. Its failure direction is the
+  opposite of a watcher's: a watcher leaves a turn open on an idle reading it
+  did not get, while the check refuses as unknown (`idleUnknown`), since only
+  a busy reading counts as the turn running, and the settle counts it a
+  failed read, never the turn's end nor the turn running: a settle whose
+  reads all failed, after family waits that passed, could not answer
+  (`runtime.ErrRuntimeUnavailable`) or timed out without one reading that
+  showed the session busy (`runtime.ErrWaitUnobserved`, RUNTIME-CONTRACT-016),
+  is `session.TurnEndUnreadError`, which withholds a restart on failure. That
+  includes `ErrObservationOutstanding`, which every later check's own
+  reading gets at once while one an earlier check left wedged is still out.
+  A read that decides which turn to act on, such as the lane interrupt's
+  target, is `TurnHandle.FreshTurn`: `CurrentTurn` with its session load and
+  runtime probes its own, under `fresh-` turn keys, so a shared read that
+  began before the turn now running never aims it at the turn before, and a
+  store that stalls leaves it unanswered when its context ends. Fresh reads
+  of one session do not share: one made while another is in flight, healthy
+  or wedged, gets `ErrObservationOutstanding` at once, so its callers
+  serialize them per session (the lane does, under its own key). It keeps
+  `CurrentTurn`'s failure direction, an idle reading it did not get leaving
+  the turn open.
+
+The worker operation event names its session from the persisted record only
+(`sessionRecordPersisted`), never `sessionRecordViaManager`: the live overlay
+(`Manager.EnrichInfo`) makes provider calls that cannot be canceled, and the
+event is named before and after every operation, so a wedged provider would hold
+a kill on the reconciler tick or a start on its async slot before the operation
+ran (`SESSION-RUNTIME-034`). Do not add a provider call to
+`populateOperationEventIdentity`.
 
 ## Turn sources
 
@@ -70,7 +107,16 @@ runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
 has a work directory, and the family has an exact by-key transcript lookup
 (`session.HasKeyedTranscriptLookup`). The read resolves only the file the
 session key finds and that records that conversation, never the work-directory
-fallback `Manager.TranscriptPath` serves for history. A session without a key
+fallback `Manager.TranscriptPath` serves for history. The key is looked up
+under the transcript search roots first; where they find none, among the files
+the session's own agent process holds open (`runtime.HeldFileProvider`, via
+`session.Manager.RuntimeHeldFiles`; only regular files the current user owns,
+and a process in the tree whose open files that user may not read, such as a
+root-owned sandbox wrapper above the agent or a zombie, is skipped), each tried
+by the family's own keyed lookup rooted at the file's ancestors
+(`session.ResolveHeldTranscriptPath`), so a provider home outside the search
+roots still has turns. A held-file read that fails is
+`runtime.ErrRuntimeUnavailable`, never a gone session. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
 `TurnCapabilities.Replace` is internal/session's answer
@@ -90,11 +136,12 @@ watch read, protocol or transcript and whatever woke it, reloads the session
 first, so a session whose row closes reads as not found from the next read on,
 even while its runtime still answers or its transcript is still written. A
 read's session reload and runtime probes (the protocol history, the idle
-snapshot) run within `turnWatchReadBound` and through `ObserveShared`, so a
-stalled store or runtime probe reads as unavailable and never holds a watch
-past its context. A transcript read's file I/O (resolving the transcript,
-`os.Stat`, the follower's read) takes no context: a hung filesystem holds a
-transcript watch, and its close on cancel, until that I/O returns.
+snapshot, the held-file read) run within `turnWatchReadBound` and through
+`ObserveShared`, so a stalled store or runtime probe reads as unavailable and
+never holds a watch past its context. A transcript read's file I/O (resolving
+the transcript, `os.Stat`, the follower's read) takes no context: a hung
+filesystem holds a transcript watch, and its close on cancel, until that I/O
+returns.
 
 The transcript tier is never `Lossless`: a read reports at most
 `sessionlog.MaxRecentTurns` ended turns from a bounded window, so turns that
@@ -102,6 +149,34 @@ end between two reads can fall out of it. `CurrentTurn` scans the transcript's
 last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
 since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
 about a turn that began before that window.
+
+For a family whose ends are inferred (Claude), the idle overlay ends a quiet
+open turn after two idle readings, at the observer's clock. A turn the
+transcript shows stopped at a provider error (`sessionlog.TurnScan.Stopped`)
+ends failed on that error instead, at the error's own time: the end the
+transcript records once the next turn starts. So every handle reads the same
+end from the unchanged transcript, and a refusal never reads as newer than it
+is. A failed turn carries the error its transcript recorded
+(`runtime.EndedTurn.Failure`): the source's own class and HTTP status, whether
+the source classed it a rate limit, and the text, for people only. Claude and
+Codex transcripts record it; a family that records none leaves it zero.
+
+## Keyed deliveries
+
+A request's `DeliveryKey` (`NudgeRequest`, `MessageRequest`) reaches only a
+runtime that deduplicates keyed deliveries (`runtime.KeyedNudgeProvider` at
+the leaf a composite routes to). Default and immediate delivery carry it;
+wait-idle delivery and a message the session queues do not. A `RuntimeHandle`
+reports the runtime's receipt on `NudgeResult.Receipt`.
+
+`Redelivery` says an earlier attempt under the key may have landed. The
+handle looks the delivery up (`runtime.LookupDelivery`,
+`session.Manager.LookupDelivery`) before any effect: for `Message`, before
+`Manager.Submit` and so before any turn sighting or interrupt. A delivery the
+runtime holds is never sent again: the result is `Replayed`, with the held
+receipt on a nudge. A lookup that cannot tell fails the request wrapping
+`runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
+looks nothing up.
 
 ## Codex activity
 
@@ -277,3 +352,9 @@ as the city's, which `gc events` refuses (`refuseLocalEventsOnWorkerSite`):
 
 Worker sites exist in production only once the sidecar is written (CN-2),
 which waits for CN-1b2.
+
+## Injected lookups
+
+The worker reads work beads and other state it does not own through lookups
+injected as func values (for example `FactoryConfig.ResolveBead`), and never
+enumerates stores itself.

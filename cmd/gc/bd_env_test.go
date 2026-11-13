@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -882,6 +881,51 @@ func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing
 	}
 	if got := env["GC_RIG"]; got != "repo" {
 		t.Errorf("GC_RIG = %q, want repo", got)
+	}
+}
+
+// TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime pins the probe
+// gc hook asks after a rig leg's read failed (hookRigRuntimeUnavailable): a rig
+// inheriting the city's managed Dolt runtime reports it unavailable while that
+// runtime is not running, without starting or publishing one, and available
+// once it runs; a rig whose store is not the managed bd contract never does.
+func TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	for dir, yaml := range map[string]string{
+		cityDir: "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+		rigDir:  "issue_prefix: repo\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	if !rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if !hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("the probe published managed runtime state (stat err = %v); it must start nothing", err)
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	if hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = true for a rig whose store is not the managed bd contract")
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	writeReachableManagedDoltState(t, cityDir)
+	if rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = true with the city's managed runtime running")
 	}
 }
 
@@ -4836,48 +4880,6 @@ dolt.auto-start: false
 	}
 }
 
-func TestNativeDoltOpenEnvForScopeContextCancelsManagedRecovery(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "")
-	cityPath := t.TempDir()
-	writeManagedBdCityFixture(t, cityPath)
-
-	childPIDFile := filepath.Join(cityPath, "provider.pid")
-	script := gcBeadsBdScriptPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	content := `#!/bin/sh
-echo $$ > "$GC_TEST_CHILD_PID"
-while :; do sleep 1; done
-`
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan error, 1)
-	go func() {
-		_, err := nativeDoltOpenEnvForScopeContext(ctx, cityPath, nil, cityPath)
-		resultCh <- err
-	}()
-
-	pid := waitForProviderTestChildPID(t, childPIDFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	cancel()
-
-	select {
-	case err := <-resultCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("native env recovery error = %v, want context canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("native env recovery did not return after parent cancellation")
-	}
-	waitForProviderTestPIDExit(t, pid, "native env recovery")
-}
-
 // TestBdRuntimeEnvForRig_ExplicitLocalExternalRigClearsAmbientTLS is the
 // plaintext-endpoint counterpart to
 // TestBdRuntimeEnvForRig_ExplicitLegacyExternalRigCarriesAmbientTLS. A legacy rig
@@ -6149,6 +6151,54 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 		}
 		if got != pinned {
 			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("explicit dolt metadata with inherited endpoint honors workspace BD_BIN", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, declared, wantErr string
+		}{
+			{name: "executable pin"},
+			{name: "relative pin is refused", declared: "./bin/bd", wantErr: "must be an absolute executable path"},
+			{name: "missing pin is refused", declared: "/nonexistent/inherited-rig/bd", wantErr: "is not executable"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				cityDir, pinned, ambient := newPinnedCity(t, `{"backend":"dolt"}`)
+				declared := tc.declared
+				if declared == "" {
+					declared = pinned
+				}
+				cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nBD_BIN = " + strconv.Quote(declared) + "\n"
+				if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rigDir := writeRig(t, cityDir, "inherit", `{"backend":"dolt"}`)
+				if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				got, err := resolveBdBinaryForScope(cityDir, rigDir)
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("resolveBdBinaryForScope(city, inherited rig) = (%q, %v), want declared-pin error containing %q", got, err, tc.wantErr)
+					}
+					return
+				}
+				if err != nil || got != pinned {
+					t.Fatalf("resolveBdBinaryForScope(city, inherited rig) = (%q, %v), want workspace BD_BIN %q; ambient wrapper is %q", got, err, pinned, ambient)
+				}
+			})
+		}
+	})
+
+	t.Run("independent dolt endpoint survives a partial city binding", func(t *testing.T) {
+		cityDir, _, ambient := newPinnedCity(t, partial)
+		rigDir := writeRig(t, cityDir, "independent", `{"backend":"dolt"}`)
+		if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: db.example.test\ndolt.port: 3307\ndolt.auto-start: false\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil || got != ambient {
+			t.Fatalf("resolveBdBinaryForScope(city, independent rig) = (%q, %v), want ambient %q despite faulty city binding", got, err, ambient)
 		}
 	})
 

@@ -119,8 +119,8 @@ func clearCityDoltConfig(cityPath string) {
 // registered yet, returning true when it added the entry (so the caller knows to
 // clear it). It never overwrites an existing registration: in the controller
 // process the city dolt config is registered persistently at boot and on every
-// reload by startBeadsLifecycle, and a transient per-request provisioning window
-// must not delete or clobber it.
+// reload by startBeadsLifecycleResolvingCityDatabase, and a transient
+// per-request provisioning window must not delete or clobber it.
 func registerCityDoltConfigIfAbsent(cityPath string, cfg config.DoltConfig) (added bool) {
 	_, loaded := cityDoltConfigs.LoadOrStore(normalizePathForCompare(cityPath), cfg)
 	return !loaded
@@ -187,11 +187,27 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 //   health        — check provider health
 //   stop          — stop the backing service
 
-// startBeadsLifecycle runs the full bead store startup sequence:
-// start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
-// Called by gc start and controller config reload. Rigs must have absolute
-// paths before calling (resolve relative paths first).
+// startBeadsLifecycle is the boot bead lifecycle, run by gc start and the
+// supervisor's city prepare: start → init+hooks(city) → init+hooks(each rig) →
+// regenerate routes, then it records the city's store binding for the runtime
+// built after it. Config reload must run startBeadsLifecycleForReload instead,
+// which holds the city to that record. Rigs must have absolute paths before
+// calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	if err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil); err != nil {
+		return err
+	}
+	// The binding boot leaves behind is the one every reload must keep.
+	recordBootCityStore(cityPath)
+	return nil
+}
+
+// startBeadsLifecycleResolvingCityDatabase is the bead lifecycle boot and
+// reload share. A nil bootStore is boot: the city scope's Dolt database name
+// is read from metadata with a default-name fallback. Reload passes the
+// binding recorded at boot; city init and normalization hold the city's
+// metadata to it and take the database name from it, never the fallback.
+func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City, stderr io.Writer, bootStore *cityStoreRecord) error {
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
@@ -277,7 +293,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// identity that differs from the bead prefix. New managed bd stores still
 	// default to prefix-named databases, but older/imported metadata may carry
 	// a different dolt_database that gc-beads-bd should preserve.
-	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
+	if err := initAndHookDirResolvingDatabase(cityPath, cityPath, beadsPrefix, bootStore); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
 	suspended := suspendedBeadsScopes(cityPath, cfg)
@@ -295,7 +311,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
+	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, bootStore, stderr); err != nil {
 		return err
 	}
 	// Regenerate routes for cross-rig routing.
@@ -940,6 +956,23 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
+	return initAndHookDirResolvingDatabase(cityPath, dir, prefix, nil)
+}
+
+// initAndHookDirResolvingDatabase is initAndHookDir held, when bootStore is
+// non-nil, to the city store binding recorded at boot: the city's metadata
+// must still name that store before any init branch classifies or writes the
+// scope, and every branch that names the city's Dolt database takes the
+// booted one instead of a default-name fallback. Only the city scope passes a
+// record.
+func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *cityStoreRecord) error {
+	// The provider start op that runs before the city's init can take
+	// seconds, and each branch below acts on the metadata as it is now.
+	if bootStore != nil {
+		if err := checkReloadCityStore(cityPath, *bootStore); err != nil {
+			return err
+		}
+	}
 	if owned, err := scopeProviderOwned(cityPath, dir); err != nil {
 		return err
 	} else if owned {
@@ -992,7 +1025,15 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		// runs — it takes back endpoint claims an earlier gc stamped and is a
 		// no-op on a clean scope. gc's bead types go into the store through bd,
 		// whose write leaves config.yaml and every other tracked file alone.
-		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, ""); err != nil {
+		doltDatabase := ""
+		if bootStore != nil {
+			db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+			if err != nil {
+				return err
+			}
+			doltDatabase = db
+		}
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 			return err
 		}
 		registerScopeCustomTypes(cityPath, dir, embeddedScopeCustomTypesEnv)
@@ -1001,7 +1042,16 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 		return nil
 	}
-	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	var doltDatabase string
+	if bootStore != nil {
+		db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+		if err != nil {
+			return err
+		}
+		doltDatabase = db
+	} else {
+		doltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
@@ -2603,6 +2653,9 @@ type doltRuntimeState struct {
 	Port      int    `json:"port"`
 	DataDir   string `json:"data_dir"`
 	StartedAt string `json:"started_at"`
+	// InfraScope names the transient systemd user scope unit the server was
+	// started in (see infraArgv); empty when it was started unscoped.
+	InfraScope string `json:"infra_scope,omitempty"`
 }
 
 // currentDoltPort returns the controller-managed Dolt port for the city.
@@ -3092,6 +3145,15 @@ func preInitScopeDoltMode(cityPath, dir string) string {
 // suppress, or a stderr writer from the caller to show them). When omitted,
 // warning output is suppressed.
 func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...io.Writer) error {
+	return normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, nil, warns...)
+}
+
+// normalizeCanonicalBdScopeFilesResolvingCityDatabase is
+// normalizeCanonicalBdScopeFiles with the city's database name taken, when
+// bootStore is non-nil, from the binding recorded at boot (confirmed against
+// metadata at the point of use) instead of the default name a missing city
+// metadata.json would otherwise be stamped with.
+func normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath string, cfg *config.City, bootStore *cityStoreRecord, warns ...io.Writer) error {
 	if cfg == nil {
 		return nil
 	}
@@ -3112,6 +3174,13 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 			return fmt.Errorf("classifying city backend: %w", err)
 		} else if !skipsManagedDolt {
 			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
+			if bootStore != nil {
+				db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+				if err != nil {
+					return err
+				}
+				doltDatabase = db
+			}
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
 					return fmt.Errorf("canonicalizing city doltlite metadata: %w", err)
@@ -3174,6 +3243,20 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		}
 		cityHasCompleteStorageBinding = completeBinding
 	}
+	// A city bd bound to a server it was pointed at keeps bd's config.yaml and
+	// bd's own port file, as a provider-owned city does: gc's endpoint keys
+	// there are the claim scopeIsBdOwnedDirectExternal reads. A complete
+	// storage binding decides first, as it does for a rig below: one that
+	// still carries bd's legacy host and port must keep the skip that leaves
+	// the city's inheriting rigs alone.
+	cityBdOwnedDirect := false
+	if !cityProviderOwned && !cityHasCompleteStorageBinding {
+		cityBdOwnedDirect, err = scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+		if err != nil {
+			return fmt.Errorf("classifying city store binding: %w", err)
+		}
+	}
+	cityUsesBd = cityUsesBd && !cityBdOwnedDirect
 	anyRigUsesBd := false
 	for _, rig := range rigs {
 		if strings.TrimSpace(rig.Path) == "" {
@@ -3206,7 +3289,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	// resolve a managed port, so it must not be asked about a city whose store
 	// gc does not serve: there is no managed port to find and the mirror is not
 	// gc's to delete.
-	if !cityProviderOwned && cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+	if !cityProviderOwned && !cityBdOwnedDirect && cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd && !cityHasCompleteStorageBinding {
@@ -3218,7 +3301,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		} else {
 			removeDoltPortFile(cityPath)
 		}
-	} else if !cityUsesBd && !cityProviderOwned {
+	} else if !cityUsesBd && !cityProviderOwned && !cityBdOwnedDirect {
 		removeDoltPortFile(cityPath)
 	}
 
@@ -3243,6 +3326,11 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			return err
 		}
 		if rigHasCompleteStorageBinding {
+			continue
+		}
+		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, rig.Path); err != nil {
+			return fmt.Errorf("classifying rig %q store binding: %w", rig.Name, err)
+		} else if bdOwnedDirect {
 			continue
 		}
 		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)
@@ -3630,6 +3718,12 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	if _, _, err := providerScopeOwnership(cityPath, cityPath); err != nil {
 		return nil, err
 	}
+	// The base env passes this process's GC_SESSION_ID through. City
+	// infrastructure scoping depends on it: an agent's gc autostarts the store
+	// via the provider script (gc-beads-bd.sh start -> gc dolt-state
+	// start-managed), and that inner gc knows it was started from a session,
+	// and so scopes the Dolt server, only through this variable. Pinned by
+	// TestProviderLifecycleEnvCarriesSessionIdentity.
 	env, err := cityRuntimeProcessEnvWithError(cityPath)
 	if err != nil {
 		return nil, err

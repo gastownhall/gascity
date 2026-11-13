@@ -1,7 +1,9 @@
 package readywork
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -272,6 +274,41 @@ func TestReadBoundedLegIsAskedAgainWhenGoOnlyPredicatesThinIt(t *testing.T) {
 		if calls[i].query.Limit <= calls[i-1].query.Limit {
 			t.Fatalf("refill limits %v do not grow", calls)
 		}
+	}
+}
+
+// cancellingOrderedStore ends its read's context as each bounded read returns.
+type cancellingOrderedStore struct {
+	*narrowingStore
+	cancel context.CancelFunc
+}
+
+func (s cancellingOrderedStore) ReadyOrdered(q beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	defer s.cancel()
+	return s.narrowingStore.ReadyOrdered(q, order)
+}
+
+// TestReadBoundedLegIsNotAskedAgainOnceTheContextEnds pins cancellation in the
+// refill: a leg whose bounded rows the Go-only predicates thinned is not asked
+// for more once the context has ended.
+func TestReadBoundedLegIsNotAskedAgainOnceTheContextEnds(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var rows []beads.Bead
+	for i := range 200 {
+		rows = append(rows, readyRow(fmt.Sprintf("c-%03d", i), 1, base.Add(time.Duration(i)*time.Second), func(b *beads.Bead) {
+			b.Labels = []string{"hold:later"}
+		}))
+	}
+	store := newNarrowingStore(rows...)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leg := testLeg("city", cancellingOrderedStore{narrowingStore: store, cancel: cancel})
+	got, err := ReadContext(ctx, []Leg{leg}, Query{Limit: 5, ExcludeLabels: []string{"hold:later"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadContext = %v, %v; want the context's error once it ended", got, err)
+	}
+	if calls := store.orderedCalls(); len(calls) != 1 {
+		t.Fatalf("leg asked %d bounded reads, want only the one in flight when the context ended", len(calls))
 	}
 }
 
