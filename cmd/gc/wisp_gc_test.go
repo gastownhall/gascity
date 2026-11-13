@@ -3255,7 +3255,7 @@ func TestWispGC_MailPurgeCapBoundsOneTickAndDrains(t *testing.T) {
 		var purged int
 		logOutput := captureWispGCLog(t, func() {
 			var err error
-			purged, err = wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+			purged, err = wg.runGC(testWispGCRoots(store, nil), nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 			if err != nil {
 				t.Fatalf("tick %d: runGC: %v", tick, err)
 			}
@@ -3288,7 +3288,7 @@ func TestWispGC_MailPurgeCapExactlyMetStaysQuiet(t *testing.T) {
 
 	logOutput := captureWispGCLog(t, func() {
 		wg := newWispGC(5*time.Minute, 0, time.Hour)
-		purged, err := wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+		purged, err := wg.runGC(testWispGCRoots(store, nil), nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 		if err != nil || purged != 3 {
 			t.Fatalf("runGC purged=%d err=%v, want 3 and nil", purged, err)
 		}
@@ -3313,7 +3313,7 @@ func TestWispGC_MailPurgeCapCountsFailedDeleteAttempts(t *testing.T) {
 	var purged int
 	logOutput := captureWispGCLog(t, func() {
 		wg := newWispGC(5*time.Minute, 0, time.Hour)
-		purged, runErr = wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
+		purged, runErr = wg.runGC(testWispGCRoots(store, nil), nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 	})
 	if runErr == nil {
 		t.Fatal("runGC: want the delete failures surfaced")
