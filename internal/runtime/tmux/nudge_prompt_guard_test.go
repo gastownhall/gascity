@@ -120,7 +120,7 @@ func TestNudgeNowDeliversWhenNoPromptAppears(t *testing.T) {
 // confirm loop must not keep retrying Enter while a prompt is on screen.
 func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 	calls := 0
-	send := func() error {
+	send := func(int) error {
 		calls++
 		if calls > 1 {
 			return runtime.ErrPendingInteraction
@@ -142,7 +142,7 @@ func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 // as a prompt on screen does.
 func TestSubmitEnterAndConfirmStopsWhenALookCannotReadThePane(t *testing.T) {
 	calls := 0
-	send := func() error {
+	send := func(int) error {
 		calls++
 		if calls > 1 {
 			return fmt.Errorf("%w: capture-pane: timed out", errPromptLookFailed)

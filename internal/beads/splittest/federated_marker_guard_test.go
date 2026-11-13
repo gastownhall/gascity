@@ -43,54 +43,13 @@ type reviewedMarker struct {
 // change, where a reviewer sees it.
 var reviewedMarkers = map[string]reviewedMarker{
 	// Legitimate federation legs.
-	"cmd/gc/claim_class_route.go classRoutedHookClaimOps": {
-		"federated", 5,
-		"the hook-claim class route's work-first escalation (#8137): a not-found (or an empty continuation list) on the work leg is what sends the call to the binding",
-	},
-	"cmd/gc/wisp_autoclose.go collectInputConvoyWorkflowRoots": {
-		"federated", 1,
-		"tracking convoys are probed on the work store and the graph store; a convoy minted single-store-era can sit on the graph side",
-	},
-
 	"cmd/gc/cmd_order.go bdCursor": {
 		"federated", 1,
 		"one leg of bdCursorAcrossStores (S3a): order-run records live in the orders binding and, as v1 poured roots, on the work legs",
 	},
-	"cmd/gc/wisp_gc.go closedWispGCEntries": {
-		"federated", 1,
-		"the graph leg of the wisp GC root union (S3a): v1 poured molecule roots live on the work legs",
-	},
-	"cmd/gc/wisp_gc.go openWispGCRootCandidates": {
-		"federated", 1,
-		"the graph leg of the wisp GC root union (S3a): v1 poured molecule roots live on the work legs",
-	},
-	"cmd/gc/wisp_gc.go enumerateWorkClassMoleculeRoots": {
-		"federated", 1,
-		"the work leg of the wisp GC root union (S3a): graph molecule roots live in the graph store",
-	},
-	"cmd/gc/wisp_gc.go storeHoldsLiveAttachmentSource": {
-		"federated", 1,
-		"one leg of the stepless-root holder walk (S3a): the graph store, then every work leg; a holder lives in one",
-	},
-	"cmd/gc/cmd_convoy.go closeCompletedConvoyAcross": {
-		"federated", 2,
-		"the two legs of a work convoy's legacy-child union (S3c): a graph child poured under it lives in the binding, a work child on the convoy's ledger",
-	},
-	"cmd/gc/molecule_autoclose.go autocloseLocate": {
-		"federated", 2,
-		"a two-store residence probe for an autoclose parent or root (S3a, S3c): the second store answers when the first misses",
-	},
 	"internal/orders/store_reads.go (*Store).LastRun": {
 		"federated", 1,
 		"one leg of the last-run read (S3a, S3c): run evidence is a tracking bead (orders), a graph root, or a v1 poured root on the work leg",
-	},
-	"cmd/gc/api_state.go liveCloseOwner": {
-		"federated", 1,
-		"first-owner close probe (S3a R4): the prefix route and the binding the residence probe proved holds a relic id",
-	},
-	"cmd/gc/wisp_step_inject.go stepResolution.activeMoleculeIn": {
-		"federated", 1,
-		"one leg of the step reminder's molecule union (S3a): graph roots in the graph store, v1 poured molecules on the work legs",
 	},
 	"internal/sling/sling.go graphWorkflowAttachmentInGraphStore": {
 		"federated", 1,

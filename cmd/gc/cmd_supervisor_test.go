@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -295,20 +296,20 @@ func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T
 	base := shortTempDir(t, "gc-supervisor-long-")
 
 	longDir := filepath.Join(base, "segment")
-	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(longDir, "supervisor.sock")) <= localsocket.PathLimit {
 		longDir = filepath.Join(longDir, "segment")
 	}
 	otherLongDir := filepath.Join(base, "other-segment")
-	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= localsocket.PathLimit {
 		otherLongDir = filepath.Join(otherLongDir, "segment")
 	}
 
 	got := supervisorSocketPathForDir(longDir)
-	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+	if dir := filepath.Dir(got); dir != localsocket.FallbackDir("gascity-supervisor") {
 		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
 	}
-	if len(got) > supervisorSocketPathLimit {
-		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	if len(got) > localsocket.PathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), localsocket.PathLimit, got)
 	}
 
 	if again := supervisorSocketPathForDir(longDir); again != got {
@@ -7429,7 +7430,7 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
@@ -7461,7 +7462,7 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {

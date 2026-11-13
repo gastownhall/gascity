@@ -6,8 +6,7 @@ package api
 // (beadListFanOut, with relocatedGraphStore), the head of statusWorkCounts
 // that picks its queries, and the retired-session sweep's store list
 // (retiredSessionWorkStores). sortedRigNames is T7d's frozen copy
-// (frozenSortedRigNames) and relocatedGraphStore T7e's
-// (frozenRelocatedGraphStore). The equivalence table
+// (frozenSortedRigNames). The equivalence table
 // (work_federation_legs_equivalence_test.go) runs each beside the plan.
 //
 // statusWorkCounts is copied up to the point its queries are chosen: what it
@@ -68,6 +67,16 @@ func frozenBeadListFanOut(state State, stores map[string]beads.Store, rigNames [
 		legs = append(legs, frozenBeadListLeg{label: "graph", store: graph, graph: true})
 	}
 	return legs
+}
+
+// frozenRelocatedGraphStore is main's relocatedGraphStore.
+func frozenRelocatedGraphStore(state State) (beads.GraphStore, bool) {
+	st := state.Stores()
+	graph := st.Graph()
+	if beads.IsNilStore(graph) || beads.SameStore(graph, st.Work()) {
+		return beads.GraphStore{}, false
+	}
+	return graph, true
 }
 
 // frozenWorkQuery is main's statusWorkCounts' workQuery.

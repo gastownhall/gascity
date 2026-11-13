@@ -67,12 +67,18 @@ type MaintenanceRun struct {
 	SnapshotPath string
 }
 
-// DoltOps is the minimal SQL surface the maintenance loop needs to run
-// CALL DOLT_GC() and the post-gc smoke test. NewSQLDoltOps wraps *sql.DB
+// DoltOps is the minimal SQL surface the maintenance loop needs to gate and
+// run CALL DOLT_GC() and the post-gc smoke test. NewSQLDoltOps wraps *sql.DB
 // and tests supply fakes; the controller does not attach a DoltOps to
 // the production loop yet, so it runs observe-only. Close must release
 // the underlying connection exactly once per cycle.
 type DoltOps interface {
+	// LiveSessions returns the number of other sessions connected to the
+	// database CALL DOLT_GC() will collect, excluding the caller's own
+	// connection. runDoltGC skips GC when it is nonzero. Whoever wires a
+	// production adapter must account for the supervisor's own pooled
+	// connections to the same database, or the gate will skip every cycle.
+	LiveSessions(ctx context.Context) (int, error)
 	// ExecGC runs CALL DOLT_GC() with the supplied context's deadline.
 	ExecGC(ctx context.Context) error
 	// SmokeCount runs SELECT COUNT(*) FROM issues against the current
@@ -439,13 +445,16 @@ func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) Maintenan
 		// attempting a doomed backup that only consumes the last of the disk.
 		// The StoreDiskCritical event informs operators; C1
 		// (hold-on-store-unreachable) handles downstream safety.
-		return m.finishSkippedCycleLocked(started)
+		return m.finishSkippedCycleLocked(started, "")
 	}
 	snapshotPath, err := m.runSnapshot(ctx)
 	if err != nil {
 		return m.finishCycleLocked(started, snapshotPath, err)
 	}
 	if err := m.runDoltGC(ctx); err != nil {
+		if errors.Is(err, errGCSkippedLiveSessions) {
+			return m.finishSkippedCycleLocked(started, snapshotPath)
+		}
 		return m.finishCycleLocked(started, snapshotPath, err)
 	}
 	return m.finishCycleLocked(started, snapshotPath, nil)
@@ -470,17 +479,19 @@ func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath
 	return m.recordRunLocked(run)
 }
 
-// finishSkippedCycleLocked completes a cycle the disk pre-flight declined to
-// start. The stage stays "done" because the loop did not fail, but the
+// finishSkippedCycleLocked completes a cycle that declined to run CALL
+// DOLT_GC(): the disk pre-flight skipped it (snapshotPath is empty), or the
+// live-session gate skipped GC after the snapshot. The stage stays "done" because the loop did not fail, but the
 // operator-alert state machine is not consulted at all: a cycle that attempted
 // nothing is evidence of nothing, and reading it as a success would close an
 // open alert with a recovery notice for a store nobody has touched. This is the
 // only completion path that skips the alert machinery, which is why it does not
 // go through recordRunLocked. The gc.store.maintenance.done event a skipped
-// cycle emits is long-standing behavior and unchanged here; StoreDiskCritical is
-// what tells operators why the cycle skipped. Caller must hold m.mu.
-func (m *StoreMaintenanceLoop) finishSkippedCycleLocked(started time.Time) MaintenanceRun {
-	run := MaintenanceRun{StartedAt: started, FinishedAt: m.clock(), Stage: "done"}
+// cycle emits is long-standing behavior and unchanged here; StoreDiskCritical
+// or the live-session log line is what tells operators why the cycle skipped.
+// Caller must hold m.mu.
+func (m *StoreMaintenanceLoop) finishSkippedCycleLocked(started time.Time, snapshotPath string) MaintenanceRun {
+	run := MaintenanceRun{StartedAt: started, FinishedAt: m.clock(), Stage: "done", SnapshotPath: snapshotPath}
 	m.lastRunAt = run.StartedAt
 	m.appendHistoryLocked(run)
 	m.recordRunEventLocked(run)
@@ -794,18 +805,34 @@ func (m *StoreMaintenanceLoop) appendHistoryLocked(r MaintenanceRun) {
 	}
 }
 
+// errGCSkippedLiveSessions is runDoltGC's signal that the live-session gate
+// skipped CALL DOLT_GC(). It is not a failure: executeCycleLocked routes it to
+// finishSkippedCycleLocked so the skip neither alerts nor reads as a recovery.
+var errGCSkippedLiveSessions = errors.New("gc skipped: live sessions on target database")
+
 // runDoltGC runs CALL DOLT_GC() followed by the SELECT COUNT(*) smoke
 // test against the managed Dolt store. Design D4 + D5 from ga-d5y.
 //
 // Returns nil on success. A non-nil return is a *MaintenanceError
 // whose Stage classifies the failing phase:
 //
-//   - "gc": factory error, SQL error from CALL DOLT_GC(), or the
-//     configured GCTimeout elapsed.
+//   - "gc": factory error, live-session probe error, SQL error from
+//     CALL DOLT_GC(), or the configured GCTimeout elapsed.
 //   - "smoke-test": SQL error on SELECT COUNT(*), the 5 s smoke
 //     deadline elapsed, or the query returned 0 rows (which indicates
 //     either a corrupted schema or a wiped table and is never a
 //     healthy post-gc state for a running city).
+//
+// GC is skipped and logged when other sessions are connected to the target
+// database, and runDoltGC returns errGCSkippedLiveSessions (not a
+// *MaintenanceError); executeCycleLocked records that cycle as "done" without
+// touching the alert state: Dolt's GC makes a separate, unprotected pass over
+// dolt_ignore'd tables and the working set, so collecting under live writers
+// can destroy them (ga-vrq5pu). A probe error fails closed rather than GCing
+// blind. The probe is a point-in-time check, not a lock: a session can connect
+// and write between the probe and CALL DOLT_GC(), so the gate narrows the
+// hazard window and does not make GC safe. The live-session probe shares the
+// smoke-test deadline, and a deadline overrun fails closed as Stage "gc".
 //
 // When openDoltOps is nil, runDoltGC returns nil.
 func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
@@ -817,6 +844,17 @@ func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("open dolt conn: %w", err)}
 	}
 	defer ops.Close() //nolint:errcheck // best-effort cleanup; underlying pool manages lifecycle
+
+	probeCtx, cancelProbe := context.WithTimeout(ctx, m.smokeTimeout)
+	live, err := ops.LiveSessions(probeCtx)
+	cancelProbe()
+	if err != nil {
+		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("probe live sessions: %w", err)}
+	}
+	if live > 0 {
+		fmt.Fprintf(m.stderr, "store-maintenance: %d live session(s) on the target database; skipping CALL DOLT_GC()\n", live) //nolint:errcheck
+		return errGCSkippedLiveSessions
+	}
 
 	gcCtx, cancelGC := context.WithTimeout(ctx, m.cfg.GCTimeoutOrDefault())
 	defer cancelGC()
@@ -857,6 +895,36 @@ func NewSQLDoltOps(open func(ctx context.Context) (*sql.DB, error)) DoltOpsFacto
 // Close closes the pool.
 type sqlDoltOps struct {
 	db *sql.DB
+}
+
+// liveSessionsQuery counts the other connections on the named database, the
+// connection's current one that CALL DOLT_GC() collects. Same
+// information_schema.processlist surface as cmd/gc's cleanup probe, narrowed to
+// one database and minus this connection (the pool is per-cycle, so the probe's
+// connection is its only one). LiveSessions resolves the name with
+// SELECT DATABASE() on the same pinned connection first, so a connection with
+// no current database fails closed instead of matching nothing.
+const liveSessionsQuery = "SELECT COUNT(*) FROM information_schema.processlist WHERE db = ? AND id <> CONNECTION_ID()"
+
+func (s *sqlDoltOps) LiveSessions(ctx context.Context) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close() //nolint:errcheck // returns the connection to the per-cycle pool
+
+	var name sql.NullString
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
+		return 0, err
+	}
+	if !name.Valid || name.String == "" {
+		return 0, fmt.Errorf("live-session probe: connection has no current database")
+	}
+	var n int
+	if err := conn.QueryRowContext(ctx, liveSessionsQuery, name.String).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *sqlDoltOps) ExecGC(ctx context.Context) error {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func requireSingleJSONLine(t *testing.T, stdout *bytes.Buffer) map[string]any {
@@ -256,7 +258,11 @@ func TestOddballRootJSONInitDefaultSkipsTTYWizard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "provider =") {
+	written, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the written city.toml: %v", err)
+	}
+	if written.Workspace.Provider != "" || len(written.Providers) != 0 {
 		t.Fatalf("init --json used the interactive provider wizard; city.toml:\n%s", string(data))
 	}
 }

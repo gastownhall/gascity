@@ -700,10 +700,15 @@ func (s *BdStore) SetPurgeRunner(fn PurgeRunnerFunc) {
 // Purge runs "bd purge" to remove closed ephemeral beads from the given
 // beads directory. Uses a 60-second timeout as a safety circuit breaker.
 // The beadsDir is the .beads/ directory path; bd runs from its parent.
+// A real purge passes --force: without it bd purge only previews and exits
+// non-zero when anything matches. A dry run passes --dry-run and never
+// --force.
 func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	args := []string{"purge", "--json"}
 	if dryRun {
 		args = append(args, "--dry-run")
+	} else {
+		args = append(args, "--force")
 	}
 
 	dir := filepath.Dir(beadsDir)
@@ -1103,6 +1108,16 @@ func (e *PartialResultError) Unwrap() error {
 func IsPartialResult(err error) bool {
 	var partial *PartialResultError
 	return errors.As(err, &partial)
+}
+
+// IsIssueTypeRefused reports whether err is a store refusing a bead type its
+// type registry does not define. bd validates a list's --type, like a
+// create's, against the store's built-in and custom types and answers
+// `invalid issue type "<type>"`; a store gc does not serve (an adopted rig
+// store, until gc's types are registered) keeps bd's own registry. The
+// refusal proves the store holds no row of that type, since bd creates none.
+func IsIssueTypeRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "invalid issue type")
 }
 
 // IsTimeoutError reports whether err was caused by a store/bd query exceeding

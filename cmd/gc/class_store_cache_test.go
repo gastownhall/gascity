@@ -134,16 +134,20 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// The batch copy capabilities (S5-C), engine-only like the single-row
 	// forms above: the migration's copy opens the binding engine itself.
 	"CreateWithForeignIDBatch": nil,
-	"DepAddBatch":              nil,
-	"DepMetadataBatch":         nil,
-	"DepRemoveBatch":           nil,
-	"DepAddWithMetadata":       nil,
-	"HasResidentOutside":       nil,
-	"SequenceFloor":            nil,
-	"SetSequenceFloor":         nil,
-	"AdvanceSequenceFloor":     nil,
-	"StoreHealthPath":          nil,
-	"ReadOnly":                 nil,
+	// The reverse migration's created form (S5-G), engine-only: the reverse
+	// opens the store it copies into itself.
+	"CreatedForm":          nil,
+	"AcceptsDanglingDep":   nil,
+	"DepAddBatch":          nil,
+	"DepMetadataBatch":     nil,
+	"DepRemoveBatch":       nil,
+	"DepAddWithMetadata":   nil,
+	"HasResidentOutside":   nil,
+	"SequenceFloor":        nil,
+	"SetSequenceFloor":     nil,
+	"AdvanceSequenceFloor": nil,
+	"StoreHealthPath":      nil,
+	"ReadOnly":             nil,
 	// (DepListBatch is carried, not omitted: a cached bd store paid one
 	// `bd dep list` per member of every close order behind a failed
 	// assertion. The cache answers the anchors it holds from memory as
