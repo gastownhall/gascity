@@ -361,7 +361,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		}
 		runStoragePreflightChecks(rehearsal, &found, stdout, stderr)
 		if found.converged {
-			block("cutover", splitConvergedRefusal(request.CityPath, split))
+			block("cutover", splitConvergedRefusal(request.CityPath, split, found.unread))
 		}
 		summary.Blocks = append(summary.Blocks, found.blocked...)
 		preflightNote(stdout, "estimate", "not computed: the work store was not read")
@@ -381,7 +381,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		splitPreflightFloor(request.CityPath, found, stdout)
 	}
 	if found.converged {
-		block("cutover", splitConvergedRefusal(request.CityPath, split))
+		block("cutover", splitConvergedRefusal(request.CityPath, split, ""))
 	}
 	closeWindow()
 	summary.Blocks = append(summary.Blocks, found.blocked...)
@@ -410,8 +410,11 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 // state may live in the binding, so migrating again would copy the work
 // store's slice over it. It reports what boot's own check (identity, then
 // containment, confirmInfraConvergence's halves) finds there, read-only: the
-// marker's identity is not back-filled, as boot's check would.
-func splitConvergedRefusal(cityPath string, split *config.City) error {
+// marker's identity is not back-filled, as boot's check would. unread, when
+// set, says why this run may read no store: the identity check reads files
+// alone and still runs, and the containment half, which reads the work store
+// (and would start a stopped provider), is named as not run.
+func splitConvergedRefusal(cityPath string, split *config.City, unread string) error {
 	target, ok, err := resolveInfraBindingTarget(cityPath, split)
 	if err != nil {
 		return fmt.Errorf("a convergence marker for the split binding exists, and the binding cannot be resolved to check it (%w)", err)
@@ -422,9 +425,12 @@ func splitConvergedRefusal(cityPath string, split *config.City) error {
 	const prefix = "gc storage preflight --split"
 	_, _, hold := markerWorkStoreIdentityHold(cityPath, target, prefix, io.Discard)
 	var report infraMigrationReport
-	if hold != nil {
+	switch {
+	case hold != nil:
 		report = *hold
-	} else {
+	case unread != "":
+		return fmt.Errorf("%s records that this city moved its infrastructure classes into binding %s, or began to, and city.toml has no [storage]: the split was backed out by removing the block. Whether the binding holds them is boot's check, which reads the work store, and this run reads none (%s). Run this again once the store can be read, and it says whether to restore the block or move %s aside; migrating again would copy the work store's slice over the binding", target.MarkerPath(), target.Binding, unread, target.Root)
+	default:
 		report = confirmInfraContainment(cityPath, target, prefix, io.Discard)
 	}
 	report.Target = target

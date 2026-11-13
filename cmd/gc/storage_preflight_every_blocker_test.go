@@ -264,3 +264,48 @@ func TestSplitPreflightRunsTheChecksThatReadNoStoreOnAStoppedCity(t *testing.T) 
 		t.Errorf("the footer does not name both the blocks and what lets a later run read the stores:\n%s", out)
 	}
 }
+
+// TestSplitPreflightOnAStoppedCityWithAMarkerReadsNoStore: the convergence
+// marker a backed-out migration leaves blocks the split rehearsal on a city
+// whose provider is down too, and the block reads no store. Boot's check of
+// what the binding holds reads the work store, which on a stopped managed or
+// proxied city would start the server and leave it running (ga-683m7f), so
+// the report names that check as not run instead of answering it.
+func TestSplitPreflightOnAStoppedCityWithAMarkerReadsNoStore(t *testing.T) {
+	request, _, provider := splitReadyCity(t, 30, nativeDoltLane)
+	split := splitHypotheticalConfig(request.Cfg)
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, request.CityPath, split, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("migrating: %s: %s", got.Outcome, log.String())
+	}
+	for _, note := range []string{infraClearedNotePath(request.CityPath), bornSplitServedNotePath(request.CityPath)} {
+		if err := os.Remove(note); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	stubMigrationProviderDown(t, true)
+	opened := 0
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
+		opened++
+		return prev(cityPath)
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+
+	code, summary, out := runSplitPreflight(t, request)
+	if code != 1 || !slices.Contains(summary.Blocks, "cutover") || !preflightRow(out, preflightBlockTag, "cutover") {
+		t.Fatalf("exit %d, blocks %v: the marker does not block the split:\n%s", code, summary.Blocks, out)
+	}
+	if opened != 0 || provider.starts != 0 {
+		t.Fatalf("the rehearsal of a city whose provider is down opened the work store %d time(s) and started the provider %d time(s):\n%s", opened, provider.starts, out)
+	}
+	target := mustResolveInfraTarget(t, request.CityPath, split)
+	for _, want := range []string{target.MarkerPath(), "this run reads none"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the cutover block does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "boot's check confirms") {
+		t.Errorf("the report answers boot's check, which reads the work store this run did not read:\n%s", out)
+	}
+}
