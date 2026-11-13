@@ -261,3 +261,92 @@ func TestGcBdCloseConfirmsEdgesWhileItReadsTheRowBack(t *testing.T) {
 		t.Fatalf("bead.closed payload %s, want an explicit confirmed-empty edge set", closes[0].Payload)
 	}
 }
+
+// TestGcBdCloseFallsBackWhenTheSpeculativeEdgeReadFails pins that a failed
+// edge read made beside the read-back answers for no bead: the closed bead's
+// edges are then confirmed on their own, so the announcement still carries
+// the edge set bd holds rather than none.
+func TestGcBdCloseFallsBackWhenTheSpeculativeEdgeReadFails(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	depReads := 0
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(full, "bd show --json demo-abc"):
+			return []byte(`[{"id":"demo-abc","title":"implement","status":"closed","issue_type":"task","close_reason":"Done: implemented"}]`), nil
+		case strings.HasPrefix(full, "bd dep list demo-abc"):
+			mu.Lock()
+			depReads++
+			first := depReads == 1
+			mu.Unlock()
+			if first {
+				return nil, errors.New("transient")
+			}
+			// A single-id dep list answers with the depended-on beads' rows.
+			return []byte(`[{"id":"demo-root","title":"root","status":"open","issue_type":"task","dependency_type":"parent-child"}]`), nil
+		}
+		return nil, errors.New("unexpected: " + full)
+	}
+	store := beads.NewBdStore(cityDir, runner)
+	before := map[string]beads.Bead{"demo-abc": {ID: "demo-abc", Title: "implement", Status: "in_progress", Type: "task"}}
+
+	announceBdPassthroughCloses(cityDir, store, before, []string{"close", "demo-abc", "--reason", "Done: implemented"})
+
+	closes, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.BeadClosed, Subject: "demo-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 1 {
+		t.Fatalf("bead.closed events for demo-abc = %d, want 1", len(closes))
+	}
+	b, ok := beads.DecodeBeadEventPayload(closes[0].Payload)
+	if !ok || len(b.Dependencies) != 1 || b.Dependencies[0].DependsOnID != "demo-root" {
+		t.Fatalf("bead.closed payload %s, want the one demo-root edge the fallback confirmed", closes[0].Payload)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if depReads != 2 {
+		t.Fatalf("dep list reads = %d, want 2: the failed read beside the read-back, then the fallback", depReads)
+	}
+}
+
+// TestGcBdCloseKeepsInlineEdgesOverTheSpeculativeRead pins that edges the
+// read-back carries inline win over the edge read made beside it: that read
+// was made because the pre-close row had no edges, and its answer must not
+// replace the committed row's own edge set.
+func TestGcBdCloseKeepsInlineEdgesOverTheSpeculativeRead(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(full, "bd show --json demo-abc"):
+			return []byte(`[{"id":"demo-abc","title":"implement","status":"closed","issue_type":"task","close_reason":"Done: implemented","dependencies":[{"issue_id":"demo-abc","depends_on_id":"demo-x","type":"blocks"}]}]`), nil
+		case strings.HasPrefix(full, "bd dep list demo-abc"):
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected: " + full)
+	}
+	store := beads.NewBdStore(cityDir, runner)
+	before := map[string]beads.Bead{"demo-abc": {ID: "demo-abc", Title: "implement", Status: "in_progress", Type: "task"}}
+
+	announceBdPassthroughCloses(cityDir, store, before, []string{"close", "demo-abc", "--reason", "Done: implemented"})
+
+	closes, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.BeadClosed, Subject: "demo-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closes) != 1 {
+		t.Fatalf("bead.closed events for demo-abc = %d, want 1", len(closes))
+	}
+	b, ok := beads.DecodeBeadEventPayload(closes[0].Payload)
+	if !ok || len(b.Dependencies) != 1 || b.Dependencies[0].DependsOnID != "demo-x" || b.Dependencies[0].Type != "blocks" {
+		t.Fatalf("bead.closed payload %s, want the read-back's inline demo-x edge, not the empty edge read", closes[0].Payload)
+	}
+}
