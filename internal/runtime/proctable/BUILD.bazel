@@ -48,6 +48,7 @@ go_library(
         "scan_scope_other.go",
         "scan_since_windows.go",
         "scan_stub.go",
+        "scan_tmux_fence.go",
         "scan_tmux_fence_darwin.go",
         "scan_tmux_fence_linux.go",
         "scan_tmux_fence_stub.go",

@@ -178,8 +178,17 @@ func (p *execScanOrphanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 }
 
 // hostFSGoldenPack writes the conformance golden reference's host-sharing
-// variant with an `exec` that runs nothing, and returns its script.
+// variant with an `exec` that runs nothing, and returns its script. The
+// golden declares no proc.exec, so gc reads its agents as running outside
+// tmux.
 func hostFSGoldenPack(t *testing.T) string {
+	t.Helper()
+	return hostFSGoldenPackWith(t, nil)
+}
+
+// hostFSGoldenPackWith is hostFSGoldenPack with edit applied to its op
+// bodies first, when set.
+func hostFSGoldenPackWith(t *testing.T, edit func(bodies map[string]string)) string {
 	t.Helper()
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -188,6 +197,9 @@ func hostFSGoldenPack(t *testing.T) string {
 	}
 	bodies := reference.HostFSBodies()
 	bodies["exec"] = `cat >/dev/null`
+	if edit != nil {
+		edit(bodies)
+	}
 	script := filepath.Join(dir, "golden")
 	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
 		t.Fatal(err)
@@ -248,14 +260,65 @@ func TestSameSessionRestartOnHostFSExecPackNeverReachesInBoxTmux(t *testing.T) {
 	}
 }
 
+// The same restart over a host-sharing exec pack whose agent runs in its
+// box's tmux session main (it declares proc.exec): the box's tmux server
+// copied the box's environment, so the agent of the stopped incarnation is a
+// pane of a server carrying the session's GC_SESSION_ID that outlived the
+// box, as tmux daemonizes outside the box's process group. The restart's
+// orphan kill ends that agent and the box's leftover, so two agents never
+// work one session, and leaves the tmux server and the agent's own child to
+// the kill of the agent's process group.
+func TestSameSessionRestartOnHostFSExecPackEndsTheStaleAgentInTheBoxsTmux(t *testing.T) {
+	store := beads.NewMemStore()
+	city := t.TempDir()
+	pack := hostFSGoldenPackWith(t, func(bodies map[string]string) {
+		bodies["protocol"] = strings.Replace(bodies["protocol"], `"fs.host"`, `"fs.host","proc.exec"`, 1)
+	})
+	scanner, ok := runtime.AsProcessTableScanner(sessionexec.NewSeamBackedForCity(pack, "c", city))
+	if !ok {
+		t.Fatal("the host-sharing golden pack has no process-table scanner")
+	}
+	sp := &execScanOrphanProvider{Fake: runtime.NewFake(), scanner: scanner}
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		serverPID = 4200
+		agentPID  = 4201
+		childPID  = 4202
+		leftover  = 4300
+	)
+	writeFakeProcess(t, root, serverPID, 1, []string{"tmux: server"}, env)
+	writeFakeProcess(t, root, agentPID, serverPID, []string{"claude"}, env)
+	writeFakeProcess(t, root, childPID, agentPID, []string{"node"}, env)
+	writeFakeProcess(t, root, leftover, 1, []string{"sleep"}, env)
+	proctable.SetScanRootForTesting(t, root)
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !slices.Equal(sp.terminated, []int{agentPID, leftover}) {
+		t.Fatalf("pre-start orphan kill terminated %v, want the stale agent %d in the box's tmux and the leftover %d", sp.terminated, agentPID, leftover)
+	}
+}
+
 // The host-sharing exec pack of TestSameSessionRestartOnHostFSExecPackNeverReachesInBoxTmux
 // as the default backend of the auto composite gc builds when the city also
 // has ACP agents (auto(exec, acp), cmd/gc/providers.go). The composite merges
 // every leaf's scan, and the ACP leaf's own scan reports an in-box pane as an
-// untracked root of the session: unfenced, the restart's orphan kill would
-// end it through the exec leaf, whether or not the pack still lists the box.
-// The composite applies its default leaf's tmux fence to every leaf's roots,
-// so the scan reports the box's program and its leftover alone, tracked while
+// untracked root of the session: merged, the restart's orphan kill would end
+// it through the exec leaf, whether or not the pack still lists the box. The
+// composite reports only the PIDs its exec leaf's fenced scan reports, so
+// the scan reports the box's program and its leftover alone, tracked while
 // the box is listed, and the restart never reaches the in-box tmux server,
 // its client, or any process in its panes.
 func TestSameSessionRestartOnAutoOverHostFSExecPackNeverReachesInBoxTmux(t *testing.T) {
@@ -349,11 +412,12 @@ func TestSameSessionRestartOnAutoOverHostFSExecPackNeverReachesInBoxTmux(t *test
 
 // The exception to AC-7 (TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim)
 // in a city that runs ACP agents over a host-sharing exec pack: gc wraps the
-// exec base as auto(exec, acp), and the composite passes the ACP leaf's roots
-// through the exec leaf's tmux fence. The fence cannot tell a tmux server an
-// ACP session's agent founded from one inside an exec box, so an ACP-routed
-// session's own tmux-parented leftover is not reported: its restart leaves
-// the pane running and the start proceeds rather than refusing.
+// exec base as auto(exec, acp), and the composite reports only the PIDs the
+// exec leaf's fenced scan reports. The fence cannot tell a tmux server an
+// ACP session's agent founded, which carries that session's GC_SESSION_ID,
+// from one inside an exec box, so an ACP-routed session's own tmux-parented
+// leftover is not reported: its restart leaves the pane running and the
+// start proceeds rather than refusing.
 func TestSameSessionRestartOnAutoOverHostFSExecPackLeavesAnACPSessionsOwnTmuxPane(t *testing.T) {
 	store := beads.NewMemStore()
 	city := t.TempDir()

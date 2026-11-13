@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	goruntime "runtime"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
@@ -97,5 +100,58 @@ func TestDrainAckEscalationNeverTargetsAnExecSeatsOwnProgram(t *testing.T) {
 				t.Fatalf("escalation targets %+v, want none: an exec seat's own program is never force-terminated by the escalation; stderr=%q", targets, stderr.String())
 			}
 		})
+	}
+}
+
+// boxTmuxGoldenPack is sweepGoldenPack's host-filesystem variant declaring
+// proc.exec too: a pack whose agent runs in its box's tmux session main. Its
+// `exec` still runs nothing, so no test drives a host tmux.
+func boxTmuxGoldenPack(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bodies := reference.HostFSBodies()
+	bodies["exec"] = `cat >/dev/null`
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle","fs.host","proc.exec"],"locality":"local"}'`
+	script := filepath.Join(dir, "golden")
+	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// The other half of the exec rule: a pack whose agent runs in its box's
+// tmux session main (proc.exec without carrier.ops) is scanned as the tmux
+// runtime is, so a wedged seat's agent, a pane of the box's tmux server
+// carrying the session's GC_SESSION_ID and tracked under the seat's name
+// while the pack lists the box, is the escalation's target, as the tmux
+// runtime's pane is.
+func TestDrainAckEscalationTargetsTheAgentPaneOfAnExecPackRunningItInTmux(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("reads /proc snapshots, which only linux has")
+	}
+	cityPath := t.TempDir()
+	sp := sessionexec.NewSeamBackedForCity(boxTmuxGoldenPack(t), "drain-city", cityPath)
+	agent := startSweepLeftover(t, sp, "seat", "gc-seat", cityPath, false)
+	root := runtimetest.SnapshotProcRoot(t, agent.PID)
+	const serverPID = 4194000
+	writeFakeProcEntry(t, root, serverPID, 1, "tmux: server", []string{"GC_SESSION_ID=gc-seat", "GC_CITY_PATH=" + cityPath})
+	runtimetest.SetSnapshotParent(t, root, agent.PID, serverPID)
+	proctable.SetScanRootForTesting(t, root)
+
+	scanner, ok := runtime.AsProcessTableScanner(sp)
+	if !ok {
+		t.Fatal("the host-sharing golden pack has no process-table scanner")
+	}
+	found, err := scanner.FindRuntimesBySessionID("gc-seat")
+	if err != nil || len(found) != 1 || found[0].PID != agent.PID || !found[0].IsTracked || found[0].ProviderName != "seat" || !found[0].ParentIsProviderInfrastructure {
+		t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the seat's agent pid %d, tracked as seat with a tmux parent", found, err, agent.PID)
+	}
+	var stderr bytes.Buffer
+	if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 1 || targets[0].PID != agent.PID {
+		t.Fatalf("escalation targets %+v, want the seat's agent pane %d; stderr=%q", targets, agent.PID, stderr.String())
 	}
 }

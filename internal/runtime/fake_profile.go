@@ -199,9 +199,10 @@ func (execHostFSTrait) CanScanProcessTable() bool { return false }
 // that cannot scan.
 func (execHostFSTrait) FindRuntimesBySessionID(string) ([]LiveRuntime, error) { return nil, nil }
 
-// FenceTmuxSubtrees keeps no root: the profiled pack cannot scan, so no
-// composite consults its fence.
-func (execHostFSTrait) FenceTmuxSubtrees([]LiveRuntime) ([]LiveRuntime, error) { return nil, nil }
+// FencesTmuxSubtrees is the profiled pack's answer: it declares proc.exec
+// without carrier.ops, so its agent runs in its box's tmux and its scan
+// would not fence. It cannot scan, so no composite reads the answer.
+func (execHostFSTrait) FencesTmuxSubtrees() bool { return false }
 
 // TerminateRuntime refuses, as exec's scanner does for a pack that cannot
 // scan.

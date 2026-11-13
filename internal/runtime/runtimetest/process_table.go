@@ -33,14 +33,14 @@ type ProcessTableScannerFixtures struct {
 	// NotScanning returns a provider of the same runtime whose sessions do
 	// not share this host, so it must not claim the scanner.
 	NotScanning func(t *testing.T) runtime.Provider
-	// FencesTmuxSubtrees marks a runtime whose sessions never run under a
-	// tmux server (an exec pack's boxes run under the pack's holder), so its
-	// scanner must never report a process that has a tmux server or client
-	// among its ancestors: such a process belongs to a tmux server an agent
-	// or a user founded inside the session, which carries the session's
-	// GC_SESSION_ID, and a reported pane would be ended by a start's orphan
-	// kill. The tmux runtime's panes are its sessions, so it leaves this
-	// unset.
+	// FencesTmuxSubtrees marks a runtime whose agents never run under a tmux
+	// server (an exec pack whose agents run outside tmux), so its scanner
+	// must never report a process that a tmux server or client carrying a
+	// session's GC_SESSION_ID hosts: such a tmux is one an agent or a user
+	// founded inside the session, which copied the session's GC_SESSION_ID,
+	// and a reported pane would be ended by a start's orphan kill. The tmux
+	// runtime's panes are its sessions, and an exec pack whose agent runs in
+	// its box's tmux has its agent among them, so both leave this unset.
 	FencesTmuxSubtrees bool
 	// StartConfig is the config a case starts its session with, before the
 	// case sets Command and the session's identity env; nil starts in a

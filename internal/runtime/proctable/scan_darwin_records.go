@@ -1,7 +1,6 @@
 package proctable
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -184,48 +183,52 @@ func scanRecordsOutsideTmux(records map[int]psRecord, id string) ([]runtime.Live
 	return roots, err
 }
 
-// fenceTmuxSubtreeRecords is the pure half of the Darwin FenceTmuxSubtrees:
-// it keeps the roots none of whose ancestors in records is a tmux server or
-// client. A root whose ancestry the snapshot cannot complete (a parent it
-// does not hold, or a loop) may sit under a tmux server, so it is left out
-// with an EntryError, as on Linux.
+// fenceTmuxSubtreeRecords is the Darwin fence over one ps snapshot, as on
+// Linux: it keeps the roots no tmux server or client carrying a
+// GC_SESSION_ID hosts (fenceRoots over recordHostedBySessionTmux). A root
+// whose ancestry the snapshot cannot complete (a parent it does not hold, a
+// loop, or a tmux whose environment ps does not show) may sit under such a
+// tmux, so it is left out with an EntryError.
 func fenceTmuxSubtreeRecords(records map[int]psRecord, roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
-	kept := make([]runtime.LiveRuntime, 0, len(roots))
-	var errs []error
-	for _, r := range roots {
-		under, err := recordUnderTmux(records, r.PID)
-		if err != nil {
-			errs = append(errs, &EntryError{PID: r.PID, Err: fmt.Errorf("reading the ancestry of pid %d: %w", r.PID, err)})
-			continue
-		}
-		if !under {
-			kept = append(kept, r)
-		}
-	}
-	return kept, errors.Join(errs...)
+	return fenceRoots(roots, func(pid int) (bool, error) { return recordHostedBySessionTmux(records, pid) })
 }
 
-// recordUnderTmux reports whether records shows a tmux server or client
-// among pid's ancestors, or an error when it cannot complete the ancestry.
-func recordUnderTmux(records map[int]psRecord, pid int) (bool, error) {
-	record, ok := records[pid]
-	if !ok {
-		return false, fmt.Errorf("pid %d vanished", pid)
-	}
-	seen := map[int]bool{pid: true}
-	for p := record.ppid; p > 1; {
+// recordHostedBySessionTmux reports whether records shows pid, or one of its
+// ancestors, as a tmux server or client carrying a GC_SESSION_ID
+// (recordIsSessionTmux). A pid the snapshot does not hold is errRootGone; an
+// ancestor it does not hold, or a parent chain that loops, is an error.
+func recordHostedBySessionTmux(records map[int]psRecord, pid int) (bool, error) {
+	seen := make(map[int]bool)
+	for p := pid; p > 1; {
 		if seen[p] {
 			return false, fmt.Errorf("the parent chain loops at pid %d", p)
 		}
 		seen[p] = true
-		ancestor, ok := records[p]
+		record, ok := records[p]
+		if !ok && p == pid {
+			return false, errRootGone
+		}
 		if !ok {
 			return false, fmt.Errorf("ancestor pid %d vanished", p)
 		}
-		if isInfrastructureCommand(ancestor.command) {
-			return true, nil
+		if hosted, err := recordIsSessionTmux(record); err != nil || hosted {
+			return hosted, err
 		}
-		p = ancestor.ppid
+		p = record.ppid
 	}
 	return false, nil
+}
+
+// recordIsSessionTmux reports whether record is a tmux server or client
+// (isInfrastructureCommand) carrying a GC_SESSION_ID. A tmux whose ps line
+// shows no environment fails closed with an error: ps prints none for
+// another user's process, which may carry one.
+func recordIsSessionTmux(record psRecord) (bool, error) {
+	if !isInfrastructureCommand(record.command) {
+		return false, nil
+	}
+	if len(record.env) == 0 {
+		return false, fmt.Errorf("ps shows no environment for tmux pid %d", record.pid)
+	}
+	return record.env["GC_SESSION_ID"] != "", nil
 }

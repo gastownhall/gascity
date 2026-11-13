@@ -8,6 +8,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // tmuxFenceFixture builds a fake /proc holding one host-sharing box and a tmux
@@ -122,24 +124,88 @@ func TestScanBySessionIDOutsideTmuxLeavesOutUndecidableAncestry(t *testing.T) {
 	}
 }
 
-// Kills a fence that a composite cannot apply to another runtime's scan: a
-// composite whose default backend's sessions never run under tmux (auto over
-// a host-sharing exec pack) filters every other backend's roots through
-// FenceTmuxSubtrees, so the tmux runtime's scan of the same fixture, fenced,
-// is the box's program and its adopted leftover alone.
-func TestFenceTmuxSubtreesFiltersAnotherScansRoots(t *testing.T) {
-	root := tmuxFenceFixture(t)
+// Kills a fence broader than the hazard: only a tmux that carries a
+// GC_SESSION_ID was founded inside a session, so only its panes read as that
+// session's roots. A box whose holder runs under a pack's own multiplexer,
+// started without session identity, and an agent of a gc that runs in a
+// user's tmux pane are roots like any other, whatever the tmux is named.
+func TestScanBySessionIDOutsideTmuxReportsRootsUnderASessionlessTmux(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	buildFakeProcUnder(t, root, 100, 1, "tmux: server", map[string]string{"PATH": "/usr/bin"})
+	buildFakeProcUnder(t, root, 101, 100, "holder", nil)
+	buildFakeProcUnder(t, root, 102, 101, "sh", map[string]string{"GC_SESSION_ID": "sid-box"})
+	buildFakeProcUnder(t, root, 110, 1, "tmux3.4:", map[string]string{"HOME": "/home/user"})
+	buildFakeProcUnder(t, root, 111, 110, "bash", nil)
+	buildFakeProcUnder(t, root, 112, 111, "gc", nil)
+	buildFakeProcUnder(t, root, 113, 112, "agent", map[string]string{"GC_SESSION_ID": "sid-acp"})
 	SetScanRootForTesting(t, root)
-	found, err := ScanBySessionID("sid-box")
-	if err != nil {
-		t.Fatalf("ScanBySessionID: %v", err)
+	for _, tc := range []struct {
+		id   string
+		want []int
+	}{
+		{"sid-box", []int{102}},
+		{"sid-acp", []int{113}},
+	} {
+		found, err := ScanBySessionIDOutsideTmux(tc.id)
+		if err != nil {
+			t.Fatalf("ScanBySessionIDOutsideTmux(%q): %v", tc.id, err)
+		}
+		if got := rootPIDs(found); !slices.Equal(got, tc.want) {
+			t.Errorf("ScanBySessionIDOutsideTmux(%q) = %v, want %v: a tmux that carries no session's id hosts no session's pane", tc.id, got, tc.want)
+		}
 	}
-	fenced, err := FenceTmuxSubtrees(found)
-	if err != nil {
-		t.Fatalf("FenceTmuxSubtrees: %v", err)
+}
+
+// Kills a fence that reads a tmux whose environment it cannot read as one
+// without a session: another user's tmux server may carry a session's
+// GC_SESSION_ID, so a root under it is left out with an entry error naming
+// that root, never a whole-scan failure.
+func TestScanBySessionIDOutsideTmuxFailsClosedOnAnUnreadableTmuxEnvironment(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	box := map[string]string{"GC_SESSION_ID": "sid-box"}
+	buildFakeProcUnder(t, root, 20, 1, "tmux: server", box)
+	// Another user's server: the scan never reads its environment, and the
+	// fence cannot. A directory stands in for the unreadable file, which a
+	// test running as root would read anyway.
+	writeFakeProcessUID(t, filepath.Join(root, "20"), os.Geteuid()+1)
+	environ := filepath.Join(root, "20", "environ")
+	if err := os.Remove(environ); err != nil {
+		t.Fatal(err)
 	}
-	if got := rootPIDs(fenced); !slices.Equal(got, []int{11, 30}) {
-		t.Fatalf("FenceTmuxSubtrees(%v) = %v, want [11 30]", rootPIDs(found), got)
+	if err := os.Mkdir(environ, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	buildFakeProcUnder(t, root, 21, 20, "bash", nil)
+	buildFakeProcUnder(t, root, 22, 21, "agent", box)
+	buildFakeProcUnder(t, root, 30, 1, "agent", box)
+	SetScanRootForTesting(t, root)
+
+	found, err := ScanBySessionIDOutsideTmux("sid-box")
+	if got := rootPIDs(found); !slices.Equal(got, []int{30}) {
+		t.Fatalf("roots = %v, want only [30]: a root under a tmux of unreadable environment is undecided", got)
+	}
+	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{22}) || HasWholeScanFailure(err) {
+		t.Fatalf("err = %v (entry pids %v), want an entry error for 22 alone", err, pids)
+	}
+}
+
+// A root that exits between the scan and the fence is left out without an
+// error, as the scan skips a process that dies under it; the drain-ack
+// escalation scans just after a stop, while a seat's processes exit. A root
+// whose ancestor vanishes mid-walk still gets an entry error: it may have sat
+// under a session's tmux.
+func TestFenceTmuxSubtreesSkipsARootThatExited(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProcUnder(t, root, 41, 40, "agent", map[string]string{"GC_SESSION_ID": "sid-box"})
+	buildFakeProcUnder(t, root, 60, 1, "agent", map[string]string{"GC_SESSION_ID": "sid-box"})
+	kept, err := fenceTmuxSubtrees(root, []runtime.LiveRuntime{{PID: 41}, {PID: 60}, {PID: 99}})
+	if got := rootPIDs(kept); !slices.Equal(got, []int{60}) {
+		t.Fatalf("kept = %v, want [60]", got)
+	}
+	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{41}) {
+		t.Fatalf("err = %v (entry pids %v), want an entry error for 41 alone: root 99 exited, ancestor 40 of 41 vanished", err, pids)
 	}
 }
 

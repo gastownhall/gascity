@@ -115,31 +115,23 @@ func ScanningBackends(backends []Backend) []BackendScanner {
 }
 
 // TmuxSubtreeFence is an optional capability of a [ProcessTableScanner]
-// whose sessions never run under a tmux server, such as an exec pack whose
-// boxes share the host. Its own scan never reports a process with a tmux
-// server or client among its ancestors: a tmux server in such a session's
-// picture is one an agent or a user founded inside it, which carries the
-// session's GC_SESSION_ID, so every pane would otherwise read as one of the
-// session's roots. A composite whose default backend has it filters every
-// later backend's roots through it ([FindRuntimesAcross]), since a later
-// backend's scan (ACP's) still reports those panes.
+// whose scan can leave out every process that a tmux server or client
+// carrying a session's GC_SESSION_ID hosts, as the exec scanner does for a
+// host-sharing pack whose agents run outside tmux: a tmux in such a box is
+// one an agent or a user founded there, which copied the session's
+// GC_SESSION_ID, so each of its panes would otherwise read as one of the
+// session's roots. A composite whose default backend fences reports only the
+// PIDs that backend reports ([FindRuntimesAcross]), since a later backend's
+// scan (ACP's) still reports those panes.
 type TmuxSubtreeFence interface {
-	// FenceTmuxSubtrees returns the roots that have no tmux server or client
-	// among their ancestors. A root whose ancestry cannot be read is left
-	// out, with an error naming it.
-	FenceTmuxSubtrees(roots []LiveRuntime) ([]LiveRuntime, error)
+	// FencesTmuxSubtrees reports whether the scanner's scan leaves out the
+	// processes a tmux carrying a session's GC_SESSION_ID hosts.
+	FencesTmuxSubtrees() bool
 }
 
 // FindRuntimesAcross implements [ProcessTableScanner.FindRuntimesBySessionID]
 // for a composite by querying every backend [ScanningBackends] returns and
-// merging the results by PID. When the default backend's scanner is a
-// [TmuxSubtreeFence], every later backend's roots pass through its fence
-// before the merge, and a PID the fence leaves out is dropped from the whole
-// merge: no backend's record of it is reported. The fence leaves out a root
-// it could not decide (with an error) as well as one under tmux, and keeping
-// another backend's record of such a PID could report a root a later backend
-// tracks as untracked, for an orphan kill to end. Dropping it only makes
-// callers terminate less.
+// merging the results by PID.
 //
 // Local backends scan the same host process table, so one root commonly
 // appears in several results, each backend marking tracked only the sessions
@@ -148,53 +140,63 @@ type TmuxSubtreeFence interface {
 // is LiveUnlisted when ANY backend claims it so. Results are ordered by PID.
 // Backend errors are labeled and joined; partial results from a failing
 // backend are still merged, per the best-effort contract.
+//
+// When the default backend's scan fences tmux subtrees ([TmuxSubtreeFence]),
+// that scan decides which PIDs the composite reports: a later backend's
+// record is merged only for a PID the default backend reported, adding its
+// tracking or claim, never a root. A later backend scans the same table
+// without the fence, so a PID only it reports is one a session-carrying tmux
+// hosts, one the default's fence could not decide, or one that appeared
+// after the default's scan, and its untracked record would hand that PID to
+// an orphan kill. Leaving it out only makes callers terminate less.
 func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 	merged := make(map[int]LiveRuntime)
-	fenced := make(map[int]bool)
 	var errs []error
-	scanners := ScanningBackends(backends)
-	var fence TmuxSubtreeFence
-	if len(scanners) > 0 {
-		fence, _ = scanners[0].Scanner.(TmuxSubtreeFence)
-	}
-	for i, b := range scanners {
+	// fencedPIDs, once set, is the fencing default backend's PIDs: the only
+	// ones a later backend's records are merged for.
+	var fencedPIDs map[int]bool
+	for i, b := range ScanningBackends(backends) {
 		found, err := b.Scanner.FindRuntimesBySessionID(id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, err))
 		}
-		if i > 0 && fence != nil && len(found) > 0 {
-			kept, fenceErr := fence.FenceTmuxSubtrees(found)
-			if fenceErr != nil {
-				errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, fenceErr))
-			}
-			keptPIDs := make(map[int]bool, len(kept))
-			for _, r := range kept {
-				keptPIDs[r.PID] = true
-			}
-			for _, r := range found {
-				if !keptPIDs[r.PID] {
-					fenced[r.PID] = true
-				}
-			}
-			found = kept
-		}
 		for _, r := range found {
-			existing, ok := merged[r.PID]
-			switch {
-			case !ok || (r.IsTracked && !existing.IsTracked):
-				merged[r.PID] = r
-			case r.LiveUnlisted && !existing.IsTracked:
-				existing.LiveUnlisted = true
-				merged[r.PID] = existing
+			if fencedPIDs == nil || fencedPIDs[r.PID] {
+				mergeLiveRuntime(merged, r)
+			}
+		}
+		if i == 0 && fencesTmuxSubtrees(b.Scanner) {
+			fencedPIDs = make(map[int]bool, len(found))
+			for _, r := range found {
+				fencedPIDs[r.PID] = true
 			}
 		}
 	}
 	out := make([]LiveRuntime, 0, len(merged))
-	for pid, r := range merged {
-		if !fenced[pid] {
-			out = append(out, r)
-		}
+	for _, r := range merged {
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
 	return out, errors.Join(errs...)
+}
+
+// fencesTmuxSubtrees reports whether s is a [TmuxSubtreeFence] whose scan
+// fences.
+func fencesTmuxSubtrees(s ProcessTableScanner) bool {
+	fence, ok := s.(TmuxSubtreeFence)
+	return ok && fence.FencesTmuxSubtrees()
+}
+
+// mergeLiveRuntime merges r into merged by PID: a tracked record replaces an
+// untracked one, and an untracked root keeps any record's LiveUnlisted
+// claim.
+func mergeLiveRuntime(merged map[int]LiveRuntime, r LiveRuntime) {
+	existing, ok := merged[r.PID]
+	switch {
+	case !ok || (r.IsTracked && !existing.IsTracked):
+		merged[r.PID] = r
+	case r.LiveUnlisted && !existing.IsTracked:
+		existing.LiveUnlisted = true
+		merged[r.PID] = existing
+	}
 }

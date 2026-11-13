@@ -83,3 +83,27 @@ func TestFenceTmuxSubtreeRecords(t *testing.T) {
 		}
 	}
 }
+
+// The Darwin half of TestScanBySessionIDOutsideTmuxReportsRootsUnderASessionlessTmux
+// and its siblings, over one ps snapshot: only a tmux that carries a
+// GC_SESSION_ID fences the roots under it; a tmux whose ps line shows no
+// environment (ps prints none for another user's process) may carry one,
+// so a root under it is left out with an entry error; and a root the
+// snapshot no longer holds is skipped without one.
+func TestFenceTmuxSubtreeRecordsFencesOnlyASessionTmux(t *testing.T) {
+	box := map[string]string{"GC_SESSION_ID": "sid-box"}
+	records := map[int]psRecord{
+		100: {pid: 100, ppid: 1, command: "tmux", env: map[string]string{"PATH": "/usr/bin"}},
+		101: {pid: 101, ppid: 100, command: "holder", env: map[string]string{"PATH": "/usr/bin"}},
+		102: {pid: 102, ppid: 101, command: "sh", env: box},
+		110: {pid: 110, ppid: 1, command: "tmux:", env: map[string]string{}},
+		111: {pid: 111, ppid: 110, command: "agent", env: box},
+	}
+	kept, err := fenceTmuxSubtreeRecords(records, []runtime.LiveRuntime{{PID: 102}, {PID: 111}, {PID: 120}})
+	if got := rootPIDs(kept); !slices.Equal(got, []int{102}) {
+		t.Fatalf("kept = %v, want [102]: a tmux that carries no session's id hosts no session's pane", got)
+	}
+	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{111}) || HasWholeScanFailure(err) {
+		t.Fatalf("err = %v (entry pids %v), want an entry error for 111 alone: its tmux shows no environment, and root 120 is gone", err, pids)
+	}
+}

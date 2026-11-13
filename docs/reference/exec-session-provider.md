@@ -708,25 +708,46 @@ sessions, and a session's start refuses rather than end a leftover the
 inventory could have shown. gc signals a process only while it still
 carries the session's `GC_SESSION_ID` and the start time the scan read.
 
-gc never counts a process under a tmux server as a box's leftover. A box's
-agent runs under the script's own processes, so a tmux server in that
-picture is one an agent or a user started inside the box (`tmux new -d`,
-or the user's default tmux server when none was running), and it carries
-the session's `GC_SESSION_ID` like anything else started there. The scan
-skips any process with a tmux server or client among its ancestors, along
-with the server and its clients. When the city also runs ACP agents, gc
-applies the same rule to the ACP side's scan. A session's start and the
-drain-ack escalation therefore never end a tmux session running inside a
-box, nor any process in its panes. gc recognizes tmux by its process name:
-`tmux`, or a title tmux takes from the name it runs under, so a renamed tmux
-binary is recognized too, except on macOS, where only `tmux` is. On Linux
-that title is `<name>: server` or `<name>: client` for a name of up to six
-characters, and `<name>:` for a longer one, because the kernel keeps 15
-bytes of a process name and tmux cuts the rest at its last space. Any other
-process whose name takes one of these forms is treated as tmux too, so the
-scan skips it and everything under it.
+How gc reads a tmux server in a box's picture depends on where the box's
+agent runs:
 
-The rule has costs:
+| The script declares | The agent runs | The scan |
+|---|---|---|
+| `proc.exec` without `carrier.ops` | In the box's tmux session `main`; with `proc.provision`, gc starts it there | Counts every pane of that tmux server as one of the box's processes, as for the tmux runtime |
+| `carrier.ops`, or no `proc.exec` | Outside tmux | Skips every process that a tmux server or client carrying a `GC_SESSION_ID` hosts |
+
+A script whose agent runs under a tmux server in its box declares
+`proc.exec`. Without it, gc reads the agent as running outside tmux, and
+the scan skips the agent. When the agent runs in session `main`, a session's
+start ends a stale incarnation's agent that its box's tmux server kept
+running, and the drain-ack escalation can end a wedged session's agent, as
+for the tmux runtime. A tmux session an agent starts on that server is the
+session's too, and is ended with its leftovers.
+
+When the agent runs outside tmux, a tmux server carrying a `GC_SESSION_ID`
+is one an agent or a user started inside a box (`tmux new -d`, or the
+user's default tmux server when none was running): tmux copies the
+environment of the process that starts its server, so the server and every
+process in its panes carry the session's `GC_SESSION_ID`. The scan skips
+the server, its clients and every process in its panes, and when the city
+also runs ACP agents, gc reports only what that scan reports for them too.
+A session's start and the drain-ack escalation therefore never end a tmux
+session running inside such a box, nor any process in its panes. A tmux
+server that carries no `GC_SESSION_ID`, such as a multiplexer a script
+starts for its boxes from the operation's own environment, changes nothing.
+gc cannot read the environment of another user's tmux server, so it skips
+a process under one and reports a scan error.
+
+gc recognizes tmux by its process name: `tmux`, or a title tmux takes from
+the name it runs under, so a renamed tmux binary is recognized too, except
+on macOS, where only `tmux` is. On Linux that title is `<name>: server` or
+`<name>: client` for a name of up to six characters, and `<name>:` for a
+name of 7 to 14 characters, because the kernel keeps 15 bytes of a process
+name and tmux cuts the rest at its last space; a longer name is not
+recognized. Any other process whose name takes one of these forms is
+treated as tmux too.
+
+Skipping these processes has costs:
 
 - A process that leaves such a pane and is adopted by init (or the user's
   subreaper) is no longer under tmux, and counts as a leftover like any
@@ -739,16 +760,11 @@ The rule has costs:
   agents' processes, since gc cannot tell a tmux server an ACP agent
   started from one inside a box. A tmux session an ACP agent starts
   (`tmux new -d`) is no longer ended when that session restarts, as it is
-  in a city without a host-sharing exec script, and any ACP agent process
-  under a tmux server is skipped.
+  in a city without such a script, and any ACP agent process under it is
+  skipped.
 - The drain-ack escalation ends a wedged session's processes only when
-  their parent is a tmux server, so it finds nothing to end for an exec
-  script's session: the slot stays occupied until the box exits.
-- A box whose own processes run under a tmux server gets no process-table
-  cleanup at all: gc neither ends its leftovers nor, when an inventory
-  fails, refuses a start because of them, so a failed inventory no longer
-  stops a duplicate start. Keep the processes that run a box out of any
-  tmux server's subtree.
+  their parent is a tmux server, so it finds nothing to end for such a
+  box's session: the slot stays occupied until the box exits.
 
 Start a process that serves several boxes, such as a multiplexer or a daemon
 the boxes run under, from the operation's own environment, never after
