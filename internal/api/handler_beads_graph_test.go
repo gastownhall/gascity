@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // beadGraphResponse mirrors the handler's response struct for test decoding.
@@ -830,7 +831,7 @@ func TestBeadGraphDeclaredMembershipCoversTheEphemeralTierOnSQLite(t *testing.T)
 	if err != nil {
 		t.Fatalf("Get(root): %v", err)
 	}
-	graph, _, membership, err := collectBeadGraph(store, rootBead)
+	graph, _, membership, err := collectBeadGraph(beadstest.Resident(store), rootBead)
 	if err != nil {
 		t.Fatalf("collectBeadGraph: %v", err)
 	}

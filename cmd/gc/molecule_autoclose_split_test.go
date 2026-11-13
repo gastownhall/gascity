@@ -81,7 +81,7 @@ func TestMoleculeAutocloseClosesAWorkResidentV1PouredRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		run := doMoleculeAutocloseWith(e.work, "", events.Discard, steps[len(steps)-1].ID, io.Discard, beads.GraphStore{Store: e.graphStore()})
+		run := doMoleculeAutocloseWith(e.work, "", events.Discard, steps[len(steps)-1].ID, io.Discard, testStores(e.work, e.graphStore()))
 		got, err := e.work.Get(root.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -110,7 +110,7 @@ func TestMoleculeAutocloseClosesABindingResidentGraphRoot(t *testing.T) {
 		if err := graph.Close(step.ID); err != nil {
 			t.Fatal(err)
 		}
-		doMoleculeAutocloseWith(graph, "", events.Discard, step.ID, io.Discard, beads.GraphStore{Store: graph})
+		doMoleculeAutocloseWith(graph, "", events.Discard, step.ID, io.Discard, testStores(graph, graph))
 		got, err := graph.Get(root.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -141,7 +141,7 @@ func TestWispAutocloseClosesAWorkResidentAttachedMolecule(t *testing.T) {
 		if err := e.work.Close(steps[1].ID); err != nil {
 			t.Fatal(err)
 		}
-		run := doWispAutocloseWith(e.work, src.ID, io.Discard, beads.GraphStore{Store: e.graphStore()})
+		run := doWispAutocloseWith(e.work, src.ID, io.Discard, testStores(e.work, e.graphStore()))
 		got, err := e.work.Get(root.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -172,7 +172,7 @@ func TestWispAutocloseClosesABindingResidentAttachedWisp(t *testing.T) {
 		if err := e.work.Close(src.ID); err != nil {
 			t.Fatal(err)
 		}
-		doWispAutocloseWith(e.work, src.ID, io.Discard, beads.GraphStore{Store: graph})
+		doWispAutocloseWith(e.work, src.ID, io.Discard, testStores(e.work, graph))
 		got, err := graph.Get(root.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -214,7 +214,7 @@ func TestAutocloseReachesARigOwnedBeadsGraphParents(t *testing.T) {
 			if err := e.rig.Close(src.ID); err != nil {
 				t.Fatal(err)
 			}
-			doWispAutocloseWith(e.rig, src.ID, io.Discard, beads.GraphStore{Store: e.graphStore()})
+			doWispAutocloseWith(e.rig, src.ID, io.Discard, testStores(e.rig, e.graphStore()))
 			got, err := pourStore.Get(root.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -240,7 +240,7 @@ func TestAutocloseReachesARigOwnedBeadsGraphParents(t *testing.T) {
 			if err := pourStore.Close(step.ID); err != nil {
 				t.Fatal(err)
 			}
-			doMoleculeAutocloseWith(pourStore, "", events.Discard, step.ID, io.Discard, beads.GraphStore{Store: e.graphStore()})
+			doMoleculeAutocloseWith(pourStore, "", events.Discard, step.ID, io.Discard, testStores(pourStore, e.graphStore()))
 			got, err := pourStore.Get(root.ID)
 			if err != nil {
 				t.Fatal(err)

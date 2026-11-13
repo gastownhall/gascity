@@ -302,7 +302,7 @@ func TestOrderHistoryStoreRefsAllResolveToTheSameStore(t *testing.T) {
 		if !ok {
 			t.Fatalf("workflowStoreByRef(%q) = false; an order endpoint published a ref no reader resolves", ref)
 		}
-		if info.store != binding {
+		if !beads.SameStore(info.store, binding) {
 			t.Fatalf("workflowStoreByRef(%q) resolved to a store other than the bead's own binding", ref)
 		}
 	}
