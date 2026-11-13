@@ -33,14 +33,29 @@ import (
 // Returns combined output and any error.
 func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
+	out, err := bdCommand(t, dir, args...).CombinedOutput()
+	return string(out), err
+}
+
+// runBDStdout runs a bd command like runBD but returns stdout alone, for a
+// caller that parses it the way gc does: gc reads stdout, never stderr.
+func runBDStdout(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	out, err := bdCommand(t, dir, args...).Output()
+	return string(out), err
+}
+
+// bdCommand builds a bd command that runs in dir with BEADS_DIR set to
+// dir/.beads.
+func bdCommand(t *testing.T, dir string, args ...string) *exec.Cmd {
+	t.Helper()
 	bdPath := helpers.RequireBD(t)
 	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
 	// BEADS_TEST_MODE keeps bd's detached metrics flusher from racing the
 	// TempDir teardown (ga-aik16g).
 	cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"), beadstest.EnvBeadsTestMode+"=1")
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return cmd
 }
 
 // requireBD runs a bd command and fails the test if it returns non-zero.
@@ -765,6 +780,57 @@ func TestBdBasicCRUD(t *testing.T) {
 			t.Fatalf("bd config get issue_prefix = %q, want ct", strings.TrimSpace(out))
 		}
 	})
+
+	// --- Ping ---
+	//
+	// gc shells out to bd ping in two places: the dashboard's store-health
+	// sampler (internal/api/dashboardbff, `ping --db <.beads> --json`) and the
+	// proxied-server migration check (cmd/gc/cmd_beads_city_migrate_proxied.go,
+	// `ping --json`). Both read stdout only, and the sampler's parsePingCheck
+	// requires it to be a JSON object that starts with '{' and carries "status"
+	// (ok, case-insensitive) or "error". --readonly is deliberately not part of
+	// this contract: the proxied-server provider rejects it.
+
+	t.Run("PingJSON", func(t *testing.T) {
+		assertBdPingOK(t, dir, "ping", "--json")
+	})
+
+	t.Run("PingDBFlagJSON", func(t *testing.T) {
+		assertBdPingOK(t, dir, "ping", "--db", filepath.Join(dir, ".beads"), "--json")
+	})
+
+	t.Run("PingWithoutStoreFails", func(t *testing.T) {
+		// gc treats a non-zero exit as "store down"; a ping that exited 0
+		// with no store behind it would read as healthy.
+		empty := beadstest.GuardedTempDir(t)
+		if out, err := runBDStdout(t, empty, "ping", "--json"); err == nil {
+			t.Fatalf("bd ping --json with no .beads store exited 0, want non-zero:\n%s", out)
+		}
+	})
+}
+
+// assertBdPingOK runs bd ping with args in dir and checks the shape gc's
+// store-health sampler parses: exit 0, stdout a JSON object that starts with
+// '{' and whose "status" is "ok" (case-insensitive).
+func assertBdPingOK(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	out, err := runBDStdout(t, dir, args...)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	trimmed := strings.TrimSpace(out)
+	if !strings.HasPrefix(trimmed, "{") {
+		t.Fatalf("bd %s stdout does not start with '{' (gc reads stdout only):\n%s", strings.Join(args, " "), out)
+	}
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		t.Fatalf("bd %s stdout not parseable as a JSON object: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	if !strings.EqualFold(payload.Status, "ok") {
+		t.Fatalf("bd %s status = %q, want ok:\n%s", strings.Join(args, " "), payload.Status, out)
+	}
 }
 
 // TestBdDependencies exercises all dependency operations against a single
