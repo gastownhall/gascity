@@ -158,14 +158,11 @@ var reviewedResidueCallers = map[string]int{
 	"handler_status.go statusListStoreWithTimeout ScopedStoreLike":        1,
 	"handler_status.go statusReadyStoreWithTimeout ScopedStoreLike":       1,
 	"huma_handlers_beads.go Server.humaHandleBeadList BeadStores":         1,
-	"huma_handlers_beads.go Server.humaHandleBeadReady BeadStores":        1,
-	"huma_handlers_beads.go Server.humaHandleBeadReady CityBeadStore":     1,
 	"huma_handlers_orders.go orderStoreInfosForState BeadStore":           1,
 	"huma_handlers_orders.go orderStoreInfosForState CityBeadStore":       1,
 	"session_resolution.go Server.retiredSessionWorkStores BeadStores":    1,
 	"session_resolution.go Server.retiredSessionWorkStores CityBeadStore": 1,
 	"store_health.go Server.computeStoreHealth CityBeadStore":             1,
-	"work_record_close_gate.go Server.workRecordLegacyRepoDir BeadStore":  1,
 }
 
 // TestStateResidueAccessorCallers holds the production uses of State's raw

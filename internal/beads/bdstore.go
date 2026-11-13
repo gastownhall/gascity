@@ -1105,6 +1105,16 @@ func IsPartialResult(err error) bool {
 	return errors.As(err, &partial)
 }
 
+// IsIssueTypeRefused reports whether err is a store refusing a bead type its
+// type registry does not define. bd validates a list's --type, like a
+// create's, against the store's built-in and custom types and answers
+// `invalid issue type "<type>"`; a store gc does not serve (an adopted rig
+// store, until gc's types are registered) keeps bd's own registry. The
+// refusal proves the store holds no row of that type, since bd creates none.
+func IsIssueTypeRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "invalid issue type")
+}
+
 // IsTimeoutError reports whether err was caused by a store/bd query exceeding
 // its time budget — a per-command bd exec timeout (bdExecTimeoutError, "timed
 // out after ...") or a context deadline. It deliberately excludes cancellation

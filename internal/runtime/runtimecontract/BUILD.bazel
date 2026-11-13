@@ -27,6 +27,7 @@ go_test(
     name = "runtimecontract_test",
     srcs = [
         "lockstep_test.go",
+        "nontmux_test.go",
         "runner_test.go",
         "screen_reference_test.go",
         "screen_script_test.go",

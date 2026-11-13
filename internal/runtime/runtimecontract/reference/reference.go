@@ -180,6 +180,34 @@ func HostFSBodies() map[string]string {
 	return b
 }
 
+// NonTmuxBodies returns Bodies for a reference that selects carrier.ops.
+// Generic exec remains available, but rejects tmux so accidental
+// default-carrier routing is observable. The screen models the started command
+// line, not its output.
+func NonTmuxBodies() map[string]string { return nonTmux(Bodies()) }
+
+// NonTmuxHostFSBodies returns HostFSBodies for a reference that selects
+// carrier.ops: with the host-filesystem tokens it declares every token the
+// catalog gates, so it exercises every requirement without tmux.
+func NonTmuxHostFSBodies() map[string]string { return nonTmux(HostFSBodies()) }
+
+// nonTmux turns the bodies b of a tmux-carrier reference into a carrier.ops
+// one (NonTmuxBodies).
+func nonTmux(b map[string]string) map[string]string {
+	b["protocol"] = strings.Replace(b["protocol"], `"idle-boundary"`, `"idle-boundary","carrier.ops"`, 1)
+	b["start"] = strings.Replace(b["start"], `mv "$box.tmp" "$box"`,
+		`printf %s "$cfg" | sed -n 's/.*"command":"\([^"]*\)".*/\1/p' > "$box.tmp/screen"; mv "$box.tmp" "$box"`, 1)
+	b["peek"] = goldenPeek + `; cat "$box/screen"`
+	b["exec"] = `cmd=$(cat); case "$cmd" in "'tmux'"|"'tmux' "*|tmux|tmux\ *) printf '%s\n' "$cmd" >> "$S/tmux-rejected"; exit 127 ;; esac; eval "$cmd"`
+	for _, op := range []string{"nudge", "send-keys", "interrupt", "clear-scrollback"} {
+		b[op] = `if [ -d "$box" ]; then printf '%s\n' "$*" >> "$box/driven"; fi; `
+		if op == "nudge" {
+			b[op] += `cat >/dev/null`
+		}
+	}
+	return b
+}
+
 // Script renders bodies (Bodies, or a variant) as an
 // executable RPP shell script keeping its state under stateDir. Unlisted
 // ops exit 2.

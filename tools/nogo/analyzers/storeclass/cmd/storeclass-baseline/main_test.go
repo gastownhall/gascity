@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -622,5 +623,72 @@ func TestStaleAllows(t *testing.T) {
 	got := staleAllows(allow, map[string]bool{"internal/beads": true, "cmd/gc": true, "internal/other": true})
 	if want := []string{"cmd/old", "internal/beads/gone"}; !slices.Equal(got, want) {
 		t.Fatalf("staleAllows = %q, want %q", got, want)
+	}
+}
+
+// TestStaleTaggedAllows: a tagged allowlist entry (Allow.Tag) is judged
+// against the files its tag's build compiles, in its own package: one only
+// that build compiles is kept; one only another build compiles, no build, or
+// the untagged build too, is reported. An untagged entry is the nogo pass's
+// to judge.
+func TestStaleTaggedAllows(t *testing.T) {
+	allow := []storeclass.Allow{
+		{Package: "internal/api", File: "dashport_support.go", Tag: "integration"},
+		{Package: "internal/api", File: "seed_*.go", Tag: "integration"},
+		{Package: "internal/api", File: "untagged.go", Tag: "integration"},
+		{Package: "internal/api", File: "gone.go", Tag: "integration"},
+		{Package: "internal/other", File: "dashport_support.go", Tag: "integration"},
+		{Package: "internal/api", File: "gone.go", Tag: "e2e"},
+		{Package: "internal/api", File: "untagged_gone.go"},
+	}
+	files := map[string]map[string]bool{
+		"":            {"internal/api/untagged.go": true, "internal/api/shared.go": true},
+		"integration": {"internal/api/dashport_support.go": true, "internal/api/seed_city.go": true, "internal/api/shared.go": true},
+	}
+	allow = append(allow, storeclass.Allow{Package: "internal/api", File: "shared.go", Tag: "integration"})
+	got := staleTaggedAllows(allow, files)
+	want := []string{"internal/api/gone.go (e2e)", "internal/api/gone.go (integration)", "internal/api/shared.go (integration; the untagged build compiles it too)", "internal/api/untagged.go (integration)", "internal/other/dashport_support.go (integration)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("staleTaggedAllows = %q, want %q", got, want)
+	}
+}
+
+// TestCheckedCensusJudgesTaggedAllowsPerBuild runs the census over a module
+// with an untagged file and one file per build tag, as the gascity tree's
+// integration seam is, and judges tagged allowlist entries against what each
+// build compiled, by module-relative path and per tag: an entry for its own
+// tag's file passes; one naming another tag's file, a file of another
+// package, or a file the untagged build compiles is refused.
+func TestCheckedCensusJudgesTaggedAllowsPerBuild(t *testing.T) {
+	repo := t.TempDir()
+	write := func(rel, text string) {
+		t.Helper()
+		p := filepath.Join(repo, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module "+strings.TrimSuffix(storeclass.Default.Module, "/")+"\n\ngo 1.22\n")
+	write("internal/api/api.go", "package api\n")
+	write("internal/api/seeded.go", "//go:build integration\n\npackage api\n")
+	write("internal/api/e2e_only.go", "//go:build e2e\n\npackage api\n")
+	write("internal/other/seeded.go", "//go:build e2e\n\npackage other\n")
+
+	ok := []storeclass.Allow{{Package: "internal/api", File: "seeded.go", Tag: "integration"}, {Package: "internal/api", File: "e2e_only.go", Tag: "e2e"}}
+	if _, err := checkedCensus(repo, ok, io.Discard); err != nil {
+		t.Fatalf("tagged entries for files their own builds compile: %v", err)
+	}
+	for name, bad := range map[string]storeclass.Allow{
+		"another tag's file":       {Package: "internal/api", File: "seeded.go", Tag: "e2e"},
+		"another package's file":   {Package: "internal/other", File: "seeded.go", Tag: "integration"},
+		"a file of no package":     {Package: "internal/gone", File: "seeded.go", Tag: "integration"},
+		"an untagged build's file": {Package: "internal/api", File: "api.go", Tag: "integration"},
+	} {
+		if _, err := checkedCensus(repo, append(slices.Clone(ok), bad), io.Discard); err == nil {
+			t.Errorf("%s (%s/%s, tag %s): the census accepted it", name, bad.Package, bad.File, bad.Tag)
+		}
 	}
 }

@@ -551,6 +551,20 @@ func TestStoreclassStaleAllowlistFile(t *testing.T) {
 	}
 }
 
+// TestStoreclassTaggedAllowlistFileNotJudgedByAPass: an entry for a file only
+// a tagged build compiles (Allow.Tag) names nothing in a pass that does not
+// compile it, and the pass cannot tell that build from a stale entry, so it
+// reports nothing; the generator judges it (staleTaggedAllows).
+func TestStoreclassTaggedAllowlistFileNotJudgedByAPass(t *testing.T) {
+	cfg := config()
+	cfg.Allow = append(cfg.Allow, storeclass.Allow{Package: "cmd/gc", File: "seeded.go", Tag: "integration", Reason: "a tagged seam"})
+	for _, d := range analyzertest.RunGraph(t, storeclass.New(cfg), graph(callers)) {
+		if strings.Contains(d.Message, "seeded.go") {
+			t.Fatalf("a tagged allowlist entry reported in a pass that does not compile its file: %q", d.Message)
+		}
+	}
+}
+
 // TestStoreclassOutsideModule: a package outside the module is not linted.
 func TestStoreclassOutsideModule(t *testing.T) {
 	cfg := config()

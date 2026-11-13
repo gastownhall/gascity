@@ -378,6 +378,10 @@ type fakeMutatorState struct {
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
 
+	// createRigErr, when set, is what CreateRig returns instead of adding the
+	// rig: the refusal the real provisioning would answer.
+	createRigErr error
+
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
 	// live-index replay path deterministically.
@@ -516,6 +520,9 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+	if f.createRigErr != nil {
+		return f.createRigErr
+	}
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }
