@@ -313,8 +313,9 @@ func probeInputUnavailable(ctx context.Context, r *runner, hs runtime.ProtocolIn
 
 // probeInputLostReplyUnknown checks that input written before its reply was
 // lost is never answered not_sent: a nudge is unconfirmed (at least once) or
-// delivered (at most once, writtenNudge), and the other ops exit 1 (outcome
-// unknown). The interrupt is sent last (drivingOps).
+// delivered and typed exactly once (at most once, writtenNudge), and the
+// other ops exit 1 (outcome unknown). The interrupt is sent last
+// (drivingOps).
 func probeInputLostReplyUnknown(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, true); !ok {
 		return StatusSkip, detail
@@ -324,8 +325,21 @@ func probeInputLostReplyUnknown(ctx context.Context, r *runner, hs runtime.Proto
 	if status != StatusPass {
 		return status, detail
 	}
-	if status, detail := writtenNudge(drive(ctx, r, inputFaultLoseReply, "nudge", name, inputText(name)), "with its reply lost"); status != StatusPass {
+	nudge := drive(ctx, r, inputFaultLoseReply, "nudge", name, inputText(name))
+	if status, detail := writtenNudge(nudge, "with its reply lost"); status != StatusPass {
 		return status, detail
+	}
+	if nudge.code == 0 {
+		// Delivered is final: gc never retries it, so the text must be
+		// typed exactly once. Read before the keys, as an interrupt may end
+		// the box.
+		n, status, detail := typedCount(ctx, r, name, inputText(name))
+		if status != StatusPass {
+			return status, detail
+		}
+		if n != 1 {
+			return StatusFail, fmt.Sprintf("a nudge with its reply lost answered delivered but was typed %d times, want once: gc does not retry a delivered nudge", n)
+		}
 	}
 	for _, op := range drivingOps[1:] {
 		if a := drive(ctx, r, inputFaultLoseReply, op, name, ""); a.code != 1 {
@@ -358,9 +372,10 @@ func probeInputExitZeroIsDelivered(ctx context.Context, r *runner, hs runtime.Pr
 
 // probeInputHeldSendTypedOnce checks that a nudge held unresolved is typed
 // once in all. A pack that answers the held nudge delivered (at most once)
-// is not redelivered by gc, so no second nudge is sent; otherwise a second
-// identical nudge while the first is held is unconfirmed, or delivered
-// without typing it again.
+// is not redelivered by gc, so no second nudge is sent; otherwise the held
+// nudge is unconfirmed (never not_sent: its text was written), and a second
+// identical nudge while it is held is unconfirmed, or delivered without
+// typing it again.
 func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, true); !ok {
 		return StatusSkip, detail
@@ -372,16 +387,14 @@ func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.Prot
 	}
 	text := inputText(name)
 	first := drive(ctx, r, inputFaultHoldSend, "nudge", name, text)
-	if first.code != 0 && first.code != runtime.ExitCodeInputOutcome {
-		return StatusFail, fmt.Sprintf("a held nudge answered %s, want exit 0 or 80", first)
+	if status, detail := writtenNudge(first, "while held"); status != StatusPass {
+		return status, detail
 	}
 	atMostOnce := first.code == 0
-	if atMostOnce {
-		if status, detail := writtenNudge(first, "while held"); status != StatusPass {
+	if !atMostOnce {
+		if status, detail := writtenNudge(drive(ctx, r, inputFaultHoldSend, "nudge", name, text), "again while the first is held"); status != StatusPass {
 			return status, detail
 		}
-	} else if status, detail := writtenNudge(drive(ctx, r, inputFaultHoldSend, "nudge", name, text), "again while the first is held"); status != StatusPass {
-		return status, detail
 	}
 	n, status, detail := typedCount(ctx, r, name, text)
 	if status != StatusPass {

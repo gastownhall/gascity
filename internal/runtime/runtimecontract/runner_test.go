@@ -337,6 +337,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputLostReplyUnknown, oedit("interrupt", `if [ "$F" = lose_reply ]; then echo "reply lost" >&2; exit 1; fi`, `if [ "$F" = lose_reply ]; then out not_sent; fi`), "an interrupt whose reply was lost answers not_sent"},
 		{ReqInputExitZeroIsDelivered, oedit("send-keys", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo '{"outcome":"not_sent"}'; exit 0; `), "send-keys prints not_sent on exit 0"},
 		{ReqInputHeldSendTypedOnce, oedit("nudge", `if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; `, ``), "types a redelivered nudge twice"},
+		{ReqInputHeldSendTypedOnce, oedit("nudge", `printf '%s\n' "$txt" >> "$box/held"; out unconfirmed;`, `printf '%s\n' "$txt" >> "$box/held"; out not_sent;`), "answers a held nudge, whose text was written, not_sent"},
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`), "exits 80 with empty stdout"},
 		{ReqInputDeadBoxGone, oedit("nudge", `if [ "$F" = dead ]; then out gone; fi; `, ``), "types a nudge into a dead box and answers delivered"},
 		{ReqInputDeadBoxGone, oedit("interrupt", `if [ "$F" = dead ]; then out gone; fi; `, `if [ "$F" = dead ]; then out not_sent; fi; `), "answers an interrupt to a dead box not_sent"},
@@ -351,11 +352,17 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 	// atMostOnceMutants edit the at-most-once golden, whose written nudge
 	// answers delivered_unobserved and keeps no send record.
+	typedLine := `printf '%s\n' "$txt" >> "$box/typed"; `
+	heldLine := `printf '%s\n' "$txt" >> "$box/held"; `
 	lostWritten := `if [ "$F" = lose_reply ]; then { echo '{"outcome":"delivered_unobserved","detail":"written"}'; exit 0; }; fi`
 	atMostOnceMutants := []mutant{
 		{ReqInputHeldSendTypedOnce, aedit("nudge", `printf '%s\n' "$txt" >> "$box/held"; `, `printf '%s\n' "$txt" >> "$box/held"; printf '%s\n' "$txt" >> "$box/held"; `), "an at-most-once pack types a held nudge twice"},
 		{ReqInputLostReplyUnknown, aedit("nudge", lostWritten, `if [ "$F" = lose_reply ]; then echo '{"outcome":"not_sent"}'; exit 0; fi`), "an at-most-once pack answers a written nudge exit 0 not_sent"},
 		{ReqInputLostReplyUnknown, aedit("nudge", lostWritten, `if [ "$F" = lose_reply ]; then out not_sent; fi`), "an at-most-once pack answers a written nudge exit 80 not_sent"},
+		{ReqInputLostReplyUnknown, aedit("nudge", lostWritten, `if [ "$F" = lose_reply ]; then echo written; exit 0; fi`), "an at-most-once pack answers a written nudge exit 0 with a non-outcome line"},
+		{ReqInputLostReplyUnknown, aedit("nudge", typedLine, lostWritten+`; `+typedLine), "an at-most-once pack answers a lost-reply nudge delivered without typing it"},
+		{ReqInputLostReplyUnknown, aedit("nudge", typedLine, typedLine+typedLine), "an at-most-once pack types a lost-reply nudge twice and answers delivered"},
+		{ReqInputHeldSendTypedOnce, aedit("nudge", heldLine, ``), "an at-most-once pack answers a held nudge delivered and never types it"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

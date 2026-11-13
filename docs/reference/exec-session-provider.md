@@ -498,7 +498,8 @@ The script's obligations:
   `unconfirmed` again, or delivered, without typing it.
 - A `nudge` whose text was written to the runtime but whose result the
   script cannot confirm (the reply was lost, or the runtime still holds the
-  text) is never `not_sent`. The script answers it under one of two
+  text) is never `not_sent`, whether gc gets its answer at once or while
+  the runtime still holds it. The script answers it under one of two
   delivery policies, and conformance accepts either:
   - **At least once:** exit 80 `unconfirmed`. The queue redelivers the
     nudge, so the script must keep a record of what it sent and
@@ -509,8 +510,11 @@ The script's obligations:
     `delivered`, or `delivered_unobserved`. The queue acks it and never
     redelivers it, so the script needs no send record, as with tmux's
     `send-keys`. The cost is that a nudge is lost if the runtime dies
-    while it still holds the text, and a `nudge` gc cancels at its
-    deadline still reads as `unconfirmed` and is redelivered.
+    while it still holds the text. A delivered answer is final, so the
+    text must be typed exactly once. And a `nudge` gc cancels at its
+    deadline still reads as `unconfirmed` and is redelivered, which types
+    it a second time since the script keeps no send record, so answer well
+    within gc's op timeout.
 - A timeout or lost connection after `send-keys`, `interrupt` or
   `clear-scrollback` reached the runtime is exit 1 (unknown), never
   `not_sent` or `unavailable`: a retried Esc or Ctrl-C can exit the program.
