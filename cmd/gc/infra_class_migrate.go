@@ -2586,12 +2586,12 @@ type infraMintedGate struct {
 }
 
 // infraCopyHoldsRefusal plans the city copy's boundary edges
-// (planInfraCityBoundary) and checks the holds bd keeps in a carried bead's
-// status (infraCopyParkedRefusal), and refuses with every hold either finds,
-// in one refusal. The migration and preflight both run it.
+// (planInfraCityBoundary) and refuses with every edge hold the plan cannot
+// carry, in one refusal. The holds bd keeps in a carried bead's status cross
+// as parked holds (infraCarryParkedHold). The migration and preflight both
+// run it.
 func infraCopyHoldsRefusal(cityPath string, cfg *config.City, plan *infraCopyPlan, all map[string]beads.Bead, fromBackup bool) error {
-	boundary := planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
-	return errors.Join(infraCopyParkedRefusal(*plan, time.Now()), boundary)
+	return planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
 }
 
 // infraUnheldExternalBlockers names each open moved row that waits, through
@@ -3035,7 +3035,8 @@ func infraMigrationRow(b beads.Bead) beads.Bead {
 	// to dependency-derived readiness" (beads.Bead.IsBlocked), and the dep rows
 	// that fallback reads ARE witnessed bidirectionally by verifyInfraCopy.
 	b.IsBlocked = nil
-	return b
+	// A hold bd keeps in the status crosses as a parked hold.
+	return infraCarryParkedHold(b)
 }
 
 // verifyInfraCopy is the equality stage: the destination must hold exactly the
@@ -3132,7 +3133,7 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		if !ok {
 			return nil, nil, fmt.Errorf("bead %s missing from binding", want.ID)
 		}
-		if diff := beadCopyDifference(withInfraCrossEdgeRecords(want, plan.boundary.Records[want.ID]), got); diff != "" {
+		if diff := beadCopyDifference(withInfraCrossEdgeRecords(infraCarryParkedHold(want), plan.boundary.Records[want.ID]), got); diff != "" {
 			return nil, nil, fmt.Errorf("bead %s differs after copy: %s", want.ID, diff)
 		}
 		if diff := infraCopyClassDifference(want, got); diff != "" {

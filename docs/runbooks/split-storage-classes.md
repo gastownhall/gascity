@@ -357,19 +357,25 @@ names, under `external refs`, every open bead the copy moves that waits on an
 `external:<id>` whose bead no store holds: it arrives blocked, so close or
 re-point the edge first if it should not wait. Every other edge between a
 moved bead and one that stays is dropped and recorded on the moved bead
-(`gc.migrated_cross_edges`). A hold
-the binding cannot express makes the migration refuse, before anything is
-copied, naming each bead and its fix; `gc storage preflight` reports the same
-refusal under `holds`:
+(`gc.migrated_cross_edges`).
 
-- **an undated deferral** (`bd` status `deferred` with no future
-  `defer_until`): give the bead a dated deferral, `bd defer <id> --until
-  <date>`, which the copy carries as `defer_until`, or undefer it;
-- **any other status `bd` parks a bead with** (`blocked`, `pinned`, `hooked`,
-  or a custom status): the binding stores only `open`, `in_progress` and
-  `closed`, and the bead would arrive `open` and ready. Keep it parked with a
-  dated deferral (`bd defer <id> --until <date>`), release it (`bd update <id>
-  --status open`), or close it;
+A bead `bd` parks by its status crosses parked. The binding stores only
+`open`, `in_progress` and `closed`, so an undated deferral (`bd` status
+`deferred` with no `defer_until`) and any other status `bd` parks a bead with
+(`blocked`, `pinned`, `hooked`, `review`, `testing`, or a custom status)
+cross as an open bead deferred until 9999-12-31, which keeps it out of every
+ready view, with the status and the `defer_until` it had recorded on it
+(`gc.migrated_parked_hold`). The rig import carries them the same way.
+`gc storage preflight` lists them under `parked holds`. Clearing the
+deferral in the split city releases the bead, and `gc storage migrate
+--to-work` puts the recorded status back on each bead still parked. A dated
+deferral crosses as its `defer_until`, which the binding honors; one already
+due wakes in the binding as `bd`'s own sweep would wake it.
+
+A hold the binding cannot express makes the migration refuse, before anything
+is copied, naming each bead and its fix; `gc storage preflight` reports the
+same refusal under `holds`:
+
 - **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
   cross-store gate encodes only `blocks`. Finish the work bead, close the
   infrastructure bead, or replace the edge with a `blocks` edge;
