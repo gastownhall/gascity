@@ -888,12 +888,14 @@ func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 // these would stop me" would appear to list checks that do not exist.
 func TestPreflightBlockIndentsAWrappedRefusalUnderTheDetailColumn(t *testing.T) {
 	var stdout bytes.Buffer
-	if code := preflightBlock(&stdout, "destination", errors.New("first line\nsecond line")); code == 0 {
-		t.Fatal("preflightBlock returned a clearing exit code")
+	var found preflightFindings
+	found.block(&stdout, "destination", errors.New("first line\nsecond line"))
+	if code := found.finish(&stdout); code == 0 {
+		t.Fatal("a report with a blocked check returned a clearing exit code")
 	}
 	lines := strings.Split(stdout.String(), "\n")
 	if len(lines) < 2 {
-		t.Fatalf("preflightBlock printed no continuation: %q", stdout.String())
+		t.Fatalf("the block printed no continuation: %q", stdout.String())
 	}
 	if !strings.HasPrefix(lines[0], "  "+preflightBlockTag) {
 		t.Fatalf("first line is not a check row: %q", lines[0])
