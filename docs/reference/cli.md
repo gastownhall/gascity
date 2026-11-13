@@ -5847,8 +5847,13 @@ refuses on any block, then: snapshots the work store and the rigs (pinned),
 runs legacy's demand-migration repairs when the split city runs the v2
 reconciler, appends the [storage] block to city.toml and writes
 .gc/min-gc-version, migrates the city's infrastructure classes into the
-binding (gc storage migrate --from-work), imports every rig (--from-rigs), and
-checks the result (gc storage status, the storage-split doctor check).
+binding (gc storage migrate --from-work), imports every rig (--from-rigs),
+repairs the blocking edges no split store resolves (gc doctor --check
+dangling-blocking-edges --fix), proves the city's ready set is the one it read
+before the copy, and checks the result (gc storage status, the storage-split
+doctor check). It closes naming both ways back: gc storage migrate --to-work,
+which keeps what was written since, and gc storage snapshot restore &lt;id&gt;
+--city, which puts the city back as the pinned snapshot found it.
 
 It records each step in .gc/storage-split.journal.json, with city.toml's
 bytes from before the split, which gc storage migrate --to-work restores.

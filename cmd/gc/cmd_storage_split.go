@@ -17,6 +17,8 @@ package main
 //	P4  [storage] appended to city.toml, and .gc/min-gc-version
 //	P6  the city migration (copy, clear, id floor, served note, relower)
 //	P8  every rig's import (S4b)
+//	    then the dangling-edge repair, and the ready set proven equal to the
+//	    one read before the copy (cmd_storage_split_readiness.go)
 //	P9  `gc storage status` and the storage-split doctor check, in process
 //	P10 the window closed; `gc start` and the rollback named
 //
@@ -111,6 +113,12 @@ type storageSplitJournal struct {
 	// replaced, null when there was none.
 	MinGCVersion       string  `json:"min_gc_version,omitempty"`
 	MinGCVersionBefore *string `json:"min_gc_version_before"`
+	// ReadyBefore is the city's ready set before the copy, which the split
+	// proves the split city's against (cmd_storage_split_readiness.go).
+	ReadyBefore *splitReadySnapshot `json:"ready_before,omitempty"`
+	// DanglingRepair says why the dangling-edge repair before the copy
+	// stopped, or "".
+	DanglingRepair string `json:"dangling_repair,omitempty"`
 	// AbandonedFrom is the phase an --abandon began from.
 	AbandonedFrom string `json:"abandoned_from,omitempty"`
 }
@@ -271,8 +279,13 @@ refuses on any block, then: snapshots the work store and the rigs (pinned),
 runs legacy's demand-migration repairs when the split city runs the v2
 reconciler, appends the [storage] block to city.toml and writes
 .gc/min-gc-version, migrates the city's infrastructure classes into the
-binding (gc storage migrate --from-work), imports every rig (--from-rigs), and
-checks the result (gc storage status, the storage-split doctor check).
+binding (gc storage migrate --from-work), imports every rig (--from-rigs),
+repairs the blocking edges no split store resolves (gc doctor --check
+dangling-blocking-edges --fix), proves the city's ready set is the one it read
+before the copy, and checks the result (gc storage status, the storage-split
+doctor check). It closes naming both ways back: gc storage migrate --to-work,
+which keeps what was written since, and gc storage snapshot restore <id>
+--city, which puts the city back as the pinned snapshot found it.
 
 It records each step in .gc/storage-split.journal.json, with city.toml's
 bytes from before the split, which gc storage migrate --to-work restores.
@@ -455,8 +468,7 @@ func doStorageSplit(ctx context.Context, request storageOperatorRequest, opts sp
 	mode, _ := doctorReconcilerMode(run.request.Cfg, cityPath, nil)
 	fmt.Fprintf(stdout, "Split. %s now serves %s from %s, and every rig with a store of its own is imported; the session reconciler is %s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
 		target.Binding, infraMigrationClassList(), target.Database, mode)
-	fmt.Fprintf(stdout, "To roll back, keeping every bead written since: `%s`. Snapshot %s of the stores before the split stays pinned in %s.\n", //nolint:errcheck // best-effort stdout
-		storageReverseInstruction(reverseToWork, nil), run.journal.Snapshot, run.journal.SnapshotTo)
+	splitClosingRollbacks(stdout, run.journal)
 	return 0
 }
 
@@ -514,6 +526,10 @@ func (r *splitRun) start(ctx context.Context, toml splitCityTOML, present bool, 
 	// the copy, for a split city that runs v2 (which does not apply them).
 	if mode, _ := doctorReconcilerMode(splitHypotheticalConfig(r.request.Cfg), cityPath, nil); mode == reconcilerV2 {
 		splitDemandRepairs(r.request.Cfg, cityPath, r.stderr)
+	}
+	// The ready set the split city is proven against.
+	if err := r.splitReadyBeforeCopy(); err != nil {
+		return err
 	}
 	if err := r.advance(splitPhaseReadied); err != nil {
 		return err
@@ -645,6 +661,12 @@ func (r *splitRun) finish(ctx context.Context, shared sharedStoreExclusion) int 
 		if err := r.advance(splitPhaseRigsImported); err != nil {
 			return fail(err)
 		}
+	}
+
+	// The dangling-edge repair, then the ready set, against the one before
+	// the copy.
+	if err := r.splitRepairAndProve(cfg); err != nil {
+		return fail(err)
 	}
 
 	// P9: the split as `gc storage status` and `gc doctor` judge it.
