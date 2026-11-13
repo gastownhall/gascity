@@ -1259,6 +1259,13 @@ func TestSupervisorUninstallWarnsAndSkipsDelegatedUnit(t *testing.T) {
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
 	argsFile := installFakeDelegatedSystemctl(t, 0, "")
 
+	// This test deliberately runs under a throwaway HOME, which the uninstall
+	// HOME guard refuses; pinning the real HOME instead would let the test
+	// remove the operator's real unit.
+	oldGuard := supervisorUninstallHomeGuard
+	supervisorUninstallHomeGuard = func() (string, bool) { return "", false }
+	t.Cleanup(func() { supervisorUninstallHomeGuard = oldGuard })
+
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
 	var calls []string

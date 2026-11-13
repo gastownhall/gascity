@@ -1638,6 +1638,13 @@ preserved sessions, then retry uninstall.`,
 	}
 }
 
+// supervisorUninstallHomeGuard is the HOME-override check doSupervisorUninstall
+// applies. It is a var so a test that must reach the uninstall under a
+// throwaway HOME can stand it down: service unit paths derive only from $HOME,
+// so pinning the real HOME there would let the test remove the operator's real
+// unit.
+var supervisorUninstallHomeGuard = platformSupervisorHomeOverrideError
+
 func doSupervisorUninstall(stdout, stderr io.Writer) int {
 	delegation, delegated, derr := supervisorSystemdDelegation()
 	if derr != nil {
@@ -1649,6 +1656,13 @@ func doSupervisorUninstall(stdout, stderr io.Writer) int {
 		// unit after delegating), so warn rather than refuse: only
 		// gc-owned service files are touched, never the delegated unit.
 		fmt.Fprintf(stderr, "gc supervisor uninstall: warning: %s is set (delegated to unit %q); uninstall removes only gc's own service files and does not touch the delegated unit\n", supervisorSystemdUnitEnv, delegation.Unit) //nolint:errcheck // best-effort stderr
+	}
+	// Under an overridden HOME the unit paths resolve somewhere the service
+	// manager never looks, so uninstall would find nothing, report success, and
+	// leave the real unit installed. Refuse, as install and start do.
+	if msg, blocked := supervisorUninstallHomeGuard(); blocked {
+		fmt.Fprintf(stderr, "gc supervisor uninstall: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	data, err := buildSupervisorServiceData()
 	if err != nil {
