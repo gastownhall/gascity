@@ -593,7 +593,7 @@ func TestReverseToRigsResumesAfterItsRenames(t *testing.T) {
 	if code, stdout, stderr := r.reverse(t, reverseOptions{Mode: reverseToRigs, Rigs: []string{"packs"}}); code != 0 {
 		t.Fatalf("the resume after the renames = %d: %s%s", code, stdout, stderr)
 	}
-	if rows := censusRigs(r.request.CityPath, r.cfg, r.target, false); rows[0].State != rigCensusAwaiting {
+	if rows := censusRigs(r.request.CityPath, r.cfg, r.target); rows[0].State != rigCensusAwaiting {
 		t.Fatalf("the rig after the resume = %+v, want awaiting import", rows[0])
 	}
 	r.assertRigAsSeeded(t)
