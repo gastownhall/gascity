@@ -52,15 +52,32 @@ func startOutcomeBox(t *testing.T, script, name string) {
 	}
 }
 
+// warmOutcomeProvider returns the seam-backed exec provider over script
+// after one nudge delivered to a running box of its own, so the provider
+// has done its handshake and, in the dedicated-op fallback, learned the pack
+// does not implement exec: it then reads the pack's outcomes, and a later
+// driving op is answered by the pack itself, never by gc's presence
+// pre-check (which a fresh fallback provider still runs).
+func warmOutcomeProvider(t *testing.T, script string) runtime.Provider {
+	t.Helper()
+	startOutcomeBox(t, script, "warm")
+	sp := sessionexec.NewSeamBacked(script)
+	if err := sp.Nudge("warm", runtime.TextContent("warm-up")); err != nil {
+		t.Fatalf("warm-up nudge to a running box = %v, want delivered", err)
+	}
+	return sp
+}
+
 // TestInputOutcomeMissingSessionContractOnExec runs RUNTIME-CONTRACT-019
 // over the production seam-backed exec provider for a pack declaring
-// input-outcome, whose outcomes are read: the pack's own gone answer, with no
-// presence pre-check, keeps a vanished session from reading as delivered.
+// input-outcome, whose outcomes are read (warmOutcomeProvider): the pack's
+// own gone answer, with no presence pre-check, keeps a vanished session from
+// reading as delivered.
 func TestInputOutcomeMissingSessionContractOnExec(t *testing.T) {
 	for name, carrierOps := range map[string]bool{"carrier.ops": true, "dedicated-op fallback": false} {
 		t.Run(name, func(t *testing.T) {
 			RunMissingSessionInputContract(t, func(t *testing.T) runtime.Provider {
-				return sessionexec.NewSeamBacked(outcomeGolden(t, carrierOps, false))
+				return warmOutcomeProvider(t, outcomeGolden(t, carrierOps, false))
 			})
 		})
 	}
@@ -99,14 +116,14 @@ func TestInputOutcomeRefusalNeverDeliveredOnExec(t *testing.T) {
 // name" over the seam-backed exec provider for a pack declaring
 // input-outcome: a box observe reports dead (the name held, nothing running)
 // answers every driving op gone, which gc reads as runtime.ErrSessionNotFound
-// with no presence pre-check, never as delivered.
+// with no presence pre-check (warmOutcomeProvider), never as delivered.
 func TestInputOutcomeDeadBoxIsGoneOnExec(t *testing.T) {
 	for name, carrierOps := range map[string]bool{"carrier.ops": true, "dedicated-op fallback": false} {
 		t.Run(name, func(t *testing.T) {
 			script := outcomeGolden(t, carrierOps, false)
 			startOutcomeBox(t, script, "corpse")
+			sp := warmOutcomeProvider(t, script)
 			t.Setenv("GC_RPP_FAULT", "dead")
-			sp := sessionexec.NewSeamBacked(script)
 			for op, call := range map[string]func() error{
 				"Nudge":           func() error { return sp.Nudge("corpse", runtime.TextContent("to a dead box")) },
 				"SendKeys":        func() error { return sp.SendKeys("corpse", "Enter") },
