@@ -495,7 +495,22 @@ The script's obligations:
 - `unconfirmed` means the submit may or may not have taken. The queue
   redelivers it, so the script must not type a redelivered text twice: a
   re-send of the same text while an earlier one is unresolved answers
-  `unconfirmed` again without typing it.
+  `unconfirmed` again, or delivered, without typing it.
+- A `nudge` whose text was written to the runtime but whose result the
+  script cannot confirm (the reply was lost, or the runtime still holds the
+  text) is never `not_sent`. The script answers it under one of two
+  delivery policies, and conformance accepts either:
+  - **At least once:** exit 80 `unconfirmed`. The queue redelivers the
+    nudge, so the script must keep a record of what it sent and
+    de-duplicate the redelivery (above). Nothing is lost if the runtime
+    dies holding the text, but a script that does not de-duplicate types
+    it twice.
+  - **At most once:** a written send is delivered: exit 0, empty or
+    `delivered`, or `delivered_unobserved`. The queue acks it and never
+    redelivers it, so the script needs no send record, as with tmux's
+    `send-keys`. The cost is that a nudge is lost if the runtime dies
+    while it still holds the text, and a `nudge` gc cancels at its
+    deadline still reads as `unconfirmed` and is redelivered.
 - A timeout or lost connection after `send-keys`, `interrupt` or
   `clear-scrollback` reached the runtime is exit 1 (unknown), never
   `not_sent` or `unavailable`: a retried Esc or Ctrl-C can exit the program.
@@ -521,9 +536,13 @@ before any operation runs.
 injects `GC_RPP_FAULT=blocked` (the box's agent waits on a pending
 interaction: `nudge` answers `pending_interaction` and types nothing),
 `lose_reply` (the input is typed, then the reply is lost: `nudge` answers
-`unconfirmed`, the other three exit 1) and `hold_send` (a `nudge` stays
-unresolved until the fault is gone: a second identical `nudge` answers
-`unconfirmed`, and the text is typed once) and `dead` (the box holds the
+`unconfirmed` or, at most once, delivered, never `not_sent`; the other
+three exit 1) and `hold_send` (a `nudge` stays unresolved until the fault
+is gone, and the text is typed once: when the held `nudge` answered
+`unconfirmed`, a second identical `nudge` answers `unconfirmed` or
+delivered without typing it again; when it answered delivered, at most
+once, no second `nudge` is sent, because gc does not redeliver it) and
+`dead` (the box holds the
 name but nothing runs in it: `observe`, when declared, reports it `dead`,
 and every driving operation answers `gone` and types nothing). It reads what was typed from
 `peek`, as a terminal shows typed input. When it drives one running box in

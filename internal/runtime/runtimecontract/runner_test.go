@@ -117,10 +117,29 @@ func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 // pass every input requirement, so no probe may drive the box after
 // interrupting it.
 func TestInterruptEndingTheBoxPassesTheInputGroup(t *testing.T) {
-	for name, bodies := range map[string]map[string]string{
+	assertInputGroupPasses(t, map[string]map[string]string{
 		"tmux": reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
 		"ops":  reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
-	} {
+	})
+}
+
+// TestAtMostOnceNudgePassesTheInputGroup runs the input group against a
+// reference whose written nudge is delivered (delivered_unobserved, no send
+// record): a written nudge may be delivered at most once, as tmux's
+// send-keys is, or at least once with de-duplication, so a correct pack of
+// either policy must pass every input requirement.
+func TestAtMostOnceNudgePassesTheInputGroup(t *testing.T) {
+	assertInputGroupPasses(t, map[string]map[string]string{
+		"tmux": reference.AtMostOnceNudgeBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
+		"ops":  reference.AtMostOnceNudgeBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
+	})
+}
+
+// assertInputGroupPasses runs the catalog against each named reference and
+// requires every input requirement, RPP-INPUT-001..012, to pass.
+func assertInputGroupPasses(t *testing.T, variants map[string]map[string]string) {
+	t.Helper()
+	for name, bodies := range variants {
 		t.Run(name, func(t *testing.T) {
 			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
 			seen := 0
@@ -172,6 +191,15 @@ func TestEveryRequirementIsGated(t *testing.T) {
 			t.Fatalf("mutant of %s: %q is not in the input-outcome golden body", op, from)
 		}
 		return map[string]string{op: strings.Replace(o[op], from, to, 1)}
+	}
+	// aedit is edit over the at-most-once input-outcome golden, the base of
+	// the at-most-once nudge mutants.
+	a := reference.AtMostOnceNudgeBodies(reference.InputOutcomeBodies(reference.Bodies()))
+	aedit := func(op, from, to string) map[string]string {
+		if !strings.Contains(a[op], from) {
+			t.Fatalf("mutant of %s: %q is not in the at-most-once golden body", op, from)
+		}
+		return map[string]string{op: strings.Replace(a[op], from, to, 1)}
 	}
 	type mutant struct {
 		target       Code
@@ -321,6 +349,14 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; };`), "exits 80 with a gone line padded past gc's 64 KiB stdout cap"},
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { printf '{"outcome":"gone","detail":"%s"}\n' "$(head -c 1025 /dev/zero | tr '\0' x)"; exit 80; };`), "exits 80 with a detail past 1 KiB"},
 	}
+	// atMostOnceMutants edit the at-most-once golden, whose written nudge
+	// answers delivered_unobserved and keeps no send record.
+	lostWritten := `if [ "$F" = lose_reply ]; then { echo '{"outcome":"delivered_unobserved","detail":"written"}'; exit 0; }; fi`
+	atMostOnceMutants := []mutant{
+		{ReqInputHeldSendTypedOnce, aedit("nudge", `printf '%s\n' "$txt" >> "$box/held"; `, `printf '%s\n' "$txt" >> "$box/held"; printf '%s\n' "$txt" >> "$box/held"; `), "an at-most-once pack types a held nudge twice"},
+		{ReqInputLostReplyUnknown, aedit("nudge", lostWritten, `if [ "$F" = lose_reply ]; then echo '{"outcome":"not_sent"}'; exit 0; fi`), "an at-most-once pack answers a written nudge exit 0 not_sent"},
+		{ReqInputLostReplyUnknown, aedit("nudge", lostWritten, `if [ "$F" = lose_reply ]; then out not_sent; fi`), "an at-most-once pack answers a written nudge exit 80 not_sent"},
+	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
 	type gated struct {
@@ -337,6 +373,11 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 	for _, m := range inputMutants {
 		all = append(all, gated{m, inputBase})
+	}
+	for _, m := range atMostOnceMutants {
+		all = append(all, gated{m, func() map[string]string {
+			return reference.AtMostOnceNudgeBodies(reference.InputOutcomeBodies(reference.Bodies()))
+		}})
 	}
 	covered := map[Code]bool{}
 	for _, m := range all {

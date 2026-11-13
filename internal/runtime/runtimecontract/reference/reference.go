@@ -256,6 +256,31 @@ func InputOutcomeBodies(b map[string]string) map[string]string {
 	return b
 }
 
+// The at-most-once nudge (AtMostOnceNudgeBodies): a nudge whose text was
+// written to the backend answers delivered, its turn start unobserved
+// (goldenNudgeWritten), even when its reply is lost (lose_reply) or the
+// backend still holds it (hold_send), and it keeps no record of sent text.
+const (
+	goldenNudgeWritten = `{ echo '{"outcome":"delivered_unobserved","detail":"written"}'; exit 0; }`
+
+	goldenInputNudgeAtMostOnce = `txt=$(cat); ` + goldenInputEntry +
+		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
+		`if [ "$F" = hold_send ]; then printf '%s\n' "$txt" >> "$box/held"; ` + goldenNudgeWritten + `; fi; ` +
+		`printf '%s\n' "$txt" >> "$box/typed"; ` +
+		`if [ "$F" = lose_reply ]; then ` + goldenNudgeWritten + `; fi`
+)
+
+// AtMostOnceNudgeBodies returns b, input-outcome bodies (InputOutcomeBodies),
+// for a reference whose written nudge counts as delivered: at most once, with
+// no send record to de-duplicate a retry, since gc does not retry a delivered
+// nudge. It is the shape of a pack that treats a written send as delivered,
+// as tmux's send-keys does; a nudge the backend loses after the write is
+// lost.
+func AtMostOnceNudgeBodies(b map[string]string) map[string]string {
+	b["nudge"] = goldenInputNudgeAtMostOnce
+	return b
+}
+
 // goldenInterruptEnds is the interrupt body InterruptEndsBoxBodies adds
 // after the interrupt is typed: the box's command ends on it, and the box
 // with it.
