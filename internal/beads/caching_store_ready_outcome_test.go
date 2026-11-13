@@ -9,10 +9,10 @@ import (
 
 // TestCachingStoreReadyDefersToAPassedStep checks the cached ready verdict
 // against both shapes of a closed blocker that recorded
-// gc.work_outcome=blocked: alone it withholds its dependent, but when the
-// blocker's control-plane step reached a terminal verdict (gc.outcome pass,
-// fail, skipped, or canceled) the dependent is ready, matching the backing
-// stores.
+// gc.work_outcome=blocked: alone it withholds its dependent, but when dispatch
+// reads the blocker's close as a verdict (a formula step with a terminal
+// gc.outcome, an attempt root, or an abort_scope member) the dependent is
+// ready, matching the backing stores.
 func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -42,6 +42,26 @@ func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 		{
 			"canceled step releases the dependent despite a blocked work outcome",
 			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"step with a padded failed outcome releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: " fail\t", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"retry attempt without an outcome releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"compiled attempt naming only its control releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.ControlForMetadataKey: "review", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"abort_scope member without an outcome releases the dependent despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: beadmeta.OnFailAbortScope, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			true,
 		},
 		{

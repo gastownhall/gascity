@@ -28,6 +28,7 @@ go_library(
         "pinned_module.go",
         "ready_parity_conformance.go",
         "recording_store.go",
+        "step_close_readiness_conformance.go",
         "tempdir_guard.go",
         "wire_model.go",
     ],

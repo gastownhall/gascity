@@ -63,6 +63,7 @@ func TestPinnedVocabularyValues(t *testing.T) {
 		ScopeRoleMember:                 "member",
 		ScopeRoleControl:                "control",
 		ScopeRoleTeardown:               "teardown",
+		OnFailAbortScope:                "abort_scope",
 		DrainStatePending:               "pending",
 		DrainStateExpanding:             "expanding",
 		DrainStateExpanded:              "expanded",

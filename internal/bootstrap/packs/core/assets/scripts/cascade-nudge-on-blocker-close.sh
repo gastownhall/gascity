@@ -136,10 +136,14 @@ MEMBERS
 # readiness rule (beads.DependencySatisfied over beads.ReadinessWorkOutcome):
 # while it is not closed, and, once closed, while it closed blocked
 # (gc.work_outcome=blocked) unless it is a formula step (gc.step_ref set)
-# whose gc.outcome is a terminal verdict (pass, fail, skipped, canceled), which
-# the controls depending on it consume. A pinned blocker holds whichever read serves it:
-# the bd passthrough reports it "pinned", and the in-process class-binding
-# read folds it to "open". bd's own readiness counts it satisfied, so a
+# whose close dispatch reads as a verdict: one with a terminal gc.outcome
+# (pass, fail, skipped, canceled), the attempt root of a retry or ralph
+# control (gc.logical_bead_id plus a retry-run/retry-eval kind, gc.attempt or
+# gc.retry_attempt, or a gc.control_for on a bead that is not itself a
+# control), or a gc.on_fail=abort_scope member. gc.outcome, gc.control_for and
+# gc.on_fail are trimmed as Go's strings.TrimSpace trims them. A pinned blocker
+# holds whichever read serves it: the bd passthrough reports it "pinned", and
+# the in-process class-binding read folds it to "open". bd's own readiness counts it satisfied, so a
 # dependent only a pinned blocker holds goes unnudged; a seat parked on that
 # dependent still wakes, because the park reads the store's ready query (gc
 # itself never pins a bead, and a pinned bead never closes). It prints "self"
@@ -158,12 +162,23 @@ still_held() {
     _down="$(gc bd dep list "$1" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=down --type=blocks --json 2>/dev/null)" || return 0
     printf '%s' "$_down" | jq -r --arg b "$2" '
-        def closed_blocked:
+        def dispatch_reads_step_close:
             (.metadata // {}) as $m
-            | .status == "closed"
-              and $m["gc.work_outcome"] == "blocked"
-              and (($m["gc.step_ref"] // "") == ""
-                   or ($m["gc.outcome"] | IN("pass", "fail", "skipped", "canceled") | not));
+            | def present($key): ($m[$key] // "") != "";
+              def trimmed($key): ($m[$key] // "") | tostring | sub("^\\s+"; "") | sub("\\s+$"; "");
+              def kind_in(kinds): ($m["gc.kind"] // "") as $kind | any(kinds; . == $kind);
+              present("gc.step_ref")
+              and (any("pass", "fail", "skipped", "canceled"; . == trimmed("gc.outcome"))
+                   or (present("gc.logical_bead_id")
+                       and (kind_in("retry-run", "retry-eval")
+                            or present("gc.attempt") or present("gc.retry_attempt")))
+                   or (trimmed("gc.control_for") != ""
+                       and (kind_in("retry", "ralph", "check", "retry-eval", "fanout", "drain", "scope-check", "workflow-finalize") | not))
+                   or trimmed("gc.on_fail") == "abort_scope");
+        def closed_blocked:
+            .status == "closed"
+            and (.metadata // {})["gc.work_outcome"] == "blocked"
+            and (dispatch_reads_step_close | not);
         def holds:
             if .external == true or (.status // "") == "" then false
             else .status != "closed" or closed_blocked end;

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
@@ -1771,12 +1772,12 @@ func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string,
 
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
-// closed, or closed with gc.work_outcome=blocked unless it is a formula step
-// (gc.step_ref) that reached a terminal verdict (gc.outcome in
-// terminalStepOutcomes; see ReadinessWorkOutcome). A target missing from this
-// store (deleted, or another store's id) has no status and so blocks. Ready
-// negates it and enrichReadyProjectionForCache selects it, so the store and a
-// cache over it cannot disagree about which rows are blocked.
+// closed, or closed with gc.work_outcome=blocked unless dispatch reads its
+// close as a verdict (sqliteDispatchReadsStepClose; see ReadinessWorkOutcome).
+// A target missing from this store (deleted, or another store's id) has no
+// status and so blocks. Ready negates it and enrichReadyProjectionForCache
+// selects it, so the store and a cache over it cannot disagree about which
+// rows are blocked.
 func sqliteReadyBlockerExists(issueCol string) string {
 	return fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM deps d
@@ -1786,39 +1787,76 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
 			    OR (
-			         EXISTS (
-			           SELECT 1 FROM metadata m
-			           WHERE m.bead_id = blocker.id
-			             AND m.meta_key = '%s'
-			             AND m.meta_value = '%s'
-			         )
-			         AND NOT (
-			           EXISTS (
-			             SELECT 1 FROM metadata o
-			             WHERE o.bead_id = blocker.id
-			               AND o.meta_key = '%s'
-			               AND o.meta_value IN (%s)
-			           )
-			           AND EXISTS (
-			             SELECT 1 FROM metadata r
-			             WHERE r.bead_id = blocker.id
-			               AND r.meta_key = '%s'
-			               AND r.meta_value <> ''
-			           )
-			         )
+			         %s
+			         AND NOT %s
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, sqliteQuotedList(terminalStepOutcomes), beadmeta.StepRefMetadataKey)
+		  )`, issueCol,
+		sqliteBlockerMetadataExists(beadmeta.WorkOutcomeMetadataKey, "v.meta_value = "+sqliteQuoted(beadmeta.WorkOutcomeBlocked)),
+		sqliteDispatchReadsStepClose)
+}
+
+// sqliteDispatchReadsStepClose is dispatchReadsStepClose over the blocker row's
+// metadata: a formula step (gc.step_ref) with a terminal gc.outcome, an attempt
+// root (beadmeta.IsAttemptRoot), or a gc.on_fail=abort_scope member, with
+// gc.outcome, gc.control_for and gc.on_fail trimmed as strings.TrimSpace trims.
+var sqliteDispatchReadsStepClose = func() string {
+	const present = "v.meta_value <> ''"
+	trimmed := "TRIM(v.meta_value, " + sqliteTrimSpaceChars + ")"
+	has := sqliteBlockerMetadataExists
+	terminal := has(beadmeta.OutcomeMetadataKey, trimmed+" IN ("+sqliteQuotedList(terminalStepOutcomes)+")")
+	retrySubject := "(" + has(beadmeta.LogicalBeadIDMetadataKey, present) + " AND (" +
+		has(beadmeta.KindMetadataKey, "v.meta_value IN ("+sqliteQuotedList([]string{beadmeta.KindRetryRun, beadmeta.KindRetryEval})+")") +
+		" OR " + has(beadmeta.AttemptMetadataKey, present) +
+		" OR " + has(beadmeta.RetryAttemptMetadataKey, present) + "))"
+	controlledAttempt := "(" + has(beadmeta.ControlForMetadataKey, trimmed+" <> ''") +
+		" AND NOT " + has(beadmeta.KindMetadataKey, "v.meta_value IN ("+sqliteQuotedList(beadmeta.ControlKinds)+")") + ")"
+	abortScope := has(beadmeta.OnFailMetadataKey, trimmed+" = "+sqliteQuoted(beadmeta.OnFailAbortScope))
+	return "(" + has(beadmeta.StepRefMetadataKey, present) + " AND (" + terminal +
+		" OR " + retrySubject + " OR " + controlledAttempt + " OR " + abortScope + "))"
+}()
+
+// sqliteTrimSpaceChars is a SQL expression naming every character
+// strings.TrimSpace trims, the Unicode White_Space set, so TRIM(x,
+// sqliteTrimSpaceChars) trims a value exactly as Go does.
+var sqliteTrimSpaceChars = sqliteCharSet(unicode.White_Space)
+
+// sqliteCharSet renders every rune of table as one SQLite char() call.
+func sqliteCharSet(table *unicode.RangeTable) string {
+	var codes []string
+	for _, r := range table.R16 {
+		for c := int(r.Lo); c <= int(r.Hi); c += int(r.Stride) {
+			codes = append(codes, strconv.Itoa(c))
+		}
+	}
+	for _, r := range table.R32 {
+		for c := int(r.Lo); c <= int(r.Hi); c += int(r.Stride) {
+			codes = append(codes, strconv.Itoa(c))
+		}
+	}
+	return "char(" + strings.Join(codes, ", ") + ")"
+}
+
+// sqliteBlockerMetadataExists renders an EXISTS over the blocker row's metadata
+// entry for key whose value satisfies cond, a predicate over v.meta_value.
+func sqliteBlockerMetadataExists(key, cond string) string {
+	return "EXISTS (SELECT 1 FROM metadata v WHERE v.bead_id = blocker.id AND v.meta_key = " + sqliteQuoted(key) + " AND " + cond + ")"
 }
 
 // sqliteQuotedList renders constant values as a comma-separated list of SQL
-// string literals for an IN clause, doubling any embedded quote.
+// string literals for an IN clause.
 func sqliteQuotedList(values []string) string {
 	quoted := make([]string, len(values))
 	for i, v := range values {
-		quoted[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+		quoted[i] = sqliteQuoted(v)
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// sqliteQuoted renders a constant value as a SQL string literal, doubling any
+// embedded quote.
+func sqliteQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

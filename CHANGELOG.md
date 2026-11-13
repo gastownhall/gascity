@@ -1009,6 +1009,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them (see Fixed). Correct or delete the entry, and check that the overrides
   below it, such as an `enabled = false`, still say what you want.
 
+- **A formula step closed `gc.outcome=fail` with `gc.work_outcome=blocked`
+  no longer stops the graph (#8153).** This replaces the 1.5.1 note that a
+  formula step meaning "blocked, stop the graph" must close with
+  `gc.outcome=fail`: such a close held back every bead that depends on the
+  step, the retry, scope-check and finalize controls among them, so the
+  workflow root never finished. `gc.work_outcome=blocked` no longer holds
+  back the dependents of a formula step (a bead carrying `gc.step_ref`)
+  whose close dispatch reads as a verdict: a step closed with `gc.outcome`
+  `pass`, `fail`, `skipped` or `canceled` (surrounding whitespace ignored),
+  and, whatever `gc.outcome` it closed with, an attempt that a retry or
+  check control owns or a `gc.on_fail = "abort_scope"` scope member, whose
+  control judges the close. A `blocks` edge is satisfied by its
+  predecessor's close whatever `gc.outcome` that carries, so the steps that
+  need such a step now run unless a scope stops them. To keep work from
+  running after a step that could not proceed, make that work members of a
+  scope with the step and give the step `gc.on_fail = "abort_scope"`: a
+  failed close, or one without a recognized `gc.outcome`, then aborts the
+  scope and skips its remaining members. A formula step closed blocked
+  without a recognized `gc.outcome` that is neither such an attempt nor an
+  `abort_scope` member still holds its dependents, and so does a plain work
+  bead closed `gc.work_outcome=blocked` whatever its `gc.outcome`. Workflow
+  roots stranded behind such a close resume after the upgrade: their
+  controls run, and a retry whose attempt closed without a terminal
+  `gc.outcome` starts another attempt, so review any such root whose work
+  should not continue before you upgrade.
+
 ### Added
 
 - **Events: `session.created` and `session.closed`.** The city event
