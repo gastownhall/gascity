@@ -930,6 +930,164 @@ func TestMainOnly(t *testing.T) {}
 '
 }
 
+# Round-2 review of ga-nlvpzq (ga-99czjsz4) blocking B. The bounded rebase runs
+# git with merge.conflictStyle=diff3, which keeps a line BOTH sides added inside
+# the conflict hunk instead of moving it out (the default style does), so the
+# keep-both union writes every shared line twice. Each of I1-I3 is base plus one
+# feature edit plus one main edit that share their leading line; the union would
+# be pushed with that line repeated, so the classifier must refuse it (rc=12,
+# HEAD and remote untouched), never certify it.
+#
+# I1: both sides add the same import. The union parses (gofmt accepts a repeated
+# import) and the column-1 func/type/var/const scan cannot see it, so only the
+# shared-line refusal stops it; go vet says "os redeclared in this block".
+test_bounded_rebase_shared_import_both_sides_refused() {
+    bounded_go_scenario "bounded/shared-import-both-sides-refused" refused \
+        pkg/widget_test.go \
+'package widget
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestExisting(t *testing.T) { fmt.Println() }
+' \
+'package widget
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestExisting(t *testing.T) { fmt.Println() }
+' \
+'package widget
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestExisting(t *testing.T) { fmt.Println() }
+'
+}
+
+# I2: both sides append the same `got := compute()` to one test body, then log
+# it differently. The union would declare `got` twice (compile error: no new
+# variables on left side of :=).
+test_bounded_rebase_shared_local_declaration_both_sides_refused() {
+    bounded_go_scenario "bounded/shared-local-declaration-both-sides-refused" refused \
+        pkg/widget_test.go \
+'package widget
+
+import "testing"
+
+func compute() int { return 1 }
+
+func TestCompute(t *testing.T) {
+	t.Log("start")
+}
+' \
+'package widget
+
+import "testing"
+
+func compute() int { return 1 }
+
+func TestCompute(t *testing.T) {
+	t.Log("start")
+	got := compute()
+	t.Log(got)
+}
+' \
+'package widget
+
+import "testing"
+
+func compute() int { return 1 }
+
+func TestCompute(t *testing.T) {
+	t.Log("start")
+	got := compute()
+	t.Log(got, "again")
+}
+'
+}
+
+# I3: a doc file (also allowlisted). Both sides add a note under a new
+# `## Unreleased` heading; the union would hold two such headings.
+test_bounded_rebase_shared_heading_both_sides_refused() {
+    bounded_go_scenario "bounded/shared-heading-both-sides-refused" refused \
+        CHANGELOG.md \
+'# Changelog
+
+## 1.0.0
+
+- first release
+' \
+'# Changelog
+
+## Unreleased
+
+- feature note
+
+## 1.0.0
+
+- first release
+' \
+'# Changelog
+
+## Unreleased
+
+- main note
+
+## 1.0.0
+
+- first release
+'
+}
+
+# Over-refusal guard for the shared-line rule: two added test functions that
+# share only blank lines, a closing brace and a MIDDLE line (`t.Parallel()`)
+# are still a legitimate additive union (rc=0, valid Go, pushed). The rule must
+# not turn every pair of similar tests into a refusal.
+test_bounded_rebase_shared_middle_line_still_resolves() {
+    bounded_go_scenario "bounded/shared-middle-line-still-resolves" resolved \
+        pkg/widget_test.go \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestFeatureOnly(t *testing.T) {
+	t.Parallel()
+	t.Log("feature")
+}
+' \
+'package widget
+
+import "testing"
+
+func TestExisting(t *testing.T) {}
+
+func TestMainOnly(t *testing.T) {
+	t.Parallel()
+	t.Log("main")
+}
+'
+}
+
 # write_go_conflict <path> <ours_block> <theirs_block>: a Go file whose one
 # conflict hunk has no diff3 base section (two pure insertions).
 write_go_conflict() {
@@ -1070,6 +1228,30 @@ test_resolve_go_unparseable_prints_gofmt_diagnostic() {
     else
         record_fail "resolve/go-unparseable-prints-gofmt-diagnostic" \
             "expected rc=1 and stderr containing 'not valid Go' and the path; rc=$rc stderr=[$errout]"
+    fi
+    rm -rf "$d"
+}
+
+# The gofmt diagnostic is echoed from file content, so it is untrusted: control
+# bytes (an ESC from a terminal escape sequence in a string literal) are
+# stripped and the line is capped, so a hostile or merely huge literal cannot
+# repaint the deployer's terminal or flood its log (round-2 review, minor).
+test_resolve_go_diagnostic_is_sanitised_and_capped() {
+    local d; d="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-sanitise.XXXXXX")"
+    local esc long
+    esc="$(printf '\033')"
+    long="$(printf '%0400d' 0)"
+    write_go_conflict "$d/f.go" "\"a${esc}[31mb${long}\"" "\"c${esc}[0md${long}\""
+    local errout rc
+    errout="$(resolve_conflict_markers_in_file "$d/f.go" 1 2>&1 >/dev/null)"
+    resolve_conflict_markers_in_file "$d/f.go" 1 >/dev/null 2>&1; rc=$?
+    local diag="${errout#*not valid Go: }"
+    if [[ $rc -eq 1 && "$errout" == *"not valid Go"* \
+          && "$errout" != *"$esc"* && ${#diag} -le 300 ]]; then
+        record_pass "resolve/go-diagnostic-sanitised-and-capped (rc=1, no control bytes, diagnostic <= 300 chars)"
+    else
+        record_fail "resolve/go-diagnostic-sanitised-and-capped" \
+            "expected rc=1, no ESC byte and a diagnostic of at most 300 chars; rc=$rc len=${#diag} stderr=[$(printf '%s' "$errout" | cat -v | cut -c1-400)]"
     fi
     rm -rf "$d"
 }
@@ -1242,9 +1424,14 @@ run_all() {
     test_bounded_rebase_same_line_rewritten_both_sides_refused
     test_bounded_rebase_same_named_top_level_func_both_sides_refused
     test_bounded_rebase_distinct_additive_go_tests_still_resolve
+    test_bounded_rebase_shared_import_both_sides_refused
+    test_bounded_rebase_shared_local_declaration_both_sides_refused
+    test_bounded_rebase_shared_heading_both_sides_refused
+    test_bounded_rebase_shared_middle_line_still_resolves
     test_resolve_go_duplicate_top_level_declaration
     test_resolve_go_diff3_nonempty_base_is_real_conflict
     test_resolve_go_unparseable_prints_gofmt_diagnostic
+    test_resolve_go_diagnostic_is_sanitised_and_capped
     test_resolve_go_missing_gofmt_is_its_own_error
     test_bounded_rebase_stale_lease_returns_13
     test_bounded_rebase_restricted_fetch_refspec_still_pushes

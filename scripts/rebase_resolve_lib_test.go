@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,28 @@ func TestRebaseResolveLibUsesBash3Syntax(t *testing.T) {
 	bash4LowercaseExpansion := regexp.MustCompile(`\$\{[^}\n]*,,[^}\n]*\}`)
 	if match := bash4LowercaseExpansion.Find(contents); match != nil {
 		t.Fatalf("rebase-resolve-lib.sh must run under macOS Bash 3; found Bash 4 lowercase expansion %q", match)
+	}
+}
+
+// TestRebaseResolveLibHoldsNoColumnOneConflictMarkers guards the lib and its
+// self-test script against tracked lines that look like conflict markers. The
+// lib's repo-wide `git grep` marker nets (the final check of every bounded
+// self-rebase) match such a line in either tracked file and answer rc=12 for
+// every rebase, so the self-test script must build its marker fixtures at run
+// time instead of holding them in heredocs.
+func TestRebaseResolveLibHoldsNoColumnOneConflictMarkers(t *testing.T) {
+	root := repoRoot(t)
+	marker := regexp.MustCompile(`^(<<<<<<< |=======$|>>>>>>> |\|\|\|\|\|\|\| )`)
+	for _, name := range []string{"rebase-resolve-lib.sh", "test-rebase-resolve.sh"} {
+		contents, err := os.ReadFile(filepath.Join(root, "scripts", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for i, line := range strings.Split(string(contents), "\n") {
+			if marker.MatchString(line) {
+				t.Errorf("scripts/%s:%d holds a column-1 conflict marker %q; build it at run time", name, i+1, line)
+			}
+		}
 	}
 }
 
