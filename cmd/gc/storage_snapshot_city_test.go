@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -320,5 +322,255 @@ func TestSplitPreflightSaysWhetherToWorkCanCarryEveryEdge(t *testing.T) {
 		if !preflightRow(out.String(), tc.tag, "way back") || !strings.Contains(out.String(), tc.want) {
 			t.Errorf("%s: %s", tc.name, out.String())
 		}
+	}
+}
+
+// TestCityRestoreHoldsBootUntilEveryFileIsBack: a city restore stopped before
+// its last move holds gc start, as an open reverse and a binding restore do,
+// and names the command that finishes it. Booted part-way, the city would
+// serve stores, records and a city.toml from different moments, and every
+// write it took would make the restore's own proof fail. Once every file is
+// back, boot is the restored city's own.
+func TestCityRestoreHoldsBootUntilEveryFileIsBack(t *testing.T) {
+	boot := func(t *testing.T, city fileStoreCity) error {
+		t.Helper()
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city.request.CityPath, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = storageBootGate(city.request.CityPath, cfg, "gc start", nil, io.Discard)
+		return err
+	}
+	for _, step := range []string{cityRestoreStepStores, cityRestoreStepRecords, cityRestoreStepCityTOML} {
+		t.Run("stopped after "+step, func(t *testing.T) {
+			city := newFileStoreCity(t)
+			id := city.snapshot(t)
+			city.split(t)
+			prev := storageSnapshotStep
+			storageSnapshotStep = func(s string) error {
+				if s == "city restore "+step {
+					return errors.New("killed in this test")
+				}
+				return nil
+			}
+			code, _, stderr := city.restore(t, id)
+			storageSnapshotStep = prev
+			if code == 0 {
+				t.Fatalf("the restore was not interrupted: %s", stderr)
+			}
+			err := boot(t, city)
+			if err == nil || !strings.Contains(err.Error(), "city restore of snapshot "+id+" is unfinished") || !strings.Contains(err.Error(), snapshotCityRestoreInstruction(id, city.to)) {
+				t.Fatalf("boot over the part-restored city = %v; want it held, naming the restore and the command that finishes it", err)
+			}
+			if code, stdout, stderr := city.restore(t, id); code != 0 {
+				t.Fatalf("finishing the restore = %d: %s%s", code, stdout, stderr)
+			}
+			if err := boot(t, city); err != nil {
+				t.Fatalf("boot after the finished restore = %v", err)
+			}
+		})
+	}
+	t.Run("every file back, the proof still to run", func(t *testing.T) {
+		city := newFileStoreCity(t)
+		id := city.snapshot(t)
+		city.split(t)
+		prev := storageSnapshotStep
+		storageSnapshotStep = func(s string) error {
+			if s == "city restore "+cityRestoreStepBinding {
+				return errors.New("killed in this test")
+			}
+			return nil
+		}
+		code, _, _ := city.restore(t, id)
+		storageSnapshotStep = prev
+		if code == 0 {
+			t.Fatal("the restore was not interrupted")
+		}
+		if err := boot(t, city); err != nil {
+			t.Fatalf("boot with every file back = %v; the proof that remains holds the storage commands, not the city", err)
+		}
+	})
+}
+
+// TestCityRestoreKeepsCityTOMLWhenItsInstallFails: city.toml is what every
+// gc loads the city from, the command that finishes an interrupted restore
+// among them, so a restore that fails while putting it back leaves the one it
+// replaces in place, and the same command then finishes.
+func TestCityRestoreKeepsCityTOMLWhenItsInstallFails(t *testing.T) {
+	city := newFileStoreCity(t)
+	id := city.snapshot(t)
+	city.split(t)
+	tomlPath := filepath.Join(city.request.CityPath, "city.toml")
+	split, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The install's temporary file cannot be created: a directory holds its
+	// name.
+	obstacle := tomlPath + ".restoring"
+	if err := os.MkdirAll(filepath.Join(obstacle, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "run this command again to finish") {
+		t.Fatalf("the restore = %d: %s", code, stderr)
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || !bytes.Equal(got, split) {
+		t.Fatalf("city.toml after the failed install: %q (%v); want the split one still in place", got, err)
+	}
+	if err := os.RemoveAll(obstacle); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := city.restore(t, id); code != 0 {
+		t.Fatalf("finishing the restore = %d: %s%s", code, stdout, stderr)
+	}
+	if got, _ := os.ReadFile(tomlPath); !bytes.Equal(got, city.unsplit) {
+		t.Errorf("city.toml after the restore:\n%s", got)
+	}
+	j, _, err := readStorageCityRestoreJournal(city.request.CityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := os.ReadFile(tomlPath + j.Suffix); err != nil || !bytes.Equal(kept, split) {
+		t.Errorf("the replaced city.toml is not kept as %s: %q (%v)", tomlPath+j.Suffix, kept, err)
+	}
+}
+
+// TestCityRestoreRefusesASnapshotOfASplitCity: the city restore puts back a
+// city from before the split. A --work snapshot of a split city holds no
+// binding, so restoring it would move the binding, the only copy of the
+// city's infrastructure state, aside and leave a split city.toml pointing at
+// nothing. It is refused before anything moves.
+func TestCityRestoreRefusesASnapshotOfASplitCity(t *testing.T) {
+	city := newFileStoreCity(t)
+	target := city.split(t)
+	id := city.snapshot(t)
+	code, stdout, stderr := city.restore(t, id)
+	if code == 0 || !strings.Contains(stderr, "taken of a split city") {
+		t.Fatalf("restore = %d: %s%s; want the snapshot of a split city refused", code, stdout, stderr)
+	}
+	if _, err := os.Stat(target.MarkerPath()); err != nil {
+		t.Errorf("the binding root moved: %v", err)
+	}
+	if _, present, _ := readStorageCityRestoreJournal(city.request.CityPath); present {
+		t.Error("a refused restore wrote its journal")
+	}
+}
+
+// TestCityRestoreRefusesARigImportedSinceTheSnapshot: a rig import moves
+// rows out of the rig's store into the binding root the city restore moves
+// aside. A snapshot that holds no copy of that rig's store, taken before the
+// import, would leave those rows in no store the city reads, so it is refused
+// (the binding restore's snapshotRigImportsLost is the same rule).
+func TestCityRestoreRefusesARigImportedSinceTheSnapshot(t *testing.T) {
+	city := newFileStoreCity(t)
+	rigPath := t.TempDir()
+	text := fileStoreCityTOML + fmt.Sprintf("\n[[rigs]]\nname = \"packs\"\npath = %q\nprefix = \"gp\"\n", rigPath)
+	if err := os.WriteFile(filepath.Join(city.request.CityPath, "city.toml"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city.request.CityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	city.request.Cfg = cfg
+	id := city.snapshot(t)
+	_, m := onlySnapshot(t, city.to)
+	if _, err := planCityRestore(city.request, m); err != nil {
+		t.Fatalf("a rig never imported refuses: %v", err)
+	}
+	note := rigGraphClearedNotePath(city.request.CityPath, "packs")
+	if err := writeInfraClearedNoteAt(note, infraClearedNote{Binding: "infra", Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planCityRestore(city.request, m); err == nil || !strings.Contains(err.Error(), "rig:packs") || !strings.Contains(err.Error(), note) {
+		t.Fatalf("planCityRestore = %v; want rig packs, imported since the snapshot, refused", err)
+	}
+	_ = id
+}
+
+// TestSnapshotOfTheManagedDoltDataDirKeepsTheDoltFloorFree: the copy of a
+// managed Dolt's data directory is refused before the server stops when it
+// would leave less than the managed Dolt's critical floor free on the
+// snapshot's filesystem, where a city's Dolt (this one's or another's) stops
+// writing. With room, the server is stopped for the copy and started again.
+func TestSnapshotOfTheManagedDoltDataDirKeepsTheDoltFloorFree(t *testing.T) {
+	cityPath, lock := windowCity(t)
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	window, err := openTestWindow(t, lock, cityPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = window.Close() })
+	dataDir := t.TempDir()
+	const size = 1 << 20
+	if err := os.MkdirAll(filepath.Join(dataDir, "hq", ".dolt", "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hq", ".dolt", "noms", "journal.idx"), bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prevDir := snapshotManagedDoltDataDir
+	snapshotManagedDoltDataDir = func(string) (string, error) { return dataDir, nil }
+	t.Cleanup(func() { snapshotManagedDoltDataDir = prevDir })
+	const floor = 8 << 20
+	t.Setenv("GC_DOLT_MIN_FREE_BYTES", strconv.Itoa(floor))
+	t.Setenv("GC_DOLT_WARN_FREE_BYTES", strconv.Itoa(floor))
+	free := int64(floor + size/2)
+	prevFree := doltContainerFreeBytesFunc
+	doltContainerFreeBytesFunc = func(string) (int64, error) { return free, nil }
+	t.Cleanup(func() { doltContainerFreeBytesFunc = prevFree })
+	stopsBefore, startsBefore := provider.stops, provider.starts
+
+	if _, _, err := snapshotDoltDataDir(cityPath, t.TempDir()); err == nil || !strings.Contains(err.Error(), "must leave") {
+		t.Fatalf("snapshotDoltDataDir = %v; want the copy refused for the floor", err)
+	}
+	if provider.stops != stopsBefore || provider.starts != startsBefore {
+		t.Fatalf("the server was stopped (%d) or started (%d) for a copy that was refused", provider.stops-stopsBefore, provider.starts-startsBefore)
+	}
+
+	free = 1 << 40
+	exact, why, err := snapshotDoltDataDir(cityPath, t.TempDir())
+	if err != nil || exact == nil || exact.Method != snapshotMethodDoltDataDir {
+		t.Fatalf("snapshotDoltDataDir with room = %+v, %q, %v", exact, why, err)
+	}
+	if provider.stops != stopsBefore+1 || provider.starts != startsBefore+1 {
+		t.Errorf("stops %d, starts %d; want the server stopped once for the copy and started again", provider.stops-stopsBefore, provider.starts-startsBefore)
+	}
+}
+
+// TestSnapshotTreeKeepsEmptyDirectories: a data directory's empty
+// directories are part of it (a Dolt git remote's cache keeps its refs in
+// one, and git does not read a repository whose refs directory is gone), so
+// the snapshot records them and the restore puts them back.
+func TestSnapshotTreeKeepsEmptyDirectories(t *testing.T) {
+	src := t.TempDir()
+	for _, d := range []string{"gp/.dolt/git-remote-cache/c/repo.git/refs/heads", "hq/.dolt/temptf"} {
+		if err := os.MkdirAll(filepath.Join(src, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(src, "gp", ".dolt", "git-remote-cache", "c", "repo.git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	tree, err := copySnapshotTree(dir, src, snapshotCityDoltDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySnapshotTree(dir, tree); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "dolt")
+	if err := installSnapshotTree(dir, *tree, dst); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"gp/.dolt/git-remote-cache/c/repo.git/refs/heads", "hq/.dolt/temptf"} {
+		if info, err := os.Stat(filepath.Join(dst, d)); err != nil || !info.IsDir() {
+			t.Errorf("the empty directory %s did not come back: %v", d, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "gp", ".dolt", "git-remote-cache", "c", "repo.git", "HEAD")); err != nil || string(got) != "ref: refs/heads/main\n" {
+		t.Errorf("the file did not come back: %q (%v)", got, err)
 	}
 }

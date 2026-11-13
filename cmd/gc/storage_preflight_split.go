@@ -250,6 +250,24 @@ func estimateSplitDisk(allJSON, movedJSON int64, exact string, rigs int64) split
 	}
 }
 
+// splitManagedDoltDataDirBytes sizes the managed Dolt data directory the
+// split's snapshot copies when the city's work store lives in it; inDolt is
+// false for any other store.
+func splitManagedDoltDataDirBytes(cityPath string) (size int64, inDolt bool, err error) {
+	if !snapshotScopeInManagedDolt(cityPath, cityPath) {
+		return 0, false, nil
+	}
+	dataDir, err := snapshotManagedDoltDataDir(cityPath)
+	if err != nil {
+		return 0, true, err
+	}
+	size, err = snapshotTreeBytes(dataDir)
+	if err != nil {
+		return 0, true, err
+	}
+	return size, true, nil
+}
+
 // splitRigSnapshotBytes sizes the rigs in the snapshot Ready names (`gc
 // storage snapshot --work --rigs`): every rig snapshotRigs selects, sized as
 // the work store is, from the rows the census read from its store. The chain
@@ -625,9 +643,22 @@ func splitPreflightEstimate(request storageOperatorRequest, found preflightFindi
 		}
 	}
 	rigs, rigRows := splitRigSnapshotBytes(request, found.rigs)
+	// A work store in the city's managed Dolt is copied whole: the server's
+	// data directory, with every database it serves (snapshotDoltDataDir).
+	dataDirBytes, inDolt, sizeErr := splitManagedDoltDataDirBytes(request.CityPath)
+	if inDolt && sizeErr == nil {
+		exact = snapshotMethodDoltDataDir
+	}
 	est.disk = estimateSplitDisk(allJSON, splitJSONBytes(moved), exact, rigs)
+	est.disk.snapshot += dataDirBytes
 	dir := filepath.Join(request.CityPath, ".gc")
 	snapshot := fmt.Sprintf("the work store's %s rows' JSONL, exact copy: %s", strconv.Itoa(len(found.all)), est.disk.exact)
+	switch {
+	case inDolt && sizeErr != nil:
+		snapshot += fmt.Sprintf(", though the snapshot copies the managed Dolt's data directory, which could not be sized (%v), so this estimate leaves it out", sizeErr)
+	case inDolt:
+		snapshot = fmt.Sprintf("the work store's %s rows' JSONL, exact copy: the managed Dolt's data directory, %s", strconv.Itoa(len(found.all)), splitBytes(dataDirBytes))
+	}
 	if rigRows > 0 {
 		snapshot += fmt.Sprintf("; the rigs' %d rows' JSONL and exact copies, %s", rigRows, splitBytes(est.disk.rigs))
 	}

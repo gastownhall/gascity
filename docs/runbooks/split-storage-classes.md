@@ -1428,11 +1428,18 @@ Know what each one can bring back:
   restore <id> --city --fleet-stopped` puts back the stores, city.toml and
   the city's storage records (`.gc/min-gc-version`, the served-binding and
   cleared notes), moves the binding root aside, and proves each restored
-  store against the snapshot's JSONL. A snapshot that holds a binding, or a
-  store whose copy is a Dolt tag or a bd export, is refused before anything
-  moves. Every file it replaces is kept as `*.pre-restore-<ts>`; an
-  interrupted restore holds every other writing storage command off until
-  the same command finishes it. `gc storage migrate --to-work` is the other
+  store against the snapshot's JSONL. A snapshot that holds a binding, a
+  snapshot of a split city (one that records a served-binding or cleared
+  note), a store whose copy is a Dolt tag or a bd export, and a rig imported
+  since the snapshot whose store the snapshot does not hold are refused
+  before anything moves. Every file it replaces is kept as
+  `*.pre-restore-<ts>` (city.toml is copied aside, so it is never missing);
+  an interrupted restore holds `gc start` until every file is back, and
+  every other writing storage command until the same command finishes it.
+  The copy of a managed Dolt's data directory is refused, before the server
+  stops, when it would leave less than the managed Dolt's critical floor
+  (`GC_DOLT_MIN_FREE_BYTES`) free, and `gc storage preflight --split` counts
+  the data directory in its disk estimate. `gc storage migrate --to-work` is the other
   way back; on native Dolt it refuses an edge that carries a payload, and
   `gc storage preflight --split` says under `way back` whether the city has
   any.

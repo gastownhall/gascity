@@ -5733,6 +5733,11 @@ every row with its edges and their payloads:
 
 The JSONL is a record, not yet a restore source: no tool imports it.
 
+A managed Dolt's data directory is copied whole, empty directories
+included. The copy is refused before the server stops when it would leave
+less than the managed Dolt's critical floor (GC_DOLT_MIN_FREE_BYTES) free
+where it lands.
+
 --work also records city.toml and the city's storage records (the id-floor
 file, the served-binding and cleared notes), so a snapshot taken before the
 split is a way back to the whole city: gc storage snapshot restore &lt;id&gt;
@@ -5810,12 +5815,14 @@ aside, so the city serves from its work store alone again. It refuses before
 it moves anything: a snapshot of another work store, one that records no
 city, a store whose copy restores nothing exactly (a Dolt tag, a bd export,
 no copy), a snapshot that holds a binding (restore that with --binding), a
+snapshot of a split city (one that records a served-binding or cleared note),
+a rig imported since the snapshot whose store the snapshot does not hold, a
 running managed Dolt, or a reverse migration in progress. Every file it
-replaces is kept beside it as *.pre-restore-&lt;ts&gt;. Its journal,
-.gc/storage-city-restore.json, holds every other writing storage command off
-until it finishes; run again, it finishes an interrupted restore. Last, it
-reads each restored store back and proves its rows equal to the snapshot's
-JSONL.
+replaces is kept beside it as *.pre-restore-&lt;ts&gt;; city.toml is copied aside,
+so it is never missing. Its journal, .gc/storage-city-restore.json, holds gc
+start until every file is back and every other writing storage command until
+it finishes; run again, it finishes an interrupted restore. Last, it reads
+each restored store back and proves its rows equal to the snapshot's JSONL.
 
 ```
 gc storage snapshot restore <id> [flags]

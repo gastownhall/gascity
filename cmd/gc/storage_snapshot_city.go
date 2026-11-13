@@ -96,10 +96,14 @@ type snapshotCityFile struct {
 	File *snapshotFile `json:"file,omitempty"`
 }
 
-// snapshotCopiedTree is a directory in a snapshot: every regular file under it.
+// snapshotCopiedTree is a directory in a snapshot: every regular file under
+// it, and every directory, relative to it, so one that holds no file comes
+// back too (a Dolt git remote's cache keeps its refs in one, and git does not
+// read a repository whose refs directory is gone).
 type snapshotCopiedTree struct {
 	Path  string         `json:"path"`
 	Files []snapshotFile `json:"files"`
+	Dirs  []string       `json:"dirs,omitempty"`
 }
 
 // snapshotCityRecordRels are the city's storage records a snapshot keeps
@@ -202,10 +206,19 @@ func verifySnapshotCity(dir string, rec *snapshotCityRecord) error {
 	return nil
 }
 
-// verifySnapshotTree proves every file a tree records.
+// verifySnapshotTree proves every file a tree records, and that every
+// directory it records is one inside it.
 func verifySnapshotTree(dir string, tree *snapshotCopiedTree) error {
 	if tree == nil || len(tree.Files) == 0 {
 		return errors.New("records no file")
+	}
+	for _, d := range tree.Dirs {
+		if !snapshotTreeRelInside(d) {
+			return fmt.Errorf("the directory %q is outside the tree %s", d, tree.Path)
+		}
+		if info, err := os.Stat(filepath.Join(dir, tree.Path, d)); err != nil || !info.IsDir() {
+			return fmt.Errorf("the directory %s is missing from the tree %s", d, tree.Path)
+		}
 	}
 	for _, f := range tree.Files {
 		if !strings.HasPrefix(filepath.Clean(f.Path)+string(filepath.Separator), filepath.Clean(tree.Path)+string(filepath.Separator)) {
@@ -246,6 +259,15 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving the managed Dolt's data directory: %w", err)
 	}
+	// Sized and judged before the server stops: the copy lands on a
+	// filesystem a managed Dolt (this city's, or another's) may write to.
+	size, err := snapshotTreeBytes(dataDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("sizing the managed Dolt's data directory %s: %w", dataDir, err)
+	}
+	if err := snapshotTreeDiskRefusal(dir, size); err != nil {
+		return nil, "", err
+	}
 	doltpool.Shutdown()
 	if err := migrationWindowStopProvider(cityPath); err != nil {
 		return nil, "", fmt.Errorf("stopping the managed Dolt for the copy of its data directory: %w", err)
@@ -258,6 +280,42 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 		return nil, "", copyErr
 	}
 	return &snapshotExact{Method: snapshotMethodDoltDataDir, Tree: tree}, "", nil
+}
+
+// snapshotTreeBytes is the size of every regular file under root.
+func snapshotTreeBytes(root string) (int64, error) {
+	var n int64
+	err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		n += info.Size()
+		return nil
+	})
+	return n, err
+}
+
+// snapshotTreeDiskRefusal refuses a copy of size bytes into dir that would
+// leave less than the managed Dolt's critical floor free there, as a binding
+// snapshot is refused (snapshotDiskPreflight). A free-space probe that fails
+// refuses nothing, as there.
+func snapshotTreeDiskRefusal(dir string, size int64) error {
+	free, err := doltContainerFreeBytesFunc(dir)
+	if err != nil {
+		return nil
+	}
+	critical, warn := doltDiskMinFreeBytes(), doltDiskWarnFreeBytes()
+	if refuse, _ := snapshotDiskVerdict(free, size, critical, warn); refuse {
+		return fmt.Errorf("%s has %d bytes free; the copy of the managed Dolt's data directory needs %d and must leave %d free for a managed Dolt on the same filesystem. Free space, or pass --to elsewhere; the server was not stopped and nothing was copied", dir, free, size, critical)
+	}
+	return nil
 }
 
 // copySnapshotTree copies every regular file under src into the snapshot at
@@ -276,6 +334,9 @@ func copySnapshotTree(dir, src, relDir string) (*snapshotCopiedTree, error) {
 		}
 		switch {
 		case d.IsDir():
+			if r != "." {
+				tree.Dirs = append(tree.Dirs, r)
+			}
 			return os.MkdirAll(filepath.Join(dir, relDir, r), 0o755)
 		case !d.Type().IsRegular():
 			return fmt.Errorf("%s is not a regular file or a directory", path)
@@ -582,6 +643,12 @@ func planCityRestore(request storageOperatorRequest, m snapshotManifest) (cityRe
 		}
 		plan.stores = append(plan.stores, store)
 	}
+	if !slices.ContainsFunc(m.Stores, func(rec snapshotStoreRecord) bool { return rec.Name == "binding" }) {
+		if rel := snapshotCitySplitRecord(m.CityRecord); rel != "" {
+			refused = append(refused, fmt.Sprintf("it was taken of a split city (it records %s) and holds no binding, so restoring it would move the binding, the only copy of the city's infrastructure state, aside and leave the city split; the city restore puts back a city from before the split", rel))
+		}
+	}
+	refused = append(refused, cityRestoreRigsLost(request, m, plan)...)
 	if len(refused) > 0 {
 		return plan, errors.New(strings.Join(refused, "; "))
 	}
@@ -592,6 +659,64 @@ func planCityRestore(request storageOperatorRequest, m snapshotManifest) (cityRe
 		return plan, fmt.Errorf("the city's managed Dolt is running, and its data directory is what this restores. Stop it with `%s` and run this again", storageStopCommand)
 	}
 	return plan, nil
+}
+
+// snapshotCitySplitRecord names a record the snapshot holds that only a
+// split city has (the served-binding note, the city's or a rig's cleared
+// note), or "" when it holds none.
+func snapshotCitySplitRecord(rec *snapshotCityRecord) string {
+	if rec == nil {
+		return ""
+	}
+	for _, f := range rec.Files {
+		if f.File == nil {
+			continue
+		}
+		base := filepath.Base(f.Rel)
+		if base == filepath.Base(bornSplitServedNotePath("")) || base == filepath.Base(infraClearedNotePath("")) || strings.HasPrefix(base, "storage-infra-cleared.rig.") {
+			return f.Rel
+		}
+	}
+	return ""
+}
+
+// cityRestoreRigsLost refuses each rig whose import into the binding ran
+// since the snapshot (its cleared note is not the one the snapshot recorded)
+// when the snapshot holds no copy of the rig's store: the import moved rows
+// out of that store into the binding root this restore moves aside, and the
+// restore would leave them in no store the city reads. The binding restore's
+// snapshotRigImportsLost is the same rule.
+func cityRestoreRigsLost(request storageOperatorRequest, m snapshotManifest, plan cityRestorePlan) []string {
+	held := map[string]bool{}
+	for _, s := range plan.stores {
+		held[s.rec.Name] = true
+	}
+	recorded := map[string]*snapshotFile{}
+	if m.CityRecord != nil {
+		for _, f := range m.CityRecord.Files {
+			recorded[f.Rel] = f.File
+		}
+	}
+	var refused []string
+	for _, r := range snapshotRigs(request) {
+		if held[r.name] || (plan.dolt != nil && snapshotScopeInManagedDolt(request.CityPath, r.root)) {
+			continue
+		}
+		note := rigGraphClearedNotePath(request.CityPath, strings.TrimPrefix(r.name, "rig:"))
+		current, err := hashSnapshotFile(filepath.Dir(note), note)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			refused = append(refused, fmt.Sprintf("%s: its cleared note %s cannot be read (%v), so whether its import ran since the snapshot cannot be told", r.name, note, err))
+			continue
+		}
+		if was := recorded[rel(request.CityPath, note)]; was != nil && was.SHA256 == current.SHA256 {
+			continue
+		}
+		refused = append(refused, fmt.Sprintf("%s: its import into the binding ran since the snapshot (%s), and the snapshot holds no copy of its store, so the rows the import moved would be left only in the binding root this restore moves aside; restore a snapshot taken with --rigs (gc storage split takes one), or move the rig's rows back first with `gc storage migrate --to-rigs --rig %s`", r.name, note, strings.TrimPrefix(r.name, "rig:")))
+	}
+	return refused
 }
 
 // moveAside renames path to path+suffix, unless a run already did; a path
@@ -653,13 +778,40 @@ func restoreCityStores(dir string, plan cityRestorePlan, suffix string) error {
 	if err := os.RemoveAll(plan.dolt.dataDir); err != nil {
 		return err
 	}
-	for _, f := range plan.dolt.tree.Files {
-		r, err := filepath.Rel(plan.dolt.tree.Path, f.Path)
+	if err := installSnapshotTree(dir, plan.dolt.tree, plan.dolt.dataDir); err != nil {
+		return fmt.Errorf("the managed Dolt's data directory: %w", err)
+	}
+	return nil
+}
+
+// snapshotTreeRelInside reports whether r, a path relative to a tree's root,
+// stays inside it.
+func snapshotTreeRelInside(r string) bool {
+	clean := filepath.Clean(r)
+	return r != "" && !filepath.IsAbs(r) && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
+}
+
+// installSnapshotTree puts a tree the snapshot holds back at dst: its
+// directories, then its files.
+func installSnapshotTree(dir string, tree snapshotCopiedTree, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, d := range tree.Dirs {
+		if !snapshotTreeRelInside(d) {
+			return fmt.Errorf("the directory %q is outside the tree %s", d, tree.Path)
+		}
+		if err := os.MkdirAll(filepath.Join(dst, d), 0o755); err != nil {
+			return err
+		}
+	}
+	for _, f := range tree.Files {
+		r, err := filepath.Rel(tree.Path, f.Path)
 		if err != nil {
 			return err
 		}
-		if err := installSnapshotCopy(dir, f, filepath.Join(plan.dolt.dataDir, r)); err != nil {
-			return fmt.Errorf("the managed Dolt's data directory: %w", err)
+		if err := installSnapshotCopy(dir, f, filepath.Join(dst, r)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -697,16 +849,47 @@ func restoreCityRecords(cityPath, dir string, rec *snapshotCityRecord, suffix st
 	return nil
 }
 
-// restoreCityTOML puts city.toml's bytes back.
+// restoreCityTOML puts city.toml's bytes back. The file it replaces is
+// copied aside, not moved: city.toml is what every gc loads the city from,
+// the command that finishes an interrupted restore among them, so it stays in
+// place until the snapshot's copy is renamed over it.
 func restoreCityTOML(cityPath, dir string, want snapshotFile, suffix string) error {
 	toml, err := cityTOMLFile(cityPath)
 	if err != nil {
 		return err
 	}
-	if err := moveAside(toml, suffix); err != nil {
+	if err := copyAside(toml, suffix); err != nil {
 		return err
 	}
 	return installSnapshotCopy(dir, want, toml)
+}
+
+// copyAside copies path to path+suffix, fsynced and with path's mode, unless
+// a run already did; path itself is left where it is.
+func copyAside(path, suffix string) error {
+	aside := path + suffix
+	if _, err := os.Lstat(aside); err == nil {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("keeping %s aside: %w", path, err)
+	}
+	tmp := aside + ".tmp"
+	_ = os.Remove(tmp)
+	err = copyFileSynced(path, tmp)
+	if err == nil {
+		err = os.Chmod(tmp, info.Mode().Perm())
+	}
+	if err == nil {
+		err = os.Rename(tmp, aside)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("keeping %s aside: %w", path, err)
+	}
+	syncInfraDir(filepath.Dir(path))
+	return nil
 }
 
 // moveBindingRootAside moves the binding root the city served from aside.
@@ -800,6 +983,23 @@ func storageCityRestoreRefusal(cityPath string) error {
 		return nil
 	}
 	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): the city's stores, storage records and city.toml may be part-way back. Finish it with `%s`", j.Snapshot, storageCityRestoreJournalPath(cityPath), snapshotCityRestoreInstruction(j.Snapshot, j.To))
+}
+
+// storageCityRestoreBootRefusal holds boot while a city restore has files
+// left to move: the city's stores, records and city.toml may be from
+// different moments, and a city that served them would write into the stores
+// the restore's proof reads. Once every file is back the city is the
+// snapshot's, and the proof that remains holds only the writing storage
+// commands (storageCityRestoreRefusal).
+func storageCityRestoreBootRefusal(cityPath string) error {
+	j, present, err := readStorageCityRestoreJournal(cityPath)
+	switch {
+	case err != nil:
+		return err
+	case !present || j.done(cityRestoreStepBinding):
+		return nil
+	}
+	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): the city's stores, storage records and city.toml may be part-way back, so the city does not start. Finish it with `%s`", j.Snapshot, storageCityRestoreJournalPath(cityPath), snapshotCityRestoreInstruction(j.Snapshot, j.To))
 }
 
 // snapshotCityConfigNote is a manifest note for a snapshot that records the
