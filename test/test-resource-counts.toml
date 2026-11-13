@@ -1487,6 +1487,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "examples/bd/dolt/compact_real_dolt_callbound_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "examples/bd/dolt/compact_real_dolt_test.go"
 resource = "fixed_sleep"
 calls = 1
