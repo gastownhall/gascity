@@ -225,6 +225,10 @@ type preflightFindings struct {
 	all  map[string]beads.Bead
 	// plan is the copy's plan over rows.
 	plan infraCopyPlan
+	// writesPayloads reports that the work store's lane writes an edge's
+	// payload (beads.DepMetadataWriter), which `gc storage migrate --to-work`
+	// needs to carry one back.
+	writesPayloads bool
 	// rigs is the per-rig census.
 	rigs []rigCensusRow
 	// converged reports a city the migration would not copy.
@@ -451,6 +455,8 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		return
 	}
 	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	under, _, _ := unwrapBeadPolicyStore(source)
+	_, writesPayloads := beads.As[beads.DepMetadataWriter](under)
 	var edgeErr, holdsErr, literalErr error
 	var unheldExternal, unheldUnread []string
 	var plan infraCopyPlan
@@ -506,7 +512,7 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		skipReaders("work store")
 		return
 	}
-	found.read, found.rows, found.all, found.plan = true, rows, all, plan
+	found.read, found.rows, found.all, found.plan, found.writesPayloads = true, rows, all, plan, writesPayloads
 	preflightPass(stdout, "work store", fmt.Sprintf("would copy %d infrastructure bead(s)", len(rows)))
 	switch {
 	case edgeErr != nil:

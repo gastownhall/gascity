@@ -125,6 +125,8 @@ type migrationSourceWindow struct {
 	cityPath string
 	// cfg is the configuration the verb loaded; the window's opens use it.
 	cfg *config.City
+	// rigRoots are the rig scopes the verb reads (openMigrationSource).
+	rigRoots []string
 	// started reports that this window, or a killed one before it, started
 	// the provider, so closing the window stops it.
 	started bool
@@ -191,7 +193,7 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 	if busy {
 		return nil, errors.New("a maintenance window is already open in this process")
 	}
-	w := &migrationSourceWindow{cityPath: cityPath, cfg: cfg}
+	w := &migrationSourceWindow{cityPath: cityPath, cfg: cfg, rigRoots: rigRoots}
 	inherited, err := readMigrationWindowRecord(cityPath)
 	if err != nil {
 		return nil, err
@@ -220,19 +222,8 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 			stopErr := w.stopProvider()
 			return nil, errors.Join(fmt.Errorf("starting the bead-store provider for the maintenance window: %w", err), stopErr)
 		}
-		for _, root := range rigRoots {
-			owned, err := scopeProviderOwned(cityPath, root)
-			if err != nil {
-				stopErr := w.stopProvider()
-				return nil, errors.Join(fmt.Errorf("the maintenance window cannot tell whether bd owns a proxied server for rig scope %s (%w), so it can neither start that server nor rule it out, and this run reads that rig; the whole run is refused, nothing was written. Repair the rig's .beads metadata, or unbind the rig, then run this again", root, err), stopErr)
-			}
-			if owned {
-				err = migrationWindowStartScope(cityPath, root)
-			}
-			if err != nil {
-				stopErr := w.stopProvider()
-				return nil, errors.Join(fmt.Errorf("starting the proxied scope %s for the maintenance window: %w", root, err), stopErr)
-			}
+		if err := w.startRigScopes(); err != nil {
+			return nil, errors.Join(err, w.stopProvider())
 		}
 		fmt.Fprintf(stderr, "%s: started the bead-store provider for this run; it is stopped again when the run ends\n", logPrefix) //nolint:errcheck // best-effort stderr
 	}
@@ -253,6 +244,36 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		fmt.Fprintf(stderr, "%s: the city's managed Dolt was running although the city is stopped (something started it and left it); this run uses it and stops it when it ends\n", logPrefix) //nolint:errcheck // best-effort stderr
 	}
 	return w, nil
+}
+
+// startRigScopes starts each rig scope the verb reads that bd owns a proxied
+// server for: ensureBeadsProvider starts the city's scope alone.
+func (w *migrationSourceWindow) startRigScopes() error {
+	for _, root := range w.rigRoots {
+		owned, err := scopeProviderOwned(w.cityPath, root)
+		if err != nil {
+			return fmt.Errorf("the maintenance window cannot tell whether bd owns a proxied server for rig scope %s (%w), so it can neither start that server nor rule it out, and this run reads that rig; the whole run is refused, nothing was written. Repair the rig's .beads metadata, or unbind the rig, then run this again", root, err)
+		}
+		if !owned {
+			continue
+		}
+		if err := migrationWindowStartScope(w.cityPath, root); err != nil {
+			return fmt.Errorf("starting the proxied scope %s for the maintenance window: %w", root, err)
+		}
+	}
+	return nil
+}
+
+// restartProvider starts the provider again after the run stopped it inside
+// the window (the snapshot stops it to copy the managed Dolt's data
+// directory): the city's scope, then each rig scope the verb reads that bd
+// owns a proxied server for, which the stop retired with the rest. Closing
+// the window stops them all, as before.
+func (w *migrationSourceWindow) restartProvider() error {
+	if err := migrationWindowStartProvider(w.cityPath); err != nil {
+		return err
+	}
+	return w.startRigScopes()
 }
 
 // abandon ends a window that refused before its verb ran. It stops the

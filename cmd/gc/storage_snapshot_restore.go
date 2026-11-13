@@ -271,14 +271,14 @@ func infraRestoreRecopyRefusal(target infraBindingTarget) error {
 
 func newStorageSnapshotRestoreCmd(prefix string, stdout, stderr io.Writer) *cobra.Command {
 	var (
-		binding, fleetStopped bool
-		to                    string
-		forced                []string
+		binding, city, fleetStopped, acceptUnproven bool
+		to                                          string
+		forced                                      []string
 	)
 	prefix += " restore"
 	cmd := &cobra.Command{
 		Use:          "restore <id>",
-		Short:        "Restore the binding from a snapshot (city stopped)",
+		Short:        "Restore the binding, or the whole city, from a snapshot (city stopped)",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		Long: `Put snapshot <id>'s binding database back in place of the live one.
@@ -306,11 +306,51 @@ stale (infra.restoring beside it): every gc that boots refuses it and names
 this command. A refusal before the live database moves changes nothing. A
 restore interrupted after that holds the city stale until you run it again.
 
-Only --binding is restorable here. A work store is restored by the runbook:
-DOLT_RESET --hard to the snapshot's tag, or bd import of its export.`,
+--city puts the whole city back as a snapshot taken with --work found it:
+every store the snapshot holds from its exact copy (a file store's file, or
+the managed Dolt's data directory, copied with the server stopped), then the
+city's storage records (.gc/min-gc-version, the served-binding and cleared
+notes), then city.toml; and, when the snapshot holds no binding, it moves the
+binding root aside, so the city serves from its work store alone again. Take
+that snapshot before the split: gc storage snapshot --work --rigs
+--fleet-stopped, before [storage] is added (gc storage preflight --split names
+it). It refuses before it moves anything: a snapshot of another work store,
+one that records no city, a store whose copy restores nothing exactly (a Dolt
+tag, a bd export, no copy), a snapshot that holds a binding (restore that
+with --binding), a snapshot of a split city (one that records a
+served-binding or cleared note), a city.toml that, with the city's include
+fragments as they are now, still routes a class off the work store, a copy of
+the managed Dolt's data directory holding a database a rig of this city keeps
+its store in that the snapshot records no store for, a rig imported since the
+snapshot whose store the snapshot does not hold, a store it replaces that
+another registered city also uses (the work store, a rig's, or any other
+database of the managed Dolt's data directory; it replaces a store whole, so
+no --force=shared-store:<identity> lifts this, and it refuses that
+attestation), a live controller, a running managed Dolt, too little disk for
+the data directory's copy, or a reverse migration in progress. Any other
+database the copy holds (gc's probe database, a removed rig's) is put back as
+the copy holds it and named unproven. Every file it replaces is kept beside it
+as *.pre-restore-<ts>; city.toml is copied aside, so it is never missing. Its
+journal, .gc/storage-city-restore.json, holds gc start and every other writing
+storage command until the restore ends, and keeps the snapshot pinned until
+then; run again, it finishes an interrupted restore.
+
+Last, it reads each restored store back and proves its rows equal to the
+snapshot's JSONL. A row the JSONL dates after the store's copy and before
+the JSONL read (each to the second) was written during the snapshot: it is
+reported, with where its later content is kept, and passes. Any other
+difference fails the proof, and the city stays held: resolve it and run the
+restore again, or pass --accept-unproven to end the restore anyway, which
+records what the proof failed on in the journal and, entry by entry, in
+.gc/storage-attestations.log, keeps every file the restore replaced, and
+releases the city.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !binding {
-				fmt.Fprintf(stderr, "%s: pass --binding; it is the one store this command restores (a work store is restored by DOLT_RESET --hard to the snapshot's tag, or bd import of its export)\n", prefix) //nolint:errcheck // best-effort stderr
+			if binding == city {
+				fmt.Fprintf(stderr, "%s: pass --binding (the binding's database) or --city (the whole city: its stores, storage records and city.toml)\n", prefix) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if acceptUnproven && !city {
+				fmt.Fprintf(stderr, "%s: --%s goes with --city: it ends an unfinished city restore whose proof fails\n", prefix, cityRestoreAcceptFlag) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			force, err := parseStorageForce(forced)
@@ -327,10 +367,15 @@ DOLT_RESET --hard to the snapshot's tag, or bd import of its export.`,
 			if to == "" {
 				to = storageSnapshotDefaultDir(request.CityPath)
 			}
+			if city {
+				return exitForCode(doStorageSnapshotRestoreCity(cmd.Context(), request, to, args[0], acceptUnproven, prefix, stdout, stderr))
+			}
 			return exitForCode(doStorageSnapshotRestore(cmd.Context(), request, to, args[0], prefix, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&binding, "binding", false, "restore the infrastructure binding")
+	cmd.Flags().BoolVar(&city, "city", false, "restore the whole city from a snapshot taken with --work: its stores, storage records and city.toml")
+	cmd.Flags().BoolVar(&acceptUnproven, cityRestoreAcceptFlag, false, "with --city: end an unfinished city restore whose every file is back and whose proof fails, recording what the proof failed on")
 	cmd.Flags().StringVar(&to, "to", "", "directory the snapshot is in (default <city>/.gc/snapshots)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false, "attest that "+storageFleetStoppedAttestation)
 	addStorageForceFlag(cmd, &forced)

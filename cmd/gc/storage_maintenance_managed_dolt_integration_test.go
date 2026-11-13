@@ -396,3 +396,69 @@ func TestStorageMigrateAdoptsAManagedDoltLeftRunningOnTheStoppedCity(t *testing.
 		t.Fatal("the window record outlived the stop")
 	}
 }
+
+// TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps is S-3 acceptance
+// 3 on a real managed Dolt (owner decision D-c): the snapshot (--work --rigs:
+// the city's rig keeps its database in the same data directory) copies the
+// data directory with the server stopped, which holds the wisp tables a Dolt
+// tag does not, the split clears the session wisps from the work store, and
+// the city restore puts them back, proven against the snapshot's JSONL with
+// the rig's store, with the server stopped again at the end.
+func TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps(t *testing.T) {
+	city := newManagedDoltWindowCity(t)
+	cfg, err := loadCityConfig(city.cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubInfraControllerPing(t, 0)
+	stubSessionInventory(t, nil, true, nil)
+	stubOtherCities(t)
+	to := t.TempDir()
+	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: cfg, FleetStopped: true}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageSnapshot(context.Background(), request, snapshotOptions{Work: true, Rigs: true, To: to, Keep: 2}, "gc storage snapshot", &stdout, &stderr); code != 0 {
+		t.Fatalf("snapshot = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	id, m := onlySnapshot(t, to)
+	for _, rec := range m.Stores {
+		if rec.Exact.Method != snapshotMethodDoltDataDir || rec.Exact.CopiedAt.IsZero() || rec.Exact.Database == "" || rec.JSONLReadAt.Before(rec.Exact.CopiedAt) {
+			t.Fatalf("%s's exact copy is %+v, JSONL read at %s; want the data directory, its database in it, the time it was copied and a JSONL read after it", rec.Name, rec.Exact, rec.JSONLReadAt)
+		}
+	}
+	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 {
+		t.Fatalf("the snapshot left the managed Dolt up (pid %d)", pid)
+	}
+	wantIDs := map[string]bool{}
+	if _, _, err := scanInfraBackupFile(filepath.Join(to, id, m.Stores[0].JSONL.Path), storageSnapshotJSONLFormat, "work", func(e infraBackupEntry) error {
+		wantIDs[e.Bead.ID] = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !wantIDs[city.from] || !wantIDs[city.to] {
+		t.Fatalf("the snapshot's JSONL lacks the session wisps %s, %s: %v", city.from, city.to, wantIDs)
+	}
+
+	code, said, _, target := city.migrateManagedCity(t)
+	if code != 0 {
+		t.Fatalf("the split = %d: %s", code, said)
+	}
+	split := *cfg
+	split.Storage = infraSplitConfig(filepath.Join(city.cityPath, ".gc", "store")).Storage
+	request.Cfg = &split
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageSnapshotRestoreCity(context.Background(), request, to, id, false, "gc storage snapshot restore", &stdout, &stderr); code != 0 {
+		t.Fatalf("restore = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 || doltPortReachable(strconv.Itoa(city.port)) {
+		t.Fatalf("the restore left the managed Dolt up (pid %d)", pid)
+	}
+	if _, err := os.Stat(target.Root); !os.IsNotExist(err) {
+		t.Fatalf("the binding root %s survived the restore (%v)", target.Root, err)
+	}
+	j, _, err := readStorageCityRestoreJournal(city.cityPath)
+	if err != nil || !j.done(cityRestoreStepVerified) {
+		t.Fatalf("journal %+v (%v): the restored store was not proven against the snapshot", j, err)
+	}
+}

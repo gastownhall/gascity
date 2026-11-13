@@ -68,6 +68,9 @@ type snapshotManifest struct {
 	Binding *snapshotBindingRecords `json:"binding,omitempty"`
 	Stores  []snapshotStoreRecord   `json:"stores"`
 	Notes   []string                `json:"notes,omitempty"`
+	// CityRecord is city.toml and the city's storage records, when the
+	// snapshot holds the work store (storage_snapshot_city.go).
+	CityRecord *snapshotCityRecord `json:"city_record,omitempty"`
 }
 
 // snapshotBindingRecords is what the binding's database is only half of: the
@@ -95,14 +98,29 @@ type snapshotStoreRecord struct {
 	Edges    int           `json:"edges"`
 	Payloads string        `json:"payloads"`
 	Notes    []string      `json:"notes,omitempty"`
+	// JSONLReadAt is when the store's rows were read for its JSONL. With
+	// Exact.CopiedAt it bounds the window in which a row may have changed
+	// after the copy and before the read, the only rows the city restore's
+	// proof excuses. Zero for a snapshot taken before gc recorded it.
+	JSONLReadAt time.Time `json:"jsonl_read_at,omitzero"`
 }
 
 // snapshotExact is a store's exact copy.
 type snapshotExact struct {
 	Method string        `json:"method"`
 	File   *snapshotFile `json:"file,omitempty"`
-	Tag    string        `json:"tag,omitempty"`
-	Commit string        `json:"commit,omitempty"`
+	// Tree is a directory copy (a managed Dolt's data directory).
+	Tree   *snapshotCopiedTree `json:"tree,omitempty"`
+	Tag    string              `json:"tag,omitempty"`
+	Commit string              `json:"commit,omitempty"`
+	// CopiedAt is when a file copy or a data-directory copy was taken. The
+	// JSONL is read after it, from the live store, so a row it records as
+	// changed at or after this moment may postdate the copy. Zero for a
+	// snapshot taken before gc recorded it, and for the other methods.
+	CopiedAt time.Time `json:"copied_at,omitzero"`
+	// Database is the store's database in a data-directory copy: the
+	// directory holds one per database the server serves.
+	Database string `json:"database,omitempty"`
 }
 
 // snapshotFile is one file in a snapshot, relative to its directory.
@@ -377,8 +395,16 @@ func verifySnapshotFiles(ctx context.Context, dir string, m snapshotManifest) er
 	if len(m.Stores) == 0 {
 		return errors.New("the manifest records no store")
 	}
+	if err := verifySnapshotCity(dir, m.CityRecord); err != nil {
+		return err
+	}
 	for _, rec := range m.Stores {
-		if rec.Exact.File != nil {
+		switch {
+		case rec.Exact.Method == snapshotMethodDoltDataDir:
+			if err := verifySnapshotTree(dir, rec.Exact.Tree); err != nil {
+				return fmt.Errorf("%s: %w", rec.Name, err)
+			}
+		case rec.Exact.File != nil:
 			if err := verifySnapshotFile(dir, *rec.Exact.File); err != nil {
 				return fmt.Errorf("%s: %w", rec.Name, err)
 			}
@@ -387,7 +413,7 @@ func verifySnapshotFiles(ctx context.Context, dir string, m snapshotManifest) er
 					return fmt.Errorf("%s: %w", rec.Name, err)
 				}
 			}
-		} else if rec.Exact.Method != snapshotMethodDoltTag && rec.Exact.Method != snapshotMethodNone {
+		case rec.Exact.Method != snapshotMethodDoltTag && rec.Exact.Method != snapshotMethodNone:
 			return fmt.Errorf("%s: %s records no file", rec.Name, rec.Exact.Method)
 		}
 		if err := verifySnapshotFile(dir, rec.JSONL); err != nil {

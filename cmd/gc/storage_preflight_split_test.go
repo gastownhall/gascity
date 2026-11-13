@@ -1271,3 +1271,51 @@ func TestSplitPreflightMarksAFloorLanesEstimate(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 }
+
+// TestSplitPreflightSizesTheManagedDoltDataDirItSnapshots: on a city whose
+// work store lives in its managed Dolt, the split's snapshot copies the
+// server's whole data directory (snapshotDoltDataDir), so the disk estimate
+// counts its bytes, and a disk the JSONL alone fits but the data directory
+// does not blocks.
+func TestSplitPreflightSizesTheManagedDoltDataDirItSnapshots(t *testing.T) {
+	request, _, _ := splitReadyCity(t, 5, nativeDoltLane)
+	t.Setenv("GC_DOLT_MIN_FREE_BYTES", "0")
+	t.Setenv("GC_DOLT_WARN_FREE_BYTES", "0")
+	free := int64(1) << 50
+	prevFree := doltContainerFreeBytesFunc
+	doltContainerFreeBytesFunc = func(string) (int64, error) { return free, nil }
+	t.Cleanup(func() { doltContainerFreeBytesFunc = prevFree })
+	code, without, out := runSplitPreflight(t, request)
+	if code != 0 || without.Estimate == nil {
+		t.Fatalf("exit %d without a managed Dolt:\n%s", code, out)
+	}
+
+	dataDir := t.TempDir()
+	const size = 3 << 20
+	if err := os.MkdirAll(filepath.Join(dataDir, "hq", ".dolt", "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hq", ".dolt", "noms", "journal.idx"), bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubSnapshotScopeDoltDatabase(t, map[string]string{request.CityPath: "hq"})
+	prevDir := snapshotManagedDoltDataDir
+	snapshotManagedDoltDataDir = func(string) (string, error) { return dataDir, nil }
+	t.Cleanup(func() { snapshotManagedDoltDataDir = prevDir })
+
+	code, with, out := runSplitPreflight(t, request)
+	if code != 0 || with.Estimate == nil {
+		t.Fatalf("exit %d with a managed Dolt:\n%s", code, out)
+	}
+	if grew := with.Estimate.disk.snapshot - without.Estimate.disk.snapshot; grew != size {
+		t.Errorf("the snapshot estimate grew %d, want the data directory's %d bytes", grew, size)
+	}
+	if !strings.Contains(out, "the managed Dolt's data directory") {
+		t.Errorf("the disk row does not name the data directory the snapshot copies:\n%s", out)
+	}
+
+	free = without.Estimate.disk.total() + size/2
+	if code, tight, out := runSplitPreflight(t, request); code != 1 || !slices.Contains(tight.Blocks, "disk") {
+		t.Errorf("exit %d, blocks %v on a disk the data directory does not fit:\n%s", code, tight.Blocks, out)
+	}
+}
