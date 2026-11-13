@@ -167,6 +167,7 @@ cmd_gc_integration_tests=(
   TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
   TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
   TestStorageSnapshotHostedBdWorkStore
+  TestStorageSplitGuidedOnAStoppedManagedDoltCity
   TestTheCityFloorHoldsOnARealBdStore
   TestTheDefaultFloorOpenerReachesARealBdCity
 )

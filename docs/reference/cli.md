@@ -5332,6 +5332,7 @@ gc storage
 | [gc storage remote-stage](#gc-storage-remote-stage) | Mark or unmark this directory as a remote stage of a controller's city |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage snapshot](#gc-storage-snapshot) | Snapshot this city's stores: the binding, the work store, the rigs |
+| [gc storage split](#gc-storage-split) | Split an unsplit city: its infrastructure classes into a binding, its rigs' graph rows with them |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 | [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
 
@@ -5835,6 +5836,50 @@ gc storage snapshot restore <id> [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--to` | string |  | directory the snapshot is in (default &lt;city&gt;/.gc/snapshots) |
+
+## gc storage split
+
+Split this city, in one command, the way the runbook does it by hand.
+
+With the city stopped (gc stop) it takes the controller lock and the
+maintenance window, rehearses the split (gc storage preflight --split) and
+refuses on any block, then: snapshots the work store and the rigs (pinned),
+runs legacy's demand-migration repairs when the split city runs the v2
+reconciler, appends the [storage] block to city.toml and writes
+.gc/min-gc-version, migrates the city's infrastructure classes into the
+binding (gc storage migrate --from-work), imports every rig (--from-rigs),
+repairs the blocking edges no split store resolves (gc doctor --check
+dangling-blocking-edges --fix), proves the city's ready set is the one it read
+before the copy, and checks the result (gc storage status, the storage-split
+doctor check). It closes naming both ways back: gc storage migrate --to-work,
+which keeps what was written since, and gc storage snapshot restore &lt;id&gt;
+--city, which puts the city back as the pinned snapshot found it.
+
+It records each step in .gc/storage-split.journal.json, with city.toml's
+bytes from before the split, which gc storage migrate --to-work restores.
+Run it again to continue a split that stopped: on its time budget (exit 75),
+on a rig the import refused, or killed. A split stopped before it wrote
+city.toml starts over.
+
+--abandon backs out a split stopped before the city's copy converged: city.toml
+gets its bytes from before the split back (or [storage] removed, if it changed
+since), the half-copied binding rows are deleted, and the version floor is
+removed. Past the convergence marker the way back is gc storage migrate
+--to-work, which keeps every bead written to the binding since.
+
+--dry-run is gc storage preflight --split.
+
+```
+gc storage split [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--abandon` | bool |  | back out a split stopped before the city's copy converged |
+| `--dry-run` | bool |  | rehearse the split (gc storage preflight --split): no lock, nothing written |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--time-budget` | duration | `30m0s` | stop the city's copy or clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
 
 ## gc storage status
 

@@ -6,7 +6,7 @@ package main
 // A city is more than its stores. What it serves from is decided by
 // city.toml's [storage], what a gc may run on it by .gc/min-gc-version, and
 // what a split has done by the storage records under .gc (the served-binding
-// note, the cleared notes). A snapshot that includes the work store also
+// note, the cleared notes, the guided split's journal). A snapshot that includes the work store also
 // records those (snapshotCityRecord): city.toml's bytes, and each record's
 // bytes or its absence.
 //
@@ -118,6 +118,7 @@ func snapshotCityRecordRels(cityPath string) ([]string, error) {
 		filepath.Join(".gc", minGCVersionFileName),
 		rel(cityPath, infraClearedNotePath(cityPath)),
 		rel(cityPath, bornSplitServedNotePath(cityPath)),
+		rel(cityPath, storageSplitJournalPath(cityPath)),
 	}
 	notes, err := filepath.Glob(rigGraphClearedNotePath(cityPath, "*"))
 	if err != nil {
