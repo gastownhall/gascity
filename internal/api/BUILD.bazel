@@ -456,6 +456,7 @@ go_test(
         "logwatcher_test.go",
         "loopback_transport_test.go",
         "mail_session_inbox_test.go",
+        "maintenance_retired_test.go",
         "middleware_host_test.go",
         "mutation_error_test.go",
         "nudge_queue_state_test.go",

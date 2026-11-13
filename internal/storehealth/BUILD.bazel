@@ -18,6 +18,7 @@ go_library(
 go_test(
     name = "storehealth_test",
     srcs = [
+        "maintenance_retired_test.go",
         "quarantine_test.go",
         "storehealth_test.go",
         "testenv_import_test.go",

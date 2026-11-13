@@ -17,6 +17,7 @@ go_test(
         "cursors_test.go",
         "exporter_test.go",
         "golden_test.go",
+        "maintenance_retired_test.go",
         "project_test.go",
         "validate_test.go",
     ],

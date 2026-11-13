@@ -4564,6 +4564,20 @@ func TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTable
 			if len(eventLines) != 2 {
 				t.Fatalf("expected 2 cumulative quarantine events (create + auto-clear), got %d\nlog:\n%s", len(eventLines), gcLog)
 			}
+			// The cleared alert carries its own type so a recipient can tell
+			// "quarantined" from "auto-cleared" without parsing the reason.
+			var created, cleared int
+			for _, line := range eventLines {
+				switch {
+				case strings.Contains(line, "type=compact-quarantine-autoclear "):
+					cleared++
+				case strings.Contains(line, "type=compact-quarantine "):
+					created++
+				}
+			}
+			if created != 1 || cleared != 1 {
+				t.Fatalf("want one type=compact-quarantine and one type=compact-quarantine-autoclear event, got created=%d cleared=%d\nlog:\n%s", created, cleared, gcLog)
+			}
 		})
 	}
 }

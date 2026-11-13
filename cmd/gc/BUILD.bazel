@@ -1792,6 +1792,7 @@ go_test(
         "mail_session_inbox_test.go",
         "main_scope_symlink_test.go",
         "main_test.go",
+        "maintenance_retired_test.go",
         "maintenance_startup_test.go",
         "managed_dolt_flight_test.go",
         "management_json_test.go",
