@@ -472,7 +472,9 @@ no meaning of its own:
 | `gone` | 80 | all four | no running box holds the name: none holds it, or the box that does is dead (`observe` would report `dead`) (`ErrSessionNotFound`) | releases it, no attempt |
 
 `detail` is optional, at most 1 KiB, and must hold no secrets: gc puts it in
-the error it reports. Unknown fields are ignored.
+the error it reports, with control characters replaced by spaces and cut at
+1 KiB on a character boundary. Unknown fields are ignored. Trailing newlines
+after the line are ignored on both exit codes, as everywhere gc reads stdout.
 
 The exit code is the class and the line is detail inside it. Exit 0 always
 means delivered: gc ignores anything on exit 0 but the two delivered lines,

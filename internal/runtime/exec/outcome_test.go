@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -345,4 +347,56 @@ func TestInputOutcomeSkipsPresenceCheckWhenRead(t *testing.T) {
 			t.Errorf("Nudge spawned %v, want only nudge once exec is known unsupported", got)
 		}
 	})
+}
+
+// TestInputOutcomeTrailingNewlinesAreOneRule pins one reading of trailing
+// newlines for both exit codes, the same one conformance and gc runtime
+// check apply: exit 0 already drops every trailing newline, so an exit 80
+// outcome line followed by blank lines is that line, not "more than one
+// line" (which would charge a gone, busy or unavailable as untyped).
+func TestInputOutcomeTrailingNewlinesAreOneRule(t *testing.T) {
+	for _, d := range drivingCalls {
+		t.Run(d.op, func(t *testing.T) {
+			pk := newOpsPack(t, outcomeCaps)
+			pk.answer(t, `{"outcome":"gone"}`+"\n\n\n", runtime.ExitCodeInputOutcome)
+			if err := d.call(NewProvider(pk.script)); !errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Fatalf("%s exit 80 gone with trailing blank lines = %v, want runtime.ErrSessionNotFound", d.op, err)
+			}
+		})
+	}
+	t.Run("nudge exit 0", func(t *testing.T) {
+		pk := newOpsPack(t, outcomeCaps)
+		pk.answer(t, `{"outcome":"delivered_unobserved"}`+"\n\n\n", 0)
+		if err := NewProvider(pk.script).Nudge("s", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+			t.Fatalf("nudge exit 0 delivered_unobserved with trailing blank lines = %v, want runtime.ErrNudgeDeliveredUnobserved", err)
+		}
+	})
+}
+
+// TestInputOutcomeDetailIsSanitized pins the pack-controlled detail an
+// outcome's error carries: cut at the cap on a character boundary, never
+// mid-rune, and stripped of control characters (newlines included), so it
+// cannot forge log lines or split a UTF-8 character.
+func TestInputOutcomeDetailIsSanitized(t *testing.T) {
+	long := strings.Repeat("a", inputOutcomeDetailCap-1) + "é and more"
+	for name, detail := range map[string]string{
+		"control characters": "line one\nforged: line\r\x1b[31mred\x00",
+		"cut mid-rune":       long,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := outcomeError("nudge", "s", runtime.InputOutcomeGone, detail)
+			msg := err.Error()
+			if !utf8.ValidString(msg) {
+				t.Errorf("error %q is not valid UTF-8", msg)
+			}
+			for _, r := range msg {
+				if unicode.IsControl(r) {
+					t.Errorf("error %q carries control character %U", msg, r)
+				}
+			}
+			if !errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Errorf("error %v does not wrap the gone sentinel", err)
+			}
+		})
+	}
 }

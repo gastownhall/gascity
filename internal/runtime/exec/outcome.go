@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -66,10 +68,11 @@ func InputOutcomeAllowed(op string, word runtime.InputOutcome) bool {
 }
 
 // ParseInputOutcome parses a driving op's stdout as exactly one outcome
-// line: one JSON object naming a known word, followed by nothing but an
-// optional newline. It returns the word and its detail.
+// line: one JSON object naming a known word, followed by nothing but
+// newlines. Trailing newlines are dropped as on exit 0 (runCapped), one rule
+// for both exit codes. It returns the word and its detail.
 func ParseInputOutcome(stdout string) (runtime.InputOutcome, string, error) {
-	line := strings.TrimSuffix(stdout, "\n")
+	line := strings.TrimRight(stdout, "\n")
 	if line == "" {
 		return "", "", fmt.Errorf("%w: no outcome line", errMalformedOutcome)
 	}
@@ -144,16 +147,31 @@ func inputOutcomeAnswer(op, name string, code int, stdout string, base error) er
 }
 
 // outcomeError is a valid word's error: its sentinel, naming the op, the
-// session and the pack's detail (bounded).
+// session and the pack's detail (sanitizeDetail).
 func outcomeError(op, name string, word runtime.InputOutcome, detail string) error {
-	if len(detail) > inputOutcomeDetailCap {
-		detail = detail[:inputOutcomeDetailCap]
-	}
 	what := string(word)
-	if detail = strings.TrimSpace(detail); detail != "" {
+	if detail = sanitizeDetail(detail); detail != "" {
 		what += ": " + detail
 	}
 	return fmt.Errorf("exec provider %s %q: %s: %w", op, name, what, word.Sentinel())
+}
+
+// sanitizeDetail makes a pack's detail safe for errors that reach logs and
+// CLI output: control characters (newlines included) become spaces, invalid
+// UTF-8 is dropped, and the result is cut at inputOutcomeDetailCap bytes on a
+// character boundary, then trimmed.
+func sanitizeDetail(detail string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(detail, "") {
+		if unicode.IsControl(r) {
+			r = ' '
+		}
+		if b.Len()+utf8.RuneLen(r) > inputOutcomeDetailCap {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // inputOutcomesDeclared reports whether the pack's successful handshake
