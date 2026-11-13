@@ -2710,14 +2710,19 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 			// that does not set it keeps the previous behavior.
 			//
 			// A check that failed is still not a zero: it stays partial, falls
-			// through to the probe, and wakes the pool exactly as before.
-			// Suppressing a wake on a count we do not trust would strand routed
-			// work with no claimant.
-			if in.ColdWakeTemplates[template] && authoritativeScaleCheck[template] {
-				continue
-			}
+			// through to the probe, and reports the probe's demand exactly as
+			// before (the existing partial-demand guard still decides whether a
+			// fresh session is created). Suppressing a wake on a count we do not
+			// trust would strand routed work with no claimant.
 			if in.ColdWakeTemplates[template] && count > 1 {
 				count = 1
+			}
+			// An authoritative check's count is the last word: the probe may name
+			// work for at most that many seats and never raises the count, so a clean
+			// 0 contributes nothing (mergeScaleCheckDemand ignores count <= 0) while a
+			// positive answer still carries the probe's work/worktree provenance.
+			if in.ColdWakeTemplates[template] && authoritativeScaleCheck[template] && count > scaleCheckCounts[template] {
+				count = scaleCheckCounts[template]
 			}
 			// An on_demand named-session backing template is a singleton: one pool
 			// slot is enough to drain N queued routed tasks sequentially. Clamp to

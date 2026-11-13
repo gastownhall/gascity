@@ -3834,8 +3834,9 @@ type Agent struct {
 	// Set this only when the check reads the same store the routed work lives
 	// in — then the probe can discover nothing the check has not already
 	// weighed, and its disagreement is pure churn. A check that FAILS is
-	// still not a zero: it stays partial and falls through to the probe, so
-	// this cannot strand routed work behind a broken check.
+	// still not a zero: it stays partial and falls through to the probe
+	// exactly as without this flag, so it adds no new way to strand routed
+	// work.
 	ScaleCheckAuthoritative bool `toml:"scale_check_authoritative,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
