@@ -19,8 +19,11 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
-	if store == nil {
+// appendMetadataAttachedChildren appends the molecules parent's metadata
+// names to children, read through store, the owner resolveBeadOwner found
+// parent in.
+func appendMetadataAttachedChildren(store beads.ResidentStore, parent beads.Bead, children []beads.Bead) []beads.Bead {
+	if beads.IsNilStore(store) {
 		return children
 	}
 	seen := make(map[string]struct{}, len(children))
@@ -334,7 +337,8 @@ type BeadGraphResponse struct {
 }
 
 // collectBeadGraph resolves the member set of the graph rooted at root and the
-// parent-child edges within it. The membership rule it applied is returned
+// parent-child edges within it, reading store, the owner resolveBeadOwner
+// found root in. The membership rule it applied is returned
 // alongside, so the handler reports it on the wire instead of the caller
 // inferring it: beads.MembershipRootIDAndParentClosure, widened to
 // beads.MembershipRootIDParentClosureAndConvoy when the root is a convoy.
@@ -362,7 +366,7 @@ type BeadGraphResponse struct {
 // the closure covers the convoy members too and a convoy member brings its own
 // subtree. That is what the "+parent-closure" half of both spellings means; it
 // is not the closure of the root alone.
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
+func collectBeadGraph(store beads.ResidentStore, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -404,6 +408,8 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 
 	if root.Type == "convoy" {
 		membership = beads.MembershipRootIDParentClosureAndConvoy
+		// A convoy root is work class; its owner is relabeled a work handle
+		// until storeref names a class for a by-id owner (T7b.2's MoleculeAt).
 		members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, root.ID, true)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)

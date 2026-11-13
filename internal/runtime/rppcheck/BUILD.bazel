@@ -15,6 +15,7 @@ go_library(
 go_test(
     name = "rppcheck_test",
     srcs = [
+        "carrier_ops_test.go",
         "rppcheck_test.go",
         "testenv_import_test.go",
     ],

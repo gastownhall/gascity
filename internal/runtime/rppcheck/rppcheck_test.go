@@ -894,3 +894,131 @@ func scriptOp(script, stdin string, args ...string) (string, error) {
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
+
+// outcomeReference writes the input-outcome golden with bodies overridden.
+func outcomeReference(t *testing.T, bodies map[string]string) string {
+	t.Helper()
+	all := reference.InputOutcomeBodies(reference.Bodies())
+	for op, body := range bodies {
+		all[op] = body
+	}
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Kills an input-outcome smoke check that does not run, or does not gate,
+// the nudge to an absent name a script declaring the token owes: the golden
+// passes it, and every other check too (its post-stop interrupt answers a
+// typed gone, not the undeclared exit 0); a nudge answering an absent name
+// with exit 0, an empty exit 80, another word or exit 1 fails it; and an
+// undeclared script is not checked.
+func TestRun_InputOutcomeSmoke(t *testing.T) {
+	res, err := Run(context.Background(), outcomeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed() {
+		for _, c := range res.Checks {
+			if c.Status == StatusFail {
+				t.Errorf("golden: %s failed: %s", c.Name, c.Detail)
+			}
+		}
+	}
+	if c := findCheck(t, res, inputOutcomeCheck); c.Status != StatusPass {
+		t.Errorf("golden: %s = %s (%s), want PASS", inputOutcomeCheck, c.Status, c.Detail)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusPass || !strings.Contains(c.Detail, "gone") {
+		t.Errorf("golden: post-stop interrupt = %s (%s), want PASS on a typed gone", c.Status, c.Detail)
+	}
+	golden := reference.InputOutcomeBodies(reference.Bodies())["nudge"]
+	for name, body := range map[string]string{
+		"exit 0":       strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 0;`, 1),
+		"empty 80":     strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`, 1),
+		"another word": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out not_sent;`, 1),
+		"exit 1":       strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 1;`, 1),
+		"past the cap": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || `+goneBeyondCap+`;`, 1),
+	} {
+		if body == golden {
+			t.Fatalf("mutant %s does not apply", name)
+		}
+		res, err := Run(context.Background(), outcomeReference(t, map[string]string{"nudge": body}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, inputOutcomeCheck); c.Status != StatusFail {
+			t.Errorf("mutant %s: %s = %s (%s), want FAIL", name, inputOutcomeCheck, c.Status, c.Detail)
+		}
+	}
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `[ -d "$box" ] || ` + goneBeyondCap + `; out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status == StatusPass && strings.Contains(c.Detail, "gone") {
+		t.Errorf("post-stop interrupt answering gone past gc's stdout cap = %s (%s), want it not read as a typed gone", c.Status, c.Detail)
+	}
+	if hasCheck(observeResult(t), inputOutcomeCheck) {
+		t.Error("a script without input-outcome reports an input-outcome check")
+	}
+}
+
+// goneBeyondCap is a shell exit-80 answer of one gone line padded with
+// trailing newlines past gc's stdout cap (sessionexec.InputOutcomeStdoutCap),
+// which gc reads as malformed.
+const goneBeyondCap = `{ echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; }`
+
+// observeResult runs the check over the base golden, which does not declare
+// input-outcome.
+func observeResult(t *testing.T) Result {
+	t.Helper()
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// Kills a check that reads a typed refusal from a driving op to the session
+// rppcheck just started and verified running as a pass: a nudge that never
+// delivers fails "required: nudge" whatever word it answers, a carrier.ops
+// key op that always answers rejected fails its carrier.ops check, and the
+// post-stop interrupt accepts only gone.
+func TestRun_InputOutcomeRefusalOnARunningSessionFails(t *testing.T) {
+	for _, word := range []string{"not_sent", "rejected", "gone", "unavailable", "busy", "pending_interaction"} {
+		path := outcomeReference(t, map[string]string{"nudge": `cat >/dev/null; out ` + word})
+		res, err := Run(context.Background(), path, Options{RequireNudge: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, "required: nudge"); c.Status != StatusFail {
+			t.Errorf("nudge always %s: required: nudge = %s (%s), want FAIL", word, c.Status, c.Detail)
+		}
+		if !res.Failed() {
+			t.Errorf("nudge always %s: the run did not fail", word)
+		}
+	}
+
+	ops := reference.InputOutcomeBodies(reference.NonTmuxBodies())
+	ops["send-keys"] = `out rejected`
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), ops)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "capability carrier.ops: send-keys"); c.Status != StatusFail {
+		t.Errorf("send-keys always rejected: %s (%s), want FAIL", c.Status, c.Detail)
+	}
+
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusFail {
+		t.Errorf("post-stop interrupt answering not_sent = %s (%s), want FAIL: only gone answers a stopped session", c.Status, c.Detail)
+	}
+}

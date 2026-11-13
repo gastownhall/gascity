@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3100,6 +3101,11 @@ func TestBdStorePurge(t *testing.T) {
 	if strings.Contains(args, "--dry-run") {
 		t.Errorf("args = %q, should not contain --dry-run", args)
 	}
+	// A real purge must confirm with --force: unforced bd purge only
+	// previews and exits non-zero when anything matches.
+	if !slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, want --force for a non-dry-run purge", args)
+	}
 	// Dir should be parent of beads dir.
 	if gotDir != "/city/rigs/fe" {
 		t.Errorf("dir = %q, want %q", gotDir, "/city/rigs/fe")
@@ -3128,8 +3134,12 @@ func TestBdStorePurgeDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
-	if !strings.Contains(args, "--dry-run") {
+	if !slices.Contains(gotArgs, "--dry-run") {
 		t.Errorf("args = %q, want --dry-run", args)
+	}
+	// A preview must never confirm the deletion.
+	if slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, dry-run must not contain --force", args)
 	}
 }
 

@@ -160,7 +160,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
-    git \
     jq \
     # lsof: TCP-LISTEN / port discovery for Dolt — runtime hard dep (gc doctor), not optional diagnostics.
     lsof \
@@ -175,6 +174,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt \
     libapt-pkg6.0t64 \
     && rm -rf /var/lib/apt/lists/*
+
+# git comes from the git-core PPA ("Ubuntu Git Maintainers", signing key
+# F911AB184317630C59970973E363C90F8F1B6217, the fingerprint Launchpad publishes
+# for ~git-core/+archive/ubuntu/ppa). CVE-2026-105437, a heap overflow in
+# xdiff's three-way merge reachable from a committed .gitattributes, is fixed in
+# 2.50.2, 2.51.3, 2.52.1, 2.53.1, 2.54.1, 2.55.1 and 2.56.1, and the Ubuntu
+# archive has no fixed git yet (noble is 1:2.43.0-1ubuntu7.4). The PPA keeps
+# only its newest build, so the version is asserted as a floor, not pinned.
+# The source stays configured so a later apt upgrade keeps following it.
+ARG GIT_MIN_VERSION=1:2.56.1
+COPY contrib/k8s/git-core-ppa.asc /etc/apt/keyrings/git-core-ppa.asc
+RUN printf '%s\n' \
+        'Types: deb' \
+        'URIs: https://ppa.launchpadcontent.net/git-core/ppa/ubuntu' \
+        "Suites: $(. /etc/os-release && echo "${VERSION_CODENAME}")" \
+        'Components: main' \
+        'Signed-By: /etc/apt/keyrings/git-core-ppa.asc' \
+        > /etc/apt/sources.list.d/git-core-ppa.sources \
+    && chmod 0644 /etc/apt/keyrings/git-core-ppa.asc \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' git)" ge "${GIT_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && git --version
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
 RUN /tmp/install-claude-native.sh "${CLAUDE_CODE_VERSION}" \

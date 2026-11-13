@@ -4222,6 +4222,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares carrier.ops is driven only through its
+nudge, peek, send-keys, interrupt and clear-scrollback operations, so each
+is reported as "capability carrier.ops: &lt;op&gt;" and an absent or broken one
+fails the run; this naming takes precedence over "required: nudge". With
+idle-boundary declared as well, "capability carrier.ops: ready-prompt
+metadata" requires set-meta and get-meta to round-trip a non-default ready
+prompt byte for byte, because gc keeps each session's prompt there.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in, twice. The check runs it,
 and the session it checks it against, in a private city: GC_EXEC_CITY_NAME

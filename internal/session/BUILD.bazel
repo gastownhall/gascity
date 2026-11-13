@@ -322,6 +322,7 @@ go_test(
         "@rules_go//go/platform:android": [
             "//internal/nudgepoller",
             "//internal/pidutil",
+            "//internal/runtime/runtimecontract/reference",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/nudgepoller",
@@ -346,6 +347,7 @@ go_test(
         "@rules_go//go/platform:linux": [
             "//internal/nudgepoller",
             "//internal/pidutil",
+            "//internal/runtime/runtimecontract/reference",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/nudgepoller",

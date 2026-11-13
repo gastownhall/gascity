@@ -51,6 +51,11 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		// The profile does not declare fs.host.
 		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
 		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true, runtimecontract.ReqFSHostHomeView: true,
+		// The profile does not declare input-outcome.
+		runtimecontract.ReqInputNudgeDelivered: true, runtimecontract.ReqInputNudgeAbsentGone: true, runtimecontract.ReqInputKeysAbsentGone: true,
+		runtimecontract.ReqInputWordsAllowedOnOp: true, runtimecontract.ReqInputBlockedNotTyped: true, runtimecontract.ReqInputUnavailable: true,
+		runtimecontract.ReqInputLostReplyUnknown: true, runtimecontract.ReqInputExitZeroIsDelivered: true, runtimecontract.ReqInputHeldSendTypedOnce: true,
+		runtimecontract.ReqInputExit80OneLine: true, runtimecontract.ReqInputDeadBoxGone: true, runtimecontract.ReqInputKeysDelivered: true,
 	}
 	for _, res := range report.Results {
 		switch {
