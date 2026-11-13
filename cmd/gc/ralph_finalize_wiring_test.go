@@ -23,6 +23,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -206,11 +207,11 @@ func startWiringWorkflow(t *testing.T, sc wiringScenario) (*beads.MemStore, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := convoycore.TrackItem(store, convoy.ID, item.ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, item.ID); err != nil {
 		t.Fatal(err)
 	}
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.CityPath = cityPath
 	worker, ok := resolveAgentIdentity(cfg, "worker", "")
 	if !ok {
@@ -255,7 +256,7 @@ func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 				continue
 			}
-			result, err := dispatch.ProcessControl(store, bead, dispatch.ProcessOptions{CityPath: cityPath})
+			result, err := dispatch.ProcessControl(beadstest.Graph(store), bead, dispatch.ProcessOptions{CityPath: cityPath, Work: beadstest.Work(store)})
 			if err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					continue

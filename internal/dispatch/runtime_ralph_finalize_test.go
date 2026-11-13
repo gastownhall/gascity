@@ -20,6 +20,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // ralphScan is a hand-built workflow root plus its finalizer, the inputs of
@@ -66,7 +67,7 @@ func (s *ralphScan) add(closed bool, meta map[string]string) beads.Bead {
 
 func (s *ralphScan) terminal() (beads.Bead, bool) {
 	s.t.Helper()
-	got, found, err := terminalAbortScopeFailureMember(s.store, s.root.ID, s.finalizer.ID, ProcessOptions{})
+	got, found, err := terminalAbortScopeFailureMember(beadstest.Graph(s.store), s.root.ID, s.finalizer.ID, ProcessOptions{})
 	if err != nil {
 		s.t.Fatalf("terminalAbortScopeFailureMember: %v", err)
 	}
@@ -588,7 +589,7 @@ func TestFinalizeCulpritSkipsExemptRalphMemberToNonRalphFailure(t *testing.T) {
 			// Every direct blocker passed, so the outcome comes from the scan.
 			mustDepAdd(t, s.store, s.finalizer.ID, c.ID, "blocks")
 
-			members, err := rootViewMembers(s.store, s.root.ID, ProcessOptions{})
+			members, err := rootViewMembers(beadstest.Graph(s.store), s.root.ID, ProcessOptions{})
 			if err != nil {
 				t.Fatalf("rootViewMembers: %v", err)
 			}
@@ -598,14 +599,14 @@ func TestFinalizeCulpritSkipsExemptRalphMemberToNonRalphFailure(t *testing.T) {
 			}
 			t.Logf("rootViewMembers order: %q (M=%s X=%s)", order, m.ID, x.ID)
 
-			outcome, err := resolveFinalizeOutcome(s.store, s.finalizer, ProcessOptions{})
+			outcome, err := resolveFinalizeOutcome(beadstest.Graph(s.store), s.finalizer, ProcessOptions{})
 			if err != nil {
 				t.Fatalf("resolveFinalizeOutcome: %v", err)
 			}
 			if outcome != beadmeta.OutcomeFail {
 				t.Errorf("finalize outcome = %q, want %q", outcome, beadmeta.OutcomeFail)
 			}
-			diag := resolveFinalizeFailureDiagnostics(s.store, s.finalizer, ProcessOptions{})
+			diag := resolveFinalizeFailureDiagnostics(beadstest.Graph(s.store), s.finalizer, ProcessOptions{})
 			if got := diag[beadmeta.FailureSubjectMetadataKey]; got != x.ID {
 				t.Errorf("failure culprit = %q, want X %q (M is %q)", got, x.ID, m.ID)
 			}
