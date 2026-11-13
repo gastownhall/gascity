@@ -108,7 +108,7 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 			HasLegacyResidents:   known || hasLegacyResidents(opts.Relics, store),
 			KnownLegacyResidents: known,
 		})
-		if refusing, ok := store.(RefusingStore); ok && refused == nil {
+		if refusing, ok := beads.As[RefusingStore](store); ok && refused == nil {
 			refused = refusing.StorageRefusal()
 		}
 	}

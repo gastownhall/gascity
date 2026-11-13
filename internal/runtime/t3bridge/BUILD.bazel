@@ -49,7 +49,9 @@ go_test(
     deps = [
         "//internal/events",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
+        "//internal/testutil",
         "@com_github_gorilla_websocket//:websocket",
     ],
 )

@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
@@ -80,7 +82,7 @@ func TestProcessRalphCheckBlindReadDoesNotBurnAttempt(t *testing.T) {
 			}
 			check1 = mustGetBead(t, store, check1.ID)
 
-			_, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			_, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if !errors.Is(err, ErrControlPending) {
 				t.Fatalf("ProcessControl on a blind gate read = %v, want ErrControlPending (re-run without burning an attempt)", err)
 			}
@@ -118,7 +120,7 @@ func TestProcessRalphCheckVerdictMarkerStillBurnsAttempt(t *testing.T) {
 			}
 			check1 = mustGetBead(t, store, check1.ID)
 
-			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -149,7 +151,7 @@ func TestProcessRalphCheckBlindReadBudgetExhaustionBurns(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -173,7 +175,7 @@ func TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -182,5 +184,70 @@ func TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt(t *testing.T) {
 	}
 	if r := mustGetBead(t, store, check1.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
 		t.Errorf("gc.check_infra_retry = %q, want empty for an ordinary gate failure", r)
+	}
+}
+
+// TestProcessRalphControlBlindReadDoesNotBurnIteration carries ga-pqlgh to the
+// compiled kind=ralph lane (formula-spec-v2 §3.1): a check that exits 75, or
+// exits nonzero with a typed infrastructure string on stderr, produced no
+// verdict and re-runs attempt-free under the infrastructure budget.
+func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range blindGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "blind-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			beadsBefore := countAllBeads(t, store)
+
+			result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+			if !errors.Is(err, ErrControlPending) {
+				t.Fatalf("ProcessControl on a blind read = (%+v, %v), want ErrControlPending (re-run without spending the iteration)", result, err)
+			}
+			assertRalphControlInfraRetryPending(t, store, control.ID, "1", beadsBefore)
+		})
+	}
+}
+
+// TestProcessRalphControlVerdictStillBurnsIteration is the compiled-lane
+// counterpart of the blind-read table: an ordinary nonzero exit, and a stderr
+// that merely mentions an infrastructure string, are verdicts. They spend the
+// iteration and never touch the infrastructure budget.
+func TestProcessRalphControlVerdictStillBurnsIteration(t *testing.T) {
+	t.Parallel()
+
+	cases := append([]struct {
+		name   string
+		script string
+	}{{name: "plain exit 1", script: "#!/bin/sh\necho 'tests failed' >&2\nexit 1\n"}}, verdictGateCases...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+
+			result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if !result.Processed || result.Action != "fail" {
+				t.Fatalf("result = %+v, want processed fail (a verdict spends the only iteration)", result)
+			}
+			got := mustGet(t, store, control.ID)
+			if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			if fa := got.Metadata[beadmeta.FailedAttemptMetadataKey]; fa != "1" {
+				t.Errorf("gc.failed_attempt = %q, want 1", fa)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+				t.Errorf("gc.check_infra_retry = %q, want empty — a verdict must not spend the infra budget", r)
+			}
+		})
 	}
 }

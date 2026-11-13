@@ -124,19 +124,27 @@ func SupportedVendors() []string {
 // that a sink symlink will target.
 type SkillEntry struct {
 	// Name is the skill name (sink leaf). Matches the source directory
-	// basename, e.g. "gc-work" or "plan".
+	// basename, e.g. "gc-work" or "plan", qualified as
+	// "<binding>.<basename>" (e.g. "core.gc-work") for a skill imported
+	// under a pack binding.
 	Name string
 	// Source is the absolute filesystem path of the source directory.
 	// The materialized symlink targets this path.
 	Source string
 	// Origin is a diagnostic label describing which catalog this entry
-	// came from. One of: "city", "<bootstrap-pack-name>", "agent".
+	// came from. One of: "city", "<binding-name>" for an imported pack,
+	// "<bootstrap-pack-name>", "agent".
 	Origin string
 	// Description is the one-line summary pulled from the SKILL.md YAML
 	// frontmatter `description:` field, or "" when the frontmatter is
 	// absent/malformed. Used by prompt-rendering surfaces that want to
 	// show each skill's purpose alongside its name.
 	Description string
+	// FrontmatterName is the SKILL.md YAML frontmatter `name:` value, or
+	// "" when unavailable. It is display metadata only — a provider that
+	// registers skills by frontmatter name loads the skill under it — and
+	// never an identity key: Name keys the sink, manifest and fingerprints.
+	FrontmatterName string
 }
 
 // ShadowedEntry records a name that was provided by more than one source
@@ -813,36 +821,46 @@ func LegacyStubNames() []string {
 	return out
 }
 
-// readSkillDescription parses the SKILL.md YAML frontmatter and returns
-// the `description:` value. Returns "" when:
+// skillFrontmatter holds the SKILL.md frontmatter fields gc reads.
+type skillFrontmatter struct {
+	Name        string
+	Description string
+}
+
+// readSkillFrontmatter parses the SKILL.md YAML frontmatter and returns
+// its `name:` and `description:` values. Both are "" when:
 //   - the file is unreadable
-//   - the file has no `---` frontmatter delimiters
-//   - the frontmatter lacks a description key
+//   - the file has no opening `---` delimiter on its first line
 //
-// Only the first 64 lines of the file are scanned — description lives
-// in frontmatter near the top; this caps the I/O cost of rendering
-// every skill's description alongside the catalog without pulling
-// large skill bodies into memory.
+// and each is "" when the frontmatter lacks its key.
 //
-// This is a minimal YAML consumer rather than a real parser. It
-// recognizes `description: <value>` (single-line), strips optional
-// surrounding quotes, and stops at the closing `---` delimiter.
-// Multi-line block scalars (`description: >\n  ...`) are not
-// supported in v0.15.1 and return "" — same end state as a missing
-// description, which the caller handles gracefully.
-func readSkillDescription(path string) string {
+// Only the first 64 lines of the file are scanned — both keys live in
+// frontmatter near the top; this caps the I/O cost of reading every
+// skill alongside the catalog without pulling large skill bodies into
+// memory.
+//
+// This is a minimal YAML consumer rather than a real parser. It stops
+// at the closing `---` delimiter, keeps the first value seen for each
+// key, trims it and strips one matching pair of surrounding quotes.
+// `name:` matches only at column zero, so a nested `name:` under
+// another key is not the skill's name; `description:` also matches
+// when indented. Values are taken literally from their own line: a
+// block-scalar indicator (`description: >`) or an inline `# comment`
+// is returned as written.
+func readSkillFrontmatter(path string) skillFrontmatter {
+	var fm skillFrontmatter
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return fm
 	}
 	// Strip optional UTF-8 BOM before the frontmatter check. Editors
 	// on Windows and some export pipelines prepend EF BB BF; without
 	// this the prefix check would silently fail and every exported
-	// SKILL.md would surface with a blank description.
+	// SKILL.md would surface with blank frontmatter.
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	// Require frontmatter to begin on the first line.
 	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
-		return ""
+		return fm
 	}
 	// Find the closing `---` on a line by itself.
 	lines := strings.Split(text, "\n")
@@ -851,27 +869,38 @@ func readSkillDescription(path string) string {
 	if end > maxScan {
 		end = maxScan
 	}
-	for i := 1; i < end; i++ {
+	var seenName, seenDescription bool
+	for i := 1; i < end && (!seenName || !seenDescription); i++ {
 		line := strings.TrimRight(lines[i], "\r")
 		if line == "---" {
 			break
 		}
-		trimmed := strings.TrimLeft(line, " \t")
-		if !strings.HasPrefix(trimmed, "description:") {
+		if !seenName && strings.HasPrefix(line, "name:") {
+			fm.Name = frontmatterValue(strings.TrimPrefix(line, "name:"))
+			seenName = true
 			continue
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
-		// Strip a matching pair of surrounding quotes; no escape handling
-		// needed for the typical single-line description.
-		if len(value) >= 2 {
-			first, last := value[0], value[len(value)-1]
-			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-				value = value[1 : len(value)-1]
-			}
+		trimmed := strings.TrimLeft(line, " \t")
+		if !seenDescription && strings.HasPrefix(trimmed, "description:") {
+			fm.Description = frontmatterValue(strings.TrimPrefix(trimmed, "description:"))
+			seenDescription = true
 		}
-		return value
 	}
-	return ""
+	return fm
+}
+
+// frontmatterValue trims a single-line frontmatter value and strips a
+// matching pair of surrounding quotes; no escape handling is needed for
+// the typical single-line value.
+func frontmatterValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return value
 }
 
 // readSkillDir enumerates skill subdirectories of root. A subdirectory
@@ -906,11 +935,13 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 		if _, statErr := os.Stat(skillMD); statErr != nil {
 			continue
 		}
+		fm := readSkillFrontmatter(skillMD)
 		out = append(out, SkillEntry{
-			Name:        e.Name(),
-			Source:      dir,
-			Origin:      origin,
-			Description: readSkillDescription(skillMD),
+			Name:            e.Name(),
+			Source:          dir,
+			Origin:          origin,
+			Description:     fm.Description,
+			FrontmatterName: fm.Name,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

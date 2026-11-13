@@ -13,9 +13,14 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// idleHandshake declares the three capabilities that give an exec pack an
+// idleHandshake declares the four capabilities that give an exec pack an
 // idle boundary.
-const idleHandshake = `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`
+const idleHandshake = `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment","idle-boundary"]}`
+
+// noIdleBoundaryHandshake declares an activity clock, an attachment probe and
+// the exec connection, as a pack whose box runs no tmux (whose agent gc
+// cannot read with capture-pane) declares them honestly.
+const noIdleBoundaryHandshake = `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`
 
 // Pane fixtures, as `tmux capture-pane -p` prints them.
 const (
@@ -157,11 +162,14 @@ func (pk idlePack) ops(t *testing.T) string {
 	return string(data)
 }
 
-// Only a pack declaring report-activity, report-attachment AND proc.exec has
-// an idle boundary, so only it gets full; everything else keeps the timed-only
-// floor, never disabled, through the raw and the seam-backed provider alike.
+// Only a pack declaring report-activity, report-attachment, proc.exec AND
+// idle-boundary has an idle boundary, so only it gets full; everything else
+// keeps the timed-only floor, never disabled, through the raw and the
+// seam-backed provider alike.
 // Kills: the hard-coded timed_only, full without proc.exec (no way to read
-// the pane), full from activity+attachment alone, and a disabled floor.
+// the pane), full from activity+attachment alone, full from the first three
+// without idle-boundary (a box with no tmux, whose pane capture always fails),
+// and a disabled floor.
 func TestSleepCapabilityDerivedFromHandshake(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -174,7 +182,10 @@ func TestSleepCapabilityDerivedFromHandshake(t *testing.T) {
 		{"activity and attachment", `{"version":0,"capabilities":["report-activity","report-attachment"]}`, runtime.SessionSleepCapabilityTimedOnly},
 		{"exec and activity", `{"version":0,"capabilities":["proc.exec","report-activity"]}`, runtime.SessionSleepCapabilityTimedOnly},
 		{"exec and attachment", `{"version":0,"capabilities":["proc.exec","report-attachment"]}`, runtime.SessionSleepCapabilityTimedOnly},
-		{"all three", idleHandshake, runtime.SessionSleepCapabilityFull},
+		{"exec, activity and attachment without idle-boundary", noIdleBoundaryHandshake, runtime.SessionSleepCapabilityTimedOnly},
+		{"idle-boundary without exec", `{"version":0,"capabilities":["report-activity","report-attachment","idle-boundary"]}`, runtime.SessionSleepCapabilityTimedOnly},
+		{"idle-boundary alone", `{"version":0,"capabilities":["idle-boundary"]}`, runtime.SessionSleepCapabilityTimedOnly},
+		{"all four", idleHandshake, runtime.SessionSleepCapabilityFull},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,6 +214,30 @@ func TestWaitForIdleUnsupportedWithoutDeclaration(t *testing.T) {
 	}
 	if ops := pk.ops(t); ops != "" {
 		t.Fatalf("ops run = %q, want none", ops)
+	}
+}
+
+// A pack that declares an activity clock, an attachment probe and the exec
+// connection, but not idle-boundary, has no in-box tmux pane gc may read: its
+// idle wait is unsupported, its idle proof keeps the orchestrator's default
+// budget, and it is never sent a tmux command for the boundary.
+// Kills: treating the first three capabilities as proof of an in-box tmux
+// session (gh#8903), which runs capture-pane against a box with no tmux.
+func TestNoIdleBoundaryWithoutDeclaration(t *testing.T) {
+	pk := newIdlePack(t, noIdleBoundaryHandshake, idleClaudePane)
+	p := NewProvider(pk.script)
+	err := p.WaitForIdle(context.Background(), "s", time.Second)
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("WaitForIdle = %v, want ErrInteractionUnsupported", err)
+	}
+	if got := p.IdleProbeBudget(); got != 0 {
+		t.Fatalf("IdleProbeBudget = %v, want 0 (the orchestrator default)", got)
+	}
+	if err := p.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if cmds := pk.tmuxCommands(t); cmds != "" {
+		t.Fatalf("in-box tmux commands = %q, want none", cmds)
 	}
 }
 
@@ -419,7 +454,7 @@ func TestStartPublishesReadyPromptOnlyWithIdleBoundary(t *testing.T) {
 	}
 
 	// The separable launch publishes once the agent's tmux session exists.
-	pk = newIdlePack(t, `{"version":0,"capabilities":["proc.exec","proc.provision","report-activity","report-attachment"]}`, idleClaudePane)
+	pk = newIdlePack(t, `{"version":0,"capabilities":["proc.exec","proc.provision","report-activity","report-attachment","idle-boundary"]}`, idleClaudePane)
 	if err := NewProvider(pk.script).launchAgent(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
 		t.Fatalf("launchAgent: %v", err)
 	}

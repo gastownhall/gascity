@@ -21,6 +21,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -51,6 +53,11 @@ type WorkLegs struct {
 	plan storeref.ResolvedPlan
 	topo storeref.Topology // the residency topology plan was built from, for by-id reads
 	err  error             // no leg set: a refused city
+	// suspended names the declared, open rigs left out of rigs because they
+	// are suspended (servingRigStores).
+	suspended []string
+	// cityName is the name a "city:<name>" store ref of this city carries.
+	cityName string
 }
 
 // errNoWorkStore: a WorkLegs minted without a city work store, which answers
@@ -68,7 +75,12 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 	if work.store == nil {
 		return l
 	}
-	l.rigs = servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
+	if cfg != nil {
+		l.cityName = loadedCityName(cfg, cityPath)
+	}
+	suspendedPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	l.rigs = servingRigStores(cfg, rigs, suspendedPaths)
+	l.suspended = suspendedOpenRigs(cfg, rigs, suspendedPaths)
 	l.topo = residencyTopologyForCity(cityPath, cfg, work.store, l.rigs)
 	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, l.topo)
 	return l
@@ -76,8 +88,60 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 
 // workLegs is the controller's leg set for one tick, over the store it
 // registers as the city's work leg (registerResidencyRoutes).
+//
+// It reads the published config snapshot rather than cr.cfg, so the wisp GC's
+// work-arm lane, which runs off the tick, can take its legs from here too.
 func (cr *CityRuntime) workLegs() WorkLegs {
-	return workLegsFromCensus(cr.cityPath, cr.cfg, cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+	return workLegsFromCensus(cr.cityPath, cr.serviceConfigSnapshot(), cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+}
+
+// suspendedRigs names the open rigs this leg set leaves out because they are
+// suspended.
+func (l WorkLegs) suspendedRigs() []string { return l.suspended }
+
+// storeForRef resolves a source store-ref ("city:<name>", "rig:<name>", a
+// class binding ref) to the leg it names: the city work store for a city or
+// binding ref, the rig's store for a serving rig. A suspended rig reports
+// suspended=true (it is not a leg, and is not read); any other ref, ok=false.
+func (l WorkLegs) storeForRef(ref string) (beads.Store, bool, bool) {
+	ref = strings.TrimSpace(ref)
+	rig, ok := storeref.ScopeRigContext(ref)
+	if !ok {
+		return nil, false, false
+	}
+	if rig == "" {
+		// Only THIS city's ref names the city work store; a class binding
+		// ref ("class:<token>") is city-scoped too, and fails this check.
+		if l.cityName == "" || ref != "city:"+l.cityName {
+			return nil, false, false
+		}
+		return l.work, false, l.work != nil
+	}
+	for _, name := range l.suspended {
+		if name == rig {
+			return nil, true, true
+		}
+	}
+	store, ok := l.rigs[rig]
+	return store, false, ok && store != nil
+}
+
+// suspendedOpenRigs names the declared rigs with an open store that are
+// suspended: the complement of servingRigStores among the open rigs.
+func suspendedOpenRigs(cfg *config.City, rigs map[string]beads.Store, suspendedRigPaths map[string]bool) []string {
+	if cfg == nil || len(rigs) == 0 || len(suspendedRigPaths) == 0 {
+		return nil
+	}
+	var out []string
+	for _, rig := range cfg.Rigs {
+		if !suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if store, ok := rigs[rig.Name]; ok && store != nil {
+			out = append(out, rig.Name)
+		}
+	}
+	return out
 }
 
 // unusable is why l answers nothing: no leg set, or the zero WorkLegs,
@@ -107,11 +171,16 @@ func (cr *CityRuntime) strandedClaimAlerter() *strandedClaimAlerts {
 
 // each visits every leg's store in plan order.
 func (l WorkLegs) each(visit func(beads.Store)) {
+	l.eachLeg(func(_ string, store beads.Store) { visit(store) })
+}
+
+// eachLeg visits every leg's store ref and store in plan order.
+func (l WorkLegs) eachLeg(visit func(ref string, store beads.Store)) {
 	if l.unusable() != nil {
 		return
 	}
 	storeref.EachLeg(l.plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — enumerates the plan's own legs
-		visit(leg.Store)
+		visit(string(leg.Ref), leg.Store)
 	})
 }
 
@@ -139,7 +208,8 @@ func (l WorkLegs) workStore() beads.Store { return l.work }
 // (byIDOwnerRowForTopology over l's topology): a relocated class binding
 // before the work ledger, so a stale pre-migration copy co-resident in the
 // ledger never answers, then the serving rigs and the work store. It reads
-// through that store's Live handle, past any cache. No store ref is
+// through the owner's live reader (beads.LiveFor), past any cache and any
+// class layer above it. No store ref is
 // consulted: a slot's gc.trigger_bead_store_ref names the demand leg, which on
 // a split city is the work ledger even for a step that lives only in the
 // binding (ga-bmfmt, the warm-bind probe's trap). found is false on a clean
@@ -157,14 +227,12 @@ func (l WorkLegs) readLive(id string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, nil
 	case err != nil:
 		return beads.Bead{}, false, err
-	case owner.Store == nil:
+	case beads.IsNilStore(owner.Resident):
+		// A zero handle: no store owns the id (a reserved namespace no
+		// binding serves). Read, it would panic.
 		return beads.Bead{}, false, nil
 	}
-	live := beads.HandlesFor(owner.Store).Live
-	if live == nil {
-		return beads.Bead{}, false, nil
-	}
-	b, err := live.Get(id)
+	b, err := beads.LiveFor(owner.Resident).Get(id)
 	switch {
 	case errors.Is(err, beads.ErrNotFound):
 		return beads.Bead{}, false, nil
@@ -190,9 +258,11 @@ type workScope interface {
 }
 
 // ReleaseScope is the narrow set: the bead ID, session_name, the configured
-// named identity and the stable alias (sessionAssignmentIdentifiersForConfig).
-// It is the only set work is released under, and it gates closing a seat
-// whose runtime is dead. A transient pool slot alias is never in it.
+// named identity, the stable alias, and a requalified named session's prior
+// bare identity and its named session's runtime name
+// (sessionAssignmentIdentifiersForConfig). It is the only set work is
+// released under, and it gates closing a seat whose runtime is dead. A
+// transient pool slot alias is never in it.
 type ReleaseScope struct{ ids []string }
 
 // RefuseScope is the wide set: ReleaseScope plus the current alias and the
@@ -257,4 +327,47 @@ func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
 		}
 	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
+}
+
+// legsTriggerResolver reads a bead by id from the store that owns it among
+// legs (WorkLegs.readLive: the class binding, the serving rigs, the city work
+// store), for the start path's trigger reads. nil when legs are unusable (a
+// refused city, or no work store), which keeps the sessions-store read.
+func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
+	if legs.unusable() != nil {
+		return nil
+	}
+	return func(id string) (beads.Bead, error) {
+		b, found, err := legs.readLive(id)
+		switch {
+		case err != nil:
+			return beads.Bead{}, err
+		case !found:
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+		}
+		return b, nil
+	}
+}
+
+// wispGCRoots is the pass's readers over l, the census (wispGCLegs): the
+// legs with a store that is not graph, in plan order, by ref, as the work
+// arm and the holder walk select them. A leg set that cannot be read reads
+// the graph placement alone, and answers no work leg.
+func (l WorkLegs) wispGCRoots(stores storeref.Stores, graph beads.StoreReader) wispGCRoots {
+	if err := l.unusable(); err != nil {
+		roots := wispGCGraphRoots(stores, graph)
+		roots.planErr = err
+		return roots
+	}
+	var refs []storeref.StoreRef
+	census := map[string]beads.StoreReader{}
+	for _, leg := range l.plan.Legs { // residency:allow — the census plan's own legs, in eachLeg's order; refs and stores only
+		if leg.Leg.Store == nil || beads.SameStore(leg.Leg.Store, graph) { // residency:allow — the same leg's store
+			continue
+		}
+		ref := string(leg.Leg.Ref)
+		refs = append(refs, leg.Leg.Ref)
+		census[ref] = leg.Leg.Store // residency:allow — the same leg's store
+	}
+	return planWispGCRoots(stores, graph, refs, census)
 }

@@ -27,7 +27,7 @@ func TestMoleculeAutocloseClosesRootWhenAllStepsClosed(t *testing.T) {
 	// Close stepA first — root must NOT close (stepB still open).
 	_ = store.Close(stepA.ID)
 	var out1 bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, stepA.ID, &out1, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, stepA.ID, &out1, testStores(store, store))
 	r1, _ := store.Get(root.ID)
 	if r1.Status == "closed" {
 		t.Fatalf("root closed prematurely after first step close: status=%q out=%q", r1.Status, out1.String())
@@ -39,7 +39,7 @@ func TestMoleculeAutocloseClosesRootWhenAllStepsClosed(t *testing.T) {
 	// Close stepB — root MUST now auto-close.
 	_ = store.Close(stepB.ID)
 	var out2 bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, stepB.ID, &out2, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, stepB.ID, &out2, testStores(store, store))
 	r2, _ := store.Get(root.ID)
 	if r2.Status != "closed" {
 		t.Fatalf("root not auto-closed after all steps closed: status=%q out=%q", r2.Status, out2.String())
@@ -65,7 +65,7 @@ func TestMoleculeAutocloseIgnoresNonStepCloses(t *testing.T) {
 	_ = store.Close(task.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, task.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, task.ID, &out, testStores(store, store))
 
 	r, _ := store.Get(root.ID)
 	if r.Status == "closed" {
@@ -86,7 +86,7 @@ func TestMoleculeAutocloseIgnoresStepWithoutParent(t *testing.T) {
 	_ = store.Close(orphan.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, orphan.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, orphan.ID, &out, testStores(store, store))
 	if out.Len() != 0 {
 		t.Fatalf("unexpected stdout for orphan step close: %q", out.String())
 	}
@@ -103,7 +103,7 @@ func TestMoleculeAutocloseIgnoresParentNotMolecule(t *testing.T) {
 	_ = store.Close(step.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, testStores(store, store))
 
 	p, _ := store.Get(parent.ID)
 	if p.Status == "closed" {
@@ -123,7 +123,7 @@ func TestMoleculeAutocloseIdempotentOnAlreadyClosedRoot(t *testing.T) {
 	_ = store.Close(root.ID) // pre-close the root directly
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, testStores(store, store))
 	if out.Len() != 0 {
 		t.Fatalf("unexpected stdout for already-closed root: %q", out.String())
 	}
@@ -140,7 +140,7 @@ func TestMoleculeAutocloseSoleChildClosesRoot(t *testing.T) {
 	_ = store.Close(step.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, step.ID, &out, testStores(store, store))
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
 		t.Fatalf("sole-child molecule did not close: status=%q out=%q", r.Status, out.String())
@@ -166,7 +166,7 @@ func TestMoleculeAutocloseRespectsTombstone(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, stepB.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, stepB.ID, &out, testStores(store, store))
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
 		t.Fatalf("root not auto-closed when one child closed + one tombstoned: status=%q out=%q", r.Status, out.String())
@@ -201,7 +201,7 @@ func TestMoleculeAutocloseNestedStepUsesRootBeadIDMetadata(t *testing.T) {
 	_ = store.Close(nested.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, nested.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, nested.ID, &out, testStores(store, store))
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
 		t.Fatalf("nested-step close did not auto-close molecule root (gc.root_bead_id path or ListSubtree traversal regressed): status=%q out=%q", r.Status, out.String())
@@ -244,7 +244,7 @@ func TestMoleculeAutocloseLeavesOpenWhenNestedDescendantStillOpen(t *testing.T) 
 	_ = nestedOpen // keep open intentionally
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, nestedClosed.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, nestedClosed.ID, &out, testStores(store, store))
 	r, _ := store.Get(root.ID)
 	if r.Status == "closed" {
 		t.Fatalf("root closed despite nested descendant still open (ListSubtree regressed to direct-children-only): status=%q out=%q", r.Status, out.String())
@@ -295,7 +295,7 @@ func TestMoleculeAutocloseClosesWorkflowRootOnSourceBeadClose(t *testing.T) {
 
 	_ = store.Close(work.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
@@ -334,7 +334,7 @@ func TestMoleculeAutocloseClosesSpecSidecarsOnSourceBeadClose(t *testing.T) {
 
 	_ = store.Close(work.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 
 	specAfter, _ := store.Get(spec.ID)
 	if specAfter.Status != "closed" {
@@ -369,7 +369,7 @@ func TestMoleculeAutocloseLeavesWorkflowRootOpenWhenStepOpenOnSourceClose(t *tes
 
 	_ = store.Close(work.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 
 	r, _ := store.Get(root.ID)
 	if r.Status == "closed" {
@@ -404,7 +404,7 @@ func TestMoleculeAutocloseClosesWorkflowRootWithTerminalStepsOnSourceClose(t *te
 
 	_ = store.Close(work.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
@@ -420,7 +420,7 @@ func TestMoleculeAutocloseSourceCloseNoMatchingRootIsNoop(t *testing.T) {
 	_ = store.Close(work.ID)
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 	if out.Len() != 0 {
 		t.Fatalf("unexpected stdout closing a task with no workflow root: %q", out.String())
 	}
@@ -459,7 +459,7 @@ func TestMoleculeAutocloseSourceCloseScopesToStoreRef(t *testing.T) {
 
 	_ = store.Close(work.ID)
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "rig:alpha", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "rig:alpha", events.Discard, work.ID, &out, testStores(store, store))
 
 	m, _ := store.Get(mine.ID)
 	if m.Status != "closed" {
@@ -492,7 +492,7 @@ func TestMoleculeAutocloseSourceCloseIdempotentOnClosedRoot(t *testing.T) {
 	_ = store.Close(root.ID) // pre-close the root directly
 
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out, testStores(store, store))
 	if out.Len() != 0 {
 		t.Fatalf("unexpected stdout for already-closed workflow root: %q", out.String())
 	}
@@ -520,7 +520,7 @@ func TestMoleculeAutocloseEmitsMoleculeResolvedWithSessionAttribution(t *testing
 	_ = store.Close(step.ID)
 	rec := events.NewFake()
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", rec, step.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", rec, step.ID, &out, testStores(store, store))
 
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
@@ -583,7 +583,7 @@ func TestMoleculeAutocloseMoleculeResolvedDegradesWithoutStampedSession(t *testi
 	_ = store.Close(step.ID)
 	rec := events.NewFake()
 	var out bytes.Buffer
-	doMoleculeAutocloseWith(store, "", rec, step.ID, &out, beads.GraphStore{Store: store})
+	doMoleculeAutocloseWith(store, "", rec, step.ID, &out, testStores(store, store))
 
 	resolved := eventsOfType(rec.Events, events.MoleculeResolved)
 	if len(resolved) != 1 {
@@ -621,4 +621,97 @@ func decodeMoleculeResolvedPayload(t *testing.T, ev events.Event) gcapi.Molecule
 		t.Fatalf("unmarshal molecule.resolved payload: %v", err)
 	}
 	return p
+}
+
+// Closing a graph.v2 workflow's input work never cancels the workflow from the
+// autoclose hooks: an in_progress step, the open continuation waiting on it,
+// and their live root are left exactly as they were by both the molecule and
+// the wisp autoclose. Input loss is settled at claim time, not here.
+func TestAutocloseLeavesInFlightWorkflowOpenWhenInputWorkCloses(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "input work", Type: "task"})
+	conv, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}})
+	if err := store.DepAdd(conv.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+	root, _ := store.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+		"gc.source_bead_id":                 issue.ID,
+	}})
+	active, _ := store.Create(beads.Bead{Title: "in-flight step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	inProgress, holder := "in_progress", "worker-1"
+	if err := store.Update(active.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &holder}); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := store.Create(beads.Bead{Title: "pending continuation", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	if err := store.DepAdd(next.ID, active.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(blocks): %v", err)
+	}
+	if err := store.Close(issue.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, issue.ID, &out, testStores(store, store))
+	doWispAutocloseWith(store, issue.ID, &out, testStores(store, store))
+
+	for id, want := range map[string]string{root.ID: "open", active.ID: "in_progress", next.ID: "open"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != want || got.Metadata[beadmeta.OutcomeMetadataKey] != "" || got.Metadata["close_reason"] != "" {
+			t.Errorf("%s after the input work closed: status=%q metadata=%v, want %s and untouched (out=%q)", id, got.Status, got.Metadata, want, out.String())
+		}
+	}
+}
+
+// TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed pins the
+// rejected arm of the #8729 triage: input-driven cancellation belongs to the
+// claim-time check (the purged verdict), never to the close-time hook. Closing
+// the synthetic input convoy itself — the convoy bead, not a member — must not
+// retire an in-flight graph.v2 workflow: the root and its unfinished steps stay
+// exactly as they were, unstamped by any retirement disposition, and the next
+// claim's input check is what decides the workflow's fate.
+func TestMoleculeAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	root, _ := store.Create(beads.Bead{
+		Title: "orchestrated workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  convoy.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "in-flight step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	_ = store.Close(convoy.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, convoy.ID, &out, testStores(store, store))
+
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", out.String())
+	}
+	for _, b := range []struct{ name, id string }{{"root", root.ID}, {"step", step.ID}} {
+		got, err := store.Get(b.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("the in-flight workflow's %s was closed by its input convoy's close; cancellation is the claim-time check's verdict", b.name)
+		}
+		if got.Metadata["close_reason"] != "" || got.Metadata["gc.failure_reason"] != "" {
+			t.Errorf("the in-flight workflow's %s was stamped (close_reason=%q failure_reason=%q) by its input convoy's close", b.name, got.Metadata["close_reason"], got.Metadata["gc.failure_reason"])
+		}
+	}
 }

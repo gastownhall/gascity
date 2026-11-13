@@ -3,6 +3,8 @@
 package proctable
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,5 +46,31 @@ func TestOpenFilesReadsTheFDLinksUnderScanRoot(t *testing.T) {
 func TestOpenFilesRefusesTheLiveProcUnderTest(t *testing.T) {
 	if _, err := OpenFiles(os.Getpid()); err == nil {
 		t.Fatal("OpenFiles read the live /proc under go test; want liveScanGuard's refusal")
+	}
+}
+
+// ProcessCwd reads pid's cwd link under scanRoot. A process that is gone has
+// no working directory: an error, never a directory.
+func TestProcessCwdReadsTheCwdLinkUnderScanRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "4242"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/home/user/city", filepath.Join(root, "4242", "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	SetScanRootForTesting(t, root)
+
+	if got, err := ProcessCwd(4242); err != nil || got != "/home/user/city" {
+		t.Fatalf("ProcessCwd = %q, %v; want /home/user/city", got, err)
+	}
+	if got, err := ProcessCwd(4343); !errors.Is(err, fs.ErrNotExist) || got != "" {
+		t.Fatalf("ProcessCwd(gone pid) = %q, %v; want empty and a not-exist error", got, err)
+	}
+}
+
+func TestProcessCwdRefusesTheLiveProcUnderTest(t *testing.T) {
+	if _, err := ProcessCwd(os.Getpid()); err == nil {
+		t.Fatal("ProcessCwd read the live /proc under go test; want liveScanGuard's refusal")
 	}
 }

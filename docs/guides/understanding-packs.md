@@ -112,7 +112,7 @@ The same URL also opens the pack directory in a browser.
 
 The Gas City pack expects the binding `gc`: its skills surface as `gc.<skill>`
 (for example `gc.mayor`) and its commands as `gc gc <command>`. Cities created
-by gc v1.4.x bound it as `[imports.gascity]`; `gc doctor --fix` renames that
+by older releases bound it as `[imports.gascity]`; `gc doctor --fix` renames that
 key to `gc` (see the `gascity-pack-binding` check in
 [Troubleshooting](/getting-started/troubleshooting)).
 
@@ -396,7 +396,7 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 
 # exact SHA pin — this revision must be used
-version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
+version = "sha:5bf643ca55bd20f080994cc31414ee4596015a0c"
 ```
 
 The authored import expresses the source and optional constraint; the lockfile

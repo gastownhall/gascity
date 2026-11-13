@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -21,6 +22,9 @@ import (
 //     read a well-formed history or fail with an error that says why
 //     (unavailable, gone, initializing or unidentifiable), never an empty
 //     error;
+//   - only a failed turn carries a failure, and a failure classed a rate
+//     limit names the source's class or HTTP 429: it is never read out of
+//     the error's text alone;
 //   - WatchTurns sends an update first, history or error, and closes once
 //     ctx ends.
 //
@@ -145,6 +149,26 @@ func checkTurnRead(hist runtime.TurnHistory, err error) error {
 		if t.TurnID == hist.Current.TurnID {
 			return fmt.Errorf("recent turn %d %q is also the current turn", i, t.TurnID)
 		}
+		if err := checkTurnFailure(t); err != nil {
+			return fmt.Errorf("recent turn %d %q: %w", i, t.TurnID, err)
+		}
+	}
+	return nil
+}
+
+// checkTurnFailure checks an ended turn's failure: only a failed turn has
+// one, a rate limit is the source's class or HTTP 429, never the text, and a
+// spent quota is a rate limit of the source's own class.
+func checkTurnFailure(t runtime.EndedTurn) error {
+	f := t.Failure
+	if f != (runtime.TurnFailure{}) && t.Status != runtime.TurnStatusFailed {
+		return fmt.Errorf("failure %+v on a turn that ended %q, want only a failed turn to carry one", f, t.Status)
+	}
+	if f.RateLimited && f.Code == "" && f.HTTPStatus != http.StatusTooManyRequests {
+		return fmt.Errorf("failure %+v is a rate limit with neither the source's class nor HTTP 429", f)
+	}
+	if f.Quota && (!f.RateLimited || f.Code == "") {
+		return fmt.Errorf("failure %+v is a spent quota that is not the source's rate-limit class", f)
 	}
 	return nil
 }

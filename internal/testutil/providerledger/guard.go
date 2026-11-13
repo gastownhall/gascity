@@ -388,8 +388,10 @@ func DiscoverRuntimeCatalog(source []byte) ([]RuntimeRegistration, error) {
 
 		switch selector.Sel.Name {
 		case "SetFallback":
-			if len(call.Args) != 1 {
-				discoverErr = fmt.Errorf("SetFallback call at %s must have exactly one factory", fset.Position(call.Pos()))
+			// The factory comes first; like Register's, any further
+			// arguments are registration options, not factories.
+			if len(call.Args) < 1 {
+				discoverErr = fmt.Errorf("SetFallback call at %s must have a factory", fset.Position(call.Pos()))
 				return false
 			}
 			factory, binding, use, err := resolveFactoryLiteral(call.Args[0], factories, bindings)

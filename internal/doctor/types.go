@@ -90,6 +90,22 @@ type Renderer interface {
 	RenderExtras(ctx *CheckContext, w io.Writer)
 }
 
+// FixHintError is an error a Check's Fix may return when the fix fails for a
+// reason whose remedy differs from the FixHint Run suggested; the runner
+// reports Err as FixError and Hint as the result's FixHint.
+type FixHintError struct {
+	// Err is the underlying fix failure, reported verbatim as FixError.
+	Err error
+	// Hint replaces the result's FixHint when non-empty.
+	Hint string
+}
+
+// Error returns the underlying error's text unchanged.
+func (e *FixHintError) Error() string { return e.Err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *FixHintError) Unwrap() error { return e.Err }
+
 // CheckResult holds the outcome of a single check execution.
 type CheckResult struct {
 	// Name identifies which check produced this result.
@@ -106,6 +122,8 @@ type CheckResult struct {
 	// Details holds extra lines shown only in verbose mode.
 	Details []string
 	// FixHint is a suggestion shown when the check fails and cannot auto-fix.
+	// When an attempted Fix fails with a *FixHintError carrying a non-empty
+	// Hint, the runner replaces FixHint with that Hint.
 	FixHint string
 	// Payload is optional structured evidence, projected into `gc doctor
 	// --json` as the result's `payload` object and never rendered to a

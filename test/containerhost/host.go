@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package containerhost emulates a container host for tests of Gas City's
 // container session providers (scripts/gc-session-docker,
 // contrib/session-scripts/gc-session-k8s) on machines that have no container

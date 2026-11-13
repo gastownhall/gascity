@@ -143,7 +143,7 @@ jobs:
           It moves \`//platforms:rbe_worker\`'s worker-env pin from \`$main\` (main) to \`$head\`. rbe-west's pool workers serve main's pin only, and $BEADS_REPO carries a byte-identical copy of the manifest and pin:
 
           - [$NOTIFY_WORKFLOW]($notify_url) then sends $BEADS_REPO the \`$BEADS_EVENT\` dispatch, and beads' [$BEADS_AUTOSYNC]($autosync_url) opens its sync PR within a minute or two of the merge. That PR lands as soon as its CI passes (auto-merge) or after beads' automated review.
-          - Until that PR merges, beads PRs fail at \`Bazel / execution mode\`. The sync PR's own CI runs fully uncached after a re-pin, so it takes about an hour, sometimes more: its release cross-compile lane (about 24k remote actions) gates it.
+          - Until that PR merges, beads PRs fail at \`Bazel / execution mode\`, unless this re-pin moves only the manifest's \`go\` line and rbe-west's grace window is switched on (beads' repository variable \`RBE_WORKER_ENV_GRACE\`): then beads may keep its previous pin for two hours while rbe-west serves it, and keeps building (TESTING.md "Grace window for Go re-pins"). The sync PR's own CI runs fully uncached after a re-pin, so it takes about an hour, sometimes more: its release cross-compile lane (about 24k remote actions) gates it.
 
           $footer
           EOF

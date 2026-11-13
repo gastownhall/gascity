@@ -5,16 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/nudgepoller"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
-	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -614,89 +612,6 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	}
 }
 
-func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
-	cityPath := t.TempDir()
-	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test", "session-id")
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, "s-test", "session-id")
-	if err != nil {
-		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
-	}
-	if running {
-		t.Fatalf("existingSessionSubmitPollerPID(%q) = true for unrelated live PID %d", pidPath, os.Getpid())
-	}
-}
-
-func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city with spaces")
-	sessionName := "s-test"
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
-	cmd := startSubmitPollerLikeProcess(t, cityPath, sessionName, "session-id")
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
-	if err != nil {
-		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
-	}
-	if !running {
-		t.Fatalf("existingSessionSubmitPollerPID(%q) = false for matching poller PID %d", pidPath, cmd.Process.Pid)
-	}
-}
-
-func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
-	cityPath := t.TempDir()
-	otherCityPath := t.TempDir()
-	sessionName := "s-test"
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
-	cmd := startSubmitPollerLikeProcess(t, otherCityPath, sessionName, "session-id")
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
-	if err != nil {
-		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
-	}
-	if running {
-		t.Fatalf("existingSessionSubmitPollerPID(%q) = true for same-session poller in different city", pidPath)
-	}
-}
-
-func TestExistingSessionSubmitPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
-	cityPath := t.TempDir()
-	sessionName := "s-test"
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
-	cmd := startSubmitPollerLikeProcess(t, cityPath, sessionName, "old-alias")
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
-	if err != nil {
-		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
-	}
-	if running {
-		t.Fatalf("existingSessionSubmitPollerPID(%q) = true for same-session poller with different target key", pidPath)
-	}
-}
-
 func TestSessionSubmitPollerPathsScopeSameSessionByTarget(t *testing.T) {
 	cityPath := t.TempDir()
 	sessionName := "s-test"
@@ -908,43 +823,6 @@ func TestPollerKeyFromInfoMatchesBead(t *testing.T) {
 			}
 		})
 	}
-}
-
-func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName, agentName string) *exec.Cmd {
-	t.Helper()
-	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake poller): %v", err)
-	}
-	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("StdinPipe(fake poller): %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		t.Fatalf("Start(fake poller): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = stdin.Close()
-		_ = cmd.Wait()
-	})
-	waitForSubmitPollerCmdline(t, cmd.Process.Pid, cityPath, sessionName, agentName)
-	return cmd
-}
-
-func waitForSubmitPollerCmdline(t *testing.T, pid int, cityPath, sessionName, agentName string) {
-	t.Helper()
-	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pidutil.AliveWithCmdline(pid, matches) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("poller PID %d did not expose matching command line", pid)
 }
 
 func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) {
@@ -1506,6 +1384,41 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 	if !sawBoundary || !sawStop || !sawNudge {
 		t.Fatalf("calls = %#v, want WaitForInterruptBoundary + Stop + NudgeNow via restart fallback", sp.Calls)
+	}
+}
+
+// TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement pins the
+// restart fallback's answer to a replacement runtime that defers the message
+// because a turn is already running there (runtime.ErrSessionBusy, nothing
+// typed): the outgoing turn is gone, so the message is queued, never
+// dropped, as a plain send queues it.
+func TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+	sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: a turn is running", runtime.ErrSessionBusy)}
+
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now) with a busy replacement: %v, want the message queued", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(interrupt_now) with a busy replacement did not queue the message")
+	}
+	var sawStop bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+	}
+	if !sawStop {
+		t.Fatalf("calls = %#v, want the restart fallback's Stop", sp.Calls)
 	}
 }
 
@@ -2259,13 +2172,15 @@ func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
 		Prompt:    "Bash: rm -rf build",
 	})
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
+	// An immediate send refuses; a default one queues behind the prompt
+	// (TestSendQueuesBehindPendingInteraction).
+	_, err = mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
 	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+		t.Fatalf("SendImmediate error = %v, want session and runtime ErrPendingInteraction", err)
 	}
 	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+			t.Fatalf("SendImmediate error = %q, want it to mention %q", err, want)
 		}
 	}
 }
@@ -2309,7 +2224,7 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2369,7 +2284,7 @@ func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2406,7 +2321,7 @@ func TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2465,7 +2380,7 @@ func TestSendPathsQueueOverACrashedAgent(t *testing.T) {
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
 		cityPath := t.TempDir()
-		mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -2567,7 +2482,7 @@ func (f emptyNamesDeadFake) ProcessAlive(name string, processNames []string) boo
 func TestSendWithoutProcessNamesReadsAlive(t *testing.T) {
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2611,7 +2526,7 @@ func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Ma
 	fake := runtime.NewFake()
 	cityPath := t.TempDir()
 	sp := &staleCacheFake{Fake: fake}
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

@@ -2168,6 +2168,76 @@ provider = "exec:/usr/local/bin/events-bridge"
 	}
 }
 
+// TestLoadWithIncludes_EventsFragmentMergesPerKey pins that a fragment's
+// [events] replaces only the keys it defines: a fragment that sets only
+// [events.mirror] keeps the root's provider and [events.rotation] (rotation
+// does not silently turn back on), and one that sets only [events.rotation]
+// keeps the root's mirror. Every EventsConfig key needs a case here, and a
+// merge line in mergeFragment.
+func TestLoadWithIncludes_EventsFragmentMergesPerKey(t *testing.T) {
+	const root = `
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[events]
+provider = "fake"
+
+[events.rotation]
+enabled = false
+archive_retain_age = "720h"
+
+[events.mirror]
+path = "/var/log/gascity/root/events.jsonl"
+mode = "0600"
+`
+	fragments := map[string]string{
+		"provider": "[events]\nprovider = \"exec:/usr/local/bin/events-bridge\"\n",
+		"rotation": "[events.rotation]\nmax_size_bytes = 1024\n",
+		"mirror":   "[events.mirror]\npath = \"/var/log/gascity/fragment/events.jsonl\"\n",
+	}
+	rootCfg, err := Parse([]byte(root))
+	if err != nil {
+		t.Fatalf("Parse(root): %v", err)
+	}
+	typ := reflect.TypeOf(EventsConfig{})
+	keyOf := func(i int) string { return strings.Split(typ.Field(i).Tag.Get("toml"), ",")[0] }
+	for i := 0; i < typ.NumField(); i++ {
+		if _, ok := fragments[keyOf(i)]; !ok {
+			t.Fatalf("events.%s has no fragment case: add one, and its merge line in mergeFragment", keyOf(i))
+		}
+		if reflect.ValueOf(rootCfg.Events).Field(i).IsZero() {
+			t.Fatalf("the root leaves events.%s unset, so keeping it would look like dropping it", keyOf(i))
+		}
+	}
+	for key, fragment := range fragments {
+		t.Run(key, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(root)
+			fs.Files["/city/fragment.toml"] = []byte(fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			fragCfg, err := Parse([]byte(fragment))
+			if err != nil {
+				t.Fatalf("Parse(fragment): %v", err)
+			}
+			got := reflect.ValueOf(cfg.Events)
+			for i := 0; i < typ.NumField(); i++ {
+				want := reflect.ValueOf(rootCfg.Events).Field(i)
+				if keyOf(i) == key {
+					want = reflect.ValueOf(fragCfg.Events).Field(i)
+				}
+				if !reflect.DeepEqual(got.Field(i).Interface(), want.Interface()) {
+					t.Errorf("events.%s = %+v, want %+v", keyOf(i), got.Field(i).Interface(), want.Interface())
+				}
+			}
+		})
+	}
+}
+
 func TestLoadWithIncludes_OrdersSectionOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -80,41 +81,73 @@ func TestBdStoreIntegrationShardRunsOnlyBdStoreTests(t *testing.T) {
 }
 
 func TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux(t *testing.T) {
+	const shardTotal = 6
 	repo := repoRoot(t)
 	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repo, runtimeTmuxManifestRelativePath))
-	fixture := newIntegrationShardFixtureForPlatform(t, "linux", "amd64")
+	selections := make([][]string, shardTotal)
 
-	out, err := fixture.runShard(t, "packages-runtime-tmux-2-of-6")
-	if err != nil {
-		t.Fatalf("runtime-tmux integration shard failed: %v\n%s", err, out)
+	for shard := 1; shard <= shardTotal; shard++ {
+		t.Run(fmt.Sprintf("shard %d of %d", shard, shardTotal), func(t *testing.T) {
+			fixture := newIntegrationShardFixtureForPlatform(t, "linux", "amd64")
+			out, err := fixture.runShard(t, fmt.Sprintf("packages-runtime-tmux-%d-of-%d", shard, shardTotal))
+			if err != nil {
+				t.Fatalf("runtime-tmux integration shard failed: %v\n%s", err, out)
+			}
+
+			captured, err := os.ReadFile(fixture.capturePath)
+			if err != nil {
+				t.Fatalf("read captured go invocation: %v", err)
+			}
+			encodedInvocations := strings.TrimSuffix(string(captured), "\x00\x00")
+			invocations := strings.Split(encodedInvocations, "\x00\x00")
+			if len(invocations) != 1 {
+				t.Fatalf("go test invoked %d times, want only the final runtime-tmux shard command:\n%s", len(invocations), captured)
+			}
+
+			got := strings.Split(invocations[0], "\x00")
+			wantPrefix := []string{
+				"test",
+				"-tags", "integration",
+				"-timeout", "17s",
+				"./internal/runtime/tmux",
+				"-run",
+			}
+			if len(got) != len(wantPrefix)+1 || !slices.Equal(got[:len(wantPrefix)], wantPrefix) {
+				t.Fatalf("runtime-tmux go test argv = %q, want %q followed by one -run pattern", got, wantPrefix)
+			}
+			pattern := got[len(wantPrefix)]
+			if !strings.HasPrefix(pattern, "^(") || !strings.HasSuffix(pattern, ")$") {
+				t.Fatalf("runtime-tmux -run pattern = %q, want ^(a|b|...)$", pattern)
+			}
+			selections[shard-1] = strings.Split(strings.TrimSuffix(strings.TrimPrefix(pattern, "^("), ")$"), "|")
+
+			// The stripe rule is restated here so a change to the script's rule fails this test.
+			var want []string
+			for index, testName := range manifest {
+				if index%shardTotal == shard-1 {
+					want = append(want, testName)
+				}
+			}
+			if !slices.Equal(selections[shard-1], want) {
+				t.Fatalf("shard %d selected %q, want manifest entries i with i%%%d == %d: %q", shard, selections[shard-1], shardTotal, shard-1, want)
+			}
+		})
 	}
 
-	captured, err := os.ReadFile(fixture.capturePath)
-	if err != nil {
-		t.Fatalf("read captured go invocation: %v", err)
-	}
-	encodedInvocations := strings.TrimSuffix(string(captured), "\x00\x00")
-	invocations := strings.Split(encodedInvocations, "\x00\x00")
-	if len(invocations) != 1 {
-		t.Fatalf("go test invoked %d times, want only the final runtime-tmux shard command:\n%s", len(invocations), captured)
-	}
-
-	var selected []string
-	for index, testName := range manifest {
-		if index%6 == 1 {
-			selected = append(selected, testName)
+	seen := make(map[string]int, len(manifest))
+	for _, selection := range selections {
+		for _, testName := range selection {
+			seen[testName]++
 		}
 	}
-	got := strings.Split(invocations[0], "\x00")
-	want := []string{
-		"test",
-		"-tags", "integration",
-		"-timeout", "17s",
-		"./internal/runtime/tmux",
-		"-run", "^(" + strings.Join(selected, "|") + ")$",
+	for _, testName := range manifest {
+		if seen[testName] != 1 {
+			t.Errorf("runtime-tmux test %s selected by %d shards, want exactly one", testName, seen[testName])
+		}
+		delete(seen, testName)
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("runtime-tmux go test argv = %q, want exact checked-manifest shard command %q", got, want)
+	for testName := range seen {
+		t.Errorf("shards selected %s, which is not in the manifest", testName)
 	}
 }
 

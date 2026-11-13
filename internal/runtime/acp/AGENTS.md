@@ -19,6 +19,12 @@
   entry makes `IsRunning` short-circuit on it and call the live replacement
   dead, and a non-gone error on that steady state is re-logged every tick by
   callers that branch only on `IsSessionGone`.
+- A `Stop` whose process outlives SIGKILL returns
+  `runtime.ErrProcessNotConfirmedDead`, in-process or relayed from the owner's
+  socket as `runtime.StopReplyNotConfirmedDead`. It is not `IsSessionGone`, so
+  `Stop` keeps the sidecars and socket for the retry (`cleanupMeta` and
+  `cleanupOwnMeta` run only on nil or gone). The cross-process stop timeout is
+  stop grace + `ManagedProcessReapGrace` + margin; never a literal.
 - Release the lifecycle lock after committing the real connection, before the
   initial nudge. A blocked stdin write needs Stop to acquire that lock and close
   the pipe. Bind initial delivery to the committed connection, not another
@@ -29,6 +35,13 @@
   `context.AfterFunc` callback closes that pipe without locks; disarm and join
   it before transferring the connection so late cancellation cannot close a
   successful session or interfere with retry cleanup.
+- Read the parent environment (`execenv.Environ`) before taking the lifecycle
+  lock or publishing the sentinel. The read waits out an in-flight native beads
+  store open and cannot be canceled, so holding either across it makes `Stop`
+  for the name wait out the open. A `Stop` during the read finds no session,
+  so `Start` checks its context again after the read
+  (`TestStartWaitingOutAProcessEnvProjectionLeavesTheProviderServing`,
+  `TestStartCanceledWhileWaitingOutAProcessEnvProjectionSpawnsNothing`).
 
 # ACP Turn Events
 

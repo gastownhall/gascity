@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -654,6 +655,23 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// Federation selects which of this city's agents may act on the rig's bead
+	// store. "city" (the default) keeps today's behavior: city-scoped agents
+	// read every rig, and any agent whose identity matches a row may serve,
+	// claim or release it. "rig" restricts this city to identities inside the
+	// rig's namespace ("<name>/...", compared under the bead store's actor
+	// fold) and to this city's own pool sessions of the rig's agents; rows
+	// owned by anything else are left alone. Set it on a rig whose bead store
+	// another city also attaches. It is deliberately not patchable. NOT YET
+	// ENFORCED: this build validates the setting and warns at start and
+	// reload, but still acts on every row of the rig's store, so a rig with
+	// federation = "rig" is not protected yet.
+	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Namespace declares whether another city may serve this rig's namespace
+	// on the same bead store: "shared" (the default) or "exclusive".
+	// "exclusive" requires federation = "rig". It is a declaration that
+	// cross-city checks read; it changes nothing in this city on its own.
+	Namespace string `toml:"namespace,omitempty" jsonschema:"enum=shared,enum=exclusive"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -851,6 +869,10 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
+	// AgentsExclude removes named agent templates from this import edge.
+	// Selectors are matched against each agent's local name before the import
+	// binding is applied; other imported resources remain visible.
+	AgentsExclude []string `toml:"agents_exclude,omitempty"`
 	// Export is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Export bool `toml:"export,omitempty" jsonschema:"-"`
@@ -896,12 +918,15 @@ func (imp *Import) ImportIsTransitive() bool {
 
 // HasDefaultOptionSemantics reports whether the import carries the
 // default option semantics: not exported, transitive resolution enabled,
-// and shadow handling empty or "warn". This is the option half of the
+// shadow handling empty or "warn", and no agent narrowing. This is the option half of the
 // reuse policy composition applies when deciding whether an existing
 // same-source binding can stand in for a converted legacy include
 // (existingDefaultImportBindingForSource); the doctor migration's
 // same-source dedup shares it so the two policies cannot drift.
 func (imp *Import) HasDefaultOptionSemantics() bool {
+	if len(imp.AgentsExclude) > 0 {
+		return false
+	}
 	if imp.Export {
 		return false
 	}
@@ -1757,16 +1782,24 @@ type SessionConfig struct {
 	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. When empty, defaults to the city name
-	// (workspace.name) — giving every city its own tmux server
-	// automatically. Set explicitly to override.
+	// When set, tmux commands connect to a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when gc runs in a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. When empty, defaults to the city name (workspace.name) —
+	// giving every city its own tmux server automatically. Set explicitly
+	// to override.
 	Socket string `toml:"socket,omitempty"`
 	// RemoteMatch is a substring pattern for the hybrid provider to route
 	// sessions to the remote (K8s) backend. Sessions whose names contain
 	// this pattern go to K8s; all others stay local (tmux).
 	// Overridden by the GC_HYBRID_REMOTE_MATCH env var if set.
 	RemoteMatch string `toml:"remote_match,omitempty"`
+	// ProgramStatus is the city switch for OSC 7501 program status. "off"
+	// (the default) changes nothing. "shadow" arms capture on declared
+	// providers ([providers.<p>.program_status]) and compares readings
+	// without changing any decision. "on" lets valid readings decide.
+	ProgramStatus string `toml:"program_status,omitempty" jsonschema:"enum=off,enum=shadow,enum=on,default=off"`
 }
 
 // durationOr parses raw as a Go duration, returning def when raw is empty or
@@ -2044,6 +2077,10 @@ type EventsConfig struct {
 	// Rotation configures file-backed JSONL rotation. Defaults are applied
 	// by EventsRotationConfig helper methods when this table is absent.
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+	// Mirror configures an optional second copy of the city's event log,
+	// written outside .gc so a log shipper can read it. Absent or with an
+	// empty path, nothing is mirrored.
+	Mirror EventsMirrorConfig `toml:"mirror,omitempty"`
 }
 
 // UsageConfig holds usage-fact sink settings.
@@ -2123,6 +2160,92 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return durationOr(c.ArchiveRetainAge, 0)
+}
+
+const (
+	// DefaultEventsMirrorMode is the default mode of the events mirror file.
+	DefaultEventsMirrorMode os.FileMode = 0o640
+	// DefaultEventsMirrorMaxSizeBytes is the default size at which the events
+	// mirror is renamed to <path>.1 and restarted.
+	DefaultEventsMirrorMaxSizeBytes int64 = 100 * 1024 * 1024
+)
+
+// EventsMirrorConfig configures the events mirror: a JSONL file outside the
+// city's .gc directory that receives a copy of every line of .gc/events.jsonl,
+// for a log shipper that may not enter .gc (which gc keeps at 0700). The
+// canonical .gc/events.jsonl is unchanged and stays what gc reads. The mirror
+// is written by the city's controller (or the supervisor running the city),
+// which tails the canonical log; a failing mirror never blocks or fails an
+// event write. Lines are copied as they are, redaction included: filtering
+// what leaves the host is the shipper's job.
+type EventsMirrorConfig struct {
+	// Path is the absolute path of the mirror file, outside the city's .gc
+	// directory. Its directory must already exist and be writable only by
+	// the city's user: gc creates only the file and never creates or changes
+	// the directory. gc writes only a regular file there: it does not follow
+	// a symbolic link at the path. Empty disables the mirror. Read when the
+	// controller opens the city's event log: a change takes effect at the
+	// next controller start.
+	Path string `toml:"path,omitempty"`
+	// Mode is the octal permission of the mirror file as a quoted string,
+	// for example "0640"; an unquoted TOML integer (0o640) is a type error
+	// that stops the config from loading. gc creates the file with it and
+	// sets it on every open. Defaults to "0640". The file's group follows
+	// the directory's: give the directory the shipper's group with the
+	// setgid bit (mode 2750) so the file inherits it.
+	Mode string `toml:"mode,omitempty" jsonschema:"default=0640"`
+	// MaxSizeBytes is the size at which the mirror is renamed to <path>.1
+	// (replacing the previous one) and a new file is started, so it stays
+	// under about twice this on disk. 0 turns gc's mirror rotation off for an
+	// external logrotate, which may rename the file away or copytruncate it.
+	// Defaults to 104857600 (100 MiB).
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=104857600"`
+}
+
+// Enabled reports whether a mirror path is configured.
+func (c EventsMirrorConfig) Enabled() bool {
+	return strings.TrimSpace(c.Path) != ""
+}
+
+// ModeOrDefault parses Mode, returning DefaultEventsMirrorMode when it is
+// empty. A value that is not an octal permission within 0777 is an error.
+func (c EventsMirrorConfig) ModeOrDefault() (os.FileMode, error) {
+	raw := strings.TrimSpace(c.Mode)
+	if raw == "" {
+		return DefaultEventsMirrorMode, nil
+	}
+	n, err := strconv.ParseUint(raw, 8, 32)
+	if err != nil || n > 0o777 || n == 0 {
+		return 0, fmt.Errorf("mode %q is not an octal permission between 0001 and 0777", c.Mode)
+	}
+	return os.FileMode(n), nil
+}
+
+// MaxSizeBytesOrDefault returns the configured rotation size.
+func (c EventsMirrorConfig) MaxSizeBytesOrDefault() int64 {
+	if c.MaxSizeBytes == nil {
+		return DefaultEventsMirrorMaxSizeBytes
+	}
+	return *c.MaxSizeBytes
+}
+
+// Problem reports why the configured mirror cannot be used, or "" when it can
+// (or none is configured). A mirror with a problem is skipped with a warning;
+// it never stops the city.
+func (c EventsMirrorConfig) Problem() string {
+	if !c.Enabled() {
+		return ""
+	}
+	if !filepath.IsAbs(c.Path) {
+		return fmt.Sprintf("path %q is not absolute", c.Path)
+	}
+	if _, err := c.ModeOrDefault(); err != nil {
+		return err.Error()
+	}
+	if c.MaxSizeBytes != nil && *c.MaxSizeBytes < 0 {
+		return fmt.Sprintf("max_size_bytes %d is negative", *c.MaxSizeBytes)
+	}
+	return ""
 }
 
 const (
@@ -2412,6 +2535,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 
@@ -2433,11 +2570,11 @@ type APIConfig struct {
 	// only config edits. City registry creation (POST /v0/city) is not covered:
 	// a grant binds a path-resident city name, which a not-yet-created city
 	// lacks, so creation stays governed by the supervisor-registry guards.
-	// Built-in callers (the bundled gc API client and dashboard SPA) send only
-	// the CSRF header and mint no grant, so enabling this gate turns their direct
-	// city mutations away with a clear 401; such deployments front mutations
-	// through the trusted authority that mints grants instead. The value is one
-	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The in-city gc client and the dashboard SPA mint no grant and send only
+	// the CSRF header, so enabling this gate turns their direct city mutations
+	// away with a clear 401; a remote gc context with a grant_command does mint
+	// one per mutation. The value is one or more "kid:base64-ed25519-pubkey"
+	// entries, comma separated, read once at startup.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
 	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
@@ -2691,13 +2828,18 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // MaintenanceConfig groups periodic store-maintenance subsections.
 type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
+	// Dolt configures the periodic Dolt store maintenance loop. The loop
+	// is observe-only for now: it takes no backup snapshot and runs no
+	// CALL DOLT_GC.
 	Dolt DoltMaintenance `toml:"dolt,omitempty"`
 }
 
-// DoltMaintenance configures the periodic Dolt store maintenance loop.
-// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+// DoltMaintenance configures the periodic Dolt store maintenance loop,
+// which is observe-only: each cycle runs the disk-space pre-flight and
+// records run history and events — it takes no backup snapshot and runs
+// no CALL DOLT_GC, so a completed run does not mean the store was
+// compacted. Opt-in for v1: omission or enabled=false leaves the loop
+// disabled.
 type DoltMaintenance struct {
 	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
 	Enabled bool `toml:"enabled,omitempty"`
@@ -2705,10 +2847,13 @@ type DoltMaintenance struct {
 	// string (e.g., "168h"). Defaults to 168h (weekly).
 	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
 	// AlertTo is the agent identity to mail on failure (e.g.,
-	// "gascity/mayor"). Empty disables alert mail.
+	// "gascity/mayor"). Empty disables alert mail. It has no effect while
+	// the loop is observe-only: an observe-only cycle cannot fail, so no
+	// alert mail is sent.
 	AlertTo string `toml:"alert_to,omitempty"`
-	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
+	// GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration
+	// string. Defaults to 10m. It has no effect while the loop is
+	// observe-only.
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
 }
 
@@ -2819,6 +2964,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter is how long a config-drift restart may stay
+	// deferred behind a seat's held work before the controller emits one
+	// escalated session.config_drift_deferred event for the episode. The
+	// escalation is a signal only: it never drains, restarts or kills the
+	// session. Positive Go duration string (e.g., "30m", "4h"). Defaults to
+	// "1h".
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -2860,9 +3012,30 @@ type DaemonConfig struct {
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
-	// unanswered nudge. "off" runs the three backstops it replaced (idle-claim,
-	// continuation, execution) instead: the rollback. Read on every pass, so a
-	// config reload applies. Legacy ignores it.
+	// unanswered nudge (a nudge the seat could not take, such as one held at
+	// a permission prompt, does not count). A claim whose metadata
+	// gc.awaiting_human names its seat (the seat asked a person and waits on
+	// their decision) is never recycled or released. While the seat's turns
+	// show its newest turn completed, it is nudged only daily, which takes
+	// up an answer that started no turn; any other reading (a turn open, a
+	// failed, canceled or status-less newest turn, no turn, turns that cannot
+	// be read) keeps it nudged hourly, so an answer whose turn died is
+	// redriven.
+	// A seat whose provider refuses its turns with a rate limit (two in a
+	// row, as its own transcript records them, the newest after a nudge it
+	// took) is paced as on a degraded provider, and once a nudge it took
+	// since is refused too, 10 minutes or more after the first refusal, it
+	// is restarted on a fresh conversation once, keeping its claims, at most
+	// one seat per provider per 30 minutes and once per seat per hour. While
+	// a person is attached or its work awaits a person, the restart waits and
+	// one alert says so. If the fresh conversation is refused too (or the
+	// refusal is a spent usage quota), one alert names the provider and the
+	// seat stays paced until its provider serves it. Every move is a
+	// work.rate_limited event, on which a pack may hold the provider through
+	// provider-health.json. Seats whose turns cannot be read are judged on
+	// their activity alone. "off" runs the three backstops it replaced
+	// (idle-claim, continuation, execution) instead: the rollback. Read on
+	// every pass, so a config reload applies. Legacy ignores it.
 	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
@@ -2874,7 +3047,7 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no stashes, and no commits that removal would orphan — commits
+	// tree and no commits that removal would orphan — commits
 	// reachable from no branch, tag, or remote-tracking ref — are removed;
 	// push state is deliberately not the test, since `git worktree remove`
 	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
@@ -2932,8 +3105,9 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
-	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
+	// provisioned, which only its owner removes), clean working tree, no
+	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -2994,7 +3168,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (not a managed worktree, clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3234,6 +3408,20 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DefaultDriftDeferralEscalateAfter is the default age at which a deferred
+// config-drift episode over held work escalates.
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
+// DriftDeferralEscalateAfterDuration returns the drift-deferral escalation
+// horizon. Defaults to DefaultDriftDeferralEscalateAfter if empty,
+// unparseable, or not positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur := durationOr(d.DriftDeferralEscalateAfter, DefaultDriftDeferralEscalateAfter); dur > 0 {
+		return dur
+	}
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -3538,7 +3726,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
@@ -4759,22 +4949,21 @@ var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix
-// (gcg/gcm/gcs/gco/gcn). The relocated SQLite class stores that mint these
-// prefixes are an identity seam on a default city, so such a prefix is allowed
-// today (see ValidateRigs) and only becomes ambiguous once the multi-backend
-// fork activates per-class routing. Callers should surface these as non-fatal
-// operator warnings so an existing city or rig that already uses one keeps
-// starting and reloading while it still has time to rename. The hqPrefix must
-// already be site-bound resolved (e.g. via EffectiveHQPrefix).
+// (gcg/gcm/gcs/gco/gcn). On a city that relocates no coordination class the
+// SQLite class stores that mint these prefixes do not exist, so such a prefix
+// is allowed (see ValidateRigs) and callers surface these as non-fatal operator
+// warnings. A SPLIT city is refused instead: see ReservedPrefixSplitRefusal.
+// The hqPrefix must already be site-bound resolved (e.g. via
+// EffectiveHQPrefix).
 func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
 	var warnings []string
-	if IsReservedClassPrefix(hqPrefix) {
-		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
+	if _, ok := ReservedPrefixCollision(hqPrefix); ok {
+		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
 	}
 	for _, r := range rigs {
 		prefix := strings.ToLower(r.EffectivePrefix())
-		if IsReservedClassPrefix(prefix) {
-			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", r.Name, prefix, reservedClassPrefixListText()))
+		if _, ok := ReservedPrefixCollision(prefix); ok {
+			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", r.Name, prefix, reservedClassPrefixListText()))
 		}
 	}
 	return warnings
@@ -5049,6 +5238,12 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
+	if err := validateProgramStatus(&cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateRigFederation(cfg.Rigs); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
