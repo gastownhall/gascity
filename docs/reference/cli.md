@@ -5743,6 +5743,13 @@ file, the served-binding and cleared notes), so a snapshot taken before the
 split is a way back to the whole city: gc storage snapshot restore &lt;id&gt;
 --city puts it back.
 
+The copy of a managed Dolt's data directory holds every database the server
+serves. --work refuses, before it starts or stops anything, when a rig keeps
+its store there and --rigs is not passed: the snapshot would record no store
+for that database, and --city would refuse it. A database no store of the city keeps
+(gc's probe database, a removed rig's) is named in a note: --city puts it back
+as the copy holds it, unproven.
+
 manifest.json records the stores, their row and edge counts, each file's
 sha256, the gc version, the work store's identity, and the binding root's
 records. It is written last, after every file is re-read and proven, so a
@@ -5809,20 +5816,40 @@ restore interrupted after that holds the city stale until you run it again.
 every store the snapshot holds from its exact copy (a file store's file, or
 the managed Dolt's data directory, copied with the server stopped), then the
 city's storage records (.gc/min-gc-version, the served-binding and cleared
-notes), then city.toml; and, when the snapshot holds no binding (one taken
-before the split, as gc storage split takes), it moves the binding root
-aside, so the city serves from its work store alone again. It refuses before
-it moves anything: a snapshot of another work store, one that records no
-city, a store whose copy restores nothing exactly (a Dolt tag, a bd export,
-no copy), a snapshot that holds a binding (restore that with --binding), a
-snapshot of a split city (one that records a served-binding or cleared note),
-a rig imported since the snapshot whose store the snapshot does not hold, a
-running managed Dolt, or a reverse migration in progress. Every file it
-replaces is kept beside it as *.pre-restore-&lt;ts&gt;; city.toml is copied aside,
-so it is never missing. Its journal, .gc/storage-city-restore.json, holds gc
-start until every file is back and every other writing storage command until
-it finishes; run again, it finishes an interrupted restore. Last, it reads
-each restored store back and proves its rows equal to the snapshot's JSONL.
+notes), then city.toml; and, when the snapshot holds no binding, it moves the
+binding root aside, so the city serves from its work store alone again. Take
+that snapshot before the split: gc storage snapshot --work --rigs
+--fleet-stopped, before [storage] is added (gc storage preflight --split names
+it). It refuses before it moves anything: a snapshot of another work store,
+one that records no city, a store whose copy restores nothing exactly (a Dolt
+tag, a bd export, no copy), a snapshot that holds a binding (restore that
+with --binding), a snapshot of a split city (one that records a
+served-binding or cleared note), a city.toml that, with the city's include
+fragments as they are now, still routes a class off the work store, a copy of
+the managed Dolt's data directory holding a database a rig of this city keeps
+its store in that the snapshot records no store for, a rig imported since the
+snapshot whose store the snapshot does not hold, a store it replaces that
+another registered city also uses (the work store, a rig's, or any other
+database of the managed Dolt's data directory; it replaces a store whole, so
+no --force=shared-store:&lt;identity&gt; lifts this, and it refuses that
+attestation), a live controller, a running managed Dolt, too little disk for
+the data directory's copy, or a reverse migration in progress. Any other
+database the copy holds (gc's probe database, a removed rig's) is put back as
+the copy holds it and named unproven. Every file it replaces is kept beside it
+as *.pre-restore-&lt;ts&gt;; city.toml is copied aside, so it is never missing. Its
+journal, .gc/storage-city-restore.json, holds gc start and every other writing
+storage command until the restore ends, and keeps the snapshot pinned until
+then; run again, it finishes an interrupted restore.
+
+Last, it reads each restored store back and proves its rows equal to the
+snapshot's JSONL. A row the JSONL dates after the store's copy and before
+the JSONL read (each to the second) was written during the snapshot: it is
+reported, with where its later content is kept, and passes. Any other
+difference fails the proof, and the city stays held: resolve it and run the
+restore again, or pass --accept-unproven to end the restore anyway, which
+records what the proof failed on in the journal and, entry by entry, in
+.gc/storage-attestations.log, keeps every file the restore replaced, and
+releases the city.
 
 ```
 gc storage snapshot restore <id> [flags]
@@ -5830,6 +5857,7 @@ gc storage snapshot restore <id> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--accept-unproven` | bool |  | with --city: end an unfinished city restore whose every file is back and whose proof fails, recording what the proof failed on |
 | `--binding` | bool |  | restore the infrastructure binding |
 | `--city` | bool |  | restore the whole city from a snapshot taken with --work: its stores, storage records and city.toml |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |

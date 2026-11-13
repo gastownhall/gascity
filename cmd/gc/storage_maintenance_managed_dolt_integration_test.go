@@ -398,11 +398,12 @@ func TestStorageMigrateAdoptsAManagedDoltLeftRunningOnTheStoppedCity(t *testing.
 }
 
 // TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps is S-3 acceptance
-// 3 on a real managed Dolt (owner decision D-c): the snapshot copies the
+// 3 on a real managed Dolt (owner decision D-c): the snapshot (--work --rigs:
+// the city's rig keeps its database in the same data directory) copies the
 // data directory with the server stopped, which holds the wisp tables a Dolt
 // tag does not, the split clears the session wisps from the work store, and
-// the city restore puts them back, proven against the snapshot's JSONL, with
-// the server stopped again at the end.
+// the city restore puts them back, proven against the snapshot's JSONL with
+// the rig's store, with the server stopped again at the end.
 func TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps(t *testing.T) {
 	city := newManagedDoltWindowCity(t)
 	cfg, err := loadCityConfig(city.cityPath, &bytes.Buffer{})
@@ -415,12 +416,14 @@ func TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps(t *testing.T) {
 	to := t.TempDir()
 	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: cfg, FleetStopped: true}
 	var stdout, stderr bytes.Buffer
-	if code := doStorageSnapshot(context.Background(), request, snapshotOptions{Work: true, To: to, Keep: 2}, "gc storage snapshot", &stdout, &stderr); code != 0 {
+	if code := doStorageSnapshot(context.Background(), request, snapshotOptions{Work: true, Rigs: true, To: to, Keep: 2}, "gc storage snapshot", &stdout, &stderr); code != 0 {
 		t.Fatalf("snapshot = %d: %s%s", code, stdout.String(), stderr.String())
 	}
 	id, m := onlySnapshot(t, to)
-	if m.Stores[0].Exact.Method != snapshotMethodDoltDataDir || m.Stores[0].Exact.CopiedAt.IsZero() {
-		t.Fatalf("the work store's exact copy is %+v, want the data directory with the time it was copied", m.Stores[0].Exact)
+	for _, rec := range m.Stores {
+		if rec.Exact.Method != snapshotMethodDoltDataDir || rec.Exact.CopiedAt.IsZero() || rec.Exact.Database == "" || rec.JSONLReadAt.Before(rec.Exact.CopiedAt) {
+			t.Fatalf("%s's exact copy is %+v, JSONL read at %s; want the data directory, its database in it, the time it was copied and a JSONL read after it", rec.Name, rec.Exact, rec.JSONLReadAt)
+		}
 	}
 	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 {
 		t.Fatalf("the snapshot left the managed Dolt up (pid %d)", pid)
@@ -445,7 +448,7 @@ func TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps(t *testing.T) {
 	request.Cfg = &split
 	stdout.Reset()
 	stderr.Reset()
-	if code := doStorageSnapshotRestoreCity(context.Background(), request, to, id, "gc storage snapshot restore", &stdout, &stderr); code != 0 {
+	if code := doStorageSnapshotRestoreCity(context.Background(), request, to, id, false, "gc storage snapshot restore", &stdout, &stderr); code != 0 {
 		t.Fatalf("restore = %d: %s%s", code, stdout.String(), stderr.String())
 	}
 	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 || doltPortReachable(strconv.Itoa(city.port)) {

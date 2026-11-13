@@ -98,6 +98,11 @@ type snapshotStoreRecord struct {
 	Edges    int           `json:"edges"`
 	Payloads string        `json:"payloads"`
 	Notes    []string      `json:"notes,omitempty"`
+	// JSONLReadAt is when the store's rows were read for its JSONL. With
+	// Exact.CopiedAt it bounds the window in which a row may have changed
+	// after the copy and before the read, the only rows the city restore's
+	// proof excuses. Zero for a snapshot taken before gc recorded it.
+	JSONLReadAt time.Time `json:"jsonl_read_at,omitzero"`
 }
 
 // snapshotExact is a store's exact copy.
@@ -113,6 +118,9 @@ type snapshotExact struct {
 	// changed at or after this moment may postdate the copy. Zero for a
 	// snapshot taken before gc recorded it, and for the other methods.
 	CopiedAt time.Time `json:"copied_at,omitzero"`
+	// Database is the store's database in a data-directory copy: the
+	// directory holds one per database the server serves.
+	Database string `json:"database,omitempty"`
 }
 
 // snapshotFile is one file in a snapshot, relative to its directory.

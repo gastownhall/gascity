@@ -317,68 +317,93 @@ type storeSharer struct {
 // registered city. It returns this store's attestation token and every
 // sharer; an error is a registry or config that could not be read.
 func findStoreSharers(cityPath, label, selfRoot string) (string, []storeSharer, error) {
-	self := storeDoltIdentityOf(cityPath, selfRoot)
+	return findIdentitySharers(cityPath, label, selfRoot, storeDoltIdentityOf(cityPath, selfRoot))
+}
+
+// findIdentitySharers is findStoreSharers for a store already resolved to
+// self. selfRoot is the store's scope directory, or "" for a database of the
+// city's managed Dolt that no scope of the city keeps its store in, which
+// shares no directory.
+func findIdentitySharers(cityPath, label, selfRoot string, self storeDoltIdentity) (string, []storeSharer, error) {
 	token := self.token(selfRoot)
 	others, err := storeSharerCities(cityPath)
 	if err != nil {
 		return token, nil, fmt.Errorf("%s: reading the city registry to rule out a shared store: %w; nothing was written", label, err)
 	}
-	// A store with no Dolt database (a file store) shares none but its
-	// directory. One whose endpoint cannot be resolved and which pins no
-	// database name cannot be told apart from any other city's Dolt store,
-	// so it is compared, and refused, rather than skipped.
-	noDatabase := self.Database == "" && !self.Unresolved
 	var sharers []storeSharer
 	for _, otherPath := range others {
-		cfg, err := readOtherCityConfig(otherPath)
-		if err == nil && cfg == nil {
-			err = errors.New("it loaded no configuration")
-		}
+		scopes, err := otherCityStoreScopes(otherPath)
 		if err != nil {
 			return token, nil, fmt.Errorf("%s: city %s is registered but its config cannot be read (%w), so it cannot be ruled out as sharing the store; nothing was written", label, otherPath, err)
 		}
-		type scope struct{ name, root string }
-		scopes := []scope{{"city store", otherPath}}
-		for _, other := range cfg.Rigs {
-			if strings.TrimSpace(other.Path) != "" {
-				scopes = append(scopes, scope{"rig " + other.Name, rigStoreRoot(otherPath, other)})
-			}
-		}
 		for _, sc := range scopes {
-			add := func(format string, args ...any) {
-				sharers = append(sharers, storeSharer{OtherPath: otherPath, Refusal: fmt.Sprintf(format, args...)})
-			}
-			if samePath(sc.root, selfRoot) {
-				add("%s's store %s is also city %s's %s: a shared store holds rows another city owns", label, selfRoot, otherPath, sc.name)
-				continue
-			}
-			if noDatabase {
-				continue
-			}
-			theirs := storeDoltIdentityOf(otherPath, sc.root)
-			if theirs.Database == "" && !theirs.Unresolved {
-				continue
-			}
-			switch {
-			case self.Unresolved && self.Database == "":
-				add("%s's Dolt endpoint cannot be resolved (%v) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's %s's database: fix what keeps the endpoint from resolving, or pin its database name", label, self.Err, otherPath, sc.name)
-			case self.Unresolved || theirs.Unresolved:
-				if theirs.Database != "" && theirs.Database != self.Database {
-					continue
-				}
-				why := theirs.Err
-				if self.Unresolved {
-					why = self.Err
-				}
-				add("%s's Dolt database %q may also be city %s's %s, and the endpoints cannot be compared (%v): fix what keeps that endpoint from resolving so they can be, or unregister that city if it is gone", label, self.Database, otherPath, sc.name, why)
-			case theirs.Database == self.Database:
-				if at, shared := self.sharedAt(theirs); shared {
-					add("%s's Dolt database %s at %s is also city %s's %s: a shared store holds rows another city owns", label, self.Database, at, otherPath, sc.name)
-				}
+			if refusal := storeSharerRefusal(label, selfRoot, self, otherPath, sc); refusal != "" {
+				sharers = append(sharers, storeSharer{OtherPath: otherPath, Refusal: refusal})
 			}
 		}
 	}
 	return token, sharers, nil
+}
+
+// otherStoreScope is one store of another registered city: its city store or
+// a rig's, by its name in that city and its scope directory.
+type otherStoreScope struct{ name, root string }
+
+// otherCityStoreScopes lists the stores of the registered city at otherPath:
+// its city store, then each rig with a path.
+func otherCityStoreScopes(otherPath string) ([]otherStoreScope, error) {
+	cfg, err := readOtherCityConfig(otherPath)
+	if err == nil && cfg == nil {
+		err = errors.New("it loaded no configuration")
+	}
+	if err != nil {
+		return nil, err
+	}
+	scopes := []otherStoreScope{{"city store", otherPath}}
+	for _, other := range cfg.Rigs {
+		if strings.TrimSpace(other.Path) != "" {
+			scopes = append(scopes, otherStoreScope{"rig " + other.Name, rigStoreRoot(otherPath, other)})
+		}
+	}
+	return scopes, nil
+}
+
+// storeSharerRefusal compares the store resolved to self (label names it;
+// selfRoot is its scope directory, or "") with sc, a store of the city at
+// otherPath, and returns the sentence that names the two when they are one
+// store or cannot be told apart, else "". A store with no Dolt database (a
+// file store) shares none but its directory. One whose endpoint cannot be
+// resolved and which pins no database name cannot be told apart from any other
+// city's Dolt store, so it is compared, and refused, rather than skipped.
+func storeSharerRefusal(label, selfRoot string, self storeDoltIdentity, otherPath string, sc otherStoreScope) string {
+	if selfRoot != "" && samePath(sc.root, selfRoot) {
+		return fmt.Sprintf("%s's store %s is also city %s's %s: a shared store holds rows another city owns", label, selfRoot, otherPath, sc.name)
+	}
+	if self.Database == "" && !self.Unresolved {
+		return ""
+	}
+	theirs := storeDoltIdentityOf(otherPath, sc.root)
+	if theirs.Database == "" && !theirs.Unresolved {
+		return ""
+	}
+	switch {
+	case self.Unresolved && self.Database == "":
+		return fmt.Sprintf("%s's Dolt endpoint cannot be resolved (%v) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's %s's database: fix what keeps the endpoint from resolving, or pin its database name", label, self.Err, otherPath, sc.name)
+	case self.Unresolved || theirs.Unresolved:
+		if theirs.Database != "" && theirs.Database != self.Database {
+			return ""
+		}
+		why := theirs.Err
+		if self.Unresolved {
+			why = self.Err
+		}
+		return fmt.Sprintf("%s's Dolt database %q may also be city %s's %s, and the endpoints cannot be compared (%v): fix what keeps that endpoint from resolving so they can be, or unregister that city if it is gone", label, self.Database, otherPath, sc.name, why)
+	case theirs.Database == self.Database:
+		if at, shared := self.sharedAt(theirs); shared {
+			return fmt.Sprintf("%s's Dolt database %s at %s is also city %s's %s: a shared store holds rows another city owns", label, self.Database, at, otherPath, sc.name)
+		}
+	}
+	return ""
 }
 
 // sharedStoreExclusion is what the shared-store check leaves held. Under an

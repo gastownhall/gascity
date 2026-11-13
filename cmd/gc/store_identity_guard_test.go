@@ -75,7 +75,6 @@ var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
 	"storage_maintenance.go migrationSourceLaneRefusal switch":              {Count: 1, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
 	"storage_preflight_split.go splitClearLaneFor eq":                       {Count: 4, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
 	"storage_preflight_split.go splitPreflightEstimate eq":                  {Count: 1, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
-	"storage_preflight_split.go splitPreflightReverseNote eq":               {Count: 1, Reason: "not a store: BeadsDiagnostic.Store is the backend name"},
 	"work_location.go WorkLegs.isWork eq":                                   {Count: 1, Reason: "the raw unwraps of a store and the work leg; T9"},
 }
 

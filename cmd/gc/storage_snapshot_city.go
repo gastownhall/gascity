@@ -6,19 +6,29 @@ package main
 // A city is more than its stores. What it serves from is decided by
 // city.toml's [storage], what a gc may run on it by .gc/min-gc-version, and
 // what a split has done by the storage records under .gc (the served-binding
-// note, the cleared notes). A snapshot that includes the work store also
-// records those (snapshotCityRecord): city.toml's bytes, and each record's
-// bytes or its absence.
+// note, the cleared notes). `gc storage snapshot --work` also records those
+// (snapshotCityRecord): city.toml's bytes, and each record's bytes or its
+// absence.
 //
 // A managed Dolt's exact copy is its data directory, copied with the server
 // stopped (D-c; the five live rollbacks before this verb did exactly that).
 // A Dolt tag covers the committed tables only, and bd keeps its wisps in
 // dolt_ignore'd ones, so a tag is no way back to a store. The snapshot runs in
 // the maintenance window, whose server is one it started or adopted, so it
-// stops that server for the copy and starts it again for the JSONL read
-// (snapshotManagedDoltDataDir). A rig whose database lives in the city's data
-// directory (the managed layout) is in the same copy. A server the window did
-// not start keeps the Dolt tag, and the manifest says why.
+// stops that server for the copy and starts it again, with the rig scopes the
+// window reads, for the JSONL read (snapshotDoltDataDir). The directory is the
+// one the server serves, never one an inherited GC_DOLT_DATA_DIR names. A rig
+// whose database lives in the city's data directory (the managed layout) is in
+// the same copy, and the manifest names each store's database in it. A server
+// the window did not start keeps the Dolt tag, and the manifest says why.
+//
+// The copy holds every database the server serves, and the census
+// (doltCopyCensus) sorts those no store of the snapshot records: one a scope
+// of the city keeps its store in (a rig the snapshot was taken without) would
+// come back unproven, so the snapshot refuses it, before it starts or stops
+// anything when --rigs is missing; any other (gc's probe database, a removed
+// rig's, a test's) belongs to no store of the city, and the snapshot names it
+// in a note on the work store.
 //
 // The city restore puts a city back as the snapshot found it: every store the
 // snapshot holds, from its exact copy; then the storage records; then
@@ -36,18 +46,44 @@ package main
 //     database are recorded by hash, not kept, so a split city is restored
 //     with `--binding` (its database) and this restore is for a snapshot
 //     from before the split;
-//   - a managed Dolt that is running, or a reverse migration in progress.
+//   - a snapshot of a split city, or one whose city.toml, composed with the
+//     city's include fragments as they are now, still routes a class off the
+//     work store: the city it would leave does not boot;
+//   - a data-directory copy holding a database a scope of the city keeps its
+//     store in that the snapshot records no store for: the restore replaces
+//     the whole directory, so that store would come back unproven. Any other
+//     database the copy holds is put back as the copy holds it, and the
+//     restore names it unproven;
+//   - a rig imported since the snapshot whose store the snapshot does not
+//     hold;
+//   - a store it replaces that another registered city also uses: the work
+//     store, a rig's, or any other database of the managed Dolt's data
+//     directory, live or copied. The restore replaces a store whole, so it
+//     cannot leave another city's rows as they are, and, unlike the writing
+//     verbs that select rows, it takes no --force=shared-store:<identity>;
+//   - a live controller; a managed Dolt that is running; too little disk for
+//     the data directory's copy; or a reverse migration in progress.
 //
 // Every file it replaces is moved aside as <path>.pre-restore-<ts>, never
 // deleted. The journal (.gc/storage-city-restore.json) records the run before
 // the first move and each step once it is done; run again, the same command
-// finishes the steps that are not. Once every step is done the restore reads
-// each restored store back (in a maintenance window opened with the restored
-// city.toml, which starts a stopped provider and stops it after) and proves
-// its rows equal to the snapshot's JSONL, row for row. The JSONL is read from
-// the live store after the copy, so a row it dates at or after the copy's
-// recorded time (snapshotExact.CopiedAt) may be in the JSONL alone: the
-// restore reports it as written during the snapshot and finishes.
+// finishes the steps that are not. Until the restore ends the journal holds
+// gc start and every other writing storage command, and the snapshot is
+// pinned, so retention keeps it.
+//
+// Once every file is back the restore reads each restored store back (in a
+// maintenance window opened with the restored city.toml, which starts a
+// stopped provider and stops it after) and proves its rows equal to the
+// snapshot's JSONL, row for row. The JSONL is read from the live store after
+// the copy, so a row may have changed in between: a row the JSONL dates inside
+// that window (snapshotExact.CopiedAt to snapshotStoreRecord.JSONLReadAt, each
+// to the second) is reported as changed or created during the snapshot, with
+// where its later content survives, and the restore ends. Any other difference
+// fails the proof, and the city stays held. The same command ends the restore
+// once the difference is resolved, and, when it cannot be, --accept-unproven
+// ends it anyway: it records what the proof failed on in the journal and, row
+// by row, in the attestation log, keeps every file the restore replaced, and
+// releases the city.
 
 import (
 	"context"
@@ -64,7 +100,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -82,6 +122,22 @@ const storageCityRestoreJournalName = "storage-city-restore.json"
 
 // storageCityRestoreFormat versions the journal.
 const storageCityRestoreFormat = "gc.storage.city-restore/v1"
+
+// cityRestoreAcceptFlag ends an unfinished city restore whose proof fails.
+const cityRestoreAcceptFlag = "accept-unproven"
+
+// cityRestoreUnprovenHazard is the attestation an accepted unproven restore
+// records in the attestation log, with the snapshot's id after a colon.
+const cityRestoreUnprovenHazard = "city-restore-unproven"
+
+// cityRestoreSnapshotCommand takes the snapshot a city restore puts back,
+// before [storage] is added and before `gc storage migrate --from-work`, as
+// `gc storage preflight --split` names it.
+const cityRestoreSnapshotCommand = "gc storage snapshot --work --rigs --" + storageFleetStoppedFlag
+
+// cityRestoreListed caps the rows a failed proof's message names; the
+// journal of an accepted one records them all.
+const cityRestoreListed = 5
 
 // snapshotCityRecord is the city in a snapshot: city.toml and the storage
 // records under .gc, each by its bytes or its absence.
@@ -108,6 +164,149 @@ type snapshotCopiedTree struct {
 	Path  string         `json:"path"`
 	Files []snapshotFile `json:"files"`
 	Dirs  []string       `json:"dirs,omitempty"`
+}
+
+// bytes is the size of every file the tree holds.
+func (t snapshotCopiedTree) bytes() int64 {
+	var n int64
+	for _, f := range t.Files {
+		n += f.Bytes
+	}
+	return n
+}
+
+// databases are the Dolt databases the tree holds, sorted: each top-level
+// directory with a .dolt directory in it.
+func (t snapshotCopiedTree) databases() []string {
+	var out []string
+	for _, d := range t.Dirs {
+		parent := filepath.Dir(filepath.Clean(d))
+		if filepath.Base(d) == ".dolt" && parent != "." && filepath.Dir(parent) == "." {
+			out = append(out, parent)
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// doltDataDirDatabases are the Dolt databases a data directory holds, sorted:
+// each directory in it with a .dolt directory inside. A data directory that is
+// not there holds none.
+func doltDataDirDatabases(dataDir string) ([]string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(dataDir, e.Name(), ".dolt"))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return nil, err
+		case info.IsDir():
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
+}
+
+// cityScopeDoltDatabases maps each database a scope of the city keeps its
+// store in, in the city's managed Dolt, to the scope: work, and rig:<name> for
+// each rig with a store of its own (snapshotRigs).
+func cityScopeDoltDatabases(request storageOperatorRequest) map[string]string {
+	named := map[string]string{}
+	for _, s := range append([]snapshotScopeRef{{name: "work", root: request.CityPath}}, snapshotRigs(request)...) {
+		if db := snapshotScopeDoltDatabase(request.CityPath, s.root); db != "" {
+			named[db] = s.name
+		}
+	}
+	return named
+}
+
+// doltCopyCensus sorts the databases a copy of the managed Dolt's data
+// directory holds (copied, sorted) that no store of the snapshot records
+// (recorded). owned are those a scope of the city keeps its store in (named,
+// database to scope), each as "<scope> (database <db>)": a restore of the copy
+// would roll that store back unproven, so the snapshot and the restore refuse
+// them. unproven are the rest (gc's probe database, a removed rig's, a
+// test's), which no store of the city keeps: the restore puts them back as
+// the copy holds them.
+func doltCopyCensus(copied []string, recorded map[string]bool, named map[string]string) (owned, unproven []string) {
+	for _, db := range copied {
+		scope, isNamed := named[db]
+		switch {
+		case recorded[db]:
+		case isNamed:
+			owned = append(owned, fmt.Sprintf("%s (database %s)", scope, db))
+		default:
+			unproven = append(unproven, db)
+		}
+	}
+	return owned, unproven
+}
+
+// snapshotDoltOwnedRefusal refuses a snapshot whose copy of the managed Dolt's
+// data directory holds stores of the city it records no store for (owned,
+// doltCopyCensus): `gc storage snapshot restore --city` would refuse it, and
+// once the split has run no snapshot it accepts can be taken.
+func snapshotDoltOwnedRefusal(owned []string) error {
+	if len(owned) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the copy of the managed Dolt's data directory holds %s, which this city keeps its store(s) in, and this snapshot would record no store for them, so `gc storage snapshot restore --city` would refuse it as the way back; take it with --rigs (`%s`)", strings.Join(owned, ", "), cityRestoreSnapshotCommand)
+}
+
+// snapshotDoltCensus runs the census (doltCopyCensus) on a snapshot's copy of
+// the managed Dolt's data directory, tree, once manifest records every store.
+// A store of the city it holds and records no store for refuses the snapshot
+// (snapshotDoltOwnedRefusal). Every other database it records no store for is
+// named in a note on the work store, which the snapshot prints: the city
+// restore puts it back as the copy holds it, unproven.
+func snapshotDoltCensus(request storageOperatorRequest, tree snapshotCopiedTree, manifest *snapshotManifest) error {
+	recorded := map[string]bool{}
+	work := -1
+	for i, rec := range manifest.Stores {
+		if rec.Exact.Method == snapshotMethodDoltDataDir && rec.Exact.Database != "" {
+			recorded[rec.Exact.Database] = true
+		}
+		if rec.Name == "work" {
+			work = i
+		}
+	}
+	owned, unproven := doltCopyCensus(tree.databases(), recorded, cityScopeDoltDatabases(request))
+	if err := snapshotDoltOwnedRefusal(owned); err != nil {
+		return err
+	}
+	if len(unproven) > 0 && work >= 0 {
+		manifest.Stores[work].Notes = append(manifest.Stores[work].Notes, fmt.Sprintf("the copy of the managed Dolt's data directory also holds database(s) %s, which no store of this city keeps (gc's probe database, a removed rig's, a test's); `gc storage snapshot restore --city` puts them back as the copy holds them, unproven", strings.Join(unproven, ", ")))
+	}
+	return nil
+}
+
+// snapshotCityRigsRefusal refuses, before the snapshot locks, starts or stops
+// anything, a snapshot that is a way back to the city (opts.City) taken
+// without --rigs of a city whose rigs keep their stores in its managed Dolt
+// beside the work store: the copy of the data directory would hold their
+// databases, which the snapshot records no store for, so the census would
+// refuse it once copied.
+func snapshotCityRigsRefusal(request storageOperatorRequest, opts snapshotOptions) error {
+	if !opts.City || opts.Rigs {
+		return nil
+	}
+	workDatabase := snapshotScopeDoltDatabase(request.CityPath, request.CityPath)
+	if workDatabase == "" {
+		return nil
+	}
+	named := cityScopeDoltDatabases(request)
+	owned, _ := doltCopyCensus(slices.Sorted(maps.Keys(named)), map[string]bool{workDatabase: true}, named)
+	return snapshotDoltOwnedRefusal(owned)
 }
 
 // snapshotCityRecordRels are the city's storage records a snapshot keeps
@@ -236,19 +435,75 @@ func verifySnapshotTree(dir string, tree *snapshotCopiedTree) error {
 }
 
 // Test seams for the managed Dolt the snapshot copies and the restore puts
-// back: whether a scope's store lives in the city's managed Dolt, whether
-// the server runs, and its data directory.
+// back: the database a scope's store keeps in the city's managed Dolt,
+// whether the server runs, and its data directory.
 var (
-	snapshotScopeInManagedDolt = scopeStoreLivesInTheCitysManagedDolt
+	snapshotScopeDoltDatabase  = scopeManagedDoltDatabase
 	snapshotManagedDoltRunning = func(cityPath string) bool { return currentManagedDoltPort(cityPath) != "" }
-	snapshotManagedDoltDataDir = func(cityPath string) (string, error) {
-		layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-		if err != nil {
-			return "", err
-		}
-		return layout.DataDir, nil
-	}
+	snapshotManagedDoltDataDir = managedDoltServedDataDir
 )
+
+// snapshotScopeInManagedDolt reports whether a scope's store lives in the
+// city's managed Dolt.
+func snapshotScopeInManagedDolt(cityPath, scopeRoot string) bool {
+	return snapshotScopeDoltDatabase(cityPath, scopeRoot) != ""
+}
+
+// scopeManagedDoltDatabase is the database a scope's store keeps in the
+// city's managed Dolt (scopeStoreLivesInTheCitysManagedDolt), or "" when the
+// store lives elsewhere.
+func scopeManagedDoltDatabase(cityPath, scopeRoot string) string {
+	if !scopeStoreLivesInTheCitysManagedDolt(cityPath, scopeRoot) {
+		return ""
+	}
+	database, _, err := contract.ReadDoltDatabase(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(database)
+}
+
+// managedDoltServedDataDir is the data directory the city's managed Dolt
+// serves: <city>/.beads/dolt, which the provider pins for the server
+// (providerLifecycleDoltPathEnv) and resolveManagedDoltRuntimeLayoutStrict
+// resolves from the city alone. The snapshot copies this directory and the
+// restore replaces it, so a GC_DOLT_DATA_DIR this process inherited (gc
+// exports one into order environments, another city's among them) must not
+// turn either onto another directory: one naming another directory refuses.
+func managedDoltServedDataDir(cityPath string) (string, error) {
+	layout, err := resolveManagedDoltRuntimeLayoutStrict(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if inherited := strings.TrimSpace(os.Getenv("GC_DOLT_DATA_DIR")); inherited != "" && !samePath(inherited, layout.DataDir) {
+		return "", fmt.Errorf("GC_DOLT_DATA_DIR in this environment names %s, and the city's managed Dolt serves %s; unset it and run this again", inherited, layout.DataDir)
+	}
+	return layout.DataDir, nil
+}
+
+// cityRestoreUnrestorable says why the city restore would refuse the snapshot
+// `gc storage preflight --split` names (cityRestoreSnapshotCommand) taken of
+// the city as it is now, or "": a store of the city, the work store or a rig
+// with a store of its own, that the snapshot takes no copy of the restore puts
+// back. A file store's copy is its file; a store in the city's managed Dolt is
+// in the copy of the data directory, which the snapshot takes when the work
+// store is in it. A database no store of the city keeps refuses nothing: the
+// restore puts it back as the copy holds it.
+func cityRestoreUnrestorable(request storageOperatorRequest) string {
+	cityPath := request.CityPath
+	workInDolt := snapshotScopeInManagedDolt(cityPath, cityPath)
+	var refused []string
+	for _, s := range append([]snapshotScopeRef{{name: "work", root: cityPath}}, snapshotRigs(request)...) {
+		fileCopy := snapshotExactMethod(rawBeadsProviderForScope(s.root, cityPath), false) == snapshotMethodFileCopy
+		if !fileCopy && (!workInDolt || !snapshotScopeInManagedDolt(cityPath, s.root)) {
+			refused = append(refused, s.name)
+		}
+	}
+	if len(refused) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("the split's snapshot of %s is a Dolt tag, a bd export or no copy, which the city restore does not put back", strings.Join(refused, ", "))
+}
 
 // snapshotDoltDataDir copies the city's managed Dolt data directory into
 // dir with the server stopped: the window open on the city stops the server
@@ -269,8 +524,8 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("sizing the managed Dolt's data directory %s: %w", dataDir, err)
 	}
-	if err := snapshotTreeDiskRefusal(dir, size); err != nil {
-		return nil, "", err
+	if free, floor, short := snapshotTreeDiskShortfall(dir, size); short {
+		return nil, "", fmt.Errorf("%s has %d bytes free; the copy of the managed Dolt's data directory needs %d and must leave %d free for a managed Dolt on the same filesystem. Free space, or pass --to elsewhere; the server was not stopped and nothing was copied", dir, free, size, floor)
 	}
 	doltpool.Shutdown()
 	if err := migrationWindowStopProvider(cityPath); err != nil {
@@ -278,7 +533,7 @@ func snapshotDoltDataDir(cityPath, dir string) (*snapshotExact, string, error) {
 	}
 	copiedAt := time.Now().UTC()
 	tree, copyErr := copySnapshotTree(dir, dataDir, snapshotCityDoltDir)
-	if err := migrationWindowStartProvider(cityPath); err != nil {
+	if err := w.restartProvider(); err != nil {
 		return nil, "", errors.Join(copyErr, fmt.Errorf("starting the managed Dolt again after the copy of its data directory: %w", err))
 	}
 	if copyErr != nil {
@@ -307,20 +562,19 @@ func snapshotTreeBytes(root string) (int64, error) {
 	return n, err
 }
 
-// snapshotTreeDiskRefusal refuses a copy of size bytes into dir that would
-// leave less than the managed Dolt's critical floor free there, as a binding
-// snapshot is refused (snapshotDiskPreflight). A free-space probe that fails
-// refuses nothing, as there.
-func snapshotTreeDiskRefusal(dir string, size int64) error {
+// snapshotTreeDiskShortfall reports whether a copy of size bytes into dir
+// would leave less than the managed Dolt's critical floor free there, with
+// the bytes free and the floor: a managed Dolt (this city's, or another's)
+// may write to that filesystem. A free-space probe that fails reports no
+// shortfall, as a binding snapshot's does (snapshotDiskPreflight).
+func snapshotTreeDiskShortfall(dir string, size int64) (free, floor int64, short bool) {
 	free, err := doltContainerFreeBytesFunc(dir)
 	if err != nil {
-		return nil
+		return 0, 0, false
 	}
-	critical, warn := doltDiskMinFreeBytes(), doltDiskWarnFreeBytes()
-	if refuse, _ := snapshotDiskVerdict(free, size, critical, warn); refuse {
-		return fmt.Errorf("%s has %d bytes free; the copy of the managed Dolt's data directory needs %d and must leave %d free for a managed Dolt on the same filesystem. Free space, or pass --to elsewhere; the server was not stopped and nothing was copied", dir, free, size, critical)
-	}
-	return nil
+	floor = doltDiskMinFreeBytes()
+	short, _ = snapshotDiskVerdict(free, size, floor, doltDiskWarnFreeBytes())
+	return free, floor, short
 }
 
 // copySnapshotTree copies every regular file under src into the snapshot at
@@ -387,15 +641,25 @@ type storageCityRestoreJournal struct {
 	Done []string `json:"done"`
 	// Binding is the binding root the restore moves aside, or "".
 	Binding string `json:"binding,omitempty"`
+	// PinnedSource reports that the restore pinned its snapshot, which it
+	// found unpinned, so retention keeps it; the restore unpins it when it
+	// ends.
+	PinnedSource bool `json:"pinned_source,omitempty"`
+	// Unproven is what the proof failed on when the operator ended the
+	// restore with --accept-unproven: each row it failed on, by store, or why
+	// it could not run.
+	Unproven []string `json:"unproven,omitempty"`
 }
 
-// The city restore's steps, in order.
+// The city restore's steps, in order. It ends at verified, or at
+// accepted-unproven when the operator ends it with a proof that fails.
 const (
 	cityRestoreStepStores   = "stores"
 	cityRestoreStepRecords  = "records"
 	cityRestoreStepCityTOML = "city.toml"
 	cityRestoreStepBinding  = "binding"
 	cityRestoreStepVerified = "verified"
+	cityRestoreStepAccepted = "accepted-unproven"
 )
 
 func storageCityRestoreJournalPath(cityPath string) string {
@@ -419,6 +683,13 @@ func readStorageCityRestoreJournal(cityPath string) (storageCityRestoreJournal, 
 	return j, true, nil
 }
 
+// readUnfinishedCityRestore reads the journal of a restore that has not
+// ended; unfinished is false when there is none.
+func readUnfinishedCityRestore(cityPath string) (storageCityRestoreJournal, bool, error) {
+	j, present, err := readStorageCityRestoreJournal(cityPath)
+	return j, present && err == nil && !j.ended(), err
+}
+
 func writeStorageCityRestoreJournal(cityPath string, j storageCityRestoreJournal) error {
 	data, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
@@ -432,130 +703,473 @@ func writeStorageCityRestoreJournal(cityPath string, j storageCityRestoreJournal
 
 func (j storageCityRestoreJournal) done(step string) bool { return slices.Contains(j.Done, step) }
 
+// ended reports that the restore is over: proven, or accepted unproven.
+func (j storageCityRestoreJournal) ended() bool {
+	return j.done(cityRestoreStepVerified) || j.done(cityRestoreStepAccepted)
+}
+
+// filesBack reports that every file the restore moves is back, so only the
+// proof is left.
+func (j storageCityRestoreJournal) filesBack() bool { return j.done(cityRestoreStepBinding) }
+
+// state says what an unfinished restore has left.
+func (j storageCityRestoreJournal) state() string {
+	if j.filesBack() {
+		return "every file is back, and the restored stores are not yet proven against the snapshot"
+	}
+	return "the city's stores, storage records and city.toml may be part-way back"
+}
+
+// remedy names the command that ends an unfinished restore and, once every
+// file is back, the one that ends it when its proof fails.
+func (j storageCityRestoreJournal) remedy() string {
+	finish := snapshotCityRestoreInstruction(j.Snapshot, j.To)
+	if !j.filesBack() {
+		return fmt.Sprintf("Finish it with `%s`", finish)
+	}
+	return fmt.Sprintf("Finish it with `%s`; if its proof fails, `%s --%s` ends it with what the proof failed on recorded", finish, finish, cityRestoreAcceptFlag)
+}
+
 // snapshotCityRestoreInstruction is the command that restores snapshot id
 // from to as the whole city.
 func snapshotCityRestoreInstruction(id, to string) string {
 	return "gc storage snapshot restore " + id + " --city --" + storageFleetStoppedFlag + " --to " + to
 }
 
-// doStorageSnapshotRestoreCity puts a city back as snapshot id found it.
-func doStorageSnapshotRestoreCity(ctx context.Context, request storageOperatorRequest, to, id, logPrefix string, stdout, stderr io.Writer) (code int) {
-	fail := func(err error) int {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
+// storageCityRestoreRefusal refuses a writing storage verb while a city
+// restore is unfinished: the city's stores, records and city.toml may be
+// part-way back, and a write would land where the restore's proof reads.
+func storageCityRestoreRefusal(cityPath string) error {
+	j, unfinished, err := readUnfinishedCityRestore(cityPath)
+	if err != nil || !unfinished {
+		return err
 	}
+	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): %s. %s", j.Snapshot, storageCityRestoreJournalPath(cityPath), j.state(), j.remedy())
+}
+
+// storageCityRestoreBootRefusal holds boot until a city restore ends. Part-way,
+// the city's stores, records and city.toml may be from different moments; with
+// every file back, the proof that remains reads the restored stores, and a city
+// that served them would write rows the proof cannot tell from the
+// snapshot's, failing it for good.
+func storageCityRestoreBootRefusal(cityPath string) error {
+	j, unfinished, err := readUnfinishedCityRestore(cityPath)
+	if err != nil || !unfinished {
+		return err
+	}
+	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): %s, so the city does not start. %s", j.Snapshot, storageCityRestoreJournalPath(cityPath), j.state(), j.remedy())
+}
+
+// doStorageSnapshotRestoreCity puts a city back as snapshot id found it. With
+// acceptUnproven it ends an unfinished restore of id whose every file is back
+// and whose proof fails.
+func doStorageSnapshotRestoreCity(ctx context.Context, request storageOperatorRequest, to, id string, acceptUnproven bool, logPrefix string, stdout, stderr io.Writer) int {
+	r := &cityRestoreRun{request: request, id: id, logPrefix: logPrefix, stdout: stdout, stderr: stderr}
+	bindingRoot, err := cityRestorePreconditions(request, id)
+	if err != nil {
+		return r.fail(err)
+	}
+	lock, err := acquireCityRestoreLock(request)
+	if err != nil {
+		return r.fail(err)
+	}
+	defer lock.Close() //nolint:errcheck // released last
+	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
+	if err != nil {
+		return r.fail(err)
+	}
+	defer guard.Release() //nolint:errcheck // released before the lock
+	if r.to, err = filepath.Abs(to); err != nil {
+		return r.fail(err)
+	}
+	dirLock, err := lockSnapshotForRestore(r.to, id)
+	if err != nil {
+		return r.fail(err)
+	}
+	defer dirLock.Close() //nolint:errcheck // releases the flock
+	r.dir, r.lock = filepath.Join(r.to, id), lock
+	if err := r.begin(ctx, bindingRoot, acceptUnproven); err != nil {
+		return r.fail(err)
+	}
+	if err := r.moveFiles(); err != nil {
+		return r.fail(fmt.Errorf("%w. The city is part-restored and held by %s: run this command again to finish", err, storageCityRestoreJournalPath(request.CityPath)))
+	}
+	return r.prove(acceptUnproven)
+}
+
+// cityRestorePreconditions is what the city restore checks before it takes a
+// lock: the snapshot id, no shared-store attestation (it lifts nothing here:
+// cityRestoreSharedStoreRefusal), no reverse migration in progress, and the
+// operator's attestation that the fleet is stopped. It returns the binding
+// root the city serves from, which the restore moves aside, or "".
+func cityRestorePreconditions(request storageOperatorRequest, id string) (string, error) {
 	if !storageSnapshotIDPattern.MatchString(id) {
-		return fail(fmt.Errorf("%q is not a snapshot id", id))
+		return "", fmt.Errorf("%q is not a snapshot id", id)
+	}
+	if len(request.Force.SharedStores) > 0 {
+		return "", fmt.Errorf("--%s=%s:<identity> does not apply to --city: the restore replaces each store it puts back whole with the snapshot's copy, so it cannot leave another city's rows as they are, and it refuses a store another registered city uses whether or not that is attested; run it without the attestation", storageForceFlag, storageHazardSharedStore)
 	}
 	target, bound, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
 	if err != nil {
-		return fail(err)
+		return "", err
 	}
 	root := ""
 	if bound {
 		root = target.Root
 	}
 	if err := storageReverseRefusal(request.CityPath, root); err != nil {
-		return fail(err)
+		return "", err
 	}
 	if !request.FleetStopped {
-		return fail(fmt.Errorf("pass --%s to attest that %s. A process this command cannot see that still has a store open would keep writing to the store this replaces", storageFleetStoppedFlag, storageFleetStoppedAttestation))
+		return "", fmt.Errorf("pass --%s to attest that %s. A process this command cannot see that still has a store open would keep writing to the store this replaces", storageFleetStoppedFlag, storageFleetStoppedAttestation)
 	}
+	return root, nil
+}
+
+// acquireCityRestoreLock takes the controller lock with the liveness checks
+// every writing storage verb runs (acquireStorageVerbExclusion), then the
+// check every writer of the work store runs under it: no controller answers
+// on the city (infraMigrationForeignControllerPID). The caller closes the
+// lock when it exits.
+func acquireCityRestoreLock(request storageOperatorRequest) (*os.File, error) {
 	lock, err := acquireStorageVerbExclusion(request, storageVerbScope{CityRestore: true})
 	if err != nil {
-		return fail(err)
+		return nil, err
 	}
-	defer lock.Close() //nolint:errcheck // released last
-	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
-	if err != nil {
-		return fail(err)
+	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
+		lock.Close() //nolint:errcheck // releasing on a refusal
+		return nil, fmt.Errorf("controller PID %d is live on this city; while it runs, any writer may change the stores this replaces. Stop it (%s) and run this again", pid, storageStopCommand)
 	}
-	defer guard.Release() //nolint:errcheck // released before the lock
-	to, err = filepath.Abs(to)
-	if err != nil {
-		return fail(err)
-	}
-	dirLock, err := lockSnapshotForRestore(to, id)
-	if err != nil {
-		return fail(err)
-	}
-	defer dirLock.Close() //nolint:errcheck // releases the flock
-	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
+	return lock, nil
+}
 
-	journal, resuming, err := readStorageCityRestoreJournal(request.CityPath)
-	if err != nil {
-		return fail(err)
-	}
-	if resuming && (journal.Snapshot != id || journal.To != to) && !journal.done(cityRestoreStepVerified) {
-		return fail(fmt.Errorf("a city restore of snapshot %s from %s is unfinished (%s); finish it with `%s` before restoring another", journal.Snapshot, journal.To, storageCityRestoreJournalPath(request.CityPath), snapshotCityRestoreInstruction(journal.Snapshot, journal.To)))
-	}
-	if resuming && journal.done(cityRestoreStepVerified) {
-		resuming = false
-	}
-
-	dir := filepath.Join(to, id)
-	m, err := readSnapshotManifest(dir)
-	if err == nil {
-		err = verifySnapshotFiles(ctx, dir, m)
-	}
-	if err != nil {
-		return fail(fmt.Errorf("snapshot %s does not verify, so nothing was restored: %w", id, err))
-	}
-	plan, err := planCityRestore(request, m)
-	if err != nil {
-		return fail(fmt.Errorf("snapshot %s cannot restore this city, so nothing was restored: %w", id, err))
-	}
-	if !resuming {
-		journal = storageCityRestoreJournal{
-			Format: storageCityRestoreFormat, Snapshot: id, To: to, StartedAt: snapshotRestoreNow().UTC(),
-			Suffix: ".pre-restore-" + snapshotRestoreNow().UTC().Format("20060102T150405Z"),
+// cityRestoreSharedStoreRefusal refuses a restore that would replace a store
+// another registered city also uses (findStoreSharers): each store the plan
+// puts back, the work store and each rig's, and every other database of the
+// managed Dolt's data directory the restore replaces, live or copied, which
+// no store of the city keeps but another city's may. The restore replaces a
+// store whole with the snapshot's copy, so it cannot leave another city's rows
+// as they are, and no attestation lifts this, as it does for the writing verbs
+// that select the rows they carry. A registry or config that cannot be read
+// refuses: absence of a sharer must be shown, not assumed.
+func cityRestoreSharedStoreRefusal(cityPath string, plan cityRestorePlan) error {
+	var refusals []string
+	collect := func(_ string, sharers []storeSharer, err error) error {
+		for _, s := range sharers {
+			refusals = append(refusals, s.Refusal)
 		}
-		if bound {
-			journal.Binding = target.Root
-		}
-		if err := writeStorageCityRestoreJournal(request.CityPath, journal); err != nil {
-			return fail(err)
-		}
-	} else {
-		fmt.Fprintf(stderr, "%s: finishing the city restore of snapshot %s that began at %s\n", logPrefix, id, journal.StartedAt.Format(time.RFC3339)) //nolint:errcheck // best-effort stderr
+		return err
 	}
-	step := func(name string, run func() error) error {
-		if journal.done(name) {
-			return nil
+	for _, s := range plan.stores {
+		label, root := sharedWorkStoreLabel, cityPath
+		if s.rigDir != "" {
+			label, root = "rig "+strings.TrimPrefix(s.rec.Name, "rig:"), s.rigDir
 		}
-		if err := run(); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		journal.Done = append(journal.Done, name)
-		if err := writeStorageCityRestoreJournal(request.CityPath, journal); err != nil {
+		if err := collect(findStoreSharers(cityPath, label, root)); err != nil {
 			return err
 		}
-		return storageSnapshotStep("city restore " + name)
 	}
-	unfinished := func(err error) int {
-		return fail(fmt.Errorf("%w. The city is part-restored and held by %s: run this command again to finish", err, storageCityRestoreJournalPath(request.CityPath)))
+	for _, db := range plan.dolt.others() {
+		if err := collect(findIdentitySharers(cityPath, "this city's managed Dolt", "", managedStoreIdentity(cityPath, db))); err != nil {
+			return err
+		}
 	}
-	if err := step(cityRestoreStepStores, func() error { return restoreCityStores(dir, plan, journal.Suffix) }); err != nil {
-		return unfinished(err)
+	if len(refusals) == 0 {
+		return nil
 	}
-	if err := step(cityRestoreStepRecords, func() error { return restoreCityRecords(request.CityPath, dir, m.CityRecord, journal.Suffix) }); err != nil {
-		return unfinished(err)
+	return fmt.Errorf("%s. The city restore replaces each of these stores whole with the snapshot's copy, so it would roll back the rows that city owns with this city's, and no --%s=%s attestation lifts that. Move the other city off the store, or unregister it if it no longer uses it (`gc unregister <path>`), and run this again; `gc storage migrate --to-work` is the way back for a city whose store another city shares. This run moved nothing", strings.Join(refusals, "; "), storageForceFlag, storageHazardSharedStore)
+}
+
+// cityRestoreRun is one run of the city restore, under its locks.
+type cityRestoreRun struct {
+	request storageOperatorRequest
+	id, to  string
+	// dir is the snapshot's directory.
+	dir       string
+	lock      *os.File
+	logPrefix string
+	stdout    io.Writer
+	stderr    io.Writer
+	m         snapshotManifest
+	plan      cityRestorePlan
+	journal   storageCityRestoreJournal
+}
+
+// fail says err on stderr and returns the exit code of a failed run.
+func (r *cityRestoreRun) fail(err error) int {
+	fmt.Fprintf(r.stderr, "%s: %v\n", r.logPrefix, err) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
+// begin reads the journal, proves the snapshot and plans the restore. A run
+// that finds this snapshot's restore unfinished resumes it; any other starts a
+// new one.
+func (r *cityRestoreRun) begin(ctx context.Context, bindingRoot string, acceptUnproven bool) error {
+	journal, unfinished, err := readUnfinishedCityRestore(r.request.CityPath)
+	if err != nil {
+		return err
 	}
-	if err := step(cityRestoreStepCityTOML, func() error { return restoreCityTOML(request.CityPath, dir, *m.CityRecord.CityTOML, journal.Suffix) }); err != nil {
-		return unfinished(err)
+	if unfinished && (journal.Snapshot != r.id || journal.To != r.to) {
+		return fmt.Errorf("a city restore of snapshot %s from %s is unfinished (%s); finish it with `%s` before restoring another", journal.Snapshot, journal.To, storageCityRestoreJournalPath(r.request.CityPath), snapshotCityRestoreInstruction(journal.Snapshot, journal.To))
 	}
-	if err := step(cityRestoreStepBinding, func() error { return moveBindingRootAside(journal.Binding, journal.Suffix) }); err != nil {
-		return unfinished(err)
+	if acceptUnproven {
+		if err := cityRestoreAcceptRefusal(journal, unfinished); err != nil {
+			return err
+		}
 	}
-	if err := step(cityRestoreStepVerified, func() error { return verifyRestoredCity(lock, request.CityPath, dir, plan, logPrefix, stderr) }); err != nil {
-		return unfinished(err)
+	m, err := readSnapshotManifest(r.dir)
+	if err == nil {
+		err = verifySnapshotFiles(ctx, r.dir, m)
 	}
-	fmt.Fprintf(stdout, "Restored the city from snapshot %s: %s, city.toml and its storage records.\n", id, strings.Join(plan.names(), ", ")) //nolint:errcheck // best-effort stdout
-	if journal.Binding != "" {
-		fmt.Fprintf(stdout, "The binding root it no longer serves from is kept as %s.\n", journal.Binding+journal.Suffix) //nolint:errcheck // best-effort stdout
+	if err != nil {
+		return fmt.Errorf("snapshot %s does not verify, so this run moved nothing: %w", r.id, err)
 	}
-	fmt.Fprintf(stdout, "Every file it replaced is kept beside it as *%s. Check the city with `%s`, then `gc start`.\n", journal.Suffix, storageStatusInstruction()) //nolint:errcheck // best-effort stdout
+	plan, err := planCityRestore(r.request, r.dir, m)
+	if err != nil {
+		return fmt.Errorf("snapshot %s cannot restore this city, so this run moved nothing: %w", r.id, err)
+	}
+	if err := cityRestoreSharedStoreRefusal(r.request.CityPath, plan); err != nil {
+		return err
+	}
+	r.m, r.plan = m, plan
+	recordStorageAttestation(r.request.CityPath, r.logPrefix, r.request.Force.acceptedHazards(), r.stderr)
+	if !unfinished {
+		return r.start(bindingRoot)
+	}
+	r.journal = journal
+	fmt.Fprintf(r.stderr, "%s: finishing the city restore of snapshot %s that began at %s\n", r.logPrefix, r.id, journal.StartedAt.Format(time.RFC3339)) //nolint:errcheck // best-effort stderr
+	return r.pinSource()
+}
+
+// cityRestoreAcceptRefusal refuses --accept-unproven where it ends nothing: it
+// ends an unfinished restore whose every file is back and whose proof fails.
+func cityRestoreAcceptRefusal(j storageCityRestoreJournal, unfinished bool) error {
+	switch {
+	case !unfinished:
+		return fmt.Errorf("--%s ends an unfinished city restore whose proof fails, and none is unfinished; run the restore without it", cityRestoreAcceptFlag)
+	case !j.filesBack():
+		return fmt.Errorf("the city restore of snapshot %s has files left to move, so there is no proof yet to accept; finish it with `%s`, and pass --%s only if its proof then fails", j.Snapshot, snapshotCityRestoreInstruction(j.Snapshot, j.To), cityRestoreAcceptFlag)
+	}
+	return nil
+}
+
+// start begins a new restore: the disk check, then the journal, written
+// before the first move, and the pin on the snapshot.
+func (r *cityRestoreRun) start(bindingRoot string) error {
+	if err := cityRestoreDiskRefusal(r.plan); err != nil {
+		return err
+	}
+	pin := filepath.Join(r.dir, storageSnapshotPinName)
+	_, pinErr := os.Stat(pin)
+	if pinErr != nil && !errors.Is(pinErr, fs.ErrNotExist) {
+		return fmt.Errorf("reading whether snapshot %s is pinned (%s): %w", r.id, pin, pinErr)
+	}
+	now := snapshotRestoreNow().UTC()
+	r.journal = storageCityRestoreJournal{
+		Format: storageCityRestoreFormat, Snapshot: r.id, To: r.to, StartedAt: now,
+		Suffix:       ".pre-restore-" + now.Format("20060102T150405Z"),
+		Binding:      bindingRoot,
+		PinnedSource: pinErr != nil,
+	}
+	if err := writeStorageCityRestoreJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	for _, notice := range r.plan.dolt.notices(r.journal.Suffix) {
+		fmt.Fprintf(r.stderr, "%s: %s\n", r.logPrefix, notice) //nolint:errcheck // best-effort stderr
+	}
+	return r.pinSource()
+}
+
+// pinSource keeps retention (a later snapshot's --keep) off the snapshot
+// while the restore is unfinished, when the restore owns the pin. Pinning
+// again is harmless, so a resumed run pins it again.
+func (r *cityRestoreRun) pinSource() error {
+	if !r.journal.PinnedSource {
+		return nil
+	}
+	reason := fmt.Sprintf("the source of the unfinished city restore %s; the restore unpins it when it ends", storageCityRestoreJournalPath(r.request.CityPath))
+	if err := pinStorageSnapshot(r.to, r.id, reason); err != nil {
+		return fmt.Errorf("pinning snapshot %s while the restore reads it: %w", r.id, err)
+	}
+	return nil
+}
+
+// cityRestoreStep is one journaled step that moves files.
+type cityRestoreStep struct {
+	name string
+	run  func() error
+}
+
+// moveFiles puts every file back, one journaled step at a time: the stores,
+// the storage records, city.toml, then the binding root moved aside.
+func (r *cityRestoreRun) moveFiles() error {
+	cityPath, suffix := r.request.CityPath, r.journal.Suffix
+	for _, s := range []cityRestoreStep{
+		{cityRestoreStepStores, func() error { return restoreCityStores(r.dir, r.plan, suffix) }},
+		{cityRestoreStepRecords, func() error { return restoreCityRecords(cityPath, r.dir, r.m.CityRecord, suffix) }},
+		{cityRestoreStepCityTOML, func() error { return restoreCityTOML(cityPath, r.dir, *r.m.CityRecord.CityTOML, suffix) }},
+		{cityRestoreStepBinding, func() error { return moveBindingRootAside(r.journal.Binding, suffix) }},
+	} {
+		if r.journal.done(s.name) {
+			continue
+		}
+		if err := s.run(); err != nil {
+			return fmt.Errorf("%s: %w", s.name, err)
+		}
+		if err := r.markDone(s.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// markDone journals step as done.
+func (r *cityRestoreRun) markDone(step string) error {
+	r.journal.Done = append(r.journal.Done, step)
+	if err := writeStorageCityRestoreJournal(r.request.CityPath, r.journal); err != nil {
+		return err
+	}
+	return storageSnapshotStep("city restore " + step)
+}
+
+// prove reads each restored store back and proves it against the snapshot's
+// JSONL, then ends the restore: proven, or, when the proof fails and the
+// operator passed --accept-unproven, accepted with what it failed on. A proof
+// that fails without it leaves the city held.
+func (r *cityRestoreRun) prove(acceptUnproven bool) int {
+	proof, err := verifyRestoredCity(r.lock, r.request.CityPath, r.dir, r.plan, r.logPrefix, r.stderr)
+	failed := proof.failures()
+	if err != nil {
+		failed = []string{"the proof could not run: " + err.Error()}
+	}
+	switch {
+	case len(failed) == 0:
+		return r.end(cityRestoreStepVerified, proof)
+	case acceptUnproven:
+		r.journal.Unproven = failed
+		return r.end(cityRestoreStepAccepted, proof)
+	}
+	why := fmt.Sprintf("%d row(s) fail the proof against the snapshot's JSONL: %s", len(failed), cityRestoreList(failed))
+	if err != nil {
+		why = err.Error()
+	}
+	instruction := snapshotCityRestoreInstruction(r.id, r.to)
+	return r.fail(fmt.Errorf("%s: %s. Every file is back as the snapshot holds it, and %s holds the city until the restore ends: resolve that and run this command again, or end the restore unproven with `%s --%s`, which records what the proof failed on and releases the city", cityRestoreStepVerified, why, storageCityRestoreJournalPath(r.request.CityPath), instruction, cityRestoreAcceptFlag))
+}
+
+// cityRestoreList names up to cityRestoreListed entries, and counts the rest.
+func cityRestoreList(entries []string) string {
+	if len(entries) <= cityRestoreListed {
+		return strings.Join(entries, "; ")
+	}
+	return fmt.Sprintf("%s; and %d more", strings.Join(entries[:cityRestoreListed], "; "), len(entries)-cityRestoreListed)
+}
+
+// end closes the journal at step, records an accepted proof's attestation,
+// unpins the snapshot the restore pinned, and reports.
+func (r *cityRestoreRun) end(step string, proof cityRestoreProof) int {
+	if err := r.markDone(step); err != nil {
+		return r.fail(err)
+	}
+	if step == cityRestoreStepAccepted {
+		r.recordAcceptance()
+	}
+	if r.journal.PinnedSource {
+		if err := os.Remove(filepath.Join(r.dir, storageSnapshotPinName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(r.stderr, "%s: unpinning snapshot %s: %v; remove %s so retention may remove it\n", r.logPrefix, r.id, err, filepath.Join(r.dir, storageSnapshotPinName)) //nolint:errcheck // best-effort stderr
+		}
+	}
+	r.report(step, proof)
 	return 0
+}
+
+// recordAcceptance records the operator's --accept-unproven in the attestation
+// log, then each entry of what the proof failed on, one line each
+// (cityRestoreUnprovenLine): the journal holds them too, and the next city
+// restore replaces the journal, while the log is only ever appended to.
+func (r *cityRestoreRun) recordAcceptance() {
+	operator, at := storageAttestationOperator(), time.Now().UTC().Format(time.RFC3339)
+	hazard := cityRestoreUnprovenHazard + ":" + r.id
+	fmt.Fprintf(r.stderr, "%s: attested --%s for snapshot %s (%s, %s)\n", r.logPrefix, cityRestoreAcceptFlag, r.id, operator, at) //nolint:errcheck // best-effort stderr
+	lines := []string{storageAttestationLine(hazard, operator, at, r.logPrefix)}
+	for _, entry := range r.journal.Unproven {
+		lines = append(lines, cityRestoreUnprovenLine(hazard, entry))
+	}
+	appendStorageAttestationLines(r.request.CityPath, r.logPrefix, lines, r.stderr)
+}
+
+// cityRestoreUnprovenTag starts each line of the attestation log that names
+// one entry an accepted city restore's proof failed on; gc doctor reads only
+// the #gc:attested lines.
+const cityRestoreUnprovenTag = "#gc:unproven"
+
+// cityRestoreUnprovenLine is the attestation log's line for one entry of what
+// an accepted restore's proof failed on, after the acceptance it belongs to
+// (hazard), on one line whatever the entry holds.
+func cityRestoreUnprovenLine(hazard, entry string) string {
+	return cityRestoreUnprovenTag + " " + hazard + " " + strings.Join(strings.Fields(entry), " ")
+}
+
+// report says how the restore ended, the rows the snapshot's window excused,
+// and everything the restore kept aside.
+func (r *cityRestoreRun) report(step string, proof cityRestoreProof) {
+	if step == cityRestoreStepAccepted {
+		fmt.Fprintf(r.stdout, "Ended the city restore of snapshot %s unproven; %s records what its proof failed on:\n", r.id, storageCityRestoreJournalPath(r.request.CityPath)) //nolint:errcheck // best-effort stdout
+		for _, f := range r.journal.Unproven {
+			fmt.Fprintf(r.stdout, "  %s\n", f) //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		fmt.Fprintf(r.stdout, "Restored the city from snapshot %s: %s, city.toml and its storage records.\n", r.id, strings.Join(r.plan.names(), ", ")) //nolint:errcheck // best-effort stdout
+	}
+	for _, s := range proof {
+		s.report(r.stdout, r.dir, s.store.aside(r.plan, r.journal.Suffix))
+	}
+	if d := r.plan.dolt; d != nil && len(d.unproven) > 0 {
+		fmt.Fprintf(r.stdout, "The managed Dolt's database(s) %s, which no store of this city keeps, are back as the snapshot's copy holds them, unproven.\n", strings.Join(d.unproven, ", ")) //nolint:errcheck // best-effort stdout
+	}
+	if r.journal.Binding != "" {
+		fmt.Fprintf(r.stdout, "The binding root it no longer serves from is kept as %s.\n", r.journal.Binding+r.journal.Suffix) //nolint:errcheck // best-effort stdout
+	}
+	fmt.Fprintf(r.stdout, "Every file it replaced is kept beside it as *%s:\n", r.journal.Suffix) //nolint:errcheck // best-effort stdout
+	for _, aside := range r.asides() {
+		fmt.Fprintf(r.stdout, "  %s\n", aside) //nolint:errcheck // best-effort stdout
+	}
+	fmt.Fprintf(r.stdout, "Check the city with `%s`, then `gc start`.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
+}
+
+// asides lists what the restore kept aside: each *<suffix> entry in a
+// directory it replaced something in.
+func (r *cityRestoreRun) asides() []string {
+	dirs := []string{r.request.CityPath, filepath.Join(r.request.CityPath, ".gc")}
+	for _, s := range r.plan.stores {
+		if s.file != "" {
+			dirs = append(dirs, filepath.Dir(s.file))
+		}
+	}
+	if r.plan.dolt != nil {
+		dirs = append(dirs, filepath.Dir(r.plan.dolt.dataDir))
+	}
+	if toml, err := cityTOMLFile(r.request.CityPath); err == nil {
+		dirs = append(dirs, filepath.Dir(toml))
+	}
+	if r.journal.Binding != "" {
+		dirs = append(dirs, filepath.Dir(r.journal.Binding))
+	}
+	var kept []string
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			kept = append(kept, fmt.Sprintf("(%s could not be listed: %v)", d, err))
+			continue
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), r.journal.Suffix) {
+				kept = append(kept, filepath.Join(d, e.Name()))
+			}
+		}
+	}
+	sort.Strings(kept)
+	return slices.Compact(kept)
 }
 
 // cityRestorePlan is what a city restore puts back.
@@ -575,11 +1189,57 @@ type cityRestoreStore struct {
 	file string
 }
 
+// aside is where the restore keeps the store it replaced.
+func (s cityRestoreStore) aside(plan cityRestorePlan, suffix string) string {
+	if s.file != "" || plan.dolt == nil {
+		return s.file + suffix
+	}
+	return plan.dolt.dataDir + suffix
+}
+
 // cityRestoreDolt is the managed Dolt data directory a city restore puts
 // back.
 type cityRestoreDolt struct {
 	tree    snapshotCopiedTree
 	dataDir string
+	// since are the databases the live data directory holds that the copy
+	// does not (created since the snapshot); the restore moves them aside
+	// with the directory.
+	since []string
+	// unproven are the databases the copy holds that no store of the
+	// snapshot records and no scope of the city keeps its store in
+	// (doltCopyCensus); the restore puts them back as the copy holds them,
+	// and the proof does not read them.
+	unproven []string
+}
+
+// others are the databases the restore replaces that no store it proves
+// keeps: the live ones the copy does not hold, and the copy's unproven ones.
+func (d *cityRestoreDolt) others() []string {
+	if d == nil {
+		return nil
+	}
+	out := slices.Concat(d.since, d.unproven)
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// notices say what the restore does with the databases no store it proves
+// keeps, before it moves anything: the live ones the copy does not hold go
+// aside with the directory, to dataDir+suffix, and the copy's unproven ones
+// come back as it holds them.
+func (d *cityRestoreDolt) notices(suffix string) []string {
+	if d == nil {
+		return nil
+	}
+	var out []string
+	if len(d.since) > 0 {
+		out = append(out, fmt.Sprintf("the managed Dolt's data directory holds database(s) %s that the snapshot does not (created since it was taken); the restore moves them aside with the directory, to %s", strings.Join(d.since, ", "), d.dataDir+suffix))
+	}
+	if len(d.unproven) > 0 {
+		out = append(out, fmt.Sprintf("the snapshot's copy of the managed Dolt's data directory holds database(s) %s that no store of the snapshot records and no store of this city keeps; the restore puts them back as the copy holds them, unproven", strings.Join(d.unproven, ", ")))
+	}
+	return out
 }
 
 func (p cityRestorePlan) names() []string {
@@ -590,70 +1250,32 @@ func (p cityRestorePlan) names() []string {
 	return out
 }
 
+// rigRoots are the rig stores the plan puts back, which the proof's
+// maintenance window starts.
+func (p cityRestorePlan) rigRoots() []string {
+	var out []string
+	for _, s := range p.stores {
+		if s.rigDir != "" {
+			out = append(out, s.rigDir)
+		}
+	}
+	return out
+}
+
 // planCityRestore resolves where each of the snapshot's stores goes back, and
 // refuses a snapshot this restore cannot put back exactly (the file comment).
-func planCityRestore(request storageOperatorRequest, m snapshotManifest) (cityRestorePlan, error) {
-	var plan cityRestorePlan
-	if m.CityRecord == nil {
-		return plan, errors.New("it records no city (it was taken without --work, or by a gc that did not record the city)")
+// dir is the snapshot's directory.
+func planCityRestore(request storageOperatorRequest, dir string, m snapshotManifest) (cityRestorePlan, error) {
+	if err := cityRestoreRecordRefusal(request.CityPath, m); err != nil {
+		return cityRestorePlan{}, err
 	}
-	if m.CityRecord.CityTOML == nil {
-		return plan, errors.New("it recorded no city.toml, so it cannot put the city's configuration back")
-	}
-	identity, err := currentWorkStoreIdentity(request.CityPath)
+	plan, refused, err := planCityRestoreStores(request, m)
 	if err != nil {
 		return plan, err
 	}
-	if m.Identity != identity.String() {
-		return plan, fmt.Errorf("it was taken of work store %s, and this city's is %s", m.Identity, identity.String())
-	}
-	rigs := map[string]string{}
-	for _, r := range snapshotRigs(request) {
-		rigs[r.name] = r.rigDir
-	}
-	var refused []string
-	for _, rec := range m.Stores {
-		if rec.Name == "binding" {
-			refused = append(refused, "binding: the snapshot holds a binding, whose records it keeps by hash and does not restore; restore its database with --binding, and use --city for a snapshot from before the split")
-			continue
-		}
-		if why := snapshotCityRestorable(rec); why != "" {
-			refused = append(refused, rec.Name+": "+why)
-			continue
-		}
-		store := cityRestoreStore{rec: rec}
-		root := request.CityPath
-		if rec.Name != "work" {
-			dir, ok := rigs[rec.Name]
-			if !ok {
-				refused = append(refused, rec.Name+": this city has no such rig any more")
-				continue
-			}
-			store.rigDir, root = dir, dir
-		}
-		switch rec.Exact.Method {
-		case snapshotMethodFileCopy:
-			store.file = filepath.Join(root, ".gc", "beads.json")
-		case snapshotMethodDoltDataDir:
-			if plan.dolt == nil {
-				dataDir, err := snapshotManagedDoltDataDir(request.CityPath)
-				if err != nil {
-					return plan, fmt.Errorf("resolving the managed Dolt's data directory: %w", err)
-				}
-				plan.dolt = &cityRestoreDolt{tree: *rec.Exact.Tree, dataDir: dataDir}
-			} else if rec.Exact.Tree.Path != plan.dolt.tree.Path {
-				refused = append(refused, rec.Name+": its Dolt data directory is not the one the work store's copy holds")
-				continue
-			}
-		}
-		plan.stores = append(plan.stores, store)
-	}
-	if !slices.ContainsFunc(m.Stores, func(rec snapshotStoreRecord) bool { return rec.Name == "binding" }) {
-		if rel := snapshotCitySplitRecord(m.CityRecord); rel != "" {
-			refused = append(refused, fmt.Sprintf("it was taken of a split city (it records %s) and holds no binding, so restoring it would move the binding, the only copy of the city's infrastructure state, aside and leave the city split; the city restore puts back a city from before the split", rel))
-		}
-	}
+	refused = append(refused, cityRestoreSplitRefusals(request.CityPath, dir, m)...)
 	refused = append(refused, cityRestoreRigsLost(request, m, plan)...)
+	refused = append(refused, plan.censusDolt(cityScopeDoltDatabases(request))...)
 	if len(refused) > 0 {
 		return plan, errors.New(strings.Join(refused, "; "))
 	}
@@ -664,6 +1286,198 @@ func planCityRestore(request storageOperatorRequest, m snapshotManifest) (cityRe
 		return plan, fmt.Errorf("the city's managed Dolt is running, and its data directory is what this restores. Stop it with `%s` and run this again", storageStopCommand)
 	}
 	return plan, nil
+}
+
+// cityRestoreRecordRefusal refuses a snapshot that records no city to put
+// back, or that was taken of another work store.
+func cityRestoreRecordRefusal(cityPath string, m snapshotManifest) error {
+	if m.CityRecord == nil {
+		return errors.New("it records no city (it was taken without --work, or by a gc that did not record the city)")
+	}
+	if m.CityRecord.CityTOML == nil {
+		return errors.New("it recorded no city.toml, so it cannot put the city's configuration back")
+	}
+	identity, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return err
+	}
+	if m.Identity != identity.String() {
+		return fmt.Errorf("it was taken of work store %s, and this city's is %s", m.Identity, identity.String())
+	}
+	return nil
+}
+
+// planCityRestoreStores places each of the snapshot's stores: a file copy at
+// its scope's file, a data-directory copy once for every store in it. It
+// lists each store it cannot place, with why.
+func planCityRestoreStores(request storageOperatorRequest, m snapshotManifest) (cityRestorePlan, []string, error) {
+	var plan cityRestorePlan
+	var refused []string
+	rigs := map[string]string{}
+	for _, r := range snapshotRigs(request) {
+		rigs[r.name] = r.rigDir
+	}
+	for _, rec := range m.Stores {
+		store, why := cityRestoreStoreFor(request.CityPath, rigs, rec)
+		if why == "" && rec.Exact.Method == snapshotMethodDoltDataDir {
+			var err error
+			if why, err = plan.placeDolt(request.CityPath, rec); err != nil {
+				return plan, nil, err
+			}
+		}
+		if why != "" {
+			refused = append(refused, rec.Name+": "+why)
+			continue
+		}
+		plan.stores = append(plan.stores, store)
+	}
+	return plan, refused, nil
+}
+
+// cityRestoreStoreFor is where rec goes back, or why it cannot. rigs maps
+// each rig the city has to its store root.
+func cityRestoreStoreFor(cityPath string, rigs map[string]string, rec snapshotStoreRecord) (cityRestoreStore, string) {
+	if rec.Name == "binding" {
+		return cityRestoreStore{}, "the snapshot holds a binding, whose records it keeps by hash and does not restore; restore its database with --binding, and use --city for a snapshot from before the split"
+	}
+	if why := snapshotCityRestorable(rec); why != "" {
+		return cityRestoreStore{}, why
+	}
+	store := cityRestoreStore{rec: rec}
+	root := cityPath
+	if rec.Name != "work" {
+		dir, ok := rigs[rec.Name]
+		if !ok {
+			return store, "this city has no such rig any more"
+		}
+		store.rigDir, root = dir, dir
+	}
+	if rec.Exact.Method == snapshotMethodFileCopy {
+		store.file = filepath.Join(root, ".gc", "beads.json")
+	}
+	return store, ""
+}
+
+// placeDolt places the managed Dolt's data directory the first
+// data-directory copy holds, with the live databases it does not; a later
+// store whose copy is another tree cannot go back with it.
+func (p *cityRestorePlan) placeDolt(cityPath string, rec snapshotStoreRecord) (string, error) {
+	if p.dolt != nil {
+		if rec.Exact.Tree.Path != p.dolt.tree.Path {
+			return "its Dolt data directory is not the one the work store's copy holds", nil
+		}
+		return "", nil
+	}
+	dataDir, err := snapshotManagedDoltDataDir(cityPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving the managed Dolt's data directory: %w", err)
+	}
+	live, err := doltDataDirDatabases(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("reading the managed Dolt's data directory %s: %w", dataDir, err)
+	}
+	copied := rec.Exact.Tree.databases()
+	since := slices.DeleteFunc(live, func(db string) bool { return slices.Contains(copied, db) })
+	p.dolt = &cityRestoreDolt{tree: *rec.Exact.Tree, dataDir: dataDir, since: since}
+	return "", nil
+}
+
+// censusDolt refuses a data-directory copy where the restore, which replaces
+// the whole directory, would lose a store of the city unseen: a store whose
+// database the copy does not hold has nothing to come back from, and a
+// database a scope of the city keeps its store in (named, database to scope)
+// that no store records would come back unproven (doltCopyCensus). Every other
+// database the copy holds comes back as the copy holds it, and the plan keeps
+// it as unproven, to name.
+func (p *cityRestorePlan) censusDolt(named map[string]string) []string {
+	if p.dolt == nil {
+		return nil
+	}
+	copied := p.dolt.tree.databases()
+	recorded := map[string]bool{}
+	var refused []string
+	for _, s := range p.stores {
+		db := s.rec.Exact.Database
+		switch {
+		case s.rec.Exact.Method != snapshotMethodDoltDataDir:
+		case db == "":
+			refused = append(refused, s.rec.Name+": the snapshot records no database of the managed Dolt's data directory for it (a gc that did not record one took it); take a new snapshot")
+		case !slices.Contains(copied, db):
+			refused = append(refused, fmt.Sprintf("%s: the snapshot's copy of the managed Dolt's data directory holds no database %s", s.rec.Name, db))
+		default:
+			recorded[db] = true
+		}
+	}
+	owned, unproven := doltCopyCensus(copied, recorded, named)
+	if len(owned) > 0 {
+		refused = append(refused, fmt.Sprintf("the snapshot's copy of the managed Dolt's data directory holds %s, which this city keeps its store(s) in, and the snapshot records no store for them, so the restore, which replaces the whole directory, would roll those stores back unproven; restore a snapshot that records them (`%s`, run before the split, takes one)", strings.Join(owned, ", "), cityRestoreSnapshotCommand))
+	}
+	p.dolt.unproven = unproven
+	return refused
+}
+
+// cityRestoreSplitRefusals refuses a snapshot whose restore would leave the
+// city split: one of a split city (it records a served-binding or cleared
+// note and holds no binding, so the binding, the only copy of the city's
+// infrastructure state, would be moved aside), and one whose city.toml,
+// composed with the city's include fragments as they are now, routes a class
+// off the work store, which boot refuses once the binding root is moved
+// aside.
+func cityRestoreSplitRefusals(cityPath, dir string, m snapshotManifest) []string {
+	var refused []string
+	if !slices.ContainsFunc(m.Stores, func(rec snapshotStoreRecord) bool { return rec.Name == "binding" }) {
+		if rel := snapshotCitySplitRecord(m.CityRecord); rel != "" {
+			refused = append(refused, fmt.Sprintf("it was taken of a split city (it records %s) and holds no binding, so restoring it would move the binding, the only copy of the city's infrastructure state, aside and leave the city split; the city restore puts back a city from before the split", rel))
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, m.CityRecord.CityTOML.Path))
+	if err == nil {
+		err = cityRestoreConfigRefusal(cityPath, data)
+	}
+	if err != nil {
+		refused = append(refused, err.Error())
+	}
+	return refused
+}
+
+// cityTOMLOverlay reads city.toml as data and every other file from disk: the
+// configuration a restore that puts city.toml's bytes back leaves.
+type cityTOMLOverlay struct {
+	fsys.OSFS
+	path string
+	data []byte
+}
+
+// ReadFile returns the overlay's bytes for city.toml and reads any other file.
+func (o cityTOMLOverlay) ReadFile(name string) ([]byte, error) {
+	if filepath.Clean(name) == filepath.Clean(o.path) {
+		return slices.Clone(o.data), nil
+	}
+	return o.OSFS.ReadFile(name)
+}
+
+// cityRestoreConfigRefusal refuses a city.toml (its bytes, data) that,
+// composed with the city's include fragments as they are now
+// (config.ComposeFragments; the restore puts back city.toml alone), routes
+// any class off the work store: boot refuses that city once the binding root
+// is moved aside. It names the files that declare [storage].
+func cityRestoreConfigRefusal(cityPath string, data []byte) error {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, prov, err := config.ComposeFragments(cityTOMLOverlay{path: tomlPath, data: data}, tomlPath)
+	if err != nil {
+		return fmt.Errorf("its city.toml does not compose with this city's include fragments as they are now: %w", err)
+	}
+	if shape, _ := storageSplitShapeOf(cfg.EffectiveStorage()); shape == storageSplitNone {
+		return nil
+	}
+	var declared []string
+	if md, err := toml.Decode(string(data), &struct{}{}); err == nil && md.IsDefined("storage") {
+		declared = append(declared, "the snapshot's city.toml declares [storage] (it was taken after the split was authored; a city restore needs one from before)")
+	}
+	if len(prov.StorageFragments) > 0 {
+		declared = append(declared, fmt.Sprintf("the include fragment(s) %s declare [storage], and the restore puts back city.toml alone: remove [storage] from them and run this again", strings.Join(prov.StorageFragments, ", ")))
+	}
+	return fmt.Errorf("the configuration it would leave routes infrastructure classes off the work store, and the city would not boot once the binding root is moved aside: %s", strings.Join(declared, "; "))
 }
 
 // snapshotCitySplitRecord names a record the snapshot holds that only a
@@ -685,12 +1499,14 @@ func snapshotCitySplitRecord(rec *snapshotCityRecord) string {
 	return ""
 }
 
-// cityRestoreRigsLost refuses each rig whose import into the binding ran
-// since the snapshot (its cleared note is not the one the snapshot recorded)
-// when the snapshot holds no copy of the rig's store: the import moved rows
-// out of that store into the binding root this restore moves aside, and the
-// restore would leave them in no store the city reads. The binding restore's
-// snapshotRigImportsLost is the same rule.
+// cityRestoreRigsLost refuses each rig the snapshot holds no store for whose
+// import into the binding ran since the snapshot (its cleared note is not
+// the one the snapshot recorded): the import moved rows out of that store
+// into the binding root this restore moves aside, and the restore would leave
+// them in no store the city reads. The binding restore's
+// snapshotRigImportsLost is the same rule. A rig whose database the managed
+// Dolt's copy holds is a store the snapshot holds (censusDolt refuses the copy
+// otherwise), so a rig the snapshot does not hold has no database there.
 func cityRestoreRigsLost(request storageOperatorRequest, m snapshotManifest, plan cityRestorePlan) []string {
 	held := map[string]bool{}
 	for _, s := range plan.stores {
@@ -704,7 +1520,7 @@ func cityRestoreRigsLost(request storageOperatorRequest, m snapshotManifest, pla
 	}
 	var refused []string
 	for _, r := range snapshotRigs(request) {
-		if held[r.name] || (plan.dolt != nil && snapshotScopeInManagedDolt(request.CityPath, r.root)) {
+		if held[r.name] {
 			continue
 		}
 		note := rigGraphClearedNotePath(request.CityPath, strings.TrimPrefix(r.name, "rig:"))
@@ -719,9 +1535,26 @@ func cityRestoreRigsLost(request storageOperatorRequest, m snapshotManifest, pla
 		if was := recorded[rel(request.CityPath, note)]; was != nil && was.SHA256 == current.SHA256 {
 			continue
 		}
-		refused = append(refused, fmt.Sprintf("%s: its import into the binding ran since the snapshot (%s), and the snapshot holds no copy of its store, so the rows the import moved would be left only in the binding root this restore moves aside; restore a snapshot taken with --rigs (gc storage split takes one), or move the rig's rows back first with `gc storage migrate --to-rigs --rig %s`", r.name, note, strings.TrimPrefix(r.name, "rig:")))
+		refused = append(refused, fmt.Sprintf("%s: its import into the binding ran since the snapshot (%s), and the snapshot holds no copy of its store, so the rows the import moved would be left only in the binding root this restore moves aside; restore a snapshot taken with `%s` before the split, or move the rig's rows back first with `gc storage migrate --to-rigs --rig %s`", r.name, note, cityRestoreSnapshotCommand, strings.TrimPrefix(r.name, "rig:")))
 	}
 	return refused
+}
+
+// cityRestoreDiskRefusal refuses a restore whose copy of the managed Dolt's
+// data directory would leave less than the managed Dolt's critical floor
+// free where it lands: the restore installs the copy beside the directory it
+// moves aside, on a filesystem a managed Dolt (this city's, or another's)
+// may write to.
+func cityRestoreDiskRefusal(plan cityRestorePlan) error {
+	if plan.dolt == nil {
+		return nil
+	}
+	parent := filepath.Dir(plan.dolt.dataDir)
+	size := plan.dolt.tree.bytes()
+	if free, floor, short := snapshotTreeDiskShortfall(parent, size); short {
+		return fmt.Errorf("%s has %d bytes free; the restore installs the snapshot's copy of the managed Dolt's data directory (%d bytes) beside the one it moves aside and must leave %d free for a managed Dolt on the same filesystem. Free space and run this again; nothing was moved", parent, free, size, floor)
+	}
+	return nil
 }
 
 // moveAside renames path to path+suffix, unless a run already did; a path
@@ -905,74 +1738,151 @@ func moveBindingRootAside(root, suffix string) error {
 	return moveAside(root, suffix)
 }
 
-// verifyRestoredCity reads each restored store back, in a maintenance window
-// opened with the restored city.toml, and proves its rows equal to the
-// snapshot's JSONL.
-func verifyRestoredCity(lock *os.File, cityPath, dir string, plan cityRestorePlan, logPrefix string, stderr io.Writer) (err error) {
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
-		return fmt.Errorf("loading the restored city.toml: %w", err)
-	}
-	var rigRoots []string
-	for _, s := range plan.stores {
-		if s.rigDir != "" {
-			rigRoots = append(rigRoots, s.rigDir)
+// cityRestoreProof is each restored store read back against the snapshot's
+// JSONL, in the plan's order.
+type cityRestoreProof []restoredStoreProof
+
+// failures lists what the proof failed on, each failing row by its store.
+func (p cityRestoreProof) failures() []string {
+	var out []string
+	for _, s := range p {
+		for _, f := range s.failed {
+			out = append(out, s.store.rec.Name+": "+f)
 		}
 	}
-	w, err := openMigrationSource(lock, cityPath, cfg, logPrefix, stderr, rigRoots...)
+	return out
+}
+
+// restoredStoreProof is one restored store read back against the snapshot's
+// JSONL.
+type restoredStoreProof struct {
+	store cityRestoreStore
+	// changedDuring are rows the JSONL dates in the snapshot's window that
+	// the restored store holds as the copy found them; createdDuring are rows
+	// it dates there that the restored store does not hold, because the copy
+	// predates them. Both sorted.
+	changedDuring, createdDuring []string
+	// failed are the rows the proof fails on, each with why, sorted.
+	failed []string
+}
+
+// verifyRestoredCity reads each restored store back, in a maintenance window
+// opened with the restored city.toml, and proves it against the snapshot's
+// JSONL. It first proves the restored configuration serves every class from
+// the work store: a city the restore left split does not boot. An error is a
+// proof that could not run.
+func verifyRestoredCity(lock *os.File, cityPath, dir string, plan cityRestorePlan, logPrefix string, stderr io.Writer) (proof cityRestoreProof, err error) {
+	toml, err := cityTOMLFile(cityPath)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	data, err := os.ReadFile(toml)
+	if err != nil {
+		return nil, fmt.Errorf("reading the restored city.toml: %w", err)
+	}
+	if err := cityRestoreConfigRefusal(cityPath, data); err != nil {
+		return nil, err
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("loading the restored city.toml: %w", err)
+	}
+	w, err := openMigrationSource(lock, cityPath, cfg, logPrefix, stderr, plan.rigRoots()...)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { err = errors.Join(err, w.Close()) }()
 	for _, s := range plan.stores {
-		during, err := verifyRestoredStore(cityPath, dir, s)
+		p, err := verifyRestoredStore(cityPath, dir, s)
 		if err != nil {
-			return fmt.Errorf("%s: %w", s.rec.Name, err)
+			return nil, fmt.Errorf("%s: %w", s.rec.Name, err)
 		}
-		if len(during) > 0 {
-			fmt.Fprintf(stderr, "%s: warning: %s: %d row(s) written during the snapshot, after its copy was taken at %s and before its JSONL was read: %s. The restored store holds them as the copy found them; the JSONL records them as they were later\n", logPrefix, s.rec.Name, len(during), s.rec.Exact.CopiedAt.Format(time.RFC3339), strings.Join(during, ", ")) //nolint:errcheck // best-effort stderr
-		}
+		proof = append(proof, p)
 	}
-	return nil
+	return proof, nil
 }
 
-// snapshotRowWrittenAfter reports whether the JSONL row b may have been
-// written at or after copiedAt, the moment its store's copy was taken. A
-// store may keep its times to the second, so a row stamped in the copy's own
-// second counts; a row whose JSONL time is earlier was in the store before the
-// copy, so the copy holds it as the JSONL does. No copy time (a snapshot taken
-// before gc recorded one) excuses nothing.
-func snapshotRowWrittenAfter(b beads.Bead, copiedAt time.Time) bool {
-	if copiedAt.IsZero() {
+// snapshotRowChangedAt is when a row last changed, as its store records it:
+// its update time, or its creation time when it records none.
+func snapshotRowChangedAt(b beads.Bead) time.Time {
+	if b.UpdatedAt.IsZero() {
+		return b.CreatedAt
+	}
+	return b.UpdatedAt
+}
+
+// snapshotWindowHolds reports whether t falls in a snapshot's window: at or
+// after copiedAt, the moment its store's copy was taken, and no later than
+// readAt, when its rows were read for the JSONL, each to the second
+// (snapshotReadBound). A snapshot that records either moment as zero (taken
+// before gc recorded it) has no window.
+func snapshotWindowHolds(t, copiedAt, readAt time.Time) bool {
+	if copiedAt.IsZero() || readAt.IsZero() {
 		return false
 	}
-	changed := b.UpdatedAt
-	if changed.IsZero() {
-		changed = b.CreatedAt
-	}
-	return !changed.Before(copiedAt.Truncate(time.Second))
+	return !t.Before(copiedAt.Truncate(time.Second)) && !t.After(snapshotReadBound(readAt))
 }
 
-// verifyRestoredStore proves one restored store's rows equal to the
-// snapshot's JSONL, row for row. A JSONL row the restored store lacks or
-// holds differently is excused when the JSONL dates it at or after the copy
-// (snapshotRowWrittenAfter): the snapshot reads its JSONL from the live store
-// after the copy, so a write in between lands in the JSONL alone. Those rows
-// are returned, sorted, as written during the snapshot. A restored row the
-// JSONL lacks has no JSONL time to judge it by, so it always fails.
-func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) (during []string, err error) {
+// snapshotReadBound is the latest time a row read at readAt can carry. A store
+// may keep its times to the second, and Dolt rounds a DATETIME to the nearest
+// one, so a write in the read's own second may be stored in the next; the
+// JSONL holds no write made after its read, so the slack admits none.
+func snapshotReadBound(readAt time.Time) time.Time {
+	return readAt.Truncate(time.Second).Add(time.Second)
+}
+
+// verifyRestoredStore reads one restored store back and proves its rows
+// against the snapshot's JSONL, row for row. The snapshot reads its JSONL
+// from the live store after the copy, so a write in between lands in the
+// JSONL alone: a row the restored store lacks or holds differently is excused
+// when the JSONL dates it in the snapshot's window, and, for one it holds,
+// the restored row changed no later than the JSONL read, to the second (a
+// later change is none of the copy's). A restored row the JSONL lacks has no
+// JSONL time to
+// judge it by, so it always fails. An error is a store or JSONL that cannot
+// be read.
+func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) (restoredStoreProof, error) {
+	proof := restoredStoreProof{store: s}
+	want, err := readSnapshotJSONLRows(dir, s.rec)
+	if err != nil {
+		return proof, fmt.Errorf("reading the snapshot's JSONL: %w", err)
+	}
+	rows, err := listRestoredStore(cityPath, s)
+	if err != nil {
+		return proof, err
+	}
+	for _, got := range rows {
+		w, inJSONL := want[got.ID]
+		delete(want, got.ID)
+		proof.judgeHeld(got, w, inJSONL)
+	}
+	for _, id := range slices.Sorted(maps.Keys(want)) {
+		proof.judgeMissing(want[id])
+	}
+	sort.Strings(proof.changedDuring)
+	sort.Strings(proof.failed)
+	return proof, nil
+}
+
+// readSnapshotJSONLRows reads a store's rows from the snapshot's JSONL, by
+// id.
+func readSnapshotJSONLRows(dir string, rec snapshotStoreRecord) (map[string]beads.Bead, error) {
 	want := map[string]beads.Bead{}
-	_, present, err := scanInfraBackupFile(filepath.Join(dir, s.rec.JSONL.Path), storageSnapshotJSONLFormat, s.rec.Name, func(e infraBackupEntry) error {
+	_, present, err := scanInfraBackupFile(filepath.Join(dir, rec.JSONL.Path), storageSnapshotJSONLFormat, rec.Name, func(e infraBackupEntry) error {
 		want[e.Bead.ID] = e.Bead
 		return nil
 	})
 	if err == nil && !present {
 		err = errors.New("it is missing")
 	}
-	if err != nil {
-		return nil, fmt.Errorf("reading the snapshot's JSONL: %w", err)
-	}
+	return want, err
+}
+
+// listRestoredStore lists every row of a restored store, closed and
+// ephemeral ones included.
+func listRestoredStore(cityPath string, s cityRestoreStore) ([]beads.Bead, error) {
 	var store beads.Store
+	var err error
 	if s.rigDir == "" {
 		store, err = openInfraMigrationSource(cityPath)
 	} else {
@@ -986,62 +1896,54 @@ func verifyRestoredStore(cityPath, dir string, s cityRestoreStore) (during []str
 	if err != nil {
 		return nil, fmt.Errorf("listing the restored store: %w", err)
 	}
-	copiedAt := s.rec.Exact.CopiedAt
-	for _, got := range rows {
-		w, ok := want[got.ID]
-		if !ok {
-			return nil, fmt.Errorf("the restored store holds %s, which the snapshot does not", got.ID)
-		}
-		delete(want, got.ID)
-		got.IsBlocked, got.Dependencies, w.IsBlocked, w.Dependencies = nil, nil, nil, nil
-		diff := beadCopyDifference(w, got)
-		switch {
-		case diff == "":
-		case snapshotRowWrittenAfter(w, copiedAt):
-			during = append(during, got.ID)
-		default:
-			return nil, fmt.Errorf("%s differs from the snapshot: %s", got.ID, diff)
-		}
-	}
-	for _, id := range slices.Sorted(maps.Keys(want)) {
-		if !snapshotRowWrittenAfter(want[id], copiedAt) {
-			return nil, fmt.Errorf("the restored store lacks %s, which the snapshot holds", id)
-		}
-		during = append(during, id)
-	}
-	sort.Strings(during)
-	return during, nil
+	return rows, nil
 }
 
-// storageCityRestoreRefusal refuses a writing storage verb while a city
-// restore is unfinished: the city's stores, records and city.toml may be
-// part-way back.
-func storageCityRestoreRefusal(cityPath string) error {
-	j, present, err := readStorageCityRestoreJournal(cityPath)
-	switch {
-	case err != nil:
-		return err
-	case !present || j.done(cityRestoreStepVerified):
-		return nil
+// judgeHeld judges a row the restored store holds against its JSONL row w;
+// inJSONL is false when the JSONL has none.
+func (p *restoredStoreProof) judgeHeld(got, w beads.Bead, inJSONL bool) {
+	if !inJSONL {
+		p.failed = append(p.failed, got.ID+": the restored store holds it, and the snapshot's JSONL does not")
+		return
 	}
-	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): the city's stores, storage records and city.toml may be part-way back. Finish it with `%s`", j.Snapshot, storageCityRestoreJournalPath(cityPath), snapshotCityRestoreInstruction(j.Snapshot, j.To))
+	got.IsBlocked, got.Dependencies, w.IsBlocked, w.Dependencies = nil, nil, nil, nil
+	diff := beadCopyDifference(w, got)
+	switch {
+	case diff == "":
+	case p.inWindow(w) && !snapshotRowChangedAt(got).After(snapshotReadBound(p.store.rec.JSONLReadAt)):
+		p.changedDuring = append(p.changedDuring, got.ID)
+	default:
+		p.failed = append(p.failed, fmt.Sprintf("%s: differs from the snapshot's JSONL: %s", got.ID, diff))
+	}
 }
 
-// storageCityRestoreBootRefusal holds boot while a city restore has files
-// left to move: the city's stores, records and city.toml may be from
-// different moments, and a city that served them would write into the stores
-// the restore's proof reads. Once every file is back the city is the
-// snapshot's, and the proof that remains holds only the writing storage
-// commands (storageCityRestoreRefusal).
-func storageCityRestoreBootRefusal(cityPath string) error {
-	j, present, err := readStorageCityRestoreJournal(cityPath)
-	switch {
-	case err != nil:
-		return err
-	case !present || j.done(cityRestoreStepBinding):
-		return nil
+// judgeMissing judges a JSONL row the restored store lacks.
+func (p *restoredStoreProof) judgeMissing(w beads.Bead) {
+	if p.inWindow(w) {
+		p.createdDuring = append(p.createdDuring, w.ID)
+		return
 	}
-	return fmt.Errorf("a city restore of snapshot %s is unfinished (%s): the city's stores, storage records and city.toml may be part-way back, so the city does not start. Finish it with `%s`", j.Snapshot, storageCityRestoreJournalPath(cityPath), snapshotCityRestoreInstruction(j.Snapshot, j.To))
+	p.failed = append(p.failed, w.ID+": the snapshot's JSONL holds it, and the restored store does not")
+}
+
+// inWindow reports whether the JSONL dates row b in the snapshot's window.
+func (p *restoredStoreProof) inWindow(b beads.Bead) bool {
+	return snapshotWindowHolds(snapshotRowChangedAt(b), p.store.rec.Exact.CopiedAt, p.store.rec.JSONLReadAt)
+}
+
+// report names the rows the snapshot's window excused, and where their
+// later content survives: the snapshot's JSONL, and the store the restore
+// kept aside (aside).
+func (p *restoredStoreProof) report(w io.Writer, dir, aside string) {
+	rec := p.store.rec
+	window := fmt.Sprintf("after its copy (%s) and before its JSONL was read (%s)", rec.Exact.CopiedAt.Format(time.RFC3339), rec.JSONLReadAt.Format(time.RFC3339))
+	survive := fmt.Sprintf("their later content is in the snapshot's JSONL %s and in the store kept aside as %s", filepath.Join(dir, rec.JSONL.Path), aside)
+	if n := len(p.changedDuring); n > 0 {
+		fmt.Fprintf(w, "%s: %d row(s) changed during the snapshot, %s, are restored as the copy found them: %s; %s.\n", rec.Name, n, window, strings.Join(p.changedDuring, ", "), survive) //nolint:errcheck // best-effort stdout
+	}
+	if n := len(p.createdDuring); n > 0 {
+		fmt.Fprintf(w, "%s: %d row(s) created during the snapshot, %s, are not restored: %s; %s.\n", rec.Name, n, window, strings.Join(p.createdDuring, ", "), survive) //nolint:errcheck // best-effort stdout
+	}
 }
 
 // snapshotCityConfigNote is a manifest note for a snapshot that records the

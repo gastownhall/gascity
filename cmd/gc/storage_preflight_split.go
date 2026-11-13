@@ -419,7 +419,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		summary.RigImports = summary.RigImports || (r.Plan != nil && len(r.Plan.Move)+len(r.Plan.Retained) > 0)
 	}
 	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
-	splitPreflightReverseNote(found.plan, diag, known, stdout)
+	splitPreflightReverseNote(found.plan, found.writesPayloads, cityRestoreUnrestorable(request), stdout)
 	return splitPreflightFooter(stdout, request, summary), summary
 }
 
@@ -436,18 +436,25 @@ func splitPayloadEdges(plan infraCopyPlan) int {
 }
 
 // splitPreflightReverseNote says whether the way back after the split,
-// `gc storage migrate --to-work`, could carry every edge the copy carries: on
-// native Dolt it cannot write an edge's payload, so it refuses each edge that
-// holds one, and the city restore of the split's snapshot is the way back.
-func splitPreflightReverseNote(plan infraCopyPlan, diag beads.BeadsDiagnostic, known bool, stdout io.Writer) {
+// `gc storage migrate --to-work`, could carry every edge the copy carries. It
+// carries an edge's payload only into a work store whose lane writes one
+// (writesPayloads), and refuses each edge that holds one on any other. The
+// city restore of the split's snapshot is then the way back, when the
+// snapshot copies every store of the city so the restore puts it back;
+// unrestorable says why it does not (cityRestoreUnrestorable), and then no
+// automated way back carries those edges.
+func splitPreflightReverseNote(plan infraCopyPlan, writesPayloads bool, unrestorable string, stdout io.Writer) {
 	n := splitPayloadEdges(plan)
+	refused := fmt.Sprintf("%d edge(s) the copy carries hold a payload, and this work store's lane has no edge-payload writer, so `gc storage migrate --to-work` would refuse them", n)
 	switch {
 	case n == 0:
 		preflightPass(stdout, "way back", "no edge the copy carries holds a payload, so `gc storage migrate --to-work` can carry every one back")
-	case known && diag.Store == beads.BeadsStoreNameNativeDoltStore:
-		preflightNote(stdout, "way back", fmt.Sprintf("%d edge(s) the copy carries hold a payload, and native Dolt has no edge-payload writer, so `gc storage migrate --to-work` would refuse them; the way back is the city restore of the split's snapshot (`gc storage snapshot restore <id> --city --%s`)", n, storageFleetStoppedFlag))
-	default:
+	case writesPayloads:
 		preflightPass(stdout, "way back", fmt.Sprintf("%d edge(s) the copy carries hold a payload; this work store's lane writes payloads, so `gc storage migrate --to-work` can carry them back", n))
+	case unrestorable == "":
+		preflightNote(stdout, "way back", fmt.Sprintf("%s; the way back is the city restore of the split's snapshot (`gc storage snapshot restore <id> --city --%s`)", refused, storageFleetStoppedFlag))
+	default:
+		preflightNote(stdout, "way back", refused+"; and "+unrestorable+", so no automated way back carries them")
 	}
 }
 
