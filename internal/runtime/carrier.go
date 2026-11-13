@@ -32,7 +32,9 @@ import (
 // best-effort swallowing in its own adapter — the carrier knows nothing about
 // pods or how the box is reached. Adopting it for a runtime that drives input
 // via its own dedicated ops (e.g. an exec pack's nudge/peek subcommands) is a
-// protocol change, not a silent migration. The local tmux control driver and
+// protocol change, not a silent migration. Exec packs select dedicated ops
+// explicitly with carrier.ops; undeclared packs retain tmux-first behavior.
+// The local tmux control driver and
 // the ACP stream driver realize these verbs differently and keep their own
 // behavior.
 type Carrier interface {

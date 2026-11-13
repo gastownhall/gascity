@@ -73,10 +73,10 @@ func TestWorkRecordLegacyRepoDirMatchesARigThroughAHandle(t *testing.T) {
 		state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigPath}, {Name: "unbound"}}
 		s := New(state)
 		dirs := s.workRecordScopeDirs()
-		if got := s.workRecordLegacyRepoDir(wrap(state.BeadStore("myrig")), dirs); got != rigPath {
+		if got := s.workRecordLegacyRepoDir(beadstest.Resident(wrap(state.BeadStore("myrig"))), dirs); got != rigPath {
 			t.Errorf("%s over the rig's store: repo dir %q, want the rig checkout %q", name, got, rigPath)
 		}
-		if got := s.workRecordLegacyRepoDir(wrap(beads.NewMemStore()), dirs); got != dirs.CityDir() {
+		if got := s.workRecordLegacyRepoDir(beadstest.Resident(wrap(beads.NewMemStore())), dirs); got != dirs.CityDir() {
 			t.Errorf("%s over another store: repo dir %q, want the city checkout %q", name, got, dirs.CityDir())
 		}
 	}

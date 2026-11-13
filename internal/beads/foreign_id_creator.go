@@ -11,11 +11,13 @@ package beads
 // The two stores that serve class bindings implement it — SQLiteStore and
 // NativeDoltStore — because they are the two that fence a pinned id (invariant
 // 16), and the migration copy is the one write that must cross a fence. A store
-// with no prefix rules has nothing to exempt, so it does not implement this and
-// callers reach it through the ordinary Create. Adding an implementation is
-// therefore a decision about the fence, not a convenience: a caller type-asserts
-// for this capability, and a store that gains it silently gains a write path
-// nothing checks the namespace of.
+// with no prefix rules has nothing to exempt, so its Create already takes the
+// id. Adding an implementation is therefore a decision about the fence, not a
+// convenience: a caller type-asserts for this capability, and a store that
+// gains it silently gains a write path nothing checks the namespace of. The
+// one exception is FileStore, which fences nothing and implements it for the
+// row it keeps whole: the reverse migration copies a row back with its status
+// and timestamps, which Create would mint afresh.
 type ForeignIDCreator interface {
 	CreateWithForeignID(b Bead) (Bead, error)
 }

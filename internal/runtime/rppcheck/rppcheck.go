@@ -217,12 +217,15 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // city-scoped) promise no op of their own, so they map to "": they are
 // listed only so the handshake check does not report them as unknown, and
 // `gc runtime conformance` checks the behavior they claim. idle-boundary is
-// a claim about the box's tmux, read over exec, not an op of its own, so it
+// a claim about the selected carrier's idle read, not an op of its own, so it
 // maps to "" too (RPP-CONN-002 checks it), and so does proc.exec, whose exec
 // op `gc runtime conformance` checks (RPP-CONN-001) and which the
 // idle-boundary migration warning names. fs.host is a promise about where a
 // box runs, checked by the conformance fshost group, so it maps to "" as
 // well; declared without locality local it draws a warning instead.
+// carrier.ops maps to "" too; its five driving ops, and with idle-boundary
+// its ready-prompt store, are required checks below, not a single
+// capability-to-op map.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -231,6 +234,7 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityIdleBoundary:     "",
 	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
 	runtime.ProtocolCapabilityFSHost:           "",
+	runtime.ProtocolCapabilityCarrierOps:       "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -288,8 +292,8 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if len(unknown) > 0 {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
-	if missingIdleBoundary(info) {
-		detail += "; " + idleBoundaryMigrationWarning
+	if warning := idleBoundaryWarning(info); warning != "" {
+		detail += "; " + warning
 	}
 	if info.Has(runtime.ProtocolCapabilityFSHost) && !info.SharesHostFS() {
 		detail += "; " + fsHostWithoutLocalityWarning
@@ -307,14 +311,30 @@ const fsHostWithoutLocalityWarning = `warning: fs.host is declared without "loca
 // declares the three capabilities that once gave it an idle boundary but not
 // idle-boundary, which it now also needs: it passes, but gc gives it no idle
 // wait and its interactive sessions do not sleep.
-const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; that is expected for a runtime whose box runs no tmux, otherwise declare idle-boundary (the agent runs in the box's tmux session main)"
+const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary for tmux session main, or carrier.ops and idle-boundary if the pack's peek reads the agent's screen"
 
-// missingIdleBoundary reports whether the handshake declares proc.exec,
-// report-activity and report-attachment but not idle-boundary: the set the exec
+const opsIdleBoundaryMigrationWarning = "warning: carrier.ops, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary if peek reads the agent's screen"
+
+// idleBoundaryWarning is the handshake check's warning for a script in the
+// missingIdleBoundary state, worded for the carrier it selects; "" for any
+// other script.
+func idleBoundaryWarning(info runtime.ProtocolInfo) string {
+	switch {
+	case !missingIdleBoundary(info):
+		return ""
+	case info.Has(runtime.ProtocolCapabilityCarrierOps):
+		return opsIdleBoundaryMigrationWarning
+	default:
+		return idleBoundaryMigrationWarning
+	}
+}
+
+// missingIdleBoundary reports whether the handshake declares a carrier's
+// needs, report-activity and report-attachment but not idle-boundary: the set the exec
 // provider's idleBoundaryDeclared requires, less the token. Change them
 // together.
 func missingIdleBoundary(info runtime.ProtocolInfo) bool {
-	return info.Has(runtime.ProtocolCapabilityConnectionExec) &&
+	return (info.Has(runtime.ProtocolCapabilityConnectionExec) || info.Has(runtime.ProtocolCapabilityCarrierOps)) &&
 		info.Has(runtime.ProtocolCapabilityReportActivity) &&
 		info.Has(runtime.ProtocolCapabilityReportAttachment) &&
 		!info.Has(runtime.ProtocolCapabilityIdleBoundary)
@@ -396,7 +416,7 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// the is-running-after-stop assertion on interrupt's side effect.
 	// Post-stop it exercises the documented missing-session contract:
 	// best-effort, exit 0.
-	c.checkOptional(ctx, "optional: interrupt", nil, "interrupt", name)
+	c.checkDrivingOp(ctx, "interrupt", name)
 }
 
 // checkServerLifecycle runs the server-stop a script declaring
@@ -508,9 +528,15 @@ func (c *checker) remainingCheckNames() []string {
 		"optional: process-alive",
 		c.nudgeCheckName(),
 		"optional: metadata round-trip",
-		"optional: peek",
+		c.drivingCheckName("peek"),
 		"optional: list-running",
 	)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		names = append(names, c.drivingCheckName("send-keys"), c.drivingCheckName("clear-scrollback"))
+	}
+	if c.readyPromptStoreRequired() {
+		names = append(names, readyPromptStoreCheck)
+	}
 	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
 	if observe {
 		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
@@ -519,7 +545,7 @@ func (c *checker) remainingCheckNames() []string {
 	if observe {
 		names = append(names, observeAbsentCheck)
 	}
-	return append(names, "lifecycle: stop idempotent", "optional: interrupt")
+	return append(names, "lifecycle: stop idempotent", c.drivingCheckName("interrupt"))
 }
 
 func (c *checker) skipRemainingChecks(detail string) {
@@ -540,8 +566,15 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkProcessAlive(ctx, name)
 	c.checkNudge(ctx, name)
 	c.checkMetadataRoundTrip(ctx, name)
-	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
+	c.checkDrivingOp(ctx, "peek", name, "10")
 	c.checkListRunning(ctx, name)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.checkDrivingOp(ctx, "send-keys", name, "Enter")
+		c.checkDrivingOp(ctx, "clear-scrollback", name)
+	}
+	if c.readyPromptStoreRequired() {
+		c.checkReadyPromptStore(ctx, name)
+	}
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
 		c.checkObserve(ctx, observeCheck, name, "running")
 		c.checkInventory(ctx, name)
@@ -711,10 +744,40 @@ func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte,
 	}
 }
 
-// nudgeCheckName is the name checkNudge reports its result under, escalated
-// by RequireNudge so remainingCheckNames's start-failure skip listing names
-// the same check checkNudge would have run.
+func (c *checker) drivingCheckName(op string) string {
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return "capability carrier.ops: " + op
+	}
+	return "optional: " + op
+}
+
+// checkDrivingOp keeps the optional path unchanged; an explicit carrier.ops
+// declaration obliges the op, so an unsupported op is a failed promise.
+func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
+	check := c.drivingCheckName(args[0])
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.checkOptional(ctx, check, nil, args...)
+		return
+	}
+	res := c.runOp(ctx, nil, args...)
+	switch {
+	case res.unsupported:
+		c.record(check, StatusFail, "carrier.ops declared but op not implemented (exit 2)")
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// nudgeCheckName is the name checkNudge reports its result under. carrier.ops
+// takes precedence over RequireNudge and requires all five driving ops.
+// Otherwise RequireNudge selects required rather than optional nudge. The
+// start-failure skip listing uses this same name as checkNudge.
 func (c *checker) nudgeCheckName() string {
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return c.drivingCheckName("nudge")
+	}
 	if c.opts.RequireNudge {
 		return "required: nudge"
 	}
@@ -732,6 +795,10 @@ func (c *checker) checkNudge(ctx context.Context, name string) {
 	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", name)
 	switch {
 	case res.unsupported:
+		if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+			c.record(check, StatusFail, "carrier.ops declared but nudge not implemented (exit 2)")
+			return
+		}
 		if c.opts.RequireNudge {
 			c.record(check, StatusFail, "declared prompt_delivery=nudge-fallback but nudge is not implemented (exit 2)")
 			return
@@ -799,6 +866,58 @@ func (c *checker) checkMetadataRoundTrip(ctx context.Context, name string) {
 	default:
 		c.record(check, StatusPass, "")
 	}
+}
+
+// readyPromptStoreCheck is the name checkReadyPromptStore reports under.
+const readyPromptStoreCheck = "capability carrier.ops: ready-prompt metadata"
+
+// readyPromptStoreProbe is the ready prompt checkReadyPromptStore stores: not
+// the default one, non-ASCII and ending in a space, as codex's is, so a store
+// that drops, trims or re-encodes the value fails.
+const readyPromptStoreProbe = "› "
+
+// readyPromptStoreRequired reports a handshake declaring carrier.ops and
+// idle-boundary, whose sessions' ready prompts gc keeps in the pack's
+// metadata (checkReadyPromptStore).
+func (c *checker) readyPromptStoreRequired() bool {
+	return c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) &&
+		c.result.Protocol.Has(runtime.ProtocolCapabilityIdleBoundary)
+}
+
+// checkReadyPromptStore requires the store a carrier.ops pack with
+// idle-boundary keeps each session's ready prompt in. gc stores the prompt
+// with set-meta after start, and every provider instance that did not start
+// the session (a restarted orchestrator, a CLI process) reads it back with
+// get-meta and waits for what it recovers (sessionexec.ParseReadyPromptMeta).
+// Without a store that answers it byte for byte, those instances wait for the
+// default prompt, so a session whose agent shows another never reads as idle
+// although the pack reports full idle sleep. Unlike the optional metadata
+// round-trip, an absent op therefore fails.
+func (c *checker) checkReadyPromptStore(ctx context.Context, name string) {
+	key := sessionexec.ReadyPromptMetaKey
+	set := c.runOp(ctx, []byte(readyPromptStoreProbe), "set-meta", name, key)
+	switch {
+	case set.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but set-meta is not implemented (exit 2)")
+		return
+	case set.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, set.err.Error())
+		return
+	}
+	get := c.runOp(ctx, nil, "get-meta", name, key)
+	switch {
+	case get.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but get-meta is not implemented (exit 2)")
+		return
+	case get.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, get.err.Error())
+		return
+	}
+	if prefix, found := sessionexec.ParseReadyPromptMeta(get.stdout); !found || prefix != readyPromptStoreProbe {
+		c.record(readyPromptStoreCheck, StatusFail, fmt.Sprintf("get-meta %s answered %q after set-meta stored %q; other gc processes would not recover the session's ready prompt", key, get.stdout, readyPromptStoreProbe))
+		return
+	}
+	c.record(readyPromptStoreCheck, StatusPass, "")
 }
 
 // checkListRunning requires the conformance session to appear when the
