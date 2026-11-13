@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // cascadeNudgeScriptPath is the on-disk copy of the cascade-nudge order's
@@ -617,26 +619,38 @@ exit 0
 // to do yet, and a nudge would wake an asleep seat parked on it for nothing
 // (ga-ylpbsy.16, RCA R4). The seat wakes on its own once the dependent is
 // ready. A blocker holds as beads.DependencySatisfied judges it: not closed,
-// or closed blocked (gc.work_outcome=blocked) and not a formula step that
-// reached a terminal verdict (pass, fail, skipped, canceled).
+// or closed blocked (gc.work_outcome=blocked) and not a formula step whose
+// close dispatch reads as a verdict (a terminal gc.outcome, an attempt root,
+// or an abort_scope member).
 func TestCascadeNudgeSkipsADependentStillBlocked(t *testing.T) {
 	cases := map[string]string{
 		"another blocker closed blocked": `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
 		// mol-do-work stamps gc.outcome=pass on the work bead it closes,
 		// blocked or not: without gc.step_ref it is no dispatch verdict.
 		"another work bead closed blocked with gc.outcome=pass": `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.outcome":"pass"}}]`,
-		// A formula step with no recognized terminal verdict has nothing for
-		// a control to consume: its blocked work outcome still holds.
-		"another formula step closed blocked with no outcome":       `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step"}}]`,
-		"another formula step closed blocked with unknown outcome":  `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"unknown"}}]`,
-		"the closing formula step closed blocked with missing_root": `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"missing_root"}}]`,
-		"the closing blocker closed blocked":                        `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
+		// A formula step whose close dispatch reads as no verdict (no
+		// recognized gc.outcome, and neither an attempt root nor an
+		// abort_scope member) still holds: its consumers would count the
+		// close as a pass.
+		"another formula step closed blocked with no outcome":                   `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step"}}]`,
+		"another formula step closed blocked with unknown outcome":              `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"unknown"}}]`,
+		"another formula step closed blocked with upper-case FAIL":              `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"FAIL"}}]`,
+		"another formula step closed blocked with a logical bead id alone":      `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.logical_bead_id":"ga-logical"}}]`,
+		"another scope member closed blocked that did not opt into abort_scope": `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.scope_ref":"mol.body","gc.on_fail":"continue"}}]`,
+		"the closing formula step closed blocked with missing_root":             `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"missing_root"}}]`,
+		"the closing blocker closed blocked":                                    `[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`,
 		// A row this read cannot judge proves nothing, but an open one
 		// beside it still holds the dependent.
 		"an open blocker beside an external one": `[{"id":"ga-blk","status":"closed"},{"id":"gb-ext","status":"","external":true},{"id":"ga-other","status":"open"}]`,
 	}
 	for _, status := range []string{"open", "in_progress", "blocked", "deferred", "hooked"} {
 		cases["another blocker "+status] = `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"` + status + `"}]`
+	}
+	// A control's gc.control_for names the step it serves, not a control that
+	// owns it: a control closed blocked with no verdict still holds. Every
+	// control kind is listed, so the script's copy of the set cannot drift.
+	for _, kind := range beadmeta.ControlKinds {
+		cases["another "+kind+" control closed blocked naming the step it serves"] = `[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.kind":"` + kind + `","gc.control_for":"mol.step"}}]`
 	}
 	// A pinned blocker holds on both reads, though bd's readiness counts it
 	// satisfied. The bd passthrough prints bd's own status, as bd 1.3's
@@ -660,9 +674,9 @@ func TestCascadeNudgeNudgesOnTheLastBlockersClose(t *testing.T) {
 	cases := map[string]string{
 		"every blocker closed":                               `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed"}]'`,
 		"the other blocker closed with another work outcome": `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"shipped"}}]'`,
-		// A formula step that reached a terminal verdict has its work outcome
-		// ignored by readiness (beads.ReadinessWorkOutcome): dispatch consumes
-		// the verdict through the controls that depend on it.
+		// A formula step whose close dispatch reads as a verdict has its work
+		// outcome ignored by readiness (beads.ReadinessWorkOutcome): dispatch
+		// consumes the close through the controls that depend on it.
 		"the other blocker a formula step closed blocked that passed":   `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"pass"}}]'`,
 		"the closing blocker a formula step closed blocked that passed": `printf '%s\n' '[{"id":"ga-blk","status":"closed","metadata":{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"pass"}}]'`,
 		"the closing blocker read before its close":                     `printf '%s\n' '[{"id":"ga-blk","status":"open"}]'`,
@@ -678,10 +692,24 @@ func TestCascadeNudgeNudgesOnTheLastBlockersClose(t *testing.T) {
 		"an unparseable blocker read": `printf 'not json\n'`,
 		"a blocker read not a list":   `printf '%s\n' '{"error":"unavailable"}'`,
 	}
-	for _, outcome := range []string{"fail", "skipped", "canceled"} {
-		step := `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"` + outcome + `"}`
-		cases["the other blocker a formula step closed blocked with outcome "+outcome] = `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":` + step + `}]'`
-		cases["the closing blocker a formula step closed blocked with outcome "+outcome] = `printf '%s\n' '[{"id":"ga-blk","status":"closed","metadata":` + step + `}]'`
+	steps := map[string]string{
+		"a formula step closed blocked with outcome fail":     `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"fail"}`,
+		"a formula step closed blocked with outcome skipped":  `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"skipped"}`,
+		"a formula step closed blocked with outcome canceled": `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"canceled"}`,
+		// Dispatch trims a verdict before it reads it.
+		"a formula step closed blocked with a padded fail outcome": `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":" fail\t"}`,
+		// The retry control owning an attempt root retries a close with no
+		// gc.outcome, and an abort_scope member's scope-check fails the scope
+		// on it.
+		"a retry attempt closed blocked with no outcome":             `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step.attempt.1","gc.logical_bead_id":"ga-logical","gc.attempt":"1","gc.retry_attempt":"1"}`,
+		"a v1 retry-run attempt closed blocked with no outcome":      `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step.run.1","gc.logical_bead_id":"ga-logical","gc.kind":"retry-run"}`,
+		"a compiled attempt naming only its control closed blocked":  `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step.attempt.1","gc.control_for":"mol.step","gc.attempt":"1","gc.retry_attempt":"1"}`,
+		"an abort_scope member closed blocked with no outcome":       `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.scope_ref":"mol.body","gc.on_fail":"abort_scope"}`,
+		"a padded abort_scope member closed blocked with no outcome": `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.scope_ref":"mol.body","gc.on_fail":" abort_scope "}`,
+	}
+	for name, step := range steps {
+		cases["the other blocker "+name] = `printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"closed","metadata":` + step + `}]'`
+		cases["the closing blocker "+name] = `printf '%s\n' '[{"id":"ga-blk","status":"closed","metadata":` + step + `}]'`
 	}
 	for name, down := range cases {
 		t.Run(name, func(t *testing.T) {

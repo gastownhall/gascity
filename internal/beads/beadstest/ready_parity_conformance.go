@@ -174,6 +174,52 @@ func seedReadyParityCorpus(t *testing.T, s beads.Store) {
 	}); err != nil {
 		t.Fatalf("CloseAll(%s): %v", outcomelessStep.ID, err)
 	}
+	// Closes dispatch reads as a verdict however gc.outcome reads: attempt
+	// roots (one naming its logical bead, one naming only its control) and an
+	// abort_scope member closed blocked with no gc.outcome, and a step whose
+	// terminal verdict is padded. Cache and store must agree they release
+	// their dependents.
+	outcomelessAttempt := mk(beads.Bead{Title: "closed outcomeless-attempt blocker"})
+	dep(mk(beads.Bead{Title: "released by outcomeless attempt"}), outcomelessAttempt.ID, "blocks")
+	if _, err := s.CloseAll([]string{outcomelessAttempt.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:       "review.attempt.1",
+		beadmeta.LogicalBeadIDMetadataKey: "gc-logical",
+		beadmeta.AttemptMetadataKey:       "1",
+		beadmeta.RetryAttemptMetadataKey:  "1",
+		beadmeta.WorkOutcomeMetadataKey:   beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", outcomelessAttempt.ID, err)
+	}
+	controlledAttempt := mk(beads.Bead{Title: "closed outcomeless controlled-attempt blocker"})
+	dep(mk(beads.Bead{Title: "released by outcomeless controlled attempt"}), controlledAttempt.ID, "blocks")
+	if _, err := s.CloseAll([]string{controlledAttempt.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:      "review.attempt.1",
+		beadmeta.ControlForMetadataKey:   "review",
+		beadmeta.AttemptMetadataKey:      "1",
+		beadmeta.RetryAttemptMetadataKey: "1",
+		beadmeta.WorkOutcomeMetadataKey:  beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", controlledAttempt.ID, err)
+	}
+	outcomelessMember := mk(beads.Bead{Title: "closed outcomeless abort_scope-member blocker"})
+	dep(mk(beads.Bead{Title: "released by outcomeless abort_scope member"}), outcomelessMember.ID, "blocks")
+	if _, err := s.CloseAll([]string{outcomelessMember.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.ScopeRefMetadataKey:    "body",
+		beadmeta.OnFailMetadataKey:      beadmeta.OnFailAbortScope,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", outcomelessMember.ID, err)
+	}
+	paddedVerdictStep := mk(beads.Bead{Title: "closed padded-verdict-step blocker"})
+	dep(mk(beads.Bead{Title: "released by padded-verdict step"}), paddedVerdictStep.ID, "blocks")
+	if _, err := s.CloseAll([]string{paddedVerdictStep.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.OutcomeMetadataKey:     " fail\t",
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", paddedVerdictStep.ID, err)
+	}
 
 	future := readyParityFarFuture
 	mk(beads.Bead{Title: "deferred", DeferUntil: &future})

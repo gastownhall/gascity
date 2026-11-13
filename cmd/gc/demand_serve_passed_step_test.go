@@ -10,7 +10,8 @@ import (
 // TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep keeps the drain-ack and
 // divergence classifiers in agreement with Ready(): a blocker closed with
 // gc.work_outcome=blocked still blocks, unless it is a formula step whose
-// control-plane step closed with a terminal gc.outcome.
+// close dispatch reads as a verdict (a terminal gc.outcome, an attempt root,
+// or an abort_scope member).
 func TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -57,6 +58,21 @@ func TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep(t *testing.T) {
 			"canceled work bead without a step ref is unmet",
 			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			true,
+		},
+		{
+			"retry attempt without an outcome is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
+			"compiled attempt naming only its control is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.ControlForMetadataKey: "review", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
+			"abort_scope member without an outcome is met despite a blocked work outcome",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: beadmeta.OnFailAbortScope, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
 		},
 		{
 			"step without an outcome is unmet",

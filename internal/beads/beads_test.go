@@ -188,9 +188,12 @@ func TestIsReadyCandidate(t *testing.T) {
 
 // TestReadinessWorkOutcomeDefersToATerminalStep pins which closed
 // dependencies have their gc.work_outcome masked for readiness: a formula step
-// (gc.step_ref) that closed with a terminal gc.outcome (pass, fail, skipped,
-// canceled) reports no work outcome, so the controls that consume its verdict
-// are offered; everything else reports its recorded gc.work_outcome verbatim.
+// (gc.step_ref) whose close dispatch reads as a verdict reports no work
+// outcome, so the controls that consume the close are offered. That is a step
+// with a terminal gc.outcome (pass, fail, skipped, canceled, trimmed as
+// dispatch trims it), an attempt root, or a gc.on_fail=abort_scope member,
+// whatever gc.outcome either closed with. Everything else reports its
+// recorded gc.work_outcome verbatim.
 func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -208,8 +211,32 @@ func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 		{"step with none outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "none", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"step with missing_root outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeMissingRoot, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"step with unknown outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "unknown", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"step with padded fail outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: " fail ", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		// Dispatch trims gc.outcome before it compares it (classifyRetryAttempt,
+		// beadOutcomeFailed), so a padded terminal verdict is still a verdict.
+		{"step with padded fail outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: " fail ", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"step with tab and newline padded canceled outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "\tcanceled\n", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"step with unicode-space padded pass outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "\u00a0pass\u3000", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		// Dispatch compares verdicts case-sensitively: FAIL is no verdict for
+		// a step that is neither an attempt root nor an abort_scope member.
 		{"step with upper-case fail outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "FAIL", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		// A retry attempt's control judges every close: it retries a missing
+		// or unrecognized gc.outcome (missing_outcome, invalid_outcome_value).
+		{"retry attempt without an outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"retry attempt with an unrecognized outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.AttemptMetadataKey: "1", beadmeta.OutcomeMetadataKey: "blocked", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"retry attempt with upper-case fail outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.RetryAttemptMetadataKey: "2", beadmeta.OutcomeMetadataKey: "FAIL", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"v1 retry-run attempt without an outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review.run.1", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.KindMetadataKey: beadmeta.KindRetryRun, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		// A store without graph apply creates a compiled attempt before its
+		// control, so gc.control_for is the attempt's only lineage stamp.
+		{"compiled attempt naming only its control ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review.attempt.1", beadmeta.ControlForMetadataKey: "review", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"control naming the step it serves keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review-scope-check", beadmeta.ControlForMetadataKey: "review", beadmeta.KindMetadataKey: beadmeta.KindScopeCheck, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"step with a logical bead id but no attempt keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"step with attempt counters but no logical bead id keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.AttemptMetadataKey: "1", beadmeta.RetryAttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		// An abort_scope member's scope-check fails the scope on any close but
+		// pass, skipped or canceled.
+		{"abort_scope member without an outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: beadmeta.OnFailAbortScope, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"abort_scope member with unknown outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: beadmeta.OnFailAbortScope, beadmeta.OutcomeMetadataKey: "unknown", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"padded abort_scope member without an outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: " abort_scope\t", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"member with another on_fail and no outcome keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OnFailMetadataKey: "continue", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"failed step with abandoned outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeAbandoned}, ""},
 		{"unknown-outcome step keeps a nonblocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "unknown", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, beadmeta.WorkOutcomeShipped},
 		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
@@ -223,6 +250,8 @@ func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 		{"work bead with canceled keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"work bead with empty step ref keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"work bead with only a step id keeps blocked work outcome", map[string]string{beadmeta.StepIDMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"attempt-shaped work bead keeps blocked work outcome", map[string]string{beadmeta.LogicalBeadIDMetadataKey: "gc-1", beadmeta.AttemptMetadataKey: "1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"abort_scope work bead keeps blocked work outcome", map[string]string{beadmeta.OnFailMetadataKey: beadmeta.OnFailAbortScope, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,7 +259,7 @@ func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
 			}
 			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
-				t.Fatalf("a closed dependency whose step reached a terminal verdict must satisfy its dependents (%v)", tt.metadata)
+				t.Fatalf("a closed formula step whose close dispatch reads as a verdict must satisfy its dependents (%v)", tt.metadata)
 			}
 		})
 	}

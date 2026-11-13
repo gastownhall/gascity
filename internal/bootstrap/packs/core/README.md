@@ -121,15 +121,21 @@ readiness rule judges it
 (`gc bd dep list <dep> --direction=down --type=blocks --json`): a blocker
 other than the one that closed whose status is not `closed`, or any blocker,
 the closing one included, that closed blocked (`gc.work_outcome=blocked`),
-unless it is a formula step (`gc.step_ref` set) whose `gc.outcome` is a
-terminal verdict (`pass`, `fail`, `skipped`, or `canceled`). Its assignee or routed target has nothing to do yet, and a nudge to
-an asleep seat parked on the dependent would wake that seat for nothing; the
-seat wakes on its own once the dependent is ready. A `pinned` blocker holds
-too, whether the read reports it `pinned` (the bd passthrough) or `open` (the
-in-process class-binding read, which folds it). bd's own readiness counts it
-satisfied, so a dependent only a pinned blocker holds is not nudged, but a
-seat parked on it still wakes: the park reads the store's ready query. gc
-itself never pins a bead.
+unless it is a formula step (`gc.step_ref` set) whose close dispatch reads
+as a verdict: its `gc.outcome` is `pass`, `fail`, `skipped`, or `canceled`
+(surrounding whitespace ignored), or it is the attempt root of a retry or
+ralph control (a bead that is not itself a control and carries
+`gc.control_for`, or `gc.logical_bead_id` with `gc.attempt`,
+`gc.retry_attempt`, or a `retry-run`/`retry-eval` kind) or a
+`gc.on_fail=abort_scope` member, whose controls judge any close. Its assignee
+or routed target has nothing to do yet, and a nudge to an asleep seat parked
+on the dependent would wake that seat for nothing; the seat wakes on its own
+once the dependent is ready. A `pinned` blocker holds too, whether the read
+reports it `pinned` (the bd passthrough) or `open` (the in-process
+class-binding read, which folds it). bd's own readiness counts it satisfied,
+so a dependent only a pinned blocker holds is not nudged, but a seat parked
+on it still wakes: the park reads the store's ready query. gc itself never
+pins a bead.
 A pair the closing blocker's own blocked close holds is not recorded, whether
 or not another blocker holds the dependent too, so that blocker's later close
 that passes still nudges. A pair only another blocker holds is recorded like
