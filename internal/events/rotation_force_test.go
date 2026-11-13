@@ -85,8 +85,8 @@ func TestForceRotateMovesEventsToArchiveAndWritesAnchor(t *testing.T) {
 	}
 	select {
 	case <-res.Done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Done not closed within 2s")
+	case <-time.After(hangBudget):
+		t.Fatalf("Done not closed within the hang budget (%s)", hangBudget)
 	}
 
 	if _, err := os.Stat(res.ArchivePath); err != nil {
