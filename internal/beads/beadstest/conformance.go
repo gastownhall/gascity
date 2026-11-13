@@ -1095,6 +1095,52 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyExcludesDependentWhenStepClosedWithWorkOutcomeBlockedAndNoTerminalVerdict", func(t *testing.T) {
+		// A formula step whose gc.outcome is missing or not a recognized
+		// terminal verdict has nothing for a control to consume, so its
+		// blocked work outcome keeps withholding the dependent.
+		for _, outcome := range []string{"", "none", beadmeta.OutcomeMissingRoot, "unknown"} {
+			name := outcome
+			if name == "" {
+				name = "no-outcome"
+			}
+			t.Run(name, func(t *testing.T) {
+				s := newStore()
+				blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.Close(blocker.ID); err != nil {
+					t.Fatal(err)
+				}
+				meta := map[string]string{
+					beadmeta.StepRefMetadataKey:     "review",
+					beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+				}
+				if outcome != "" {
+					meta[beadmeta.OutcomeMetadataKey] = outcome
+				}
+				if err := s.SetMetadataBatch(blocker.ID, meta); err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.Ready()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 0 {
+					t.Fatalf("Ready() = %v, want empty: a formula step closed gc.outcome=%q with gc.work_outcome=blocked must not satisfy its dependent", titlesOf(got), outcome)
+				}
+			})
+		}
+	})
+
 	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})

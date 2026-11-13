@@ -45,6 +45,11 @@ func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 			true,
 		},
 		{
+			"step with an unknown outcome still withholds the dependent",
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: "unknown", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
+		{
 			"passed work bead without a step ref still withholds the dependent",
 			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			false,
