@@ -309,7 +309,7 @@ func releasedNamedSessionPredecessors(store beads.SessionStore, identity, canoni
 // to one session id, not a residency answer: each store is listed by assignee,
 // so a store that holds nothing for the id costs one query and changes nothing.
 func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
-	if relocatedGraphStore(s.state) == nil {
+	if _, relocated := relocatedGraphStore(s.state); !relocated {
 		return []beads.Store{sessions} // residency:allow — a city that relocates nothing sweeps the one sessions store it always swept
 	}
 	var out []beads.Store

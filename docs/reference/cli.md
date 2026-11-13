@@ -332,12 +332,21 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+All arguments after "gc bd" are forwarded to bd unchanged, with two
+exceptions. A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Every other list is forwarded as written. A ready frontier —
+"ready", or "list --ready" — also gets "--exclude-type=session" and
+"--exclude-label=order-tracking". gc's per-agent session beads and per-run
+order-tracking beads are open, unassigned and unblocked for their whole
+lifetime, so bd would list them as claimable work; claiming or closing one
+edits the reconciler's own state. Each exclusion is dropped when the argv
+already names what it would hide ("--type session", "--label
+order-tracking") or already excludes it. The label exclusion is also
+dropped when "--skip-labels" is set, which bd will not combine with
+"--exclude-label". "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
@@ -2594,7 +2603,7 @@ gc init --template gascity --default-provider claude \
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--storage` | string |  | storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes) |
+| `--storage` | string |  | storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger) |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
@@ -4213,6 +4222,14 @@ One exception: when the argument resolves to a pack-declared runtime whose
 nudge probe is reported as "required: nudge" and an absent or broken nudge
 op fails the run — the declaration is smoke-tested, not trusted.
 
+A runtime whose handshake declares carrier.ops is driven only through its
+nudge, peek, send-keys, interrupt and clear-scrollback operations, so each
+is reported as "capability carrier.ops: &lt;op&gt;" and an absent or broken one
+fails the run; this naming takes precedence over "required: nudge". With
+idle-boundary declared as well, "capability carrier.ops: ready-prompt
+metadata" requires set-meta and get-meta to round-trip a non-default ready
+prompt byte for byte, because gc keeps each session's prompt there.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in, twice. The check runs it,
 and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
@@ -5378,6 +5395,33 @@ beside the marker (infra.recopying), and until its own marker lands the binding
 stays unconverged, so boot refuses it and the same command resumes it, whether
 the run paused, failed or was killed.
 
+--to-work reverses the split. It takes a snapshot of the binding, the work
+store and the rigs, pinned, then copies the binding's current rows back
+(keeping their ids and edge payloads, and restoring each cross-store edge a
+migration recorded) and proves each copy: a rig's imported rows into its
+store, everything else into the work store. Then it removes [storage] from
+city.toml (or restores the bytes from before the split), renames the split's
+notes and records *.reverted-&lt;run&gt;, and archives the binding root the same
+way. It refuses, naming each bead and the fix, an open cross-store gate, an
+open row the binding minted for a rig's scope, an edge that would join two
+open rows in different stores or hold an open row behind a blocker in another
+store that has not released it (open, or closed with gc.work_outcome=blocked),
+and an edge payload its destination cannot write. An explicit
+session_reconciler = "v2" refuses too, unless --reconciler=legacy rewrites it
+in the same edit. --dry-run prints the plan and every refusal and writes
+nothing; it takes no lock and needs no --fleet-stopped, so it rehearses on a
+live city.
+
+--to-rigs --rig X returns rig X's imported rows to its store and keeps the
+city split: the binding's copies go once the rig's are proven, and the rig
+reads as awaiting import again.
+
+Every row a reverse writes carries gc.infra_reversed_from, and until the
+binding is changed (its archive, or a to-rigs clear) --abort-reverse removes
+exactly those rows and puts back what the reverse changed. A reverse pauses on
+--time-budget and continues on the next run, as the copy does; while one is
+open, boot and the other storage commands refuse the city.
+
 ```
 gc storage migrate [flags]
 ```
@@ -5385,13 +5429,18 @@ gc storage migrate [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
+| `--abort-reverse` | bool |  | abandon an unfinished --to-work or --to-rigs: remove exactly the rows it wrote and put back what it changed |
+| `--dry-run` | bool |  | with --to-work or --to-rigs, print what would move and every refusal, and write nothing (no lock, no --fleet-stopped: a live rehearsal) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
-| `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
+| `--reconciler` | string |  | with --to-work, rewrite [daemon] session_reconciler to this value (legacy) in the same city.toml edit |
+| `--rig` | stringSlice |  | with --from-rigs, import only this rig; with --to-rigs, return this rig (repeatable) |
 | `--time-budget` | duration | `30m0s` | stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
+| `--to-rigs` | bool |  | with --rig X, return rig X's imported rows from the binding to its store and keep the city split |
+| `--to-work` | bool |  | reverse the split: copy the binding's current rows back into the work and rig stores, prove them, and retire [storage] and the binding |
 
 ## gc storage preflight
 

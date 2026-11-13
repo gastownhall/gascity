@@ -29,6 +29,12 @@
     },
     "bootstrap_profile": {
       "type": "string"
+    },
+    "storage": {
+      "enum": [
+        "single",
+        "split"
+      ]
     }
   },
   "additionalProperties": true

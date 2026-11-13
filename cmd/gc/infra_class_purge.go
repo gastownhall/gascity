@@ -331,6 +331,10 @@ func openInfraPurgeSession(ctx context.Context, request storageOperatorRequest, 
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return nil, false
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
 	if !ok {
 		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
 		return nil, false
