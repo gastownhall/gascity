@@ -401,7 +401,36 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		summary.RigImports = summary.RigImports || (r.Plan != nil && len(r.Plan.Move)+len(r.Plan.Retained) > 0)
 	}
 	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
+	splitPreflightReverseNote(found.plan, diag, known, stdout)
 	return splitPreflightFooter(stdout, request, summary), summary
+}
+
+// splitPayloadEdges counts the edges the copy carries into the binding that
+// hold a payload.
+func splitPayloadEdges(plan infraCopyPlan) int {
+	n := 0
+	for pair := range plan.copied {
+		if _, ok := plan.payloads[pair]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+// splitPreflightReverseNote says whether the way back after the split,
+// `gc storage migrate --to-work`, could carry every edge the copy carries: on
+// native Dolt it cannot write an edge's payload, so it refuses each edge that
+// holds one, and the city restore of the split's snapshot is the way back.
+func splitPreflightReverseNote(plan infraCopyPlan, diag beads.BeadsDiagnostic, known bool, stdout io.Writer) {
+	n := splitPayloadEdges(plan)
+	switch {
+	case n == 0:
+		preflightPass(stdout, "way back", "no edge the copy carries holds a payload, so `gc storage migrate --to-work` can carry every one back")
+	case known && diag.Store == beads.BeadsStoreNameNativeDoltStore:
+		preflightNote(stdout, "way back", fmt.Sprintf("%d edge(s) the copy carries hold a payload, and native Dolt has no edge-payload writer, so `gc storage migrate --to-work` would refuse them; the way back is the city restore of the split's snapshot (`gc storage snapshot restore <id> --city --%s`)", n, storageFleetStoppedFlag))
+	default:
+		preflightPass(stdout, "way back", fmt.Sprintf("%d edge(s) the copy carries hold a payload; this work store's lane writes payloads, so `gc storage migrate --to-work` can carry them back", n))
+	}
 }
 
 // splitConvergedRefusal is the refusal for an unsplit city whose split

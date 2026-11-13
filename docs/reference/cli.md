@@ -5722,13 +5722,21 @@ Each store gets an exact copy where its kind has one and, always, a JSONL of
 every row with its edges and their payloads:
 
   binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
-  native Dolt        a Dolt tag of HEAD (wisps, in dolt_ignore'd tables, are
-                     not in it; the JSONL holds them)
+  managed Dolt       the server's data directory, copied with the server
+                     stopped, when this run started the server; else a Dolt
+                     tag of HEAD (wisps, in dolt_ignore'd tables, are not in
+                     a tag; the JSONL holds them)
+  other native Dolt  a Dolt tag of HEAD
   bd CLI, hosted bd  bd export --all
   file               a copy of the file
   generic exec       the JSONL alone
 
 The JSONL is a record, not yet a restore source: no tool imports it.
+
+--work also records city.toml and the city's storage records (the id-floor
+file, the served-binding and cleared notes), so a snapshot taken before the
+split is a way back to the whole city: gc storage snapshot restore &lt;id&gt;
+--city puts it back.
 
 manifest.json records the stores, their row and edge counts, each file's
 sha256, the gc version, the work store's identity, and the binding root's
@@ -5763,7 +5771,7 @@ gc storage snapshot [flags]
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc storage snapshot restore](#gc-storage-snapshot-restore) | Restore the binding from a snapshot (city stopped) |
+| [gc storage snapshot restore](#gc-storage-snapshot-restore) | Restore the binding, or the whole city, from a snapshot (city stopped) |
 
 ## gc storage snapshot restore
 
@@ -5792,8 +5800,22 @@ stale (infra.restoring beside it): every gc that boots refuses it and names
 this command. A refusal before the live database moves changes nothing. A
 restore interrupted after that holds the city stale until you run it again.
 
-Only --binding is restorable here. A work store is restored by the runbook:
-DOLT_RESET --hard to the snapshot's tag, or bd import of its export.
+--city puts the whole city back as a snapshot taken with --work found it:
+every store the snapshot holds from its exact copy (a file store's file, or
+the managed Dolt's data directory, copied with the server stopped), then the
+city's storage records (.gc/min-gc-version, the served-binding and cleared
+notes), then city.toml; and, when the snapshot holds no binding (one taken
+before the split, as gc storage split takes), it moves the binding root
+aside, so the city serves from its work store alone again. It refuses before
+it moves anything: a snapshot of another work store, one that records no
+city, a store whose copy restores nothing exactly (a Dolt tag, a bd export,
+no copy), a snapshot that holds a binding (restore that with --binding), a
+running managed Dolt, or a reverse migration in progress. Every file it
+replaces is kept beside it as *.pre-restore-&lt;ts&gt;. Its journal,
+.gc/storage-city-restore.json, holds every other writing storage command off
+until it finishes; run again, it finishes an interrupted restore. Last, it
+reads each restored store back and proves its rows equal to the snapshot's
+JSONL.
 
 ```
 gc storage snapshot restore <id> [flags]
@@ -5802,6 +5824,7 @@ gc storage snapshot restore <id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--binding` | bool |  | restore the infrastructure binding |
+| `--city` | bool |  | restore the whole city from a snapshot taken with --work: its stores, storage records and city.toml |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--to` | string |  | directory the snapshot is in (default &lt;city&gt;/.gc/snapshots) |

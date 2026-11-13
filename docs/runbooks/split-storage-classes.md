@@ -1406,7 +1406,8 @@ row with its edges and their payloads:
 | Store | Exact copy |
 |---|---|
 | SQLite binding | `VACUUM INTO`, proven with `PRAGMA integrity_check`. The copy is one self-contained file in rollback-journal mode |
-| Native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
+| The city's managed Dolt | its data directory, copied with the server stopped, when the snapshot's maintenance window started the server (otherwise a Dolt tag, as below) |
+| Other native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
 | bd CLI, hosted bd | `bd export --all` |
 | File | a copy of the file |
 | Generic exec | none |
@@ -1420,10 +1421,21 @@ Know what each one can bring back:
 - **A Dolt tag holds the committed tables only.** bd keeps wisps in
   `dolt_ignore`'d tables, so they are not in the tag; the JSONL holds them. A
   working set with uncommitted changes is noted in the manifest.
-- **The binding is restorable** (below). A work store is restored by hand:
-  `CALL DOLT_RESET('--hard', '<tag>')` on its Dolt, or `bd import` of the
-  snapshot's `work/export.jsonl`. `gc storage migrate --to-work` is the
-  automated rollback.
+- **The binding is restorable** (below).
+- **The whole city is restorable** from a snapshot taken with `--work`
+  before the split, as `gc storage split` takes it, when each of its stores
+  has a file copy or a managed Dolt data directory: `gc storage snapshot
+  restore <id> --city --fleet-stopped` puts back the stores, city.toml and
+  the city's storage records (`.gc/min-gc-version`, the served-binding and
+  cleared notes), moves the binding root aside, and proves each restored
+  store against the snapshot's JSONL. A snapshot that holds a binding, or a
+  store whose copy is a Dolt tag or a bd export, is refused before anything
+  moves. Every file it replaces is kept as `*.pre-restore-<ts>`; an
+  interrupted restore holds every other writing storage command off until
+  the same command finishes it. `gc storage migrate --to-work` is the other
+  way back; on native Dolt it refuses an edge that carries a payload, and
+  `gc storage preflight --split` says under `way back` whether the city has
+  any.
 
 A snapshot directory holds `manifest.json` only once every file in it has
 been re-read and proven, so a directory without one is an interrupted

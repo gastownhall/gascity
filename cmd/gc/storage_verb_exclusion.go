@@ -148,6 +148,9 @@ type storageVerbScope struct {
 	// Splits is true for a verb that moves the city onto its split: the
 	// remote-runtime refusal applies.
 	Splits bool
+	// CityRestore is the city restore itself, which an unfinished city
+	// restore does not refuse: it is what finishes it.
+	CityRestore bool
 }
 
 // acquireStorageVerbExclusion takes the controller lock and runs the liveness
@@ -163,6 +166,11 @@ func acquireStorageVerbExclusion(request storageOperatorRequest, scope storageVe
 	cityPath := request.CityPath
 	if err := storageVerbRemoteStageRefusal(cityPath); err != nil {
 		return nil, err
+	}
+	if !scope.CityRestore {
+		if err := storageCityRestoreRefusal(cityPath); err != nil {
+			return nil, err
+		}
 	}
 	registered, err := storageVerbCityRegistered(cityPath)
 	if err != nil {

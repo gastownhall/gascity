@@ -11,9 +11,12 @@ package main
 //     integrity_check on the copy before the manifest. Its JSONL is read from
 //     the copy, a page of ids at a time, so the two agree row for row and the
 //     read holds one page in memory;
-//   - a native Dolt work or rig store: a Dolt tag of HEAD (exact, copies
-//     nothing; beads.NativeDoltTagger). It covers the committed tables, not
-//     the dolt_ignore'd ones bd keeps wisps in: the JSONL holds those;
+//   - a work or rig store in the city's managed Dolt: the server's data
+//     directory, copied with the server stopped (storage_snapshot_city.go),
+//     when the maintenance window started the server; else a Dolt tag of
+//     HEAD (copies nothing; beads.NativeDoltTagger), which covers the
+//     committed tables, not the dolt_ignore'd ones bd keeps wisps in;
+//   - another native Dolt store: a Dolt tag of HEAD;
 //   - a bd-backed store on another lane (bd CLI, hosted bd, proxied): `bd
 //     export --all`, the core jsonl-export format;
 //   - a file store: a copy of its file;
@@ -41,8 +44,11 @@ package main
 // writing storage verb does (storage_verb_exclusion.go), because a stopped
 // managed-Dolt city has no server to read until the window starts one.
 //
-// Restore (storage_snapshot_restore.go) puts a snapshot's binding back. A
-// work-store restore is a runbook step (owner decision O7).
+// A snapshot that includes the work store also records city.toml and the
+// city's storage records (storage_snapshot_city.go). Restore puts a
+// snapshot's binding back (storage_snapshot_restore.go), or the whole city
+// from a snapshot taken before the split (--city, storage_snapshot_city.go;
+// owner decision D-b supersedes O7's runbook step).
 //
 // No function here takes or returns a store: each store is opened, read and
 // closed inside one function, and the readers take the narrow read surfaces
@@ -153,13 +159,21 @@ Each store gets an exact copy where its kind has one and, always, a JSONL of
 every row with its edges and their payloads:
 
   binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
-  native Dolt        a Dolt tag of HEAD (wisps, in dolt_ignore'd tables, are
-                     not in it; the JSONL holds them)
+  managed Dolt       the server's data directory, copied with the server
+                     stopped, when this run started the server; else a Dolt
+                     tag of HEAD (wisps, in dolt_ignore'd tables, are not in
+                     a tag; the JSONL holds them)
+  other native Dolt  a Dolt tag of HEAD
   bd CLI, hosted bd  bd export --all
   file               a copy of the file
   generic exec       the JSONL alone
 
 The JSONL is a record, not yet a restore source: no tool imports it.
+
+--work also records city.toml and the city's storage records (the id-floor
+file, the served-binding and cleared notes), so a snapshot taken before the
+split is a way back to the whole city: gc storage snapshot restore <id>
+--city puts it back.
 
 manifest.json records the stores, their row and edge counts, each file's
 sha256, the gc version, the work store's identity, and the binding root's
@@ -376,14 +390,34 @@ func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, op
 			return "", nil, err
 		}
 	}
+	var dolt *snapshotExact
 	if opts.Work {
-		if err := add(snapshotScope(request, snapshotScopeRef{name: "work", root: request.CityPath}, snapshotTagName(id, to), dir)); err != nil {
+		city, err := snapshotCityFiles(request.CityPath, dir)
+		if err != nil {
+			return "", nil, fmt.Errorf("city: %w", err)
+		}
+		manifest.CityRecord = city
+		manifest.Notes = append(manifest.Notes, snapshotCityConfigNote)
+		// The managed Dolt's data directory, with the server stopped (D-c),
+		// before any store is opened on it.
+		if snapshotScopeInManagedDolt(request.CityPath, request.CityPath) {
+			exact, why, err := snapshotDoltDataDir(request.CityPath, dir)
+			if err != nil {
+				return "", nil, err
+			}
+			if exact == nil {
+				manifest.Notes = append(manifest.Notes, why)
+			}
+			dolt = exact
+		}
+		if err := add(withSnapshotDoltCopy(snapshotScope(request, snapshotScopeRef{name: "work", root: request.CityPath}, snapshotTagName(id, to), dir))(dolt, true)); err != nil {
 			return "", nil, err
 		}
 	}
 	if opts.Rigs {
 		for _, rig := range snapshotRigs(request) {
-			if err := add(snapshotScope(request, rig, snapshotTagName(id, to), dir)); err != nil {
+			inDolt := dolt != nil && snapshotScopeInManagedDolt(request.CityPath, rig.root)
+			if err := add(withSnapshotDoltCopy(snapshotScope(request, rig, snapshotTagName(id, to), dir))(dolt, inDolt)); err != nil {
 				return "", nil, err
 			}
 		}
@@ -414,6 +448,8 @@ func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, op
 
 func describeSnapshotExact(e snapshotExact) string {
 	switch e.Method {
+	case snapshotMethodDoltDataDir:
+		return fmt.Sprintf("the managed Dolt's data directory %s (%d file(s))", e.Tree.Path, len(e.Tree.Files))
 	case snapshotMethodDoltTag:
 		return fmt.Sprintf("Dolt tag %s (%s)", e.Tag, e.Commit)
 	case snapshotMethodNone:
@@ -663,6 +699,23 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, tag, 
 		return nil
 	})
 	return rec, err
+}
+
+// withSnapshotDoltCopy returns a function that records dolt, the managed
+// Dolt's data directory, as the exact copy of a store that lives in it (when
+// in), in place of the Dolt tag its kind takes; the tag stays a note.
+func withSnapshotDoltCopy(rec snapshotStoreRecord, err error) func(dolt *snapshotExact, in bool) (snapshotStoreRecord, error) {
+	return func(dolt *snapshotExact, in bool) (snapshotStoreRecord, error) {
+		if err != nil || dolt == nil || !in {
+			return rec, err
+		}
+		if rec.Exact.Method == snapshotMethodDoltTag {
+			rec.Notes = append(rec.Notes, fmt.Sprintf("Dolt tag %s (%s) also taken", rec.Exact.Tag, rec.Exact.Commit))
+		}
+		rec.Exact = *dolt
+		rec.Notes = append(rec.Notes, "the exact copy is the managed Dolt's data directory, copied with the server stopped; it holds every database the server serves, wisps included")
+		return rec, nil
+	}
 }
 
 // snapshotExactMethod is the exact copy a scope's kind has (S5 §5.3 table).

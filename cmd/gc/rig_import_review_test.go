@@ -736,9 +736,10 @@ func TestReviewTwoRigsOnOneDatabaseRefuse(t *testing.T) {
 // census share, `gc storage snapshot --rigs`, whose JSONL must hold every row
 // of a rig's ledger, infrastructure rows included (S5-E), and the binding
 // restore's content check, which reads a rig's restored store for the
-// infrastructure rows its import carried out of it.
+// infrastructure rows its import carried out of it, and the city restore's,
+// which proves a rig's restored store against the snapshot's JSONL.
 func TestReviewPhysicalScopeOpenerCallersArePinned(t *testing.T) {
-	want := map[string]int{"rig_import.go": 1, "storage_snapshot.go": 1, "storage_snapshot_restore.go": 1}
+	want := map[string]int{"rig_import.go": 1, "storage_snapshot.go": 1, "storage_snapshot_city.go": 1, "storage_snapshot_restore.go": 1}
 	got := map[string]int{}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
