@@ -21,12 +21,16 @@ type DiscoveredCommand struct {
 	PackDir     string
 	PackName    string
 	BindingName string
+	// NativeHelp is true when the command opted into delegated help: its
+	// script's own --help answers gc <binding> <command> --help.
+	NativeHelp bool
 }
 
 type commandManifest struct {
 	Command     []string `toml:"command"`
 	Description string   `toml:"description"`
 	Run         string   `toml:"run"`
+	NativeHelp  bool     `toml:"native_help"`
 }
 
 func resolveContainedRunPath(packDir, nodeDir, runRel string) (string, error) {

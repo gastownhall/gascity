@@ -1196,6 +1196,12 @@ type PackCommandEntry struct {
 	// Script is the path to the script (relative to pack dir).
 	// Supports Go text/template variables: {{.CityRoot}}, {{.ConfigDir}}, etc.
 	Script string `toml:"script" jsonschema:"required"`
+	// NativeHelp opts the command into delegated help: when true,
+	// gc <pack> <command> --help runs the script with exactly "--help" and
+	// shows its stdout, instead of rendering Description and LongDescription.
+	// Set it only when the script's own --help is a safe, side-effect-free
+	// query that exits 0. Default false keeps the static rendering.
+	NativeHelp bool `toml:"native_help,omitempty"`
 }
 
 // PackGlobal defines commands a pack applies to all agents in scope.

@@ -854,6 +854,10 @@
         "script": {
           "type": "string",
           "description": "Script is the path to the script (relative to pack dir).\nSupports Go text/template variables: {{.CityRoot}}, {{.ConfigDir}}, etc."
+        },
+        "native_help": {
+          "type": "boolean",
+          "description": "NativeHelp opts the command into delegated help: when true,\ngc \u003cpack\u003e \u003ccommand\u003e --help runs the script with exactly \"--help\" and\nshows its stdout, instead of rendering Description and LongDescription.\nSet it only when the script's own --help is a safe, side-effect-free\nquery that exits 0. Default false keeps the static rendering."
         }
       },
       "additionalProperties": false,

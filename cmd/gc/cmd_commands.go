@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -23,6 +24,10 @@ const (
 	productMetricsClassAnnotation  = "gc.productmetrics.class"
 	packCommandClassificationValue = "pack-command"
 )
+
+// nativeHelpTimeout bounds a delegated --help run so a hung script cannot
+// stall help; it is not a security control.
+var nativeHelpTimeout = 5 * time.Second
 
 type commandClassification string
 

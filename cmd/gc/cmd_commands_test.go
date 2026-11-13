@@ -4229,3 +4229,158 @@ wait_timeout_seconds = 120
 		}
 	}
 }
+
+// nativeHelpScript answers --help itself and reports what it was given.
+const nativeHelpScript = `#!/bin/sh
+case "$1" in
+  -h|--help)
+    printf 'NATIVE USAGE argc=%s arg1=%s pack=%s\n' "$#" "$1" "$GC_PACK_NAME"
+    exit 0 ;;
+esac
+echo should-not-run
+`
+
+type nativeHelpCase struct {
+	name string
+	// script is the run script body; missing leaves RunScript pointing at a
+	// file that does not exist.
+	script  string
+	missing bool
+	native  bool
+	timeout time.Duration
+	// wantNative is true when the script's own stdout must be shown instead
+	// of the static help.
+	wantNative bool
+}
+
+func nativeHelpCases() []nativeHelpCase {
+	return []nativeHelpCase{
+		{name: "opted in renders script help", script: nativeHelpScript, native: true, wantNative: true},
+		{name: "unset keeps static help", script: nativeHelpScript},
+		{name: "non-zero exit falls back", script: "#!/bin/sh\necho partial-help\necho boom >&2\nexit 3\n", native: true},
+		{name: "empty stdout falls back", script: "#!/bin/sh\nexit 0\n", native: true},
+		{name: "hung script falls back", script: "#!/bin/sh\nsleep 5\n", native: true, timeout: 300 * time.Millisecond},
+		{name: "spawn error falls back", missing: true, native: true},
+	}
+}
+
+// nativeHelpEntry writes tc's script and static help into a temp pack and
+// returns the discovered command plus the city dir.
+func nativeHelpEntry(t *testing.T, tc nativeHelpCase) (config.DiscoveredCommand, string) {
+	t.Helper()
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if !tc.missing {
+		if err := os.WriteFile(scriptPath, []byte(tc.script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	helpPath := filepath.Join(sourceDir, "help.md")
+	if err := os.WriteFile(helpPath, []byte("Long discovered help.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tc.timeout > 0 {
+		prev := nativeHelpTimeout
+		nativeHelpTimeout = tc.timeout
+		t.Cleanup(func() { nativeHelpTimeout = prev })
+	}
+	return config.DiscoveredCommand{
+		BindingName: "ops",
+		PackName:    "ops",
+		Command:     []string{"status"},
+		Description: "Show status",
+		RunScript:   scriptPath,
+		HelpFile:    helpPath,
+		SourceDir:   sourceDir,
+		PackDir:     packDir,
+		NativeHelp:  tc.native,
+	}, dir
+}
+
+func checkNativeHelpOutput(t *testing.T, tc nativeHelpCase, stdout, stderr string, elapsed time.Duration) {
+	t.Helper()
+	if strings.Contains(stdout, "should-not-run") {
+		t.Fatalf("help executed the command body, stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, "boom") || strings.Contains(stdout, "partial-help") {
+		t.Fatalf("a failed script's output leaked into help, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if tc.wantNative {
+		// The script sees exactly --help, never the caller's real argv.
+		if !strings.Contains(stdout, "NATIVE USAGE argc=1 arg1=--help pack=ops") {
+			t.Fatalf("stdout missing script-delegated help, got:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "Long discovered help.") {
+			t.Fatalf("delegated help should replace static help, got:\n%s", stdout)
+		}
+		return
+	}
+	if !strings.Contains(stdout, "Long discovered help.") {
+		t.Fatalf("stdout missing static help, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "NATIVE USAGE") {
+		t.Fatalf("script help rendered without a usable opt-in, got:\n%s", stdout)
+	}
+	if tc.timeout > 0 && elapsed > 4*time.Second {
+		t.Fatalf("help took %v, want it bounded by the %v timeout", elapsed, tc.timeout)
+	}
+}
+
+func TestAddDiscoveredCommandsToRoot_NativeHelp(t *testing.T) {
+	for _, tc := range nativeHelpCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, dir := nativeHelpEntry(t, tc)
+			root := &cobra.Command{Use: "gc"}
+			addDiscoveredCommandsToRoot(root, []config.DiscoveredCommand{entry}, dir, "testcity", &bytes.Buffer{}, &bytes.Buffer{}, true)
+
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs([]string{"ops", "status", "--title", "x", "--help"})
+			start := time.Now()
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute: %v\nstderr=%s", err, stderr.String())
+			}
+			checkNativeHelpOutput(t, tc, stdout.String(), stderr.String(), time.Since(start))
+		})
+	}
+}
+
+func TestTryDiscoveredCommandFallback_NativeHelp(t *testing.T) {
+	for _, tc := range nativeHelpCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, dir := nativeHelpEntry(t, tc)
+			cfg := &config.City{
+				Workspace:    config.Workspace{Name: "testcity"},
+				PackCommands: []config.DiscoveredCommand{entry},
+			}
+
+			var stdout, stderr bytes.Buffer
+			start := time.Now()
+			outcome := tryDiscoveredCommandFallback([]string{"ops", "status", "--title", "x", "--help"}, cfg, dir, &stdout, &stderr)
+			elapsed := time.Since(start)
+			if !outcome.handled || outcome.classification != packCommandClassification || outcome.exitCode != 0 {
+				t.Fatalf("outcome = %+v, want handled pack-command help with exit 0", outcome)
+			}
+			checkNativeHelpOutput(t, tc, stdout.String(), stderr.String(), elapsed)
+		})
+	}
+}
+
+func TestDiscoveredCommandFromPackCommandInfo_CarriesNativeHelp(t *testing.T) {
+	for _, native := range []bool{true, false} {
+		info := config.PackCommandInfo{
+			PackName: "ops",
+			PackDir:  t.TempDir(),
+			Entry:    config.PackCommandEntry{Name: "status", Script: "run.sh", NativeHelp: native},
+		}
+		if got := discoveredCommandFromPackCommandInfo(info).NativeHelp; got != native {
+			t.Errorf("NativeHelp = %v, want %v", got, native)
+		}
+	}
+}
