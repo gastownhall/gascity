@@ -303,6 +303,10 @@ func splitHypotheticalConfig(cfg *config.City) *config.City {
 	return &split
 }
 
+// splitEstimateNotReadNote is the estimate's note when the work store was not
+// read: its row above says why (blocked, or skipped with what it needs).
+const splitEstimateNotReadNote = "not computed: the work store was not read (see its row above)"
+
 // doStorageSplitPreflight rehearses the split and reports it.
 func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.Writer) (int, splitPreflightSummary) {
 	var summary splitPreflightSummary
@@ -362,9 +366,10 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		runStoragePreflightChecks(rehearsal, &found, stdout, stderr)
 		if found.converged {
 			block("cutover", splitConvergedRefusal(request.CityPath, split, found.unread))
+			preflightSkipCopyChecks(stdout, "cutover")
 		}
 		summary.Blocks = append(summary.Blocks, found.blocked...)
-		preflightNote(stdout, "estimate", "not computed: the work store was not read")
+		preflightNote(stdout, "estimate", splitEstimateNotReadNote)
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	if after == reconcilerV2 {
@@ -382,6 +387,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	}
 	if found.converged {
 		block("cutover", splitConvergedRefusal(request.CityPath, split, ""))
+		preflightSkipCopyChecks(stdout, "cutover")
 	}
 	closeWindow()
 	summary.Blocks = append(summary.Blocks, found.blocked...)
@@ -391,7 +397,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	}
 	switch {
 	case !found.read:
-		preflightNote(stdout, "estimate", "not computed: the checks above stopped before the work store was read")
+		preflightNote(stdout, "estimate", splitEstimateNotReadNote)
 		return splitPreflightFooter(stdout, request, summary), summary
 	case code != 0 || found.converged:
 		preflightNote(stdout, "estimate", "not computed: a check above blocked, so the copy's plan is partial")
@@ -685,7 +691,7 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 	case len(summary.Blocks) > 0:
 		fmt.Fprintf(stdout, "\n%s: the split would refuse (%s). Fix the blocking checks above and run this again.\n", prefix, strings.Join(summary.Blocks, ", ")) //nolint:errcheck // best-effort stdout
 		if summary.Unread != "" {
-			fmt.Fprintf(stdout, "The checks marked [SKIP] read the city's stores and did not run, because this command starts nothing. %s.\n", summary.UnreadRemedy) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "The checks marked [SKIP] that need a readable store did not run, because this command starts nothing. %s.\n", summary.UnreadRemedy) //nolint:errcheck // best-effort stdout
 		}
 		return 1
 	case summary.Unread != "":

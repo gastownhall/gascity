@@ -28,8 +28,11 @@ func preflightRow(out, tag, check string) bool {
 
 // TestPreflightNamesEveryBlockerInOneRun is S-3's first acceptance item: the
 // preflight names every blocker, not the first. One city carries six
-// independent refusals; a report that stopped at the first would send the
-// operator through six windows to find them.
+// refusals, none of which depends on another; a report that stopped at the
+// first would send the operator through six windows to find them. The
+// closing line names exactly those six: the shared-store check reads the
+// registry the supervisor check could not, so it is skipped rather than
+// naming that one fault a second time.
 func TestPreflightNamesEveryBlockerInOneRun(t *testing.T) {
 	build := func(t *testing.T) storageOperatorRequest {
 		request, cfg, _ := preflightReadyCity(t, 0)
@@ -74,13 +77,14 @@ func TestPreflightNamesEveryBlockerInOneRun(t *testing.T) {
 		}
 		return request
 	}
-	want := map[string]string{
-		"remote stage":   "remote stage of city controller-city",
-		"supervisor":     "reading the supervisor registry",
-		"runtime":        "could not list every session",
-		"served binding": "elsewhere",
-		"holds":          "a work store cannot hold a cross-store gate",
-		"destination":    "did not write",
+	// In report order.
+	want := []struct{ check, reason string }{
+		{"remote stage", "remote stage of city controller-city"},
+		{"supervisor", "reading the supervisor registry"},
+		{"runtime", "could not list every session"},
+		{"served binding", "elsewhere"},
+		{"holds", "a work store cannot hold a cross-store gate"},
+		{"destination", "did not write"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -88,29 +92,33 @@ func TestPreflightNamesEveryBlockerInOneRun(t *testing.T) {
 		t.Fatalf("exit %d, want 1:\n%s", code, stdout.String())
 	}
 	out := stdout.String()
-	for check, reason := range want {
-		if !preflightRow(out, preflightBlockTag, check) {
-			t.Errorf("the report does not block on %q:\n%s", check, out)
+	var checks []string
+	for _, w := range want {
+		checks = append(checks, w.check)
+		if !preflightRow(out, preflightBlockTag, w.check) {
+			t.Errorf("the report does not block on %q:\n%s", w.check, out)
 		}
-		if !strings.Contains(out, reason) {
-			t.Errorf("the report does not name %q's refusal %q:\n%s", check, reason, out)
-		}
-	}
-	closing := out[strings.LastIndex(out, "the migration would refuse ("):]
-	for check := range want {
-		if !strings.Contains(closing, check) {
-			t.Errorf("the closing line does not name %q: %q", check, closing)
+		if !strings.Contains(out, w.reason) {
+			t.Errorf("the report does not name %q's refusal %q:\n%s", w.check, w.reason, out)
 		}
 	}
-	if strings.Contains(out, preflightSkipTag) {
-		t.Errorf("six independent checks blocked, and one was skipped as if it depended on another:\n%s", out)
+	if closing := "the migration would refuse (" + strings.Join(checks, ", ") + ")."; !strings.Contains(out, closing) {
+		t.Errorf("the closing line does not name exactly the six blockers; want %q:\n%s", closing, out)
+	}
+	if !preflightRow(out, preflightSkipTag, "shared store") || !strings.Contains(out, "needs supervisor") || strings.Count(out, preflightSkipTag) != 1 {
+		t.Errorf("want one skipped check, the shared store, which reads the registry the supervisor check could not:\n%s", out)
 	}
 
 	// The migration refuses the same city: the report is a rehearsal of a
-	// real refusal, not a stricter one.
+	// real refusal, not a stricter one. The migration stops at its first,
+	// the remote stage; TestPreflightRefusesEveryCityTheMigrationRefuses pins
+	// each of the others one city at a time.
 	var migrateStdout, migrateStderr bytes.Buffer
 	if code := doStorageMigrate(context.Background(), build(t), &migrateStdout, &migrateStderr); code == 0 {
 		t.Fatalf("the migration accepted the city the preflight blocked: %s", migrateStdout.String())
+	}
+	if !strings.Contains(migrateStderr.String(), want[0].reason) {
+		t.Errorf("the migration refused for another reason than its first check, the remote stage: %s", migrateStderr.String())
 	}
 }
 
@@ -189,13 +197,63 @@ func TestPreflightSkipsOnlyWhatDependsOnABlock(t *testing.T) {
 				t.Errorf("no block on %q:\n%s", check, out)
 			}
 		}
-		for _, check := range []string{"rig scopes", "served binding", "cutover", "work store", "destination"} {
+		for _, check := range []string{"rig scopes", "served binding", "cutover", "work store", "edge payloads", "holds", "destination"} {
 			if !preflightRow(out, preflightSkipTag, check) {
-				t.Errorf("%q, which reads the binding, is not skipped:\n%s", check, out)
+				t.Errorf("%q, which reads the binding or what the work store holds, is not skipped:\n%s", check, out)
 			}
 		}
-		if !strings.Contains(out, "needs topology") {
-			t.Errorf("the skipped checks do not name the topology:\n%s", out)
+		if !strings.Contains(out, "needs topology") || !strings.Contains(out, "needs work store") {
+			t.Errorf("the skipped checks do not name the check each needs:\n%s", out)
+		}
+	})
+
+	t.Run("the supervisor registry cannot be read", func(t *testing.T) {
+		request, _, _ := preflightReadyCity(t, 1)
+		home := t.TempDir()
+		t.Setenv("GC_HOME", home)
+		if err := os.WriteFile(filepath.Join(home, "cities.toml"), []byte("[[cities\nthis is not toml"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doStoragePreflight(request, &stdout, &stderr); code != 1 {
+			t.Fatalf("exit %d, want 1:\n%s", code, stdout.String())
+		}
+		out := stdout.String()
+		if !preflightRow(out, preflightBlockTag, "supervisor") || !preflightRow(out, preflightSkipTag, "shared store") || !strings.Contains(out, "needs supervisor") {
+			t.Errorf("the shared-store check, which reads the registry the supervisor check could not, is not skipped for it:\n%s", out)
+		}
+		if strings.Contains(out, "rule out a shared store") || !strings.Contains(out, "the migration would refuse (supervisor).") {
+			t.Errorf("one unreadable registry is reported as more than one blocker:\n%s", out)
+		}
+	})
+
+	t.Run("the binding root cannot be read", func(t *testing.T) {
+		request, cfg, _ := preflightReadyCity(t, 1)
+		// A file where the binding root's directory belongs: every path in it
+		// fails to stat, and not as an absence.
+		if err := os.WriteFile(mustResolveInfraTarget(t, request.CityPath, cfg).Root, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if code := doStoragePreflight(request, &stdout, &stderr); code != 1 {
+			t.Fatalf("exit %d, want 1:\n%s", code, stdout.String())
+		}
+		out := stdout.String()
+		if !preflightRow(out, preflightBlockTag, "binding root") {
+			t.Fatalf("the unreadable binding root does not block:\n%s", out)
+		}
+		for _, check := range []string{"cutover", "destination"} {
+			if !preflightRow(out, preflightSkipTag, check) {
+				t.Errorf("%q, which reads the binding root, is not skipped:\n%s", check, out)
+			}
+		}
+		if !strings.Contains(out, "needs binding root") || !strings.Contains(out, "the migration would refuse (binding root).") {
+			t.Errorf("one unreadable binding root is reported as more than one blocker:\n%s", out)
+		}
+		if !preflightRow(out, preflightPassTag, "work store") {
+			t.Errorf("the work store, which is not in the binding root, was not checked:\n%s", out)
 		}
 	})
 }
@@ -308,6 +366,22 @@ func TestSplitPreflightOnAStoppedCityWithAMarkerReadsNoStore(t *testing.T) {
 	if strings.Contains(out, "boot's check confirms") {
 		t.Errorf("the report answers boot's check, which reads the work store this run did not read:\n%s", out)
 	}
+	assertCopyChecksSkippedForTheCutover(t, out)
+}
+
+// assertCopyChecksSkippedForTheCutover: a cutover the convergence marker
+// blocks leaves the copy's checks unrun, and the report says so rather than
+// leaving their rows out.
+func assertCopyChecksSkippedForTheCutover(t *testing.T, out string) {
+	t.Helper()
+	for _, check := range []string{"work store", "edge payloads", "holds", "destination"} {
+		if !preflightRow(out, preflightSkipTag, check) {
+			t.Errorf("%q, which waits on the cutover, is not reported skipped:\n%s", check, out)
+		}
+	}
+	if !strings.Contains(out, "needs cutover") {
+		t.Errorf("the skipped copy checks do not name the cutover:\n%s", out)
+	}
 }
 
 // TestSplitPreflightOnAStoppedCityReadsNoRigStore: the rig census reads each
@@ -335,5 +409,46 @@ func TestSplitPreflightOnAStoppedCityReadsNoRigStore(t *testing.T) {
 	}
 	if !preflightRow(out, preflightSkipTag, preflightRigScopesCheck) {
 		t.Errorf("the rig census is not reported skipped:\n%s", out)
+	}
+}
+
+// TestSplitPreflightOnAStoppedCityReadsNoSharedRows: naming the rows another
+// city's scope holds in a shared work store reads that store, so on a city
+// whose provider is down the census is skipped, not run: the open would start
+// the stopped server and leave it running (ga-683m7f). The shared-store check
+// itself reads no store, so it still runs, attested or not.
+func TestSplitPreflightOnAStoppedCityReadsNoSharedRows(t *testing.T) {
+	for _, attested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attested=%t", attested), func(t *testing.T) {
+			request, _, provider := splitReadyCity(t, 10, nativeDoltLane)
+			stubMigrationProviderDown(t, true)
+			sharedStoreCities(t, request)
+			want := preflightBlockTag
+			if attested {
+				request.Force = storageForce{SharedStores: []string{sharedToken}}
+				want = preflightPassTag
+			}
+			opened := 0
+			prev := openInfraMigrationSource
+			openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
+				opened++
+				return prev(cityPath)
+			}
+			t.Cleanup(func() { openInfraMigrationSource = prev })
+
+			code, summary, out := runSplitPreflight(t, request)
+			if code != 1 || summary.ready() {
+				t.Fatalf("exit %d, %+v:\n%s", code, summary, out)
+			}
+			if opened != 0 || provider.starts != 0 {
+				t.Fatalf("the rehearsal of a city whose provider is down opened the work store %d time(s) and started the provider %d time(s):\n%s", opened, provider.starts, out)
+			}
+			if !preflightRow(out, want, "shared store") {
+				t.Errorf("the shared-store check, which reads no store, is not reported %s:\n%s", want, out)
+			}
+			if !preflightRow(out, preflightSkipTag, "shared rows") || !strings.Contains(out, "needs a readable store") {
+				t.Errorf("the shared-row census is not reported skipped for want of a readable store:\n%s", out)
+			}
+		})
 	}
 }
