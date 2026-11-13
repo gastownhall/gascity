@@ -1200,6 +1200,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Order `schedule` expressions are now validated when an order loads, and
+  ranges finally fire.** The runtime cron matcher and `gc doctor`'s firing
+  check now share one parser (#5711). Three changes for existing cities:
+  ranges such as `9-17` and `5-59/10` now fire, where before they silently
+  never matched; out-of-bounds fields (`70 * * * *`, `0 24 * * *`,
+  `0 0 0 * *`, and `0 0 * * 7`, since Sunday is `0` only) are now load
+  errors instead of orders that load and never fire; and `*/N` in the
+  day-of-month or month field now counts from 1, as standard cron does, so
+  `*/2` there means the 1st, 3rd, 5th, and so on, where it used to mean the
+  2nd, 4th, 6th.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to
