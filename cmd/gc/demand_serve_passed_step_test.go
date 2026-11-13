@@ -43,6 +43,21 @@ func TestBeadHasUnmetPlainBlocksDepDefersToATerminalStep(t *testing.T) {
 			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			true,
 		},
+		{
+			"failed work bead without a step ref is unmet",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"skipped work bead without a step ref is unmet",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
+		{
+			"canceled work bead without a step ref is unmet",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()

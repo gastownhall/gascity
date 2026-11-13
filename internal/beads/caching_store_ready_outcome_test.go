@@ -49,6 +49,11 @@ func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			false,
 		},
+		{
+			"failed work bead without a step ref still withholds the dependent",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cs := NewCachingStoreForTest(NewMemStore(), nil)
