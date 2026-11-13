@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -137,8 +138,75 @@ func TestGuidedSplitRefusesAReadinessChange(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr, "changed which beads are ready") || !strings.Contains(stderr, "ready before the split, not after") {
 		t.Fatalf("the split = %d:\n%s\n%s", code, stdout, stderr)
 	}
-	if j := c.journal(); j.Phase == splitPhaseComplete || j.ReadyBefore == nil || len(j.ReadyBefore.IDs) == 0 {
+	j := c.journal()
+	if j.Phase == splitPhaseComplete || j.ReadyBefore == nil || len(j.ReadyBefore.IDs) == 0 {
 		t.Fatalf("journal phase %s, ready before %+v", j.Phase, j.ReadyBefore)
+	}
+	// The refusal names both ways back, which the closing report a failed
+	// run never reaches would have named.
+	for _, want := range []string{storageReverseInstruction(reverseToWork, nil), snapshotCityRestoreInstruction(j.Snapshot, j.SnapshotTo)} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the readiness refusal does not name %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestGuidedSplitExplainsADeferralThatCameDue: a row whose deferral comes
+// due between the read before the copy and the read after the rig imports
+// (a date inside the window, or a bd deferral past its date, which bd parks
+// until its own sweep and the binding serves once due) is not ready before
+// and is ready after through nothing the split did, so it does not fail the
+// split.
+func TestGuidedSplitExplainsADeferralThatCameDue(t *testing.T) {
+	c := newGuidedSplitCity(t)
+	due := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	step := mustCreateInfraBead(t, c.work(), beads.Bead{Title: "a step whose deferral came due", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}, DeferUntil: &due})
+	// Read before the copy, the row was still deferred.
+	reads := 0
+	prev := splitReadyRead
+	splitReadyRead = func(cityPath string, cfg *config.City) (splitReadySnapshot, error) {
+		reads++
+		got, err := prev(cityPath, cfg)
+		if reads == 1 {
+			notYet := func(id string) bool { return id == step.ID }
+			got.IDs = slices.DeleteFunc(slices.Clone(got.IDs), notYet)
+			got.Explained = slices.DeleteFunc(slices.Clone(got.Explained), notYet)
+		}
+		return got, err
+	}
+	t.Cleanup(func() { splitReadyRead = prev })
+	code, stdout, stderr := c.split(splitOptions{})
+	if code != 0 {
+		t.Fatalf("the split = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	if reads != 2 || !strings.Contains(stdout, "the ready set is the same before and after the split") {
+		t.Errorf("the split read the ready set %d time(s), want 2, and reports:\n%s", reads, stdout)
+	}
+}
+
+// TestCityRestoreRefusesAWorkOnlySnapshotAfterARigImport: the guided split
+// imports the city's rig, moving its rows out of the rig's store into the
+// binding; a city restore from a snapshot taken without the rig's store would
+// leave them in the binding root it moves aside, so it is refused, and the
+// rig's rows stay where the split put them.
+func TestCityRestoreRefusesAWorkOnlySnapshotAfterARigImport(t *testing.T) {
+	c := newGuidedSplitCity(t)
+	to := filepath.Join(t.TempDir(), "snapshots")
+	var sout, serr bytes.Buffer
+	if code := doStorageSnapshot(context.Background(), c.reload(), snapshotOptions{Work: true, To: to, Keep: 5}, "gc storage snapshot", &sout, &serr); code != 0 {
+		t.Fatalf("snapshot = %d: %s%s", code, sout.String(), serr.String())
+	}
+	id, _ := onlySnapshot(t, to)
+	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
+		t.Fatalf("the split = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	j := c.journal()
+	var rout, rerr bytes.Buffer
+	if code := doStorageSnapshotRestoreCity(context.Background(), c.reload(), to, id, "gc storage snapshot restore", &rout, &rerr); code == 0 || !strings.Contains(rerr.String(), "rig:packs") {
+		t.Fatalf("the city restore = %d: %s%s; want rig packs, imported since the snapshot, refused", code, rout.String(), rerr.String())
+	}
+	if _, err := os.Stat(j.Root); err != nil {
+		t.Errorf("the refused restore moved the binding root: %v", err)
 	}
 }
 
