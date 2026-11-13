@@ -534,9 +534,9 @@ func TestTheCityCopyRewritesAGateEdgeChangedBetweenRuns(t *testing.T) {
 
 // TestAnEdgeHoldRefusesAndAStatusHoldCrosses: a city with an edge hold the
 // plan refuses and a status hold the binding cannot record (owner decision
-// D-a) is refused over the edge alone, by migrate and by preflight alike; the
-// status hold is no refusal, and preflight names it as a parked hold the copy
-// carries.
+// D-a) is refused over the edge alone, by migrate and by preflight alike.
+// Neither refusal names the status hold, which is no refusal: the copy
+// carries it (TestTheCopyCarriesStatusHolds).
 func TestAnEdgeHoldRefusesAndAStatusHoldCrosses(t *testing.T) {
 	request, _, _ := preflightReadyCity(t, 0)
 	source, err := openInfraMigrationSource(request.CityPath)
@@ -568,8 +568,12 @@ func TestAnEdgeHoldRefusesAndAStatusHoldCrosses(t *testing.T) {
 	if !errors.As(report.Fault, &boundary) || strings.Contains(report.Fault.Error(), parked.ID) {
 		t.Fatalf("the migrate refusal %v is not the edge hold alone", report.Fault)
 	}
-	if strings.Contains(stdout.String(), "[BLOCK] holds") && !strings.Contains(stdout.String(), waiting.ID) {
-		t.Errorf("preflight's holds block does not name the edge hold: %s", stdout.String())
+	holds := preflightRowText(stdout.String(), preflightBlockTag, "holds")
+	if holds == "" {
+		t.Fatalf("preflight has no %s holds row: %s", preflightBlockTag, stdout.String())
+	}
+	if strings.Contains(holds, parked.ID) {
+		t.Errorf("preflight's holds refusal names the status hold %s, which the copy carries: %s", parked.ID, holds)
 	}
 }
 

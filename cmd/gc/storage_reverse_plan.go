@@ -588,8 +588,8 @@ func planReverse(in reverseInput) reversePlan {
 		"finish the import with `"+rigImportAllInstruction()+"`, then re-run")
 	refuse(reused, "the destination already holds each of these ids as another bead",
 		"compare the two rows (`gc bd show <id>` reads the binding first) and remove the one that is not wanted from its store, then re-run")
-	refuse(parkedUnreadable, "each carries a "+beadmeta.MigratedParkedHoldMetadataKey+" record that does not parse, so the status hold it had before the split cannot be restored",
-		"repair the record (a JSON object naming the status), or remove it to return the row as the split city holds it, then re-run")
+	refuse(parkedUnreadable, "the storage migration parked each of these, and the record of the status hold each had before the split ("+beadmeta.MigratedParkedHoldMetadataKey+") is missing or does not parse, so the reverse cannot restore it",
+		"set the record to the status the row returns to the work store with (`gc bd update <id> --set-metadata '"+beadmeta.MigratedParkedHoldMetadataKey+"={\"status\":\"open\"}'` returns a row still parked there open; a status such as blocked returns it parked), then re-run")
 	refuse(unreadable, "each carries a gc.migrated_cross_edges record that does not parse, so its boundary edges cannot be restored",
 		"restore the row's gc.migrated_cross_edges from a snapshot of the binding, then re-run")
 	refuse(crossing, "each edge joins two open rows that would land in different stores, and no cross-store edge is ever written",

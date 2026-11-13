@@ -2571,6 +2571,8 @@ func TestTheCopyCarriesStatusHolds(t *testing.T) {
 		{bead: wisp("a custom status", beads.Bead{SourceStatus: "awaiting-review"}), status: "awaiting-review"},
 	}
 	dated := wisp("dated deferral", beads.Bead{IndefinitelyDeferred: true, SourceStatus: "deferred", DeferUntil: &future})
+	sentinel := infraParkedDeferUntil
+	atParkedDate := wisp("deferral bd set to the parked date", beads.Bead{IndefinitelyDeferred: true, SourceStatus: "deferred", DeferUntil: &sentinel})
 	rawOpen := wisp("open", beads.Bead{SourceStatus: "open"})
 	closedBlocked := wisp("closed", beads.Bead{SourceStatus: "blocked"})
 	if err := source.Close(closedBlocked.ID); err != nil {
@@ -2589,7 +2591,7 @@ func TestTheCopyCarriesStatusHolds(t *testing.T) {
 			t.Errorf("preflight does not name %s as parked %s: %s", p.bead.ID, p.status, stdout.String())
 		}
 	}
-	for _, b := range []beads.Bead{dated, rawOpen, closedBlocked} {
+	for _, b := range []beads.Bead{dated, atParkedDate, rawOpen, closedBlocked} {
 		if strings.Contains(stdout.String(), b.ID) {
 			t.Errorf("preflight names %s (%s), which is not parked: %s", b.ID, b.Title, stdout.String())
 		}
@@ -2632,6 +2634,19 @@ func TestTheCopyCarriesStatusHolds(t *testing.T) {
 	}
 	if got, _ := binding.Get(dated.ID); got.DeferUntil == nil || !got.DeferUntil.Equal(future) {
 		t.Errorf("the dated deferral crossed with defer_until %v, want %v", got.DeferUntil, future)
+	}
+	// A deferral bd set to the parked date itself crosses as its date, with
+	// the record a parked row gets, so the reverse returns it as bd held it.
+	got, err := binding.Get(atParkedDate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, err := parseInfraParkedHold(got.Metadata[beadmeta.MigratedParkedHoldMetadataKey])
+	if until, untilErr := hold.deferUntil(); err != nil || untilErr != nil || hold.Status != "deferred" || until == nil || !until.Equal(sentinel) {
+		t.Errorf("%s records %+v (%v), want status deferred until %v", atParkedDate.ID, hold, err, sentinel)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(sentinel) || slices.Contains(ready, atParkedDate.ID) {
+		t.Errorf("%s crossed with defer_until %v (ready %v), want deferred until %v", atParkedDate.ID, got.DeferUntil, slices.Contains(ready, atParkedDate.ID), sentinel)
 	}
 }
 

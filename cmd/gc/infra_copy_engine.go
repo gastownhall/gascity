@@ -37,7 +37,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // The batch sizes. Variables only so a test can cut a small city into many
@@ -418,7 +417,8 @@ func infraBackupEntriesFrom(rows []beads.Bead, down map[string][]beads.Dep, payl
 	}
 	out := make([]infraBackupEntry, 0, len(rows))
 	for _, b := range rows {
-		entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String(), Dependents: dependents[b.ID]}
+		entry := newInfraBackupEntry(b)
+		entry.Dependents = dependents[b.ID]
 		for _, d := range down[b.ID] {
 			entry.Deps = append(entry.Deps, edge(d))
 		}

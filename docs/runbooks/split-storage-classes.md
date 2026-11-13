@@ -363,14 +363,28 @@ A bead `bd` parks by its status crosses parked. The binding stores only
 `open`, `in_progress` and `closed`, so an undated deferral (`bd` status
 `deferred` with no `defer_until`) and any other status `bd` parks a bead with
 (`blocked`, `pinned`, `hooked`, `review`, `testing`, or a custom status)
-cross as an open bead deferred until 9999-12-31, which keeps it out of every
-ready view, with the status and the `defer_until` it had recorded on it
-(`gc.migrated_parked_hold`). The rig import carries them the same way.
-`gc storage preflight` lists them under `parked holds`. Clearing the
-deferral in the split city releases the bead, and `gc storage migrate
---to-work` puts the recorded status back on each bead still parked. A dated
-deferral crosses as its `defer_until`, which the binding honors; one already
-due wakes in the binding as `bd`'s own sweep would wake it.
+cross as an open bead deferred until 9999-12-31, with the status and the
+`defer_until` it had recorded on it (`gc.migrated_parked_hold`). The binding
+leaves a bead deferred into the future out of every ready view and every read
+of live work, and refuses to claim it, as `bd` refuses to claim a parked bead,
+so a parked bead neither wakes a session nor keeps one from closing. The rig
+import carries them the same way, and `gc storage preflight` lists them under
+`parked holds` when its `holds` check passes. A dated deferral crosses as
+its `defer_until`, which the binding honors; one already due wakes in the
+binding as `bd`'s own sweep would wake it. A bead `bd` defers until exactly
+9999-12-31T00:00:00Z, the date the copy parks with, crosses as it is, with its
+status and that date recorded the same way.
+
+A parked bead stays parked in the split city. `gc bd update <id> --claim`
+refuses it. A status write keeps the deferral, so `gc bd update <id> --status`
+gives a deferred bead no status but `open` or `closed`: `--status in_progress`
+would leave it in progress but hidden from every hook. No `gc bd` verb clears
+a binding bead's deferral (`defer`, `undefer` and `update --defer` are refused
+for it), so release a bead in the work store before the window if it is to be
+worked after it. After cutover a parked bead can only be closed, or returned
+by `gc storage migrate --to-work` (`--to-rigs` for a bead a rig import
+carried), which puts the recorded status and `defer_until` back on each bead
+still parked.
 
 A hold the binding cannot express makes the migration refuse, before anything
 is copied, naming each bead and its fix; `gc storage preflight` reports the
@@ -397,13 +411,16 @@ as gc models it: id, title, status, type, description, priority, assignee,
 sender, parent, ref, labels, metadata, the ephemeral and no-history bits,
 timestamps, defer-until, and every dependency edge touching the bead with its
 payload. That is exactly the set of fields the copy carried into the binding
-and the equality stage proved. It does **not** hold the fields only `bd` models:
-notes, comments, close reason and closed-at, design, acceptance criteria, the
-event history, and the indefinitely-deferred state. Those were never copied
-into the binding either (an open bead in the indefinitely-deferred state is
-refused, see **Holds**). On a native-Dolt work store each removal is a Dolt
-commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
-before the clear) is the full-fidelity backstop for them.
+and the equality stage proved. Beside them it records the raw status `bd`
+held the bead in (`source_status`) and whether `bd` recorded it deferred
+(`indefinitely_deferred`), as the rig import's backup does, so a re-copy from
+the backup carries a parked bead parked again (see **Holds**), and the restore
+below puts the raw status back. It does
+**not** hold the fields only `bd` models: notes, comments, close reason and
+closed-at, design, acceptance criteria, and the event history. Those were
+never copied into the binding either. On a native-Dolt work store each removal
+is a Dolt commit, so until Dolt garbage-collects that history, `dolt` (`AS OF`
+a commit before the clear) is the full-fidelity backstop for them.
 
 **Batches, the time budget, and resuming.** The copy and the clear run in
 batches: rows are created 500 to a transaction, edges 2,000 to one, the edges
@@ -1931,11 +1948,17 @@ want served, or that the binding's contents are deliberately abandoned.
 This puts the pre-cutover infrastructure rows back into a `bd` work store, for
 a rollback after the clear. It restores the state **as of the cutover**: beads
 written to the binding since then are not in the backup and are lost by the
-rollback, and the fields listed under "What the backup holds" are not restored.
+rollback, and the fields the backup does not hold (see "What the backup holds,
+and what it does not") are not restored.
 That includes progress: a workflow step that was open at the cutover and
 finished in the binding afterwards comes back open, and the restored city
 dispatches it again. Check the binding (`gc bd show <id>` before the revert)
 for any step whose work must not run twice.
+Each row that was not closed comes back with the raw status `bd` held it in,
+a parked one included: the transform takes it from the entry's
+`source_status`, or `deferred` from its `indefinitely_deferred`. A backup an
+earlier gc wrote records neither, and its rows come back with gc's folded
+status, a parked one as `open`.
 Edge payloads (a `waits_for` gate's `{"gate":"any-children"}`) are not carried
 by `bd import`; a restored gate reads as the default, `all-children`. Verified
 with `bd` 1.3.2-rc.1. The transform marks every ephemeral and no-history row
@@ -1959,10 +1982,12 @@ notes stand — that refusal is what sent you here:
 B=<binding root>/infra.retained-source.jsonl
 
 # The rows, with their outbound edges and parent links, each ephemeral and
-# no-history row marked for bd's dolt_ignore'd tables.
+# no-history row marked for bd's dolt_ignore'd tables, and each row that was
+# not closed in the raw status bd held it in.
 cat > /tmp/gc-restore.jq <<'JQ'
 select(.bead)
 | .bead as $b
+| (.source_status // (if .indefinitely_deferred then "deferred" else null end)) as $raw
 | ([(.deps // [])[] | {issue_id, depends_on_id, type}]
    + (if $b.parent then [{issue_id: $b.id, depends_on_id: $b.parent, type: "parent-child"}] else [] end)
    | unique_by([.depends_on_id, .type])) as $deps
@@ -1971,6 +1996,7 @@ select(.bead)
 | .dependencies = $deps
 | if $b.from then .metadata = (($b.metadata // {}) + {from: $b.from}) else . end
 | if $b.ephemeral or $b.no_history then .wisp_plane = true else . end
+| if $raw and $b.status != "closed" then .status = $raw else . end
 JQ
 jq -c -f /tmp/gc-restore.jq "$B" > /tmp/gc-restore.jsonl
 gc bd import /tmp/gc-restore.jsonl
