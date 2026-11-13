@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -43,6 +45,41 @@ func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
 	}
 	if !shouldEmitLoadCityConfigWarning(w) {
 		t.Error("an always+fresh warning must be emitted to the operator, not swallowed")
+	}
+}
+
+// TestEmitLoadCityConfigWarningsSkipsAlwaysFreshAdvisory pins ga-l1mmlp: the
+// always+fresh advisory describes a deliberate configuration, so ordinary
+// commands (which emit load warnings on every invocation) must not print it,
+// while any other non-fatal warning in the same load still reaches stderr.
+// The advisory stays visible where configuration is inspected: `gc config
+// show` and the start command print every provenance warning themselves.
+func TestEmitLoadCityConfigWarningsSkipsAlwaysFreshAdvisory(t *testing.T) {
+	warnings, err := config.ValidateNamedSessions(&config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "watchdog", WakeMode: "fresh"}},
+		NamedSessions: []config.NamedSession{{
+			Template: "watchdog",
+			Mode:     "always",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("config.ValidateNamedSessions: %v", err)
+	}
+	if len(warnings) != 1 || !config.IsAlwaysFreshWakeModeWarning(warnings[0]) {
+		t.Fatalf("warnings = %v, want exactly the always+fresh advisory", warnings)
+	}
+	other := `/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`
+
+	var stderr bytes.Buffer
+	emitLoadCityConfigWarnings(&stderr, &config.Provenance{Warnings: []string{warnings[0], other}})
+
+	out := stderr.String()
+	if strings.Contains(out, "starts a fresh provider session") {
+		t.Errorf("ordinary-command stderr carries the always+fresh advisory: %q", out)
+	}
+	if !strings.Contains(out, other) {
+		t.Errorf("other non-fatal warnings must still be emitted, got %q", out)
 	}
 }
 
