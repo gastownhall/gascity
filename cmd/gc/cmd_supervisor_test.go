@@ -4325,6 +4325,97 @@ func TestDoSupervisorInstallRejectsHomeOverrideEvenWhenIsolated(t *testing.T) {
 	}
 }
 
+// seedSupervisorServiceUnit writes a gc-owned platform unit at the path this
+// platform's uninstall would remove, derived from the current (test) HOME, and
+// returns that path.
+func seedSupervisorServiceUnit(t *testing.T) string {
+	t.Helper()
+	path := supervisorSystemdServicePath()
+	if goruntime.GOOS == "darwin" {
+		path = supervisorLaunchdPlistPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("Environment=GC_HOME=\""+os.Getenv("GC_HOME")+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// uninstall resolves the unit path from $HOME, so under an overridden HOME it
+// would look in the wrong place and report success while the real unit,
+// installed under the real HOME, stays enabled. It must refuse instead, and
+// must not reach the platform uninstall at all.
+func TestDoSupervisorUninstallRejectsHomeOverride(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	unit := seedSupervisorServiceUnit(t)
+
+	var systemctlCalls, launchctlCalls []string
+	oldSystemctl, oldLaunchctl := supervisorSystemctlRun, supervisorLaunchctlRun
+	supervisorSystemctlRun = func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorLaunchctlRun = func(args ...string) error {
+		launchctlCalls = append(launchctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorLaunchctlRun = oldSystemctl, oldLaunchctl
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "gc supervisor uninstall: ") {
+		t.Fatalf("stderr = %q, want a 'gc supervisor uninstall:' refusal", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+	if len(systemctlCalls) != 0 || len(launchctlCalls) != 0 {
+		t.Fatalf("service manager reached under a HOME override: systemctl=%q launchctl=%q", systemctlCalls, launchctlCalls)
+	}
+	if _, err := os.Stat(unit); err != nil {
+		t.Fatalf("unit %q must survive a refused uninstall; stat err=%v", unit, err)
+	}
+}
+
+// The refusal comes after the delegated-mode warning, so a delegated operator
+// still sees why gc's own service files are left alone.
+func TestDoSupervisorUninstallHomeOverrideKeepsDelegationWarning(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd delegation only applies on linux")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	warning := strings.Index(stderr.String(), "does not touch the delegated unit")
+	refusal := strings.Index(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs")
+	if warning < 0 || refusal < 0 || warning > refusal {
+		t.Fatalf("stderr = %q, want the delegation warning, then the HOME override refusal", stderr.String())
+	}
+}
+
 // The opt-in requires an explicit GC_HOME: without one, supervisor state would
 // land in the throwaway HOME's default ~/.gc with nothing tying the run to an
 // isolated installation.
