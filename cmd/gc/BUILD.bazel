@@ -2366,6 +2366,7 @@ go_test(
         "storage_boot_test.go",
         "storage_boot_workspace_integration_test.go",
         "storage_boot_workspace_test.go",
+        "storage_cotenant_lock_test.go",
         "storage_id_floor_bd_integration_test.go",
         "storage_id_floor_test.go",
         "storage_maintenance_managed_dolt_integration_test.go",
