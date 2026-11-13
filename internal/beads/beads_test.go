@@ -209,6 +209,11 @@ func TestReadinessWorkOutcomeDefersToATerminalStep(t *testing.T) {
 		// itself, including blocked/abandoned closes, so gc.outcome must not
 		// mask its blocked work outcome.
 		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"work bead with fail keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"work bead with skipped keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"work bead with canceled keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"work bead with empty step ref keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"work bead with only a step id keeps blocked work outcome", map[string]string{beadmeta.StepIDMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
