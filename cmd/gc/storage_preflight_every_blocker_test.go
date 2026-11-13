@@ -309,3 +309,31 @@ func TestSplitPreflightOnAStoppedCityWithAMarkerReadsNoStore(t *testing.T) {
 		t.Errorf("the report answers boot's check, which reads the work store this run did not read:\n%s", out)
 	}
 }
+
+// TestSplitPreflightOnAStoppedCityReadsNoRigStore: the rig census reads each
+// rig's store, so on a city whose provider is down it is skipped, not run:
+// a rig store open on a stopped city starts its server as a work-store open
+// does.
+func TestSplitPreflightOnAStoppedCityReadsNoRigStore(t *testing.T) {
+	request, _, provider := splitReadyCity(t, 10, nativeDoltLane)
+	request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: t.TempDir()}}
+	stubMigrationProviderDown(t, true)
+	rigOpens := 0
+	prev := rigImportStoreOpener
+	rigImportStoreOpener = func(cityPath string, rig config.Rig) (beads.Store, error) {
+		rigOpens++
+		return prev(cityPath, rig)
+	}
+	t.Cleanup(func() { rigImportStoreOpener = prev })
+
+	code, summary, out := runSplitPreflight(t, request)
+	if code != 1 || summary.ready() {
+		t.Fatalf("exit %d, %+v:\n%s", code, summary, out)
+	}
+	if rigOpens != 0 || provider.starts != 0 {
+		t.Fatalf("the rehearsal of a city whose provider is down opened a rig store %d time(s) and started the provider %d time(s):\n%s", rigOpens, provider.starts, out)
+	}
+	if !preflightRow(out, preflightSkipTag, preflightRigScopesCheck) {
+		t.Errorf("the rig census is not reported skipped:\n%s", out)
+	}
+}
