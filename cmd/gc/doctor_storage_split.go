@@ -45,6 +45,7 @@ type storageSplitFindings struct {
 func (c *storageSplitCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
 	var f storageSplitFindings
 	c.versionFloor(&f)
+	c.splitJournal(&f)
 	var ok string
 	switch stage, staged, err := readRemoteStage(c.cityPath); {
 	case err != nil:
@@ -94,6 +95,24 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 			f.warns = append(f.warns, fmt.Sprintf("the gc on the session PATH (%s) reports version %s, which cannot be compared with the floor %s", path, running, floor))
 		}
 		f.details = append(f.details, fmt.Sprintf("session PATH gc %s: %s; floor %s", path, running, floor))
+	}
+}
+
+// splitJournal warns on a guided split that stopped with work left
+// (S5-H, owner decision: WARN): what it left is graded by the checks below
+// (an unconverged city is an error through status), and this names the
+// command that continues it. A split past its rig imports has only its
+// verification left, which the checks below are.
+func (c *storageSplitCheck) splitJournal(f *storageSplitFindings) {
+	j, present, err := readStorageSplitJournal(c.cityPath)
+	switch {
+	case err != nil:
+		f.warns = append(f.warns, err.Error())
+	case !present || !j.open() || j.Phase == splitPhaseRigsImported:
+	case j.Phase == splitPhaseAbandoning:
+		f.warns = append(f.warns, fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction()))
+	default:
+		f.warns = append(f.warns, fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, storageSplitInstruction()))
 	}
 }
 
@@ -163,7 +182,7 @@ func (c *storageSplitCheck) split(f *storageSplitFindings) string {
 		}
 	}
 	awaiting := 0
-	for _, r := range censusRigs(c.cityPath, c.cfg, target, false) {
+	for _, r := range censusRigs(c.cityPath, c.cfg, target) {
 		if r.blocking() {
 			awaiting++
 		}

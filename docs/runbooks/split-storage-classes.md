@@ -44,6 +44,58 @@ is: swap the config, run one command, start the city.
   a provider a downstream fork compiled in creates its binding at first boot
   and moves nothing. This command's one source is the work store.
 
+## The short path: `gc storage split`
+
+`gc storage split` runs Steps 1 to 4b below as one command, on a stopped
+city that authors no `[storage]` yet:
+
+```
+gc stop
+gc storage split --dry-run            # the rehearsal: gc storage preflight --split
+gc storage split --fleet-stopped
+gc start
+```
+
+In order, under one controller lock and one maintenance window, it:
+
+1. rehearses the split (`gc storage preflight --split`) and refuses, writing
+   nothing, on any blocking check. A copy that will exceed `--time-budget` is
+   a note, not a refusal: the run pauses (exit 75) and the same command
+   continues it;
+2. snapshots the work store and every rig into `.gc/snapshots/` and pins the
+   snapshot;
+3. runs legacy's demand-migration repairs once, when the split city will run
+   the v2 reconciler, so the rows it copies are the repaired ones;
+4. appends the `[storage]` block from Step 1 to `city.toml`, keeping every other
+   byte, and writes `.gc/min-gc-version` (1.6.0, or a higher floor already
+   there): a gc that reads that file refuses a split city when it is older;
+5. migrates the city (Step 4), then imports every rig (Step 4b);
+6. checks the result as `gc storage status` and `gc doctor --check
+   storage-split` do, then names `gc start`, the rollback and the snapshot.
+
+It records each step in `.gc/storage-split.journal.json`, with `city.toml`'s
+bytes from before the split. Run the same command again to continue a split
+that stopped: on its time budget, on a rig whose import refused (the city is
+split and serves meanwhile, and `gc doctor` warns until the split finishes),
+or because the run was killed. A split that stopped before it wrote
+`city.toml` starts over, because the city may have run since.
+
+It takes the same attestations as the commands it runs:
+`--force=remote-runtime` for a city whose sessions run on remote hosts (they
+refuse mail, nudges and session lookups until worker-site transport exists),
+and `--force=shared-store:<identity>` for a work or rig store another
+registered city uses, with that city stopped by `gc supervisor stop --wait`.
+A bare `--force` refuses.
+
+**Rolling back.** Before the city's copy converges, `gc storage split
+--abandon --fleet-stopped` puts `city.toml` and the version floor back, deletes
+the rows it copied into the binding, and unpins the snapshot. After that, run
+`gc storage migrate --to-work --fleet-stopped` ("Reversing the split" below).
+It copies the binding's rows back and, when `city.toml` is still the file the
+split wrote, restores the file's bytes from before the split.
+
+The rest of this runbook is the same cutover, one command at a time.
+
 ## Step 1: author the split
 
 Add the class map and the binding it names. Either half may live in an include
