@@ -11508,6 +11508,60 @@ func TestWorkflowDeleteSourceClearsTheRigsCopyForARigSelector(t *testing.T) {
 	}
 }
 
+// TestWorkflowDeleteSourceKeepsARigSelectorOutOfTheCityScopeForABindingOwnedSource
+// is the ga-grk7rk regression.
+//
+// --rig resolves with requireSource=false, so a rig that does not hold the id
+// still yields a target: the rig's view, an empty source bead, and a lock keyed
+// on the RIG's scope. The write resolver then asked the by-id residency walk
+// about the id alone and, finding the binding the owner, wrote the city scope's
+// copy under a lock that does not exclude a city-scoped run.
+//
+// The selector names a scope, and the lock is taken on it, so the write has to
+// stay inside it. The assertions are the three things that diverge when it does
+// not: the binding's live row, the retained twin, and the lock file the run took.
+func TestWorkflowDeleteSourceKeepsARigSelectorOutOfTheCityScopeForABindingOwnedSource(t *testing.T) {
+	cityPath, rootID, _, work, binding := relocatedWorkflowCity(t)
+	sourceID := relocatedSourceBead(t, cityPath, work, binding, rootID)
+	// A rig the source bead is NOT resident in: it holds only an unrelated bead.
+	rigHoldingID(t, cityPath, "rig-unrelated-1", "a bead the rig holds instead", "task")
+	for _, store := range []beads.Store{work, binding} {
+		if err := store.SetMetadataBatch(rootID, map[string]string{
+			beadmeta.SourceBeadIDMetadataKey:   sourceID,
+			beadmeta.SourceStoreRefMetadataKey: "rig:frontend",
+		}); err != nil {
+			t.Fatalf("stamping the root's source identity: %v", err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(sourceID, sourceWorkflowStoreSelector{storeRef: "rig:frontend"}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc workflow delete-source exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "metadata_cleared=false") {
+		t.Errorf("delete-source reported clearing a source bead the rig does not hold:\n%s", stdout.String())
+	}
+	if got := sourceWorkflowID(t, binding, sourceID); got != rootID {
+		t.Errorf("the binding's live source row names workflow %q, want %q; a --rig run wrote the city scope", got, rootID)
+	}
+	if got := sourceWorkflowID(t, work, sourceID); got != rootID {
+		t.Errorf("the retained frozen copy names workflow %q, want %q; a --rig run wrote the city scope", got, rootID)
+	}
+
+	locked := sourceWorkflowLockFiles(t, cityPath)
+	if len(locked) != 1 {
+		t.Fatalf("the command left %d lock files (%v), want exactly the one it took", len(locked), locked)
+	}
+	takeSourceWorkflowLock(t, cityPath, filepath.Join(cityPath, "rigs", "frontend"), sourceID)
+	if after := sourceWorkflowLockFiles(t, cityPath); !slices.Equal(after, locked) {
+		t.Errorf("the rig scope hashes to %v but the command locked %v", after, locked)
+	}
+	takeSourceWorkflowLock(t, cityPath, cityPath, sourceID)
+	if after := sourceWorkflowLockFiles(t, cityPath); len(after) != 2 {
+		t.Errorf("the city scope hashes to the rig's lock file (%v), so this test cannot tell the scopes apart", after)
+	}
+}
+
 // TestWorkflowDeleteSourceFailsWhenTheOwningCopyCannotBeCleared is the fault row.
 //
 // The owning copy is the one every later reader consults, so failing to clear it
