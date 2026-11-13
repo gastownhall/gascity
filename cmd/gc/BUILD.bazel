@@ -1772,6 +1772,7 @@ go_test(
         "init_storage_realbd_integration_test.go",
         "init_storage_test.go",
         "init_workspace_prefix_preserve_test.go",
+        "input_outcome_projection_test.go",
         "invocation_store_memo_test.go",
         "json_oddball_root_test.go",
         "json_output_test.go",

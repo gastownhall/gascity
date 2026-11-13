@@ -86,6 +86,19 @@ var probes = map[Code]probe{
 	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
 	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
 	ReqFSHostHomeView:          probeFSHostHomeView,
+
+	ReqInputNudgeDelivered:      probeInputNudgeDelivered,
+	ReqInputNudgeAbsentGone:     probeInputNudgeAbsentGone,
+	ReqInputKeysAbsentGone:      probeInputKeysAbsentGone,
+	ReqInputWordsAllowedOnOp:    probeInputWordsAllowedOnOp,
+	ReqInputBlockedNotTyped:     probeInputBlockedNotTyped,
+	ReqInputUnavailable:         probeInputUnavailable,
+	ReqInputLostReplyUnknown:    probeInputLostReplyUnknown,
+	ReqInputExitZeroIsDelivered: probeInputExitZeroIsDelivered,
+	ReqInputHeldSendTypedOnce:   probeInputHeldSendTypedOnce,
+	ReqInputExit80OneLine:       probeInputExit80OneLine,
+	ReqInputDeadBoxGone:         probeInputDeadBoxGone,
+	ReqInputKeysDelivered:       probeInputKeysDelivered,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {

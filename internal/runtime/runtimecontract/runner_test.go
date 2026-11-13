@@ -30,7 +30,7 @@ func writeScript(t *testing.T, stateDir string, bodies map[string]string) string
 func writeGolden(t *testing.T) string {
 	t.Helper()
 	state := t.TempDir()
-	return writeScript(t, state, reference.HostFSBodies())
+	return writeScript(t, state, reference.InputOutcomeBodies(reference.HostFSBodies()))
 }
 
 func runGolden(t *testing.T, path string) Report {
@@ -83,7 +83,10 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 }
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
-	for name, bodies := range map[string]map[string]string{"tmux": reference.HostFSBodies(), "ops": reference.NonTmuxHostFSBodies()} {
+	for name, bodies := range map[string]map[string]string{
+		"tmux": reference.InputOutcomeBodies(reference.HostFSBodies()),
+		"ops":  reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies()),
+	} {
 		t.Run(name, func(t *testing.T) {
 			state := t.TempDir()
 			report := runGolden(t, writeScript(t, state, bodies))
@@ -103,6 +106,35 @@ func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
 					t.Error("ops golden received tmux")
 				}
+			}
+		})
+	}
+}
+
+// TestInterruptEndingTheBoxPassesTheInputGroup runs the input group against
+// a reference whose delivered interrupt ends the box (a real Ctrl-C to a box
+// that lives only while its command runs): a correct pack of that shape must
+// pass every input requirement, so no probe may drive the box after
+// interrupting it.
+func TestInterruptEndingTheBoxPassesTheInputGroup(t *testing.T) {
+	for name, bodies := range map[string]map[string]string{
+		"tmux": reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
+		"ops":  reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			seen := 0
+			for _, res := range report.Results {
+				if res.Group != GroupInput {
+					continue
+				}
+				seen++
+				if res.Status != StatusPass {
+					t.Errorf("%s: %s %s", res.Code, res.Status, res.Detail)
+				}
+			}
+			if seen != 12 {
+				t.Errorf("ran %d input requirements, want RPP-INPUT-001..012 (12)", seen)
 			}
 		})
 	}
@@ -131,6 +163,15 @@ func TestEveryRequirementIsGated(t *testing.T) {
 			t.Fatalf("mutant of %s: %q is not in the host-filesystem golden body", op, from)
 		}
 		return map[string]string{op: strings.Replace(h[op], from, to, 1)}
+	}
+	// oedit is edit over the input-outcome golden, the base of the input
+	// group's mutants.
+	o := reference.InputOutcomeBodies(reference.Bodies())
+	oedit := func(op, from, to string) map[string]string {
+		if !strings.Contains(o[op], from) {
+			t.Fatalf("mutant of %s: %q is not in the input-outcome golden body", op, from)
+		}
+		return map[string]string{op: strings.Replace(o[op], from, to, 1)}
 	}
 	type mutant struct {
 		target       Code
@@ -250,18 +291,52 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqFSHostAgentPIDOnHost, hedit("observe", `if [ -f "$box/pid" ]; then printf ',"agent_pid"`, `if false; then printf ',"agent_pid"`), "reports no agent_pid"},
 		{ReqFSHostHomeView, hedit("start", `if [ -n "$cmd" ]; then`, `if [ -n "$cmd" ]; then mkdir -p "$S/home"; cmd=$(printf %s "$cmd" | sed "s|$HOME|$S/home|g"); `), "runs the command with a home directory of its own at the caller's HOME (a container bind-mounting only the work dir)"},
 	}
+	// inputMutants edit InputOutcomeBodies(Bodies()), the base of the input
+	// group.
+	inputMutants := []mutant{
+		{ReqInputNudgeDelivered, oedit("nudge", `printf '%s\n' "$txt" >> "$box/typed"; `, `printf '%s\n' "$txt" >> "$box/typed"; echo '{"outcome":"ok"}'; exit 0; `), "prints {\"outcome\":\"ok\"} on a delivered nudge"},
+		{ReqInputNudgeDelivered, oedit("nudge", `printf '%s\n' "$txt" >> "$box/typed"; `, `out not_sent; `), "refuses every nudge to a running box"},
+		{ReqInputNudgeAbsentGone, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 0;`), "a nudge to an absent name exits 0"},
+		{ReqInputNudgeAbsentGone, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out not_sent;`), "a nudge to an absent name answers not_sent"},
+		{ReqInputKeysAbsentGone, oedit("interrupt", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 0;`), "interrupt to an absent name exits 0 with empty stdout"},
+		{ReqInputKeysAbsentGone, oedit("clear-scrollback", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 2;`), "clear-scrollback to an absent name answers exit 2"},
+		{ReqInputWordsAllowedOnOp, oedit("interrupt", `printf '%s\n' "$*" >> "$box/typed"; `, `out busy; `), "interrupt answers busy"},
+		{ReqInputBlockedNotTyped, oedit("nudge", `if [ "$F" = blocked ]; then out pending_interaction; fi; `, ``), "types into a blocked box"},
+		{ReqInputBlockedNotTyped, oedit("nudge", `if [ "$F" = blocked ]; then out pending_interaction; fi; `, `if [ "$F" = blocked ]; then printf '%s\n' "$txt" >> "$box/typed"; out pending_interaction; fi; `), "types into a blocked box and then refuses"},
+		{ReqInputUnavailable, oedit("nudge", `be || out unavailable;`, `be || { echo '{"outcome":"delivered"}'; exit 0; };`), "a nudge answers delivered with the backend unavailable"},
+		{ReqInputUnavailable, oedit("send-keys", `be || out unavailable;`, `be || out not_sent;`), "send-keys answers not_sent with the backend unavailable"},
+		{ReqInputLostReplyUnknown, oedit("nudge", `if [ "$F" = lose_reply ]; then out unconfirmed; fi`, `if [ "$F" = lose_reply ]; then out not_sent; fi`), "a nudge whose reply was lost answers not_sent"},
+		{ReqInputLostReplyUnknown, oedit("interrupt", `if [ "$F" = lose_reply ]; then echo "reply lost" >&2; exit 1; fi`, `if [ "$F" = lose_reply ]; then out not_sent; fi`), "an interrupt whose reply was lost answers not_sent"},
+		{ReqInputExitZeroIsDelivered, oedit("send-keys", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo '{"outcome":"not_sent"}'; exit 0; `), "send-keys prints not_sent on exit 0"},
+		{ReqInputHeldSendTypedOnce, oedit("nudge", `if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; `, ``), "types a redelivered nudge twice"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`), "exits 80 with empty stdout"},
+		{ReqInputDeadBoxGone, oedit("nudge", `if [ "$F" = dead ]; then out gone; fi; `, ``), "types a nudge into a dead box and answers delivered"},
+		{ReqInputDeadBoxGone, oedit("interrupt", `if [ "$F" = dead ]; then out gone; fi; `, `if [ "$F" = dead ]; then out not_sent; fi; `), "answers an interrupt to a dead box not_sent"},
+		{ReqInputDeadBoxGone, oedit("observe", `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead"`, `if false; then printf '{"state":"dead"`), "observe reports the dead box running"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out delivered;`), "exits 80 with a success word"},
+		{ReqInputKeysDelivered, oedit("send-keys", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; out delivered; `), "send-keys to a running box exits 80 delivered"},
+		{ReqInputKeysDelivered, oedit("clear-scrollback", `printf '%s\n' "$*" >> "$box/typed"; `, `printf '%s\n' "$*" >> "$box/typed"; echo cleared; exit 0; `), "clear-scrollback to a running box prints a non-outcome line on exit 0"},
+		{ReqInputKeysDelivered, oedit("interrupt", `printf '%s\n' "$*" >> "$box/typed"; `, `out not_sent; `), "refuses every interrupt to a running box"},
+		{ReqInputExit80OneLine, oedit("send-keys", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; echo '{"outcome":"gone"}'; exit 80; };`), "exits 80 with two outcome lines"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; };`), "exits 80 with a gone line padded past gc's 64 KiB stdout cap"},
+		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { printf '{"outcome":"gone","detail":"%s"}\n' "$(head -c 1025 /dev/zero | tr '\0' x)"; exit 80; };`), "exits 80 with a detail past 1 KiB"},
+	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.
 	type gated struct {
 		mutant
-		hostFS bool
+		base func() map[string]string
 	}
+	inputBase := func() map[string]string { return reference.InputOutcomeBodies(reference.Bodies()) }
 	var all []gated
 	for _, m := range mutants {
-		all = append(all, gated{m, false})
+		all = append(all, gated{m, reference.Bodies})
 	}
 	for _, m := range hostFSMutants {
-		all = append(all, gated{m, true})
+		all = append(all, gated{m, reference.HostFSBodies})
+	}
+	for _, m := range inputMutants {
+		all = append(all, gated{m, inputBase})
 	}
 	covered := map[Code]bool{}
 	for _, m := range all {
@@ -275,10 +350,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 
 	for _, m := range all {
 		t.Run(string(m.target)+"/"+m.whatItBreaks, func(t *testing.T) {
-			bodies := reference.Bodies()
-			if m.hostFS {
-				bodies = reference.HostFSBodies()
-			}
+			bodies := m.base()
 			for op, body := range m.bodies {
 				if _, ok := bodies[op]; !ok {
 					t.Fatalf("mutant op %q is not a golden op", op)
@@ -568,10 +640,11 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
 	for group, token := range map[Group]string{
 		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
+		GroupInput:  runtime.ProtocolCapabilityInputOutcome,
 	} {
-		bodies := reference.Bodies()
+		bodies := reference.InputOutcomeBodies(reference.Bodies())
 		var caps []string
-		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle} {
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome} {
 			if c != token {
 				caps = append(caps, `"`+c+`"`)
 			}
@@ -700,9 +773,9 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 	}
 }
 
-// The base golden, which does not declare fs.host, fails nothing and skips
-// exactly the fshost group: fs.host adds a promise, it changes no other. The
-// same holds under either carrier.
+// The base golden, which declares neither fs.host nor input-outcome, fails
+// nothing and skips exactly the fshost and input groups: each token adds a
+// promise, it changes no other. The same holds under either carrier.
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
 		t.Run(name, func(t *testing.T) {
@@ -712,8 +785,8 @@ func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 				switch {
 				case res.Status == StatusFail:
 					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
-				case (res.Status == StatusSkip) != (res.Group == GroupFSHost):
-					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost group", res.Code, res.Group, res.Status)
+				case (res.Status == StatusSkip) != (res.Group == GroupFSHost || res.Group == GroupInput):
+					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost and input groups", res.Code, res.Group, res.Status)
 				}
 			}
 			if name == "ops" {

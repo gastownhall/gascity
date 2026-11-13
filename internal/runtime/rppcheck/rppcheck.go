@@ -133,6 +133,7 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
 	c.checkServerLifecycle(ctx)
+	c.checkInputOutcome(ctx)
 	return c.result, nil
 }
 
@@ -152,6 +153,12 @@ type opResult struct {
 	stdout      string
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2, stderr included
+	// exitCode and failedStdout are a failed op's exit status (-1 when it
+	// had none) and its raw stdout: under input-outcome an exit 80 carries
+	// its outcome line there, read untrimmed so gc's stdout cap reads on what
+	// the script printed (sessionexec.ReadExit80Outcome).
+	exitCode     int
+	failedStdout string
 }
 
 // runOp invokes the executable with the op timeout.
@@ -206,7 +213,11 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 		case msg == "":
 			msg = err.Error()
 		}
-		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		code := -1
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), exitCode: code, failedStdout: stdout.String()}
 	}
 	return opResult{stdout: strings.TrimRight(stdout.String(), "\n")}
 }
@@ -225,7 +236,8 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // well; declared without locality local it draws a warning instead.
 // carrier.ops maps to "" too; its five driving ops, and with idle-boundary
 // its ready-prompt store, are required checks below, not a single
-// capability-to-op map.
+// capability-to-op map. input-outcome types the driving ops' answers rather
+// than promising an op, so it maps to "" and checkInputOutcome checks it.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -235,6 +247,7 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
 	runtime.ProtocolCapabilityFSHost:           "",
 	runtime.ProtocolCapabilityCarrierOps:       "",
+	runtime.ProtocolCapabilityInputOutcome:     "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -255,6 +268,10 @@ const (
 	serverStopCheck           = "capability server-lifecycle: server-stop"
 	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
 )
+
+// inputOutcomeCheck is the input-outcome smoke check (`gc runtime
+// conformance` gates the token in full as the input group).
+const inputOutcomeCheck = "capability input-outcome: nudge to an absent name"
 
 const handshakeCheck = "protocol handshake"
 
@@ -415,8 +432,53 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// probe would tear the session down and let a broken stop op pass
 	// the is-running-after-stop assertion on interrupt's side effect.
 	// Post-stop it exercises the documented missing-session contract:
-	// best-effort, exit 0.
-	c.checkDrivingOp(ctx, "interrupt", name)
+	// best-effort, exit 0, or under input-outcome exit 80 gone.
+	c.checkDrivingOpAfterStop(ctx, "interrupt", name)
+}
+
+// checkInputOutcome sends a nudge to a name no session holds, as a script
+// declaring input-outcome must answer with exit 80 and one valid gone line,
+// never the exit 0 gc reads as delivered. A script that does not declare the
+// token is not checked.
+func (c *checker) checkInputOutcome(ctx context.Context) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) {
+		return
+	}
+	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", c.opts.SessionName+"-absent")
+	switch {
+	case res.unsupported:
+		c.record(inputOutcomeCheck, StatusFail, "input-outcome declared but nudge not implemented (exit 2)")
+		return
+	case res.err == nil:
+		c.record(inputOutcomeCheck, StatusFail, "nudge to a name no session holds exited 0, which gc reads as delivered; want exit 80 with the outcome gone")
+		return
+	case res.exitCode != runtime.ExitCodeInputOutcome:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("nudge to a name no session holds exited %d, want exit %d with the outcome gone: %v", res.exitCode, runtime.ExitCodeInputOutcome, res.err))
+		return
+	}
+	word, _, err := sessionexec.ReadExit80Outcome("nudge", res.failedStdout)
+	switch {
+	case err != nil:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("exit 80 without exactly one valid outcome line: %v", err))
+	case word != runtime.InputOutcomeGone:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("nudge to a name no session holds answered %q, want gone", word))
+	default:
+		c.record(inputOutcomeCheck, StatusPass, "exit 80 gone")
+	}
+}
+
+// goneAfterStop reports a driving op's answer to the session rppcheck has
+// just stopped as an exit 80 gone under input-outcome: the answer a script
+// declaring the token owes a name no running box holds. Any other typed
+// word, and every typed answer from a running session, is not accepted: a
+// driving op that refuses the session rppcheck started and verified running
+// is a broken op, whichever word it names.
+func (c *checker) goneAfterStop(op string, res opResult) bool {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) || res.exitCode != runtime.ExitCodeInputOutcome {
+		return false
+	}
+	word, _, err := sessionexec.ReadExit80Outcome(op, res.failedStdout)
+	return err == nil && word == runtime.InputOutcomeGone
 }
 
 // checkServerLifecycle runs the server-stop a script declaring
@@ -731,9 +793,8 @@ func (c *checker) checkProcessAlive(ctx context.Context, name string) {
 	}
 }
 
-// checkOptional probes an op whose absence is acceptable.
-func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte, args ...string) {
-	res := c.runOp(ctx, stdin, args...)
+// recordOptional records res for an op whose absence is acceptable.
+func (c *checker) recordOptional(check string, res opResult) {
 	switch {
 	case res.unsupported:
 		c.record(check, StatusSkip, "not implemented (exit 2)")
@@ -754,12 +815,29 @@ func (c *checker) drivingCheckName(op string) string {
 // checkDrivingOp keeps the optional path unchanged; an explicit carrier.ops
 // declaration obliges the op, so an unsupported op is a failed promise.
 func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
+	c.recordDrivingOp(c.drivingCheckName(args[0]), c.runOp(ctx, nil, args...))
+}
+
+// checkDrivingOpAfterStop is checkDrivingOp for a session rppcheck has
+// stopped, where an exit 80 gone (goneAfterStop) is the answer a script
+// declaring input-outcome owes.
+func (c *checker) checkDrivingOpAfterStop(ctx context.Context, args ...string) {
 	check := c.drivingCheckName(args[0])
-	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
-		c.checkOptional(ctx, check, nil, args...)
+	res := c.runOp(ctx, nil, args...)
+	if c.goneAfterStop(args[0], res) {
+		c.record(check, StatusPass, "typed outcome gone")
 		return
 	}
-	res := c.runOp(ctx, nil, args...)
+	c.recordDrivingOp(check, res)
+}
+
+// recordDrivingOp records res for a driving op: optional unless carrier.ops
+// is declared.
+func (c *checker) recordDrivingOp(check string, res opResult) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.recordOptional(check, res)
+		return
+	}
 	switch {
 	case res.unsupported:
 		c.record(check, StatusFail, "carrier.ops declared but op not implemented (exit 2)")
