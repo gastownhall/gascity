@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -82,15 +84,80 @@ func isBdInitDirtyTablesError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), bdInitDirtyTablesMarker)
 }
 
-// dirtyTablesEndpointText names the Dolt an init ran against, from the host and
-// port in env.
-func dirtyTablesEndpointText(_ []string) string {
-	return ""
+// dirtyTablesEndpointText names the Dolt an exec-provider init ran against, from
+// the GC_DOLT_HOST and GC_DOLT_PORT in env (the last entry for a key wins). It
+// reads nothing else from env: the same env carries the Dolt credentials.
+func dirtyTablesEndpointText(env []string) string {
+	host := strings.TrimSpace(envListValue(env, "GC_DOLT_HOST"))
+	port := strings.TrimSpace(envListValue(env, "GC_DOLT_PORT"))
+	switch {
+	case host != "" && port != "":
+		return "the Dolt at " + net.JoinHostPort(host, port)
+	case host != "":
+		return "the Dolt at " + host
+	case port != "":
+		return "the Dolt on port " + port
+	default:
+		return "the provider's default Dolt"
+	}
+}
+
+// dirtyTablesDatabaseText names the database in a remedy, and never prints an
+// empty quoted name when the scope's database is not known.
+func dirtyTablesDatabaseText(database string) string {
+	if database = strings.TrimSpace(database); database != "" {
+		return fmt.Sprintf("database %q", database)
+	}
+	return "the scope's database"
+}
+
+// dirtyTablesRemedy wraps bd's dirty-table refusal, first and intact, with what
+// the operator has to do. gc does not commit here because it commits a working
+// set only on a Dolt it manages, and bd's own `bd dolt commit` advice does not
+// help because it re-opens the store and meets the same refusal. where names the
+// Dolt holding the working set; detail is an optional sentence after it.
+func dirtyTablesRemedy(refusal error, database, where, detail string) error {
+	return fmt.Errorf("%w; gc did not commit the working set: gc commits a working set only on a Dolt it manages. "+
+		"To clear the refusal, commit the working set of %s on %s.%s "+
+		"With that database selected, run CALL DOLT_COMMIT('-A', '-m', '<message>'), then re-run. "+
+		"bd's own advice, 'bd dolt commit', does not help here: it re-opens the store and meets the same refusal",
+		refusal, dirtyTablesDatabaseText(database), where, detail)
+}
+
+// execInitDirtyTablesRemedy returns err unchanged unless it is bd's dirty-table
+// refusal, in which case it adds the remedy for an exec-provider scope. The
+// endpoint is the one the provider's init env names, which is the rig's own for
+// a rig scope. database is the name gc asked for; a provider may not forward
+// it to bd.
+func execInitDirtyTablesRemedy(err error, database string, providerEnv []string) error {
+	if !isBdInitDirtyTablesError(err) {
+		return err
+	}
+	return dirtyTablesRemedy(err, database, dirtyTablesEndpointText(providerEnv), "")
+}
+
+// defaultRigInitDirtyTablesRemedy returns err unchanged unless it is bd's
+// dirty-table refusal, in which case it adds the remedy for a scope bd
+// initialized against a server it resolved itself. gc passes bd no endpoint
+// there, so the remedy points at the scope's .beads/ directory instead.
+func defaultRigInitDirtyTablesRemedy(err error, database, scopeDir string) error {
+	if !isBdInitDirtyTablesError(err) {
+		return err
+	}
+	return dirtyTablesRemedy(err, database, "the Dolt server bd resolved for this scope",
+		fmt.Sprintf(" gc does not know which Dolt server bd resolved for this scope; its connection settings are in %s.",
+			filepath.Join(scopeDir, ".beads")))
 }
 
 // commitDirtyScopeTables commits a scope database's uncommitted working set on
 // the managed Dolt server, reporting whether there was anything to commit. It
 // is a variable so tests can exercise the recovery loop without a live server.
+//
+// Ownership: gc commits a working set only on a Dolt it manages, so this is
+// callable only for a scope whose Dolt gc manages. Today that is the canonical
+// gc-beads-bd branch of initBeadsForDirWithExecutor and no other. A new caller
+// must establish that gc manages the scope's RESOLVED (rig-aware) endpoint
+// rather than infer it from the provider name.
 var commitDirtyScopeTables = commitDirtyScopeTablesViaManagedDolt
 
 // commitDirtyScopeTablesViaManagedDolt applies the remedy that actually clears
@@ -103,6 +170,12 @@ var commitDirtyScopeTables = commitDirtyScopeTablesViaManagedDolt
 // verifyManagedDoltDatabaseExistsAfterInit: an external or gateway endpoint is
 // not ours to commit against, and its working set is not what bd is refusing
 // over here.
+//
+// Ownership: its guards check the city's Dolt, not the endpoint of the scope
+// being initialized, so it is callable only for a scope whose Dolt gc manages
+// (today only the canonical gc-beads-bd branch). A new caller must establish
+// that gc manages the scope's resolved, rig-aware endpoint rather than infer it
+// from the provider name.
 func commitDirtyScopeTablesViaManagedDolt(cityPath, database string) (bool, error) {
 	database = strings.TrimSpace(database)
 	if database == "" {
@@ -233,6 +306,13 @@ func parseSmokeCount(out string) (int, error) {
 //
 // It returns nil once init succeeds. Otherwise it returns an error that wraps
 // the refusal, so a caller that cannot be helped still sees why.
+//
+// Ownership: it commits through commitDirtyScopeTables, so it is callable only
+// for a scope whose Dolt gc manages. Today that is the canonical gc-beads-bd
+// branch of initBeadsForDirWithExecutor and no other. A new caller must
+// establish that gc manages the scope's resolved, rig-aware endpoint rather than
+// infer it from the provider name; for any other scope, return the refusal with
+// execInitDirtyTablesRemedy or defaultRigInitDirtyTablesRemedy.
 func recoverBdInitFromDirtyTables(cityPath, database string, initErr error, reinit func() error) error {
 	if strings.TrimSpace(database) == "" {
 		return initErr

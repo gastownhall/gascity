@@ -2151,19 +2151,10 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 		if err != nil {
 			return err
 		}
-		err = execute(script, providerEnv, args...)
-		if err == nil || !isBdInitDirtyTablesError(err) {
-			return err
-		}
-		// Same circular `bd dolt commit` advice as the canonical branch; the
-		// commit only runs against a managed local Dolt, so on an external
-		// endpoint the returned error carries both the refusal and why the
-		// commit could not run.
-		reinit := func() error { return execute(script, providerEnv, args...) }
-		if recoverErr := recoverBdInitFromDirtyTables(cityPath, doltDatabase, err, reinit); recoverErr != nil && !isBdAlreadyInitializedError(recoverErr) {
-			return recoverErr
-		}
-		return nil
+		// gc commits a working set only on a Dolt it manages, and this provider's
+		// Dolt is not known to be one: a dirty-table refusal is returned with a
+		// remedy instead of being recovered here.
+		return execInitDirtyTablesRemedy(execute(script, providerEnv, args...), doltDatabase, providerEnv)
 	}
 	if shouldInitDefaultRigBdStore(cityPath, dir, provider) {
 		return initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase)
@@ -2248,19 +2239,11 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	if canonicalDoltDatabase != "" {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
-	runInit := func() error {
-		_, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...)
-		return err
-	}
-	if err := runInit(); err != nil {
-		if isBdInitDirtyTablesError(err) {
-			// beads' own remedy for a dirty working set hits the same refusal;
-			// clear it here as the provider-owned init branch does.
-			err = recoverBdInitFromDirtyTables(cityPath, canonicalDoltDatabase, err, runInit)
+	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
+		if isBdAlreadyInitializedError(err) {
+			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 		}
-		if err != nil && !isBdAlreadyInitializedError(err) {
-			return fmt.Errorf("bd init: %w", err)
-		}
+		return fmt.Errorf("bd init: %w", defaultRigInitDirtyTablesRemedy(err, canonicalDoltDatabase, dir))
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 }
