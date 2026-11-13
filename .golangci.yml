@@ -26,6 +26,11 @@ formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      # Gitignored npm packages, such as flatted's Go port under the dashboard's
+      # node_modules after a local npm install; CI never has them.
+      - (^|/)node_modules/
 
 linters:
   # The default linters (errcheck, govet, ineffassign, staticcheck, unused)
@@ -44,6 +49,8 @@ linters:
       locale: US
 
   exclusions:
+    paths:
+      - (^|/)node_modules/
     rules:
       # runtime shadows stdlib but is isolated to internal/.
       - path: internal/runtime/
