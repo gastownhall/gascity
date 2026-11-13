@@ -544,6 +544,14 @@ func preflightLiveRowIDs(source infraRowLister) ([]string, error) {
 // preflightCopyNotes reports, without blocking, what a copy that clears its
 // holds does to edges the operator may care about.
 func preflightCopyNotes(stdout io.Writer, plan infraCopyPlan, unheldExternal, unheldUnread []string) {
+	// A hold bd keeps in the status crosses parked: deferred to a date no
+	// clock reaches, the hold recorded beside it for the reverse.
+	if parked := infraParkedRows(plan.rows); len(parked) > 0 {
+		preflightNote(stdout, "parked holds", fmt.Sprintf("%d open bead(s) the copy moves are parked by a status the binding cannot record; each crosses deferred until %s, so it stays out of every ready view, with its status recorded in %s. Clearing its deferral in the split city releases it; `gc storage migrate --to-work` restores the status:", len(parked), infraParkedDeferUntil.Format("2006-01-02"), beadmeta.MigratedParkedHoldMetadataKey))
+		for _, line := range parked {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+	}
 	// An external: reference is carried as it is, and a split city's readers
 	// enforce it, so a moved row waiting on one whose bead no store holds
 	// arrives blocked until something holds and closes it.

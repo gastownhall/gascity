@@ -1760,6 +1760,7 @@ go_test(
         "infra_copy_manifest_test.go",
         "infra_engine_bench_test.go",
         "infra_engine_fixture_test.go",
+        "infra_parked_hold_test.go",
         "infra_scope_integration_test.go",
         "infra_scope_test.go",
         "init_bd_version_floor_doc_test.go",

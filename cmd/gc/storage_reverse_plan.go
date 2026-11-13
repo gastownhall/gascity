@@ -196,7 +196,7 @@ func planReverse(in reverseInput) reversePlan {
 	closedGate := map[string]bool{}
 	refused := map[string]bool{} // rows refused on their own: their edges are not judged again
 	leaving := map[string]bool{}
-	var openGates, d8, unconfigured, unrecorded, reused, unreadable, stampTaken []string
+	var openGates, d8, unconfigured, unrecorded, reused, unreadable, parkedUnreadable, stampTaken []string
 	for _, b := range in.Binding {
 		byID[b.ID] = b
 	}
@@ -235,9 +235,15 @@ func planReverse(in reverseInput) reversePlan {
 			reused = append(reused, fmt.Sprintf("%s (%s)", b.ID, reverseDestNoun(dest)))
 			continue
 		}
+		// The hold the forward copy parked the row with goes back with it.
+		restored, err := reverseParkedHold(b)
+		if err != nil {
+			parkedUnreadable = append(parkedUnreadable, fmt.Sprintf("%s (%v)", b.ID, err))
+			continue
+		}
 		destOf[b.ID] = dest
 		carried[b.ID] = true
-		row := reverseRow(b, in.Stamp, annotated)
+		row := reverseRow(restored, in.Stamp, annotated)
 		if in.DropsRef[dest] && row.Ref != "" && row.Metadata[beadmeta.StepRefMetadataKey] == "" {
 			// A root's ref is its formula's name, not a step's: it is not
 			// copied into gc.step_ref, and only counted.
@@ -582,6 +588,8 @@ func planReverse(in reverseInput) reversePlan {
 		"finish the import with `"+rigImportAllInstruction()+"`, then re-run")
 	refuse(reused, "the destination already holds each of these ids as another bead",
 		"compare the two rows (`gc bd show <id>` reads the binding first) and remove the one that is not wanted from its store, then re-run")
+	refuse(parkedUnreadable, "each carries a "+beadmeta.MigratedParkedHoldMetadataKey+" record that does not parse, so the status hold it had before the split cannot be restored",
+		"repair the record (a JSON object naming the status), or remove it to return the row as the split city holds it, then re-run")
 	refuse(unreadable, "each carries a gc.migrated_cross_edges record that does not parse, so its boundary edges cannot be restored",
 		"restore the row's gc.migrated_cross_edges from a snapshot of the binding, then re-run")
 	refuse(crossing, "each edge joins two open rows that would land in different stores, and no cross-store edge is ever written",

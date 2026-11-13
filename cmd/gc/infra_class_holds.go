@@ -1,94 +1,183 @@
 package main
 
-// Holds the copy must carry (ga-1hncv0).
+// Holds the copy must carry (ga-1hncv0, ga-uv5rch).
 //
 // The copy re-adds an infrastructure bead's edges to other infrastructure beads
-// and nothing else, so two things that keep a bead from being ready in the work
-// store do not reach the binding on their own:
+// and nothing else, so two things that keep a bead from being ready in its
+// source store do not reach the binding on their own:
 //
 //   - a blocking edge onto an unfinished WORK bead. A dependency row can only
 //     name an id its own store holds, and the work bead stays in the work
 //     store. Copied as a bare edge, SQLite would strand the bead forever and
 //     bd would read the edge as external and never block.
-//   - bd's indefinite deferral (status=deferred with no defer_until, or one
-//     already past that bd's sweep has not lifted). Gas City reads it as
-//     IndefinitelyDeferred, which no class binding can record.
-//   - any other status bd parks a bead with: blocked (the sanctioned "I cannot
-//     proceed" mark), pinned, hooked, or a custom status. A bd-backed read folds
-//     each to "open" and keeps the raw status beside it (Bead.SourceStatus);
-//     Gas City's demand reads and gc hook honor the raw status, so the bead is
-//     parked in the work store, while the binding stores the folded "open".
+//   - a hold bd keeps in the bead's status that the binding cannot record:
+//     bd's undated deferral (status=deferred with no defer_until), or any
+//     other status bd parks a bead with (blocked, the sanctioned "I cannot
+//     proceed" mark; pinned; hooked; review; testing; a custom status). A
+//     bd-backed read folds each to "open" and keeps the raw status beside it
+//     (Bead.SourceStatus, Bead.IndefinitelyDeferred); Gas City's demand reads
+//     and gc hook honor it, so the bead is parked in its source store, while
+//     the binding stores the folded "open".
 //
-// Either way the bead an operator or agent parked arrives open and ready in the
-// binding, and is dispatched. The rehearsals found the first two on every
+// Either way the bead an operator or agent parked would arrive open and ready
+// in the binding, and be dispatched. The rehearsals found both on every
 // unsplit city.
 //
 // The edge holds are the shared cross-boundary plan's (cross_boundary_plan.go,
 // S5 §8.1): a `blocks` edge onto unfinished work crosses as a cross-store gate
-// in the binding, exactly as the rig importer and the drain carry the same
-// hold, and another blocking type onto unfinished work is refused by id. This
-// file holds the status holds: an undated deferral or a parking status is
-// refused by id, before anything is written, with what to do about it, and
-// preflight names the same refusal so the operator fixes it before taking the
-// window. A deferral with a future defer_until crosses as that date, which
-// the binding honors.
+// in the binding, and another blocking type onto unfinished work is refused by
+// id. This file carries the status holds (owner decision D-a): a parked bead
+// crosses with its defer_until set to infraParkedDeferUntil, which keeps it
+// out of every ready and claimable view the binding serves, and with
+// beadmeta.MigratedParkedHoldMetadataKey recording the status and the
+// defer_until it had, so nothing about the hold is lost. Clearing the
+// deferral in the split city releases the bead; `gc storage migrate
+// --to-work` restores the recorded status and defer_until from the stamp
+// (reverseParkedHold). A dated deferral is not parked: it crosses as its
+// date, which the binding honors, and one already due wakes there as bd's
+// own sweep would wake it.
+//
+// The carry is a pure function of the row, with no clock, so every stage that
+// compares a source row with the row the copy wrote (the equality stage, a
+// resume's keep, the rig import's proof before its clear) reaches the same
+// form whenever it runs.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// infraUncarriedHolds is the migration's refusal for holds the binding cannot
-// express. Each entry names the bead, the hold, and the fix.
-type infraUncarriedHolds struct {
-	Holds []string
+// infraParkedDeferUntil is the defer_until a parked bead carries in a class
+// binding: far enough ahead that no clock reaches it, so the bead stays
+// deferred until someone releases it.
+var infraParkedDeferUntil = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
+
+// infraParkedHold is the content of beadmeta.MigratedParkedHoldMetadataKey:
+// the hold a bead had in its source store.
+type infraParkedHold struct {
+	// Status is bd's raw status in the source store.
+	Status string `json:"status"`
+	// DeferUntil is the source row's defer_until in RFC 3339, or "".
+	DeferUntil string `json:"defer_until,omitempty"`
 }
 
-func (e *infraUncarriedHolds) Error() string {
-	return fmt.Sprintf("%d infrastructure bead(s) are held in the work store by something the binding cannot express, so the copy would make them ready; nothing was copied. Resolve each, then run this again:\n  %s",
-		len(e.Holds), strings.Join(e.Holds, "\n  "))
-}
-
-// infraCopyParkedRefusal refuses the copy when an open row of its plan is
-// held by its status in a way the binding cannot record (an undated
-// deferral, a parked status), naming every such row and its fix. The holds
-// kept in edges are the cross-boundary plan's (planInfraCityBoundary). It
-// reads only.
-func infraCopyParkedRefusal(plan infraCopyPlan, now time.Time) error {
-	var uncarried []string
-	for _, b := range plan.rows {
-		if b.Status == "closed" {
-			continue
-		}
-		if why := infraParkedStatusRefusal(b, now); why != "" {
-			uncarried = append(uncarried, why)
-		}
+// infraParkedStatus reports the raw status that parks b in its source store
+// in a way a class binding cannot record, or "" when nothing does. A closed
+// bead is never parked; a deferral with a date crosses as that date.
+func infraParkedStatus(b beads.Bead) string {
+	if b.Status == "closed" {
+		return ""
 	}
-	if len(uncarried) > 0 {
-		return &infraUncarriedHolds{Holds: uncarried}
-	}
-	return nil
-}
-
-// infraParkedStatusRefusal names the hold bd's raw status puts on b when the
-// binding cannot carry it, or returns "". The binding stores Gas City's three
-// statuses only, so a bead bd parks by status reaches it as the "open" a
-// bd-backed read folds the status to, and is ready there. A deferral is carried
-// only as a future defer_until; deferred is read from either signal a store
-// reports it by (IndefinitelyDeferred, or the raw status alone).
-func infraParkedStatusRefusal(b beads.Bead, now time.Time) string {
 	if b.IndefinitelyDeferred || b.SourceStatus == "deferred" {
-		if b.DeferUntil != nil && b.DeferUntil.After(now) {
+		if b.DeferUntil != nil {
 			return ""
 		}
-		return fmt.Sprintf("%s is deferred in the work store with no future defer_until, which the binding cannot hold: give it a dated deferral (bd defer %s --until <date>), which the copy carries, or undefer it (bd undefer %s)", b.ID, b.ID, b.ID)
+		return "deferred"
 	}
 	switch b.SourceStatus {
 	case "", "open", "in_progress", "closed":
 		return ""
 	}
-	return fmt.Sprintf("%s has bd status %q in the work store, which parks it there and which the binding cannot hold (it stores open, in_progress and closed), so it would arrive ready: keep it parked with a dated deferral (bd defer %s --until <date>), which the copy carries, release it (bd update %s --status open), or close it", b.ID, b.SourceStatus, b.ID, b.ID)
+	return b.SourceStatus
+}
+
+// infraCarryParkedHold returns b as a class binding holds it when its source
+// store parks it (infraParkedStatus): deferred to infraParkedDeferUntil, the
+// hold recorded in beadmeta.MigratedParkedHoldMetadataKey. Any other b is
+// returned unchanged. It does not mutate the caller's metadata map.
+func infraCarryParkedHold(b beads.Bead) beads.Bead {
+	status := infraParkedStatus(b)
+	if status == "" {
+		return b
+	}
+	hold := infraParkedHold{Status: status}
+	if b.DeferUntil != nil {
+		hold.DeferUntil = b.DeferUntil.UTC().Format(time.RFC3339Nano)
+	}
+	raw, _ := json.Marshal(hold) // a struct of strings always encodes
+	metadata := make(beads.StringMap, len(b.Metadata)+1)
+	for key, value := range b.Metadata {
+		metadata[key] = value
+	}
+	metadata[beadmeta.MigratedParkedHoldMetadataKey] = string(raw)
+	b.Metadata = metadata
+	until := infraParkedDeferUntil
+	b.DeferUntil = &until
+	b.IndefinitelyDeferred = false
+	b.SourceStatus = ""
+	return b
+}
+
+// parseInfraParkedHold reads a beadmeta.MigratedParkedHoldMetadataKey value.
+func parseInfraParkedHold(raw string) (infraParkedHold, error) {
+	var hold infraParkedHold
+	if err := json.Unmarshal([]byte(raw), &hold); err != nil {
+		return infraParkedHold{}, err
+	}
+	if strings.TrimSpace(hold.Status) == "" {
+		return infraParkedHold{}, fmt.Errorf("it names no status")
+	}
+	return hold, nil
+}
+
+// deferUntil is the recorded defer_until, or nil.
+func (h infraParkedHold) deferUntil() (*time.Time, error) {
+	if h.DeferUntil == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, h.DeferUntil)
+	if err != nil {
+		return nil, fmt.Errorf("its defer_until %q: %w", h.DeferUntil, err)
+	}
+	return &t, nil
+}
+
+// reverseParkedHold returns b, a binding row on its way back to its source
+// store, with the hold its stamp records restored: the raw status and the
+// defer_until it had. The stamp is removed either way. A bead released in the
+// split city (no longer open, or its deferral changed from
+// infraParkedDeferUntil) keeps what the split city made of it. It refuses a
+// stamp that does not parse.
+func reverseParkedHold(b beads.Bead) (beads.Bead, error) {
+	raw, ok := b.Metadata[beadmeta.MigratedParkedHoldMetadataKey]
+	if !ok {
+		return b, nil
+	}
+	hold, err := parseInfraParkedHold(raw)
+	if err != nil {
+		return b, err
+	}
+	until, err := hold.deferUntil()
+	if err != nil {
+		return b, err
+	}
+	metadata := make(beads.StringMap, len(b.Metadata))
+	for key, value := range b.Metadata {
+		metadata[key] = value
+	}
+	delete(metadata, beadmeta.MigratedParkedHoldMetadataKey)
+	b.Metadata = metadata
+	if b.Status != "open" || b.DeferUntil == nil || !b.DeferUntil.Equal(infraParkedDeferUntil) {
+		return b, nil
+	}
+	b.Status = hold.Status
+	b.DeferUntil = until
+	return b, nil
+}
+
+// infraParkedRows names, for preflight, each open row of rows the copy
+// carries as parked, with its status.
+func infraParkedRows(rows []beads.Bead) []string {
+	var out []string
+	for _, b := range rows {
+		if status := infraParkedStatus(b); status != "" {
+			out = append(out, fmt.Sprintf("%s (%s)", b.ID, status))
+		}
+	}
+	return out
 }
