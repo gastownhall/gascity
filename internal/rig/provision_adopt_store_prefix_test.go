@@ -886,14 +886,17 @@ func TestProvisionAdoptReservedStorePrefixOnASplitCityNamesTheStoreRemedy(t *tes
 	}
 }
 
-// A fresh add's reserved prefix keeps the [[rigs]] remedy: that rig's prefix
-// is gc's to choose.
-func TestProvisionFreshAddReservedPrefixOnASplitCityKeepsTheRigsRemedy(t *testing.T) {
+// A fresh add's reserved prefix is gc's to choose, and the refused add writes
+// no [[rigs]] entry, so its remedy is the prefix the add itself takes.
+func TestProvisionFreshAddReservedPrefixOnASplitCityNamesTheAddPrefix(t *testing.T) {
 	deps := stubDeps(t.TempDir())
 	deps.Cfg = splitCityCfg()
 	_, _, err := Provision(deps, ProvisionRequest{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Prefix: "gco"})
-	want := `rig "beta" bead prefix "gco" is in the reserved "gco" namespace; set an explicit prefix: prefix = "<prefix>" on that [[rigs]] entry`
+	want := `rig "beta" bead prefix "gco" is in the reserved "gco" namespace; add it with a non-reserved prefix: gc rig add --prefix <prefix>, or the "prefix" field of an API rig create`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("Provision err = %v, want it to contain %q", err, want)
+	}
+	if strings.Contains(err.Error(), "[[rigs]] entry") {
+		t.Errorf("refusal names a [[rigs]] entry the refused add never wrote: %v", err)
 	}
 }

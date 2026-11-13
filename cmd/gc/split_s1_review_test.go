@@ -109,6 +109,11 @@ provider = "sqlite-beads"
 			if strings.Contains(stderr.String(), "site.toml") {
 				t.Errorf("the refusal tells the user to edit a file of a city that does not exist yet: %q", stderr.String())
 			}
+			for _, flag := range []string{"--storage", "--prefix"} {
+				if strings.Contains(stderr.String(), flag) {
+					t.Errorf("the --from refusal names %s, which gc init refuses with --from: %q", flag, stderr.String())
+				}
+			}
 			if _, err := os.Stat(cityPath); err == nil {
 				entries, _ := os.ReadDir(cityPath)
 				t.Errorf("the refused init left %d entr(ies) behind at %s", len(entries), cityPath)

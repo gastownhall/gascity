@@ -525,12 +525,12 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Frame: every rig BeadStores holds, suspended ones included. `gc ready`
-//     deliberately does not match this: it federates the serving rigs only,
-//     the frame the controller's demand census reads, so a suspended rig's own
-//     rows are in this answer and absent from the CLI's (ga-h07n0z; see
-//     readyServingRigs in cmd/gc/ready_federation.go). CLI == API holds over a
-//     city with no suspended rig.
+//   - Frame: every rig Stores().Rigs() lists, suspended ones included.
+//     `gc ready` deliberately does not match this: it federates the serving
+//     rigs only, the frame the controller's demand census reads, so a
+//     suspended rig's own rows are in this answer and absent from the CLI's
+//     (ga-h07n0z; see readyServingRigs in cmd/gc/ready_federation.go).
+//     CLI == API holds over a city with no suspended rig.
 //   - Within a leg: whatever order that leg's own Ready reader emits. For a
 //     work store (CachingStore.Ready) and for the canonical relocated binding
 //     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
@@ -575,8 +575,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 	index := s.latestIndex()
 
-	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	// One epoch for the request: the work legs, the graph leg and its
+	// reserved prefixes all come from st.
+	st := s.state.Stores()
+	cityName := s.state.CityName()
+	stores := workStoresByName(st, cityName)
+	rigNames := sortedWorkStoreNames(stores)
 	var pa partialAggregator
 	// Each leg's rows are kept by leg so a split city can pass them through the
 	// cross-store rule before they merge (below).
@@ -585,53 +589,53 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		rows []beads.Bead
 	}
 	var legs []readyLeg
-	federate := func(label string, store beads.Store) {
-		if store == nil {
+	federate := func(leg readywork.Leg) {
+		if beads.IsNilStore(leg.Store) {
 			return
 		}
 		pa.attempt()
-		ready, err := beads.ReadyPreferCache(store, readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(leg.Store, readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
-				pa.record(label, err)
+				pa.record(leg.Label, err)
 				pa.success()
 			} else {
-				pa.record(label, err)
+				pa.record(leg.Label, err)
 				return
 			}
 		} else {
 			pa.success()
 		}
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
+		legs = append(legs, readyLeg{leg: leg, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
-	// `bd ready` would never surface it. In production BeadStores() also returns
-	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
-	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
-	cityName := s.state.CityName()
+	// `bd ready` would never surface it. workStoresByName also lists the city
+	// work store under cityName, as BeadStores() does (cmd/gc/api_state.go),
+	// so skip that name in the rig loop below to avoid querying it twice.
+	// Every leg is a class handle and reads strict, as the raw stores did.
+	federate(readywork.Leg{Label: "city", Store: st.Work()})
 	for _, rigName := range rigNames {
 		if rigName == cityName {
-			continue // city store already federated explicitly above; production
-			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
+			continue // city store already federated explicitly above; a rig
+			// named like the city replaces it under that name, and is skipped
 		}
-		federate("rig "+rigName, stores[rigName])
+		federate(readywork.Leg{Label: "rig " + rigName, Store: stores[rigName]})
 	}
 	// Split city: graph-class ready work (gcg- steps, control beads, molecule
-	// roots) lives in the relocated graph store, which BeadStores() does not
+	// roots) lives in the relocated graph store, which the work stores do not
 	// include — federate it or the whole execution DAG is invisible behind an
 	// authoritative-looking 200. It runs LAST so the merged order stays a leg
 	// concatenation whose prefix is exactly what a legacy city serves, and it
 	// does NOT go through federate(): the graph leg has no partial tier.
-	if graph, ok := relocatedGraphStore(s.state); ok {
+	if graph, ok := relocatedGraphIn(st); ok {
 		pa.attempt()
 		ready, err := beads.ReadyPreferCache(graph, readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(s.state.Stores())}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(st)}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

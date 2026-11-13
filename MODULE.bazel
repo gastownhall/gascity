@@ -488,11 +488,28 @@ openapi_base_spec(
 # lanes no network, so packages come only from committed, integrity-pinned
 # lockfiles fetched here.
 #
-# Node.js 24, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=24.22.1 <25, which
-# openclaw 2026.10.8 requires).
+# Node.js 24; it satisfies every workspace's engines (dashboard >=22.13.0,
+# contrib/openclaw-bridge >=24.22.1 <25, which openclaw 2026.10.8 requires).
+#
+# rules_nodejs 6.7.7 predates 24.22.3 (the 2026-11-11 security release), so
+# the archives and sha256s are listed here, copied from
+# https://nodejs.org/dist/v24.22.3/SHASUMS256.txt (signature checked against
+# github.com/nodejs/release-keys). Drop node_repositories once a rules_nodejs
+# release that knows this version is on the BCR.
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
-node.toolchain(node_version = "24.22.1")
+node.toolchain(
+    node_repositories = {
+        "24.22.3-darwin_amd64": ["node-v24.22.3-darwin-x64.tar.gz", "node-v24.22.3-darwin-x64", "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7"],
+        "24.22.3-darwin_arm64": ["node-v24.22.3-darwin-arm64.tar.gz", "node-v24.22.3-darwin-arm64", "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd"],
+        "24.22.3-linux_amd64": ["node-v24.22.3-linux-x64.tar.xz", "node-v24.22.3-linux-x64", "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"],
+        "24.22.3-linux_arm64": ["node-v24.22.3-linux-arm64.tar.xz", "node-v24.22.3-linux-arm64", "6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c"],
+        "24.22.3-linux_ppc64le": ["node-v24.22.3-linux-ppc64le.tar.xz", "node-v24.22.3-linux-ppc64le", "c4b446699171f64763304a0bc6fb972b0fb4acb1de5358e52b4c52a95883593a"],
+        "24.22.3-linux_s390x": ["node-v24.22.3-linux-s390x.tar.xz", "node-v24.22.3-linux-s390x", "b5dbeb563ffb81946478fd765ae92efc21117e410e4e9b7d966bf59b00cee55d"],
+        "24.22.3-windows_amd64": ["node-v24.22.3-win-x64.zip", "node-v24.22.3-win-x64", "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f"],
+        "24.22.3-windows_arm64": ["node-v24.22.3-win-arm64.zip", "node-v24.22.3-win-arm64", "b3cc74a295b39d4f273271e96f58c06dd2b35757ca12abec64c7d0598b434f14"],
+    },
+    node_version = "24.22.3",
+)
 
 # One npm_translate_lock per npm workspace, named npm_<area>, each with:
 #   * package-lock.json kept as the source of truth for local `npm ci`;

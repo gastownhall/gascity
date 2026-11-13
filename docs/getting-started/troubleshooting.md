@@ -317,6 +317,78 @@ bd version
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
 
+## `gc init` Created a Single-Store City
+
+A new city is born split unless something keeps it single-store, and `gc init`
+prints the reason on stderr. The HTTP city create follows the same rules.
+
+| Notice names | Why | To get the split |
+|---|---|---|
+| bd older than v1.3.2, or a bd tree that matches no pinned inventory | A split city's `gc bd` runs only a bd whose command tree gc pins | Upgrade bd, put the real binary (not a shim or wrapper script) on `PATH`, then split with `gc storage migrate` |
+| a session runtime that runs sessions on remote hosts | A split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport exists | Keep the city single-store for now |
+| a bead prefix, derived from the city name, in the reserved namespace (`gas-city-ops` derives `gco`) | A split city's infrastructure store mints its ids under `gcg`, `gcm`, `gcs`, `gco`, `gcn` and `gcnq`, so the city's own beads cannot use one | Init the city under another name, or with a non-reserved prefix: `gc init --prefix gops ~/gas-city-ops` |
+
+`gc init --from` applies the bd and session-runtime rules to a source that
+carries the split, as the shipped examples do: the copy leaves the source's
+`[storage]` out and prints the same notice. A copy can leave out only the
+`[storage]` of the source's `city.toml`, so where those rules apply to a source
+that declares part of it in an include fragment, as `examples/storage` does,
+`gc init --from` refuses the copy instead and copies nothing. Run it where a
+split city is served, or copy the source, remove `[storage]` and every
+`[storage.*]` table from its `city.toml` and include fragments, and run
+`gc init --from` on that copy. A reserved name is not judged here:
+`gc init --from` refuses a copy that keeps the split under such a name (next
+section).
+
+`gc init --storage=single` creates a single-store city on purpose and prints
+nothing. `--storage` is refused with `gc init --from`. To keep a copied city
+single-store on purpose, make the copy without starting it, take the whole
+`[storage]` section out of its `city.toml` and of any include fragment that
+declares part of it (`[storage]` and every `[storage.*]` table under it), then
+start it:
+
+```bash
+gc init --from examples/gastown --no-start ~/my-city
+# delete [storage] and every [storage.*] table from ~/my-city/city.toml
+cd ~/my-city && gc start
+```
+
+Without `--no-start`, `gc init --from` starts the city split. Once it has
+served its infrastructure classes from `.gc/store`, a city with the section
+taken out refuses to start until you remove `.gc/storage-served-binding.json`,
+which abandons everything that store holds; read
+[Rolling back](/runbooks/split-storage-classes#rolling-back) first. To split a
+single-store city later, see
+[Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes).
+
+## `gc init` or `gc rig add` Refuses a Reserved Bead Prefix
+
+A split city reserves the bead prefixes `gcg`, `gcm`, `gcs`, `gco`, `gcn` and
+`gcnq` for its infrastructure store, so a split city whose work beads would
+use one is refused before anything is written. A prefix derives from a name's
+initials: the city name `gas-city-ops` derives `gco`, and a rig directory
+named `graphql-code-generator` derives `gcg`.
+
+A plain `gc init` whose city name derives a reserved prefix starts the city
+single-store instead (previous section). These are refused:
+
+| Command | Fix |
+|---|---|
+| `gc init --prefix gcm ~/bright-lights`, a reserved prefix you pass | Pass a non-reserved prefix: `gc init --prefix bl ~/bright-lights` |
+| `gc init --storage=split ~/gas-city-ops` | Pass a non-reserved prefix: `gc init --storage=split --prefix gops ~/gas-city-ops` |
+| `gc init --file` of a split config, or `gc init --from` of a split source whose copy keeps the split, into a name that derives a reserved prefix | `--prefix` is refused with both; give the city another name: `gc init --from examples/gastown --name city-ops ~/gas-city-ops` |
+| `gc rig add` on a split city, for a rig whose prefix is reserved | Give the rig a prefix of its own: `gc rig add --prefix gqlgen ~/src/graphql-code-generator`, or the `prefix` field of an HTTP rig create |
+
+## `gc bd` Refuses a Command on a Split City
+
+On a split city, `gc bd` forwards only the commands and flags it has vetted,
+and only to a bd whose command tree matches a pinned inventory. A refusal
+names the command and the `gc` alternative; nothing is written. `gc bd ready`
+is refused on purpose: use `gc ready`, which also reads the infrastructure
+store. `gc doctor`'s `bd-command-inventory` check shows why a bd binary does
+not match. The full list is in
+[gc bd on split cities](/runbooks/split-storage-classes#gc-bd-on-split-cities).
+
 ## Native Store Falls Back Because Hooks Are Installed
 
 Native `bd` store selection intentionally falls back to the subprocess-backed

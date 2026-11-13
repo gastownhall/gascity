@@ -2784,6 +2784,7 @@ func mapKeys(m map[string]TemplateParams) []string {
 // --- gc init (doInit with fsys.Fake) ---
 
 func TestDoInitSuccess(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	// No pre-existing files — doInit creates everything from scratch.
 
@@ -2805,6 +2806,11 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.Contains(out, "bright-lights") {
 		t.Errorf("stdout missing city name: %q", out)
 	}
+	written, err := config.Parse(f.Files[filepath.Join("/bright-lights", "city.toml")])
+	if err != nil {
+		t.Fatalf("parsing the written city.toml: %v", err)
+	}
+	assertBornSplit(t, written)
 
 	// Verify .gc/ and the new city-root conventions were created (no rigs/ — created on demand by gc rig add).
 	if !f.Dirs[filepath.Join("/bright-lights", ".gc")] {
@@ -3486,6 +3492,7 @@ func TestRunWizardEOFStdin(t *testing.T) {
 }
 
 func TestDoInitWithWizardConfig(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		interactive:     true,
@@ -3672,6 +3679,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 }
 
 func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		configName:       "minimal",
