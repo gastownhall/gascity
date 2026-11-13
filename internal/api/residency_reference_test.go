@@ -23,6 +23,17 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
+// referenceClassBindingCensus is the census State carried before T7e removed
+// ClassBindingHasLegacyResidents from it: every test State still answers it
+// as a concrete method, so the frozen topology asks the State it is handed.
+func referenceClassBindingCensus(s *Server) func(beads.Store) bool {
+	census, ok := s.state.(interface{ ClassBindingHasLegacyResidents(beads.Store) bool })
+	if !ok {
+		return func(beads.Store) bool { return true }
+	}
+	return census.ClassBindingHasLegacyResidents
+}
+
 // referenceResidencyTopology builds the API's view of which stores answer which
 // questions.
 //
@@ -51,7 +62,7 @@ func referenceResidencyTopology(s *Server) storeref.Topology {
 	topo := storeref.Topology{
 		Work: storeref.Leg{Ref: storeref.WorkRef, Store: city, Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg))},
 	}
-	topo.Bindings, topo.Refused = referenceAPIResidencyBindings(order, byStore, s.state.ClassBindingHasLegacyResidents)
+	topo.Bindings, topo.Refused = referenceAPIResidencyBindings(order, byStore, referenceClassBindingCensus(s))
 
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
