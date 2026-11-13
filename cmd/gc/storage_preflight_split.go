@@ -303,6 +303,10 @@ func splitHypotheticalConfig(cfg *config.City) *config.City {
 	return &split
 }
 
+// splitEstimateNotReadNote is the estimate's note when the work store was not
+// read: its row above says why (blocked, or skipped with what it needs).
+const splitEstimateNotReadNote = "not computed: the work store was not read (see its row above)"
+
 // doStorageSplitPreflight rehearses the split and reports it.
 func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.Writer) (int, splitPreflightSummary) {
 	var summary splitPreflightSummary
@@ -317,10 +321,12 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	// writes no second one.
 	if request.Cfg.Storage != nil {
 		block("config", fmt.Errorf("this city already authors [storage], so there is no split to rehearse: `gc storage %s` (without --%s) rehearses the migration it describes", storagePreflightVerb, storagePreflightSplitFlag))
+		preflightSkip(stdout, "split checks", "config")
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	if blocked, held := revertHoldingNote(storageSplitNone, request.CityPath); held {
 		block("config", errors.New(preflightAdviceDetail(blocked)))
+		preflightSkip(stdout, "split checks", "config")
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	split := splitHypotheticalConfig(request.Cfg)
@@ -348,10 +354,26 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	}
 	splitPreflightVouch(request.CityPath, stdout)
 
-	// Nothing below may start the provider.
+	// Nothing below may start the provider. A city whose stores cannot be
+	// read without starting it still runs every check that reads none, so
+	// the report names those blockers now rather than a window later.
+	rehearsal := request
+	rehearsal.Cfg = split
+	found := preflightFindings{quiet: true}
 	if why, remedy := splitStoreReadGate(request.CityPath, request.Cfg); why != "" {
 		summary.Unread, summary.UnreadRemedy = why, remedy
+		found.unread = why
 		preflightNote(stdout, "source lane", why+"; the split starts it in its maintenance window, and the lane is decided there")
+		if after == reconcilerV2 {
+			preflightSkip(stdout, "v2 sessions", found.unreadNeeds())
+		}
+		runStoragePreflightChecks(rehearsal, &found, stdout, stderr)
+		if found.converged {
+			block("cutover", splitConvergedRefusal(request.CityPath, split, found.unread))
+			preflightSkipCopyChecks(stdout, "cutover")
+		}
+		summary.Blocks = append(summary.Blocks, found.blocked...)
+		preflightNote(stdout, "estimate", splitEstimateNotReadNote)
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	if after == reconcilerV2 {
@@ -361,9 +383,6 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 
 	// The migration's checks against cfg', unchanged, and the reads that
 	// follow them, inside the lane window and only there.
-	rehearsal := request
-	rehearsal.Cfg = split
-	found := preflightFindings{quiet: true}
 	closeWindow := openPreflightLaneWindow(request.CityPath, request.Cfg)
 	code := runStoragePreflightChecks(rehearsal, &found, stdout, stderr)
 	diag, known := migrationWindowLane(request.CityPath)
@@ -371,19 +390,18 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		splitPreflightFloor(request.CityPath, found, stdout)
 	}
 	if found.converged {
-		block("cutover", splitConvergedRefusal(request.CityPath, split))
+		block("cutover", splitConvergedRefusal(request.CityPath, split, ""))
+		preflightSkipCopyChecks(stdout, "cutover")
 	}
 	closeWindow()
-	if code != 0 {
-		summary.Blocks = append(summary.Blocks, found.blocked)
-	}
+	summary.Blocks = append(summary.Blocks, found.blocked...)
 	lane := splitClearLaneFor(diag, known)
 	if known {
 		preflightPass(stdout, "source lane", fmt.Sprintf("the work store opens on %s in the window (%s lane)", diag.Store, lane.name))
 	}
 	switch {
 	case !found.read:
-		preflightNote(stdout, "estimate", "not computed: the checks above stopped before the work store was read")
+		preflightNote(stdout, "estimate", splitEstimateNotReadNote)
 		return splitPreflightFooter(stdout, request, summary), summary
 	case code != 0 || found.converged:
 		preflightNote(stdout, "estimate", "not computed: a check above blocked, so the copy's plan is partial")
@@ -402,8 +420,11 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 // state may live in the binding, so migrating again would copy the work
 // store's slice over it. It reports what boot's own check (identity, then
 // containment, confirmInfraConvergence's halves) finds there, read-only: the
-// marker's identity is not back-filled, as boot's check would.
-func splitConvergedRefusal(cityPath string, split *config.City) error {
+// marker's identity is not back-filled, as boot's check would. unread, when
+// set, says why this run may read no store: the identity check reads files
+// alone and still runs, and the containment half, which reads the work store
+// (and would start a stopped provider), is named as not run.
+func splitConvergedRefusal(cityPath string, split *config.City, unread string) error {
 	target, ok, err := resolveInfraBindingTarget(cityPath, split)
 	if err != nil {
 		return fmt.Errorf("a convergence marker for the split binding exists, and the binding cannot be resolved to check it (%w)", err)
@@ -414,9 +435,12 @@ func splitConvergedRefusal(cityPath string, split *config.City) error {
 	const prefix = "gc storage preflight --split"
 	_, _, hold := markerWorkStoreIdentityHold(cityPath, target, prefix, io.Discard)
 	var report infraMigrationReport
-	if hold != nil {
+	switch {
+	case hold != nil:
 		report = *hold
-	} else {
+	case unread != "":
+		return fmt.Errorf("%s records that this city moved its infrastructure classes into binding %s, or began to, and city.toml has no [storage]: the split was backed out by removing the block. Whether the binding holds them is boot's check, which reads the work store, and this run reads none (%s). Run this again once the store can be read, and it says whether to restore the block or move %s aside; migrating again would copy the work store's slice over the binding", target.MarkerPath(), target.Binding, unread, target.Root)
+	default:
 		report = confirmInfraContainment(cityPath, target, prefix, io.Discard)
 	}
 	report.Target = target
@@ -670,6 +694,9 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 	switch {
 	case len(summary.Blocks) > 0:
 		fmt.Fprintf(stdout, "\n%s: the split would refuse (%s). Fix the blocking checks above and run this again.\n", prefix, strings.Join(summary.Blocks, ", ")) //nolint:errcheck // best-effort stdout
+		if summary.Unread != "" {
+			fmt.Fprintf(stdout, "The checks marked [SKIP] that need a readable store did not run, because this command starts nothing. %s.\n", summary.UnreadRemedy) //nolint:errcheck // best-effort stdout
+		}
 		return 1
 	case summary.Unread != "":
 		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. %s.\n", prefix, summary.UnreadRemedy) //nolint:errcheck // best-effort stdout
