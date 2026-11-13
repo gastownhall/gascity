@@ -574,3 +574,60 @@ func TestSnapshotTreeKeepsEmptyDirectories(t *testing.T) {
 		t.Errorf("the file did not come back: %q (%v)", got, err)
 	}
 }
+
+// TestCityRestoreProvesTheRestoredStoreAgainstTheJSONL: the restore's last
+// step reads each restored store back and proves its rows equal to the
+// snapshot's JSONL. A snapshot whose exact copy and JSONL disagree (each
+// proven by its own hash) restores files that do not hold what the snapshot
+// says, so the restore does not report success, and the journal stays open.
+func TestCityRestoreProvesTheRestoredStoreAgainstTheJSONL(t *testing.T) {
+	city := newFileStoreCity(t)
+	id := city.snapshot(t)
+	city.split(t)
+	dir := filepath.Join(city.to, id)
+	m, err := readSnapshotManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(dir, m.Stores[0].Exact.File.Path)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, copyPath, beads.WithFileStoreIDPrefix("rc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The work row: every reader sees it, the split-strict gate's work view
+	// included.
+	dropped := ""
+	for _, b := range rows {
+		if b.Title == "real work" {
+			dropped = b.ID
+		}
+	}
+	if dropped == "" {
+		t.Fatalf("the copy holds no work row: %+v", rows)
+	}
+	if err := store.Delete(dropped); err != nil {
+		t.Fatal(err)
+	}
+	file, err := hashSnapshotFile(dir, copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Stores[0].Exact.File = &file
+	if err := os.Remove(filepath.Join(dir, storageSnapshotManifestName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishSnapshotManifest(context.Background(), dir, m); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := city.restore(t, id)
+	if code == 0 || !strings.Contains(stderr, "verified: work:") {
+		t.Fatalf("restore = %d: %s%s; want the proof against the JSONL to fail", code, stdout, stderr)
+	}
+	if j, present, err := readStorageCityRestoreJournal(city.request.CityPath); err != nil || !present || j.done(cityRestoreStepVerified) {
+		t.Fatalf("journal %+v present %v (%v); want it open, the proof not done", j, present, err)
+	}
+}
