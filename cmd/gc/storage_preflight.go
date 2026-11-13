@@ -111,6 +111,10 @@ It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
 reports exactly that and exits non-zero — author the split first.
 
+It starts no bead-store provider: on a city whose provider is down, or with
+a proxied server stopped, it says so and what lets a later run read, runs every
+check that reads no store, skips each that reads one, and exits non-zero.
+
 It names every check that would refuse, not only the first: a check that
 blocks does not stop the report, and a check that depends on one that blocked
 is printed as [SKIP] with the check it needs.
@@ -186,8 +190,23 @@ quiescent binding; nothing else is written.`,
 func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "city: %s\n", request.CityPath) //nolint:errcheck // best-effort stdout
 	var found preflightFindings
+	// The read gate --split takes: a store whose server is down is not read,
+	// because any read would start it and leave it running on the stopped
+	// city (ga-683m7f). The checks that read no store still run.
+	why, remedy := splitStoreReadGate(request.CityPath, request.Cfg)
+	if why != "" {
+		found.unread = why
+		preflightNote(stdout, "stores", why+"; this command starts nothing, so the checks that read a store are skipped")
+	}
 	if code := runStoragePreflightChecks(request, &found, stdout, stderr); code != 0 || found.converged {
+		if code != 0 && why != "" {
+			fmt.Fprintf(stdout, "The checks marked [SKIP] read the city's stores and did not run. %s.\n", remedy) //nolint:errcheck // best-effort stdout
+		}
 		return code
+	}
+	if why != "" {
+		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. %s.\n", storagePreflightLogPrefix, remedy) //nolint:errcheck // best-effort stdout
+		return 1
 	}
 	command := append([]string{storageMigrationCommand, "--" + storageFleetStoppedFlag}, request.Force.flags()...)
 	fmt.Fprintf(stdout, "\nReady. When the fleet is stopped, run: %s\n", strings.Join(command, " ")) //nolint:errcheck // best-effort stdout

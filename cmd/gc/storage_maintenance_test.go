@@ -22,7 +22,10 @@ import (
 // migrationWindowProvider stubs the provider lifecycle and the session list
 // the window drives, and records what it asked for.
 type migrationWindowProvider struct {
-	down          bool
+	down bool
+	// adoptable is the answer of the probe for a managed Dolt left running
+	// on the stopped city.
+	adoptable     bool
 	startErr      error
 	stopErr       error
 	starts, stops int
@@ -47,6 +50,9 @@ func stubMigrationWindowProvider(t *testing.T, p *migrationWindowProvider) {
 	prevDown := migrationWindowProviderDown
 	t.Cleanup(func() { migrationWindowProviderDown = prevDown })
 	migrationWindowProviderDown = func(string) (bool, error) { return p.down, nil }
+	prevAdoptable := migrationWindowAdoptable
+	t.Cleanup(func() { migrationWindowAdoptable = prevAdoptable })
+	migrationWindowAdoptable = func(string) (bool, error) { return p.adoptable, nil }
 }
 
 // stubMigrationWindowStartStop stubs the start, the stop and the session list:

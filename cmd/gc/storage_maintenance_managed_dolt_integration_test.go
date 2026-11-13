@@ -368,3 +368,31 @@ func TestStorageMigrateDoesNotCountItsOwnPooledSessions(t *testing.T) {
 		t.Fatalf("the provider the window started is still up (pid %d)", pid)
 	}
 }
+
+// TestStorageMigrateAdoptsAManagedDoltLeftRunningOnTheStoppedCity
+// (ga-683m7f): something started the stopped city's managed Dolt and left it
+// (a one-shot bd read's recovery, an earlier command). The window adopts it:
+// the run migrates on it and stops it at the end, so the city is left as gc
+// stop left it.
+func TestStorageMigrateAdoptsAManagedDoltLeftRunningOnTheStoppedCity(t *testing.T) {
+	city := newManagedDoltWindowCity(t)
+	if err := ensureBeadsProvider(city.cityPath); err != nil {
+		t.Fatalf("starting the managed Dolt the way something left it running: %v", err)
+	}
+	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid == 0 {
+		t.Fatal("the fixture's managed Dolt did not start")
+	}
+	code, said, _, _ := city.migrateManagedCity(t)
+	if code != 0 {
+		t.Fatalf("migrate = %d: %s", code, said)
+	}
+	if !strings.Contains(said, "was running although the city is stopped") {
+		t.Errorf("the run did not say it adopted the running server: %s", said)
+	}
+	if pid := managedDoltRuntimePID(t, city.cityPath, city.port); pid != 0 || doltPortReachable(strconv.Itoa(city.port)) {
+		t.Fatalf("the adopted managed Dolt is still up after the run (pid %d)", pid)
+	}
+	if fileExists(migrationWindowRecordPath(city.cityPath)) {
+		t.Fatal("the window record outlived the stop")
+	}
+}
